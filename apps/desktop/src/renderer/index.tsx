@@ -2,6 +2,7 @@ import React, { createContext, lazy, memo, Suspense, useCallback, useContext, us
 import { useWindowReady } from "./lib/use-window-ready";
 import { useAccountLogin } from "./lib/use-account-login";
 import { AccountTools } from "./components/account-tools";
+import { RadioGroup, RadioGroupItem } from "./components/ui/radio-group";
 import { errorMessage } from "./lib/error-message";
 import {
   BatteryMedium,
@@ -81,7 +82,6 @@ import { IconButton, SwitchControl } from "./components/controls";
 import { Sheet, SheetActions, DismissSheetAction, NativeDialogHost } from "./components/sheet";
 import { SettingsSection, SettingsList, SettingsLink, SettingsToggle, FormField } from "./components/settings";
 import { ChoiceSelect } from "./components/choice-select";
-import { ToggleGroup, ToggleGroupItem } from "./components/ui/toggle-group";
 import type {
   AgentStatus,
   CliRegistration,
@@ -241,12 +241,13 @@ function BrandMark({ className = "", busy = false }: { className?: string; busy?
   );
 }
 
-function ServiceLogo({ url, size = "regular" }: { url: string; size?: "regular" | "large" }): React.JSX.Element {
+function ServiceLogo({ url, size = "regular" }: { url: string; size?: "small" | "regular" | "large" }): React.JSX.Element {
   const service = servicePreset(url);
+  const dimensions = size === "small" ? "size-4" : size === "large" ? "size-7.5" : "size-6";
   if (!service) {
-    return <span className={`service-custom-icon w-6 h-6 flex-none grid place-items-center overflow-hidden rounded-md [&.service-logo-large]:w-7.5 [&.service-logo-large]:h-7.5 text-muted-foreground service-logo-${size}`}><Network size={size === "large" ? 16 : 14} /></span>;
+    return <span className={`service-custom-icon ${dimensions} flex-none grid place-items-center overflow-hidden rounded-md [&.service-logo-large]:w-7.5 [&.service-logo-large]:h-7.5 text-muted-foreground service-logo-${size}`}><Network size={size === "large" ? 16 : 14} /></span>;
   }
-  return <span className={`service-logo w-6 h-6 flex-none grid place-items-center overflow-hidden rounded-md [&_img]:w-full [&_img]:h-full [&_img]:object-contain service-${service.id} service-logo-${size}`}><img src={service.icon} alt="" /></span>;
+  return <span className={`service-logo ${dimensions} flex-none grid place-items-center overflow-hidden rounded-md [&_img]:w-full [&_img]:h-full [&_img]:object-contain service-${service.id} service-logo-${size}`}><img src={service.icon} alt="" /></span>;
 }
 
 type View = "overview" | "agents" | "usage" | "settings";
@@ -2437,8 +2438,9 @@ function ProfileEditorSheet({
   const savedCredentialApplies = !isNew
     && profileHasCredential(profile)
     && !profileChanged;
-  const accountScope = authorized?.kind === "oauth" ? authorized.scope
-    : !account.busy && savedCredentialApplies && profile?.auth.kind === "oauth" ? profile.auth.scope : undefined;
+  const selectedAccount = authorized?.kind === "oauth" ? authorized
+    : !account.busy && savedCredentialApplies && profile?.auth.kind === "oauth" ? profile.auth : undefined;
+  const accountScope = selectedAccount?.scope;
   const needsAccountLogin = draft.provider !== "custom" && authMethod === "account"
     && !authorized && (!savedCredentialApplies || profile?.auth.kind !== "oauth");
 
@@ -2503,60 +2505,49 @@ function ProfileEditorSheet({
     finally { setSaving(false); }
   };
   return (
-    <Sheet title={isNew ? "New Profile" : "Edit Profile"} label={isNew ? "New profile" : "Edit profile"} className="profile-editor-sheet w-[min(620px,_calc(var(--window-dialog-width,_100vw)_-_32px))] [&_.sheet-scroll]:min-h-0 [&_.sheet-scroll]:overflow-y-auto [&_.sheet-footer]:flex-none [&[open]]:flex [&[open]]:flex-col [&_form]:min-h-0 [&_form]:flex [&_form]:flex-col form-sheet [&_>_.sheet-heading]:px-5 [&_>_.field-note]:mx-5 [&_.sheet-footer]:mx-5 [&_form_>_[data-slot=field-error]]:mx-5 [&_.sheet-scroll]:px-5" dismissible={!saving && !account.working} onClose={() => void closeEditor()}>
+    <Sheet title={isNew ? "New profile" : "Edit profile"} className="profile-editor-sheet w-[min(480px,_calc(var(--window-dialog-width,_100vw)_-_32px))] [&_.sheet-scroll]:min-h-0 [&_.sheet-scroll]:overflow-y-auto [&_.sheet-footer]:flex-none [&[open]]:flex [&[open]]:flex-col [&_form]:min-h-0 [&_form]:flex [&_form]:flex-col form-sheet [&_>_.sheet-heading]:px-5 [&_>_.field-note]:mx-5 [&_.sheet-footer]:mx-5 [&_form_>_[data-slot=field-error]]:mx-5 [&_.sheet-scroll]:px-5" dismissible={!saving && !account.working} onClose={() => void closeEditor()}>
       <form className="mt-4" onSubmit={(event) => void submit(event)}>
         <div className="sheet-scroll py-1">
-        <FieldGroup>
-        <Field>
-        <FieldLabel id="profile-provider-label">Provider</FieldLabel>
-        <ToggleGroup variant="outline" className="service-presets w-full grid grid-cols-3 gap-2 max-[440px]:grid-cols-1" value={[draft.provider]} disabled={frozen || working} aria-labelledby="profile-provider-label" onValueChange={([value]) => { if (value === "phala" || value === "redpill" || value === "custom") void chooseService(value); }}>
-          {SERVICE_PRESETS.map((service) => (
-            <ToggleGroupItem key={service.id} value={service.id} className="service-preset min-w-0 text-left [&_.service-logo]:w-4.5 [&_.service-logo]:h-4.5 [&_.service-custom-icon]:w-4.5 [&_.service-custom-icon]:h-4.5 [&_strong]:min-w-0 [&_strong]:flex-auto [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_>_svg]:flex-none [&_>_svg]:text-foreground" aria-label={service.name}>
-              <ServiceLogo url={service.url} />
-              <strong>{service.name}</strong>
-              {draft.provider === service.id && <Check size={15} aria-hidden="true" />}
-            </ToggleGroupItem>
-          ))}
-          <ToggleGroupItem value="custom" className="service-preset min-w-0 text-left [&_.service-logo]:w-4.5 [&_.service-logo]:h-4.5 [&_.service-custom-icon]:w-4.5 [&_.service-custom-icon]:h-4.5 [&_strong]:min-w-0 [&_strong]:flex-auto [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_>_svg]:flex-none [&_>_svg]:text-foreground" aria-label="Custom">
-            <ServiceLogo url="custom://service" />
-            <strong>Custom</strong>
-            {draft.provider === "custom" && <Check size={15} aria-hidden="true" />}
-          </ToggleGroupItem>
-        </ToggleGroup>
-        </Field>
+        <FieldGroup className="gap-4 [&_[data-slot=field]]:gap-2">
+          <FormField id="profile-provider" label="Provider">
+            <ChoiceSelect id="profile-provider" label="Provider" value={draft.provider} className="w-full" disabled={frozen || working}
+              options={[
+                ...SERVICE_PRESETS.map((service) => ({ value: service.id, label: service.name, icon: <ServiceLogo url={service.url} size="small" /> })),
+                { value: "custom", label: "Custom", icon: <ServiceLogo url="custom://service" size="small" /> },
+              ]} onChange={(next) => { if (next === "phala" || next === "redpill" || next === "custom") void chooseService(next); }} />
+          </FormField>
           <FormField id="profile-name" label="Profile name"><Input id="profile-name" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} disabled={frozen || working} autoComplete="off" /></FormField>
           {draft.provider === "custom" && <FormField id="profile-endpoint" label="Service endpoint"><Input id="profile-endpoint" value={draft.remoteUrl} onChange={(event) => setDraft((current) => ({ ...current, remoteUrl: event.target.value }))} disabled={frozen || working} spellCheck={false} /></FormField>}
-          {draft.provider !== "custom" && <Field>
-            <FieldLabel id="profile-auth-label">Sign-in method</FieldLabel>
-            <ToggleGroup variant="outline" value={[authMethod]} disabled={working || frozen} aria-labelledby="profile-auth-label" onValueChange={([value]) => { if (value === "account" || value === "apiKey") void chooseAuthMethod(value); }}>
-              <ToggleGroupItem value="account">Account</ToggleGroupItem>
-              <ToggleGroupItem value="apiKey">API key</ToggleGroupItem>
-            </ToggleGroup>
-          </Field>}
+          {draft.provider !== "custom" && <RadioGroup aria-label="Sign-in method" value={authMethod} className="flex items-center gap-5" disabled={working || frozen}
+            onValueChange={(next) => void chooseAuthMethod(next)}>
+            <FieldLabel className="flex items-center gap-2 font-normal"><RadioGroupItem value="account" />Account</FieldLabel>
+            <FieldLabel className="flex items-center gap-2 font-normal"><RadioGroupItem value="apiKey" />API key</FieldLabel>
+          </RadioGroup>}
           {draft.provider !== "custom" && authMethod === "account" ? <Field>
-            <FieldDescription>{authorized?.kind === "oauth" ? `Signed in${authorized.accountName ? ` as ${authorized.accountName}` : ""}. Confirm this account to connect.` : savedCredentialApplies && profile?.auth.kind === "oauth" ? `Signed in${profile.auth.accountName ? ` to ${profile.auth.accountName}` : ""}.` : `Sign in with ${selectedPreset?.name} in your browser. Requests use your selected workspace's balance and permissions.`}</FieldDescription>
-            {accountScope?.organization && <div className="space-y-1"><p className="text-sm">Organization: <strong>{accountScope.organization}</strong></p><FieldDescription>To change organization, sign in again.</FieldDescription></div>}
-            {(authorized && login || savedCredentialApplies && profile?.auth.kind === "oauth" && !account.busy) && <AccountTools
-              key={login?.id ?? draft.id} api={desktopApi} provider={draft.provider}
-              target={authorized && login ? { kind: "login", id: login.id } : { kind: "profile", profileId: draft.id }}
-              scope={accountScope} credentialRef={profile?.credentialRef} disabled={working || frozen}
-            />}
-            {authorized && workspaces && workspaces.length > 0 ? <FormField id="profile-workspace" label="Workspace">
-              <ChoiceSelect id="profile-workspace" label="Workspace" className="w-full" value={workspaceId === undefined ? "" : String(workspaceId)} options={[
-                { value: "", label: "Select a workspace", disabled: true },
-                ...workspaces.map((workspace) => ({ value: String(workspace.id), label: workspace.name })),
-              ]} disabled={working || frozen || workspaces.length === 1} onChange={(value) => setWorkspaceId(Number(value))} />
-            </FormField> : accountScope?.workspace && <p className="text-sm">Workspace: <strong>{accountScope.workspace}</strong></p>}
-            {login && !authorized ? <div role="status" aria-live="polite">
-              <p>Finish signing in in your browser.</p>
-              {login.userCode && <p>Confirm code <strong className="font-mono">{login.userCode}</strong></p>}
-              <Button type="button" variant="outline" disabled={account.working} onClick={() => void account.cancel()}>Cancel Sign-in</Button>
-            </div> : <Button type="button" variant="outline" className="[&_.service-logo]:size-4.5" disabled={working || frozen || !draft.name.trim()} onClick={() => void signIn()}><ServiceLogo url={draft.remoteUrl} />{authorized || (savedCredentialApplies && profile?.auth.kind === "oauth") ? "Sign in again" : `Sign in with ${selectedPreset?.name}`}</Button>}
+            {login && !authorized ? <div className="flex items-center justify-between gap-3 rounded-xl border px-3.5 py-3" role="status" aria-live="polite">
+              <div className="space-y-1 text-sm"><p>Continue in your browser</p>{login.userCode && <p className="font-mono text-muted-foreground">{login.userCode}</p>}</div>
+              <Button type="button" variant="ghost" size="sm" disabled={account.working} onClick={() => void account.cancel()}>Cancel Sign-in</Button>
+            </div> : selectedAccount ? <SettingsList>
+              <Item size="sm">
+                <ItemContent><ItemTitle className="wrap-anywhere">{accountScope?.organization ?? selectedAccount.accountName ?? "Signed in"}</ItemTitle></ItemContent>
+                <ItemActions><Button type="button" variant="ghost" size="sm" aria-label="Change account" disabled={working || frozen} onClick={() => void signIn()}>Change</Button></ItemActions>
+              </Item>
+              {(workspaces?.length || accountScope?.workspace) && <Item size="sm">
+                <span className="text-xs text-muted-foreground">Workspace</span>
+                {authorized && workspaces && workspaces.length > 1 ? <ChoiceSelect id="profile-workspace" label="Workspace" className="ml-auto min-w-0 flex-1" value={workspaceId === undefined ? "" : String(workspaceId)} options={[
+                  { value: "", label: "Select workspace", disabled: true },
+                  ...workspaces.map((workspace) => ({ value: String(workspace.id), label: workspace.name })),
+                ]} disabled={working || frozen} onChange={(value) => setWorkspaceId(Number(value))} /> : <span className="ml-auto text-sm text-right wrap-anywhere">{workspaces?.[0]?.name ?? accountScope?.workspace}</span>}
+              </Item>}
+              <Item size="sm"><AccountTools key={login?.id ?? draft.id} api={desktopApi} provider={draft.provider}
+                target={authorized && login ? { kind: "login", id: login.id } : { kind: "profile", profileId: draft.id }}
+                scope={accountScope} credentialRef={profile?.credentialRef} disabled={working || frozen} /></Item>
+            </SettingsList> : <Button type="button" variant="outline" className="[&_.service-logo]:size-4" disabled={working || frozen || !draft.name.trim()} onClick={() => void signIn()}><ServiceLogo url={draft.remoteUrl} />Sign in with {selectedPreset?.name}</Button>}
 
           </Field> : <Field>
             <FieldLabel htmlFor="profile-key">{keyLabel}</FieldLabel>
             <Input id="profile-key" type="password" value={apiKeyDraft} onChange={(event) => setApiKeyDraft(event.target.value)} placeholder={savedCredentialApplies ? "Replace the saved key" : `Paste your ${keyLabel}`} disabled={frozen || working} autoComplete="off" spellCheck={false} aria-describedby="profile-key-note" />
-            <FieldDescription id="profile-key-note">{savedCredentialApplies ? "Using this profile's saved key. Enter a new one to replace it after verification." : profileChanged ? "A key is required for a new provider or endpoint." : "The key is stored in the system credential store and never written into agent configs."}</FieldDescription>
+            <FieldDescription id="profile-key-note">{savedCredentialApplies ? "Leave blank to keep the saved key." : profileChanged ? "Enter a key for this provider." : "Stored securely on this device."}</FieldDescription>
           </Field>}
         </FieldGroup>
         </div>
