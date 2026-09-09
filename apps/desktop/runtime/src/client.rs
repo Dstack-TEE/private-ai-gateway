@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::{Duration, Instant},
 };
@@ -24,6 +24,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct Client {
     states: watch::Sender<GatewayState>,
+    expected_shutdown: Mutex<Option<String>>,
 }
 
 impl Default for Client {
@@ -35,7 +36,10 @@ impl Default for Client {
 impl Client {
     pub fn new() -> Self {
         let (states, _) = watch::channel(GatewayState::default());
-        Self { states }
+        Self {
+            states,
+            expected_shutdown: Mutex::new(None),
+        }
     }
 
     pub fn hello(&self) -> Result<Hello, String> {
@@ -127,20 +131,33 @@ impl Client {
                 break;
             };
             if let Err(error) = result {
-                let mut state = client.states.borrow().clone();
-                state.status = "error".into();
-                state.backend_connected = Some(false);
-                state.identity = None;
-                state.proxy_url = None;
-                state.error = Some(error.clone());
-                state.endpoint_error =
-                    Some("Backend disconnected. Start it with pap service start.".into());
-                client.states.send_replace(state);
+                client.report_disconnect(error);
             }
             drop(client);
             std::thread::sleep(Duration::from_secs(1));
         });
         Ok(client)
+    }
+
+    fn report_disconnect(&self, error: String) {
+        let mut state = self.states.borrow().clone();
+        let expected = self
+            .expected_shutdown
+            .lock()
+            .ok()
+            .and_then(|value| value.clone());
+        // Only a shutdown initiated by this client for this exact instance is expected.
+        if expected.is_some() && expected == state.backend_instance {
+            return;
+        }
+        state.status = "error".into();
+        state.backend_connected = Some(false);
+        state.identity = None;
+        state.proxy_url = None;
+        state.error = Some(error);
+        state.endpoint_error =
+            Some("Backend disconnected. Start it with pap service start.".into());
+        self.states.send_replace(state);
     }
 
     pub fn watch_connection(mut receive: impl FnMut(GatewayState) -> bool) -> Result<(), String> {
@@ -355,25 +372,38 @@ impl Client {
             .set_read_timeout(Some(REQUEST_TIMEOUT))
             .map_err(connection_error)?;
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        protocol::write(
-            reader.get_mut(),
-            &Request {
-                version: protocol::VERSION,
-                id,
-                command: Command::Shutdown {
-                    instance_id: before.instance_id.clone(),
+        *self
+            .expected_shutdown
+            .lock()
+            .map_err(|_| "Shutdown state unavailable")? = Some(before.instance_id.clone());
+        let shutdown = (|| {
+            protocol::write(
+                reader.get_mut(),
+                &Request {
+                    version: protocol::VERSION,
+                    id,
+                    command: Command::Shutdown {
+                        instance_id: before.instance_id.clone(),
+                    },
                 },
-            },
-        )
-        .map_err(connection_error)?;
-        decode::<()>(&mut reader, id)?;
-        drop(reader);
-        crate::launch::wait_for_exit(before.process_id, Duration::from_secs(15))?;
-        match open() {
-            Err(error) if absent(&error) => Ok(()),
-            Err(error) => Err(connection_error(error)),
-            Ok(_) => Err("Another backend started during shutdown".into()),
+            )
+            .map_err(connection_error)?;
+            decode::<()>(&mut reader, id)?;
+            drop(reader);
+            crate::launch::wait_for_exit(before.process_id, Duration::from_secs(15))?;
+            match open() {
+                Err(error) if absent(&error) => Ok(()),
+                Err(error) => Err(connection_error(error)),
+                Ok(_) => Err("Another backend started during shutdown".into()),
+            }
+        })();
+        if shutdown.is_err() {
+            *self
+                .expected_shutdown
+                .lock()
+                .map_err(|_| "Shutdown state unavailable")? = None;
         }
+        shutdown
     }
     pub fn install_update(
         &self,
@@ -463,6 +493,29 @@ fn connection_error(error: io::Error) -> String {
 mod tests {
     use super::export_path;
     use std::{ffi::OsString, os::unix::ffi::OsStringExt, path::PathBuf};
+
+    #[test]
+    fn only_the_intentionally_stopped_instance_disconnects_without_a_fault() {
+        let client = super::Client::new();
+        let mut state = crate::contracts::GatewayState {
+            backend_instance: Some("old-instance".into()),
+            ..Default::default()
+        };
+        client.states.send_replace(state.clone());
+        *client.expected_shutdown.lock().unwrap() = Some("old-instance".into());
+        client.report_disconnect("connection closed".into());
+        assert!(client.states.borrow().error.is_none());
+
+        state.backend_instance = Some("replacement-instance".into());
+        client.states.send_replace(state);
+        client.report_disconnect("unexpected disconnection".into());
+        assert_eq!(client.states.borrow().status, "error");
+        assert_eq!(client.states.borrow().backend_connected, Some(false));
+        assert_eq!(
+            client.states.borrow().error.as_deref(),
+            Some("unexpected disconnection")
+        );
+    }
 
     #[test]
     fn export_rejects_paths_that_json_cannot_represent() {
