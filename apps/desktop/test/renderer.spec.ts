@@ -927,7 +927,7 @@ test("complex dialogs render as native child-window surfaces", async ({ page }) 
       size: { width: 580, height: 560 },
       path: "/?mock=ready&native-dialog=profile-editor",
       name: "New profile",
-      text: "Sign in with Phala",
+      text: "Verify and Save",
     },
     {
       size: { width: 700, height: 680 },
@@ -2035,4 +2035,31 @@ test("responsive, zoomed, dark, high-contrast, and reduced-motion layouts stay b
   expect(audit.tooSmall).toEqual([]);
   expect(audit.clippedControls).toEqual([]);
   expect(audit.nestedInteractive).toBe(0);
+});
+
+test("account sign-in stays in the form and requires explicit verification and save", async ({ page }) => {
+  for (const provider of ["Phala", "RedPill"]) {
+    await page.goto("/?mock=no-profiles");
+    await page.getByRole("switch", { name: "Start protection" }).click();
+    const editor = page.getByRole("dialog", { name: "New profile" });
+    await editor.getByRole("button", { name: provider, exact: true }).click();
+    const signIn = editor.locator(".sheet-scroll").getByRole("button", { name: `Sign in with ${provider}`, exact: true });
+    const save = editor.locator(".sheet-footer").getByRole("button", { name: "Verify and Save" });
+    await expect(signIn.locator("img")).toHaveCount(1);
+    await expect(editor.locator(".sheet-footer").getByRole("button", { name: /Sign in/ })).toHaveCount(0);
+    await expect(save).toBeDisabled();
+    await signIn.click();
+    await expect(editor.getByText("Signed in as Personal. Verify and save to use this account.")).toBeVisible();
+    await expect(editor).toBeVisible();
+    await expect(save).toBeEnabled();
+    if (provider === "Phala") {
+      await editor.getByRole("button", { name: "Cancel", exact: true }).click();
+      await expect(page.getByRole("button", { name: "Set up profile" })).toBeVisible();
+      await expect(page.getByRole("switch", { name: "Start protection" })).toHaveAttribute("aria-checked", "false");
+    } else {
+      await save.click();
+      await expect(editor).toHaveCount(0);
+      await expect(page.getByRole("switch", { name: "Stop protection" })).toBeVisible();
+    }
+  }
 });

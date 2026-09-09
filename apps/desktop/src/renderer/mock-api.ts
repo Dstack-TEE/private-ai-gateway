@@ -518,9 +518,13 @@ export function mockApi(name: string | null): DesktopApi {
       if (!login || login.id !== id) throw new Error("Account login is no longer active");
       if (login.polls++ < 2) return null;
       if (name === "oauth-denied") throw new Error("Authorization was declined");
-      const saved: ConfidentialProfile = { ...login.profile, auth: { kind: "oauth", accountId: "preview-account", accountName: "Personal" }, credentialSaved: true, verifiedAt: Math.floor(Date.now() / 1000) };
+      return { kind: "oauth", accountId: "preview-account", accountName: "Personal" };
+    },
+    saveAccountLogin: async (id, profile, requireProductionOs) => {
+      if (!login || login.id !== id || login.polls < 3 || profile.id !== login.profile.id || profile.provider !== login.profile.provider) throw new Error("Finish signing in first");
+      const saved: ConfidentialProfile = { ...profile, auth: { kind: "oauth", accountId: "preview-account", accountName: "Personal" }, credentialSaved: true, verifiedAt: Math.floor(Date.now() / 1000) };
       credentialProfiles.add(saved.id);
-      state = { ...state, profiles: [...state.profiles.filter((p) => p.id !== saved.id), saved], activeProfileId: saved.id, apiKeySaved: true, status: "stopped", configurationVerification: false, remoteUrl: saved.remoteUrl, config: { ...state.config, remoteUrl: saved.remoteUrl } };
+      state = { ...state, profiles: [...state.profiles.filter((p) => p.id !== saved.id), saved], activeProfileId: saved.id, apiKeySaved: true, status: "stopped", configurationVerification: false, remoteUrl: saved.remoteUrl, config: { remoteUrl: saved.remoteUrl, requireProductionOs } };
       login = undefined;
       publish();
       return structuredClone(state);
