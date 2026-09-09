@@ -4,6 +4,7 @@
 //! autostart integration. This crate owns product state and policy.
 
 pub mod account_login;
+mod balance_cache;
 pub mod cli;
 pub mod cli_install;
 pub mod client;

@@ -3,7 +3,7 @@
 Phala and RedPill profiles offer account login alongside manual API keys. Custom
 endpoints use manual keys. Provider buttons with their icons stay in the form
 content; authorization stages credentials, and the footer offers Cancel and
-Verify and Save. Preset service endpoints are hidden. The runtime owns the
+Connect account. Existing account edits use Save; manual keys use Verify and Save. Preset service endpoints are hidden. The runtime owns the
 browser authorization, verification and OS credential store; the renderer only
 receives presentation and non-secret account metadata.
 
@@ -20,7 +20,7 @@ flow, S256 PKCE and public token exchange. The callback checks Host, state, uniq
 code and issuer when present. Requests do not follow redirects. The requested
 scopes are `openid profile user:org:read`; no client secret or refresh token is
 used. Clerk tokens stay in runtime memory. Sign in alone does not issue a
-RedPill inference key: Verify and Save exchanges the grant at
+RedPill inference key: Connect account exchanges the grant at
 `POST https://service.redpill.ai/api/desktop/key`.
 
 Organization selection is Clerk's OAuth extension, not an OAuth/OIDC standard.
@@ -101,16 +101,30 @@ rechecks its ownership and membership. The saved profile retains non-secret
 organization/workspace names. Changing organization requires signing in again;
 after a key has been issued, changing workspace also requires fresh authorization.
 
-Check balance is available in the account section before Save and when editing a
-saved account profile. The runtime uses the pending OAuth grant or the profile's
-OS-stored inference key; credentials never pass through the renderer. RedPill
-returns the organization's shared USD balance, independently of workspace/key
-spending limits. An inference key needs a server-owned `desktop_balance_read`
-grant, and its actor's live Clerk membership and billing-read permission are
-checked again. Ordinary inference keys cannot use this endpoint. Keys created
-before the balance grant was introduced require signing in and saving again.
-Phala uses its existing `/api/v1/private_ai/self` contract and shows workspace
-balance and promotional credits separately.
+Balances load automatically after authorization, when opening a saved account,
+and on the active profile's main card. The same component handles both surfaces,
+refreshing a visible main card every five minutes, an editor every minute, and
+on focus with a 30-second minimum interval. The runtime coalesces concurrent windows by login ID or profile ID plus
+credential reference; successful results live for 30 seconds and failures for 10.
+A replaced credential cannot reuse an old cache entry. Balance reads do not update
+profile settings or hold the authorization lock during network requests. The renderer discards results when the target changes.
+
+Loading and unavailable states never masquerade as a zero balance. Refresh and
+Top up remain separate actions; balance failures stay local to this display and
+cannot interrupt protection. RedPill shows the shared organization USD balance;
+workspace and key limits still apply. Saved app keys require current live Clerk
+billing-read and workspace permissions, so a later permission grant no longer
+requires another sign-in. The API limits balance requests to ten per minute per
+bearer credential across workers using Redis; Redis failure only makes balance
+unavailable. Phala shows workspace balance and promotional credits separately.
+
+There is one authorization session per runtime, not per account. Repeated clicks
+are blocked in the hook; another window receives an explicit instruction to
+finish or cancel the existing sign-in. A save or balance operation cannot make a
+second begin request wait and unexpectedly launch another flow afterward. Users
+can intentionally create separate profiles for the same account. Browser OAuth
+success is not gateway verification: Connect account still verifies the selected
+provider before saving and never silently changes the selected tenant.
 
 Top up opens the system browser at RedPill's `/credits` page or Phala's `/cost`
 page, both of which include recharge controls. These sites use their own browser

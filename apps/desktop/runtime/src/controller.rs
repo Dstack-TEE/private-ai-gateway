@@ -34,6 +34,7 @@ pub struct RuntimeOptions {
 }
 
 pub struct DesktopRuntime {
+    balances: crate::balance_cache::BalanceCache,
     account_login: tokio::sync::Mutex<Option<crate::account_login::PendingLogin>>,
     account_save: Mutex<
         Option<(
@@ -314,6 +315,7 @@ impl DesktopRuntime {
             credentials: ClientCredentials::new()?,
             account_login: tokio::sync::Mutex::new(None),
             account_save: Mutex::new(None),
+            balances: crate::balance_cache::BalanceCache::default(),
             legacy_credential_pending: Mutex::new(migrated_legacy),
             endpoint: EndpointRuntime::new(task_runtime.clone()),
             codex_sync: CodexCatalogSync::default(),
@@ -884,10 +886,15 @@ impl DesktopRuntime {
         self: &Arc<Self>,
         profile: ConfidentialProfileInput,
     ) -> Result<crate::account_login::LoginPresentation, String> {
-        let mut slot = self.account_login.lock().await;
+        let mut slot = self.account_login.try_lock().map_err(|_| {
+            "Account: An account operation is in progress. Finish it before signing in again."
+        })?;
         if let Some(pending) = slot.as_mut() {
             if pending.is_active() {
-                return Err("Another account login is in progress".into());
+                return Err(
+                    "Account: Another sign-in is open. Finish or cancel it in the other window."
+                        .into(),
+                );
             }
             self.cancel_pending(pending).await?;
         }
@@ -1018,12 +1025,18 @@ impl DesktopRuntime {
         use crate::contracts::{AccountBalanceTarget, ProfileAuth};
         match target {
             AccountBalanceTarget::Login { id } => {
-                self.account_login
-                    .lock()
-                    .await
-                    .as_mut()
-                    .ok_or("Account login is no longer active")?
-                    .balance(&id)
+                self.balances
+                    .get(format!("login:{id}"), async {
+                        let (provider, secret) = self
+                            .account_login
+                            .lock()
+                            .await
+                            .as_mut()
+                            .ok_or("Account login is no longer active")?
+                            .balance_credential(&id)
+                            .await?;
+                        crate::account_login::account_balance(&provider, &secret).await
+                    })
                     .await
             }
             AccountBalanceTarget::Profile { profile_id } => {
@@ -1033,13 +1046,21 @@ impl DesktopRuntime {
                     .iter()
                     .find(|p| p.id == profile_id)
                     .ok_or("Profile not found")?;
-                if !matches!(profile.auth, ProfileAuth::OAuth { .. }) {
+                if !matches!(profile.auth, ProfileAuth::OAuth { .. })
+                    || !service_config::profile_has_credential(profile)
+                {
                     return Err("Sign in with an account to view its balance".into());
                 }
-                let key = self
-                    .load_profile_key(&profile_id)?
-                    .ok_or("This profile has no saved credential")?;
-                crate::account_login::account_balance(&profile.provider, &key).await
+                let entry = service_config::profile_credential_entry(profile)?;
+                self.balances
+                    .get(format!("profile:{profile_id}:{entry}"), async {
+                        let key = self
+                            .secrets
+                            .get(&entry)?
+                            .ok_or("This profile has no saved credential")?;
+                        crate::account_login::account_balance(&profile.provider, &key).await
+                    })
+                    .await
             }
         }
     }
@@ -2011,6 +2032,7 @@ mod tests {
             credentials: ClientCredentials::from_files(TokenFiles::new(directory)),
             account_login: tokio::sync::Mutex::new(None),
             account_save: Mutex::new(None),
+            balances: crate::balance_cache::BalanceCache::default(),
             legacy_credential_pending: Mutex::new(false),
             endpoint: EndpointRuntime::new(executor.handle().clone()),
             codex_sync: CodexCatalogSync::default(),

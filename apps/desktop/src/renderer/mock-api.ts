@@ -541,6 +541,7 @@ export function mockApi(name: string | null): DesktopApi {
       const profile = target.kind === "login" ? login?.id === target.id && login.polls >= 3 ? login.profile : undefined : state.profiles.find((p) => p.id === target.profileId);
       if (!profile) throw new Error("Account is unavailable");
       const saved = target.kind === "profile" ? state.profiles.find((p) => p.id === profile.id) : undefined;
+      if (name === "oauth-balance-delayed") await new Promise<void>((resolve) => window.addEventListener("mock:release-balance", () => resolve(), { once: true }));
       return { balanceUsd: "12.50", grantedUsd: profile.provider === "phala" ? "3.25" : null,
         scope: saved?.auth.kind === "oauth" && saved.auth.scope ? saved.auth.scope : { organization: profile.provider === "redpill" ? "Personal organization" : null, workspace: profile.provider === "phala" ? "Phala workspace" : null, workspaceId: null } };
     },

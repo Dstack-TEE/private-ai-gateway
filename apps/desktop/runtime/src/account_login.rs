@@ -122,12 +122,11 @@ impl Authorization {
         }
     }
 
-    async fn balance(&self, provider: &ServiceProvider) -> Result<AccountBalance, String> {
-        let secret = match self {
+    fn balance_secret(&self) -> &str {
+        match self {
             Self::Inference(credential) => &credential.key,
             Self::Redpill { access_token, .. } => access_token,
-        };
-        account_balance(provider, secret).await
+        }
     }
 }
 
@@ -229,14 +228,19 @@ impl PendingLogin {
         Ok(credential)
     }
 
-    pub async fn balance(&mut self, id: &str) -> Result<AccountBalance, String> {
+    pub async fn balance_credential(
+        &mut self,
+        id: &str,
+    ) -> Result<(ServiceProvider, String), String> {
         self.validate(id)?;
         let provider = self.profile.provider.clone();
-        self.resolve()
+        let secret = self
+            .resolve()
             .await?
             .ok_or("Finish signing in first")?
-            .balance(&provider)
-            .await
+            .balance_secret()
+            .to_owned();
+        Ok((provider, secret))
     }
 
     pub fn profile_id(&self) -> &str {
@@ -374,6 +378,8 @@ fn account_error(status: StatusCode, data: &Value) -> String {
     if let Some(message) = match protocol_error(data) {
         Some("org_required") => Some("Select an organization on the sign-in page and try again."),
         Some("keys_permission_required" | "organization_permission_required") => Some("Your organization must grant key-management permission before you can connect."),
+        Some("rate_limited") => Some("Balance refresh is temporarily limited. Try again in a minute."),
+        Some("balance_unavailable") => Some("Balance is temporarily unavailable. Try refreshing later."),
         Some("billing_permission_required") => Some("Your account does not have permission to view this balance."),
         Some("account_mapping_conflict") => Some("Account setup conflicts with an existing account. Contact RedPill support."),
         Some("account_setup_unavailable" | "account_service_unavailable" | "organization_unavailable" | "authorization_unavailable") => Some("Account setup is temporarily unavailable. Retry signing in."),
