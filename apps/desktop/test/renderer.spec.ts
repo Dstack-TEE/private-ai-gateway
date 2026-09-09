@@ -2085,6 +2085,12 @@ test("RedPill confirms workspace and exposes scoped balance and top-up actions",
   const mainCard = page.getByRole("region", { name: "Protection status" });
   await expect(mainCard.getByText("$12.50 USD", { exact: true })).toBeVisible();
   await expect(mainCard.getByRole("button", { name: "Top up", exact: true })).toBeVisible();
+  const billingOwner = mainCard.getByText("Billing account: Personal organization. Select this account on the billing website.");
+  await expect(billingOwner).toBeInViewport();
+  expect(await billingOwner.evaluate((element) => {
+    const card = element.closest(".status-surface");
+    return card !== null && element.getBoundingClientRect().bottom <= card.getBoundingClientRect().bottom;
+  })).toBe(true);
   await page.getByRole("button", { name: "Profiles: RedPill" }).click();
   await page.getByRole("button", { name: "Edit RedPill" }).click();
   const saved = page.getByRole("dialog", { name: "Edit profile" });
