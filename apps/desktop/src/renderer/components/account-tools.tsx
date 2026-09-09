@@ -12,6 +12,8 @@ type Props = {
   target: AccountBalanceTarget;
   scope?: AccountScope;
   credentialRef?: string;
+  accountName?: string | null;
+  onSignIn?(): void;
   disabled?: boolean;
   compact?: boolean;
 };
@@ -22,7 +24,7 @@ export function AccountTools(props: Props) {
   return <AccountBalanceView key={`${props.provider}:${props.target.kind}:${id}:${props.credentialRef ?? ""}`} {...props} />;
 }
 
-function AccountBalanceView({ api, provider, target, scope, disabled = false, compact = false }: Props) {
+function AccountBalanceView({ api, provider, target, scope, accountName, onSignIn, disabled = false, compact = false }: Props) {
   const [balance, setBalance] = useState<AccountBalance>();
   const [error, setError] = useState<string>();
   const [linkError, setLinkError] = useState<string>();
@@ -84,7 +86,11 @@ function AccountBalanceView({ api, provider, target, scope, disabled = false, co
   if (compact) return <Button type="button" variant="outline" size="sm" className="tabular-nums"
     aria-label={`Current balance: ${amount}`} title={error ?? `${owner ?? "Account"} · USD · Refresh balance`}
     disabled={busy} onClick={() => refresh.current()}>{amount}</Button>;
-  return <div className="w-full min-w-0 space-y-1.5" aria-label="Account balance">
+  return <div className="w-full min-w-0 space-y-3 rounded-xl border p-3" aria-label="Account balance">
+    <div className="flex items-center justify-between gap-3">
+      <span className="min-w-0 text-sm font-medium wrap-anywhere">{scope?.organization ?? accountName ?? owner ?? "Account"}</span>
+      {onSignIn && <Button type="button" size="xs" variant="ghost" disabled={disabled} onClick={onSignIn}>Sign in again</Button>}
+    </div>
     <div className="flex items-center justify-between gap-3" role="status" aria-live="polite" aria-busy={busy}>
       <span className="min-w-0 text-xs text-muted-foreground wrap-anywhere" title={provider === "redpill" ? "Shared organization balance" : "Workspace balance"}>Balance</span>
       <div className="flex shrink-0 items-center gap-1">

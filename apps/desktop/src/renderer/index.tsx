@@ -2529,7 +2529,7 @@ function ProfileEditorSheet({
           {draft.provider === "custom" && <FormField id="profile-endpoint" label="Service endpoint"><Input id="profile-endpoint" value={draft.remoteUrl} onChange={(event) => setDraft((current) => ({ ...current, remoteUrl: event.target.value }))} disabled={frozen || working} spellCheck={false} /></FormField>}
           <Tabs value={draft.provider === "custom" ? "apiKey" : authMethod} className="gap-4"
             onValueChange={(next) => { if (next === "account" || next === "apiKey") void chooseAuthMethod(next); }}>
-            {draft.provider !== "custom" && <TabsList aria-label="Sign-in method" variant="line">
+            {draft.provider !== "custom" && <TabsList aria-label="Sign-in method" className="w-full">
               <TabsTrigger value="account" disabled={working || frozen}>Account</TabsTrigger>
               <TabsTrigger value="apiKey" disabled={working || frozen}>API key</TabsTrigger>
             </TabsList>}
@@ -2539,21 +2539,16 @@ function ProfileEditorSheet({
                   <div className="space-y-1 text-sm"><p>Continue in your browser</p>{login.userCode && <p className="font-mono text-muted-foreground">{login.userCode}</p>}</div>
                   <Button type="button" variant="ghost" size="sm" disabled={account.working} onClick={() => void account.cancel()}>Cancel Sign-in</Button>
                 </div> : selectedAccount ? <>
-                  <FormField id="profile-organization" label={accountScope?.organization ? "Organization" : "Account"}>
-                    <div className="flex items-center gap-2">
-                      <Input id="profile-organization" value={accountScope?.organization ?? selectedAccount.accountName ?? "Signed in"} readOnly />
-                      <Button type="button" variant="outline" aria-label="Change account" disabled={working || frozen} onClick={() => void signIn()}>Change</Button>
-                    </div>
-                  </FormField>
+                  <AccountTools key={login?.id ?? draft.id} api={desktopApi} provider={draft.provider}
+                    target={authorized && login ? { kind: "login", id: login.id } : { kind: "profile", profileId: draft.id }}
+                    scope={accountScope} accountName={selectedAccount.accountName} onSignIn={() => void signIn()}
+                    credentialRef={profile?.credentialRef} disabled={working || frozen} />
                   {(workspaces?.length || accountScope?.workspace) && <FormField id="profile-workspace" label="Workspace">
                     {authorized && workspaces && workspaces.length > 0 ? <ChoiceSelect id="profile-workspace" label="Workspace" className="w-full" value={workspaceId === undefined ? "" : String(workspaceId)} options={[
                       { value: "", label: "Select workspace", disabled: true },
                       ...workspaces.map((workspace) => ({ value: String(workspace.id), label: workspace.name })),
                     ]} disabled={working || frozen || workspaces.length === 1} onChange={(value) => setWorkspaceId(Number(value))} /> : <Input id="profile-workspace" value={accountScope?.workspace ?? ""} readOnly />}
                   </FormField>}
-                  <AccountTools key={login?.id ?? draft.id} api={desktopApi} provider={draft.provider}
-                    target={authorized && login ? { kind: "login", id: login.id } : { kind: "profile", profileId: draft.id }}
-                    scope={accountScope} credentialRef={profile?.credentialRef} disabled={working || frozen} />
                 </> : <Button type="button" variant="outline" className="w-full [&_.service-logo]:size-4" disabled={working || frozen || !draft.name.trim()} onClick={() => void signIn()}><ServiceLogo url={draft.remoteUrl} />Sign in with {selectedPreset?.name}</Button>}
               </FieldGroup>
             </TabsContent>
@@ -2568,7 +2563,7 @@ function ProfileEditorSheet({
         <FieldError className="mt-3">{error}</FieldError>
         <SheetActions leading={!isNew && <Button type="button" variant="destructive" disabled={working || frozen} onClick={() => void removeProfile()}><Trash2 size={14} />Delete Profile</Button>}>
           <Button type="button" variant="outline" onClick={() => void closeEditor()} disabled={saving || account.working}>Cancel</Button>
-          <Button type="submit" variant="default" disabled={working || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || Boolean(needsAccountLogin) || needsWorkspace || (!authorized && !savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Verifying…" : authMethod === "account" && draft.provider !== "custom" ? authorized || needsAccountLogin ? "Connect account" : "Save" : "Verify and Save"}</Button>
+          <Button type="submit" variant="default" disabled={working || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || Boolean(needsAccountLogin) || needsWorkspace || (!authorized && !savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Saving…" : "Save"}</Button>
         </SheetActions>
       </form>
     </Sheet>

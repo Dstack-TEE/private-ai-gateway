@@ -927,7 +927,7 @@ test("complex dialogs render as native child-window surfaces", async ({ page }) 
       size: { width: 580, height: 560 },
       path: "/?mock=ready&native-dialog=profile-editor",
       name: "New profile",
-      text: "Verify and Save",
+      text: "Save",
     },
     {
       size: { width: 700, height: 680 },
@@ -1144,7 +1144,7 @@ test("protection flow, page headers, and focus follow the native desktop contrac
   await expect(editor.getByRole("button", { name: "Phala", exact: true })).toHaveAttribute("aria-pressed", "true");
   await editor.getByRole("tab", { name: "API key", exact: true }).click();
   await editor.getByLabel("Phala AI API key").fill("sk-test-123");
-  await editor.getByRole("button", { name: "Verify and Save" }).click();
+  await editor.getByRole("button", { name: "Save" }).click();
   await expect(editor).toHaveCount(0);
   await expect(page.getByRole("dialog", { name: "Profiles" })).toHaveCount(0);
 
@@ -1796,7 +1796,7 @@ test("editing a live profile reconnects, while a failed candidate stays unsaved 
   await expect(editor.getByLabel("RedPill API key")).toBeEnabled();
   await expect(editor.getByText(/Saving briefly stops protection/)).toHaveCount(0);
   page.once("dialog", (dialog) => dialog.accept());
-  await editor.getByRole("button", { name: "Verify and Save" }).click();
+  await editor.getByRole("button", { name: "Save" }).click();
   await expect(profiles).toBeVisible();
   await profiles.getByRole("button", { name: "New Profile" }).click();
   const candidate = page.getByRole("dialog", { name: "New profile" });
@@ -1804,7 +1804,7 @@ test("editing a live profile reconnects, while a failed candidate stays unsaved 
   await candidate.getByRole("button", { name: "Custom", exact: true }).click();
   await candidate.getByLabel("Service endpoint").fill("https://unreachable.invalid");
   await candidate.getByLabel("API key", { exact: true }).fill("sk-test-candidate");
-  await candidate.getByRole("button", { name: "Verify and Save" }).click();
+  await candidate.getByRole("button", { name: "Save" }).click();
   await expect(candidate.getByRole("alert")).toContainText("did not answer");
   await candidate.getByRole("button", { name: "Cancel" }).click();
   await expect(profiles.locator(".profile-select")).toHaveCount(1);
@@ -1900,7 +1900,7 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
   await editor.getByRole("tab", { name: "API key", exact: true }).click();
   await expect(editor.getByLabel("Phala AI API key")).toBeVisible();
   await expect(editor.getByText("Stored securely on this device.")).toBeVisible();
-  await expect(editor.getByRole("button", { name: "Verify and Save" })).toBeDisabled();
+  await expect(editor.getByRole("button", { name: "Save" })).toBeDisabled();
 
   await editor.getByRole("button", { name: "Custom", exact: true }).click();
   await expect(editor.getByLabel("Profile name")).toHaveValue("Custom");
@@ -1925,7 +1925,7 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
   await editor.getByRole("button", { name: "Custom", exact: true }).click();
   await editor.getByLabel("Service endpoint").fill("https://private.example.com");
   await editor.getByLabel("API key").fill("sk-profile-test");
-  await editor.getByRole("button", { name: "Verify and Save" }).click();
+  await editor.getByRole("button", { name: "Save" }).click();
   await expect(editor).toHaveCount(0);
   await expect(profiles).toBeVisible();
   const reopenedProfiles = page.getByRole("dialog", { name: "Profiles" });
@@ -2044,12 +2044,12 @@ test("account sign-in stays in the form and requires explicit verification and s
     const editor = page.getByRole("dialog", { name: "New profile" });
     await editor.getByRole("button", { name: provider, exact: true }).click();
     const signIn = editor.locator(".sheet-scroll").getByRole("button", { name: `Sign in with ${provider}`, exact: true });
-    const save = editor.locator(".sheet-footer").getByRole("button", { name: "Connect account" });
+    const save = editor.locator(".sheet-footer").getByRole("button", { name: "Save" });
     await expect(signIn.locator("img")).toHaveCount(1);
     await expect(editor.locator(".sheet-footer").getByRole("button", { name: /Sign in/ })).toHaveCount(0);
     await expect(save).toBeDisabled();
     await signIn.click();
-    await expect(editor.getByRole("button", { name: "Change account" })).toBeVisible();
+    await expect(editor.getByRole("button", { name: "Sign in again" })).toBeVisible();
     await expect(editor).toBeVisible();
     await expect(save).toBeEnabled();
     if (provider === "Phala") {
@@ -2073,8 +2073,11 @@ test("RedPill confirms workspace and exposes scoped balance and top-up actions",
   const editor = page.getByRole("dialog", { name: "New profile" });
   await editor.getByRole("button", { name: "RedPill", exact: true }).click();
   await editor.getByRole("button", { name: "Sign in with RedPill" }).click();
-  await expect(editor.getByLabel("Organization", { exact: true })).toHaveValue("Personal organization");
-  const save = editor.getByRole("button", { name: "Connect account" });
+  const accountSummary = editor.getByLabel("Account balance");
+  await expect(accountSummary.getByText("Personal organization", { exact: true })).toBeVisible();
+  await expect(accountSummary.getByText("$12.50", { exact: true })).toBeVisible();
+  await expect(accountSummary.getByRole("textbox")).toHaveCount(0);
+  const save = editor.getByRole("button", { name: "Save" });
   await expect(save).toBeDisabled();
   await editor.getByRole("combobox", { name: "Workspace" }).click();
   const research = page.getByRole("option", { name: "Research", exact: true });
@@ -2126,7 +2129,7 @@ test("a delayed balance cannot appear after changing provider", async ({ page })
   await page.getByRole("button", { name: "Set up profile" }).click();
   const editor = page.getByRole("dialog", { name: "New profile" });
   await editor.getByRole("button", { name: "Sign in with Phala" }).click();
-  await expect(editor.getByRole("button", { name: "Change account" })).toBeVisible();
+  await expect(editor.getByRole("button", { name: "Sign in again" })).toBeVisible();
   await expect(editor.getByLabel("Account balance")).toBeVisible();
   await editor.getByRole("button", { name: "RedPill", exact: true }).click();
   await page.evaluate(() => window.dispatchEvent(new Event("mock:release-balance")));
