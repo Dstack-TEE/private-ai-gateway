@@ -102,7 +102,9 @@ organization/workspace names. Changing organization requires signing in again;
 after a key has been issued, changing workspace also requires fresh authorization.
 
 Balances load automatically after authorization, when opening a saved account,
-and on the active profile's main card. The same component handles both surfaces,
+and on the active profile's main card. The main card adds only a current-balance
+button beside the profile selector; clicking it refreshes the amount. Organization,
+workspace, promotional credits and Top up remain in the editor. The same component handles both surfaces,
 refreshing a visible main card every five minutes, an editor every minute, and
 on focus with a 30-second minimum interval. The runtime coalesces concurrent windows by login ID or profile ID plus
 credential reference; successful results live for 30 seconds and failures for 10.

@@ -36,17 +36,16 @@ macOS acceptance testing. Browser geometry checks cannot replace that work.
 
 ## Account form consistency
 
-Buttons, inputs and select triggers share the `rounded-lg` control radius;
-dialog surfaces use `rounded-2xl`. Providers use the shared Select composition;
-authentication methods use a Base UI RadioGroup. Neither is represented as tabs.
-The profile form uses 16 px between fields and 8 px between labels and controls,
-with a 480 px default width in both browser and native editor windows.
+Provider selection uses three outlined buttons with provider icons. Account and
+API key use the shared Tabs, TabsList, TabsTrigger and TabsContent components.
+Organization and workspace use FormField with Input or Select; organization is
+read-only because it comes from browser authorization, with Change to sign in
+again. Workspace selection is editable only when the grant provides alternatives.
 
-Authorized account details reuse `SettingsList` and `Item`: identity with a
-secondary Change action, workspace, then balance. A sole workspace is read-only;
-multiple workspaces use the shared select. Repeated sign-in, tenant and billing
-paragraphs are omitted. The main card shows the billing owner, amount and actions
-in one row; nonzero promotional credits and actionable errors remain visible.
+The main status card retains its original two-row layout and height. It adds only
+one current-balance button immediately after the profile selector; clicking the
+button refreshes the balance. Billing details and Top up remain in the editor.
+Buttons, inputs and select triggers share their control radius and field spacing.
 
 ## What was taken from reference products
 

@@ -80,9 +80,13 @@ function AccountBalanceView({ api, provider, target, scope, disabled = false, co
     finally { openingRef.current = false; setOpening(false); }
   }, [api, provider, disabled]);
   const owner = (balance?.scope ?? scope)?.organization ?? (balance?.scope ?? scope)?.workspace;
+  const amount = balance ? currency(Number(balance.balanceUsd)) : busy ? "…" : "Unavailable";
+  if (compact) return <Button type="button" variant="outline" size="sm" className="tabular-nums"
+    aria-label={`Current balance: ${amount}`} title={error ?? `${owner ?? "Account"} · USD · Refresh balance`}
+    disabled={busy} onClick={() => refresh.current()}>{amount}</Button>;
   return <div className="w-full min-w-0 space-y-1.5" aria-label="Account balance">
     <div className="flex items-center justify-between gap-3" role="status" aria-live="polite" aria-busy={busy}>
-      <span className="min-w-0 text-xs text-muted-foreground wrap-anywhere" title={provider === "redpill" ? "Shared organization balance" : "Workspace balance"}>{compact ? owner ?? "Balance" : "Balance"}</span>
+      <span className="min-w-0 text-xs text-muted-foreground wrap-anywhere" title={provider === "redpill" ? "Shared organization balance" : "Workspace balance"}>Balance</span>
       <div className="flex shrink-0 items-center gap-1">
         <span className="text-sm font-medium tabular-nums" aria-label="Balance in USD">{balance ? currency(Number(balance.balanceUsd)) : busy ? "Loading…" : "Unavailable"}</span>
         <Button type="button" size="icon-xs" variant="ghost" aria-label="Refresh balance" disabled={disabled || busy} onClick={() => refresh.current()}><RefreshCw className={busy ? "animate-spin motion-reduce:animate-none" : ""} aria-hidden /></Button>
