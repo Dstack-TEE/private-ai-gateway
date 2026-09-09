@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ExternalLink, RefreshCw } from "lucide-react";
+import { Building2, Ellipsis, ExternalLink, LogIn, RefreshCw, UserRound } from "lucide-react";
 import type { AccountBalance, AccountBalanceTarget, AccountScope, DesktopApi, ServiceProvider } from "../../shared/contracts";
 import { errorMessage } from "../lib/error-message";
 import { currency } from "../lib/usage-presentation";
 import { Button } from "./ui/button";
 import { FieldError } from "./ui/field";
+import { Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemTitle } from "./ui/item";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 
 type Props = {
   api: Pick<DesktopApi, "getAccountBalance" | "openTopUp">;
@@ -86,20 +88,40 @@ function AccountBalanceView({ api, provider, target, scope, accountName, onSignI
   if (compact) return <Button type="button" variant="outline" size="sm" className="tabular-nums"
     aria-label={`Current balance: ${amount}`} title={error ?? `${owner ?? "Account"} · USD · Refresh balance`}
     disabled={busy} onClick={() => refresh.current()}>{amount}</Button>;
-  return <div className="w-full min-w-0 space-y-3 rounded-xl border p-3" aria-label="Account balance">
-    <div className="flex items-center justify-between gap-3">
-      <span className="min-w-0 text-sm font-medium wrap-anywhere">{scope?.organization ?? accountName ?? owner ?? "Account"}</span>
-      {onSignIn && <Button type="button" size="xs" variant="ghost" disabled={disabled} onClick={onSignIn}>Sign in again</Button>}
-    </div>
-    <div className="flex items-center justify-between gap-3" role="status" aria-live="polite" aria-busy={busy}>
-      <span className="min-w-0 text-xs text-muted-foreground wrap-anywhere" title={provider === "redpill" ? "Shared organization balance" : "Workspace balance"}>Balance</span>
-      <div className="flex shrink-0 items-center gap-1">
-        <span className="text-sm font-medium tabular-nums" aria-label="Balance in USD">{balance ? currency(Number(balance.balanceUsd)) : busy ? "Loading…" : "Unavailable"}</span>
-        <Button type="button" size="icon-xs" variant="ghost" aria-label="Refresh balance" disabled={disabled || busy} onClick={() => refresh.current()}><RefreshCw className={busy ? "animate-spin motion-reduce:animate-none" : ""} aria-hidden /></Button>
-        <Button type="button" size="xs" variant="link" title={owner ? `Top up ${owner}` : "Open billing"} disabled={disabled || opening} onClick={() => void topUp()}>Top up<ExternalLink aria-hidden /></Button>
-      </div>
-    </div>
-    {balance?.grantedUsd != null && Number(balance.grantedUsd) > 0 && <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground tabular-nums"><span>Promo credits</span><span>{currency(Number(balance.grantedUsd))}</span></div>}
+  const organization = (balance?.scope ?? scope)?.organization;
+  const name = organization ?? accountName ?? owner ?? "Account";
+  return <div aria-label="Account balance">
+    <Item variant="outline" size="sm">
+      <ItemMedia variant="icon">{organization ? <Building2 aria-hidden /> : <UserRound aria-hidden />}</ItemMedia>
+      <ItemContent className="min-w-0">
+        <ItemTitle className="line-clamp-none wrap-anywhere">{name}</ItemTitle>
+        <ItemDescription className="line-clamp-none" role="status" aria-live="polite" aria-busy={busy}>
+          Balance: <span className="tabular-nums" aria-label="Balance in USD">{balance ? currency(Number(balance.balanceUsd)) : busy ? "Loading…" : "Unavailable"}</span>
+          {balance?.grantedUsd != null && Number(balance.grantedUsd) > 0 && <> · {currency(Number(balance.grantedUsd))} promo credits</>}
+        </ItemDescription>
+      </ItemContent>
+      <ItemActions>
+        <Button type="button" size="sm" variant="outline" title={`Top up ${name}`} disabled={disabled || opening} onClick={() => void topUp()}>Top up<ExternalLink aria-hidden /></Button>
+        <AccountActions disabled={disabled} refreshing={busy} onRefresh={() => refresh.current()} onSignIn={onSignIn} />
+      </ItemActions>
+    </Item>
     <FieldError>{linkError ?? error}</FieldError>
   </div>;
+}
+
+function AccountActions({ disabled, refreshing, onRefresh, onSignIn }: {
+  disabled: boolean;
+  refreshing: boolean;
+  onRefresh(): void;
+  onSignIn?(): void;
+}) {
+  const trigger = useRef<HTMLButtonElement>(null);
+  const [container, setContainer] = useState<HTMLDialogElement | null>(null);
+  return <DropdownMenu onOpenChange={(open) => { if (open) setContainer(trigger.current?.closest("dialog") ?? null); }}>
+    <DropdownMenuTrigger render={<Button ref={trigger} type="button" size="icon-sm" variant="ghost" aria-label="Account actions" disabled={disabled} />}><Ellipsis aria-hidden /></DropdownMenuTrigger>
+    <DropdownMenuContent align="end" container={container ?? undefined}>
+      <DropdownMenuItem disabled={refreshing} onClick={onRefresh}><RefreshCw aria-hidden />Refresh balance</DropdownMenuItem>
+      {onSignIn && <DropdownMenuItem onClick={onSignIn}><LogIn aria-hidden />Sign in again</DropdownMenuItem>}
+    </DropdownMenuContent>
+  </DropdownMenu>;
 }

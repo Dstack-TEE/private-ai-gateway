@@ -2049,7 +2049,7 @@ test("account sign-in stays in the form and requires explicit verification and s
     await expect(editor.locator(".sheet-footer").getByRole("button", { name: /Sign in/ })).toHaveCount(0);
     await expect(save).toBeDisabled();
     await signIn.click();
-    await expect(editor.getByRole("button", { name: "Sign in again" })).toBeVisible();
+    await expect(editor.getByRole("button", { name: "Account actions" })).toBeVisible();
     await expect(editor).toBeVisible();
     await expect(save).toBeEnabled();
     if (provider === "Phala") {
@@ -2077,6 +2077,10 @@ test("RedPill confirms workspace and exposes scoped balance and top-up actions",
   await expect(accountSummary.getByText("Personal organization", { exact: true })).toBeVisible();
   await expect(accountSummary.getByText("$12.50", { exact: true })).toBeVisible();
   await expect(accountSummary.getByRole("textbox")).toHaveCount(0);
+  await accountSummary.getByRole("button", { name: "Account actions" }).click();
+  await expect(page.getByRole("menuitem", { name: "Sign in again" })).toBeVisible();
+  await page.getByRole("menuitem", { name: "Refresh balance" }).click();
+  await expect(page.getByRole("menu")).toHaveCount(0);
   const save = editor.getByRole("button", { name: "Save" });
   await expect(save).toBeDisabled();
   await editor.getByRole("combobox", { name: "Workspace" }).click();
@@ -2109,6 +2113,9 @@ test("RedPill confirms workspace and exposes scoped balance and top-up actions",
   const saved = page.getByRole("dialog", { name: "Edit profile" });
   await expect(saved.getByLabel("Workspace", { exact: true })).toHaveValue("Research");
   await expect(saved.getByText("$12.50", { exact: true })).toBeInViewport();
+  await saved.getByRole("button", { name: "Account actions" }).click();
+  await page.getByRole("menuitem", { name: "Sign in again" }).click();
+  await expect(saved.getByRole("button", { name: "Account actions" })).toBeVisible();
   await saved.getByRole("button", { name: "Phala", exact: true }).click();
   await expect(saved.getByText("Personal organization", { exact: true })).toHaveCount(0);
   await expect(saved.getByRole("button", { name: "Sign in with Phala" })).toBeVisible();
@@ -2129,7 +2136,7 @@ test("a delayed balance cannot appear after changing provider", async ({ page })
   await page.getByRole("button", { name: "Set up profile" }).click();
   const editor = page.getByRole("dialog", { name: "New profile" });
   await editor.getByRole("button", { name: "Sign in with Phala" }).click();
-  await expect(editor.getByRole("button", { name: "Sign in again" })).toBeVisible();
+  await expect(editor.getByRole("button", { name: "Account actions" })).toBeVisible();
   await expect(editor.getByLabel("Account balance")).toBeVisible();
   await editor.getByRole("button", { name: "RedPill", exact: true }).click();
   await page.evaluate(() => window.dispatchEvent(new Event("mock:release-balance")));
