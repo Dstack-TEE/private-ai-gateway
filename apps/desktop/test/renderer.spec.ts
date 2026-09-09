@@ -2112,6 +2112,12 @@ test("RedPill confirms workspace and exposes scoped balance and top-up actions",
   await page.getByRole("button", { name: "Edit RedPill" }).click();
   const saved = page.getByRole("dialog", { name: "Edit profile" });
   await expect(saved.getByLabel("Workspace", { exact: true })).toHaveValue("Research");
+  await saved.getByRole("tab", { name: "API key", exact: true }).click();
+  await expect(saved.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+  await saved.getByLabel("RedPill API key").fill("sk-manual-replacement");
+  await expect(saved.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
+  await saved.getByRole("tab", { name: "Account", exact: true }).click();
+  await expect(saved.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
   await expect(saved.getByText("$12.50", { exact: true })).toBeInViewport();
   await saved.getByRole("button", { name: "Account actions" }).click();
   await page.getByRole("menuitem", { name: "Switch account" }).click();
@@ -2143,4 +2149,51 @@ test("a delayed balance cannot appear after changing provider", async ({ page })
   await expect(editor.getByRole("button", { name: "Sign in with RedPill" })).toBeVisible();
   await expect(editor.getByLabel("Account balance")).toHaveCount(0);
   await expect(editor.getByText("$12.50", { exact: true })).toHaveCount(0);
+});
+
+
+test("cancelled and declined authorizations leave the form reusable", async ({ page }) => {
+  await page.goto("/?mock=oauth-denied");
+  await page.getByRole("button", { name: "Set up profile" }).click();
+  const editor = page.getByRole("dialog", { name: "New profile" });
+  const signIn = editor.getByRole("button", { name: "Sign in with Phala" });
+  await signIn.click();
+  await editor.getByRole("button", { name: "Cancel Sign-in" }).click();
+  await expect(signIn).toBeEnabled();
+  await expect(editor.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+  await signIn.click();
+  await expect(editor.getByText("Authorization was declined", { exact: true })).toBeVisible();
+  await expect(signIn).toBeEnabled();
+  await editor.getByRole("tab", { name: "API key", exact: true }).click();
+  await expect(editor.getByLabel("Phala AI API key")).toBeEnabled();
+  await editor.getByRole("tab", { name: "Account", exact: true }).click();
+  await expect(signIn).toBeEnabled();
+  await editor.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.getByRole("button", { name: "Set up profile" }).click();
+  await expect(signIn).toBeEnabled();
+});
+
+test("account save failure retries the staged grant and saved accounts can be deleted", async ({ page }) => {
+  await page.goto("/?mock=oauth-save-retry");
+  await page.getByRole("button", { name: "Set up profile" }).click();
+  const editor = page.getByRole("dialog", { name: "New profile" });
+  await editor.getByRole("button", { name: "RedPill", exact: true }).click();
+  await editor.getByRole("button", { name: "Sign in with RedPill" }).click();
+  const save = editor.getByRole("button", { name: "Save", exact: true });
+  await expect(save).toBeEnabled();
+  await save.click();
+  await expect(editor.getByText("The verified gateway did not answer the model list request", { exact: true })).toBeVisible();
+  await expect(editor.getByLabel("Account balance").getByText("Personal organization", { exact: true })).toBeVisible();
+  await save.click();
+  await expect(editor).toHaveCount(0);
+  await page.getByRole("button", { name: "Profiles: RedPill" }).click();
+  await page.getByRole("button", { name: "Edit RedPill" }).click();
+  const saved = page.getByRole("dialog", { name: "Edit profile" });
+  await saved.getByLabel("Profile name").fill("Work");
+  await saved.getByRole("button", { name: "Save", exact: true }).click();
+  await page.getByRole("button", { name: "Edit Work" }).click();
+  page.once("dialog", (dialog) => dialog.accept());
+  await saved.getByRole("button", { name: "Delete Profile" }).click();
+  await expect(saved).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Edit Work" })).toHaveCount(0);
 });
