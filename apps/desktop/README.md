@@ -101,7 +101,11 @@ shadows or typography; choose from the official component variants instead.
 
 Component sources in `src/renderer/components/ui` were obtained from the official
 `https://ui.shadcn.com/r/styles/base-luma/{component}.json` registry on 2026-09-05.
-Local changes are import paths and Lucide icon substitution.
+Local changes are import paths and Lucide icon substitution. The account summary follows
+[Item composition](https://ui.shadcn.com/docs/components/base/item#composition)
+and [Item vs Field](https://ui.shadcn.com/docs/components/base/item#item-vs-field).
+Its action menu uses the official Base Luma Dropdown Menu registry (2026-09-09),
+with portal ownership passed into native HTML dialogs.
 Protection controls use the standard 44x20 switch geometry and Base UI behavior.
 Overview aligns the switch with the status text at the top right;
 the profile and info actions sit below. The Agents card reserves three standard
