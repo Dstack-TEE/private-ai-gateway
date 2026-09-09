@@ -2076,7 +2076,17 @@ test("RedPill confirms workspace and exposes scoped balance and top-up actions",
   await expect(editor.getByText("Personal organization", { exact: true })).toBeVisible();
   const save = editor.getByRole("button", { name: "Connect account" });
   await expect(save).toBeDisabled();
-  await choose(page, editor.getByRole("combobox", { name: "Workspace" }), "Research");
+  await editor.getByRole("combobox", { name: "Workspace" }).click();
+  const research = page.getByRole("option", { name: "Research", exact: true });
+  await expect(research).toBeInViewport();
+  await expect.poll(() => research.evaluate((option) => {
+    const dialog = option.closest("dialog");
+    if (!dialog) return false;
+    const item = option.getBoundingClientRect();
+    const frame = dialog.getBoundingClientRect();
+    return dialog.scrollLeft === 0 && item.left >= frame.left && item.right <= frame.right && item.bottom <= frame.bottom;
+  })).toBe(true);
+  await research.click();
   await expect(save).toBeEnabled();
   await expect(editor.getByText("$12.50 USD", { exact: true })).toBeInViewport();
   await editor.getByRole("button", { name: "Top up", exact: true }).click();

@@ -23,7 +23,7 @@ export function ChoiceSelect({ id, label, describedBy, value, options, disabled,
     <SelectTrigger ref={trigger} id={id} aria-label={label} aria-describedby={describedBy} size={size} className={className}>
       <SelectValue />
     </SelectTrigger>
-    <SelectContent container={container ?? undefined}>
+    <SelectContent container={container ?? undefined} alignItemWithTrigger={container === null}>
       <SelectGroup>{options.map((option) => <SelectItem key={option.value} value={option.value} disabled={option.disabled}>{option.label}</SelectItem>)}</SelectGroup>
     </SelectContent>
   </Select>;
