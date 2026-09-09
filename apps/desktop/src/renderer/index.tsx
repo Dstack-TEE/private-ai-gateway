@@ -1157,7 +1157,7 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
   return (
     <div className="desktop-preview relative w-full h-full min-w-50 pt-12 pr-6 pb-6 pl-6 grid place-items-center overflow-hidden bg-background bg-[url('/macos-wallpaper.webp')] bg-center bg-cover bg-no-repeat max-[620px]:pt-10 max-[620px]:pr-2 max-[620px]:pb-2 max-[620px]:pl-2">
       <MacMenuBar protected={isProtected(state)} trayOpen={previewTrayOpen} onTray={() => setPreviewTrayOpen((open) => !open)} />
-      <div className="desktop-window relative box-content w-[min(1052px,_calc(100%_-_2px))] h-[min(880px,_calc(100vh_-_74px))] min-h-140 overflow-hidden bg-background border border-[color-mix(in_srgb,_var(--color-black)_20%,_transparent)] rounded-lg [box-shadow:0_22px_60px_color-mix(in_srgb,_var(--color-black)_30%,_transparent),_0_2px_8px_color-mix(in_srgb,_var(--color-black)_16%,_transparent)] max-[620px]:w-[calc(100vw_-_16px)] max-[620px]:h-[calc(100vh_-_48px)] max-[620px]:min-h-0">{windowContent}</div>
+      <div className="desktop-window relative box-content w-[min(1052px,_calc(100%_-_2px))] h-[min(784px,_calc(100vh_-_74px))] min-h-140 overflow-hidden bg-background border border-[color-mix(in_srgb,_var(--color-black)_20%,_transparent)] rounded-lg [box-shadow:0_22px_60px_color-mix(in_srgb,_var(--color-black)_30%,_transparent),_0_2px_8px_color-mix(in_srgb,_var(--color-black)_16%,_transparent)] max-[620px]:w-[calc(100vw_-_16px)] max-[620px]:h-[calc(100vh_-_48px)] max-[620px]:min-h-0">{windowContent}</div>
       {previewTrayOpen && (
         <PreviewTrayMenu
           state={state}
@@ -1439,7 +1439,7 @@ function Overview({
   const recent = protectedNow || state.sessionActive || state.reconnecting ? state.activity.slice(0, 4) : [];
   return (
     <div className="overview-page max-w-240 min-h-full mt-0 mr-auto mb-0 ml-auto flex flex-col @container/overview @max-[600px]/overview:[&_.overview-grid_>_.overview-module:nth-child(n)]:col-auto @max-[600px]/overview:[&_.overview-grid_>_.overview-module:nth-child(n)]:row-auto">
-      <div className="overview-top grid *:h-44 grid-cols-2 gap-4 items-stretch [&_.status-surface.status-compact]:min-w-0 @max-[600px]/overview:grid-cols-1">
+      <div className="overview-top grid *:h-36 grid-cols-2 gap-4 items-stretch [&_.status-surface.status-compact]:min-w-0 @max-[600px]/overview:grid-cols-1">
       <StatusSurface
         state={state}
         agents={agents}
@@ -1472,9 +1472,9 @@ function Overview({
           />
         </OverviewModule>
         <OverviewModule title="Agents" description="Use private AI in your agents." action="View all" onAction={onAgents}>
-          <div className="preview-list [&_>_:last-child]:border-b-0 overview-agent-list [--agent-row-height:calc(2rem_+_1.25rem_+_2px)] grid grid-rows-[repeat(4,_minmax(var(--agent-row-height),_auto))] gap-3 [&_>_.empty-state]:row-span-full">
+          <div className="preview-list [&_>_:last-child]:border-b-0 overview-agent-list [--agent-row-height:calc(2rem_+_1.25rem_+_2px)] grid grid-rows-[repeat(3,_minmax(var(--agent-row-height),_auto))] gap-3 [&_>_.empty-state]:row-span-full">
             {!agents.some((agent) => agent.installed) && <EmptyState text="No installed agents found" />}
-            {sortAgents(agents.filter((agent) => agent.installed)).slice(0, 4).map((agent) => (
+            {sortAgents(agents.filter((agent) => agent.installed)).slice(0, 3).map((agent) => (
               <AgentRow
                 pendingConnection={pendingAgentChanges[agent.id]}
                 key={agent.id}
@@ -1695,14 +1695,14 @@ function SessionSummary({ summary, active }: { summary: UsageSummary; active: bo
   return (
     <Card size="sm" role="region" className="session-overview min-w-0" aria-labelledby="session-usage-heading">
       <CardHeader><CardTitle><h2 id="session-usage-heading" className="text-base font-medium">Current session</h2></CardTitle></CardHeader>
-    <CardContent className="session-summary flex min-w-0 flex-1 items-start gap-3" role="group" aria-label="Usage in this session">
+    <CardContent className="session-summary flex min-w-0 items-stretch gap-3" role="group" aria-label="Usage in this session">
       {[
         ["Requests", active ? summary.requests.toLocaleString() : "—"],
         ["Tokens", active ? formatTokens(totalTokens) : "—"],
         ["Estimated cost", active ? currency(summary.costUsd) : "—"],
       ].map(([label, value], index) => <React.Fragment key={label}>
         {index > 0 && <Separator orientation="vertical" className="h-auto self-stretch" />}
-        <div data-slot="session-metric" className="grid min-w-0 flex-1 gap-2">
+        <div data-slot="session-metric" className="flex min-w-0 flex-1 flex-col justify-between gap-2">
           <span className="text-xs text-muted-foreground">{label}</span>
           <strong className="truncate text-xl font-semibold tabular-nums">{value}</strong>
         </div>
@@ -1757,9 +1757,6 @@ function AgentsView({
     <div className="page-body max-w-230 min-h-full mt-0 mr-auto mb-0 ml-auto">
       {problem && <Alert variant="destructive"><AlertDescription>{problem}</AlertDescription></Alert>}
 
-      <div className="page-toolbar flex items-center gap-4 mb-4 [&_.page-intro]:flex-1 [&_.page-intro]:m-0">
-        <p className="page-intro mt-[-4px] mr-0 mb-3 ml-0 text-muted-foreground text-xs [&_+_.group]:mt-3">Connected agents use {brand.productName} while protected. Their previous settings return when protection stops.</p>
-      </div>
       <section className="group mt-5 [&:first-child]:mt-0" aria-labelledby="agents-title">
         <h2 className="group-title min-h-5 mt-0 mr-0.5 mb-2 ml-0.5 flex items-center gap-2 text-sm font-semibold [&_>_span]:ml-auto [&_>_span]:min-w-0 [&_>_span]:overflow-hidden [&_>_span]:text-muted-foreground [&_>_span]:text-xs [&_>_span]:font-normal [&_>_span]:text-ellipsis [&_>_span]:whitespace-nowrap [&_>_.group-actions]:ml-0 [&_>_.group-actions]:flex [&_>_.group-actions]:shrink-0 [&_>_.group-actions]:gap-1.5 [&_>_.group-actions]:overflow-visible [&_>_.group-actions:first-of-type]:ml-auto" id="agents-title">Installed <span>{connected} connected</span></h2>
         <div className="inset min-w-0 bg-card border border-border rounded-2xl overflow-hidden">
@@ -1957,20 +1954,19 @@ function UsageView({
         </FieldSet>
       </div>
       <UsageStats page={page} />
-      <section className="group mt-5 [&:first-child]:mt-0 usage-over-time mt-4.5" aria-labelledby="usage-chart-title">
-        <h2 className="group-title min-h-5 mt-0 mr-0.5 mb-2 ml-0.5 flex items-center gap-2 text-sm font-semibold [&_>_span]:ml-auto [&_>_span]:min-w-0 [&_>_span]:overflow-hidden [&_>_span]:text-muted-foreground [&_>_span]:text-xs [&_>_span]:font-normal [&_>_span]:text-ellipsis [&_>_span]:whitespace-nowrap [&_>_.group-actions]:ml-0 [&_>_.group-actions]:flex [&_>_.group-actions]:shrink-0 [&_>_.group-actions]:gap-1.5 [&_>_.group-actions]:overflow-visible [&_>_.group-actions:first-of-type]:ml-auto" id="usage-chart-title">Usage over time <span>{usageDateLabel(range)}</span></h2>
-        <UsageChart page={page} loading={loading} range={range.preset} bounds={bounds} metric={metric} onMetric={setMetric} />
-      </section>
-      <section className="group mt-5 [&:first-child]:mt-0 usage-history" aria-labelledby="usage-history-title">
-        <h2 className="group-title min-h-5 mt-0 mr-0.5 mb-2 ml-0.5 flex items-center gap-2 text-sm font-semibold [&_>_span]:ml-auto [&_>_span]:min-w-0 [&_>_span]:overflow-hidden [&_>_span]:text-muted-foreground [&_>_span]:text-xs [&_>_span]:font-normal [&_>_span]:text-ellipsis [&_>_span]:whitespace-nowrap [&_>_.group-actions]:ml-0 [&_>_.group-actions]:flex [&_>_.group-actions]:shrink-0 [&_>_.group-actions]:gap-1.5 [&_>_.group-actions]:overflow-visible [&_>_.group-actions:first-of-type]:ml-auto" id="usage-history-title" tabIndex={-1}>
-          Usage history
-          <span aria-live="polite">{loading ? "Loading" : page ? `${page.summary.requests} records · kept on this Mac` : "Unavailable"}</span>
-          <span className="group-actions">
+      <Card size="sm" role="region" className="usage-over-time mt-4" aria-labelledby="usage-chart-title">
+        <CardHeader><CardTitle><h2 id="usage-chart-title">Usage over time</h2></CardTitle><CardDescription>{usageDateLabel(range)}</CardDescription></CardHeader>
+        <CardContent><UsageChart page={page} loading={loading} range={range.preset} bounds={bounds} metric={metric} onMetric={setMetric} /></CardContent>
+      </Card>
+      <Card size="sm" role="region" className="usage-history mt-4" aria-labelledby="usage-history-title">
+        <CardHeader><CardTitle><h2 id="usage-history-title" tabIndex={-1}>Usage history</h2></CardTitle>
+          <CardDescription aria-live="polite">{loading ? "Loading" : page ? `${page.summary.requests} records · kept on this Mac` : "Unavailable"}</CardDescription>
+          <CardAction className="flex gap-2">
             <IconButton label="Export usage as CSV" onClick={() => void exportCsv()}><Download size={16} /></IconButton>
             <IconButton label="Clear usage history" onClick={() => void clear()}><Trash2 size={16} /></IconButton>
-          </span>
-        </h2>
-        <Suspense fallback={<div className="h-80" aria-busy="true" />}><UsageTable items={page?.items ?? []} loading={loading} pageIndex={cursors.length - 1} pageSize={pageSize} total={page?.summary.requests ?? 0} onInspect={onInspect} /></Suspense>
+          </CardAction>
+        </CardHeader>
+        <CardContent><Suspense fallback={<div className="h-80" aria-busy="true" />}><UsageTable items={page?.items ?? []} loading={loading} pageIndex={cursors.length - 1} pageSize={pageSize} total={page?.summary.requests ?? 0} onInspect={onInspect} /></Suspense>
         <div className="pagination mt-2.5 flex flex-wrap items-center justify-center gap-3 [&_>_span]:min-w-32 [&_>_span]:text-muted-foreground [&_>_span]:text-center">
           <Field orientation="horizontal" className="w-auto">
             <FieldLabel htmlFor="usage-page-size">Rows per page</FieldLabel>
@@ -2000,7 +1996,7 @@ function UsageView({
             }}
           ><ChevronRight size={16} /></IconButton>
         </div>
-      </section>
+      </CardContent></Card>
     </div>
   );
 }

@@ -10,8 +10,8 @@ runtime tests exercise filesystem, SQLite, local HTTP and policy behavior.
 - Beta.19 (`c03eec2`) passed 66 renderer tests and all three native CI jobs.
   macOS Developer ID signing, notarization and package inspection passed in
   https://github.com/Dstack-TEE/private-ai-gateway/actions/runs/34182726717.
-- At the default 1052x880 content size, Overview's content scroll height equals
-  its client height (670px); all four agent rows fit. This is browser layout
+- At the default 1052x784 content size, Overview's content scroll height equals
+  its client height; all three agent rows fit. This is browser layout
   evidence, not native multi-monitor restoration evidence.
 - Main `c2d31a8` was subsequently merged into the candidate branch. It includes
   tenant identity changes and the Chutes per-instance evidence memory fix.
@@ -134,7 +134,7 @@ upgrade/restart still require platform acceptance.
 | Updates | Standard Tauri updater and SemVer libraries; channel isolation, persistence, automatic checks, offline retry, missing-feed state, confirmation | Installed-version upgrade/restart and rollback acceptance |
 | Settings | Grouped shadcn Item/Field composition, Advanced channel selector, independent local version display | WKWebView font/rendering acceptance |
 | Navigation/dialogs | Keyboard navigation, nested dialogs, focus return, no transient loading frame, Profile opens dialog | VoiceOver and native window focus |
-| Layout | Four Overview rows, bounded widths down to 320px, 200% zoom, dark/high-contrast/reduced-motion checks | Human visual approval on macOS |
+| Layout | Three Overview agent rows, bounded widths down to 320px, 200% zoom, dark/high-contrast/reduced-motion checks | Human visual approval on macOS |
 | Tray/startup/quit | Native code uses shared runtime operations; runtime enforces projection only while connected and protected | Native tray interactions, login launch and quit recovery |
 
 ## Historical Verification
