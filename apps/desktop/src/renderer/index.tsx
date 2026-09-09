@@ -1695,7 +1695,7 @@ function SessionSummary({ summary, active }: { summary: UsageSummary; active: bo
   return (
     <Card size="sm" role="region" className="session-overview min-w-0" aria-labelledby="session-usage-heading">
       <CardHeader><CardTitle><h2 id="session-usage-heading" className="text-base font-medium">Current session</h2></CardTitle></CardHeader>
-    <CardContent className="session-summary flex min-w-0 items-stretch gap-3" role="group" aria-label="Usage in this session">
+    <CardContent className="session-summary mt-auto flex min-w-0 items-stretch gap-3" role="group" aria-label="Usage in this session">
       {[
         ["Requests", active ? summary.requests.toLocaleString() : "—"],
         ["Tokens", active ? formatTokens(totalTokens) : "—"],

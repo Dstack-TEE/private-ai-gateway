@@ -228,7 +228,11 @@ Native windows wait for required content, the initial appearance, fonts and loca
 image decoding before requesting presentation. Failed image decoding does not
 block the window. Example dialogs also wait for their local key read.
 The main window uses the same readiness gate instead of showing during native
-setup; Open at Login stays hidden until explicitly requested. This follows
+setup. Its config uses `create: false`; `WebviewWindowBuilder::from_config` creates
+it after the backend client and native services are registered, so initial IPC
+requests cannot race managed-state initialization. Saved geometry still restores
+through the window-state plugin's window-ready hook. Open at Login stays hidden
+until explicitly requested. This follows
 [Tauri's frontend-ready pattern](https://v2.tauri.app/learn/splashscreen/), without
 adding a splash screen. It is a content-readiness gate, not a compositor fence.
 Dialog windows are created lazily and reused after closing. Closing unmounts the

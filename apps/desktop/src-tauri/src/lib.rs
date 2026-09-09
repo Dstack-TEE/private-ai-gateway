@@ -774,9 +774,16 @@ pub fn run() {
             });
             notifications::initialize(app.handle());
 
-            let window = app
-                .get_webview_window("main")
-                .ok_or_else(|| "main window was not created".to_string())?;
+            // The renderer invokes backend commands on mount. Create it only
+            // after Client and native services are registered in managed state.
+            let config = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|window| window.label == "main")
+                .ok_or("Main window configuration is missing")?;
+            let window = tauri::WebviewWindowBuilder::from_config(app, config)?.build()?;
             window.set_title(desktop_gateway::brand::PRODUCT_NAME)?;
             let window_for_events = window.clone();
             let app_for_events = app.handle().clone();

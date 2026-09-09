@@ -42,6 +42,12 @@ test("compact overview separates provider verification from current-session usag
   await expect(page.locator('.session-summary > [data-slot="separator"]')).toHaveCount(2);
   const metricBottoms = await page.locator('[data-slot="session-metric"] strong').evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().bottom));
   expect(new Set(metricBottoms).size).toBe(1);
+  const sessionBottomGap = await page.locator(".session-overview").evaluate((card) => {
+    const content = card.querySelector(".session-summary");
+    if (!content) throw new Error("Missing session summary");
+    return card.getBoundingClientRect().bottom - content.getBoundingClientRect().bottom;
+  });
+  expect(sessionBottomGap).toBe(16);
   await expect(page.locator(".page-header")).toHaveCSS("border-bottom-width", "0px");
   await expect(page.locator(".session-summary")).toHaveCSS("gap", "12px");
   await expect(page.locator(".overview-top")).toHaveCSS("gap", "16px");
