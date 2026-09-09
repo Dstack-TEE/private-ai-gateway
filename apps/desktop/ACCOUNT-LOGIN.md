@@ -7,6 +7,13 @@ Verify and Save is a separate footer action. The Tauri shell only opens the brow
 non-secret presentation and account metadata. Each runtime allows one login at a
 time, with a 15-minute deadline and explicit cancellation.
 
+The renderer's `useAccountLogin` owns polling, cancellation and unmount cleanup;
+the form owns its draft and Save action. `PendingLogin` owns the runtime task,
+expiry, provider binding and staged credential through exclusive authorizing,
+authorized and failed states. The controller only orchestrates verification,
+persistence and reconnect. A failed authorization can be polled again safely;
+failed key revocation retains the session so cleanup can be retried.
+
 Phala uses the existing provider device flow at `cloud-api.phala.com`, with
 `client_id=private-ai-proxy` and `scope=redpill:api-key`. Its token endpoint long
 polls for up to 25 seconds; the client allows 35 seconds per request and honors

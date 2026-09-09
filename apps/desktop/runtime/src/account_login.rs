@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 use crate::contracts::{ConfidentialProfileInput, ProfileAuth, ServiceProvider};
 
-pub const REDPILL_CLIENT_ID: &str = "cGrHCOWG3S91oa0A";
+const REDPILL_CLIENT_ID: &str = "cGrHCOWG3S91oa0A";
 const ISSUER: &str = "https://clerk.redpill.ai";
 const CALLBACK: &str = "http://127.0.0.1:4181/oauth/callback";
 const KEY_URL: &str = "https://service.redpill.ai/api/desktop/key";
@@ -42,12 +42,12 @@ pub struct LoginPresentation {
 }
 
 #[derive(Clone)]
-pub struct Credential {
+pub(crate) struct Credential {
     pub key: String,
     pub auth: ProfileAuth,
 }
 
-pub enum Authorization {
+pub(crate) enum Authorization {
     Inference(Credential),
     Redpill {
         access_token: String,
@@ -56,14 +56,14 @@ pub enum Authorization {
 }
 
 impl Authorization {
-    pub fn auth(&self) -> ProfileAuth {
+    fn auth(&self) -> ProfileAuth {
         match self {
             Self::Inference(key) => key.auth.clone(),
             Self::Redpill { auth, .. } => auth.clone(),
         }
     }
 
-    pub async fn issue(&self, profile: &ConfidentialProfileInput) -> Result<Credential, String> {
+    async fn issue(&self, profile: &ConfidentialProfileInput) -> Result<Credential, String> {
         match self {
             Self::Inference(key) => Ok(key.clone()),
             Self::Redpill { access_token, .. } => {
@@ -83,21 +83,114 @@ impl Authorization {
     }
 }
 
-pub struct PendingLogin {
-    pub presentation: LoginPresentation,
-    pub profile: ConfidentialProfileInput,
-    pub worker: JoinHandle<Result<Authorization, String>>,
-    pub authorization: Option<Authorization>,
-    pub deadline: Instant,
+enum LoginState {
+    Authorizing(JoinHandle<Result<Authorization, String>>),
+    Authorized(Authorization),
+    Failed(String),
 }
 
-impl Drop for PendingLogin {
+impl Drop for LoginState {
     fn drop(&mut self) {
-        self.worker.abort();
+        if let Self::Authorizing(task) = self {
+            task.abort();
+        }
     }
 }
 
-pub async fn revoke_redpill_key(key: &str) -> Result<(), String> {
+pub(crate) struct PendingLogin {
+    pub presentation: LoginPresentation,
+    profile: ConfidentialProfileInput,
+    state: LoginState,
+    deadline: Instant,
+}
+
+impl PendingLogin {
+    pub(crate) fn new(
+        presentation: LoginPresentation,
+        profile: ConfidentialProfileInput,
+        worker: JoinHandle<Result<Authorization, String>>,
+    ) -> Self {
+        Self {
+            presentation,
+            profile,
+            state: LoginState::Authorizing(worker),
+            deadline: Instant::now() + LOGIN_TIMEOUT,
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.deadline > Instant::now() && !matches!(self.state, LoginState::Failed(_))
+    }
+
+    fn validate(&self, id: &str) -> Result<(), String> {
+        if self.presentation.id != id {
+            return Err("Account login is no longer active".into());
+        }
+        if self.deadline <= Instant::now() {
+            return Err("Account authorization expired; sign in again".into());
+        }
+        Ok(())
+    }
+
+    async fn resolve(&mut self) -> Result<Option<&mut Authorization>, String> {
+        if let LoginState::Authorizing(task) = &mut self.state {
+            if !task.is_finished() {
+                return Ok(None);
+            }
+            self.state = match task.await {
+                Ok(Ok(authorization)) => LoginState::Authorized(authorization),
+                Ok(Err(error)) => LoginState::Failed(error),
+                Err(_) => LoginState::Failed("Account login stopped".into()),
+            };
+        }
+        match &mut self.state {
+            LoginState::Authorized(authorization) => Ok(Some(authorization)),
+            LoginState::Failed(error) => Err(error.clone()),
+            LoginState::Authorizing(_) => Ok(None),
+        }
+    }
+
+    pub async fn poll(&mut self, id: &str) -> Result<Option<ProfileAuth>, String> {
+        self.validate(id)?;
+        Ok(self
+            .resolve()
+            .await?
+            .map(|authorization| authorization.auth()))
+    }
+
+    pub async fn credential(
+        &mut self,
+        id: &str,
+        profile: &ConfidentialProfileInput,
+    ) -> Result<Credential, String> {
+        self.validate(id)?;
+        let candidate = crate::service_config::resolve_profile(profile.clone(), None)?;
+        if candidate.id != self.profile.id
+            || candidate.provider != self.profile.provider
+            || candidate.remote_url != self.profile.remote_url
+        {
+            return Err("Sign in again for the selected provider".into());
+        }
+        let authorization = self.resolve().await?.ok_or("Finish signing in first")?;
+        let credential = authorization.issue(profile).await?;
+        // Verification retries reuse the issued key instead of rotating it again.
+        *authorization = Authorization::Inference(credential.clone());
+        Ok(credential)
+    }
+
+    pub async fn cancel(&mut self) -> Result<(), String> {
+        let redpill = self.profile.provider == ServiceProvider::Redpill;
+        if let Ok(Some(Authorization::Inference(credential))) = self.resolve().await {
+            if redpill {
+                revoke_redpill_key(&credential.key).await?;
+            }
+        }
+        // Failed revocation keeps the authorization available for a cleanup retry.
+        Ok(())
+    }
+}
+
+async fn revoke_redpill_key(key: &str) -> Result<(), String> {
     let response = client()?
         .delete(KEY_URL)
         .bearer_auth(key)
@@ -204,7 +297,7 @@ fn trusted_url(value: &str, origin: &str) -> Result<Url, String> {
     Ok(url)
 }
 
-pub async fn begin(mut profile: ConfidentialProfileInput) -> Result<PendingLogin, String> {
+pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<PendingLogin, String> {
     profile.remote_url = crate::service_config::resolve_profile(profile.clone(), None)?.remote_url;
     let client = client()?;
     let id = Uuid::new_v4().to_string();
@@ -275,13 +368,11 @@ pub async fn begin(mut profile: ConfidentialProfileInput) -> Result<PendingLogin
             return Err("Account login is only available for Phala and RedPill".into())
         }
     };
-    Ok(PendingLogin {
-        presentation: LoginPresentation { id, url, user_code },
+    Ok(PendingLogin::new(
+        LoginPresentation { id, url, user_code },
         profile,
         worker,
-        authorization: None,
-        deadline: Instant::now() + LOGIN_TIMEOUT,
-    })
+    ))
 }
 
 fn installation_id(profile_id: &str) -> Uuid {
@@ -497,6 +588,40 @@ async fn redpill(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_authorization_is_terminal_and_repeatable() {
+        let profile = ConfidentialProfileInput {
+            id: "profile-test".into(),
+            name: "Phala".into(),
+            provider: ServiceProvider::Phala,
+            remote_url: "https://inference.phala.com".into(),
+        };
+        let presentation = LoginPresentation {
+            id: "login-test".into(),
+            url: "https://cloud.phala.com/cli/verify".into(),
+            user_code: None,
+        };
+        let mut pending = PendingLogin::new(
+            presentation,
+            profile,
+            tokio::spawn(async { Err("Authorization was declined".into()) }),
+        );
+        let error = timeout(Duration::from_secs(5), async {
+            loop {
+                match pending.poll("login-test").await {
+                    Err(error) => break error,
+                    Ok(_) => tokio::task::yield_now().await,
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(error, "Authorization was declined");
+        assert_eq!(pending.poll("login-test").await.unwrap_err(), error);
+        assert!(!pending.is_active());
+        pending.cancel().await.unwrap();
+    }
 
     #[test]
     fn callback_binds_host_state_and_issuer_and_rejects_duplicates() {

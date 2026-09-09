@@ -1,5 +1,6 @@
 import React, { createContext, lazy, memo, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useWindowReady } from "./lib/use-window-ready";
+import { useAccountLogin } from "./lib/use-account-login";
 import {
   BatteryMedium,
   Bot,
@@ -2392,57 +2393,18 @@ function ProfileEditorSheet({
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [saving, setSaving] = useState(false);
   const [authMethod, setAuthMethod] = useState<"account" | "apiKey">(profile?.auth.kind === "apiKey" ? "apiKey" : "account");
-  const [login, setLogin] = useState<Awaited<ReturnType<typeof desktopApi.beginAccountLogin>>>();
-  const [polling, setPolling] = useState(false);
-  const [authorized, setAuthorized] = useState<Awaited<ReturnType<typeof desktopApi.pollAccountLogin>>>();
-  useEffect(() => {
-    if (!login) return;
-    let disposed = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const poll = async () => {
-      setPolling(true);
-      try {
-        const completed = await desktopApi.pollAccountLogin(login.id);
-        if (disposed) return;
-        if (completed) {
-          setAuthorized(completed);
-          setSaving(false);
-        } else timer = setTimeout(() => void poll(), 1000);
-      } catch (error) {
-        if (!disposed) { setError(errorMessage(error)); setLogin(undefined); setSaving(false); }
-      } finally { if (!disposed) setPolling(false); }
-    };
-    void poll();
-    return () => {
-      disposed = true;
-      clearTimeout(timer);
-      void desktopApi.cancelAccountLogin(login.id).catch(() => console.error("Could not cancel account login"));
-    };
-  }, [login]);
-  const cancelLogin = async () => {
-    if (!login) return true;
-    setSaving(true);
-    try {
-      await desktopApi.cancelAccountLogin(login.id);
-      setLogin(undefined);
-      setAuthorized(undefined);
-      setSaving(false);
-      return true;
-    } catch (error) { setError(errorMessage(error)); setSaving(false); return false; }
-  };
-  const closeEditor = async () => {
-    if (await cancelLogin()) onClose();
-  };
-  const signIn = async () => {
-    setSaving(true);
-    setError(undefined);
-    try {
-      if (!await cancelLogin()) return;
-      setSaving(true);
-      setLogin(await desktopApi.beginAccountLogin(draft));
-    } catch (error) { setError(errorMessage(error)); setSaving(false); }
-  };
   const [error, setError] = useState<string>();
+  const reportLoginError = useCallback((error: unknown) => setError(errorMessage(error)), []);
+  const account = useAccountLogin(desktopApi, reportLoginError);
+  const { session: login, auth: authorized } = account;
+  const working = saving || account.busy;
+  const closeEditor = async () => {
+    if (await account.cancel()) onClose();
+  };
+  const signIn = () => {
+    setError(undefined);
+    return account.start(draft);
+  };
   const selectedPreset = SERVICE_PRESETS.find((service) => service.id === draft.provider);
   const keyLabel = selectedPreset?.keyLabel ?? "API key";
   const draftUrl = draft.remoteUrl.trim().replace(/\/$/, "");
@@ -2456,7 +2418,7 @@ function ProfileEditorSheet({
     && !authorized && (!savedCredentialApplies || profile?.auth.kind !== "oauth");
 
   const chooseService = async (next: ServicePreset) => {
-    if (!await cancelLogin()) return;
+    if (!await account.cancel()) return;
     const preset = SERVICE_PRESETS.find((service) => service.id === next);
     setDraft((current) => ({
       ...current,
@@ -2470,8 +2432,13 @@ function ProfileEditorSheet({
     setApiKeyDraft("");
     setError(undefined);
   };
+  const chooseAuthMethod = async (next: "account" | "apiKey") => {
+    if (!await account.cancel()) return;
+    setAuthMethod(next);
+    setError(undefined);
+  };
   const removeProfile = async () => {
-    if (saving || frozen) return;
+    if (working || frozen) return;
     setSaving(true);
     setError(undefined);
     try {
@@ -2499,8 +2466,7 @@ function ProfileEditorSheet({
       if (running && profile?.id === state.activeProfileId && !await desktopApi.confirm({ title: "Save and reconnect?", message: "Saving this active profile restarts protection. In-flight requests may be interrupted.", confirmLabel: "Save and Reconnect" })) return;
       if (authorized && login && authMethod === "account") {
         const saved = await desktopApi.saveAccountLogin(login.id, draft, state.config.requireProductionOs);
-        setLogin(undefined);
-        setAuthorized(undefined);
+        account.consume();
         if (startAfterSave) await desktopApi.start(saved.config);
         onComplete();
         return;
@@ -2512,13 +2478,13 @@ function ProfileEditorSheet({
     finally { setSaving(false); }
   };
   return (
-    <Sheet title={isNew ? "New Profile" : "Edit Profile"} label={isNew ? "New profile" : "Edit profile"} className="profile-editor-sheet w-[min(620px,_calc(var(--window-dialog-width,_100vw)_-_32px))] [&_.sheet-scroll]:min-h-0 [&_.sheet-scroll]:overflow-y-auto [&_.sheet-footer]:flex-none [&[open]]:flex [&[open]]:flex-col [&_form]:min-h-0 [&_form]:flex [&_form]:flex-col form-sheet [&_>_.sheet-heading]:px-5 [&_>_.field-note]:mx-5 [&_.sheet-footer]:mx-5 [&_form_>_[data-slot=field-error]]:mx-5 [&_.sheet-scroll]:px-5" dismissible={!saving || Boolean(login && !authorized)} onClose={() => void closeEditor()}>
+    <Sheet title={isNew ? "New Profile" : "Edit Profile"} label={isNew ? "New profile" : "Edit profile"} className="profile-editor-sheet w-[min(620px,_calc(var(--window-dialog-width,_100vw)_-_32px))] [&_.sheet-scroll]:min-h-0 [&_.sheet-scroll]:overflow-y-auto [&_.sheet-footer]:flex-none [&[open]]:flex [&[open]]:flex-col [&_form]:min-h-0 [&_form]:flex [&_form]:flex-col form-sheet [&_>_.sheet-heading]:px-5 [&_>_.field-note]:mx-5 [&_.sheet-footer]:mx-5 [&_form_>_[data-slot=field-error]]:mx-5 [&_.sheet-scroll]:px-5" dismissible={!saving && !account.working} onClose={() => void closeEditor()}>
       <form className="mt-4" onSubmit={(event) => void submit(event)}>
         <div className="sheet-scroll py-1">
         <FieldGroup>
         <Field>
         <FieldLabel id="profile-provider-label">Provider</FieldLabel>
-        <ToggleGroup variant="outline" className="service-presets w-full grid grid-cols-3 gap-2 max-[440px]:grid-cols-1" value={[draft.provider]} disabled={frozen || saving} aria-labelledby="profile-provider-label" onValueChange={([value]) => { if (value === "phala" || value === "redpill" || value === "custom") void chooseService(value); }}>
+        <ToggleGroup variant="outline" className="service-presets w-full grid grid-cols-3 gap-2 max-[440px]:grid-cols-1" value={[draft.provider]} disabled={frozen || working} aria-labelledby="profile-provider-label" onValueChange={([value]) => { if (value === "phala" || value === "redpill" || value === "custom") void chooseService(value); }}>
           {SERVICE_PRESETS.map((service) => (
             <ToggleGroupItem key={service.id} value={service.id} className="service-preset min-w-0 text-left [&_.service-logo]:w-4.5 [&_.service-logo]:h-4.5 [&_.service-custom-icon]:w-4.5 [&_.service-custom-icon]:h-4.5 [&_strong]:min-w-0 [&_strong]:flex-auto [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_>_svg]:flex-none [&_>_svg]:text-foreground" aria-label={service.name}>
               <ServiceLogo url={service.url} />
@@ -2533,11 +2499,11 @@ function ProfileEditorSheet({
           </ToggleGroupItem>
         </ToggleGroup>
         </Field>
-          <FormField id="profile-name" label="Profile name"><Input id="profile-name" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} disabled={frozen || saving} autoComplete="off" /></FormField>
-          {draft.provider === "custom" && <FormField id="profile-endpoint" label="Service endpoint"><Input id="profile-endpoint" value={draft.remoteUrl} onChange={(event) => setDraft((current) => ({ ...current, remoteUrl: event.target.value }))} disabled={frozen || saving} spellCheck={false} /></FormField>}
+          <FormField id="profile-name" label="Profile name"><Input id="profile-name" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} disabled={frozen || working} autoComplete="off" /></FormField>
+          {draft.provider === "custom" && <FormField id="profile-endpoint" label="Service endpoint"><Input id="profile-endpoint" value={draft.remoteUrl} onChange={(event) => setDraft((current) => ({ ...current, remoteUrl: event.target.value }))} disabled={frozen || working} spellCheck={false} /></FormField>}
           {draft.provider !== "custom" && <Field>
             <FieldLabel id="profile-auth-label">Sign-in method</FieldLabel>
-            <ToggleGroup variant="outline" value={[authMethod]} disabled={saving || frozen} aria-labelledby="profile-auth-label" onValueChange={([value]) => { if (value === "account" || value === "apiKey") { void cancelLogin().then((cancelled) => { if (cancelled) { setAuthMethod(value); setError(undefined); } }); } }}>
+            <ToggleGroup variant="outline" value={[authMethod]} disabled={working || frozen} aria-labelledby="profile-auth-label" onValueChange={([value]) => { if (value === "account" || value === "apiKey") void chooseAuthMethod(value); }}>
               <ToggleGroupItem value="account">Account</ToggleGroupItem>
               <ToggleGroupItem value="apiKey">API key</ToggleGroupItem>
             </ToggleGroup>
@@ -2547,19 +2513,19 @@ function ProfileEditorSheet({
             {login && !authorized ? <div role="status" aria-live="polite">
               <p>Finish signing in in your browser.</p>
               {login.userCode && <p>Confirm code <strong className="font-mono">{login.userCode}</strong></p>}
-              <Button type="button" variant="outline" disabled={polling} onClick={() => void cancelLogin()}>Cancel Sign-in</Button>
-            </div> : <Button type="button" variant="outline" className="[&_.service-logo]:size-4.5" disabled={saving || frozen || !draft.name.trim()} onClick={() => void signIn()}><ServiceLogo url={draft.remoteUrl} />{authorized || (savedCredentialApplies && profile?.auth.kind === "oauth") ? "Sign in again" : `Sign in with ${selectedPreset?.name}`}</Button>}
+              <Button type="button" variant="outline" disabled={account.working} onClick={() => void account.cancel()}>Cancel Sign-in</Button>
+            </div> : <Button type="button" variant="outline" className="[&_.service-logo]:size-4.5" disabled={working || frozen || !draft.name.trim()} onClick={() => void signIn()}><ServiceLogo url={draft.remoteUrl} />{authorized || (savedCredentialApplies && profile?.auth.kind === "oauth") ? "Sign in again" : `Sign in with ${selectedPreset?.name}`}</Button>}
           </Field> : <Field>
             <FieldLabel htmlFor="profile-key">{keyLabel}</FieldLabel>
-            <Input id="profile-key" type="password" value={apiKeyDraft} onChange={(event) => setApiKeyDraft(event.target.value)} placeholder={savedCredentialApplies ? "Replace the saved key" : `Paste your ${keyLabel}`} disabled={frozen || saving} autoComplete="off" spellCheck={false} aria-describedby="profile-key-note" />
+            <Input id="profile-key" type="password" value={apiKeyDraft} onChange={(event) => setApiKeyDraft(event.target.value)} placeholder={savedCredentialApplies ? "Replace the saved key" : `Paste your ${keyLabel}`} disabled={frozen || working} autoComplete="off" spellCheck={false} aria-describedby="profile-key-note" />
             <FieldDescription id="profile-key-note">{savedCredentialApplies ? "Using this profile's saved key. Enter a new one to replace it after verification." : profileChanged ? "A key is required for a new provider or endpoint." : "The key is stored in the system credential store and never written into agent configs."}</FieldDescription>
           </Field>}
         </FieldGroup>
         </div>
         <FieldError className="mt-3">{error}</FieldError>
-        <SheetActions leading={!isNew && <Button type="button" variant="destructive" disabled={saving || frozen} onClick={() => void removeProfile()}><Trash2 size={14} />Delete Profile</Button>}>
-          <Button type="button" variant="outline" onClick={() => void closeEditor()} disabled={saving && (!login || Boolean(authorized))}>Cancel</Button>
-          <Button type="submit" variant="default" disabled={saving || busy || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || Boolean(needsAccountLogin) || (!authorized && !savedCredentialApplies && !apiKeyDraft.trim())}>{saving && authorized || busy ? "Verifying…" : "Verify and Save"}</Button>
+        <SheetActions leading={!isNew && <Button type="button" variant="destructive" disabled={working || frozen} onClick={() => void removeProfile()}><Trash2 size={14} />Delete Profile</Button>}>
+          <Button type="button" variant="outline" onClick={() => void closeEditor()} disabled={saving || account.working}>Cancel</Button>
+          <Button type="submit" variant="default" disabled={working || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || Boolean(needsAccountLogin) || (!authorized && !savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Verifying…" : "Verify and Save"}</Button>
         </SheetActions>
       </form>
     </Sheet>
