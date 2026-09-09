@@ -2436,7 +2436,8 @@ function ProfileEditorSheet({
     || profile.remoteUrl.replace(/\/$/, "") !== draftUrl;
   const savedCredentialApplies = !isNew
     && profileHasCredential(profile)
-    && !profileChanged;
+    && !profileChanged
+    && profile.auth.kind === (authMethod === "account" ? "oauth" : "apiKey");
   const selectedAccount = authorized?.kind === "oauth" ? authorized
     : !account.busy && savedCredentialApplies && profile?.auth.kind === "oauth" ? profile.auth : undefined;
   const accountScope = selectedAccount?.scope;

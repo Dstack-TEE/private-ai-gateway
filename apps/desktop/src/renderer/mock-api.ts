@@ -356,6 +356,7 @@ export function mockApi(name: string | null): DesktopApi {
   let updateChannel: "beta" | "stable" = "stable";
   let updateAttempts = 0;
   let keyRotations = 0;
+  let failedAccountSave = false;
   let login: { id: string; profile: ConfidentialProfileInput; polls: number } | undefined;
   return {
     startBackendService: async () => { state = { ...BASE, backendConnected: true }; publish(); return structuredClone(state); },
@@ -529,6 +530,10 @@ export function mockApi(name: string | null): DesktopApi {
     saveAccountLogin: async (id, profile, requireProductionOs, workspaceId) => {
       if (!login || login.id !== id || login.polls < 3 || profile.id !== login.profile.id || profile.provider !== login.profile.provider) throw new Error("Finish signing in first");
       if (profile.provider === "redpill" && workspaceId !== 123 && workspaceId !== 124) throw new Error("Choose a workspace before saving");
+      if (name === "oauth-save-retry" && !failedAccountSave) {
+        failedAccountSave = true;
+        throw new Error("The verified gateway did not answer the model list request");
+      }
       const saved: ConfidentialProfile = { ...profile, auth: { kind: "oauth", accountId: "preview-account", accountName: "Personal", scope: { organization: profile.provider === "redpill" ? "Personal organization" : null, workspace: profile.provider === "redpill" ? workspaceId === 124 ? "Research" : "Default" : "Phala workspace", workspaceId: workspaceId ?? null } }, credentialSaved: true, verifiedAt: Math.floor(Date.now() / 1000) };
       credentialProfiles.add(saved.id);
       state = { ...state, profiles: [...state.profiles.filter((p) => p.id !== saved.id), saved], activeProfileId: saved.id, apiKeySaved: true, status: "stopped", configurationVerification: false, remoteUrl: saved.remoteUrl, config: { remoteUrl: saved.remoteUrl, requireProductionOs } };
