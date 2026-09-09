@@ -684,11 +684,11 @@ impl DesktopRuntime {
         profile: ConfidentialProfileInput,
     ) -> Result<crate::account_login::LoginPresentation, String> {
         let mut slot = self.account_login.lock().await;
-        if slot
-            .as_ref()
-            .is_some_and(|pending| pending.deadline > tokio::time::Instant::now())
-        {
-            return Err("Another account login is in progress".into());
+        if let Some(pending) = slot.as_mut() {
+            if pending.is_active() {
+                return Err("Another account login is in progress".into());
+            }
+            pending.cancel().await?;
         }
         *slot = None;
         let pending = crate::account_login::begin(profile).await?;
@@ -701,34 +701,13 @@ impl DesktopRuntime {
         self: &Arc<Self>,
         id: String,
     ) -> Result<Option<crate::contracts::ProfileAuth>, String> {
-        let mut slot = self.account_login.lock().await;
-        let pending = slot
+        self.account_login
+            .lock()
+            .await
             .as_mut()
-            .filter(|p| p.presentation.id == id)
-            .ok_or("Account login is no longer active")?;
-        if pending.deadline <= tokio::time::Instant::now() {
-            return Err("Account authorization expired; sign in again".into());
-        }
-        if pending.authorization.is_none() {
-            if !pending.worker.is_finished() {
-                return Ok(None);
-            }
-            match (&mut pending.worker).await {
-                Ok(Ok(authorization)) => pending.authorization = Some(authorization),
-                result => {
-                    let error = match result {
-                        Ok(Err(error)) => error,
-                        _ => "Account login stopped".into(),
-                    };
-                    *slot = None;
-                    return Err(error);
-                }
-            }
-        }
-        Ok(pending
-            .authorization
-            .as_ref()
-            .map(crate::account_login::Authorization::auth))
+            .ok_or("Account login is no longer active")?
+            .poll(&id)
+            .await
     }
 
     pub async fn save_account_login(
@@ -738,31 +717,11 @@ impl DesktopRuntime {
         require_production_os: bool,
     ) -> Result<GatewayState, String> {
         let mut slot = self.account_login.lock().await;
-        let pending = slot
+        let credential = slot
             .as_mut()
-            .filter(|p| p.presentation.id == id)
-            .ok_or("Account login is no longer active")?;
-        if pending.deadline <= tokio::time::Instant::now() {
-            return Err("Account authorization expired; sign in again".into());
-        }
-        let candidate = service_config::resolve_profile(profile.clone(), None)?;
-        if candidate.id != pending.profile.id
-            || candidate.provider != pending.profile.provider
-            || candidate.remote_url != pending.profile.remote_url
-        {
-            return Err("Sign in again for the selected provider".into());
-        }
-        let credential = pending
-            .authorization
-            .as_ref()
-            .ok_or("Finish signing in first")?
-            .issue(&profile)
+            .ok_or("Account login is no longer active")?
+            .credential(&id, &profile)
             .await?;
-        // Once issued, retain the inference key for a verification retry; never
-        // repeat issuance or persist a credential before the explicit Save.
-        pending.authorization = Some(crate::account_login::Authorization::Inference(
-            credential.clone(),
-        ));
         let saved = self
             .verify_account_configuration(
                 profile,
@@ -777,24 +736,12 @@ impl DesktopRuntime {
 
     pub async fn cancel_account_login(&self, id: String) -> Result<(), String> {
         let mut slot = self.account_login.lock().await;
-        if slot
-            .as_ref()
-            .is_some_and(|pending| pending.presentation.id == id)
+        if let Some(pending) = slot
+            .as_mut()
+            .filter(|pending| pending.presentation.id == id)
         {
-            if let Some(mut pending) = slot.take() {
-                if pending.authorization.is_none() && pending.worker.is_finished() {
-                    if let Ok(Ok(authorization)) = (&mut pending.worker).await {
-                        pending.authorization = Some(authorization);
-                    }
-                }
-                if pending.profile.provider == crate::contracts::ServiceProvider::Redpill {
-                    if let Some(crate::account_login::Authorization::Inference(credential)) =
-                        &pending.authorization
-                    {
-                        crate::account_login::revoke_redpill_key(&credential.key).await?;
-                    }
-                }
-            }
+            pending.cancel().await?;
+            *slot = None;
         }
         Ok(())
     }
@@ -1719,17 +1666,15 @@ mod tests {
                     auth,
                 }))
             });
-            *runtime.account_login.lock().await = Some(PendingLogin {
-                presentation: LoginPresentation {
+            *runtime.account_login.lock().await = Some(PendingLogin::new(
+                LoginPresentation {
                     id: "login-test".into(),
                     url: "https://cloud.phala.com/cli/verify".into(),
                     user_code: None,
                 },
-                profile: profile.clone(),
+                profile.clone(),
                 worker,
-                authorization: None,
-                deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(60),
-            });
+            ));
             let completed = tokio::time::timeout(std::time::Duration::from_secs(1), async {
                 loop {
                     if let Some(auth) = runtime
