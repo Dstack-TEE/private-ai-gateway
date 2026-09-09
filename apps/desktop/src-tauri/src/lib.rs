@@ -300,7 +300,7 @@ async fn begin_account_login(
 async fn poll_account_login(
     client: State<'_, Arc<Client>>,
     id: String,
-) -> Result<Option<desktop_runtime::contracts::ProfileAuth>, String> {
+) -> Result<Option<desktop_runtime::contracts::AccountLoginDetails>, String> {
     client.inner().clone().poll_account_login(id).await
 }
 
@@ -310,12 +310,36 @@ async fn save_account_login(
     id: String,
     profile: ConfidentialProfileInput,
     require_production_os: bool,
+    workspace_id: Option<i64>,
 ) -> Result<GatewayState, String> {
     client
         .inner()
         .clone()
-        .save_account_login(id, profile, require_production_os)
+        .save_account_login(id, profile, require_production_os, workspace_id)
         .await
+}
+
+#[tauri::command]
+async fn account_balance(
+    client: State<'_, Arc<Client>>,
+    target: desktop_runtime::contracts::AccountBalanceTarget,
+) -> Result<desktop_runtime::contracts::AccountBalance, String> {
+    client.inner().clone().account_balance(target).await
+}
+
+#[tauri::command]
+async fn open_top_up(
+    app: AppHandle,
+    provider: desktop_runtime::contracts::ServiceProvider,
+) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let url = desktop_runtime::account_login::top_up_url(&provider)?;
+    run_blocking(move || {
+        app.opener()
+            .open_url(url, None::<&str>)
+            .map_err(|_| "Cannot open the billing page".into())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -771,6 +795,8 @@ pub fn run() {
             begin_account_login,
             poll_account_login,
             save_account_login,
+            account_balance,
+            open_top_up,
             cancel_account_login,
             activate_profile,
             delete_profile,

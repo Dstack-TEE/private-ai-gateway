@@ -66,6 +66,10 @@ pub enum Command {
         id: String,
         profile: ConfidentialProfileInput,
         require_production_os: bool,
+        workspace_id: Option<i64>,
+    },
+    AccountBalance {
+        target: AccountBalanceTarget,
     },
     PollAccountLogin {
         id: String,

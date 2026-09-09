@@ -64,3 +64,30 @@ Local fixture checks cover the callback trust boundary, token/client/scope and
 membership rejection, budget-preserving replacement, plus the real profile UI
 with a simulated provider. Full authorization and OS credential-store acceptance
 on packaged macOS/Windows/Linux apps remain release checks.
+
+## Organization, workspace and billing
+
+RedPill selects the organization in Clerk's OAuth consent screen. After sign-in,
+`GET /api/desktop/account` returns only workspaces accessible to that actor in
+that organization. One workspace is selected automatically; multiple workspaces
+require an explicit choice in the app. Save sends that workspace ID and the API
+rechecks its ownership and membership. The saved profile retains non-secret
+organization/workspace names. Changing organization requires signing in again;
+after a key has been issued, changing workspace also requires fresh authorization.
+
+Check balance is available in the account section before Save and when editing a
+saved account profile. The runtime uses the pending OAuth grant or the profile's
+OS-stored inference key; credentials never pass through the renderer. RedPill
+returns the organization's shared USD balance, independently of workspace/key
+spending limits. An inference key needs a server-owned `desktop_balance_read`
+grant, and its actor's live Clerk membership and billing-read permission are
+checked again. Ordinary inference keys cannot use this endpoint. Keys created
+before the balance grant was introduced require signing in and saving again.
+Phala uses its existing `/api/v1/private_ai/self` contract and shows workspace
+balance and promotional credits separately.
+
+Top up opens the system browser at RedPill's `/credits` page or Phala's `/cost`
+page, both of which include recharge controls. These sites use their own browser
+session; the app shows which organization/workspace to select there. No invented
+tenant query parameters, credentials in URLs, automatic checkout, or payment
+mutation is used.

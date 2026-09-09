@@ -142,6 +142,50 @@ pub enum ServiceProvider {
     Custom,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountScope {
+    pub organization: Option<String>,
+    pub workspace: Option<String>,
+    pub workspace_id: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountWorkspace {
+    pub id: i64,
+    pub name: String,
+    #[serde(alias = "is_default")]
+    pub is_default: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountLoginDetails {
+    pub auth: ProfileAuth,
+    pub workspaces: Vec<AccountWorkspace>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountBalance {
+    pub balance_usd: String,
+    pub granted_usd: Option<String>,
+    pub scope: AccountScope,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum AccountBalanceTarget {
+    Login {
+        id: String,
+    },
+    Profile {
+        #[serde(rename = "profileId")]
+        profile_id: String,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum ProfileAuth {
@@ -157,6 +201,8 @@ pub enum ProfileAuth {
             skip_serializing_if = "Option::is_none"
         )]
         account_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<AccountScope>,
     },
 }
 

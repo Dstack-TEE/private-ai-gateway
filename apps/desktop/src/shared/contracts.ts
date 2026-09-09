@@ -140,7 +140,7 @@ export type ServiceProvider = "phala" | "redpill" | "custom";
 
 export type ProfileAuth =
   | { kind: "apiKey" }
-  | { kind: "oauth"; accountId: string; accountName?: string };
+  | { kind: "oauth"; accountId: string; accountName?: string; scope?: AccountScope };
 
 export interface ConfidentialProfile {
   id: string;
@@ -151,6 +151,31 @@ export interface ConfidentialProfile {
   /** Non-secret presence metadata; absent on profiles saved by early betas. */
   credentialSaved?: boolean;
   verifiedAt?: number;
+}
+
+export interface AccountScope {
+  organization: string | null;
+  workspace: string | null;
+  workspaceId: number | null;
+}
+
+export interface AccountWorkspace {
+  id: number;
+  name: string;
+  isDefault: boolean;
+}
+
+export interface AccountLoginDetails {
+  auth: ProfileAuth;
+  workspaces: AccountWorkspace[];
+}
+
+export type AccountBalanceTarget = { kind: "login"; id: string } | { kind: "profile"; profileId: string };
+
+export interface AccountBalance {
+  balanceUsd: string;
+  grantedUsd: string | null;
+  scope: AccountScope;
 }
 
 export interface AccountLogin {
@@ -348,8 +373,10 @@ export interface DesktopApi {
   confirm(options: ConfirmationOptions): Promise<boolean>;
   start(config: StartGatewayConfig): Promise<GatewayState>;
   beginAccountLogin(profile: ConfidentialProfileInput): Promise<AccountLogin>;
-  pollAccountLogin(id: string): Promise<ProfileAuth | null>;
-  saveAccountLogin(id: string, profile: ConfidentialProfileInput, requireProductionOs: boolean): Promise<GatewayState>;
+  pollAccountLogin(id: string): Promise<AccountLoginDetails | null>;
+  saveAccountLogin(id: string, profile: ConfidentialProfileInput, requireProductionOs: boolean, workspaceId?: number): Promise<GatewayState>;
+  getAccountBalance(target: AccountBalanceTarget): Promise<AccountBalance>;
+  openTopUp(provider: ServiceProvider): Promise<void>;
   cancelAccountLogin(id: string): Promise<void>;
   verifyConfiguration(profile: ConfidentialProfileInput, requireProductionOs: boolean, key?: string): Promise<GatewayState>;
   activateProfile(profileId: string): Promise<GatewayState>;

@@ -310,7 +310,7 @@ function scenario(name: MockScenario): { state: GatewayState; agents: AgentStatu
 
 export function mockApi(name: string | null): DesktopApi {
   const known: MockScenario[] = ["backend-disconnected", "ready", "no-profiles", "no-key", "verifying", "configuration-verifying", "error", "empty-catalog", "blocked", "needs-attention", "endpoint-busy", "interactive"];
-  const picked = name === "oauth-denied" ? "no-profiles" : known.find((candidate) => candidate === name) ?? "ready";
+  const picked = name?.startsWith("oauth-") ? "no-profiles" : known.find((candidate) => candidate === name) ?? "ready";
   let { state, agents } = scenario(picked);
   if (name === "reconnecting") state = { ...state, status: "stopped", reconnecting: true, protectedSince: now - 600, error: "Network unavailable. Connect to a network; protection resumes after verification." };
   if (name === "all-agent-icons") agents = [...agents,
@@ -518,17 +518,33 @@ export function mockApi(name: string | null): DesktopApi {
       if (!login || login.id !== id) throw new Error("Account login is no longer active");
       if (login.polls++ < 2) return null;
       if (name === "oauth-denied") throw new Error("Authorization was declined");
-      return { kind: "oauth", accountId: "preview-account", accountName: "Personal" };
+      return {
+        auth: { kind: "oauth", accountId: "preview-account", accountName: "Personal", scope: { organization: login.profile.provider === "redpill" ? "Personal organization" : null, workspace: login.profile.provider === "phala" ? "Phala workspace" : null, workspaceId: null } },
+        workspaces: login.profile.provider === "redpill" ? [
+          { id: 123, name: "Default", isDefault: true },
+          ...(name === "oauth-workspaces" ? [{ id: 124, name: "Research", isDefault: false }] : []),
+        ] : [],
+      };
     },
-    saveAccountLogin: async (id, profile, requireProductionOs) => {
+    saveAccountLogin: async (id, profile, requireProductionOs, workspaceId) => {
       if (!login || login.id !== id || login.polls < 3 || profile.id !== login.profile.id || profile.provider !== login.profile.provider) throw new Error("Finish signing in first");
-      const saved: ConfidentialProfile = { ...profile, auth: { kind: "oauth", accountId: "preview-account", accountName: "Personal" }, credentialSaved: true, verifiedAt: Math.floor(Date.now() / 1000) };
+      if (profile.provider === "redpill" && workspaceId !== 123 && workspaceId !== 124) throw new Error("Choose a workspace before saving");
+      const saved: ConfidentialProfile = { ...profile, auth: { kind: "oauth", accountId: "preview-account", accountName: "Personal", scope: { organization: profile.provider === "redpill" ? "Personal organization" : null, workspace: profile.provider === "redpill" ? workspaceId === 124 ? "Research" : "Default" : "Phala workspace", workspaceId: workspaceId ?? null } }, credentialSaved: true, verifiedAt: Math.floor(Date.now() / 1000) };
       credentialProfiles.add(saved.id);
       state = { ...state, profiles: [...state.profiles.filter((p) => p.id !== saved.id), saved], activeProfileId: saved.id, apiKeySaved: true, status: "stopped", configurationVerification: false, remoteUrl: saved.remoteUrl, config: { remoteUrl: saved.remoteUrl, requireProductionOs } };
       login = undefined;
       publish();
       return structuredClone(state);
     },
+    getAccountBalance: async (target) => {
+      if (name === "oauth-balance-denied") throw new Error("Your account does not have permission to view this balance");
+      const profile = target.kind === "login" ? login?.id === target.id && login.polls >= 3 ? login.profile : undefined : state.profiles.find((p) => p.id === target.profileId);
+      if (!profile) throw new Error("Account is unavailable");
+      const saved = target.kind === "profile" ? state.profiles.find((p) => p.id === profile.id) : undefined;
+      return { balanceUsd: "12.50", grantedUsd: profile.provider === "phala" ? "3.25" : null,
+        scope: saved?.auth.kind === "oauth" && saved.auth.scope ? saved.auth.scope : { organization: profile.provider === "redpill" ? "Personal organization" : null, workspace: profile.provider === "phala" ? "Phala workspace" : null, workspaceId: null } };
+    },
+    openTopUp: async (provider) => { window.dispatchEvent(new CustomEvent("mock:top-up", { detail: { provider } })); },
     cancelAccountLogin: async (id) => { if (login?.id === id) login = undefined; },
     verifyConfiguration: async (profile, requireProductionOs, key) => {
       const reconnect = !state.configurationVerification && (state.status === "verified" || state.status === "blocked");

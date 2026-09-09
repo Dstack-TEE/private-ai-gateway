@@ -24,7 +24,10 @@ use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use url::Url;
 use uuid::Uuid;
 
-use crate::contracts::{ConfidentialProfileInput, ProfileAuth, ServiceProvider};
+use crate::contracts::{
+    AccountBalance, AccountLoginDetails, AccountScope, AccountWorkspace, ConfidentialProfileInput,
+    ProfileAuth, ServiceProvider,
+};
 
 const REDPILL_CLIENT_ID: &str = "cGrHCOWG3S91oa0A";
 const ISSUER: &str = "https://clerk.redpill.ai";
@@ -51,35 +54,80 @@ pub(crate) enum Authorization {
     Inference(Credential),
     Redpill {
         access_token: String,
-        auth: ProfileAuth,
+        details: AccountLoginDetails,
     },
 }
 
 impl Authorization {
-    fn auth(&self) -> ProfileAuth {
+    fn details(&self) -> AccountLoginDetails {
         match self {
-            Self::Inference(key) => key.auth.clone(),
-            Self::Redpill { auth, .. } => auth.clone(),
+            Self::Inference(key) => AccountLoginDetails {
+                auth: key.auth.clone(),
+                workspaces: Vec::new(),
+            },
+            Self::Redpill { details, .. } => details.clone(),
         }
     }
 
-    async fn issue(&self, profile: &ConfidentialProfileInput) -> Result<Credential, String> {
+    async fn issue(
+        &self,
+        profile: &ConfidentialProfileInput,
+        workspace_id: Option<i64>,
+    ) -> Result<Credential, String> {
         match self {
-            Self::Inference(key) => Ok(key.clone()),
-            Self::Redpill { access_token, .. } => {
+            Self::Inference(key) => {
+                if profile.provider == ServiceProvider::Redpill {
+                    let saved = match &key.auth {
+                        ProfileAuth::OAuth {
+                            scope: Some(scope), ..
+                        } => scope.workspace_id,
+                        _ => None,
+                    };
+                    if saved != workspace_id {
+                        return Err("Sign in again to change workspace".into());
+                    }
+                }
+                Ok(key.clone())
+            }
+            Self::Redpill {
+                access_token,
+                details,
+            } => {
+                let selected = workspace_id
+                    .filter(|id| details.workspaces.iter().any(|w| w.id == *id))
+                    .ok_or("Choose a workspace before saving")?;
                 let result = response(client()?.post(KEY_URL).bearer_auth(access_token).json(
-                    &json!({"installation_id": installation_id(&profile.id), "name": profile.name}),
-                ))
-                .await?;
+                    &json!({"installation_id": installation_id(&profile.id), "name": profile.name, "workspace_id": selected}),
+                )).await?;
+                if result.get("workspace_id").and_then(Value::as_i64) != Some(selected) {
+                    return Err("Unexpected workspace in the account response".into());
+                }
+                let organization = string(&result, "account_name")?;
                 Ok(Credential {
                     key: desktop_gateway::secrets::validate_api_key(&string(&result, "api_key")?)?,
                     auth: ProfileAuth::OAuth {
                         account_id: string(&result, "account_id")?,
-                        account_name: Some(string(&result, "account_name")?),
+                        account_name: match &details.auth {
+                            ProfileAuth::OAuth { account_name, .. } => account_name.clone(),
+                            _ => None,
+                        },
+                        scope: Some(AccountScope {
+                            organization: Some(organization),
+                            workspace: Some(string(&result, "workspace_name")?),
+                            workspace_id: Some(selected),
+                        }),
                     },
                 })
             }
         }
+    }
+
+    async fn balance(&self, provider: &ServiceProvider) -> Result<AccountBalance, String> {
+        let secret = match self {
+            Self::Inference(credential) => &credential.key,
+            Self::Redpill { access_token, .. } => access_token,
+        };
+        account_balance(provider, secret).await
     }
 }
 
@@ -150,18 +198,19 @@ impl PendingLogin {
         }
     }
 
-    pub async fn poll(&mut self, id: &str) -> Result<Option<ProfileAuth>, String> {
+    pub async fn poll(&mut self, id: &str) -> Result<Option<AccountLoginDetails>, String> {
         self.validate(id)?;
         Ok(self
             .resolve()
             .await?
-            .map(|authorization| authorization.auth()))
+            .map(|authorization| authorization.details()))
     }
 
     pub async fn credential(
         &mut self,
         id: &str,
         profile: &ConfidentialProfileInput,
+        workspace_id: Option<i64>,
     ) -> Result<Credential, String> {
         self.validate(id)?;
         let candidate = crate::service_config::resolve_profile(profile.clone(), None)?;
@@ -172,10 +221,20 @@ impl PendingLogin {
             return Err("Sign in again for the selected provider".into());
         }
         let authorization = self.resolve().await?.ok_or("Finish signing in first")?;
-        let credential = authorization.issue(profile).await?;
+        let credential = authorization.issue(profile, workspace_id).await?;
         // Verification retries reuse the issued key instead of rotating it again.
         *authorization = Authorization::Inference(credential.clone());
         Ok(credential)
+    }
+
+    pub async fn balance(&mut self, id: &str) -> Result<AccountBalance, String> {
+        self.validate(id)?;
+        let provider = self.profile.provider.clone();
+        self.resolve()
+            .await?
+            .ok_or("Finish signing in first")?
+            .balance(&provider)
+            .await
     }
 
     pub async fn cancel(&mut self) -> Result<(), String> {
@@ -439,17 +498,21 @@ async fn phala(client: Client, device: String, mut interval: u64) -> Result<Cred
             .and_then(|v| v.pointer("/workspace/name"))
             .and_then(Value::as_str)
             .map(str::to_owned);
-        let account = metadata
+        let account_name = metadata
             .as_ref()
             .and_then(|v| v.pointer("/user/username"))
             .and_then(Value::as_str)
-            .unwrap_or("phala")
-            .to_owned();
+            .map(str::to_owned);
+        let account = account_name.clone().unwrap_or_else(|| "phala".into());
         return Ok(Credential {
             key,
             auth: ProfileAuth::OAuth {
                 account_id: account,
-                account_name: name,
+                account_name,
+                scope: name.map(|workspace| AccountScope {
+                    workspace: Some(workspace),
+                    ..AccountScope::default()
+                }),
             },
         });
     }
@@ -576,13 +639,115 @@ async fn redpill(
             .bearer_auth(&access_token),
     )
     .await?;
+    let account = response(
+        client
+            .get("https://service.redpill.ai/api/desktop/account")
+            .bearer_auth(&access_token),
+    )
+    .await?;
+    let workspaces: Vec<AccountWorkspace> = serde_json::from_value(
+        account
+            .get("workspaces")
+            .cloned()
+            .ok_or("Missing workspace list")?,
+    )
+    .map_err(|_| "Invalid workspace list")?;
+    validate_workspaces(&workspaces)?;
     Ok(Authorization::Redpill {
         access_token,
-        auth: ProfileAuth::OAuth {
-            account_id: string(&info, "sub")?,
-            account_name: info.get("name").and_then(Value::as_str).map(str::to_owned),
+        details: AccountLoginDetails {
+            auth: ProfileAuth::OAuth {
+                account_id: string(&info, "sub")?,
+                account_name: info.get("name").and_then(Value::as_str).map(str::to_owned),
+                scope: Some(AccountScope {
+                    organization: Some(string(&account, "organization_name")?),
+                    ..AccountScope::default()
+                }),
+            },
+            workspaces,
         },
     })
+}
+
+fn validate_workspaces(workspaces: &[AccountWorkspace]) -> Result<(), String> {
+    let mut ids = std::collections::HashSet::new();
+    if workspaces.is_empty() {
+        return Err("No accessible workspace is available".into());
+    }
+    for workspace in workspaces {
+        if workspace.id <= 0
+            || workspace.id > 9_007_199_254_740_991
+            || workspace.name.trim().is_empty()
+            || !ids.insert(workspace.id)
+        {
+            return Err("Invalid workspace list".into());
+        }
+    }
+    Ok(())
+}
+
+fn amount(value: &Value, field: &str) -> Result<String, String> {
+    let text = string(value, field)?;
+    if !text.parse::<f64>().is_ok_and(f64::is_finite) {
+        return Err("Invalid balance response".into());
+    }
+    Ok(text)
+}
+
+pub(crate) async fn account_balance(
+    provider: &ServiceProvider,
+    secret: &str,
+) -> Result<AccountBalance, String> {
+    let url = match provider {
+        ServiceProvider::Phala => "https://cloud-api.phala.com/api/v1/private_ai/self",
+        ServiceProvider::Redpill => "https://service.redpill.ai/api/desktop/balance",
+        ServiceProvider::Custom => {
+            return Err("Balance is only available for Phala and RedPill accounts".into())
+        }
+    };
+    let (status, data) = request_json(client()?.get(url).bearer_auth(secret)).await?;
+    if status == StatusCode::FORBIDDEN {
+        return Err("Your account does not have permission to view this balance".into());
+    }
+    if !status.is_success() {
+        return Err(account_error(status, &data));
+    }
+    match provider {
+        ServiceProvider::Phala => {
+            let credits = data.get("credits").ok_or("Missing balance response")?;
+            Ok(AccountBalance {
+                balance_usd: amount(credits, "balance")?,
+                granted_usd: Some(amount(credits, "granted_balance")?),
+                scope: AccountScope {
+                    workspace: Some(string(
+                        data.get("workspace").ok_or("Missing workspace")?,
+                        "name",
+                    )?),
+                    ..AccountScope::default()
+                },
+            })
+        }
+        _ => Ok(AccountBalance {
+            balance_usd: amount(&data, "balance_usd")?,
+            granted_usd: None,
+            scope: AccountScope {
+                organization: Some(string(&data, "organization_name")?),
+                workspace: data
+                    .get("workspace_name")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                workspace_id: data.get("workspace_id").and_then(Value::as_i64),
+            },
+        }),
+    }
+}
+
+pub fn top_up_url(provider: &ServiceProvider) -> Result<&'static str, String> {
+    match provider {
+        ServiceProvider::Phala => Ok("https://cloud.phala.com/cost"),
+        ServiceProvider::Redpill => Ok("https://redpill.ai/credits"),
+        ServiceProvider::Custom => Err("Top up is only available for Phala and RedPill".into()),
+    }
 }
 
 #[cfg(test)]
@@ -621,6 +786,54 @@ mod tests {
         assert_eq!(pending.poll("login-test").await.unwrap_err(), error);
         assert!(!pending.is_active());
         pending.cancel().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn redpill_requires_an_explicit_accessible_workspace() {
+        let profile = ConfidentialProfileInput {
+            id: "profile-test".into(),
+            name: "RedPill".into(),
+            provider: ServiceProvider::Redpill,
+            remote_url: "https://tee.redpill.ai".into(),
+        };
+        let authorization = Authorization::Redpill {
+            access_token: "must-not-be-sent".into(),
+            details: AccountLoginDetails {
+                auth: ProfileAuth::OAuth {
+                    account_id: "user_test".into(),
+                    account_name: None,
+                    scope: None,
+                },
+                workspaces: vec![AccountWorkspace {
+                    id: 7,
+                    name: "Research".into(),
+                    is_default: false,
+                }],
+            },
+        };
+        for selection in [None, Some(999)] {
+            let result = authorization.issue(&profile, selection).await;
+            assert_eq!(result.err().unwrap(), "Choose a workspace before saving");
+        }
+    }
+
+    #[test]
+    fn workspace_and_balance_responses_are_validated() {
+        let valid = AccountWorkspace {
+            id: 7,
+            name: "Research".into(),
+            is_default: false,
+        };
+        assert!(validate_workspaces(std::slice::from_ref(&valid)).is_ok());
+        assert!(validate_workspaces(&[valid.clone(), valid]).is_err());
+        assert!(validate_workspaces(&[]).is_err());
+        for value in ["NaN", "inf", "not-a-number"] {
+            assert!(amount(&json!({"balance": value}), "balance").is_err());
+        }
+        assert_eq!(
+            amount(&json!({"balance": "-1.25"}), "balance").unwrap(),
+            "-1.25"
+        );
     }
 
     #[test]
