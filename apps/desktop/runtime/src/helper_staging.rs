@@ -52,7 +52,9 @@ pub fn stage(bundled: &Path, app_data: &Path) -> io::Result<PathBuf> {
         .as_file()
         .set_permissions(fs::Permissions::from_mode(0o700))?;
     temporary.as_file().sync_all()?;
-    temporary.persist(&destination)?;
+    // Close the writable handle before publishing an executable. Otherwise a
+    // concurrent launch can observe the destination while it is still writable.
+    temporary.into_temp_path().persist(&destination)?;
     File::open(&directory)?.sync_all()?;
     Ok(destination)
 }
