@@ -338,7 +338,7 @@ their labels in tooltips.
 | Overview privacy info / Local API help | Dialog name | Tooltip; click opens the dialog |
 | Edit, copy, reveal, rotate, export and other icon actions | Action name | Tooltip; click executes the action |
 | Theme icon toggles | System / Light / Dark | Tooltip; click selects the theme |
-| Agent configuration path / usage model | Full text that may be truncated | Tooltip |
+| Usage model | Full text that may be truncated | Tooltip |
 | Non-loopback warning | Network exposure explanation | Tooltip |
 | Usage table token count | Input, output, cache counts | Tooltip, hover/focus |
 | Missing usage in proof | Why unavailable or not applicable | Tooltip, hover/focus |
@@ -367,7 +367,8 @@ placement to the OS when the saved monitor is unavailable.
 Native close requests and Cmd/Ctrl+W go through the topmost dialog's existing
 dismissal guard before destruction. Saving and update installation cannot be
 bypassed by an OS close button. Cmd+. uses the same cancel guard. Form dialogs
-focus the first enabled editable field; reading dialogs focus their heading.
+focus their heading without a visible focus ring. Tab navigation retains standard
+focus indicators on interactive controls.
 Closing a nested editor restores focus to its trigger. The fixed desktop sidebar
 opts out of shadcn's collapse shortcut; Cmd/Ctrl+B is left untouched.
 

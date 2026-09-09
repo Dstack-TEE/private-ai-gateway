@@ -1820,7 +1820,6 @@ function AgentRow({
             ? <AgentAttention name={name} message={note} authorized={agent.authorized} action={!disabled ? agent.repairAction : undefined} onRepair={() => onSelect(agent.repairAction === "reconnect")} />
             : <StateLabel tone={presence.tone} text={presence.label} />}
         </ItemTitle>
-        {agent.installed && !compact && <Hint content={agent.configPath}><ItemDescription>{homePath(agent.configPath)}</ItemDescription></Hint>}
       </ItemContent>
       <ItemActions>
       {agent.installed ? <SwitchControl
@@ -2442,7 +2441,7 @@ function ProfileEditorSheet({
     finally { setSaving(false); }
   };
   return (
-    <Sheet title={isNew ? "New Profile" : "Edit Profile"} label={isNew ? "New profile" : "Edit profile"} className="profile-editor-sheet w-[min(620px,_calc(var(--window-dialog-width,_100vw)_-_32px))] [&[open]]:flex [&[open]]:flex-col [&_form]:min-h-0 [&_form]:flex [&_form]:flex-col form-sheet [&_>_.sheet-heading]:px-5 [&_>_.field-note]:mx-5 [&_.sheet-footer]:mx-5 [&_form_>_[data-slot=field-error]]:mx-5 [&_.sheet-scroll]:px-5" initialFocus="field" dismissible={!saving} onClose={onClose}>
+    <Sheet title={isNew ? "New Profile" : "Edit Profile"} label={isNew ? "New profile" : "Edit profile"} className="profile-editor-sheet w-[min(620px,_calc(var(--window-dialog-width,_100vw)_-_32px))] [&[open]]:flex [&[open]]:flex-col [&_form]:min-h-0 [&_form]:flex [&_form]:flex-col form-sheet [&_>_.sheet-heading]:px-5 [&_>_.field-note]:mx-5 [&_.sheet-footer]:mx-5 [&_form_>_[data-slot=field-error]]:mx-5 [&_.sheet-scroll]:px-5" dismissible={!saving} onClose={onClose}>
       <form className="mt-4" onSubmit={(event) => void submit(event)}>
         <div className="sheet-scroll py-1">
         <FieldGroup>
@@ -2560,7 +2559,7 @@ function LocalApiSheet({
     }
   };
   return (
-    <Sheet title="Local API settings" className="local-api-sheet w-[min(560px,_calc(var(--window-dialog-width,_100vw)_-_32px))] h-[min(512px,_calc(var(--window-dialog-height,_100vh)_-_32px))] [&_.sheet-card]:mt-3 form-sheet [&_>_.sheet-heading]:px-5 [&_>_.field-note]:mx-5 [&_.sheet-footer]:mx-5 [&_form_>_[data-slot=field-error]]:mx-5 [&_.sheet-scroll]:px-5" initialFocus="field" dismissible={!saving} onClose={onClose}>
+    <Sheet title="Local API settings" className="local-api-sheet w-[min(560px,_calc(var(--window-dialog-width,_100vw)_-_32px))] h-[min(512px,_calc(var(--window-dialog-height,_100vh)_-_32px))] [&_.sheet-card]:mt-3 form-sheet [&_>_.sheet-heading]:px-5 [&_>_.field-note]:mx-5 [&_.sheet-footer]:mx-5 [&_form_>_[data-slot=field-error]]:mx-5 [&_.sheet-scroll]:px-5" dismissible={!saving} onClose={onClose}>
       <form onSubmit={(event) => void submit(event)}>
         <div className="sheet-scroll py-4">
           <FieldGroup>
@@ -2804,10 +2803,6 @@ function serviceHost(value: string): string {
   } catch {
     return value;
   }
-}
-
-function homePath(value: string): string {
-  return value.replace(/^\/Users\/[^/]+/, "~").replace(/^\/home\/[^/]+/, "~");
 }
 
 function hardwareName(value: string): string {
