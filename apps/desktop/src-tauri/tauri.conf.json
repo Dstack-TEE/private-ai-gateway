@@ -13,6 +13,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "Private AI Proxy",
         "width": 1052,
         "height": 784,
