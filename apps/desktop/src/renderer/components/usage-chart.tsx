@@ -49,7 +49,7 @@ export function UsageChart({ page, loading, range, bounds, metric, onMetric }: {
   const formatValue = useMemo(() => new Intl.NumberFormat(undefined, metric === "cost"
     ? { style: "currency", currency: "USD", maximumFractionDigits: 6 }
     : {}).format, [metric]);
-  return <figure className="usage-chart relative min-h-62.5 m-0 pt-3 pr-3 pb-2.5 pl-3 bg-card border border-border rounded-2xl overflow-hidden max-[440px]:min-h-43" aria-busy={loading} aria-label={`${metric} usage by model${monthly ? " per month" : " per day"}`}>
+  return <figure className="usage-chart relative min-h-62.5 m-0 max-[440px]:min-h-43" aria-busy={loading} aria-label={`${metric} usage by model${monthly ? " per month" : " per day"}`}>
     <Tabs value={metric} onValueChange={(value) => { if (value === "tokens" || value === "cost" || value === "requests") onMetric(value); }}>
       <TabsList aria-label="Chart metric">
         <TabsTrigger value="tokens">Tokens</TabsTrigger><TabsTrigger value="cost">Cost</TabsTrigger><TabsTrigger value="requests">Requests</TabsTrigger>

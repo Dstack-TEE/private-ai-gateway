@@ -18,7 +18,7 @@ test("compact overview separates provider verification from current-session usag
   await page.goto("/?mock=ready");
   const protection = page.getByRole("region", { name: "Protection status", exact: true });
   const agentCard = page.locator(".overview-module").filter({ has: page.getByRole("heading", { name: "Agents", exact: true }) });
-  await expect(agentCard.locator(".agent-block")).toHaveCount(4);
+  await expect(agentCard.locator(".agent-block")).toHaveCount(3);
   const bottomSpace = await agentCard.evaluate((node) => {
     const frame = node.querySelector(".module")?.getBoundingClientRect();
     const last = Array.from(node.querySelectorAll(".agent-block")).at(-1)?.getBoundingClientRect();
@@ -37,9 +37,11 @@ test("compact overview separates provider verification from current-session usag
   expect(margins).toEqual([24, 24, 24]);
   await expect(page.locator(".overview-page [data-slot=card]")).toHaveCount(5);
   await expect(agentCard.locator('[data-slot="separator"]')).toHaveCount(0);
-  await expect(agentCard.locator('[data-slot="item"][data-variant="muted"]')).toHaveCount(4);
+  await expect(agentCard.locator('[data-slot="item"][data-variant="muted"]')).toHaveCount(3);
   await expect(page.locator('.session-summary > [data-slot="session-metric"]')).toHaveCount(3);
   await expect(page.locator('.session-summary > [data-slot="separator"]')).toHaveCount(2);
+  const metricBottoms = await page.locator('[data-slot="session-metric"] strong').evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().bottom));
+  expect(new Set(metricBottoms).size).toBe(1);
   await expect(page.locator(".page-header")).toHaveCSS("border-bottom-width", "0px");
   await expect(page.locator(".session-summary")).toHaveCSS("gap", "12px");
   await expect(page.locator(".overview-top")).toHaveCSS("gap", "16px");
@@ -711,9 +713,9 @@ test("usage tooltips stay mounted while backend state and row data refresh", asy
   await expect(page.getByRole("dialog", { name: "Usage proof", exact: true })).toBeVisible();
 });
 
-test("Agents reserves four rows and elapsed time only appears while protected", async ({ page }) => {
+test("Agents reserves three rows and elapsed time only appears while protected", async ({ page }) => {
   let fullHeight: number | undefined;
-  for (const [scenario, count] of [["ready", 4], ["one-agent", 1], ["no-agents", 0]] as const) {
+  for (const [scenario, count] of [["ready", 3], ["one-agent", 1], ["no-agents", 0]] as const) {
     await page.goto(`/?mock=${scenario}`);
     const card = page.locator(".overview-module").filter({ has: page.getByRole("heading", { name: "Agents", exact: true }) });
     await expect(card.locator(".agent-block")).toHaveCount(count);
@@ -725,14 +727,14 @@ test("Agents reserves four rows and elapsed time only appears while protected", 
     await page.goto(`/?mock=${scenario}`);
     await expect(page.getByLabel("Protection status").locator(".protection-duration")).toHaveCount(0);
     for (const card of await page.locator(".overview-top > [data-slot=card]").all()) {
-      await expect(card).toHaveCSS("height", "176px");
+      await expect(card).toHaveCSS("height", "144px");
     }
   }
   await page.goto("/?mock=ready");
   const duration = page.getByLabel("Protection status").locator(".protection-duration");
   await expect(duration).toBeVisible();
   for (const card of await page.locator(".overview-top > [data-slot=card]").all()) {
-    await expect(card).toHaveCSS("height", "176px");
+    await expect(card).toHaveCSS("height", "144px");
   }
   await page.clock.install();
   const initial = await duration.getAttribute("datetime");
@@ -1230,12 +1232,12 @@ test("five agents connect and disconnect directly from the verified discovered c
   await expect(page.getByRole("switch", { name: /^Disconnect / })).toHaveCount(0);
 });
 
-test("overview shows four agents, four current-session records, truthful copy surfaces, and session totals", async ({ page }) => {
+test("overview shows three agents, four current-session records, truthful copy surfaces, and session totals", async ({ page }) => {
   await page.setViewportSize({ width: 1100, height: 1040 });
   await page.goto("/?mock=ready");
 
   const agentsModule = page.locator(".overview-module", { has: page.getByRole("heading", { name: "Agents" }) });
-  await expect(agentsModule.locator(".agent-block")).toHaveCount(4);
+  await expect(agentsModule.locator(".agent-block")).toHaveCount(3);
   await expect(agentsModule.locator(".agent-block").last()).toBeVisible();
   const usageModule = page.locator(".overview-module", { has: page.getByRole("heading", { name: "Recent usage" }) });
   await expect(usageModule.locator(".usage-row")).toHaveCount(4);
@@ -1735,7 +1737,7 @@ test("installed agents stay ordered and protection state is consistent across pa
   await page.goto("/?mock=mixed-agents");
   await expect(page.locator(".status-agent-icon")).toHaveCount(0);
   const preview = page.locator(".overview-module", { has: page.getByRole("heading", { name: "Agents", exact: true }) });
-  await expect(preview.locator(".agent-block")).toHaveCount(4);
+  await expect(preview.locator(".agent-block")).toHaveCount(3);
   await page.getByRole("button", { name: "Agents", exact: true }).click();
   const installed = page.getByRole("region", { name: /^Installed/ });
   await expect(installed.getByRole("heading")).not.toContainText("active");
