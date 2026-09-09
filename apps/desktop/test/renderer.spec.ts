@@ -1544,6 +1544,31 @@ test("local copy hover follows the grouped row shape and profiles open their dia
   expect(Math.abs(shape.height - shape.rowHeight)).toBeLessThanOrEqual(1);
   expect(shape.clipped).toBe("hidden");
   expect(Number.parseFloat(shape.radius)).toBeGreaterThan(0);
+  for (const name of ["Local API settings", "Reveal client key"]) {
+    const button = page.getByRole("button", { name, exact: true });
+    await button.hover();
+    const before = await button.boundingBox();
+    if (!before) throw new Error("Missing Local API button");
+    await page.mouse.down();
+    try {
+      // Let the real pressed transition finish while the pointer stays down.
+      await button.evaluate(async (node) => {
+        await Promise.allSettled(node.getAnimations().map((animation) => animation.finished));
+      });
+      const pressed = await button.boundingBox();
+      if (!pressed) throw new Error("Missing pressed Local API button");
+      expect(Math.abs(pressed.y - before.y)).toBeLessThanOrEqual(1);
+      expect(pressed.x).toBe(before.x);
+      await page.mouse.move(0, 0);
+    } finally {
+      await page.mouse.up();
+    }
+  }
+  await page.getByRole("button", { name: "Reveal client key", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Hide client key", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Local API settings", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Local API settings", exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
   const profile = page.getByRole("button", { name: "Profiles: RedPill" });
   await expect(profile).toHaveAttribute("aria-haspopup", "dialog");
   await profile.click();
