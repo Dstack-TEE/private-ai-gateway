@@ -15,7 +15,7 @@ export function SettingsList({ children }: PropsWithChildren): React.JSX.Element
 export function SettingsSection({ title, children }: PropsWithChildren<{ title: string }>): React.JSX.Element {
   const id = useId();
   return <section className="group mt-5 [&:first-child]:mt-0" aria-labelledby={id}>
-    <h2 className="group-title min-h-5 mt-0 mr-0.5 mb-2 ml-0.5 flex items-center gap-2 text-sm font-semibold [&_>_span]:ml-auto [&_>_span]:min-w-0 [&_>_span]:overflow-hidden [&_>_span]:text-muted-foreground [&_>_span]:text-xs [&_>_span]:font-normal [&_>_span]:text-ellipsis [&_>_span]:whitespace-nowrap [&_>_.group-actions]:ml-0 [&_>_.group-actions]:flex [&_>_.group-actions]:shrink-0 [&_>_.group-actions]:gap-1.5 [&_>_.group-actions]:overflow-visible [&_>_.group-actions:first-of-type]:ml-auto" id={id}>{title}</h2>
+    <h2 className="group-title mx-0.5 mb-2 flex min-h-5 items-center gap-2 text-sm font-semibold" id={id}>{title}</h2>
     <SettingsList>{children}</SettingsList>
   </section>;
 }
