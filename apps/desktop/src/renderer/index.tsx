@@ -1,6 +1,8 @@
 import React, { createContext, lazy, memo, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useWindowReady } from "./lib/use-window-ready";
 import { useAccountLogin } from "./lib/use-account-login";
+import { AccountTools } from "./components/account-tools";
+import { errorMessage } from "./lib/error-message";
 import {
   BatteryMedium,
   Bot,
@@ -2397,6 +2399,13 @@ function ProfileEditorSheet({
   const reportLoginError = useCallback((error: unknown) => setError(errorMessage(error)), []);
   const account = useAccountLogin(desktopApi, reportLoginError);
   const { session: login, auth: authorized } = account;
+  const [workspaceId, setWorkspaceId] = useState<number>();
+  const workspaces = account.details?.workspaces;
+  useEffect(() => {
+    setWorkspaceId(workspaces?.length === 1 ? workspaces.at(0)?.id : undefined);
+  }, [workspaces]);
+  const needsWorkspace = Boolean(authorized && draft.provider === "redpill" && workspaces?.length && workspaceId === undefined);
+
   const working = saving || account.busy;
   const closeEditor = async () => {
     if (await account.cancel()) onClose();
@@ -2414,6 +2423,8 @@ function ProfileEditorSheet({
   const savedCredentialApplies = !isNew
     && profileHasCredential(profile)
     && !profileChanged;
+  const accountScope = authorized?.kind === "oauth" ? authorized.scope
+    : !account.busy && savedCredentialApplies && profile?.auth.kind === "oauth" ? profile.auth.scope : undefined;
   const needsAccountLogin = draft.provider !== "custom" && authMethod === "account"
     && !authorized && (!savedCredentialApplies || profile?.auth.kind !== "oauth");
 
@@ -2459,13 +2470,13 @@ function ProfileEditorSheet({
   };
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (needsAccountLogin) return;
+    if (needsAccountLogin || needsWorkspace) return;
     setSaving(true);
     setError(undefined);
     try {
       if (running && profile?.id === state.activeProfileId && !await desktopApi.confirm({ title: "Save and reconnect?", message: "Saving this active profile restarts protection. In-flight requests may be interrupted.", confirmLabel: "Save and Reconnect" })) return;
       if (authorized && login && authMethod === "account") {
-        const saved = await desktopApi.saveAccountLogin(login.id, draft, state.config.requireProductionOs);
+        const saved = await desktopApi.saveAccountLogin(login.id, draft, state.config.requireProductionOs, workspaceId);
         account.consume();
         if (startAfterSave) await desktopApi.start(saved.config);
         onComplete();
@@ -2510,11 +2521,23 @@ function ProfileEditorSheet({
           </Field>}
           {draft.provider !== "custom" && authMethod === "account" ? <Field>
             <FieldDescription>{authorized?.kind === "oauth" ? `Signed in${authorized.accountName ? ` as ${authorized.accountName}` : ""}. Verify and save to use this account.` : savedCredentialApplies && profile?.auth.kind === "oauth" ? `Signed in${profile.auth.accountName ? ` to ${profile.auth.accountName}` : ""}.` : `Sign in with ${selectedPreset?.name} in your browser. Requests use your selected workspace's balance and permissions.`}</FieldDescription>
+            {accountScope?.organization && <div className="space-y-1"><p className="text-sm">Organization: <strong>{accountScope.organization}</strong></p><FieldDescription>To change organization, sign in again.</FieldDescription></div>}
+            {authorized && workspaces && workspaces.length > 0 ? <FormField id="profile-workspace" label="Workspace">
+              <ChoiceSelect id="profile-workspace" label="Workspace" className="w-full" value={workspaceId === undefined ? "" : String(workspaceId)} options={[
+                { value: "", label: "Select a workspace", disabled: true },
+                ...workspaces.map((workspace) => ({ value: String(workspace.id), label: workspace.name })),
+              ]} disabled={working || frozen || workspaces.length === 1} onChange={(value) => setWorkspaceId(Number(value))} />
+            </FormField> : accountScope?.workspace && <p className="text-sm">Workspace: <strong>{accountScope.workspace}</strong></p>}
             {login && !authorized ? <div role="status" aria-live="polite">
               <p>Finish signing in in your browser.</p>
               {login.userCode && <p>Confirm code <strong className="font-mono">{login.userCode}</strong></p>}
               <Button type="button" variant="outline" disabled={account.working} onClick={() => void account.cancel()}>Cancel Sign-in</Button>
             </div> : <Button type="button" variant="outline" className="[&_.service-logo]:size-4.5" disabled={working || frozen || !draft.name.trim()} onClick={() => void signIn()}><ServiceLogo url={draft.remoteUrl} />{authorized || (savedCredentialApplies && profile?.auth.kind === "oauth") ? "Sign in again" : `Sign in with ${selectedPreset?.name}`}</Button>}
+            {(authorized && login || savedCredentialApplies && profile?.auth.kind === "oauth" && !account.busy) && <AccountTools
+              key={login?.id ?? draft.id} api={desktopApi} provider={draft.provider}
+              target={authorized && login ? { kind: "login", id: login.id } : { kind: "profile", profileId: draft.id }}
+              scope={accountScope} disabled={working || frozen}
+            />}
           </Field> : <Field>
             <FieldLabel htmlFor="profile-key">{keyLabel}</FieldLabel>
             <Input id="profile-key" type="password" value={apiKeyDraft} onChange={(event) => setApiKeyDraft(event.target.value)} placeholder={savedCredentialApplies ? "Replace the saved key" : `Paste your ${keyLabel}`} disabled={frozen || working} autoComplete="off" spellCheck={false} aria-describedby="profile-key-note" />
@@ -2525,7 +2548,7 @@ function ProfileEditorSheet({
         <FieldError className="mt-3">{error}</FieldError>
         <SheetActions leading={!isNew && <Button type="button" variant="destructive" disabled={working || frozen} onClick={() => void removeProfile()}><Trash2 size={14} />Delete Profile</Button>}>
           <Button type="button" variant="outline" onClick={() => void closeEditor()} disabled={saving || account.working}>Cancel</Button>
-          <Button type="submit" variant="default" disabled={working || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || Boolean(needsAccountLogin) || (!authorized && !savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Verifying…" : "Verify and Save"}</Button>
+          <Button type="submit" variant="default" disabled={working || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || Boolean(needsAccountLogin) || needsWorkspace || (!authorized && !savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Verifying…" : "Verify and Save"}</Button>
         </SheetActions>
       </form>
     </Sheet>
@@ -2884,13 +2907,6 @@ function formatTimestamp(value: number, date = false): string {
   return new Intl.DateTimeFormat(undefined, options).format(new Date(value));
 }
 
-function errorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
-  if (!message || /undefined|invoke|__TAURI_INTERNALS__/i.test(message)) {
-    return "Desktop bridge unavailable";
-  }
-  return message;
-}
 
 function NativeWindowContent(): React.JSX.Element | null {
   const nativeDialog = query.get("native-dialog");

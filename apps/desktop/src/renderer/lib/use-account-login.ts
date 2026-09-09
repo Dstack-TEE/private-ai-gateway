@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AccountLogin, ConfidentialProfileInput, DesktopApi, ProfileAuth } from "../../shared/contracts";
+import type { AccountLogin, ConfidentialProfileInput, DesktopApi, AccountLoginDetails } from "../../shared/contracts";
 
 type LoginApi = Pick<DesktopApi, "beginAccountLogin" | "pollAccountLogin" | "cancelAccountLogin">;
 type LoginState =
   | { phase: "idle" }
   | { phase: "authorizing"; session: AccountLogin }
-  | { phase: "authorized"; session: AccountLogin; auth: ProfileAuth };
+  | { phase: "authorized"; session: AccountLogin; details: AccountLoginDetails };
 
 /** Owns a draft authorization, independently of the form's save operation. */
 export function useAccountLogin(api: LoginApi, onError: (error: unknown) => void) {
@@ -75,10 +75,10 @@ export function useAccountLogin(api: LoginApi, onError: (error: unknown) => void
       if (!current()) return;
       if (!operation.current) {
         try {
-          const auth = await api.pollAccountLogin(pending.id);
+          const details = await api.pollAccountLogin(pending.id);
           if (!current()) return;
-          if (auth && !operation.current) {
-            setState({ phase: "authorized", session: pending, auth });
+          if (details && !operation.current) {
+            setState({ phase: "authorized", session: pending, details });
             return;
           }
         } catch (error) {
@@ -99,7 +99,8 @@ export function useAccountLogin(api: LoginApi, onError: (error: unknown) => void
 
   return {
     session: state.phase === "idle" ? undefined : state.session,
-    auth: state.phase === "authorized" ? state.auth : undefined,
+    auth: state.phase === "authorized" ? state.details.auth : undefined,
+    details: state.phase === "authorized" ? state.details : undefined,
     busy: working || state.phase === "authorizing",
     working,
     start,

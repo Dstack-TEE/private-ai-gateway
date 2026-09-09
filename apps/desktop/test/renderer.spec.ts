@@ -2063,3 +2063,43 @@ test("account sign-in stays in the form and requires explicit verification and s
     }
   }
 });
+
+test("RedPill confirms workspace and exposes scoped balance and top-up actions", async ({ page }) => {
+  await page.goto("/?mock=oauth-workspaces");
+  await page.evaluate(() => window.addEventListener("mock:top-up", (event) => {
+    if (event instanceof CustomEvent) document.documentElement.dataset.topUpProvider = event.detail.provider;
+  }));
+  await page.getByRole("button", { name: "Set up profile" }).click();
+  const editor = page.getByRole("dialog", { name: "New profile" });
+  await editor.getByRole("button", { name: "RedPill", exact: true }).click();
+  await editor.getByRole("button", { name: "Sign in with RedPill" }).click();
+  await expect(editor.getByText("Personal organization", { exact: true })).toBeVisible();
+  const save = editor.getByRole("button", { name: "Verify and Save" });
+  await expect(save).toBeDisabled();
+  await choose(page, editor.getByRole("combobox", { name: "Workspace" }), "Research");
+  await expect(save).toBeEnabled();
+  await editor.getByRole("button", { name: "Check balance" }).click();
+  await expect(editor.getByText("$12.50 USD", { exact: true })).toBeVisible();
+  await editor.getByRole("button", { name: "Top up", exact: true }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-top-up-provider", "redpill");
+  await save.click();
+  await page.getByRole("button", { name: "Profiles: RedPill" }).click();
+  await page.getByRole("button", { name: "Edit RedPill" }).click();
+  const saved = page.getByRole("dialog", { name: "Edit profile" });
+  await expect(saved.getByText("Research", { exact: true })).toBeVisible();
+  await saved.getByRole("button", { name: "Check balance" }).click();
+  await expect(saved.getByText("$12.50 USD", { exact: true })).toBeVisible();
+  await saved.getByRole("button", { name: "Phala", exact: true }).click();
+  await expect(saved.getByText("Personal organization", { exact: true })).toHaveCount(0);
+  await expect(saved.getByRole("button", { name: "Sign in with Phala" })).toBeVisible();
+});
+
+test("balance permission errors never display a zero balance", async ({ page }) => {
+  await page.goto("/?mock=oauth-balance-denied");
+  await page.getByRole("button", { name: "Set up profile" }).click();
+  const editor = page.getByRole("dialog", { name: "New profile" });
+  await editor.getByRole("button", { name: "Sign in with Phala" }).click();
+  await editor.getByRole("button", { name: "Check balance" }).click();
+  await expect(editor.getByText("Your account does not have permission to view this balance")).toBeVisible();
+  await expect(editor.getByText(/\$0\.00/)).toHaveCount(0);
+});

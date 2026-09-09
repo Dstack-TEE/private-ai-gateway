@@ -700,7 +700,7 @@ impl DesktopRuntime {
     pub async fn poll_account_login(
         self: &Arc<Self>,
         id: String,
-    ) -> Result<Option<crate::contracts::ProfileAuth>, String> {
+    ) -> Result<Option<crate::contracts::AccountLoginDetails>, String> {
         self.account_login
             .lock()
             .await
@@ -715,12 +715,13 @@ impl DesktopRuntime {
         id: String,
         profile: ConfidentialProfileInput,
         require_production_os: bool,
+        workspace_id: Option<i64>,
     ) -> Result<GatewayState, String> {
         let mut slot = self.account_login.lock().await;
         let credential = slot
             .as_mut()
             .ok_or("Account login is no longer active")?
-            .credential(&id, &profile)
+            .credential(&id, &profile, workspace_id)
             .await?;
         let saved = self
             .verify_account_configuration(
@@ -732,6 +733,39 @@ impl DesktopRuntime {
             .await?;
         *slot = None;
         self.finish_configuration(saved)
+    }
+
+    pub async fn account_balance(
+        &self,
+        target: crate::contracts::AccountBalanceTarget,
+    ) -> Result<crate::contracts::AccountBalance, String> {
+        use crate::contracts::{AccountBalanceTarget, ProfileAuth};
+        match target {
+            AccountBalanceTarget::Login { id } => {
+                self.account_login
+                    .lock()
+                    .await
+                    .as_mut()
+                    .ok_or("Account login is no longer active")?
+                    .balance(&id)
+                    .await
+            }
+            AccountBalanceTarget::Profile { profile_id } => {
+                let state = self.manager.snapshot()?;
+                let profile = state
+                    .profiles
+                    .iter()
+                    .find(|p| p.id == profile_id)
+                    .ok_or("Profile not found")?;
+                if !matches!(profile.auth, ProfileAuth::OAuth { .. }) {
+                    return Err("Sign in with an account to view its balance".into());
+                }
+                let key = self
+                    .load_profile_key(&profile_id)?
+                    .ok_or("This profile has no saved credential")?;
+                crate::account_login::account_balance(&profile.provider, &key).await
+            }
+        }
     }
 
     pub async fn cancel_account_login(&self, id: String) -> Result<(), String> {
@@ -1658,6 +1692,7 @@ mod tests {
             let auth = ProfileAuth::OAuth {
                 account_id: "account-test".into(),
                 account_name: Some("Personal".into()),
+                scope: None,
             };
             let expected = auth.clone();
             let worker = tokio::spawn(async move {
@@ -1689,7 +1724,7 @@ mod tests {
             })
             .await
             .unwrap();
-            assert_eq!(completed, expected);
+            assert_eq!(completed.auth, expected);
             assert!(!serde_json::to_string(&completed)
                 .unwrap()
                 .contains("secret-not-for-the-renderer"));
@@ -1697,7 +1732,8 @@ mod tests {
                 runtime
                     .poll_account_login("login-test".into())
                     .await
-                    .unwrap(),
+                    .unwrap()
+                    .map(|details| details.auth),
                 Some(expected)
             );
             assert!(runtime.state().unwrap().profiles.is_empty());
@@ -1708,7 +1744,7 @@ mod tests {
             };
             assert_eq!(
                 runtime
-                    .save_account_login("login-test".into(), different_provider, true)
+                    .save_account_login("login-test".into(), different_provider, true, None)
                     .await
                     .unwrap_err(),
                 "Sign in again for the selected provider"

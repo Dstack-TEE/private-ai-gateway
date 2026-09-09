@@ -316,7 +316,7 @@ impl Client {
     pub async fn poll_account_login(
         self: &Arc<Self>,
         id: String,
-    ) -> Result<Option<ProfileAuth>, String> {
+    ) -> Result<Option<AccountLoginDetails>, String> {
         self.background(Command::PollAccountLogin { id }).await
     }
     pub async fn save_account_login(
@@ -324,13 +324,21 @@ impl Client {
         id: String,
         profile: ConfidentialProfileInput,
         require_production_os: bool,
+        workspace_id: Option<i64>,
     ) -> Result<GatewayState, String> {
         self.background(Command::SaveAccountLogin {
             id,
             profile,
             require_production_os,
+            workspace_id,
         })
         .await
+    }
+    pub async fn account_balance(
+        self: &Arc<Self>,
+        target: AccountBalanceTarget,
+    ) -> Result<AccountBalance, String> {
+        self.background(Command::AccountBalance { target }).await
     }
     pub async fn cancel_account_login(self: &Arc<Self>, id: String) -> Result<(), String> {
         self.background(Command::CancelAccountLogin { id }).await

@@ -141,7 +141,9 @@ export const desktopApi: DesktopApi = {
   },
 
   beginAccountLogin: (profile) => invoke("begin_account_login", { profile }),
-  saveAccountLogin: (id, profile, requireProductionOs) => invoke("save_account_login", { id, profile, requireProductionOs }),
+  saveAccountLogin: (id, profile, requireProductionOs, workspaceId) => invoke("save_account_login", { id, profile, requireProductionOs, workspaceId }),
+  getAccountBalance: (target) => invoke("account_balance", { target }),
+  openTopUp: (provider) => invoke("open_top_up", { provider }),
   pollAccountLogin: (id) => invoke("poll_account_login", { id }),
   cancelAccountLogin: (id) => invoke("cancel_account_login", { id }),
   start(config: StartGatewayConfig): Promise<GatewayState> {

@@ -347,11 +347,13 @@ async fn dispatch(runtime: &Arc<DesktopRuntime>, command: Command) -> Result<Val
                 id,
                 profile,
                 require_production_os,
+                workspace_id,
             } => value(
                 runtime
-                    .save_account_login(id, profile, require_production_os)
+                    .save_account_login(id, profile, require_production_os, workspace_id)
                     .await?,
             ),
+            Command::AccountBalance { target } => value(runtime.account_balance(target).await?),
             Command::PollAccountLogin { id } => value(runtime.poll_account_login(id).await?),
             Command::CancelAccountLogin { id } => value(runtime.cancel_account_login(id).await?),
             Command::ActivateProfile { profile_id } => value(runtime.activate_profile(profile_id)?),
