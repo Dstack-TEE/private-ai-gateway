@@ -1472,19 +1472,25 @@ test("agent actions report progress without disabling unrelated switches", async
 
 test("update installation uses a progress dialog and exposes failure without a fake cancel", async ({ page }) => {
   await page.goto("/?mock=update-install-error");
+  await nav(page, "Settings").click();
+  const about = page.getByRole("region", { name: "About", exact: true, includeHidden: true });
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "Update available", exact: true }).click();
   const progress = page.getByRole("dialog", { name: "Installing update", exact: true });
   await expect(progress).toBeVisible();
   await expect(progress.getByRole("progressbar", { name: "Update progress" })).toHaveAttribute("aria-valuenow", "40");
+  await expect(about).not.toContainText("Downloading");
+  await expect(about).not.toContainText("Preparing update");
   await page.keyboard.press("Escape");
   await expect(progress).toBeVisible();
   await expect(progress.getByRole("button", { name: "Cancel" })).toHaveCount(0);
   await page.evaluate(() => window.dispatchEvent(new Event("mock:finish-update")));
   const failure = page.getByRole("dialog", { name: "Update failed", exact: true });
   await expect(failure).toBeVisible();
+  await expect(about).not.toContainText("installation failed");
   await failure.getByRole("button", { name: "Done" }).click();
   await expect(failure).toHaveCount(0);
+  await expect(about.getByRole("button", { name: "Install and Restart" })).toBeEnabled();
 });
 
 test("model stacks render under production-style CSP without dynamic style tags", async ({ page }) => {

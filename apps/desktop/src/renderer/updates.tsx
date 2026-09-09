@@ -88,18 +88,25 @@ export function useUpdates(api: DesktopApi, native = false) {
     inFlight.current = true;
     setError(undefined);
     setBusy("installing");
+    let dialogOpened = false;
     try {
       if (!await api.confirm({ title: "Install update?", message: "Protection will stop and connected agent configurations will be restored before the app restarts. In-flight requests may be interrupted.", confirmLabel: "Install and Restart" })) return;
       setInstallError(undefined);
       setProgress(undefined);
       if (native) await api.openNativeDialog("update-progress");
       else setInstallDialogOpen(true);
+      dialogOpened = true;
       await api.installUpdate();
     } catch {
       if (mounted.current) {
-        setError("Update installation failed. A new check will run automatically.");
-        setInstallError("The update could not be installed. Close this dialog and try again later.");
-        setInfo((current) => current ? { ...current, version: null } : current);
+        if (!dialogOpened) {
+          setError("Could not open the update dialog. Please try again.");
+        } else {
+          if (!native) setInstallError("The update could not be installed. Close this dialog and try again later.");
+          // Installing consumes the native update handle. Refresh it for a retry
+          // without duplicating the install error outside its progress window.
+          await refresh();
+        }
       }
     } finally {
       inFlight.current = false;
@@ -142,9 +149,8 @@ export function UpdateChannelControl({ updates }: { updates: ReturnType<typeof u
 }
 
 export function UpdateControl({ updates, productName }: { updates: ReturnType<typeof useUpdates>; productName: string }): React.JSX.Element {
-  const { info, currentVersion, busy, error, progress } = updates;
+  const { info, currentVersion, busy, error } = updates;
   const label = busy === "changing" ? "Saving update channel…" : busy === "checking" ? "Checking for updates…"
-    : busy === "installing" ? progress?.total ? `Downloading ${Math.min(100, Math.floor(progress.downloaded / progress.total * 100))}%` : "Preparing update…"
     : error ?? (info?.enabled === false ? "Automatic updates unavailable in this build"
       : info?.channelPublished === false ? "No releases published in this channel yet"
       : info?.version ? `Version ${info.version} is available`
@@ -156,7 +162,7 @@ export function UpdateControl({ updates, productName }: { updates: ReturnType<ty
     <ItemActions className="ml-auto max-w-full flex-wrap justify-end text-right">
       <span className="text-sm font-medium tabular-nums" data-slot="app-version">{currentVersion ? `v${currentVersion}` : "Version unavailable"}</span>
       {info?.version ? <Button disabled={Boolean(busy)} onClick={() => void updates.install()}><Download aria-hidden="true" />Install and Restart</Button> : <ItemDescription className="max-w-sm text-right" role="status">{label}</ItemDescription>}
-      {info?.version && <span role="status" className="sr-only">{label}</span>}
+      {info?.version && <span role={error ? "alert" : "status"} className={error ? "text-sm text-destructive" : "sr-only"}>{label}</span>}
     </ItemActions>
   </Item>;
 }
