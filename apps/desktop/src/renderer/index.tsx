@@ -586,6 +586,17 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
   const [applying, setApplying] = useState(false);
   const [selectedUsage, setSelectedUsage] = useState<RequestActivity>();
   const [notice, setNotice] = useState<{ id: number; text: string } | undefined>(() => initialView === "settings" ? { id: Date.now(), text: "Settings reset" } : undefined);
+  const previousProfiles = useRef<ConfidentialProfile[] | undefined>(undefined);
+  useEffect(() => {
+    if (!stateLoaded) return;
+    const previous = previousProfiles.current;
+    previousProfiles.current = state.profiles;
+    if (!previous) return;
+    const saved = state.profiles.find((profile) => profile.auth.kind === "oauth" && profile.credentialSaved &&
+      !previous.some((old) => old.id === profile.id && old.credentialRef === profile.credentialRef && old.verifiedAt === profile.verifiedAt));
+    if (saved) setNotice({ id: Date.now(), text: `${saved.name} verified and saved` });
+  }, [state.profiles, stateLoaded]);
+
   const [previewTrayOpen, setPreviewTrayOpen] = useState(false);
   const copyTimer = useRef<number | undefined>(undefined);
   const [startAfterSetup, setStartAfterSetup] = useState(false);
@@ -2457,14 +2468,14 @@ function ProfileEditorSheet({
       const needsStop = !current.configurationVerification && ["verified", "blocked", "verifying"].includes(current.status);
       const confirmed = await desktopApi.confirm({
         title: `Delete “${draft.name}”?`,
-        message: needsStop ? "Protection will stop and connected agent configurations will be restored. This profile and its saved credential will be permanently deleted." : "The profile and its saved credential will be permanently removed from this device.",
+        message: needsStop ? "Protection will stop and connected agent configurations will be restored. This profile will be deleted and its account credential revoked." : "The profile will be deleted. An account credential will also be revoked at its provider.",
         confirmLabel: needsStop ? "Stop and Delete" : "Delete Profile",
       });
       if (!confirmed) return;
       if (needsStop) await desktopApi.stop();
       const message = await onDelete(draft.id);
       if (message) setError(message);
-      else onDeleted();
+      else { await account.cancel(); onDeleted(); }
     } catch (error) { setError(errorMessage(error)); }
     finally { setSaving(false); }
   };

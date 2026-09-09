@@ -142,6 +142,14 @@ pub enum ServiceProvider {
     Custom,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum AccountSaveResult {
+    Running,
+    Complete { state: Box<GatewayState> },
+    Failed { error: String },
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountScope {
@@ -210,6 +218,8 @@ pub enum ProfileAuth {
 #[serde(rename_all = "camelCase")]
 pub struct ConfidentialProfile {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_ref: Option<String>,
     pub name: String,
     pub provider: ServiceProvider,
     pub remote_url: String,
