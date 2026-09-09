@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CircleDollarSign, ExternalLink } from "lucide-react";
 import type { AccountBalance, AccountBalanceTarget, AccountScope, DesktopApi, ServiceProvider } from "../../shared/contracts";
 import { errorMessage } from "../lib/error-message";
@@ -13,7 +13,9 @@ export function AccountTools({ api, provider, target, scope, disabled }: {
   scope?: AccountScope;
   disabled: boolean;
 }) {
+  const result = useRef<HTMLDivElement>(null);
   const [balance, setBalance] = useState<AccountBalance>();
+  useEffect(() => { if (balance) result.current?.scrollIntoView({ block: "nearest" }); }, [balance]);
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const run = async (action: () => Promise<void>) => {
@@ -32,7 +34,7 @@ export function AccountTools({ api, provider, target, scope, disabled }: {
       <Button type="button" variant="link" disabled={disabled || busy} onClick={() => void run(() => api.openTopUp(provider))}>Top up<ExternalLink aria-hidden /></Button>
     </div>
     <FieldError>{error}</FieldError>
-    {balance && <div role="status" className="text-sm tabular-nums">
+    {balance && <div ref={result} role="status" className="text-sm tabular-nums">
       <p>{provider === "redpill" ? "Organization balance" : "Workspace balance"}{owner ? ` · ${owner}` : ""}: <strong>{currency(Number(balance.balanceUsd))} USD</strong></p>
       {balance.grantedUsd !== null && <p>Promotional credits: {currency(Number(balance.grantedUsd))} USD</p>}
     </div>}

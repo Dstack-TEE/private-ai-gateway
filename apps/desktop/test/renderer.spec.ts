@@ -2079,7 +2079,7 @@ test("RedPill confirms workspace and exposes scoped balance and top-up actions",
   await choose(page, editor.getByRole("combobox", { name: "Workspace" }), "Research");
   await expect(save).toBeEnabled();
   await editor.getByRole("button", { name: "Check balance" }).click();
-  await expect(editor.getByText("$12.50 USD", { exact: true })).toBeVisible();
+  await expect(editor.getByText("$12.50 USD", { exact: true })).toBeInViewport();
   await editor.getByRole("button", { name: "Top up", exact: true }).click();
   await expect(page.locator("html")).toHaveAttribute("data-top-up-provider", "redpill");
   await save.click();
@@ -2088,7 +2088,7 @@ test("RedPill confirms workspace and exposes scoped balance and top-up actions",
   const saved = page.getByRole("dialog", { name: "Edit profile" });
   await expect(saved.getByText("Research", { exact: true })).toBeVisible();
   await saved.getByRole("button", { name: "Check balance" }).click();
-  await expect(saved.getByText("$12.50 USD", { exact: true })).toBeVisible();
+  await expect(saved.getByText("$12.50 USD", { exact: true })).toBeInViewport();
   await saved.getByRole("button", { name: "Phala", exact: true }).click();
   await expect(saved.getByText("Personal organization", { exact: true })).toHaveCount(0);
   await expect(saved.getByRole("button", { name: "Sign in with Phala" })).toBeVisible();
