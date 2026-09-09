@@ -927,7 +927,7 @@ test("complex dialogs render as native child-window surfaces", async ({ page }) 
       size: { width: 580, height: 560 },
       path: "/?mock=ready&native-dialog=profile-editor",
       name: "New profile",
-      text: "Verify and Save",
+      text: "Sign in with Phala",
     },
     {
       size: { width: 700, height: 680 },
@@ -1141,7 +1141,7 @@ test("protection flow, page headers, and focus follow the native desktop contrac
   await page.getByRole("switch", { name: "Start protection" }).click();
   editor = page.getByRole("dialog", { name: "New profile" });
   await expect(editor).toBeVisible();
-  await expect(editor.getByRole("button", { name: "Phala" })).toHaveAttribute("aria-pressed", "true");
+  await expect(editor.getByRole("button", { name: "Phala", exact: true })).toHaveAttribute("aria-pressed", "true");
   await editor.getByRole("button", { name: "API key", exact: true }).click();
   await editor.getByLabel("Phala AI API key").fill("sk-test-123");
   await editor.getByRole("button", { name: "Verify and Save" }).click();
@@ -1877,10 +1877,10 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
   await expect(redpill).toHaveAttribute("aria-pressed", "true");
   await profiles.getByRole("button", { name: "Edit RedPill" }).click();
   let editor = page.getByRole("dialog", { name: "Edit profile" });
-  await expect(editor.getByRole("button", { name: "RedPill" })).toHaveAttribute("aria-pressed", "true");
+  await expect(editor.getByRole("button", { name: "RedPill", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(editor.getByLabel("Service endpoint")).toHaveCount(0);
 
-  await editor.getByRole("button", { name: "Phala" }).click();
+  await editor.getByRole("button", { name: "Phala", exact: true }).click();
   await expect(editor.getByText("Provider", { exact: true })).toBeVisible();
   await expect(editor.getByLabel("Profile name")).toHaveValue("Phala");
   const fieldSpacing = await editor.evaluate((element) => {
@@ -1919,7 +1919,7 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
   await editor.getByRole("button", { name: "RedPill", exact: true }).click();
   await expect(editor.getByLabel("Profile name")).toHaveValue("Research account");
   await editor.getByRole("button", { name: "Phala", exact: true }).click();
-  await expect(editor.getByRole("button", { name: "Phala" })).toHaveAttribute("aria-pressed", "true");
+  await expect(editor.getByRole("button", { name: "Phala", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(editor.getByRole("button", { name: "Sign in with Phala" })).toBeVisible();
   await editor.getByLabel("Profile name").fill("Private Lab");
   await editor.getByRole("button", { name: "Custom" }).click();
