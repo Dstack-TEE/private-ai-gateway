@@ -641,6 +641,8 @@ async fn empty_candidates_is_reported_as_a_control_failure() {
             "allow": true,
             "candidates": [],
             "userId": 7,
+            "organizationId": 11,
+            "workspaceId": 13,
             "virtualKeyId": 3
         }),
     )
@@ -907,6 +909,8 @@ async fn buffered_success_transforms_injects_cost_and_meters() {
             "candidates": [{ "routeId": "anthropic:claude", "format": "anthropic" }],
             "pricing": { "inputCostPerToken": "0.000001", "outputCostPerToken": "0.000002" },
             "userId": 7,
+            "organizationId": 11,
+            "workspaceId": 13,
             "virtualKeyId": 3
         }),
     )
@@ -943,8 +947,8 @@ async fn buffered_success_transforms_injects_cost_and_meters() {
         "report usage must be pre-cost-injection"
     );
     assert_eq!(report["userId"], json!(7));
-    assert!(report.get("organizationId").is_none());
-    assert!(report.get("workspaceId").is_none());
+    assert_eq!(report["organizationId"], json!(11));
+    assert_eq!(report["workspaceId"], json!(13));
     assert_eq!(report["isStreaming"], json!(false));
 }
 

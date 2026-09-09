@@ -161,7 +161,7 @@ pub struct OrganizationScope {
     pub workspace_id: i64,
 }
 
-/// Authenticated actor and optional resource scope fixed by pre-consult.
+/// Anonymous requests omit identity; authenticated actors carry their resource scope.
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TenantIdentity {
@@ -248,8 +248,8 @@ impl TryFrom<PreConsultWire> for PreConsult {
                 return Err("organizationId and workspaceId must be positive and provided together")
             }
         };
-        if organization.is_some() && user_id.is_none() {
-            return Err("organizationId and workspaceId require a positive userId");
+        if organization.is_some() != user_id.is_some() {
+            return Err("userId, organizationId and workspaceId must be provided together");
         }
 
         Ok(Self {
@@ -334,15 +334,7 @@ mod tests {
     use super::PreConsult;
 
     #[test]
-    fn tenant_identity_accepts_legacy_and_expanded_scopes() {
-        let legacy: PreConsult = serde_json::from_value(serde_json::json!({
-            "allow": true,
-            "userId": 7
-        }))
-        .unwrap();
-        assert_eq!(legacy.tenant.user_id, Some(7));
-        assert!(legacy.tenant.organization.is_none());
-
+    fn tenant_identity_accepts_scoped_and_anonymous_requests() {
         let user_with_resources: PreConsult = serde_json::from_value(serde_json::json!({
             "allow": true,
             "userId": 7,
@@ -371,6 +363,7 @@ mod tests {
     #[test]
     fn tenant_identity_rejects_invalid_wire_shapes() {
         for invalid in [
+            serde_json::json!({ "allow": true, "userId": 7 }),
             serde_json::json!({ "allow": true, "userId": 0 }),
             serde_json::json!({
                 "allow": true,
