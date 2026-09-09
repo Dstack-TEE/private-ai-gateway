@@ -51,6 +51,13 @@ pub struct DesktopRuntime {
     instance: Option<lock::InstanceLock>,
 }
 
+struct SavedConfiguration<'a> {
+    config: StartGatewayConfig,
+    reconnect: bool,
+    // Keep mutations serialized until the post-save restart has completed.
+    _operation: tokio::sync::MutexGuard<'a, ()>,
+}
+
 struct ClientCredentials(Mutex<ClientCredentialState>);
 
 struct ClientCredentialState {
@@ -717,7 +724,7 @@ impl DesktopRuntime {
             )
             .await;
         match result {
-            Ok(state) => Ok(Some(state)),
+            Ok(saved) => self.finish_configuration(saved).map(Some),
             Err(error) => {
                 if pending.profile.provider == crate::contracts::ServiceProvider::Redpill {
                     if let Err(revoke_error) = crate::account_login::revoke_redpill_key(&key).await
@@ -755,8 +762,21 @@ impl DesktopRuntime {
         require_production_os: bool,
         key: Option<String>,
     ) -> Result<GatewayState, String> {
-        self.verify_account_configuration(profile, require_production_os, key, None)
-            .await
+        let saved = self
+            .verify_account_configuration(profile, require_production_os, key, None)
+            .await?;
+        self.finish_configuration(saved)
+    }
+
+    fn finish_configuration(
+        self: &Arc<Self>,
+        saved: SavedConfiguration<'_>,
+    ) -> Result<GatewayState, String> {
+        if saved.reconnect {
+            self.start_inner(saved.config)
+        } else {
+            self.manager.snapshot()
+        }
     }
 
     async fn verify_account_configuration(
@@ -765,7 +785,7 @@ impl DesktopRuntime {
         require_production_os: bool,
         key: Option<String>,
         auth: Option<crate::contracts::ProfileAuth>,
-    ) -> Result<GatewayState, String> {
+    ) -> Result<SavedConfiguration<'_>, String> {
         let _operation = self.configuration_change()?;
         let initial = self.manager.snapshot()?;
         if initial.status == "verifying" {
@@ -909,11 +929,11 @@ impl DesktopRuntime {
             true,
             true,
         );
-        if reconnect {
-            self.start_inner(config)
-        } else {
-            self.manager.snapshot()
-        }
+        Ok(SavedConfiguration {
+            config,
+            reconnect,
+            _operation,
+        })
     }
 
     pub fn activate_profile(self: &Arc<Self>, profile_id: String) -> Result<GatewayState, String> {
