@@ -61,6 +61,10 @@ pub enum Command {
     },
     BeginAccountLogin {
         profile: ConfidentialProfileInput,
+    },
+    SaveAccountLogin {
+        id: String,
+        profile: ConfidentialProfileInput,
         require_production_os: bool,
     },
     PollAccountLogin {

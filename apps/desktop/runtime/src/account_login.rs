@@ -41,16 +41,53 @@ pub struct LoginPresentation {
     pub user_code: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct Credential {
     pub key: String,
     pub auth: ProfileAuth,
 }
 
+pub enum Authorization {
+    Inference(Credential),
+    Redpill {
+        access_token: String,
+        auth: ProfileAuth,
+    },
+}
+
+impl Authorization {
+    pub fn auth(&self) -> ProfileAuth {
+        match self {
+            Self::Inference(key) => key.auth.clone(),
+            Self::Redpill { auth, .. } => auth.clone(),
+        }
+    }
+
+    pub async fn issue(&self, profile: &ConfidentialProfileInput) -> Result<Credential, String> {
+        match self {
+            Self::Inference(key) => Ok(key.clone()),
+            Self::Redpill { access_token, .. } => {
+                let result = response(client()?.post(KEY_URL).bearer_auth(access_token).json(
+                    &json!({"installation_id": installation_id(&profile.id), "name": profile.name}),
+                ))
+                .await?;
+                Ok(Credential {
+                    key: desktop_gateway::secrets::validate_api_key(&string(&result, "api_key")?)?,
+                    auth: ProfileAuth::OAuth {
+                        account_id: string(&result, "account_id")?,
+                        account_name: Some(string(&result, "account_name")?),
+                    },
+                })
+            }
+        }
+    }
+}
+
 pub struct PendingLogin {
     pub presentation: LoginPresentation,
     pub profile: ConfidentialProfileInput,
-    pub require_production_os: bool,
-    pub worker: JoinHandle<Result<Credential, String>>,
+    pub worker: JoinHandle<Result<Authorization, String>>,
+    pub authorization: Option<Authorization>,
     pub deadline: Instant,
 }
 
@@ -167,11 +204,8 @@ fn trusted_url(value: &str, origin: &str) -> Result<Url, String> {
     Ok(url)
 }
 
-pub async fn begin(
-    profile: ConfidentialProfileInput,
-    require_production_os: bool,
-) -> Result<PendingLogin, String> {
-    crate::service_config::resolve_profile(profile.clone(), None)?;
+pub async fn begin(mut profile: ConfidentialProfileInput) -> Result<PendingLogin, String> {
+    profile.remote_url = crate::service_config::resolve_profile(profile.clone(), None)?.remote_url;
     let client = client()?;
     let id = Uuid::new_v4().to_string();
     let (url, user_code, worker) = match profile.provider {
@@ -199,6 +233,7 @@ pub async fn begin(
                 )
                 .await
                 .map_err(|_| "Authorization expired; sign in again".to_string())?
+                .map(Authorization::Inference)
             });
             (url, Some(code), worker)
         }
@@ -226,20 +261,10 @@ pub async fn begin(
                 ),
             ]);
             let token_url = trusted_url(&string(&discovery, "token_endpoint")?, ISSUER)?;
-            let installation = installation_id(&profile.id);
-            let name = profile.name.clone();
             let worker = tokio::spawn(async move {
                 timeout(
                     LOGIN_TIMEOUT,
-                    redpill(
-                        client,
-                        listener,
-                        state,
-                        verifier,
-                        token_url,
-                        installation,
-                        name,
-                    ),
+                    redpill(client, listener, state, verifier, token_url),
                 )
                 .await
                 .map_err(|_| "Authorization expired; sign in again".to_string())?
@@ -253,8 +278,8 @@ pub async fn begin(
     Ok(PendingLogin {
         presentation: LoginPresentation { id, url, user_code },
         profile,
-        require_production_os,
         worker,
+        authorization: None,
         deadline: Instant::now() + LOGIN_TIMEOUT,
     })
 }
@@ -425,9 +450,7 @@ async fn redpill(
     state: String,
     verifier: String,
     token_url: Url,
-    installation: Uuid,
-    name: String,
-) -> Result<Credential, String> {
+) -> Result<Authorization, String> {
     let (sender, receiver) = oneshot::channel();
     let state = Arc::new(CallbackState {
         expected: state,
@@ -455,19 +478,18 @@ async fn redpill(
         ("redirect_uri", CALLBACK),
     ]))
     .await?;
-    let access = string(&token, "access_token")?;
-    let result = response(
+    let access_token = string(&token, "access_token")?;
+    let info = response(
         client
-            .post(KEY_URL)
-            .bearer_auth(access)
-            .json(&json!({"installation_id": installation, "name": name})),
+            .get(format!("{ISSUER}/oauth/userinfo"))
+            .bearer_auth(&access_token),
     )
     .await?;
-    Ok(Credential {
-        key: desktop_gateway::secrets::validate_api_key(&string(&result, "api_key")?)?,
+    Ok(Authorization::Redpill {
+        access_token,
         auth: ProfileAuth::OAuth {
-            account_id: string(&result, "account_id")?,
-            account_name: Some(string(&result, "account_name")?),
+            account_id: string(&info, "sub")?,
+            account_name: info.get("name").and_then(Value::as_str).map(str::to_owned),
         },
     })
 }

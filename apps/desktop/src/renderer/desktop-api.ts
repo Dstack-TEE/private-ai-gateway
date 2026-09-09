@@ -140,7 +140,8 @@ export const desktopApi: DesktopApi = {
     });
   },
 
-  beginAccountLogin: (profile, requireProductionOs) => invoke("begin_account_login", { profile, requireProductionOs }),
+  beginAccountLogin: (profile) => invoke("begin_account_login", { profile }),
+  saveAccountLogin: (id, profile, requireProductionOs) => invoke("save_account_login", { id, profile, requireProductionOs }),
   pollAccountLogin: (id) => invoke("poll_account_login", { id }),
   cancelAccountLogin: (id) => invoke("cancel_account_login", { id }),
   start(config: StartGatewayConfig): Promise<GatewayState> {

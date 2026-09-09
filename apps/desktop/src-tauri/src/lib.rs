@@ -285,13 +285,10 @@ async fn begin_account_login(
     app: AppHandle,
     client: State<'_, Arc<Client>>,
     profile: ConfidentialProfileInput,
-    require_production_os: bool,
 ) -> Result<desktop_runtime::account_login::LoginPresentation, String> {
     use tauri_plugin_opener::OpenerExt;
     let client = client.inner().clone();
-    let login = client
-        .begin_account_login(profile, require_production_os)
-        .await?;
+    let login = client.begin_account_login(profile).await?;
     if app.opener().open_url(&login.url, None::<&str>).is_err() {
         client.cancel_account_login(login.id).await?;
         return Err("Cannot open the sign-in page in your browser".into());
@@ -303,8 +300,22 @@ async fn begin_account_login(
 async fn poll_account_login(
     client: State<'_, Arc<Client>>,
     id: String,
-) -> Result<Option<GatewayState>, String> {
+) -> Result<Option<desktop_runtime::contracts::ProfileAuth>, String> {
     client.inner().clone().poll_account_login(id).await
+}
+
+#[tauri::command]
+async fn save_account_login(
+    client: State<'_, Arc<Client>>,
+    id: String,
+    profile: ConfidentialProfileInput,
+    require_production_os: bool,
+) -> Result<GatewayState, String> {
+    client
+        .inner()
+        .clone()
+        .save_account_login(id, profile, require_production_os)
+        .await
 }
 
 #[tauri::command]
@@ -759,6 +770,7 @@ pub fn run() {
             verify_configuration,
             begin_account_login,
             poll_account_login,
+            save_account_login,
             cancel_account_login,
             activate_profile,
             delete_profile,
