@@ -90,6 +90,11 @@ at their component owners. `base.css` contains only global defaults and animatio
 keyframes; `theme.css` remains managed by shadcn. `NativeDialogHost` owns the shared
 native-window layout. Semantic class names are retained as stable test selectors,
 not as a parallel CSS styling system.
+
+Class composition uses [shadcn-ui/cn](https://github.com/shadcn-ui/cn), migrated
+with `npx shadcn migrate cn --yes`. The shared `lib/utils.ts` re-exports the
+package directly; there is no local merging implementation. CVA and Recharts
+may still depend on `clsx` internally; those dependency contracts are unchanged.
 Tailwind Preflight and shadcn's standard CSS are enabled. System selects retain
 their browser/platform picker. Do not override component dimensions, radii,
 shadows or typography; choose from the official component variants instead.
