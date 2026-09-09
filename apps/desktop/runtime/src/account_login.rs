@@ -266,9 +266,15 @@ impl PendingLogin {
         }
         let action = "abort";
         if let Ok(Some(Authorization::Inference(credential))) = self.resolve().await {
-            transition_credential(&provider, &credential.key, action).await?;
+            if transition_credential(&provider, &credential.key, action)
+                .await
+                .is_err()
+            {
+                // Pending credentials also expire server-side. Offline cleanup
+                // must not trap the user in an editor or prevent a fresh login.
+                eprintln!("Pending authorization cleanup deferred to server expiry");
+            }
         }
-        // Failed revocation keeps the authorization available for a cleanup retry.
         Ok(())
     }
 }
@@ -517,7 +523,7 @@ pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<Pendi
 
 fn installation_id(profile_id: &str) -> Result<Uuid, String> {
     // Profile IDs are already random and persist with the credential. Deriving a
-    // UUID keeps re-login stable without another installation file or secret.
+    // UUID mixes the profile with the local installation identity.
     let data = desktop_gateway::agents::app_data_dir()?;
     let path = data.join("installation-id");
     let device = match std::fs::read_to_string(&path) {
