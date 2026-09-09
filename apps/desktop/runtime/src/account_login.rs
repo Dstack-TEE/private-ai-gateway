@@ -97,7 +97,7 @@ impl Authorization {
                     .filter(|id| details.workspaces.iter().any(|w| w.id == *id))
                     .ok_or("Choose a workspace before saving")?;
                 let result = response(client()?.post(KEY_URL).bearer_auth(access_token).json(
-                    &json!({"installation_id": installation_id(&profile.id), "name": profile.name, "workspace_id": selected}),
+                    &json!({"installation_id": installation_id(&profile.id).to_string(), "name": profile.name, "workspace_id": selected}),
                 )).await?;
                 if result.get("workspace_id").and_then(Value::as_i64) != Some(selected) {
                     return Err("Unexpected workspace in the account response".into());
