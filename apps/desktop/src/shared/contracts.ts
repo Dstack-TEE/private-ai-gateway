@@ -153,6 +153,12 @@ export interface ConfidentialProfile {
   verifiedAt?: number;
 }
 
+export interface AccountLogin {
+  id: string;
+  url: string;
+  userCode: string | null;
+}
+
 export interface ConfidentialProfileInput {
   id: string;
   name: string;
@@ -341,6 +347,9 @@ export interface DesktopApi {
   /** Use the platform confirmation dialog for destructive actions. */
   confirm(options: ConfirmationOptions): Promise<boolean>;
   start(config: StartGatewayConfig): Promise<GatewayState>;
+  beginAccountLogin(profile: ConfidentialProfileInput, requireProductionOs: boolean): Promise<AccountLogin>;
+  pollAccountLogin(id: string): Promise<GatewayState | null>;
+  cancelAccountLogin(id: string): Promise<void>;
   verifyConfiguration(profile: ConfidentialProfileInput, requireProductionOs: boolean, key?: string): Promise<GatewayState>;
   activateProfile(profileId: string): Promise<GatewayState>;
   deleteProfile(profileId: string): Promise<GatewayState>;

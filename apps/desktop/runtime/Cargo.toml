@@ -11,6 +11,12 @@ name = "desktop_runtime"
 path = "src/lib.rs"
 
 [dependencies]
+axum = "0.7"
+base64 = "0.22"
+rand = "0.8"
+sha2 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 tempfile = "3"

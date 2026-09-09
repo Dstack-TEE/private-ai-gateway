@@ -340,6 +340,16 @@ async fn dispatch(runtime: &Arc<DesktopRuntime>, command: Command) -> Result<Val
                     .verify_configuration(profile, require_production_os, key)
                     .await?,
             ),
+            Command::BeginAccountLogin {
+                profile,
+                require_production_os,
+            } => value(
+                runtime
+                    .begin_account_login(profile, require_production_os)
+                    .await?,
+            ),
+            Command::PollAccountLogin { id } => value(runtime.poll_account_login(id).await?),
+            Command::CancelAccountLogin { id } => value(runtime.cancel_account_login(id).await?),
             Command::ActivateProfile { profile_id } => value(runtime.activate_profile(profile_id)?),
             Command::DeleteProfile { profile_id } => value(runtime.delete_profile(profile_id)?),
             Command::ClearApiKey => value(runtime.clear_api_key()?),

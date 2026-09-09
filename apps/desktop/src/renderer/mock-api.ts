@@ -3,6 +3,7 @@ import type {
   AgentStatus,
   CliRegistration,
   ConfidentialProfile,
+  ConfidentialProfileInput,
   DesktopApi,
   GatewayState,
   RequestActivity,
@@ -309,7 +310,7 @@ function scenario(name: MockScenario): { state: GatewayState; agents: AgentStatu
 
 export function mockApi(name: string | null): DesktopApi {
   const known: MockScenario[] = ["backend-disconnected", "ready", "no-profiles", "no-key", "verifying", "configuration-verifying", "error", "empty-catalog", "blocked", "needs-attention", "endpoint-busy", "interactive"];
-  const picked = known.find((candidate) => candidate === name) ?? "ready";
+  const picked = name === "oauth-denied" ? "no-profiles" : known.find((candidate) => candidate === name) ?? "ready";
   let { state, agents } = scenario(picked);
   if (name === "reconnecting") state = { ...state, status: "stopped", reconnecting: true, protectedSince: now - 600, error: "Network unavailable. Connect to a network; protection resumes after verification." };
   if (name === "all-agent-icons") agents = [...agents,
@@ -355,6 +356,7 @@ export function mockApi(name: string | null): DesktopApi {
   let updateChannel: "beta" | "stable" = "stable";
   let updateAttempts = 0;
   let keyRotations = 0;
+  let login: { id: string; profile: ConfidentialProfileInput; polls: number } | undefined;
   return {
     startBackendService: async () => { state = { ...BASE, backendConnected: true }; publish(); return structuredClone(state); },
     showEditMenu: async (editable) => { window.dispatchEvent(new CustomEvent("mock:edit-menu", { detail: { editable } })); },
@@ -508,6 +510,22 @@ export function mockApi(name: string | null): DesktopApi {
       }, 350);
       return state;
     },
+    beginAccountLogin: async (profile) => {
+      login = { id: crypto.randomUUID(), profile, polls: 0 };
+      return { id: login.id, url: "https://example.invalid/sign-in", userCode: profile.provider === "phala" ? "ABCD-EFGH" : null };
+    },
+    pollAccountLogin: async (id) => {
+      if (!login || login.id !== id) throw new Error("Account login is no longer active");
+      if (login.polls++ < 2) return null;
+      if (name === "oauth-denied") throw new Error("Authorization was declined");
+      const saved: ConfidentialProfile = { ...login.profile, auth: { kind: "oauth", accountId: "preview-account", accountName: "Personal" }, credentialSaved: true, verifiedAt: Math.floor(Date.now() / 1000) };
+      credentialProfiles.add(saved.id);
+      state = { ...state, profiles: [...state.profiles.filter((p) => p.id !== saved.id), saved], activeProfileId: saved.id, apiKeySaved: true, status: "stopped", configurationVerification: false, remoteUrl: saved.remoteUrl, config: { ...state.config, remoteUrl: saved.remoteUrl } };
+      login = undefined;
+      publish();
+      return structuredClone(state);
+    },
+    cancelAccountLogin: async (id) => { if (login?.id === id) login = undefined; },
     verifyConfiguration: async (profile, requireProductionOs, key) => {
       const reconnect = !state.configurationVerification && (state.status === "verified" || state.status === "blocked");
       const existing = state.profiles.find((entry) => entry.id === profile.id);
@@ -529,7 +547,7 @@ export function mockApi(name: string | null): DesktopApi {
       }
       const savedProfile: ConfidentialProfile = {
         ...profile,
-        auth: { kind: "apiKey" },
+        auth: key?.trim() ? { kind: "apiKey" } : existing?.auth ?? { kind: "apiKey" },
         credentialSaved: true,
         verifiedAt: Math.floor(Date.now() / 1000),
       };
