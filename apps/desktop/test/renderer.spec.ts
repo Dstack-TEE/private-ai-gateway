@@ -841,13 +841,13 @@ test("reused native dialog discards drafts and credentials before reopening", as
   await page.goto("/?mock=ready&native-dialog=profile-editor");
   const name = page.getByRole("textbox", { name: "Profile name" });
   await name.fill("Unsaved draft");
-  await page.getByRole("radio", { name: "API key", exact: true }).click();
+  await page.getByRole("tab", { name: "API key", exact: true }).click();
   await page.getByLabel("Phala AI API key").fill("sk-test-discard");
   await page.evaluate(() => window.dispatchEvent(new Event("mock:dialog-dismissed")));
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await page.evaluate(() => window.dispatchEvent(new Event("mock:dialog-open")));
   await expect(name).toHaveValue("Phala");
-  await page.getByRole("radio", { name: "API key", exact: true }).click();
+  await page.getByRole("tab", { name: "API key", exact: true }).click();
   await expect(page.getByLabel("Phala AI API key")).toHaveValue("");
   await name.fill("Another draft");
   await page.evaluate(() => {
@@ -1141,8 +1141,8 @@ test("protection flow, page headers, and focus follow the native desktop contrac
   await page.getByRole("switch", { name: "Start protection" }).click();
   editor = page.getByRole("dialog", { name: "New profile" });
   await expect(editor).toBeVisible();
-  await expect(editor.getByRole("combobox", { name: "Provider" }).locator('[data-slot="select-value"]')).toHaveText("Phala");
-  await editor.getByRole("radio", { name: "API key", exact: true }).click();
+  await expect(editor.getByRole("button", { name: "Phala", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await editor.getByRole("tab", { name: "API key", exact: true }).click();
   await editor.getByLabel("Phala AI API key").fill("sk-test-123");
   await editor.getByRole("button", { name: "Verify and Save" }).click();
   await expect(editor).toHaveCount(0);
@@ -1801,7 +1801,7 @@ test("editing a live profile reconnects, while a failed candidate stays unsaved 
   await profiles.getByRole("button", { name: "New Profile" }).click();
   const candidate = page.getByRole("dialog", { name: "New profile" });
   await expect(candidate.getByText(/Saving briefly stops protection/)).toHaveCount(0);
-  await choose(page, candidate.getByRole("combobox", { name: "Provider" }), "Custom");
+  await candidate.getByRole("button", { name: "Custom", exact: true }).click();
   await candidate.getByLabel("Service endpoint").fill("https://unreachable.invalid");
   await candidate.getByLabel("API key", { exact: true }).fill("sk-test-candidate");
   await candidate.getByRole("button", { name: "Verify and Save" }).click();
@@ -1877,10 +1877,10 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
   await expect(redpill).toHaveAttribute("aria-pressed", "true");
   await profiles.getByRole("button", { name: "Edit RedPill" }).click();
   let editor = page.getByRole("dialog", { name: "Edit profile" });
-  await expect(editor.getByRole("combobox", { name: "Provider" }).locator('[data-slot="select-value"]')).toHaveText("RedPill");
+  await expect(editor.getByRole("button", { name: "RedPill", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(editor.getByLabel("Service endpoint")).toHaveCount(0);
 
-  await choose(page, editor.getByRole("combobox", { name: "Provider" }), "Phala");
+  await editor.getByRole("button", { name: "Phala", exact: true }).click();
   await expect(editor.getByText("Provider", { exact: true })).toBeVisible();
   await expect(editor.getByLabel("Profile name")).toHaveValue("Phala");
   const fieldSpacing = await editor.evaluate((element) => {
@@ -1890,19 +1890,19 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
       return label && control ? control.top - label.bottom : null;
     };
     return {
-      provider: gap('label[for="profile-provider"]', "#profile-provider"),
+      provider: gap("#profile-provider-label", ".service-presets"),
       name: gap('label[for="profile-name"]', "#profile-name"),
     };
   });
   expect(fieldSpacing.provider).not.toBeNull();
   expect(fieldSpacing.provider).toBe(fieldSpacing.name);
   await expect(editor.getByLabel("Service endpoint")).toHaveCount(0);
-  await editor.getByRole("radio", { name: "API key", exact: true }).click();
+  await editor.getByRole("tab", { name: "API key", exact: true }).click();
   await expect(editor.getByLabel("Phala AI API key")).toBeVisible();
-  await expect(editor.getByText("Enter a key for this provider.")).toBeVisible();
+  await expect(editor.getByText("Stored securely on this device.")).toBeVisible();
   await expect(editor.getByRole("button", { name: "Verify and Save" })).toBeDisabled();
 
-  await choose(page, editor.getByRole("combobox", { name: "Provider" }), "Custom");
+  await editor.getByRole("button", { name: "Custom", exact: true }).click();
   await expect(editor.getByLabel("Profile name")).toHaveValue("Custom");
   await expect(editor.getByLabel("Service endpoint")).toBeEnabled();
   await editor.getByLabel("Service endpoint").fill("https://private.example.com");
@@ -1911,18 +1911,18 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
 
   await profiles.getByRole("button", { name: "New Profile" }).click();
   editor = page.getByRole("dialog", { name: "New profile" });
-  await choose(page, editor.getByRole("combobox", { name: "Provider" }), "Custom");
+  await editor.getByRole("button", { name: "Custom", exact: true }).click();
   await expect(editor.getByLabel("Profile name")).toHaveValue("Custom");
-  await choose(page, editor.getByRole("combobox", { name: "Provider" }), "Phala");
+  await editor.getByRole("button", { name: "Phala", exact: true }).click();
   await expect(editor.getByLabel("Profile name")).toHaveValue("Phala");
   await editor.getByLabel("Profile name").fill("Research account");
-  await choose(page, editor.getByRole("combobox", { name: "Provider" }), "RedPill");
+  await editor.getByRole("button", { name: "RedPill", exact: true }).click();
   await expect(editor.getByLabel("Profile name")).toHaveValue("Research account");
-  await choose(page, editor.getByRole("combobox", { name: "Provider" }), "Phala");
-  await expect(editor.getByRole("combobox", { name: "Provider" }).locator('[data-slot="select-value"]')).toHaveText("Phala");
+  await editor.getByRole("button", { name: "Phala", exact: true }).click();
+  await expect(editor.getByRole("button", { name: "Phala", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(editor.getByRole("button", { name: "Sign in with Phala" })).toBeVisible();
   await editor.getByLabel("Profile name").fill("Private Lab");
-  await choose(page, editor.getByRole("combobox", { name: "Provider" }), "Custom");
+  await editor.getByRole("button", { name: "Custom", exact: true }).click();
   await editor.getByLabel("Service endpoint").fill("https://private.example.com");
   await editor.getByLabel("API key").fill("sk-profile-test");
   await editor.getByRole("button", { name: "Verify and Save" }).click();
@@ -2042,7 +2042,7 @@ test("account sign-in stays in the form and requires explicit verification and s
     await page.goto("/?mock=no-profiles");
     await page.getByRole("switch", { name: "Start protection" }).click();
     const editor = page.getByRole("dialog", { name: "New profile" });
-    await choose(page, editor.getByRole("combobox", { name: "Provider" }), provider);
+    await editor.getByRole("button", { name: provider, exact: true }).click();
     const signIn = editor.locator(".sheet-scroll").getByRole("button", { name: `Sign in with ${provider}`, exact: true });
     const save = editor.locator(".sheet-footer").getByRole("button", { name: "Connect account" });
     await expect(signIn.locator("img")).toHaveCount(1);
@@ -2071,9 +2071,9 @@ test("RedPill confirms workspace and exposes scoped balance and top-up actions",
   }));
   await page.getByRole("button", { name: "Set up profile" }).click();
   const editor = page.getByRole("dialog", { name: "New profile" });
-  await choose(page, editor.getByRole("combobox", { name: "Provider" }), "RedPill");
+  await editor.getByRole("button", { name: "RedPill", exact: true }).click();
   await editor.getByRole("button", { name: "Sign in with RedPill" }).click();
-  await expect(editor.getByText("Personal organization", { exact: true })).toBeVisible();
+  await expect(editor.getByLabel("Organization", { exact: true })).toHaveValue("Personal organization");
   const save = editor.getByRole("button", { name: "Connect account" });
   await expect(save).toBeDisabled();
   await editor.getByRole("combobox", { name: "Workspace" }).click();
@@ -2093,20 +2093,20 @@ test("RedPill confirms workspace and exposes scoped balance and top-up actions",
   await expect(page.locator("html")).toHaveAttribute("data-top-up-provider", "redpill");
   await save.click();
   const mainCard = page.getByRole("region", { name: "Protection status" });
-  await expect(mainCard.getByText("$12.50", { exact: true })).toBeVisible();
-  await expect(mainCard.getByRole("button", { name: "Top up", exact: true })).toBeVisible();
-  const billingOwner = mainCard.getByText("Personal organization");
-  await expect(billingOwner).toBeInViewport();
-  expect(await billingOwner.evaluate((element) => {
-    const card = element.closest(".status-surface");
-    return card !== null && element.getBoundingClientRect().bottom <= card.getBoundingClientRect().bottom;
-  })).toBe(true);
+  const balanceButton = mainCard.getByRole("button", { name: "Current balance: $12.50", exact: true });
+  await expect(balanceButton).toBeVisible();
+  await expect(mainCard.getByRole("button", { name: "Top up", exact: true })).toHaveCount(0);
+  const profileButton = mainCard.getByRole("button", { name: "Profiles: RedPill" });
+  const profileBox = await profileButton.boundingBox();
+  const balanceBox = await balanceButton.boundingBox();
+  expect(profileBox?.y).toBe(balanceBox?.y);
+  expect(balanceBox && profileBox && balanceBox.x > profileBox.x).toBe(true);
   await page.getByRole("button", { name: "Profiles: RedPill" }).click();
   await page.getByRole("button", { name: "Edit RedPill" }).click();
   const saved = page.getByRole("dialog", { name: "Edit profile" });
-  await expect(saved.getByText("Research", { exact: true })).toBeVisible();
+  await expect(saved.getByLabel("Workspace", { exact: true })).toHaveValue("Research");
   await expect(saved.getByText("$12.50", { exact: true })).toBeInViewport();
-  await choose(page, saved.getByRole("combobox", { name: "Provider" }), "Phala");
+  await saved.getByRole("button", { name: "Phala", exact: true }).click();
   await expect(saved.getByText("Personal organization", { exact: true })).toHaveCount(0);
   await expect(saved.getByRole("button", { name: "Sign in with Phala" })).toBeVisible();
 });
@@ -2128,7 +2128,7 @@ test("a delayed balance cannot appear after changing provider", async ({ page })
   await editor.getByRole("button", { name: "Sign in with Phala" }).click();
   await expect(editor.getByRole("button", { name: "Change account" })).toBeVisible();
   await expect(editor.getByLabel("Account balance")).toBeVisible();
-  await choose(page, editor.getByRole("combobox", { name: "Provider" }), "RedPill");
+  await editor.getByRole("button", { name: "RedPill", exact: true }).click();
   await page.evaluate(() => window.dispatchEvent(new Event("mock:release-balance")));
   await expect(editor.getByRole("button", { name: "Sign in with RedPill" })).toBeVisible();
   await expect(editor.getByLabel("Account balance")).toHaveCount(0);
