@@ -47,6 +47,7 @@ import { UpdateControl, UpdateChannelControl, UpdateProgressDialog, UpdateProgre
 import type { UpdateProgress } from "../shared/contracts";
 import { Button } from "./components/ui/button";
 import { ActionItem } from "./components/action-item";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "./components/ui/tabs";
 import { UsageChart, type UsageMetric } from "./components/usage-chart";
 import { StateLabel } from "./components/state-label";
 import { LocalApiExamples } from "./components/local-api-examples";
@@ -1076,7 +1077,6 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
             state={state}
             agents={agents}
             problem={problem}
-            onNotice={(text) => setNotice({ id: Date.now(), text })}
             onInspect={inspectUsage}
           />
         )}
@@ -1214,7 +1214,7 @@ function Sidebar({
     (event.currentTarget.querySelector(`#nav-${next}`) as HTMLElement | null)?.focus();
   };
   return (
-    <aside className={previewMode || /Macintosh|Mac OS X/.test(navigator.userAgent) ? "sidebar min-w-0 pt-3 pr-2 pb-3 pl-2 flex flex-col gap-0.5 bg-sidebar border-r border-r-border [&_nav]:grid [&_nav]:gap-0.5 max-[620px]:pl-2 max-[620px]:pr-2 max-[440px]:pl-1.5 max-[440px]:pr-1.5" : "sidebar min-w-0 pt-3 pr-2 pb-3 pl-2 flex flex-col gap-0.5 bg-sidebar border-r border-r-border [&_nav]:grid [&_nav]:gap-0.5 max-[620px]:pl-2 max-[620px]:pr-2 max-[440px]:pl-1.5 max-[440px]:pr-1.5 sidebar-standard [&_.sidebar-drag]:hidden"}>
+    <aside className={previewMode || /Macintosh|Mac OS X/.test(navigator.userAgent) ? "sidebar min-w-0 pt-3 pr-2 pb-3 pl-2 flex flex-col gap-0.5 bg-sidebar border-r border-r-sidebar-border [&_nav]:grid [&_nav]:gap-0.5 max-[620px]:pl-2 max-[620px]:pr-2 max-[440px]:pl-1.5 max-[440px]:pr-1.5" : "sidebar min-w-0 pt-3 pr-2 pb-3 pl-2 flex flex-col gap-0.5 bg-sidebar border-r border-r-sidebar-border [&_nav]:grid [&_nav]:gap-0.5 max-[620px]:pl-2 max-[620px]:pr-2 max-[440px]:pl-1.5 max-[440px]:pr-1.5 sidebar-standard [&_.sidebar-drag]:hidden"}>
       <div className="sidebar-drag relative flex-[0_0_28px]" data-tauri-drag-region>
         {previewControls && (
           <span className="traffic-lights absolute inset-0 p-1 flex items-center gap-2 [&_>_span]:w-3 [&_>_span]:h-3 [&_>_span]:border-[0.5px] [&_>_span]:border-[color-mix(in_srgb,_var(--color-black)_16%,_transparent)] [&_>_span]:rounded-full [&_>_span]:[box-shadow:inset_0_0_0_0.5px_color-mix(in_srgb,_var(--color-white)_18%,_transparent)] max-[440px]:top-5.5 max-[440px]:left-1/2 max-[440px]:gap-1 max-[440px]:-translate-x-1/2 max-[440px]:[&_>_span]:w-2 max-[440px]:[&_>_span]:h-2" aria-hidden="true">
@@ -1847,13 +1847,11 @@ function UsageView({
   state,
   agents,
   problem,
-  onNotice,
   onInspect,
 }: {
   state: GatewayState;
   agents: AgentStatus[];
   problem?: string;
-  onNotice(text: string): void;
   onInspect(activity: RequestActivity): void;
 }): React.JSX.Element {
   const [agent, setAgent] = useState("");
@@ -1913,34 +1911,6 @@ function UsageView({
     ...(page?.agents ?? []),
   ]));
   const modelOptions = Array.from(new Set([...(model ? [model] : []), ...(page?.models ?? [])]));
-  const exportCsv = async () => {
-    try {
-      const path = query.has("mock")
-        ? "usage.csv"
-        : await save({ title: "Export Usage", defaultPath: `private-ai-proxy-usage-${new Date().toISOString().slice(0, 10)}.csv`, filters: [{ name: "CSV", extensions: ["csv"] }] });
-      if (!path) return;
-      const count = await desktopApi.exportUsageCsv({ agent: agent || undefined, model: model || undefined, since, until }, path);
-      onNotice(`Exported ${count.toLocaleString()} usage ${count === 1 ? "record" : "records"}`);
-    } catch (exportError) {
-      setError(errorMessage(exportError));
-    }
-  };
-  const clear = async () => {
-    try {
-      const confirmed = await desktopApi.confirm({
-        title: "Clear usage history?",
-        message: "This permanently deletes local usage records. Provider billing and remote receipt retention are not affected.",
-        confirmLabel: "Clear History",
-      });
-      if (!confirmed) return;
-      const count = await desktopApi.clearUsage();
-      resetPagination();
-      setPage(undefined);
-      onNotice(`Deleted ${count.toLocaleString()} usage ${count === 1 ? "record" : "records"}`);
-    } catch (clearError) {
-      setError(errorMessage(clearError));
-    }
-  };
 
   return (
     <div className="usage-page max-w-230 min-h-full mt-0 mr-auto mb-0 ml-auto">
@@ -1955,16 +1925,17 @@ function UsageView({
       </div>
       <UsageStats page={page} />
       <Card size="sm" role="region" className="usage-over-time mt-4" aria-labelledby="usage-chart-title">
-        <CardHeader><CardTitle><h2 id="usage-chart-title">Usage over time</h2></CardTitle><CardDescription>{usageDateLabel(range)}</CardDescription></CardHeader>
-        <CardContent><UsageChart page={page} loading={loading} range={range.preset} bounds={bounds} metric={metric} onMetric={setMetric} /></CardContent>
+        <Tabs value={metric} onValueChange={(value) => { if (value === "tokens" || value === "cost" || value === "requests") setMetric(value); }}>
+          <CardHeader className="items-center gap-3 max-[440px]:grid-cols-1">
+            <CardTitle><h2 id="usage-chart-title">Usage over time</h2></CardTitle>
+            <CardAction className="max-[440px]:col-start-1 max-[440px]:row-start-2 max-[440px]:justify-self-start"><TabsList aria-label="Chart metric"><TabsTrigger value="tokens">Tokens</TabsTrigger><TabsTrigger value="cost">Cost</TabsTrigger><TabsTrigger value="requests">Requests</TabsTrigger></TabsList></CardAction>
+          </CardHeader>
+          <CardContent><TabsContent value={metric}><UsageChart page={page} loading={loading} range={range.preset} bounds={bounds} metric={metric} /></TabsContent></CardContent>
+        </Tabs>
       </Card>
       <Card size="sm" role="region" className="usage-history mt-4" aria-labelledby="usage-history-title">
         <CardHeader><CardTitle><h2 id="usage-history-title" tabIndex={-1}>Usage history</h2></CardTitle>
           <CardDescription aria-live="polite">{loading ? "Loading" : page ? `${page.summary.requests} records · kept on this Mac` : "Unavailable"}</CardDescription>
-          <CardAction className="flex gap-2">
-            <IconButton label="Export usage as CSV" onClick={() => void exportCsv()}><Download size={16} /></IconButton>
-            <IconButton label="Clear usage history" onClick={() => void clear()}><Trash2 size={16} /></IconButton>
-          </CardAction>
         </CardHeader>
         <CardContent><Suspense fallback={<div className="h-80" aria-busy="true" />}><UsageTable items={page?.items ?? []} loading={loading} pageIndex={cursors.length - 1} pageSize={pageSize} total={page?.summary.requests ?? 0} onInspect={onInspect} /></Suspense>
         <div className="pagination mt-2.5 flex flex-wrap items-center justify-center gap-3 [&_>_span]:min-w-32 [&_>_span]:text-muted-foreground [&_>_span]:text-center">
@@ -2007,7 +1978,15 @@ function UsageStats({ page }: { page?: UsagePage }): React.JSX.Element {
   const forwarded = Math.max(0, (summary?.requests ?? 0) - (summary?.blockedLocally ?? 0));
   const protectedRate = forwarded ? (summary?.protected ?? 0) / forwarded : 0;
   const failedOrRejected = (summary?.blockedLocally ?? 0) + (summary?.failedProof ?? 0);
-  return <div className="usage-stats mt-3.5 grid grid-cols-4 bg-card border border-border rounded-2xl overflow-hidden [&_>_div]:min-w-0 [&_>_div]:min-h-20.5 [&_>_div]:pt-2 [&_>_div]:pr-3 [&_>_div]:pb-2 [&_>_div]:pl-3 [&_>_div]:flex [&_>_div]:flex-col [&_>_div]:justify-center [&_>_div]:border-r [&_>_div]:border-r-border [&_>_div:last-child]:border-r-0 [&_span]:text-muted-foreground [&_span]:text-xs [&_small]:text-xs [&_small]:text-muted-foreground [&_strong]:max-w-full [&_strong]:mt-0.5 [&_strong]:mr-0 [&_strong]:mb-0.5 [&_strong]:ml-0 [&_strong]:overflow-hidden [&_strong]:text-xl [&_strong]:tabular-nums [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap max-[780px]:grid-cols-2 max-[780px]:[&_>_div:nth-child(2)]:border-r-0 max-[780px]:[&_>_div:nth-child(-n_+_2)]:border-b max-[780px]:[&_>_div:nth-child(-n_+_2)]:border-b-border"><div><span>Requests</span><strong>{summary ? summary.requests.toLocaleString() : "—"}</strong><small>{summary ? `${failedOrRejected.toLocaleString()} failed or rejected` : "—"}</small></div><div><span>Tokens</span><strong>{summary ? formatTokens(totalTokens) : "—"}</strong><small>{summary ? `${formatTokens(summary.inputTokens)} in · ${formatTokens(summary.outputTokens)} out` : "—"}</small></div><div><span>Cost</span><strong>{summary ? currency(summary.costUsd) : "—"}</strong><small>Estimated from model prices</small></div><div><span>Protected</span><strong>{forwarded ? `${Math.round(protectedRate * 100)}%` : "—"}</strong><small>{summary ? `${summary.protected} of ${forwarded} answers` : "—"}</small></div></div>;
+  const stats = [
+    ["Requests", summary ? summary.requests.toLocaleString() : "—", summary ? `${failedOrRejected.toLocaleString()} failed or rejected` : "—"],
+    ["Tokens", summary ? formatTokens(totalTokens) : "—", summary ? `${formatTokens(summary.inputTokens)} in · ${formatTokens(summary.outputTokens)} out` : "—"],
+    ["Cost", summary ? currency(summary.costUsd) : "—", "Estimated from model prices"],
+    ["Protected", forwarded ? `${Math.round(protectedRate * 100)}%` : "—", summary ? `${summary.protected} of ${forwarded} responses` : "—"],
+  ];
+  return <div className="usage-stats mt-4 grid grid-cols-4 gap-4 max-[780px]:grid-cols-2">
+    {stats.map(([label, value, detail]) => <Card key={label} size="sm" className="min-w-0"><CardContent className="grid gap-1"><span className="text-xs text-muted-foreground">{label}</span><strong className="truncate text-xl font-semibold tabular-nums">{value}</strong><small className="text-xs text-muted-foreground">{detail}</small></CardContent></Card>)}
+  </div>;
 }
 
 function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Element {

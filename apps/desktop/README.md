@@ -827,7 +827,7 @@ body, status, and streamed bytes through unchanged), the projections
 `npm run test:renderer` first builds the production renderer, then runs
 Playwright against the stateful in-page mock. It covers protection start/stop,
 agent discovery and reversible config previews, current-session Overview
-usage, persistent-history filters and cursor pagination, CSV/clear flows,
+usage, persistent-history filters and cursor pagination,
 proof and local-block semantics, profile management, system confirmation boundaries,
 dark/high-contrast/reduced-motion
 media, 200% zoom, and
