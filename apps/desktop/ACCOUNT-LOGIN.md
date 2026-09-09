@@ -68,7 +68,8 @@ Deleting a profile, clearing a credential, replacing an account key or changing
 workspace queues retirement of the old managed key. Local removal works offline;
 remote revocation completes after connectivity returns while the runtime is
 running. Manual API keys are only removed locally. Cancelling staged login does
-not revoke a saved credential. Unfinished first-time authorization is bounded by
+not revoke a saved credential. Aborting an unsaved issued key is best effort;
+a failed request never prevents closing the editor. Unfinished authorization is bounded by
 server expiry. No operation revokes the user's Clerk OAuth grant.
 
 ## Release dependencies and validation
@@ -122,7 +123,9 @@ unavailable. Phala shows workspace balance and promotional credits separately.
 
 There is one authorization session per runtime, not per account. Repeated clicks
 are blocked in the hook; another window receives an explicit instruction to
-finish or cancel the existing sign-in. A save or balance operation cannot make a
+finish or cancel the existing sign-in for a different profile. Reopening the same
+profile replaces its pending session, including one left by a closed native window.
+A save or balance operation cannot make a
 second begin request wait and unexpectedly launch another flow afterward. Users
 can intentionally create separate profiles for the same account. Browser OAuth
 success is not gateway verification: Save still verifies the selected

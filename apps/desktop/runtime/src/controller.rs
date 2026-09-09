@@ -890,7 +890,7 @@ impl DesktopRuntime {
             "Account: An account operation is in progress. Finish it before signing in again."
         })?;
         if let Some(pending) = slot.as_mut() {
-            if pending.is_active() {
+            if pending.is_active() && pending.profile_id() != profile.id {
                 return Err(
                     "Account: Another sign-in is open. Finish or cancel it in the other window."
                         .into(),
@@ -2121,9 +2121,35 @@ mod tests {
                     .unwrap_err(),
                 "Sign in again for the selected provider"
             );
-            // Discard the fixture directly: remote cancellation is covered by
-            // the local HTTP lifecycle test, never a live provider.
-            runtime.account_login.lock().await.take();
+            // A different editor must not replace the active authorization.
+            let other = ConfidentialProfileInput {
+                id: "another-profile".into(),
+                name: "Other".into(),
+                provider: ServiceProvider::Custom,
+                remote_url: "https://example.com".into(),
+            };
+            assert!(runtime
+                .begin_account_login(other.clone())
+                .await
+                .err()
+                .unwrap()
+                .contains("other window"));
+            // Simulate a saved authorization left behind by a closed window.
+            runtime
+                .account_login
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .mark_saved();
+            let reopened = ConfidentialProfileInput {
+                id: "profile-test".into(),
+                ..other
+            };
+            assert_eq!(
+                runtime.begin_account_login(reopened).await.err().unwrap(),
+                "Account login is only available for Phala and RedPill"
+            );
             assert!(runtime.state().unwrap().profiles.is_empty());
             assert!(runtime.account_login.lock().await.is_none());
             assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
