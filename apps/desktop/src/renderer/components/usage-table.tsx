@@ -34,8 +34,7 @@ export function UsageTable({ items, loading, pageIndex, pageSize, total, onInspe
     { id: "outcome", header: "Result", cell: ({ row }) => { const outcome = outcomeOf(row.original); return <StateLabel tone={outcome.tone} text={outcome.label} />; } },
   ], [onInspect]);
   const table = useTable({ features, data: items, columns, getRowId: (item) => item.id, manualPagination: true, rowCount: total, state: { pagination: { pageIndex, pageSize } } });
-  return <div className="overflow-hidden rounded-2xl border" aria-busy={loading}>
-    <Table aria-label="Usage history">
+  return <Table aria-label="Usage history" aria-busy={loading}>
       <TableHeader>{table.getHeaderGroups().map((group) => <TableRow key={group.id}>{group.headers.map((header) => <TableHead key={header.id} className={header.id === "costUsd" || header.id === "tokens" ? "text-right" : undefined}><table.FlexRender header={header} /></TableHead>)}</TableRow>)}</TableHeader>
       <TableBody>
         {table.getRowModel().rows.map((row) => <TableRow key={row.id} className="cursor-pointer" onClick={(event) => {
@@ -44,6 +43,5 @@ export function UsageTable({ items, loading, pageIndex, pageSize, total, onInspe
         }}>{row.getAllCells().map((cell) => <TableCell key={cell.id} className={cell.column.id === "tokens" ? "text-right" : undefined}><table.FlexRender cell={cell} /></TableCell>)}</TableRow>)}
         {items.length === 0 && <TableRow><TableCell colSpan={columns.length} className="h-24 text-center text-muted-foreground">{loading ? "Loading usage history…" : "No saved usage matches these filters."}</TableCell></TableRow>}
       </TableBody>
-    </Table>
-  </div>;
+    </Table>;
 }
