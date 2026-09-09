@@ -34,6 +34,7 @@ pub struct RuntimeOptions {
 }
 
 pub struct DesktopRuntime {
+    account_login: tokio::sync::Mutex<Option<crate::account_login::PendingLogin>>,
     manager: Arc<GatewayManager>,
     proxy: Arc<ProxyState>,
     usage: Arc<UsageStore>,
@@ -288,6 +289,7 @@ impl DesktopRuntime {
             usage,
             secrets,
             credentials: ClientCredentials::new()?,
+            account_login: tokio::sync::Mutex::new(None),
             legacy_credential_pending: Mutex::new(migrated_legacy),
             endpoint: EndpointRuntime::new(task_runtime.clone()),
             codex_sync: CodexCatalogSync::default(),
@@ -670,11 +672,99 @@ impl DesktopRuntime {
         self.manager.report_error(message);
     }
 
+    pub async fn begin_account_login(
+        self: &Arc<Self>,
+        profile: ConfidentialProfileInput,
+        require_production_os: bool,
+    ) -> Result<crate::account_login::LoginPresentation, String> {
+        let mut slot = self.account_login.lock().await;
+        if slot
+            .as_ref()
+            .is_some_and(|pending| pending.deadline > tokio::time::Instant::now())
+        {
+            return Err("Another account login is in progress".into());
+        }
+        *slot = None;
+        let pending = crate::account_login::begin(profile, require_production_os).await?;
+        let presentation = pending.presentation.clone();
+        *slot = Some(pending);
+        Ok(presentation)
+    }
+
+    pub async fn poll_account_login(
+        self: &Arc<Self>,
+        id: String,
+    ) -> Result<Option<GatewayState>, String> {
+        let mut slot = self.account_login.lock().await;
+        let pending = slot
+            .as_ref()
+            .filter(|p| p.presentation.id == id)
+            .ok_or("Account login is no longer active")?;
+        if !pending.worker.is_finished() {
+            return Ok(None);
+        }
+        let mut pending = slot.take().ok_or("Account login is no longer active")?;
+        let credential = (&mut pending.worker)
+            .await
+            .map_err(|_| "Account login stopped")??;
+        let key = credential.key;
+        let result = self
+            .verify_account_configuration(
+                pending.profile.clone(),
+                pending.require_production_os,
+                Some(key.clone()),
+                Some(credential.auth),
+            )
+            .await;
+        match result {
+            Ok(state) => Ok(Some(state)),
+            Err(error) => {
+                if pending.profile.provider == crate::contracts::ServiceProvider::Redpill {
+                    if let Err(revoke_error) = crate::account_login::revoke_redpill_key(&key).await
+                    {
+                        return Err(format!("{error}. {revoke_error}"));
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn cancel_account_login(&self, id: String) -> Result<(), String> {
+        let mut slot = self.account_login.lock().await;
+        if slot
+            .as_ref()
+            .is_some_and(|pending| pending.presentation.id == id)
+        {
+            if let Some(mut pending) = slot.take() {
+                if pending.worker.is_finished()
+                    && pending.profile.provider == crate::contracts::ServiceProvider::Redpill
+                {
+                    if let Ok(Ok(credential)) = (&mut pending.worker).await {
+                        crate::account_login::revoke_redpill_key(&credential.key).await?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub async fn verify_configuration(
         self: &Arc<Self>,
         profile: ConfidentialProfileInput,
         require_production_os: bool,
         key: Option<String>,
+    ) -> Result<GatewayState, String> {
+        self.verify_account_configuration(profile, require_production_os, key, None)
+            .await
+    }
+
+    async fn verify_account_configuration(
+        self: &Arc<Self>,
+        profile: ConfidentialProfileInput,
+        require_production_os: bool,
+        key: Option<String>,
+        auth: Option<crate::contracts::ProfileAuth>,
     ) -> Result<GatewayState, String> {
         let _operation = self.configuration_change()?;
         let initial = self.manager.snapshot()?;
@@ -695,6 +785,13 @@ impl DesktopRuntime {
             .cloned();
         let mut candidate =
             service_config::resolve_profile(profile, Some(service_config::now_secs()))?;
+        if let Some(auth) = auth {
+            candidate.auth = auth;
+        } else if key.is_none() {
+            if let Some(existing) = &existing {
+                candidate.auth = existing.auth.clone();
+            }
+        }
         let profile_changed = existing.as_ref().is_none_or(|existing| {
             existing.provider != candidate.provider
                 || existing.remote_url != candidate.remote_url
@@ -1519,6 +1616,7 @@ mod tests {
             usage,
             secrets: Arc::new(KeyringStore),
             credentials: ClientCredentials::from_files(TokenFiles::new(directory)),
+            account_login: tokio::sync::Mutex::new(None),
             legacy_credential_pending: Mutex::new(false),
             endpoint: EndpointRuntime::new(executor.handle().clone()),
             codex_sync: CodexCatalogSync::default(),

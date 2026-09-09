@@ -306,6 +306,27 @@ impl Client {
         self.request(Command::SetPreference(change))
     }
 
+    pub async fn begin_account_login(
+        self: &Arc<Self>,
+        profile: ConfidentialProfileInput,
+        require_production_os: bool,
+    ) -> Result<crate::account_login::LoginPresentation, String> {
+        self.background(Command::BeginAccountLogin {
+            profile,
+            require_production_os,
+        })
+        .await
+    }
+    pub async fn poll_account_login(
+        self: &Arc<Self>,
+        id: String,
+    ) -> Result<Option<GatewayState>, String> {
+        self.background(Command::PollAccountLogin { id }).await
+    }
+    pub async fn cancel_account_login(self: &Arc<Self>, id: String) -> Result<(), String> {
+        self.background(Command::CancelAccountLogin { id }).await
+    }
+
     pub async fn verify_configuration(
         self: &Arc<Self>,
         profile: ConfidentialProfileInput,

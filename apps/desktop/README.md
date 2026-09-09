@@ -630,8 +630,9 @@ protocol is the service's own response, shown as such.
   Settings offers local, self-hosted branding for the Phala and RedPill
   presets plus a custom HTTPS endpoint. New providers or endpoints require a
   new key, so a credential is never silently reused. Profile metadata is
-  written atomically and the current API-key authentication model is shaped so
-  an OAuth account can be added as another auth kind later. A successful
+  written atomically. Phala and RedPill also offer browser account login; the
+  shared runtime exchanges authorization for an inference key and stores only
+  the key in the OS credential store. See [Account login](ACCOUNT-LOGIN.md). A successful
   `Verify and Save` selects the profile and returns to the chooser. If protection
   was off it stays off; if it was on, saving or switching profiles stops protection,
   restores agent configs, and starts a freshly verified connection. A failed

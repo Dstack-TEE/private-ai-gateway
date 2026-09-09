@@ -841,11 +841,13 @@ test("reused native dialog discards drafts and credentials before reopening", as
   await page.goto("/?mock=ready&native-dialog=profile-editor");
   const name = page.getByRole("textbox", { name: "Profile name" });
   await name.fill("Unsaved draft");
+  await page.getByRole("button", { name: "API key", exact: true }).click();
   await page.getByLabel("Phala AI API key").fill("sk-test-discard");
   await page.evaluate(() => window.dispatchEvent(new Event("mock:dialog-dismissed")));
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await page.evaluate(() => window.dispatchEvent(new Event("mock:dialog-open")));
   await expect(name).toHaveValue("Phala");
+  await page.getByRole("button", { name: "API key", exact: true }).click();
   await expect(page.getByLabel("Phala AI API key")).toHaveValue("");
   await name.fill("Another draft");
   await page.evaluate(() => {
@@ -1140,6 +1142,7 @@ test("protection flow, page headers, and focus follow the native desktop contrac
   editor = page.getByRole("dialog", { name: "New profile" });
   await expect(editor).toBeVisible();
   await expect(editor.getByRole("button", { name: "Phala" })).toHaveAttribute("aria-pressed", "true");
+  await editor.getByRole("button", { name: "API key", exact: true }).click();
   await editor.getByLabel("Phala AI API key").fill("sk-test-123");
   await editor.getByRole("button", { name: "Verify and Save" }).click();
   await expect(editor).toHaveCount(0);
@@ -1875,9 +1878,7 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
   await profiles.getByRole("button", { name: "Edit RedPill" }).click();
   let editor = page.getByRole("dialog", { name: "Edit profile" });
   await expect(editor.getByRole("button", { name: "RedPill" })).toHaveAttribute("aria-pressed", "true");
-  await expect(editor.getByLabel("Service endpoint")).toHaveValue("https://tee.redpill.ai");
-  await expect(editor.getByLabel("Service endpoint")).toHaveAttribute("readonly", "");
-  await expect(editor.getByLabel("Service endpoint")).toBeEnabled();
+  await expect(editor.getByLabel("Service endpoint")).toHaveCount(0);
 
   await editor.getByRole("button", { name: "Phala" }).click();
   await expect(editor.getByText("Provider", { exact: true })).toBeVisible();
@@ -1895,7 +1896,8 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
   });
   expect(fieldSpacing.provider).not.toBeNull();
   expect(fieldSpacing.provider).toBe(fieldSpacing.name);
-  await expect(editor.getByLabel("Service endpoint")).toHaveValue("https://inference.phala.com");
+  await expect(editor.getByLabel("Service endpoint")).toHaveCount(0);
+  await editor.getByRole("button", { name: "API key", exact: true }).click();
   await expect(editor.getByLabel("Phala AI API key")).toBeVisible();
   await expect(editor.getByText("A key is required for a new provider or endpoint.")).toBeVisible();
   await expect(editor.getByRole("button", { name: "Verify and Save" })).toBeDisabled();
@@ -1918,7 +1920,7 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
   await expect(editor.getByLabel("Profile name")).toHaveValue("Research account");
   await editor.getByRole("button", { name: "Phala", exact: true }).click();
   await expect(editor.getByRole("button", { name: "Phala" })).toHaveAttribute("aria-pressed", "true");
-  await expect(editor.getByRole("button", { name: "Verify and Save" })).toBeVisible();
+  await expect(editor.getByRole("button", { name: "Sign in with Phala" })).toBeVisible();
   await editor.getByLabel("Profile name").fill("Private Lab");
   await editor.getByRole("button", { name: "Custom" }).click();
   await editor.getByLabel("Service endpoint").fill("https://private.example.com");

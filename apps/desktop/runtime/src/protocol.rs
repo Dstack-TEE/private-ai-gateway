@@ -59,6 +59,16 @@ pub enum Command {
         require_production_os: bool,
         key: Option<String>,
     },
+    BeginAccountLogin {
+        profile: ConfidentialProfileInput,
+        require_production_os: bool,
+    },
+    PollAccountLogin {
+        id: String,
+    },
+    CancelAccountLogin {
+        id: String,
+    },
     ActivateProfile {
         profile_id: String,
     },
