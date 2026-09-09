@@ -3,7 +3,7 @@
 Phala and RedPill profiles offer account login alongside manual API keys. Custom
 endpoints use manual keys. Provider buttons with their icons stay in the form
 content; authorization stages credentials, and the footer offers Cancel and
-Connect account. Existing account edits use Save; manual keys use Verify and Save. Preset service endpoints are hidden. The runtime owns the
+Save. Saving verifies the selected provider before persisting either an account or manual key. Preset service endpoints are hidden. The runtime owns the
 browser authorization, verification and OS credential store; the renderer only
 receives presentation and non-secret account metadata.
 
@@ -20,7 +20,7 @@ flow, S256 PKCE and public token exchange. The callback checks Host, state, uniq
 code and issuer when present. Requests do not follow redirects. The requested
 scopes are `openid profile user:org:read`; no client secret or refresh token is
 used. Clerk tokens stay in runtime memory. Sign in alone does not issue a
-RedPill inference key: Connect account exchanges the grant at
+RedPill inference key: Save exchanges the grant at
 `POST https://service.redpill.ai/api/desktop/key`.
 
 Organization selection is Clerk's OAuth extension, not an OAuth/OIDC standard.
@@ -125,7 +125,7 @@ are blocked in the hook; another window receives an explicit instruction to
 finish or cancel the existing sign-in. A save or balance operation cannot make a
 second begin request wait and unexpectedly launch another flow afterward. Users
 can intentionally create separate profiles for the same account. Browser OAuth
-success is not gateway verification: Connect account still verifies the selected
+success is not gateway verification: Save still verifies the selected
 provider before saving and never silently changes the selected tenant.
 
 Top up opens the system browser at RedPill's `/credits` page or Phala's `/cost`

@@ -633,7 +633,7 @@ protocol is the service's own response, shown as such.
   written atomically. Phala and RedPill also offer browser account login; the
   shared runtime exchanges authorization for an inference key and stores only
   the key in the OS credential store. See [Account login](ACCOUNT-LOGIN.md). A successful
-  `Verify and Save` selects the profile and returns to the chooser. If protection
+  `Save` verifies and selects the profile and returns to the chooser. If protection
   was off it stays off; if it was on, saving or switching profiles stops protection,
   restores agent configs, and starts a freshly verified connection. A failed
   verification keeps protection off and does not save the candidate. Selecting an existing

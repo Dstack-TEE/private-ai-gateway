@@ -37,10 +37,11 @@ macOS acceptance testing. Browser geometry checks cannot replace that work.
 ## Account form consistency
 
 Provider selection uses three outlined buttons with provider icons. Account and
-API key use the shared Tabs, TabsList, TabsTrigger and TabsContent components.
-Organization and workspace use FormField with Input or Select; organization is
-read-only because it comes from browser authorization, with Change to sign in
-again. Workspace selection is editable only when the grant provides alternatives.
+API key use the shared Tabs components with the default segmented appearance.
+Organization and balance are one read-only account summary, with Sign in again
+for fresh browser authorization. Workspace is the account section's only form
+control; it is selectable when the grant provides alternatives. The footer uses
+Save for both account and manual-key configuration, including verification.
 
 The main status card retains its original two-row layout and height. It adds only
 one current-balance button immediately after the profile selector; clicking the
