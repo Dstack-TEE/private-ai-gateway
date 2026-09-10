@@ -427,7 +427,7 @@ otherwise. ACI adds headers and artifacts.
 | `POST /v1/chat/completions` | REQUIRED |
 | `POST /v1/completions` | OPTIONAL |
 | `POST /v1/embeddings` | OPTIONAL (non-streaming only) |
-| Other prompt endpoints (e.g. OpenAI-format `/v1/responses`, Anthropic-format `/v1/messages`) | OPTIONAL |
+| Other prompt endpoints (e.g. OpenAI-format `/v1/responses`, Anthropic-format `/v1/messages`) | OPTIONAL (`/v1/responses` may be served through Chat Completions conversion or native passthrough) |
 | `GET /v1/models` | OpenAI-compatible. ACI adds no required fields |
 
 Trust metadata is service-level and lives in the attestation report. Clients

@@ -4,13 +4,18 @@
 //! originally captured from the reference middleware transforms the Rust port
 //! replaced; they now serve as a regression guard on the Rust transforms.
 
-use private_ai_gateway::middleware::request_transform::{transform_to_provider_request, Endpoint};
-use private_ai_gateway::middleware::response_transform::transform_response;
+use private_ai_gateway::middleware::request_transform::{
+    responses_to_chat_params, transform_to_provider_request, Endpoint,
+};
+use private_ai_gateway::middleware::response_transform::{
+    openai_chat_to_responses, transform_response,
+};
 use private_ai_gateway::middleware::types::{Engine, ProviderFormat};
 use serde_json::Value;
 
 const FIXTURES: &str = include_str!("fixtures/transform_golden.json");
 const RESPONSE_FIXTURES: &str = include_str!("fixtures/response_golden.json");
+const RESPONSES_FIXTURES: &str = include_str!("fixtures/responses_golden.json");
 
 fn parse_format(value: &str) -> ProviderFormat {
     match value {
@@ -92,13 +97,13 @@ fn rust_request_transforms_match_node_fixtures() {
     }
 }
 
-// Drop the non-deterministic `created` timestamp the response transforms inject.
+// Drop non-deterministic timestamps injected by response transforms.
 fn strip_created(value: &Value) -> Value {
     match value {
         Value::Array(items) => Value::Array(items.iter().map(strip_created).collect()),
         Value::Object(map) => Value::Object(
             map.iter()
-                .filter(|(k, _)| k.as_str() != "created")
+                .filter(|(k, _)| !matches!(k.as_str(), "created" | "created_at"))
                 .map(|(k, v)| (k.clone(), strip_created(v)))
                 .collect(),
         ),
@@ -123,6 +128,44 @@ fn rust_response_transforms_match_node_fixtures() {
         assert!(
             canonical_eq(&output, expected),
             "case {name}: Rust response output does not match Node fixture\n  rust: {output}\n  node: {expected}"
+        );
+    }
+}
+
+#[test]
+fn responses_requests_match_golden_fixtures() {
+    let fixture: Value = serde_json::from_str(RESPONSES_FIXTURES).expect("parse fixtures");
+    let cases = fixture["requests"].as_array().expect("request fixtures");
+    for case in cases {
+        let name = case["name"].as_str().unwrap();
+        let result = responses_to_chat_params(&case["input"]);
+        if case.get("error").and_then(Value::as_bool) == Some(true) {
+            assert!(result.is_err(), "case {name}: expected an error");
+            continue;
+        }
+        let output = result.unwrap_or_else(|err| panic!("case {name}: unexpected error: {err}"));
+        assert!(
+            canonical_eq(&output, &case["output"]),
+            "case {name}: output mismatch\n  rust: {output}\n  expected: {}",
+            case["output"]
+        );
+    }
+}
+
+#[test]
+fn chat_responses_match_golden_fixtures() {
+    let fixture: Value = serde_json::from_str(RESPONSES_FIXTURES).expect("parse fixtures");
+    let cases = fixture["responses"].as_array().expect("response fixtures");
+    for case in cases {
+        let name = case["name"].as_str().unwrap();
+        let output = strip_created(&openai_chat_to_responses(
+            case["input"].clone(),
+            &case["echo"],
+        ));
+        assert!(
+            canonical_eq(&output, &case["output"]),
+            "case {name}: output mismatch\n  rust: {output}\n  expected: {}",
+            case["output"]
         );
     }
 }
