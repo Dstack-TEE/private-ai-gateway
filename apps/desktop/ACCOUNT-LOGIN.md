@@ -21,7 +21,7 @@ code and issuer when present. Requests do not follow redirects. The requested
 scopes are `openid profile user:org:read`; no client secret or refresh token is
 used. Clerk tokens stay in runtime memory. Sign in alone does not issue a
 RedPill inference key: Save exchanges the grant at
-`POST https://service.redpill.ai/api/desktop/key`.
+`POST https://service.redpill.ai/api/oauth/key`.
 
 Organization selection is Clerk's OAuth extension, not an OAuth/OIDC standard.
 The API reads the selected organization from trusted userinfo, checks current
@@ -78,6 +78,8 @@ Deploy both provider changes before releasing desktop account login:
 
 - [redpill-api #103](https://github.com/redpill-ai/redpill-api/pull/103): migration
   `98d712b3c4e5`, API and Celery worker/beat; existing `ENCRYPTION_KEY` configuration.
+  Configure `OAUTH_CLIENTS` to allow public client `cGrHCOWG3S91oa0A` with label
+  `Private AI Proxy`. The shared `/api/oauth` API isolates credentials per client.
 - [Phala #2138](https://github.com/Phala-Network/phala-cloud-monorepo/pull/2138):
   migration `proxy_device_credentials`, API and pending-key expiry worker;
   existing `WALLET_ENCRYPTION_PASSWORD` configuration.
@@ -95,7 +97,7 @@ inference and billed usage remain release acceptance checks.
 ## Organization, workspace and billing
 
 RedPill selects the organization in Clerk's OAuth consent screen. After sign-in,
-`GET /api/desktop/account` returns only workspaces accessible to that actor in
+`GET /api/oauth/account` returns only workspaces accessible to that actor in
 that organization. One workspace is selected automatically; multiple workspaces
 require an explicit choice in the app. Save sends that workspace ID and the API
 rechecks its ownership and membership. The saved profile retains non-secret
