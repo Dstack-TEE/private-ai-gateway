@@ -32,7 +32,7 @@ use crate::contracts::{
 const REDPILL_CLIENT_ID: &str = "cGrHCOWG3S91oa0A";
 const ISSUER: &str = "https://clerk.redpill.ai";
 const CALLBACK: &str = "http://127.0.0.1:4181/oauth/callback";
-const KEY_URL: &str = "https://service.redpill.ai/api/desktop/key";
+const KEY_URL: &str = "https://service.redpill.ai/api/oauth/key";
 const PHALA_API: &str = "https://cloud-api.phala.com";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(900);
 
@@ -762,7 +762,7 @@ async fn redpill(
     .await?;
     let account = response(
         client
-            .get("https://service.redpill.ai/api/desktop/account")
+            .get("https://service.redpill.ai/api/oauth/account")
             .bearer_auth(&access_token),
     )
     .await?;
@@ -821,7 +821,7 @@ pub(crate) async fn account_balance(
 ) -> Result<AccountBalance, String> {
     let url = match provider {
         ServiceProvider::Phala => "https://cloud-api.phala.com/api/v1/private_ai/self",
-        ServiceProvider::Redpill => "https://service.redpill.ai/api/desktop/balance",
+        ServiceProvider::Redpill => "https://service.redpill.ai/api/oauth/balance",
         ServiceProvider::Custom => {
             return Err("Balance is only available for Phala and RedPill accounts".into())
         }
