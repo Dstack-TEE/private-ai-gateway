@@ -196,8 +196,9 @@ A billing reader sees the balance but no Top up unless management is permitted.
 Permission changes are rechecked by the API on refresh, subject to the existing
 30-second runtime cache. Network failures remain errors, not zero balances or
 permission denials. Balance request failures hide the balance entry and retry on
-the normal refresh schedule; they do not add a form error. Older API responses
-without navigation metadata still display the balance. Billing links use
+the normal refresh schedule; they do not add a form error. RedPill account and
+balance responses require organization IDs and slugs; balance responses also
+require explicit billing permissions. Billing links use
 `/{organizationSlug}/credits`,
 so the browser's previously selected organization cannot redirect the user's
 intended billing scope. The billing website still authorizes all mutations.

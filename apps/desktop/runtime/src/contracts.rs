@@ -184,7 +184,6 @@ pub struct AccountLoginDetails {
 #[serde(rename_all = "camelCase")]
 pub struct AccountBalance {
     pub balance_usd: String,
-    #[serde(default)]
     pub can_top_up: bool,
     pub organization_id: Option<String>,
     pub granted_usd: Option<String>,
