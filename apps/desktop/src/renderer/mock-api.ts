@@ -783,9 +783,6 @@ export function mockApi(name: string | null): DesktopApi {
     },
     previewAgent: async (agentId, connect, options): Promise<AgentPreview> => {
       const agent = agents.find((candidate) => candidate.id === agentId) ?? CLAUDE_OFF;
-      if (connect && state.status === "verified" && agent.id === "codex" && !options.defaultModel) {
-        throw new Error("Choose a verified default model for Codex");
-      }
       return {
         agent,
         connect,
