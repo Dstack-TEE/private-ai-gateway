@@ -85,6 +85,7 @@ import { ChoiceSelect } from "./components/choice-select";
 import type {
   AgentStatus,
   CliRegistration,
+  AccountWorkspace,
   ConfidentialProfile,
   ConfidentialProfileInput,
   DesktopApi,
@@ -2416,11 +2417,16 @@ function ProfileEditorSheet({
   const account = useAccountLogin(desktopApi, reportLoginError);
   const { session: login, auth: authorized } = account;
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<number>();
+  const [savedWorkspaces, setSavedWorkspaces] = useState<AccountWorkspace[]>();
+  const [workspaceError, setWorkspaceError] = useState<string>();
+  const pendingWorkspaceSave = useRef<number | undefined>(undefined);
   const [callbackDraft, setCallbackDraft] = useState("");
   useEffect(() => setCallbackDraft(""), [login?.id]);
-  const workspaces = account.details?.workspaces;
-  useEffect(() => setSelectedWorkspaceId(undefined), [login?.id]);
-  const workspaceId = workspaces?.length === 1 ? workspaces[0]?.id : selectedWorkspaceId;
+  const workspaces = account.details?.workspaces ?? savedWorkspaces;
+  const savedScope = profile?.auth.kind === "oauth" ? profile.auth.scope : undefined;
+  const workspaceId = selectedWorkspaceId ?? (authorized
+    ? workspaces?.length === 1 ? workspaces[0]?.id : undefined
+    : savedScope?.workspaceId ?? undefined);
   const needsWorkspace = Boolean(authorized && draft.provider === "redpill" && workspaces?.length && workspaceId === undefined);
 
   const working = saving || account.busy;
@@ -2428,6 +2434,8 @@ function ProfileEditorSheet({
     if (!saveInFlight.current && await account.cancel()) onClose();
   };
   const signIn = async () => {
+    pendingWorkspaceSave.current = undefined;
+    setSelectedWorkspaceId(undefined);
     setError(undefined);
     try {
       if (running && !await desktopApi.confirm({ title: "Connect and restart protection?", message: "Connecting this account restarts protection. In-flight requests may be interrupted.", confirmLabel: "Continue" })) return;
@@ -2450,8 +2458,23 @@ function ProfileEditorSheet({
   const needsAccountLogin = draft.provider !== "custom" && authMethod === "account"
     && !authorized && (!savedCredentialApplies || profile?.auth.kind !== "oauth");
 
+  useEffect(() => {
+    let disposed = false;
+    setSavedWorkspaces(undefined);
+    setWorkspaceError(undefined);
+    if (savedCredentialApplies && draft.provider === "redpill" && authMethod === "account" && profile?.id) {
+      void desktopApi.getAccountWorkspaces(profile.id).then(
+        (items) => { if (!disposed) setSavedWorkspaces(items); },
+        (error: unknown) => { if (!disposed) setWorkspaceError(errorMessage(error)); },
+      );
+    }
+    return () => { disposed = true; };
+  }, [savedCredentialApplies, draft.provider, authMethod, profile?.id, profile?.credentialRef]);
+
   const chooseService = async (next: ServicePreset) => {
     if (!await account.cancel()) return;
+    pendingWorkspaceSave.current = undefined;
+    setSelectedWorkspaceId(undefined);
     const preset = SERVICE_PRESETS.find((service) => service.id === next);
     setDraft((current) => ({
       ...current,
@@ -2467,6 +2490,7 @@ function ProfileEditorSheet({
   };
   const chooseAuthMethod = async (next: "account" | "apiKey") => {
     if (!await account.cancel()) return;
+    pendingWorkspaceSave.current = undefined;
     setAuthMethod(next);
     setError(undefined);
   };
@@ -2497,6 +2521,12 @@ function ProfileEditorSheet({
     setError(undefined);
     try {
       if (!authorized && running && profile?.id === state.activeProfileId && !await desktopApi.confirm({ title: "Save and reconnect?", message: "Saving this active profile restarts protection. In-flight requests may be interrupted.", confirmLabel: "Save and Reconnect" })) return;
+      if (!authorized && authMethod === "account" && draft.provider === "redpill"
+        && workspaceId !== undefined && workspaceId !== savedScope?.workspaceId) {
+        pendingWorkspaceSave.current = workspaceId;
+        if (!await account.start(draft)) pendingWorkspaceSave.current = undefined;
+        return;
+      }
       if (authorized && login && authMethod === "account") {
         const saved = await desktopApi.saveAccountLogin(login.id, draft, state.config.requireProductionOs, workspaceId);
         account.consume();
@@ -2509,14 +2539,21 @@ function ProfileEditorSheet({
       else onComplete();
     } catch (error) { setError(errorMessage(error)); }
     finally { saveInFlight.current = false; setSaving(false); }
-  }, [working, frozen, needsAccountLogin, needsWorkspace, authorized, running, profile?.id, state.activeProfileId, login, authMethod, draft, state.config.requireProductionOs, workspaceId, account.consume, startAfterSave, onComplete, onSave, apiKeyDraft]);
+  }, [working, frozen, needsAccountLogin, needsWorkspace, authorized, running, profile?.id, state.activeProfileId, login, authMethod, draft, state.config.requireProductionOs, workspaceId, account.consume, startAfterSave, onComplete, onSave, apiKeyDraft, savedScope?.workspaceId, account.start]);
 
   useEffect(() => {
-    if (!authorized || !login || (workspaces?.length ?? 0) > 1 || working || frozen
-      || autoSaveAttempt.current === login.id) return;
+    if (!authorized || !login || working || frozen || autoSaveAttempt.current === login.id) return;
+    const pendingWorkspace = pendingWorkspaceSave.current;
+    if (draft.provider !== "phala" && pendingWorkspace === undefined) return;
+    pendingWorkspaceSave.current = undefined;
     autoSaveAttempt.current = login.id;
+    if (pendingWorkspace !== undefined && !workspaces?.some((item) => item.id === pendingWorkspace)) {
+      setSelectedWorkspaceId(undefined);
+      setError("The selected workspace is no longer available. Choose a workspace and save again.");
+      return;
+    }
     void save();
-  }, [authorized, login, workspaces, working, frozen, save]);
+  }, [authorized, login, draft.provider, workspaces, working, frozen, save]);
 
   return (
     <Sheet title={isNew ? "New profile" : "Edit profile"} className="profile-editor-sheet w-[min(480px,_calc(var(--window-dialog-width,_100vw)_-_32px))] [&_.sheet-scroll]:min-h-0 [&_.sheet-scroll]:overflow-y-auto [&_.sheet-footer]:flex-none [&[open]]:flex [&[open]]:flex-col [&_form]:min-h-0 [&_form]:flex [&_form]:flex-col form-sheet [&_>_.sheet-heading]:px-5 [&_>_.field-note]:mx-5 [&_.sheet-footer]:mx-5 [&_form_>_[data-slot=field-error]]:mx-5 [&_.sheet-scroll]:px-5" dismissible={!saving && !account.working} onClose={() => void closeEditor()}>
@@ -2574,10 +2611,15 @@ function ProfileEditorSheet({
                     scope={accountScope} accountName={selectedAccount.accountName} onSignIn={() => void signIn()}
                     credentialRef={profile?.credentialRef} disabled={working || frozen} />
                   {(workspaces?.length || accountScope?.workspace) && <FormField id="profile-workspace" label="Workspace">
-                    {authorized && workspaces && workspaces.length > 0 ? <ChoiceSelect id="profile-workspace" label="Workspace" className="w-full" value={workspaceId === undefined ? "" : String(workspaceId)} options={[
-                      { value: "", label: "Select workspace", disabled: true },
-                      ...workspaces.map((workspace) => ({ value: String(workspace.id), label: workspace.name })),
-                    ]} disabled={working || frozen || workspaces.length === 1} onChange={(value) => setSelectedWorkspaceId(Number(value))} /> : <div className="flex items-center gap-2"><Input id="profile-workspace" value={accountScope?.workspace ?? ""} readOnly />{draft.provider === "redpill" && <Button type="button" variant="outline" disabled={working || frozen} onClick={() => void signIn()}>Change workspace</Button>}</div>}
+                    {draft.provider === "redpill" ? <>
+                      <ChoiceSelect id="profile-workspace" label="Workspace" className="w-full" value={workspaceId === undefined ? "" : String(workspaceId)} options={[
+                        { value: "", label: "Select workspace", disabled: true },
+                        ...(workspaces ?? []).map((workspace) => ({ value: String(workspace.id), label: workspace.name })),
+                        ...(!authorized && savedScope?.workspaceId != null && !workspaces?.some((item) => item.id === savedScope.workspaceId)
+                          ? [{ value: String(savedScope.workspaceId), label: savedScope.workspace ?? "Current workspace", disabled: true }] : []),
+                      ]} disabled={working || frozen || !workspaces?.length} onChange={(value) => setSelectedWorkspaceId(Number(value))} />
+                      {!authorized && workspaceError && <FieldError>{workspaceError}</FieldError>}
+                    </> : <Input id="profile-workspace" value={accountScope?.workspace ?? ""} readOnly />}
                   </FormField>}
                 </> : <Button type="button" variant="default" size="lg" className="w-full [&_.service-logo]:size-4" disabled={working || frozen || !draft.name.trim()} onClick={() => void signIn()}><ServiceLogo url={draft.remoteUrl} />Sign in with {selectedPreset?.name}</Button>}
               </FieldGroup>
@@ -2593,7 +2635,7 @@ function ProfileEditorSheet({
         <FieldError className="mt-3">{error}</FieldError>
         <SheetActions leading={!isNew && <Button type="button" variant="destructive" disabled={working || frozen} onClick={() => void removeProfile()}><Trash2 size={14} />Delete Profile</Button>}>
           <Button type="button" variant="outline" onClick={() => void closeEditor()} disabled={saving || account.working}>Cancel</Button>
-          {!needsAccountLogin && <Button type="submit" variant="default" disabled={working || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || needsWorkspace || (!authorized && !savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Saving…" : authorized ? (workspaces?.length ?? 0) > 1 ? "Confirm workspace" : "Retry" : "Save"}</Button>}
+          {!needsAccountLogin && <Button type="submit" variant="default" disabled={working || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || needsWorkspace || (!authorized && !savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Saving…" : authorized && draft.provider === "phala" ? "Retry" : "Save"}</Button>}
         </SheetActions>
       </form>
     </Sheet>

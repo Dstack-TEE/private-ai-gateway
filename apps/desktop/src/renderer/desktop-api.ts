@@ -144,6 +144,7 @@ export const desktopApi: DesktopApi = {
   completeAccountLogin: (id, callbackUrl) => invoke("complete_account_login", { id, callbackUrl }),
   beginAccountLogin: (profile) => invoke("begin_account_login", { profile }),
   saveAccountLogin: (id, profile, requireProductionOs, workspaceId) => invoke("save_account_login", { id, profile, requireProductionOs, workspaceId }),
+  getAccountWorkspaces: (profileId) => invoke("account_workspaces", { profileId }),
   getAccountBalance: (target) => invoke("account_balance", { target }),
   openTopUp: (provider) => invoke("open_top_up", { provider }),
   pollAccountLogin: (id) => invoke("poll_account_login", { id }),

@@ -81,6 +81,9 @@ pub enum Command {
     AccountSaveResult {
         operation_id: String,
     },
+    AccountWorkspaces {
+        profile_id: String,
+    },
     AccountBalance {
         target: AccountBalanceTarget,
     },

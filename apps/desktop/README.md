@@ -637,8 +637,8 @@ protocol is the service's own response, shown as such.
   written atomically. Phala and RedPill also offer browser account login; the
   shared runtime exchanges authorization for an inference key and stores only
   the key in the OS credential store. See [Account login](ACCOUNT-LOGIN.md). A successful
-  account login persists and selects the profile automatically unless RedPill needs
-  a workspace choice; manual keys and profile edits use `Save`. Completion returns
+  Phala login persists and selects the profile automatically. RedPill uses a
+  workspace selector and `Save`, as do subsequent workspace edits. Completion returns
   to the chooser. If protection
   was off it stays off; if it was on, saving or switching profiles stops protection,
   restores agent configs, and starts a freshly verified connection. Saving while stopped does not start verification; protection verifies the service

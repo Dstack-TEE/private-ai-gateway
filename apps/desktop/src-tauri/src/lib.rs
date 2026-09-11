@@ -347,6 +347,14 @@ async fn save_account_login(
 }
 
 #[tauri::command]
+async fn account_workspaces(
+    client: State<'_, Arc<Client>>,
+    profile_id: String,
+) -> Result<Vec<desktop_runtime::contracts::AccountWorkspace>, String> {
+    client.inner().clone().account_workspaces(profile_id).await
+}
+
+#[tauri::command]
 async fn account_balance(
     client: State<'_, Arc<Client>>,
     target: desktop_runtime::contracts::AccountBalanceTarget,
@@ -824,6 +832,7 @@ pub fn run() {
             save_configuration,
             poll_account_login,
             save_account_login,
+            account_workspaces,
             account_balance,
             open_top_up,
             cancel_account_login,
