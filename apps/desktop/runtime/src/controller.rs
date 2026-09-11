@@ -1045,6 +1045,30 @@ impl DesktopRuntime {
         self.finish_configuration(saved)
     }
 
+    pub async fn account_workspaces(
+        &self,
+        profile_id: String,
+    ) -> Result<Vec<crate::contracts::AccountWorkspace>, String> {
+        use crate::contracts::{ProfileAuth, ServiceProvider};
+        let state = self.manager.snapshot()?;
+        let profile = state
+            .profiles
+            .iter()
+            .find(|p| p.id == profile_id)
+            .ok_or("Profile not found")?;
+        if profile.provider != ServiceProvider::Redpill
+            || !matches!(profile.auth, ProfileAuth::OAuth { .. })
+        {
+            return Err("Sign in with RedPill to select a workspace".into());
+        }
+        let entry = service_config::profile_credential_entry(profile)?;
+        let key = self
+            .secrets
+            .get(&entry)?
+            .ok_or("This profile has no saved credential")?;
+        crate::account_login::account_workspaces(&key).await
+    }
+
     pub async fn account_balance(
         &self,
         target: crate::contracts::AccountBalanceTarget,

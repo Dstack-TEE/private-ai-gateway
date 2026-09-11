@@ -376,6 +376,13 @@ impl Client {
                 .map_err(|_| "Account: Save outcome is not yet confirmed. Reconnect to the backend and check the profile before retrying.".to_string())?;
         }
     }
+    pub async fn account_workspaces(
+        self: &Arc<Self>,
+        profile_id: String,
+    ) -> Result<Vec<AccountWorkspace>, String> {
+        self.background(Command::AccountWorkspaces { profile_id })
+            .await
+    }
     pub async fn account_balance(
         self: &Arc<Self>,
         target: AccountBalanceTarget,

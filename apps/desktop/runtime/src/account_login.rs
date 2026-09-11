@@ -842,14 +842,7 @@ async fn redpill(
             .bearer_auth(&access_token),
     )
     .await?;
-    let workspaces: Vec<AccountWorkspace> = serde_json::from_value(
-        account
-            .get("workspaces")
-            .cloned()
-            .ok_or("Missing workspace list")?,
-    )
-    .map_err(|_| "Invalid workspace list")?;
-    validate_workspaces(&workspaces)?;
+    let workspaces = parse_workspaces(&account)?;
     Ok(Authorization::Redpill {
         access_token,
         details: AccountLoginDetails {
@@ -864,6 +857,28 @@ async fn redpill(
             workspaces,
         },
     })
+}
+
+pub async fn account_workspaces(key: &str) -> Result<Vec<AccountWorkspace>, String> {
+    let account = response(
+        client()?
+            .get("https://service.redpill.ai/api/oauth/account")
+            .bearer_auth(key),
+    )
+    .await?;
+    parse_workspaces(&account)
+}
+
+fn parse_workspaces(account: &Value) -> Result<Vec<AccountWorkspace>, String> {
+    let workspaces: Vec<AccountWorkspace> = serde_json::from_value(
+        account
+            .get("workspaces")
+            .cloned()
+            .ok_or("Missing workspace list")?,
+    )
+    .map_err(|_| "Invalid workspace list")?;
+    validate_workspaces(&workspaces)?;
+    Ok(workspaces)
 }
 
 fn validate_workspaces(workspaces: &[AccountWorkspace]) -> Result<(), String> {

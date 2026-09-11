@@ -378,6 +378,7 @@ export interface DesktopApi {
   beginAccountLogin(profile: ConfidentialProfileInput): Promise<AccountLogin>;
   pollAccountLogin(id: string): Promise<AccountLoginDetails | null>;
   saveAccountLogin(id: string, profile: ConfidentialProfileInput, requireProductionOs: boolean, workspaceId?: number): Promise<GatewayState>;
+  getAccountWorkspaces(profileId: string): Promise<AccountWorkspace[]>;
   getAccountBalance(target: AccountBalanceTarget): Promise<AccountBalance>;
   openTopUp(provider: ServiceProvider): Promise<void>;
   cancelAccountLogin(id: string): Promise<void>;

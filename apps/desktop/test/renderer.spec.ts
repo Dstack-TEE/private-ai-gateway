@@ -2036,7 +2036,7 @@ test("responsive, zoomed, dark, high-contrast, and reduced-motion layouts stay b
   expect(audit.nestedInteractive).toBe(0);
 });
 
-test("account sign-in completes setup automatically when no workspace choice is needed", async ({ page }) => {
+test("Phala completes automatically while RedPill confirms its workspace with Save", async ({ page }) => {
   for (const provider of ["Phala", "RedPill"]) {
     await page.goto("/?mock=no-profiles");
     await page.getByRole("switch", { name: "Start protection" }).click();
@@ -2046,6 +2046,10 @@ test("account sign-in completes setup automatically when no workspace choice is 
     await expect(signIn.locator("img")).toHaveCount(1);
     await expect(editor.locator(".sheet-footer").getByRole("button", { name: /Sign in|Save/ })).toHaveCount(0);
     await signIn.click();
+    if (provider === "RedPill") {
+      await expect(editor.getByRole("combobox", { name: "Workspace" })).toContainText("Default");
+      await editor.getByRole("button", { name: "Save", exact: true }).click();
+    }
     await expect(editor).toHaveCount(0);
     await expect(page.getByRole("switch", { name: "Stop protection" })).toBeVisible();
     await expect(page.getByRole("button", { name: `Profiles: ${provider}` })).toBeVisible();
@@ -2069,7 +2073,7 @@ test("RedPill confirms workspace and exposes scoped balance and top-up actions",
   await expect(page.getByRole("menuitem", { name: "Switch account" })).toBeVisible();
   await page.getByRole("menuitem", { name: "Refresh balance" }).click();
   await expect(page.getByRole("menu")).toHaveCount(0);
-  const save = editor.getByRole("button", { name: "Confirm workspace" });
+  const save = editor.getByRole("button", { name: "Save" });
   await expect(save).toBeDisabled();
   await editor.getByRole("combobox", { name: "Workspace" }).click();
   const research = page.getByRole("option", { name: "Research", exact: true });
@@ -2102,7 +2106,7 @@ test("RedPill confirms workspace and exposes scoped balance and top-up actions",
   await page.getByRole("button", { name: "Profiles: RedPill" }).click();
   await page.getByRole("button", { name: "Edit RedPill" }).click();
   const saved = page.getByRole("dialog", { name: "Edit profile" });
-  await expect(saved.getByLabel("Workspace", { exact: true })).toHaveValue("Research");
+  await expect(saved.getByRole("combobox", { name: "Workspace" })).toContainText("Research");
   await saved.getByRole("tab", { name: "API key", exact: true }).click();
   await expect(saved.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
   await saved.getByLabel("RedPill API key").fill("sk-manual-replacement");
@@ -2110,19 +2114,20 @@ test("RedPill confirms workspace and exposes scoped balance and top-up actions",
   await saved.getByRole("tab", { name: "Account", exact: true }).click();
   await expect(saved.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
   await expect(saved.getByText("$12.50", { exact: true })).toBeInViewport();
-  await saved.getByRole("button", { name: "Change workspace" }).click();
-  await expect(saved.getByRole("combobox", { name: "Workspace" })).toBeVisible();
+  await expect(saved.getByRole("button", { name: "Change workspace" })).toHaveCount(0);
+  await choose(page, saved.getByRole("combobox", { name: "Workspace" }), "Default");
+  await saved.getByRole("button", { name: "Save", exact: true }).click();
+  await saved.getByRole("button", { name: "Cancel Sign-in", exact: true }).click();
   await saved.getByRole("button", { name: "Phala", exact: true }).click();
   await expect(saved.getByText("Personal organization", { exact: true })).toHaveCount(0);
   await expect(saved.getByRole("button", { name: "Sign in with Phala" })).toBeVisible();
   await saved.getByRole("button", { name: "Cancel", exact: true }).click();
   await page.getByRole("button", { name: "Edit RedPill" }).click();
-  await expect(saved.getByLabel("Workspace", { exact: true })).toHaveValue("Research");
-  await saved.getByRole("button", { name: "Change workspace" }).click();
+  await expect(saved.getByRole("combobox", { name: "Workspace" })).toContainText("Research");
   await choose(page, saved.getByRole("combobox", { name: "Workspace" }), "Default");
-  await saved.getByRole("button", { name: "Confirm workspace" }).click();
+  await saved.getByRole("button", { name: "Save" }).click();
   await page.getByRole("button", { name: "Edit RedPill" }).click();
-  await expect(saved.getByLabel("Workspace", { exact: true })).toHaveValue("Default");
+  await expect(saved.getByRole("combobox", { name: "Workspace" })).toContainText("Default");
 });
 
 test("balance permission errors never display a zero balance", async ({ page }) => {
@@ -2183,7 +2188,9 @@ test("account save failure retries the staged grant and saved accounts can be de
   const editor = page.getByRole("dialog", { name: "New profile" });
   await editor.getByRole("button", { name: "RedPill", exact: true }).click();
   await editor.getByRole("button", { name: "Sign in with RedPill" }).click();
-  const save = editor.getByRole("button", { name: "Retry", exact: true });
+  const save = editor.getByRole("button", { name: "Save", exact: true });
+  await expect(save).toBeEnabled();
+  await save.click();
   await expect(editor.getByText("Could not store account credential", { exact: true })).toBeVisible();
   await expect(editor.getByLabel("Account balance").getByText("Personal organization", { exact: true })).toBeVisible();
   await save.click();
@@ -2201,7 +2208,7 @@ test("account save failure retries the staged grant and saved accounts can be de
 });
 
 
-test("manual callback fallback completes account setup automatically", async ({ page }) => {
+test("manual callback fallback keeps RedPill workspace confirmation", async ({ page }) => {
   await page.goto("/?mock=oauth-manual-callback");
   await page.getByRole("button", { name: "Set up profile" }).click();
   const editor = page.getByRole("dialog", { name: "New profile" });
@@ -2214,6 +2221,8 @@ test("manual callback fallback completes account setup automatically", async ({ 
   await expect(editor.getByLabel("Callback URL")).toHaveValue("");
   await editor.getByLabel("Callback URL").fill("http://127.0.0.1:4181/oauth/callback?state=mock&code=secret");
   await editor.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(editor.getByRole("combobox", { name: "Workspace" })).toContainText("Default");
+  await editor.getByRole("button", { name: "Save", exact: true }).click();
   await expect(editor).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Profiles: RedPill" })).toBeVisible();
 });

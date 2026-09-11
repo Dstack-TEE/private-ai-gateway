@@ -94,10 +94,10 @@ Naming and CLI integration proposal: [Client architecture](CLIENT-ARCHITECTURE.m
 - Settings, profiles and usage share an Item-based action row with full-row hover.
   Provider logos are 18px; chart metrics use standard Tabs with visible selection.
 - Profile forms omit the credential-delete action and verification badge.
-  Account login completes automatically when the workspace is already determined;
-  RedPill with multiple workspaces asks for one selection and confirmation. Failed
-  persistence remains retryable, and Change workspace preserves the old profile
-  on cancellation. Manual edits use Save; reconnection still verifies the gateway.
+  Phala login completes automatically after browser workspace selection. RedPill
+  always uses a workspace selector and Save, including edits of saved profiles.
+  Workspace changes authorize during Save; cancellation preserves the old profile.
+  Failed persistence remains retryable. Manual edits use Save; reconnection still verifies the gateway.
 - Agent detection is automatic on startup and window activation; connection mutations show optimistic
   state and progress without disabling unrelated agents. Restore all is locked
   during a connection mutation. Model-sync filler text is removed.

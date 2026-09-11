@@ -558,6 +558,11 @@ export function mockApi(name: string | null): DesktopApi {
       publish();
       return structuredClone(state);
     },
+    getAccountWorkspaces: async (profileId) => {
+      const profile = state.profiles.find((item) => item.id === profileId);
+      if (!profile || profile.provider !== "redpill" || profile.auth.kind !== "oauth") throw new Error("Sign in with RedPill to select a workspace");
+      return [{ id: 123, name: "Default", isDefault: true }, { id: 124, name: "Research", isDefault: false }];
+    },
     getAccountBalance: async (target) => {
       if (name === "oauth-balance-denied") throw new Error("Your account does not have permission to view this balance");
       const profile = target.kind === "login" ? login?.id === target.id && login.polls >= 3 ? login.profile : undefined : state.profiles.find((p) => p.id === target.profileId);

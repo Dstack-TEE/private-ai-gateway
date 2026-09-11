@@ -371,6 +371,9 @@ async fn dispatch(runtime: &Arc<DesktopRuntime>, command: Command) -> Result<Val
             Command::AccountSaveResult { operation_id } => {
                 value(runtime.account_save_result(&operation_id)?)
             }
+            Command::AccountWorkspaces { profile_id } => {
+                value(runtime.account_workspaces(profile_id).await?)
+            }
             Command::AccountBalance { target } => value(runtime.account_balance(target).await?),
             Command::PollAccountLogin { id } => value(runtime.poll_account_login(id).await?),
             Command::CancelAccountLogin { id } => value(runtime.cancel_account_login(id).await?),
