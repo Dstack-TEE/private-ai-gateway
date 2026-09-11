@@ -549,7 +549,7 @@ export function mockApi(name: string | null): DesktopApi {
       if (profile.provider === "redpill" && workspaceId !== 123 && workspaceId !== 124) throw new Error("Choose a workspace before saving");
       if (name === "oauth-save-retry" && !failedAccountSave) {
         failedAccountSave = true;
-        throw new Error("The verified gateway did not answer the model list request");
+        throw new Error("Could not store account credential");
       }
       const saved: ConfidentialProfile = { ...profile, auth: { kind: "oauth", accountId: "preview-account", accountName: "Personal", scope: { organization: profile.provider === "redpill" ? "Personal organization" : null, workspace: profile.provider === "redpill" ? workspaceId === 124 ? "Research" : "Default" : "Phala workspace", workspaceId: workspaceId ?? null } }, credentialSaved: true, verifiedAt: Math.floor(Date.now() / 1000) };
       credentialProfiles.add(saved.id);
