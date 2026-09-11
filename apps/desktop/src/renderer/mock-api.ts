@@ -511,12 +511,29 @@ export function mockApi(name: string | null): DesktopApi {
       }, 350);
       return state;
     },
+    saveConfiguration: async (profile, requireProductionOs, key) => {
+      const existing = state.profiles.find((entry) => entry.id === profile.id);
+      if (!key?.trim() && !credentialProfiles.has(profile.id)) throw new Error("Enter an API key");
+      const reconnect = !state.configurationVerification && (state.status === "verified" || state.status === "blocked");
+      const saved: ConfidentialProfile = { ...profile, auth: key?.trim() ? { kind: "apiKey" } : existing?.auth ?? { kind: "apiKey" }, credentialSaved: true };
+      credentialProfiles.add(profile.id);
+      state = { ...state, profiles: [...state.profiles.filter((entry) => entry.id !== profile.id), saved], activeProfileId: profile.id, apiKeySaved: true, status: reconnect ? "verified" : "stopped", configurationVerification: false, config: { remoteUrl: profile.remoteUrl, requireProductionOs } };
+      publish();
+      return structuredClone(state);
+    },
+    completeAccountLogin: async (id, callbackUrl) => {
+      if (!login || login.id !== id) throw new Error("Account login is no longer active");
+      const url = new URL(callbackUrl);
+      if (url.origin !== "http://127.0.0.1:4181" || url.pathname !== "/oauth/callback" || !url.searchParams.get("code")) throw new Error("Invalid callback link");
+      login.polls = 3;
+    },
     beginAccountLogin: async (profile) => {
       login = { id: crypto.randomUUID(), profile, polls: 0 };
       return { id: login.id, url: "https://example.invalid/sign-in", userCode: profile.provider === "phala" ? "ABCD-EFGH" : null };
     },
     pollAccountLogin: async (id) => {
       if (!login || login.id !== id) throw new Error("Account login is no longer active");
+      if (name === "oauth-manual-callback" && login.polls < 3) return null;
       if (login.polls++ < 2) return null;
       if (name === "oauth-denied") throw new Error("Authorization was declined");
       return {

@@ -86,8 +86,8 @@ function AccountBalanceView({ api, provider, target, scope, accountName, onSignI
   const owner = (balance?.scope ?? scope)?.organization ?? (balance?.scope ?? scope)?.workspace;
   const amount = balance ? currency(Number(balance.balanceUsd)) : busy ? "…" : "Unavailable";
   if (compact) return <Button type="button" variant="outline" size="sm" className="tabular-nums"
-    aria-label={`Current balance: ${amount}`} title={error ?? `${owner ?? "Account"} · USD · Refresh balance`}
-    disabled={busy} onClick={() => refresh.current()}>{amount}</Button>;
+    aria-label={`Current balance: ${amount}`} title={linkError ?? error ?? `${owner ?? "Account"} · Open billing`}
+    disabled={opening} onClick={() => void topUp()}>{amount}</Button>;
   const organization = (balance?.scope ?? scope)?.organization;
   const name = organization ?? accountName ?? owner ?? "Account";
   return <div aria-label="Account balance">

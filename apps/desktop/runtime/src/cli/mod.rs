@@ -15,6 +15,7 @@ use clap::{CommandFactory, FromArgMatches};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
+mod account;
 mod args;
 #[path = "output.rs"]
 mod human;
@@ -155,6 +156,10 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
         Action::Stop => value(client.stop()?)?,
         Action::Profiles { command } => {
             match command {
+                Profiles::Login(options) => {
+                    confirm(cli, "Sign in and save this account profile? This selects the profile and may reconnect active protection.")?;
+                    account::login(&client, cli, options)?
+                }
                 Profiles::List => value(client.state()?.profiles)?,
                 Profiles::Show { id } => value(
                     client

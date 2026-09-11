@@ -31,6 +31,12 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
             command: Profiles::Use { id },
         } => format!("Selected profile: {}\n{}", safe(id), status(value)),
         Action::Profiles {
+            command: Profiles::Login(_),
+        } => format!(
+            "Account saved. Use pap start to enable protection.\n{}",
+            status(value)
+        ),
+        Action::Profiles {
             command: Profiles::Remove { id },
         } => format!("Deleted profile: {}", safe(id)),
         Action::Profiles {

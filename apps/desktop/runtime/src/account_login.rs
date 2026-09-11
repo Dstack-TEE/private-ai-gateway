@@ -150,6 +150,7 @@ pub(crate) struct PendingLogin {
     state: LoginState,
     deadline: Instant,
     saved: bool,
+    callback: Option<Arc<CallbackState>>,
 }
 
 impl PendingLogin {
@@ -164,6 +165,7 @@ impl PendingLogin {
             state: LoginState::Authorizing(worker),
             deadline: Instant::now() + LOGIN_TIMEOUT,
             saved: false,
+            callback: None,
         }
     }
 
@@ -241,6 +243,38 @@ impl PendingLogin {
             .balance_secret()
             .to_owned();
         Ok((provider, secret))
+    }
+
+    pub async fn complete_callback(&self, id: &str, value: &str) -> Result<(), String> {
+        self.validate(id)?;
+        let state = self
+            .callback
+            .as_ref()
+            .ok_or("Account: This provider uses a device code, not a callback link.")?;
+        if value.len() > 16384 {
+            return Err("Account: Callback link is too long.".into());
+        }
+        let url =
+            Url::parse(value.trim()).map_err(|_| "Account: Paste the complete callback URL.")?;
+        if url.scheme() != "http"
+            || url.host_str() != Some("127.0.0.1")
+            || url.port() != Some(4181)
+            || url.path() != "/oauth/callback"
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.fragment().is_some()
+        {
+            return Err("Account: This callback URL does not match the current sign-in.".into());
+        }
+        let uri: Uri = format!("{}?{}", url.path(), url.query().unwrap_or_default())
+            .parse()
+            .map_err(|_| "Account: Invalid callback URL.")?;
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "127.0.0.1:4181".parse().expect("constant host"));
+        state
+            .accept(&uri, &headers)
+            .await
+            .map_err(|_| "Account: This callback is invalid or has already been used.".into())
     }
 
     pub fn profile_id(&self) -> &str {
@@ -447,7 +481,7 @@ pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<Pendi
     profile.remote_url = crate::service_config::resolve_profile(profile.clone(), None)?.remote_url;
     let client = client()?;
     let id = Uuid::new_v4().to_string();
-    let (url, user_code, worker) = match profile.provider {
+    let (url, user_code, worker, callback_state) = match profile.provider {
         ServiceProvider::Phala => {
             let data = response(
                 client
@@ -474,7 +508,7 @@ pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<Pendi
                 .map_err(|_| "Authorization expired; sign in again".to_string())?
                 .map(Authorization::Inference)
             });
-            (url, Some(code), worker)
+            (url, Some(code), worker, None)
         }
         ServiceProvider::Redpill => {
             let discovery =
@@ -500,25 +534,36 @@ pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<Pendi
                 ),
             ]);
             let token_url = trusted_url(&string(&discovery, "token_endpoint")?, ISSUER)?;
+            let (sender, receiver) = oneshot::channel();
+            let callback = Arc::new(CallbackState {
+                expected: state,
+                sender: Mutex::new(Some(sender)),
+            });
+            let worker_callback = callback.clone();
             let worker = tokio::spawn(async move {
                 timeout(
                     LOGIN_TIMEOUT,
-                    redpill(client, listener, state, verifier, token_url),
+                    redpill(
+                        client,
+                        listener,
+                        worker_callback,
+                        receiver,
+                        verifier,
+                        token_url,
+                    ),
                 )
                 .await
                 .map_err(|_| "Authorization expired; sign in again".to_string())?
             });
-            (url.to_string(), None, worker)
+            (url.to_string(), None, worker, Some(callback))
         }
         ServiceProvider::Custom => {
             return Err("Account login is only available for Phala and RedPill".into())
         }
     };
-    Ok(PendingLogin::new(
-        LoginPresentation { id, url, user_code },
-        profile,
-        worker,
-    ))
+    let mut pending = PendingLogin::new(LoginPresentation { id, url, user_code }, profile, worker);
+    pending.callback = callback_state;
+    Ok(pending)
 }
 
 fn installation_id(profile_id: &str) -> Result<Uuid, String> {
@@ -651,7 +696,9 @@ enum CallbackError {
 }
 
 fn callback_code(uri: &Uri, headers: &HeaderMap, expected: &str) -> Result<String, CallbackError> {
-    if headers.get("host").and_then(|v| v.to_str().ok()) != Some("127.0.0.1:4181") {
+    if uri.path() != "/oauth/callback"
+        || headers.get("host").and_then(|v| v.to_str().ok()) != Some("127.0.0.1:4181")
+    {
         return Err(CallbackError::Invalid);
     }
     let pairs: Vec<_> = url::form_urlencoded::parse(uri.query().unwrap_or("").as_bytes()).collect();
@@ -682,55 +729,84 @@ fn callback_code(uri: &Uri, headers: &HeaderMap, expected: &str) -> Result<Strin
         .ok_or(CallbackError::Invalid)
 }
 
+impl CallbackState {
+    async fn accept(&self, uri: &Uri, headers: &HeaderMap) -> Result<(), CallbackError> {
+        let result = match callback_code(uri, headers, &self.expected) {
+            Ok(code) => Ok(code),
+            Err(CallbackError::Declined) => Err("Account: Authorization was declined.".into()),
+            Err(error) => return Err(error),
+        };
+        let declined = result.is_err();
+        let sender = self
+            .sender
+            .lock()
+            .await
+            .take()
+            .ok_or(CallbackError::Invalid)?;
+        sender.send(result).map_err(|_| CallbackError::Invalid)?;
+        if declined {
+            Err(CallbackError::Declined)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn callback_page(accepted: bool) -> String {
+    let product = desktop_gateway::brand::PRODUCT_NAME
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;");
+    include_str!("account-callback.html")
+        .replace("__PRODUCT__", &product)
+        .replace(
+            "__LOGO__",
+            &include_str!("../../src/renderer/generated/brand-mark-light.svg")
+                .replace("#303236", "currentColor"),
+        )
+        .replace(
+            "__TITLE__",
+            if accepted {
+                "Authorization received"
+            } else {
+                "Sign-in could not complete"
+            },
+        )
+        .replace(
+            "__MESSAGE__",
+            if accepted {
+                "Return to the app or terminal to finish setting up your account."
+            } else {
+                "Return to the app or terminal and try signing in again."
+            },
+        )
+        .replace("__TONE__", if accepted { "" } else { "error" })
+        .replace("__SYMBOL__", if accepted { "✓" } else { "!" })
+}
+
 async fn callback(
     State(state): State<Arc<CallbackState>>,
     uri: Uri,
     headers: HeaderMap,
-) -> (StatusCode, [(String, String); 2], Html<&'static str>) {
-    let result = match callback_code(&uri, &headers, &state.expected) {
-        Ok(code) => Some(Ok(code)),
-        Err(CallbackError::Declined) => Some(Err("Authorization was declined".into())),
-        Err(CallbackError::Invalid) => None,
-    };
-    let accepted = result.is_some();
-    if let Some(result) = result {
-        if let Some(sender) = state.sender.lock().await.take() {
-            let _ = sender.send(result);
-        }
-    }
-    (
-        if accepted {
-            StatusCode::OK
-        } else {
-            StatusCode::BAD_REQUEST
-        },
-        [
-            ("Cache-Control".into(), "no-store".into()),
-            (
-                "Content-Security-Policy".into(),
-                "default-src 'none'; frame-ancestors 'none'".into(),
-            ),
-        ],
-        Html(if accepted {
-            "<!doctype html><title>Private AI Proxy</title><p>Return to Private AI Proxy to finish signing in.</p>"
-        } else {
-            "<!doctype html><title>Private AI Proxy</title><p>This login response was rejected. Return to the app and retry.</p>"
-        }),
-    )
+) -> (StatusCode, [(String, String); 4], Html<String>) {
+    let accepted = state.accept(&uri, &headers).await.is_ok();
+    (if accepted { StatusCode::OK } else { StatusCode::BAD_REQUEST }, [
+        ("Cache-Control".into(), "no-store".into()),
+        ("Content-Security-Policy".into(), "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'".into()),
+        ("Referrer-Policy".into(), "no-referrer".into()),
+        ("X-Content-Type-Options".into(), "nosniff".into()),
+    ], Html(callback_page(accepted)))
 }
 
 async fn redpill(
     client: Client,
     listener: TcpListener,
-    state: String,
+    state: Arc<CallbackState>,
+    receiver: oneshot::Receiver<Result<String, String>>,
     verifier: String,
     token_url: Url,
 ) -> Result<Authorization, String> {
-    let (sender, receiver) = oneshot::channel();
-    let state = Arc::new(CallbackState {
-        expected: state,
-        sender: Mutex::new(Some(sender)),
-    });
     let shutdown = CancellationToken::new();
     let stop = shutdown.clone();
     let app = Router::new()
@@ -1039,6 +1115,44 @@ mod tests {
         let public = crate::protocol::RpcError::operation(&error);
         assert!(public.message.contains("disabled"));
         assert!(!public.message.contains("secret"));
+    }
+
+    #[tokio::test]
+    async fn pasted_callback_is_bound_to_session_and_consumed_once() {
+        let profile = ConfidentialProfileInput {
+            id: "test".into(),
+            name: "Test".into(),
+            provider: ServiceProvider::Redpill,
+            remote_url: "https://tee.redpill.ai".into(),
+        };
+        let mut pending = PendingLogin::new(
+            LoginPresentation {
+                id: "login".into(),
+                url: "https://clerk.redpill.ai".into(),
+                user_code: None,
+            },
+            profile,
+            tokio::spawn(std::future::pending()),
+        );
+        let (sender, receiver) = oneshot::channel();
+        pending.callback = Some(Arc::new(CallbackState {
+            expected: "expected".into(),
+            sender: Mutex::new(Some(sender)),
+        }));
+        for url in [
+            "https://attacker.test/oauth/callback?state=expected&code=secret",
+            "http://127.0.0.1:4181/oauth/callback?state=wrong&code=secret",
+            "http://127.0.0.1:4181/other?state=expected&code=secret",
+            "http://127.0.0.1:4181/oauth/callback?state=expected&state=expected&code=secret",
+        ] {
+            assert!(pending.complete_callback("login", url).await.is_err());
+        }
+        let url = "http://127.0.0.1:4181/oauth/callback?state=expected&code=secret";
+        assert!(pending.complete_callback("other-login", url).await.is_err());
+        pending.complete_callback("login", url).await.unwrap();
+        assert_eq!(receiver.await.unwrap().unwrap(), "secret");
+        assert!(pending.complete_callback("login", url).await.is_err());
+        assert!(!callback_page(true).contains("secret"));
     }
 
     #[test]

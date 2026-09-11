@@ -281,6 +281,33 @@ async fn verify_configuration(
 }
 
 #[tauri::command]
+async fn save_configuration(
+    client: State<'_, Arc<Client>>,
+    profile: ConfidentialProfileInput,
+    require_production_os: bool,
+    key: Option<String>,
+) -> Result<GatewayState, String> {
+    client
+        .inner()
+        .clone()
+        .save_configuration(profile, require_production_os, key)
+        .await
+}
+
+#[tauri::command]
+async fn complete_account_login(
+    client: State<'_, Arc<Client>>,
+    id: String,
+    callback_url: String,
+) -> Result<(), String> {
+    client
+        .inner()
+        .clone()
+        .complete_account_login(id, callback_url)
+        .await
+}
+
+#[tauri::command]
 async fn begin_account_login(
     app: AppHandle,
     client: State<'_, Arc<Client>>,
@@ -290,8 +317,8 @@ async fn begin_account_login(
     let client = client.inner().clone();
     let login = client.begin_account_login(profile).await?;
     if app.opener().open_url(&login.url, None::<&str>).is_err() {
-        client.cancel_account_login(login.id).await?;
-        return Err("Cannot open the sign-in page in your browser".into());
+        // Keep the authorization available for the copy-link/manual callback path.
+        eprintln!("Cannot open sign-in browser; use the manual sign-in link");
     }
     Ok(login)
 }
@@ -793,6 +820,8 @@ pub fn run() {
             start_gateway,
             verify_configuration,
             begin_account_login,
+            complete_account_login,
+            save_configuration,
             poll_account_login,
             save_account_login,
             account_balance,

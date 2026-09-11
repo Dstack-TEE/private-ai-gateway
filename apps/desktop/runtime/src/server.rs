@@ -340,6 +340,18 @@ async fn dispatch(runtime: &Arc<DesktopRuntime>, command: Command) -> Result<Val
                     .verify_configuration(profile, require_production_os, key)
                     .await?,
             ),
+            Command::SaveConfiguration {
+                profile,
+                require_production_os,
+                key,
+            } => value(
+                runtime
+                    .save_configuration(profile, require_production_os, key)
+                    .await?,
+            ),
+            Command::CompleteAccountLogin { id, callback_url } => {
+                value(runtime.complete_account_login(id, callback_url).await?)
+            }
             Command::BeginAccountLogin { profile } => {
                 value(runtime.begin_account_login(profile).await?)
             }

@@ -386,8 +386,8 @@ function NativeProfilesWindow({ repair, editor = false, profileId, startAfterSav
     state={native.state} busy={busy} running={running}
     profile={editingProfile}
     startAfterSave={startAfterSave}
-    onVerify={(profile, key) => run(async () => {
-      const saved = await desktopApi.verifyConfiguration(profile, native.state.config.requireProductionOs, key);
+    onSave={(profile, key) => run(async () => {
+      const saved = await desktopApi.saveConfiguration(profile, native.state.config.requireProductionOs, key);
       return startAfterSave ? desktopApi.start(saved.config) : saved;
     })}
     onDelete={(profileId) => run(() => desktopApi.deleteProfile(profileId))}
@@ -402,7 +402,7 @@ function NativeProfilesWindow({ repair, editor = false, profileId, startAfterSav
         busy={busy}
         running={running}
         initialEditorProfileId={repairRequest ? native.state.activeProfileId || undefined : undefined}
-        onVerify={(profile, key) => run(() => desktopApi.verifyConfiguration(profile, native.state.config.requireProductionOs, key))}
+        onSave={(profile, key) => run(() => desktopApi.saveConfiguration(profile, native.state.config.requireProductionOs, key))}
         onActivate={(profileId) => run(() => desktopApi.activateProfile(profileId))}
         onDelete={(profileId) => run(() => desktopApi.deleteProfile(profileId))}
         onClose={native.close}
@@ -594,7 +594,7 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
     if (!previous) return;
     const saved = state.profiles.find((profile) => profile.auth.kind === "oauth" && profile.credentialSaved &&
       !previous.some((old) => old.id === profile.id && old.credentialRef === profile.credentialRef && old.verifiedAt === profile.verifiedAt));
-    if (saved) setNotice({ id: Date.now(), text: `${saved.name} verified and saved` });
+    if (saved) setNotice({ id: Date.now(), text: `${saved.name} saved` });
   }, [state.profiles, stateLoaded]);
 
   const [previewTrayOpen, setPreviewTrayOpen] = useState(false);
@@ -853,13 +853,13 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
     finally { setApplying(false); }
   };
 
-  const verifyConfiguration = async (profile: ConfidentialProfileInput, key?: string): Promise<string | undefined> => {
+  const saveConfiguration = async (profile: ConfidentialProfileInput, key?: string): Promise<string | undefined> => {
     setActionError(undefined);
     try {
-      const saved = await desktopApi.verifyConfiguration(profile, !allowDevelopmentOs, key);
+      const saved = await desktopApi.saveConfiguration(profile, !allowDevelopmentOs, key);
       setState(startAfterSetup ? await desktopApi.start(saved.config) : saved);
       setStartAfterSetup(false);
-      setNotice({ id: Date.now(), text: `${profile.name.trim()} verified and saved` });
+      setNotice({ id: Date.now(), text: `${profile.name.trim()} saved` });
       return undefined;
     } catch (error) {
       const message = errorMessage(error);
@@ -1123,7 +1123,7 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
           running={running}
           initialEditorProfileId={profileEditorId}
           startAfterSave={startAfterSetup}
-          onVerify={verifyConfiguration}
+          onSave={saveConfiguration}
           onActivate={activateProfile}
           onDelete={deleteProfile}
           onClose={() => {
@@ -2221,7 +2221,7 @@ function ProfilesSheet({
   running,
   initialEditorProfileId,
   startAfterSave = false,
-  onVerify,
+  onSave,
   onActivate,
   onDelete,
   onClose,
@@ -2231,7 +2231,7 @@ function ProfilesSheet({
   running: boolean;
   initialEditorProfileId?: string;
   startAfterSave?: boolean;
-  onVerify(profile: ConfidentialProfileInput, key?: string): Promise<string | undefined>;
+  onSave(profile: ConfidentialProfileInput, key?: string): Promise<string | undefined>;
   onActivate(profileId: string): Promise<string | undefined>;
   onDelete(profileId: string): Promise<string | undefined>;
   onClose(): void;
@@ -2271,7 +2271,7 @@ function ProfilesSheet({
           running={running}
           profile={editor?.kind === "edit" ? state.profiles.find((profile) => profile.id === editor.profileId) : undefined}
           startAfterSave={startAfterSave}
-          onVerify={onVerify}
+          onSave={onSave}
           onDelete={onDelete}
           onComplete={state.profiles.length === 0 ? onClose : completeEditor}
           onDeleted={state.profiles.length === 1 ? onClose : completeEditor}
@@ -2381,7 +2381,7 @@ function ProfileEditorSheet({
   running,
   profile,
   startAfterSave = false,
-  onVerify,
+  onSave,
   onDelete,
   onComplete,
   onDeleted,
@@ -2392,7 +2392,7 @@ function ProfileEditorSheet({
   running: boolean;
   profile?: ConfidentialProfile;
   startAfterSave?: boolean;
-  onVerify(profile: ConfidentialProfileInput, key?: string): Promise<string | undefined>;
+  onSave(profile: ConfidentialProfileInput, key?: string): Promise<string | undefined>;
   onDelete(profileId: string): Promise<string | undefined>;
   onComplete(): void;
   onDeleted(): void;
@@ -2414,6 +2414,8 @@ function ProfileEditorSheet({
   const account = useAccountLogin(desktopApi, reportLoginError);
   const { session: login, auth: authorized } = account;
   const [workspaceId, setWorkspaceId] = useState<number>();
+  const [callbackDraft, setCallbackDraft] = useState("");
+  useEffect(() => setCallbackDraft(""), [login?.id]);
   const workspaces = account.details?.workspaces;
   useEffect(() => {
     setWorkspaceId(workspaces?.length === 1 ? workspaces.at(0)?.id : undefined);
@@ -2498,7 +2500,7 @@ function ProfileEditorSheet({
         onComplete();
         return;
       }
-      const message = await onVerify(draft, authMethod === "apiKey" || draft.provider === "custom" ? apiKeyDraft.trim() || undefined : undefined);
+      const message = await onSave(draft, authMethod === "apiKey" || draft.provider === "custom" ? apiKeyDraft.trim() || undefined : undefined);
       if (message) setError(message);
       else onComplete();
     } catch (error) { setError(errorMessage(error)); }
@@ -2536,9 +2538,24 @@ function ProfileEditorSheet({
             </TabsList>}
             <TabsContent value="account">
               <FieldGroup className="gap-4">
-                {login && !authorized ? <div className="flex items-center justify-between gap-3" role="status" aria-live="polite">
+                {login && !authorized ? <div className="space-y-3">
+                  <div className="flex items-center justify-between gap-3" role="status" aria-live="polite">
                   <div className="space-y-1 text-sm"><p>Continue in your browser</p>{login.userCode && <p className="font-mono text-muted-foreground">{login.userCode}</p>}</div>
-                  <Button type="button" variant="ghost" size="sm" disabled={account.working} onClick={() => void account.cancel()}>Cancel Sign-in</Button>
+                  <div className="flex items-center gap-1">
+                    <IconButton size="icon-sm" label="Copy sign-in link" onClick={() => void desktopApi.copyText(login.url).catch((error: unknown) => setError(errorMessage(error)))}><Copy aria-hidden /></IconButton>
+                    <Button type="button" variant="ghost" size="sm" disabled={account.working} onClick={() => void account.cancel()}>Cancel Sign-in</Button>
+                  </div>
+                  </div>
+                  {draft.provider === "redpill" && <details>
+                    <summary className="cursor-pointer text-sm text-muted-foreground">Paste callback link</summary>
+                    <div className="mt-3 space-y-2">
+                      <FormField id="account-callback" label="Callback URL">
+                        <Input id="account-callback" type="password" value={callbackDraft} autoComplete="off" spellCheck={false} disabled={account.working}
+                          placeholder="http://127.0.0.1:4181/oauth/callback?…" onChange={(event) => setCallbackDraft(event.target.value)} />
+                      </FormField>
+                      <Button type="button" variant="outline" disabled={account.working || !callbackDraft.trim()} onClick={() => { const value = callbackDraft; setCallbackDraft(""); setError(undefined); void account.complete(value); }}>Continue</Button>
+                    </div>
+                  </details>}
                 </div> : selectedAccount ? <>
                   <AccountTools key={login?.id ?? draft.id} api={desktopApi} provider={draft.provider}
                     target={authorized && login ? { kind: "login", id: login.id } : { kind: "profile", profileId: draft.id }}
