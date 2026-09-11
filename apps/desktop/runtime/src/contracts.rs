@@ -178,6 +178,9 @@ pub struct AccountLoginDetails {
 #[serde(rename_all = "camelCase")]
 pub struct AccountBalance {
     pub balance_usd: String,
+    #[serde(default)]
+    pub can_top_up: bool,
+    pub organization_id: Option<String>,
     pub granted_usd: Option<String>,
     pub scope: AccountScope,
 }
@@ -192,6 +195,12 @@ pub enum AccountBalanceTarget {
         #[serde(rename = "profileId")]
         profile_id: String,
     },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountImages {
+    pub user: Option<String>,
+    pub organization: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,6 +218,8 @@ pub enum ProfileAuth {
             skip_serializing_if = "Option::is_none"
         )]
         account_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        images: Option<AccountImages>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scope: Option<AccountScope>,
     },

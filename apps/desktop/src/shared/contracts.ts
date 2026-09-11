@@ -140,7 +140,7 @@ export type ServiceProvider = "phala" | "redpill" | "custom";
 
 export type ProfileAuth =
   | { kind: "apiKey" }
-  | { kind: "oauth"; accountId: string; accountName?: string; scope?: AccountScope };
+  | { kind: "oauth"; accountId: string; accountName?: string; images?: AccountImages; scope?: AccountScope };
 
 export interface ConfidentialProfile {
   id: string;
@@ -152,6 +152,11 @@ export interface ConfidentialProfile {
   /** Non-secret presence metadata; absent on profiles saved by early betas. */
   credentialSaved?: boolean;
   verifiedAt?: number;
+}
+
+export interface AccountImages {
+  user: string | null;
+  organization: string | null;
 }
 
 export interface AccountScope {
@@ -175,6 +180,8 @@ export type AccountBalanceTarget = { kind: "login"; id: string } | { kind: "prof
 
 export interface AccountBalance {
   balanceUsd: string;
+  canTopUp: boolean;
+  organizationId: string | null;
   grantedUsd: string | null;
   scope: AccountScope;
 }
@@ -378,9 +385,9 @@ export interface DesktopApi {
   beginAccountLogin(profile: ConfidentialProfileInput): Promise<AccountLogin>;
   pollAccountLogin(id: string): Promise<AccountLoginDetails | null>;
   saveAccountLogin(id: string, profile: ConfidentialProfileInput, requireProductionOs: boolean, workspaceId?: number): Promise<GatewayState>;
-  getAccountWorkspaces(profileId: string): Promise<AccountWorkspace[]>;
-  getAccountBalance(target: AccountBalanceTarget): Promise<AccountBalance>;
-  openTopUp(provider: ServiceProvider): Promise<void>;
+  getAccountDetails(profileId: string): Promise<AccountLoginDetails>;
+  getAccountBalance(target: AccountBalanceTarget): Promise<AccountBalance | null>;
+  openTopUp(provider: ServiceProvider, organizationId?: string): Promise<void>;
   cancelAccountLogin(id: string): Promise<void>;
   verifyConfiguration(profile: ConfidentialProfileInput, requireProductionOs: boolean, key?: string): Promise<GatewayState>;
   activateProfile(profileId: string): Promise<GatewayState>;

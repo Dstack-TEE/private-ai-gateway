@@ -85,7 +85,7 @@ import { ChoiceSelect } from "./components/choice-select";
 import type {
   AgentStatus,
   CliRegistration,
-  AccountWorkspace,
+  AccountLoginDetails,
   ConfidentialProfile,
   ConfidentialProfileInput,
   DesktopApi,
@@ -2417,12 +2417,14 @@ function ProfileEditorSheet({
   const account = useAccountLogin(desktopApi, reportLoginError);
   const { session: login, auth: authorized } = account;
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<number>();
-  const [savedWorkspaces, setSavedWorkspaces] = useState<AccountWorkspace[]>();
+  const [savedDetails, setSavedDetails] = useState<{ key: string; details: AccountLoginDetails }>();
+  const profileKey = `${profile?.id}:${profile?.credentialRef}`;
+  const currentDetails = savedDetails?.key === profileKey ? savedDetails.details : undefined;
   const [workspaceError, setWorkspaceError] = useState<string>();
   const pendingWorkspaceSave = useRef<number | undefined>(undefined);
   const [callbackDraft, setCallbackDraft] = useState("");
   useEffect(() => setCallbackDraft(""), [login?.id]);
-  const workspaces = account.details?.workspaces ?? savedWorkspaces;
+  const workspaces = account.details?.workspaces ?? currentDetails?.workspaces;
   const savedScope = profile?.auth.kind === "oauth" ? profile.auth.scope : undefined;
   const workspaceId = selectedWorkspaceId ?? (authorized
     ? workspaces?.length === 1 ? workspaces[0]?.id : undefined
@@ -2452,24 +2454,29 @@ function ProfileEditorSheet({
     && profileHasCredential(profile)
     && !profileChanged
     && profile.auth.kind === (authMethod === "account" ? "oauth" : "apiKey");
+  const savedAccount = currentDetails?.auth.kind === "oauth" ? {
+    ...currentDetails.auth,
+    scope: { organization: currentDetails.auth.scope?.organization ?? null,
+      workspace: savedScope?.workspace ?? null, workspaceId: savedScope?.workspaceId ?? null },
+  } : profile?.auth.kind === "oauth" ? profile.auth : undefined;
   const selectedAccount = authorized?.kind === "oauth" ? authorized
-    : !account.busy && savedCredentialApplies && profile?.auth.kind === "oauth" ? profile.auth : undefined;
+    : !account.busy && savedCredentialApplies ? savedAccount : undefined;
   const accountScope = selectedAccount?.scope;
   const needsAccountLogin = draft.provider !== "custom" && authMethod === "account"
     && !authorized && (!savedCredentialApplies || profile?.auth.kind !== "oauth");
 
   useEffect(() => {
     let disposed = false;
-    setSavedWorkspaces(undefined);
+    setSavedDetails(undefined);
     setWorkspaceError(undefined);
     if (savedCredentialApplies && draft.provider === "redpill" && authMethod === "account" && profile?.id) {
-      void desktopApi.getAccountWorkspaces(profile.id).then(
-        (items) => { if (!disposed) setSavedWorkspaces(items); },
+      void desktopApi.getAccountDetails(profile.id).then(
+        (details) => { if (!disposed) setSavedDetails({ key: profileKey, details }); },
         (error: unknown) => { if (!disposed) setWorkspaceError(errorMessage(error)); },
       );
     }
     return () => { disposed = true; };
-  }, [savedCredentialApplies, draft.provider, authMethod, profile?.id, profile?.credentialRef]);
+  }, [savedCredentialApplies, draft.provider, authMethod, profile?.id, profile?.credentialRef, profileKey]);
 
   const chooseService = async (next: ServicePreset) => {
     if (!await account.cancel()) return;
@@ -2608,7 +2615,7 @@ function ProfileEditorSheet({
                 </div> : selectedAccount ? <>
                   <AccountTools key={login?.id ?? draft.id} api={desktopApi} provider={draft.provider}
                     target={authorized && login ? { kind: "login", id: login.id } : { kind: "profile", profileId: draft.id }}
-                    scope={accountScope} accountName={selectedAccount.accountName} onSignIn={() => void signIn()}
+                    scope={accountScope} accountName={selectedAccount.accountName ?? selectedAccount.accountId} images={selectedAccount.images} onSignIn={() => void signIn()}
                     credentialRef={profile?.credentialRef} disabled={working || frozen} />
                   {(workspaces?.length || accountScope?.workspace) && <FormField id="profile-workspace" label="Workspace">
                     {draft.provider === "redpill" ? <>

@@ -25,8 +25,8 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::contracts::{
-    AccountBalance, AccountLoginDetails, AccountScope, AccountWorkspace, ConfidentialProfileInput,
-    ProfileAuth, ServiceProvider,
+    AccountBalance, AccountImages, AccountLoginDetails, AccountScope, AccountWorkspace,
+    ConfidentialProfileInput, ProfileAuth, ServiceProvider,
 };
 
 const REDPILL_CLIENT_ID: &str = "cGrHCOWG3S91oa0A";
@@ -109,6 +109,10 @@ impl Authorization {
                         account_id: string(&result, "account_id")?,
                         account_name: match &details.auth {
                             ProfileAuth::OAuth { account_name, .. } => account_name.clone(),
+                            _ => None,
+                        },
+                        images: match &details.auth {
+                            ProfileAuth::OAuth { images, .. } => images.clone(),
                             _ => None,
                         },
                         scope: Some(AccountScope {
@@ -662,6 +666,7 @@ async fn phala_at(
             Ok(ProfileAuth::OAuth {
                 account_id: account.clone(),
                 account_name: Some(account),
+                images: None,
                 scope: Some(AccountScope {
                     workspace: Some(workspace),
                     ..AccountScope::default()
@@ -842,31 +847,53 @@ async fn redpill(
             .bearer_auth(&access_token),
     )
     .await?;
-    let workspaces = parse_workspaces(&account)?;
+    if string(&account, "user_id")? != string(&info, "sub")? {
+        return Err("Unexpected account identity".into());
+    }
     Ok(Authorization::Redpill {
         access_token,
-        details: AccountLoginDetails {
-            auth: ProfileAuth::OAuth {
-                account_id: string(&info, "sub")?,
-                account_name: info.get("name").and_then(Value::as_str).map(str::to_owned),
-                scope: Some(AccountScope {
-                    organization: Some(string(&account, "organization_name")?),
-                    ..AccountScope::default()
-                }),
-            },
-            workspaces,
-        },
+        details: redpill_details(&account)?,
     })
 }
 
-pub async fn account_workspaces(key: &str) -> Result<Vec<AccountWorkspace>, String> {
+pub async fn account_details(key: &str) -> Result<AccountLoginDetails, String> {
     let account = response(
         client()?
             .get("https://service.redpill.ai/api/oauth/account")
             .bearer_auth(key),
     )
     .await?;
-    parse_workspaces(&account)
+    redpill_details(&account)
+}
+
+fn avatar_url(data: &Value, field: &str) -> Option<String> {
+    let url = Url::parse(data.get(field)?.as_str()?).ok()?;
+    (url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && matches!(
+            url.host_str(),
+            Some("img.clerk.com" | "images.clerk.dev" | "clerk.redpill.ai")
+        ))
+    .then(|| url.to_string())
+}
+
+fn redpill_details(account: &Value) -> Result<AccountLoginDetails, String> {
+    Ok(AccountLoginDetails {
+        auth: ProfileAuth::OAuth {
+            account_id: string(account, "user_id")?,
+            account_name: Some(string(account, "user_name")?),
+            images: Some(AccountImages {
+                user: avatar_url(account, "user_image_url"),
+                organization: avatar_url(account, "organization_image_url"),
+            }),
+            scope: Some(AccountScope {
+                organization: Some(string(account, "organization_name")?),
+                ..AccountScope::default()
+            }),
+        },
+        workspaces: parse_workspaces(account)?,
+    })
 }
 
 fn parse_workspaces(account: &Value) -> Result<Vec<AccountWorkspace>, String> {
@@ -909,7 +936,7 @@ fn amount(value: &Value, field: &str) -> Result<String, String> {
 pub(crate) async fn account_balance(
     provider: &ServiceProvider,
     secret: &str,
-) -> Result<AccountBalance, String> {
+) -> Result<Option<AccountBalance>, String> {
     let url = match provider {
         ServiceProvider::Phala => "https://cloud-api.phala.com/api/v1/private_ai/self",
         ServiceProvider::Redpill => "https://service.redpill.ai/api/oauth/balance",
@@ -918,17 +945,30 @@ pub(crate) async fn account_balance(
         }
     };
     let (status, data) = request_json(client()?.get(url).bearer_auth(secret)).await?;
-    if status == StatusCode::FORBIDDEN {
-        return Err("Your account does not have permission to view this balance".into());
+    parse_account_balance(provider, status, &data)
+}
+
+fn parse_account_balance(
+    provider: &ServiceProvider,
+    status: StatusCode,
+    data: &Value,
+) -> Result<Option<AccountBalance>, String> {
+    if status == StatusCode::FORBIDDEN
+        && (*provider == ServiceProvider::Phala
+            || protocol_error(data) == Some("billing_permission_required"))
+    {
+        return Ok(None);
     }
     if !status.is_success() {
-        return Err(account_error(status, &data));
+        return Err(account_error(status, data));
     }
     match provider {
         ServiceProvider::Phala => {
             let credits = data.get("credits").ok_or("Missing balance response")?;
-            Ok(AccountBalance {
+            Ok(Some(AccountBalance {
                 balance_usd: amount(credits, "balance")?,
+                can_top_up: true,
+                organization_id: None,
                 granted_usd: Some(amount(credits, "granted_balance")?),
                 scope: AccountScope {
                     workspace: Some(string(
@@ -937,27 +977,44 @@ pub(crate) async fn account_balance(
                     )?),
                     ..AccountScope::default()
                 },
-            })
+            }))
         }
-        _ => Ok(AccountBalance {
-            balance_usd: amount(&data, "balance_usd")?,
+        _ => Ok(Some(AccountBalance {
+            balance_usd: amount(data, "balance_usd")?,
+            can_top_up: data
+                .get("can_top_up")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            organization_id: Some(string(data, "organization_id")?),
             granted_usd: None,
             scope: AccountScope {
-                organization: Some(string(&data, "organization_name")?),
+                organization: Some(string(data, "organization_name")?),
                 workspace: data
                     .get("workspace_name")
                     .and_then(Value::as_str)
                     .map(str::to_owned),
                 workspace_id: data.get("workspace_id").and_then(Value::as_i64),
             },
-        }),
+        })),
     }
 }
 
-pub fn top_up_url(provider: &ServiceProvider) -> Result<&'static str, String> {
+pub fn top_up_url(
+    provider: &ServiceProvider,
+    organization_id: Option<&str>,
+) -> Result<String, String> {
     match provider {
-        ServiceProvider::Phala => Ok("https://cloud.phala.com/cost"),
-        ServiceProvider::Redpill => Ok("https://redpill.ai/credits"),
+        ServiceProvider::Phala => Ok("https://cloud.phala.com/cost".into()),
+        ServiceProvider::Redpill => {
+            let id = organization_id
+                .filter(|id| {
+                    id.strip_prefix("org_").is_some_and(|suffix| {
+                        !suffix.is_empty() && suffix.bytes().all(|c| c.is_ascii_alphanumeric())
+                    })
+                })
+                .ok_or("The billing organization is unavailable. Refresh the account balance.")?;
+            Ok(format!("https://redpill.ai/orgs/{id}/credits"))
+        }
         ServiceProvider::Custom => Err("Top up is only available for Phala and RedPill".into()),
     }
 }
@@ -965,6 +1022,82 @@ pub fn top_up_url(provider: &ServiceProvider) -> Result<&'static str, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_presentation_uses_clerk_identity_and_restricts_avatar_sources() {
+        let data = json!({
+            "user_id": "user_alice", "user_name": "Alice Example",
+            "user_image_url": "https://img.clerk.com/alice",
+            "organization_name": "Research", "organization_image_url": "https://images.clerk.dev/research",
+            "workspaces": [{"id": 1, "name": "Default", "is_default": true}]
+        });
+        let details = redpill_details(&data).unwrap();
+        let ProfileAuth::OAuth {
+            account_id,
+            account_name,
+            images,
+            scope,
+        } = details.auth
+        else {
+            panic!("Expected OAuth identity")
+        };
+        assert_eq!(account_id, "user_alice");
+        assert_eq!(account_name.as_deref(), Some("Alice Example"));
+        assert_eq!(
+            images.unwrap().organization.as_deref(),
+            Some("https://images.clerk.dev/research")
+        );
+        assert_eq!(scope.unwrap().organization.as_deref(), Some("Research"));
+        for url in [
+            "http://img.clerk.com/a",
+            "https://example.com/a",
+            "https://img.clerk.com.evil.test/a",
+            "https://user:secret@img.clerk.com/a",
+        ] {
+            assert!(avatar_url(&json!({"image":url}), "image").is_none());
+        }
+    }
+
+    #[test]
+    fn billing_permissions_hide_denied_balances_and_bind_links_to_the_organization() {
+        let denied = json!({"detail":{"error":"billing_permission_required"}});
+        assert!(
+            parse_account_balance(&ServiceProvider::Redpill, StatusCode::FORBIDDEN, &denied)
+                .unwrap()
+                .is_none()
+        );
+        assert!(parse_account_balance(
+            &ServiceProvider::Redpill,
+            StatusCode::SERVICE_UNAVAILABLE,
+            &json!({})
+        )
+        .is_err());
+        let data = json!({"balance_usd":"0", "organization_id":"org_test", "organization_name":"Research", "can_top_up":false});
+        let balance = parse_account_balance(&ServiceProvider::Redpill, StatusCode::OK, &data)
+            .unwrap()
+            .unwrap();
+        assert_eq!(balance.balance_usd, "0");
+        assert!(!balance.can_top_up);
+        let legacy: AccountBalance = serde_json::from_value(json!({"balanceUsd":"1", "grantedUsd":null, "scope":{"organization":null,"workspace":null,"workspaceId":null}})).unwrap();
+        assert!(!legacy.can_top_up && legacy.organization_id.is_none());
+        assert_eq!(
+            top_up_url(
+                &ServiceProvider::Redpill,
+                balance.organization_id.as_deref()
+            )
+            .unwrap(),
+            "https://redpill.ai/orgs/org_test/credits"
+        );
+        for id in [
+            None,
+            Some(""),
+            Some("org_"),
+            Some("org_../other"),
+            Some("org_test?other"),
+        ] {
+            assert!(top_up_url(&ServiceProvider::Redpill, id).is_err());
+        }
+    }
 
     #[tokio::test]
     async fn failed_authorization_is_terminal_and_repeatable() {
@@ -1014,6 +1147,7 @@ mod tests {
                 auth: ProfileAuth::OAuth {
                     account_id: "user_test".into(),
                     account_name: None,
+                    images: None,
                     scope: None,
                 },
                 workspaces: vec![AccountWorkspace {

@@ -1045,10 +1045,10 @@ impl DesktopRuntime {
         self.finish_configuration(saved)
     }
 
-    pub async fn account_workspaces(
+    pub async fn account_details(
         &self,
         profile_id: String,
-    ) -> Result<Vec<crate::contracts::AccountWorkspace>, String> {
+    ) -> Result<crate::contracts::AccountLoginDetails, String> {
         use crate::contracts::{ProfileAuth, ServiceProvider};
         let state = self.manager.snapshot()?;
         let profile = state
@@ -1066,13 +1066,13 @@ impl DesktopRuntime {
             .secrets
             .get(&entry)?
             .ok_or("This profile has no saved credential")?;
-        crate::account_login::account_workspaces(&key).await
+        crate::account_login::account_details(&key).await
     }
 
     pub async fn account_balance(
         &self,
         target: crate::contracts::AccountBalanceTarget,
-    ) -> Result<crate::contracts::AccountBalance, String> {
+    ) -> Result<Option<crate::contracts::AccountBalance>, String> {
         use crate::contracts::{AccountBalanceTarget, ProfileAuth};
         match target {
             AccountBalanceTarget::Login { id } => {
@@ -2121,6 +2121,7 @@ mod tests {
             let auth = ProfileAuth::OAuth {
                 account_id: "account-test".into(),
                 account_name: Some("Personal".into()),
+                images: None,
                 scope: None,
             };
             let expected = auth.clone();
@@ -2252,6 +2253,7 @@ mod tests {
         profile.auth = crate::contracts::ProfileAuth::OAuth {
             account_id: "user_test".into(),
             account_name: None,
+            images: None,
             scope: None,
         };
         let entry = service_config::profile_credential_entry(&profile).unwrap();

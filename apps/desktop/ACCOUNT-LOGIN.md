@@ -182,3 +182,21 @@ non-secret profile state; login links/prompts go to stderr. A lost save response
 is reconciled by operation ID. Explicit pap profiles verify remains available;
 normal UI Save does not verify. Starting protection always performs attestation
 and connection checks before exposing inference to agents.
+
+## Account identity and billing permissions
+
+The account item displays the organization and `Signed in as` user with official
+shadcn Avatar components. RedPill names and avatar URLs come from the API's
+verified Clerk membership response; opening the editor refreshes saved identity
+metadata. Missing or failed avatars fall back to initials. Only HTTPS Clerk image
+hosts are accepted, allowed explicitly by CSP, and images send no referrer.
+
+OAuth scopes remain `openid profile user:org:read`. Key management, billing read
+and billing management are separate live organization permissions. A denied
+balance response becomes a typed null result: no balance or Top up is rendered.
+A billing reader sees the balance but no Top up unless management is permitted.
+Permission changes are rechecked by the API on refresh, subject to the existing
+30-second runtime cache. Network failures remain errors, not zero balances or
+permission denials. Billing links use `/orgs/{Clerk organization ID}/credits`,
+so the browser's previously selected organization cannot redirect the user's
+intended billing scope. The billing website still authorizes all mutations.

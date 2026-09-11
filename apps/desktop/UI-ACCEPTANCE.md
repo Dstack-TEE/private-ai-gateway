@@ -171,3 +171,9 @@ upgrade/restart still require platform acceptance.
   position/size/maximization only. Monitor-detachment restoration, actual OS close
   events and VoiceOver still need macOS/Windows platform acceptance; browser
   dispatch tests verify the shared content guard, not the native event delivery.
+
+- Account identity displays current Clerk organization/user names and avatars,
+  with initials on image failure. Signed in as stays with the user avatar.
+- Billing-read denial hides the balance and Top up; readers without billing
+  management see only the balance. Permission grants take effect after refresh.
+  Billing navigation is bound to the account's Clerk organization ID.
