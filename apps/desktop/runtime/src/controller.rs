@@ -300,13 +300,18 @@ impl DesktopRuntime {
             active_profile_id: settings.active_profile_id.clone(),
             ..GatewayState::default()
         };
-        let manager = Arc::new(GatewayManager::new(
-            proxy.clone(),
-            usage.clone(),
-            options.launcher,
-            task_runtime.clone(),
-            initial_state,
-        ));
+        let manager = Arc::new(
+            GatewayManager::new(
+                proxy.clone(),
+                usage.clone(),
+                options.launcher,
+                task_runtime.clone(),
+                initial_state,
+            )
+            .with_endpoint_inventory(crate::endpoint_inventory::InventoryUpdater::new(
+                data_dir.join("model-endpoints-cache.json"),
+            )?),
+        );
         let runtime = Arc::new(Self {
             manager: manager.clone(),
             proxy: proxy.clone(),

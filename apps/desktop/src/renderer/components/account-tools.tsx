@@ -6,7 +6,7 @@ import { currency } from "../lib/usage-presentation";
 import { Avatar, AvatarFallback, AvatarImage } from "./ui/avatar";
 import { Button } from "./ui/button";
 import { FieldError } from "./ui/field";
-import { Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemTitle } from "./ui/item";
+import { Item, ItemActions, ItemContent, ItemDescription, ItemTitle } from "./ui/item";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 
 type Props = {
@@ -95,35 +95,33 @@ function AccountDetailsView({ api, provider, target, scope, accountName, images,
   const organization = displayScope?.organization;
   const name = owner ?? accountName ?? "Account";
   return <div aria-label="Account details">
-    <Item variant="outline" size="sm">
-      <ItemMedia><AccountAvatar name={name} src={organization ? images?.organization : images?.user} /></ItemMedia>
-      <ItemContent className="min-w-0">
+    <Item variant="outline" size="sm" className="grid grid-cols-[1.5rem_minmax(0,_1fr)_auto] gap-x-2 gap-y-0">
+      <AccountAvatar name={name} src={organization ? images?.organization : images?.user} />
+      <ItemContent className="min-h-8 min-w-0 justify-center">
         <ItemTitle className="line-clamp-none wrap-anywhere">{name}</ItemTitle>
-        {accountName && <ItemDescription className="line-clamp-none wrap-anywhere">
-          <span className="inline-flex items-center gap-1.5">
-            <AccountAvatar name={accountName} src={images?.user} small />
-            <span>Signed in as {accountName}</span>
-          </span>
-        </ItemDescription>}
-        {balance && <ItemDescription className="line-clamp-none" role="status" aria-live="polite" aria-busy={busy}>
-          Balance: <span className="tabular-nums" aria-label="Balance in USD">{currency(Number(balance.balanceUsd))}</span>
-          {balance.grantedUsd != null && Number(balance.grantedUsd) > 0 && <> · {currency(Number(balance.grantedUsd))} promo credits</>}
-        </ItemDescription>}
       </ItemContent>
       <ItemActions>
         {balance?.canTopUp && <Button type="button" size="sm" variant="outline" title={`Top up ${name}`} disabled={disabled || opening} onClick={() => void topUp()}>Top up<ExternalLink aria-hidden /></Button>}
         <AccountActions disabled={disabled} refreshing={busy} onRefresh={balance === null ? undefined : () => refresh.current()} onSignIn={onSignIn} />
       </ItemActions>
+      {accountName && <>
+        <AccountAvatar name={accountName} src={images?.user} />
+        <ItemDescription className="col-span-2 line-clamp-none wrap-anywhere">Signed in as {accountName}</ItemDescription>
+      </>}
+      {balance && <ItemDescription className="col-span-2 col-start-2 line-clamp-none" role="status" aria-live="polite" aria-busy={busy}>
+        Balance: <span className="tabular-nums" aria-label="Balance in USD">{currency(Number(balance.balanceUsd))}</span>
+        {balance.grantedUsd != null && Number(balance.grantedUsd) > 0 && <> · {currency(Number(balance.grantedUsd))} promo credits</>}
+      </ItemDescription>}
     </Item>
     <FieldError>{linkError ?? error}</FieldError>
   </div>;
 }
 
-function AccountAvatar({ name, src, small = false }: { name: string; src?: string | null; small?: boolean }) {
+function AccountAvatar({ name, src }: { name: string; src?: string | null }) {
   const initials = name.trim().split(/\s+/).slice(0, 2).map((part) => part.charAt(0)).join("").toUpperCase();
-  return <Avatar className={small ? "size-5" : undefined}>
+  return <Avatar size="sm">
     {src && <AvatarImage src={src} alt={`${name} avatar`} referrerPolicy="no-referrer" />}
-    <AvatarFallback className={small ? "text-xs" : undefined}>{initials}</AvatarFallback>
+    <AvatarFallback>{initials}</AvatarFallback>
   </Avatar>;
 }
 

@@ -37,6 +37,7 @@ use tokio::{net::TcpListener, sync::mpsc, sync::Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    agents::Agent,
     brand::{PRODUCT_NAME, SERVICE_NAME},
     catalog::{Catalog, Surface},
     tokens::{agent_allows, TokenSet},
@@ -426,17 +427,25 @@ async fn health(State(state): State<Arc<ProxyState>>) -> Response {
 
 async fn models(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
     let surface = Surface::ChatCompletions;
-    if let Err(rejection) = state.authorize(&headers, "/v1/models") {
-        return error_response(
-            surface,
-            rejection.status,
-            rejection.code,
-            &rejection.message,
-        );
-    }
+    let auth = match state.authorize(&headers, "/v1/models") {
+        Ok(auth) => auth,
+        Err(rejection) => {
+            return error_response(
+                surface,
+                rejection.status,
+                rejection.code,
+                &rejection.message,
+            )
+        }
+    };
     let session = state.session();
     match (session.verified, session.catalog) {
-        (true, Some(catalog)) => Json(catalog.openai_list()).into_response(),
+        (true, Some(catalog)) => {
+            let catalog = Agent::from_id(&auth.agent)
+                .map(|agent| catalog.for_surface(agent.surface()))
+                .unwrap_or(catalog);
+            Json(catalog.openai_list()).into_response()
+        }
         _ => error_response(
             surface,
             StatusCode::SERVICE_UNAVAILABLE,
@@ -594,7 +603,7 @@ async fn relay(
         }
     };
     let model = model_of(&bytes);
-    if let Err(rejection) = check_catalog(&state, model.as_deref()) {
+    if let Err(rejection) = check_catalog(&state, model.as_deref(), surface) {
         return reject(&state, Some(agent), "POST", path, model, surface, rejection);
     }
     // Take the delivery token first, then re-validate session and credentials:
@@ -640,7 +649,11 @@ async fn relay(
     .await
 }
 
-fn check_catalog(state: &ProxyState, model: Option<&str>) -> Result<(), Rejection> {
+fn check_catalog(
+    state: &ProxyState,
+    model: Option<&str>,
+    surface: Surface,
+) -> Result<(), Rejection> {
     let model = model.ok_or_else(|| {
         Rejection::new(
             StatusCode::BAD_REQUEST,
@@ -656,13 +669,24 @@ fn check_catalog(state: &ProxyState, model: Option<&str>) -> Result<(), Rejectio
             "The verified model list is not available",
         )
     })?;
-    catalog.get(model).map(|_| ()).ok_or_else(|| {
+    let entry = catalog.get(model).ok_or_else(|| {
         Rejection::new(
             StatusCode::NOT_FOUND,
             "model_not_found",
             format!("`{model}` is not in the verified model list"),
         )
-    })
+    })?;
+    if !entry.supports(surface) {
+        return Err(Rejection::new(
+            StatusCode::BAD_REQUEST,
+            "model_endpoint_unavailable",
+            format!(
+                "`{model}` has no confirmed {} support; choose a compatible model",
+                surface.path()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1351,6 +1375,52 @@ mod tests {
                     .unwrap();
                 assert!(response.status().is_success());
             });
+    }
+
+    #[tokio::test]
+    async fn discovery_and_request_admission_share_endpoint_capabilities() {
+        let (state, _events) = state();
+        state.set_tokens(tokens());
+        let mut catalog = Catalog::from_remote(
+            &json!({"data": [
+                {"id": "responses-only"}, {"id": "messages-only"}, {"id": "chat-only"}
+            ]}),
+            1,
+        )
+        .unwrap();
+        for (model, surface) in catalog.models.iter_mut().zip([
+            Surface::Responses,
+            Surface::Messages,
+            Surface::ChatCompletions,
+        ]) {
+            model.supported_surfaces = Some(vec![surface]);
+        }
+        state.publish(Session {
+            verified: true,
+            catalog: Some(catalog),
+            ..Session::default()
+        });
+        for (token, expected) in [
+            ("codex-token", "responses-only"),
+            ("claude-token", "messages-only"),
+            ("opencode-token", "chat-only"),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::AUTHORIZATION,
+                format!("Bearer {token}").parse().unwrap(),
+            );
+            let response = models(State(state.clone()), headers).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap())
+                    .unwrap();
+            assert_eq!(body["data"].as_array().unwrap().len(), 1);
+            assert_eq!(body["data"][0]["id"], expected);
+        }
+        assert!(check_catalog(&state, Some("messages-only"), Surface::Messages).is_ok());
+        let error = check_catalog(&state, Some("messages-only"), Surface::Responses).unwrap_err();
+        assert_eq!(error.code, "model_endpoint_unavailable");
     }
 
     async fn verified(state: &ProxyState, sidecar: &str, generation: u64, epoch: u64) {

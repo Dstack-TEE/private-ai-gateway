@@ -166,15 +166,7 @@ fn perform_action(app: &AppHandle, id: String) {
                         return Err("Agent is not installed".into());
                     }
                     let connect = !agent.recorded;
-                    let options = ConnectOptions {
-                        default_model: if connect && agent_id == "codex" {
-                            client.state()?.catalog.and_then(|catalog| {
-                                catalog.models.first().map(|model| model.id.clone())
-                            })
-                        } else {
-                            None
-                        },
-                    };
+                    let options = ConnectOptions::default();
                     let preview =
                         client.preview_agent(agent.id.clone(), connect, options.clone())?;
                     client.apply_agent(agent.id, connect, preview.revision, options)?;

@@ -30,7 +30,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     brand::PRODUCT_NAME,
-    catalog::Catalog,
+    catalog::{Catalog, Surface},
     config_doc::{parse_jsonc, ConfigDoc, ConfigValue, Format},
     lock,
     secrets::SecretStore,
@@ -131,6 +131,16 @@ pub enum Agent {
 }
 
 impl Agent {
+    pub fn surface(self) -> Surface {
+        match self {
+            Self::Codex => Surface::Responses,
+            Self::ClaudeCode => Surface::Messages,
+            Self::OpenCode | Self::Pi | Self::Hermes | Self::OpenClaw | Self::OhMyPi => {
+                Surface::ChatCompletions
+            }
+        }
+    }
+
     pub const ALL: [Agent; 7] = [
         Agent::Codex,
         Agent::ClaudeCode,
@@ -305,6 +315,19 @@ fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
     let catalog = inputs
         .catalog
         .ok_or_else(|| "The verified model list is not available".to_string())?;
+    let catalog = catalog.for_surface(agent.surface());
+    if catalog.models.is_empty() {
+        return Err(format!(
+            "No models with confirmed {} support are available for {}",
+            agent.surface().path(),
+            agent.name()
+        ));
+    }
+    let inputs = &Inputs {
+        catalog: Some(&catalog),
+        ..*inputs
+    };
+    let catalog = &catalog;
     let default_model = inputs
         .options
         .default_model
@@ -313,8 +336,10 @@ fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
         .filter(|model| !model.is_empty());
     if default_model.is_some_and(|model| catalog.get(model).is_none()) {
         return Err(format!(
-            "`{}` is not in the verified model list",
-            default_model.unwrap_or_default()
+            "`{}` is not in the verified model list compatible with {} ({})",
+            default_model.unwrap_or_default(),
+            agent.name(),
+            agent.surface().path()
         ));
     }
     if agent == Agent::Codex && default_model.is_none() {
@@ -538,7 +563,7 @@ fn pi_provider(
         .collect();
     Ok(serde_json::json!({
         "baseUrl": format!("{base}/v1"),
-        "api": "openai-responses",
+        "api": "openai-completions",
         "apiKey": format!("!{}", credential_helper_command(helper_exe, Agent::Pi)?),
         "models": models,
     }))
@@ -566,6 +591,7 @@ fn codex_catalog(
     let models = catalog
         .models
         .iter()
+        .filter(|model| model.supports(Surface::Responses))
         .enumerate()
         .map(|(index, model)| {
             let leaf = model.id().rsplit('/').next().unwrap_or(model.id());
@@ -850,6 +876,9 @@ fn is_sensitive(path: &[String]) -> bool {
 /// What a connection wrote, kept so a disconnect can restore exactly that.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Connection {
+    /// Last catalog reconciled, including failed attempts, to avoid repeated writes.
+    #[serde(default)]
+    catalog_revision: Option<String>,
     #[serde(default)]
     config_path: Option<PathBuf>,
     fields: Vec<OwnedField>,
@@ -1330,12 +1359,29 @@ impl Projector {
                         let path = self.action_path(agent, store.get(agent.id()), true)?;
                         self.connect(agent, &mut store, text, &path, catalog, &record.options)
                     })
+                } else if !record.suspended
+                    && catalog.is_some_and(|catalog| {
+                        record.catalog_revision.as_deref() != Some(catalog.revision.as_str())
+                    })
+                {
+                    (|| {
+                        self.require_helper()?;
+                        let text = self.read_config(agent)?;
+                        let doc = self.parse_config(agent, text.as_deref())?;
+                        let options = ConnectOptions {
+                            default_model: selected_model(agent, Some(&doc))
+                                .or_else(|| record.options.default_model.clone()),
+                        };
+                        let path = self.action_path(agent, store.get(agent.id()), true)?;
+                        self.connect(agent, &mut store, text, &path, catalog, &options)
+                    })()
                 } else {
                     Ok(())
                 };
                 if let Err(error) = result {
                     if let Some(record) = store.get_mut(agent.id()) {
                         record.attention = Some(error.clone());
+                        record.catalog_revision = catalog.map(|catalog| catalog.revision.clone());
                     }
                     self.save_store(&store)?;
                     failures.push((agent.id().to_string(), error));
@@ -1463,6 +1509,7 @@ impl Projector {
             if let Some(mut record) = edit.record {
                 record.config_path = Some(path.to_path_buf());
                 record.options = options.clone();
+                record.catalog_revision = catalog.map(|catalog| catalog.revision.clone());
                 store.insert(agent.id().to_string(), record);
             }
             self.save_store(store)
@@ -1636,7 +1683,7 @@ impl Projector {
                 let existing = doc.get_str(&["model", "default"]);
                 let selected = options.default_model.as_deref().map(str::trim).filter(|s| !s.is_empty())
                     .or(existing.as_deref());
-                if selected.is_none_or(|id| id.is_empty() || catalog.is_some_and(|catalog| catalog.get(id).is_none())) {
+                if selected.is_none_or(|id| id.is_empty() || catalog.is_some_and(|catalog| catalog.get(id).is_none_or(|model| !model.supports(agent.surface())))) {
                     return Err("Choose a verified default model for Hermes; the existing default cannot be used for this connection".to_string());
                 }
                 let path = Agent::Hermes.config_path(&self.home, self.tool_env);
@@ -1900,7 +1947,10 @@ impl Projector {
             );
         } else if status.connected {
             if let (Some(catalog), Some(model)) = (catalog, selected_model(agent, doc.as_ref())) {
-                if catalog.get(&model).is_none() {
+                if catalog
+                    .get(&model)
+                    .is_none_or(|model| !model.supports(agent.surface()))
+                {
                     status.attention = Some(format!(
                         "`{model}` is not available from the current profile. Choose an available model in the agent; the connection does not need to be recreated."
                     ));
@@ -2358,7 +2408,12 @@ fn connection_options(
     ConnectOptions {
         default_model: preferred.or_else(|| {
             catalog
-                .and_then(|catalog| catalog.models.first())
+                .and_then(|catalog| {
+                    catalog
+                        .models
+                        .iter()
+                        .find(|model| model.supports(agent.surface()))
+                })
                 .map(|model| model.id().to_string())
         }),
     }
@@ -4050,6 +4105,120 @@ mod tests {
     }
 
     #[test]
+    fn inventory_refresh_updates_active_catalog_without_rotating_credentials() {
+        let sandbox = sandbox("inventory-refresh");
+        let agent = Agent::Pi;
+        let path = agent.config_path(&sandbox.home, false);
+        write(&path, r#"{"custom":true}"#);
+        write(
+            &sandbox
+                .home
+                .join(".local/bin")
+                .join(if cfg!(windows) { "pi.exe" } else { "pi" }),
+            "test cli",
+        );
+        let mut catalog = catalog();
+        let options = ConnectOptions::default();
+        let preview = sandbox
+            .projector
+            .preview(agent, true, Some(&catalog), &options)
+            .unwrap();
+        sandbox
+            .projector
+            .apply(agent, true, &preview.revision, Some(&catalog), &options)
+            .unwrap();
+        let token = sandbox.projector.tokens.read(agent.id()).unwrap();
+        catalog
+            .apply_endpoint_inventory(
+                "https://tee.redpill.ai",
+                &crate::catalog::EndpointInventory::bundled().unwrap(),
+            )
+            .unwrap();
+        assert!(sandbox
+            .projector
+            .reconcile(Some(&catalog))
+            .unwrap()
+            .is_empty());
+        assert_eq!(sandbox.projector.tokens.read(agent.id()).unwrap(), token);
+        let ConfigValue::Json(provider) = doc(&sandbox, agent)
+            .get_value(&["providers", "private-ai-proxy"])
+            .unwrap()
+        else {
+            panic!("missing Pi catalog");
+        };
+        assert_eq!(provider["models"].as_array().unwrap().len(), 1);
+        let record = fs::read(sandbox.projector.store_path()).unwrap();
+        assert!(sandbox
+            .projector
+            .reconcile(Some(&catalog))
+            .unwrap()
+            .is_empty());
+        assert_eq!(fs::read(sandbox.projector.store_path()).unwrap(), record);
+        disconnect(&sandbox, agent);
+        assert!(doc(&sandbox, agent)
+            .get_value(&["providers", "private-ai-proxy"])
+            .is_none());
+        assert_eq!(
+            doc(&sandbox, agent).get_value(&["custom"]),
+            Some(ConfigValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn projections_and_codex_defaults_use_the_same_endpoint_filter() {
+        let sandbox = sandbox("endpoint-filter");
+        let mut catalog = catalog();
+        catalog.models[0].supported_surfaces = Some(vec![Surface::ChatCompletions]);
+        catalog.models[1].supported_surfaces = Some(vec![Surface::Responses]);
+        let options = ConnectOptions::default();
+        for agent in [Agent::Codex, Agent::Pi] {
+            let preview = sandbox
+                .projector
+                .preview(agent, true, Some(&catalog), &options)
+                .unwrap();
+            sandbox
+                .projector
+                .apply(agent, true, &preview.revision, Some(&catalog), &options)
+                .unwrap();
+        }
+        assert_eq!(
+            doc(&sandbox, Agent::Codex).get_str(&["model"]).as_deref(),
+            Some("phala/qwen")
+        );
+        let bundled: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(sandbox.projector.codex_catalog_path()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(bundled["models"].as_array().unwrap().len(), 1);
+        assert_eq!(bundled["models"][0]["slug"], "phala/qwen");
+        let ConfigValue::Json(provider) = doc(&sandbox, Agent::Pi)
+            .get_value(&["providers", "private-ai-proxy"])
+            .unwrap()
+        else {
+            panic!("missing Pi provider");
+        };
+        assert_eq!(provider["models"].as_array().unwrap().len(), 1);
+        assert_eq!(provider["models"][0]["id"], "openai/gpt-oss-20b");
+        assert!(sandbox
+            .projector
+            .preview(Agent::ClaudeCode, true, Some(&catalog), &options)
+            .unwrap_err()
+            .contains("No models with confirmed"));
+        assert!(sandbox
+            .projector
+            .preview(Agent::Codex, true, Some(&catalog), &claude_options())
+            .is_err());
+
+        // Losing support must not silently replace the saved Codex selection.
+        catalog.models[0].supported_surfaces = Some(vec![Surface::Responses]);
+        catalog.models[1].supported_surfaces = Some(vec![]);
+        assert!(sandbox
+            .projector
+            .preview(Agent::Codex, true, Some(&catalog), &options)
+            .is_err());
+    }
+
+    #[test]
     fn pi_and_hermes_use_verified_model_discovery() {
         let sandbox = sandbox("discovery-providers");
         let catalog = Catalog::from_remote(
@@ -4080,6 +4249,7 @@ mod tests {
         let ConfigValue::Json(provider) = provider else {
             panic!("Pi provider must be a generated JSON catalog");
         };
+        assert_eq!(provider["api"], "openai-completions");
         assert_eq!(provider["models"].as_array().unwrap().len(), 2);
         assert_eq!(provider["models"][0]["id"], "openai/gpt-oss-20b");
         assert_eq!(provider["models"][0]["input"], json!(["text", "image"]));

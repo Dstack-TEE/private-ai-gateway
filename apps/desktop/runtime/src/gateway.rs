@@ -18,8 +18,10 @@ use crate::contracts::{
     CatalogSummary, ConfidentialProfile, GatewayIdentity, GatewayState, LocalApiConfig,
     RequestActivity, SourceProvenance, StartGatewayConfig, UsageSummary, VerificationCheck,
 };
+use crate::endpoint_inventory::InventoryUpdater;
 use crate::usage::UsageStore;
 use crate::{local_api, service_config};
+use desktop_gateway::catalog::{Catalog, EndpointInventory};
 use desktop_gateway::proxy::{ProxyEvent, ProxyState, Session};
 use serde_json::{Map, Value};
 use tokio::{
@@ -33,6 +35,7 @@ const MAX_DIAGNOSTIC_BYTES: usize = 4_096;
 const MAX_EVENT_BYTES: usize = 1_048_576;
 
 pub struct GatewayManager {
+    inventory: Option<InventoryUpdater>,
     inner: Mutex<RuntimeState>,
     proxy: Arc<ProxyState>,
     usage: Arc<UsageStore>,
@@ -84,6 +87,10 @@ struct RuntimeState {
 }
 
 impl GatewayManager {
+    pub(crate) fn with_endpoint_inventory(mut self, inventory: InventoryUpdater) -> Self {
+        self.inventory = Some(inventory);
+        self
+    }
     pub fn new(
         proxy: Arc<ProxyState>,
         usage: Arc<UsageStore>,
@@ -127,6 +134,7 @@ impl GatewayManager {
                 state,
             }),
             proxy,
+            inventory: None,
             usage,
             launcher,
             task_runtime,
@@ -582,7 +590,19 @@ impl GatewayManager {
     }
 
     async fn load_catalog(self: &Arc<Self>, generation: u64, epoch: u64) -> Result<(), String> {
-        let result = self.proxy.fetch_catalog(generation, epoch).await;
+        let endpoint = self.lock()?.state.remote_url.clone();
+        let (result, inventory) =
+            tokio::join!(self.proxy.fetch_catalog(generation, epoch), async {
+                if endpoint
+                    .as_deref()
+                    .is_some_and(Catalog::has_endpoint_inventory)
+                {
+                    if let Some(updater) = &self.inventory {
+                        return Ok(updater.refresh().await);
+                    }
+                }
+                EndpointInventory::bundled()
+            });
         let mut runtime = self.lock()?;
         if runtime.generation != generation || runtime.epoch != epoch || !runtime.identity_ready {
             return Ok(());
@@ -590,6 +610,12 @@ impl GatewayManager {
         let Some(sidecar_url) = runtime.sidecar_url.clone() else {
             return Ok(());
         };
+        let result = result.and_then(|mut catalog| {
+            if let Some(endpoint) = runtime.state.remote_url.as_deref() {
+                catalog.apply_endpoint_inventory(endpoint, &inventory?)?;
+            }
+            Ok(catalog)
+        });
         let outcome = match result {
             Ok(catalog) => {
                 let summary = CatalogSummary::from_catalog(&catalog, runtime.last_catalog.as_ref());
