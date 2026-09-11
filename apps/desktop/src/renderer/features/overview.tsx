@@ -1,6 +1,6 @@
 import React, { memo } from "react";
 import { AccountTools } from "../components/account-tools";
-import { ChevronDown, CircleHelp, Info, Plus } from "lucide-react";
+import { ChevronDown, CircleHelp, Info, Plus, Settings } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { StateLabel } from "../components/state-label";
 import { Hint } from "../components/hint";
@@ -104,7 +104,7 @@ export function Overview({
       <SessionSummary summary={state.sessionUsage} active={protectedNow || Boolean(state.sessionActive || state.reconnecting)} />
       </div>
       <div className="overview-grid mt-4 grid grid-cols-2 grid-rows-[auto_auto] gap-4 @max-[540px]/overview:grid-cols-1 [&_>_.overview-module:first-child]:col-start-1 [&_>_.overview-module:first-child]:row-start-1 [&_>_.overview-module:nth-child(2)]:col-start-1 [&_>_.overview-module:nth-child(2)]:row-start-2 [&_>_.overview-module:nth-child(3)]:col-start-2 [&_>_.overview-module:nth-child(3)]:row-[1_/_span_2] max-[780px]:grid-cols-1 max-[440px]:gap-3">
-        <OverviewModule title="Local API" titleAdornment={<Hint content="Local API examples"><Badge variant="ghost" className="size-6 p-0 [&>svg]:size-4!" render={<button type="button" />} aria-label="Local API examples" aria-haspopup="dialog" onClick={onLocalExamples}><CircleHelp aria-hidden="true" /></Badge></Hint>} status={<StateLabel tone={localAvailable ? "success" : "neutral"} text={localAvailable ? "Available" : "Unavailable"} />}>
+        <OverviewModule title="Local API" titleAdornment={<Hint content="Local API examples"><Badge variant="ghost" className="size-6 p-0 [&>svg]:size-4!" render={<button type="button" />} aria-label="Local API examples" aria-haspopup="dialog" onClick={onLocalExamples}><CircleHelp aria-hidden="true" /></Badge></Hint>} status={<StateLabel tone={localAvailable ? "success" : "neutral"} text={localAvailable ? "Available" : "Unavailable"} />} action={<IconButton label="Local API settings" aria-haspopup="dialog" onClick={onLocalSettings}><Settings size={16} /></IconButton>}>
           <LocalApiPanel
             proxyUrl={state.proxyUrl}
             endpointError={state.endpointError}
@@ -112,7 +112,6 @@ export function Overview({
             clientKeyVisible={clientKeyVisible}
             copied={copied}
             onCopy={onCopy}
-            onSettings={onLocalSettings}
             onToggleKey={onToggleClientKey}
           />
         </OverviewModule>
@@ -232,7 +231,7 @@ function OverviewModule({
   description?: string;
   titleAdornment?: React.ReactNode;
   status?: React.ReactNode;
-  action?: string;
+  action?: React.ReactNode;
   onAction?(): void;
 }>): React.JSX.Element {
   return (
@@ -240,7 +239,7 @@ function OverviewModule({
       <CardHeader className="items-center">
         <CardTitle className="overview-module-title flex items-center flex-wrap gap-2"><h2 className="text-base font-medium">{title}</h2>{titleAdornment}{status}</CardTitle>
         {description && <CardDescription>{description}</CardDescription>}
-        {action && onAction && <CardAction><Button variant="outline" size="sm" onClick={onAction}>{action}</Button></CardAction>}
+        {action && <CardAction>{onAction ? <Button variant="outline" size="sm" onClick={onAction}>{action}</Button> : action}</CardAction>}
       </CardHeader>
       <CardContent className="module min-w-0 @container min-h-0 flex-1">{children}</CardContent>
     </Card>

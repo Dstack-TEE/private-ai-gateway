@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { errorMessage } from "../lib/error-message";
-import { Check, Copy, Eye, EyeOff, RefreshCw, Settings } from "lucide-react";
+import { Check, Copy, Eye, EyeOff, RefreshCw } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { ListenAddress, localAddressKind } from "../components/listen-address";
 import { NetworkWarning } from "../components/network-warning";
@@ -23,7 +23,6 @@ export function LocalApiPanel({
   clientKeyVisible,
   copied,
   onCopy,
-  onSettings,
   onToggleKey,
 }: {
   proxyUrl?: string;
@@ -32,7 +31,6 @@ export function LocalApiPanel({
   clientKeyVisible: boolean;
   copied?: string;
   onCopy(label: string, value: string): Promise<void>;
-  onSettings(): void;
   onToggleKey(): void;
 }): React.JSX.Element {
   const endpointLabel = "Local endpoint";
@@ -52,7 +50,6 @@ export function LocalApiPanel({
           <code className="row-note flex-[1_0_100%] block text-muted-foreground text-xs wrap-anywhere [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [code&]:overflow-hidden [code&]:text-ellipsis [code&]:whitespace-nowrap">{proxyUrl ?? "Unavailable"}</code>
           <span className={`copy-feedback absolute right-13.5 top-[50%] opacity-0 -translate-y-1/2 text-muted-foreground text-xs font-semibold [transition:opacity_120ms_ease] [&.is-copied]:opacity-100 [&.is-copied]:text-primary ${copied === endpointLabel ? "is-copied" : ""}`}>{copied === endpointLabel ? "Copied" : "Copy"}</span>
         </Button>
-        <IconButton className="row-action relative z-2 ml-auto" label="Local API settings" aria-haspopup="dialog" onClick={onSettings}><Settings size={16} /></IconButton>
       </Item>
       <Item variant="muted" size="xs" className="copy-row relative min-w-0 h-14 overflow-hidden">
         <Button variant="ghost" className="copy-surface absolute inset-0 min-w-0 min-h-0 pt-2.25 pr-[min(100px,_40%)] pb-2.25 pl-3 flex flex-col items-start justify-center gap-0.5 bg-transparent border-0 text-left [&_>_*]:max-w-full [&_>_.row-title-line]:w-full [&_>_.row-title-line]:min-w-0 [&_>_.row-note]:w-full [&_>_.row-note]:min-w-0 [&_>_.row-title-line]:overflow-hidden [&_>_.row-title-line_>_*]:min-w-0 [&_>_.row-title-line_>_*]:overflow-hidden [&_>_.row-title-line_>_*]:text-ellipsis [&_>_.row-title-line_>_*]:whitespace-nowrap [&_>_.row-note]:flex-none [&_.row-title]:text-muted-foreground [&_.row-title]:text-xs [&_.row-title]:font-normal [&_code.row-note]:text-foreground [&_code.row-note]:text-sm hover:bg-muted [&_code]:max-w-full [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [&:hover_.copy-feedback]:opacity-100 [&:focus-visible_.copy-feedback]:opacity-100 h-full w-full rounded-none" disabled={!clientKey} aria-label={`${keyLabel}: ${clientKeyVisible ? clientKey : "hidden"}. Copy`} onClick={() => clientKey && void onCopy(keyLabel, clientKey)}>
