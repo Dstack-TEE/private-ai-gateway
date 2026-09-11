@@ -1173,7 +1173,7 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
   return (
     <div className="desktop-preview relative w-full h-full min-w-50 pt-12 pr-6 pb-6 pl-6 grid place-items-center overflow-hidden bg-background bg-[url('/macos-wallpaper.webp')] bg-center bg-cover bg-no-repeat max-[620px]:pt-10 max-[620px]:pr-2 max-[620px]:pb-2 max-[620px]:pl-2">
       <MacMenuBar protected={isProtected(state)} trayOpen={previewTrayOpen} onTray={() => setPreviewTrayOpen((open) => !open)} />
-      <div className="desktop-window relative box-content w-[min(1052px,_calc(100%_-_2px))] h-[min(784px,_calc(100vh_-_74px))] min-h-140 overflow-hidden bg-background border border-[color-mix(in_srgb,_var(--color-black)_20%,_transparent)] rounded-lg [box-shadow:0_22px_60px_color-mix(in_srgb,_var(--color-black)_30%,_transparent),_0_2px_8px_color-mix(in_srgb,_var(--color-black)_16%,_transparent)] max-[620px]:w-[calc(100vw_-_16px)] max-[620px]:h-[calc(100vh_-_48px)] max-[620px]:min-h-0">{windowContent}</div>
+      <div className="desktop-window relative box-content w-[min(1052px,_calc(100%_-_2px))] h-[min(752px,_calc(100vh_-_74px))] min-h-140 overflow-hidden bg-background border border-[color-mix(in_srgb,_var(--color-black)_20%,_transparent)] rounded-lg [box-shadow:0_22px_60px_color-mix(in_srgb,_var(--color-black)_30%,_transparent),_0_2px_8px_color-mix(in_srgb,_var(--color-black)_16%,_transparent)] max-[620px]:w-[calc(100vw_-_16px)] max-[620px]:h-[calc(100vh_-_48px)] max-[620px]:min-h-0">{windowContent}</div>
       {previewTrayOpen && (
         <PreviewTrayMenu
           state={state}
@@ -1474,7 +1474,7 @@ function Overview({
           <TriangleAlert size={15} aria-hidden="true" /> {problem}
         </p>
       )}
-      <div className="overview-grid flex-1 mt-4 grid grid-cols-2 grid-rows-[minmax(212px,_1fr)_auto] gap-4 @max-[540px]/overview:grid-cols-1 [&_>_.overview-module:first-child]:col-start-1 [&_>_.overview-module:first-child]:row-start-1 [&_>_.overview-module:nth-child(2)]:col-start-1 [&_>_.overview-module:nth-child(2)]:row-start-2 [&_>_.overview-module:nth-child(3)]:col-start-2 [&_>_.overview-module:nth-child(3)]:row-[1_/_span_2] max-[780px]:grid-cols-1 max-[440px]:gap-3">
+      <div className="overview-grid mt-4 grid grid-cols-2 grid-rows-[auto_auto] gap-4 @max-[540px]/overview:grid-cols-1 [&_>_.overview-module:first-child]:col-start-1 [&_>_.overview-module:first-child]:row-start-1 [&_>_.overview-module:nth-child(2)]:col-start-1 [&_>_.overview-module:nth-child(2)]:row-start-2 [&_>_.overview-module:nth-child(3)]:col-start-2 [&_>_.overview-module:nth-child(3)]:row-[1_/_span_2] max-[780px]:grid-cols-1 max-[440px]:gap-3">
         <OverviewModule title="Local API" titleAdornment={<Hint content="Local API examples"><Badge variant="ghost" className="size-6 p-0 [&>svg]:size-4!" render={<button type="button" />} aria-label="Local API examples" aria-haspopup="dialog" onClick={onLocalExamples}><CircleHelp aria-hidden="true" /></Badge></Hint>} status={<StateLabel tone={localAvailable ? "success" : "neutral"} text={localAvailable ? "Available" : "Unavailable"} />}>
           <LocalApiPanel
             proxyUrl={state.proxyUrl}
@@ -1678,8 +1678,8 @@ function LocalApiPanel({
   const endpointLabel = "Local endpoint";
   const keyLabel = "Client key";
   return (
-    <div className="copy-rows relative h-full grid grid-rows-[repeat(2,_minmax(64px,_1fr))] gap-3">
-      <Item variant="muted" size="xs" className="copy-row relative min-w-0 min-h-16 overflow-hidden">
+    <div className="copy-rows relative grid auto-rows-auto gap-3">
+      <Item variant="muted" size="xs" className="copy-row relative min-w-0 h-14 overflow-hidden">
         <Button variant="ghost"
           className="copy-surface absolute inset-0 min-w-0 min-h-0 pt-2.25 pr-[min(100px,_40%)] pb-2.25 pl-3 flex flex-col items-start justify-center gap-0.5 bg-transparent border-0 text-left [&_>_*]:max-w-full [&_>_.row-title-line]:w-full [&_>_.row-title-line]:min-w-0 [&_>_.row-note]:w-full [&_>_.row-note]:min-w-0 [&_>_.row-title-line]:overflow-hidden [&_>_.row-title-line_>_*]:min-w-0 [&_>_.row-title-line_>_*]:overflow-hidden [&_>_.row-title-line_>_*]:text-ellipsis [&_>_.row-title-line_>_*]:whitespace-nowrap [&_>_.row-note]:flex-none [&_.row-title]:text-muted-foreground [&_.row-title]:text-xs [&_.row-title]:font-normal [&_code.row-note]:text-foreground [&_code.row-note]:text-sm hover:bg-muted [&_code]:max-w-full [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [&:hover_.copy-feedback]:opacity-100 [&:focus-visible_.copy-feedback]:opacity-100 h-full w-full rounded-none"
           disabled={!proxyUrl}
@@ -1694,7 +1694,7 @@ function LocalApiPanel({
         </Button>
         <IconButton className="row-action relative z-2 ml-auto" label="Local API settings" aria-haspopup="dialog" onClick={onSettings}><Settings size={16} /></IconButton>
       </Item>
-      <Item variant="muted" size="xs" className="copy-row relative min-w-0 min-h-16 overflow-hidden">
+      <Item variant="muted" size="xs" className="copy-row relative min-w-0 h-14 overflow-hidden">
         <Button variant="ghost" className="copy-surface absolute inset-0 min-w-0 min-h-0 pt-2.25 pr-[min(100px,_40%)] pb-2.25 pl-3 flex flex-col items-start justify-center gap-0.5 bg-transparent border-0 text-left [&_>_*]:max-w-full [&_>_.row-title-line]:w-full [&_>_.row-title-line]:min-w-0 [&_>_.row-note]:w-full [&_>_.row-note]:min-w-0 [&_>_.row-title-line]:overflow-hidden [&_>_.row-title-line_>_*]:min-w-0 [&_>_.row-title-line_>_*]:overflow-hidden [&_>_.row-title-line_>_*]:text-ellipsis [&_>_.row-title-line_>_*]:whitespace-nowrap [&_>_.row-note]:flex-none [&_.row-title]:text-muted-foreground [&_.row-title]:text-xs [&_.row-title]:font-normal [&_code.row-note]:text-foreground [&_code.row-note]:text-sm hover:bg-muted [&_code]:max-w-full [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [&:hover_.copy-feedback]:opacity-100 [&:focus-visible_.copy-feedback]:opacity-100 h-full w-full rounded-none" disabled={!clientKey} aria-label={`${keyLabel}: ${clientKeyVisible ? clientKey : "hidden"}. Copy`} onClick={() => clientKey && void onCopy(keyLabel, clientKey)}>
           <span className="row-title-line max-w-full flex items-center flex-wrap gap-y-1 gap-x-2">
             <span className="row-title">Client key</span>
@@ -1999,11 +1999,11 @@ function UsageStats({ page }: { page?: UsagePage }): React.JSX.Element {
   const stats = [
     ["Requests", summary ? summary.requests.toLocaleString() : "—", summary ? `${failedOrRejected.toLocaleString()} failed or rejected` : "—"],
     ["Tokens", summary ? formatTokens(totalTokens) : "—", summary ? `${formatTokens(summary.inputTokens)} in · ${formatTokens(summary.outputTokens)} out` : "—"],
-    ["Cost", summary ? currency(summary.costUsd) : "—", "Estimated from model prices"],
+    ["Estimated cost", summary ? currency(summary.costUsd) : "—", "Based on model prices"],
     ["Protected", forwarded ? `${Math.round(protectedRate * 100)}%` : "—", summary ? `${summary.protected} of ${forwarded} responses` : "—"],
   ];
   return <div className="usage-stats mt-4 grid grid-cols-4 gap-4 max-[780px]:grid-cols-2">
-    {stats.map(([label, value, detail]) => <Card key={label} size="sm" className="min-w-0"><CardContent className="grid gap-1"><span className="text-xs text-muted-foreground">{label}</span><strong className="truncate text-xl font-semibold tabular-nums">{value}</strong><small className="text-xs text-muted-foreground">{detail}</small></CardContent></Card>)}
+    {stats.map(([label, value, detail]) => <Card key={label} size="sm" className="min-w-0"><CardContent className="grid gap-1"><span className="text-xs text-muted-foreground">{label}</span><strong className="truncate text-xl font-semibold tabular-nums">{value}</strong><small className="truncate text-xs text-muted-foreground">{detail}</small></CardContent></Card>)}
   </div>;
 }
 

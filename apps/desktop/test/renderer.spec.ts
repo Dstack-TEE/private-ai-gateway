@@ -1374,7 +1374,7 @@ test("updates are discovered on launch and installation requires confirmation", 
 });
 
 test("success colors, list separators, control sizes and About alignment are consistent", async ({ page }) => {
-  await page.setViewportSize({ width: 1052, height: 784 });
+  await page.setViewportSize({ width: 1052, height: 752 });
   for (const colorScheme of ["light", "dark"] as const) {
     await page.emulateMedia({ colorScheme });
     await page.goto("/?mock=ready");
