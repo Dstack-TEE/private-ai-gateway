@@ -887,10 +887,7 @@ fn redpill_details(account: &Value) -> Result<AccountLoginDetails, String> {
             }),
             scope: Some(Box::new(AccountScope {
                 organization_id: Some(string(account, "organization_id")?),
-                organization_slug: account
-                    .get("organization_slug")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
+                organization_slug: Some(string(account, "organization_slug")?),
                 organization: Some(string(account, "organization_name")?),
                 ..AccountScope::default()
             })),
@@ -987,21 +984,12 @@ fn parse_account_balance(
             can_top_up: data
                 .get("can_top_up")
                 .and_then(Value::as_bool)
-                .unwrap_or(false),
-            organization_id: data
-                .get("organization_id")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
+                .ok_or("Invalid billing permissions response")?,
+            organization_id: Some(string(data, "organization_id")?),
             granted_usd: None,
             scope: AccountScope {
-                organization_id: data
-                    .get("organization_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                organization_slug: data
-                    .get("organization_slug")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
+                organization_id: Some(string(data, "organization_id")?),
+                organization_slug: Some(string(data, "organization_slug")?),
                 organization: Some(string(data, "organization_name")?),
                 workspace: data
                     .get("workspace_name")
@@ -1103,18 +1091,14 @@ mod tests {
             organization_url(Some("research-team")).unwrap(),
             "https://redpill.ai/research-team"
         );
-        let legacy: AccountBalance = serde_json::from_value(json!({"balanceUsd":"1", "grantedUsd":null, "scope":{"organization":null,"workspace":null,"workspaceId":null}})).unwrap();
-        assert!(!legacy.can_top_up && legacy.organization_id.is_none());
-        let older_api = parse_account_balance(
-            &ServiceProvider::Redpill,
-            StatusCode::OK,
-            &json!({"balance_usd":"12.5", "organization_name":"Research"}),
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(older_api.balance_usd, "12.5");
-        assert!(older_api.organization_id.is_none());
-        assert!(older_api.scope.organization_slug.is_none());
+        for field in ["organization_id", "organization_slug", "can_top_up"] {
+            let mut incomplete = data.clone();
+            incomplete.as_object_mut().unwrap().remove(field);
+            assert!(
+                parse_account_balance(&ServiceProvider::Redpill, StatusCode::OK, &incomplete)
+                    .is_err()
+            );
+        }
         assert_eq!(
             top_up_url(
                 &ServiceProvider::Redpill,
