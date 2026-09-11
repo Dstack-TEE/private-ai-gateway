@@ -2071,13 +2071,13 @@ test("RedPill confirms workspace and exposes scoped balance and top-up actions",
   await editor.getByRole("button", { name: "Sign in with RedPill" }).click();
   const accountSummary = editor.getByLabel("Account details");
   await expect(accountSummary.getByText("Personal organization", { exact: true })).toBeVisible();
-  await expect(accountSummary.getByText("Signed in as Alice Example", { exact: true })).toBeVisible();
+  await expect(accountSummary.getByText("Signed in as Alice Example", { exact: true })).toHaveCount(0);
   await expect(accountSummary.getByRole("img", { name: "Personal organization avatar" })).toBeVisible();
-  await expect(accountSummary.getByRole("img", { name: "Alice Example avatar" })).toBeVisible();
+  await expect(accountSummary.getByRole("img", { name: "Alice Example avatar" })).toHaveCount(0);
   await expect(accountSummary.getByText("$12.50", { exact: true })).toBeVisible();
   await expect(accountSummary.getByRole("textbox")).toHaveCount(0);
   await accountSummary.getByRole("button", { name: "Account actions" }).click();
-  await expect(page.getByRole("menuitem", { name: "Switch account" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Switch" })).toBeVisible();
   await page.getByRole("menuitem", { name: "Refresh balance" }).click();
   await expect(page.getByRole("menu")).toHaveCount(0);
   const save = editor.getByRole("button", { name: "Save" });
@@ -2137,9 +2137,16 @@ test("RedPill confirms workspace and exposes scoped balance and top-up actions",
   await saved.getByRole("button", { name: "Save" }).click();
   await page.getByRole("button", { name: "Edit RedPill" }).click();
   await expect(saved.getByRole("combobox", { name: "Workspace" })).toContainText("Default");
+  await saved.getByRole("button", { name: "Account actions" }).click();
+  await page.getByRole("menuitem", { name: "Switch", exact: true }).click();
+  await saved.getByRole("button", { name: "Cancel Sign-in", exact: true }).click();
+  await expect(saved.getByRole("combobox", { name: "Workspace" })).toContainText("Default");
 });
 
-test("billing permissions hide unavailable actions while keeping account identity", async ({ page }) => {
+test("billing permissions hide billing actions but allow scoped organization management", async ({ page }) => {
+  await page.addInitScript(() => window.addEventListener("mock:manage-organization", (event) => {
+    if (event instanceof CustomEvent) document.documentElement.dataset.managedOrganization = event.detail.organizationId;
+  }));
   await page.clock.install();
   for (const mode of ["oauth-balance-denied", "oauth-balance-readonly"]) {
     await page.goto(`/?mock=${mode}`);
@@ -2147,15 +2154,19 @@ test("billing permissions hide unavailable actions while keeping account identit
     const fresh = page.getByRole("dialog", { name: "New profile" });
     await fresh.getByRole("button", { name: "RedPill", exact: true }).click();
     await fresh.getByRole("button", { name: "Sign in with RedPill" }).click();
-    await expect(fresh.getByText("Signed in as Alice Example", { exact: true })).toBeVisible();
+    await expect(fresh.getByText("Personal organization", { exact: true })).toBeVisible();
     await fresh.getByRole("button", { name: "Save", exact: true }).click();
     await expect(fresh).toHaveCount(0);
     await page.getByRole("button", { name: "Profiles: RedPill" }).click();
     await page.getByRole("button", { name: "Edit RedPill" }).click();
     const editor = page.getByRole("dialog", { name: "Edit profile" });
-    await expect(editor.getByText("Signed in as Alice Example", { exact: true })).toBeVisible();
+    await expect(editor.getByText("Personal organization", { exact: true })).toBeVisible();
     await expect(editor.getByRole("button", { name: "Top up", exact: true })).toHaveCount(0);
     await expect(editor.getByText(/\$0\.00/)).toHaveCount(0);
+    await editor.getByRole("button", { name: "Account actions" }).click();
+    await expect(page.getByRole("menuitem", { name: "Switch", exact: true })).toBeVisible();
+    await page.getByRole("menuitem", { name: "Manage", exact: true }).click();
+    await expect(page.locator("html")).toHaveAttribute("data-managed-organization", "org_test");
     if (mode === "oauth-balance-denied") {
       await expect(editor.getByLabel("Balance in USD")).toHaveCount(0);
       await editor.getByRole("button", { name: "Cancel", exact: true }).click();
@@ -2263,21 +2274,21 @@ test("manual callback fallback keeps RedPill workspace confirmation", async ({ p
 });
 
 
-test("saved account identity refreshes Clerk names and avatars independently of balance", async ({ page }) => {
+test("saved organization refreshes its Clerk name and avatar independently of balance", async ({ page }) => {
   await page.route("https://img.clerk.com/**", (route) => route.fulfill({ contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><circle cx="12" cy="12" r="12" fill="green"/></svg>' }));
   await page.goto("/?mock=oauth-profile-updated");
   await page.getByRole("button", { name: "Set up profile" }).click();
   const fresh = page.getByRole("dialog", { name: "New profile" });
   await fresh.getByRole("button", { name: "RedPill", exact: true }).click();
   await fresh.getByRole("button", { name: "Sign in with RedPill" }).click();
-  await expect(fresh.getByText("Signed in as Alice Example", { exact: true })).toBeVisible();
+  await expect(fresh.getByText("Personal organization", { exact: true })).toBeVisible();
   await fresh.getByRole("button", { name: "Save", exact: true }).click();
   await page.getByRole("button", { name: "Profiles: RedPill" }).click();
   await page.getByRole("button", { name: "Edit RedPill" }).click();
   const editor = page.getByRole("dialog", { name: "Edit profile" });
-  await expect(editor.getByText("Signed in as Alicia Updated", { exact: true })).toBeVisible();
+  await expect(editor.getByText("Signed in as Alicia Updated", { exact: true })).toHaveCount(0);
   await expect(editor.getByText("Updated organization", { exact: true })).toBeVisible();
   await expect(editor.getByLabel("Balance in USD")).toHaveText("$12.50");
-  await expect(editor.getByRole("img", { name: "Alicia Updated avatar" })).toHaveAttribute("src", "https://img.clerk.com/updated-user");
+  await expect(editor.getByRole("img", { name: "Alicia Updated avatar" })).toHaveCount(0);
   await expect(editor.getByRole("img", { name: "Updated organization avatar" })).toHaveAttribute("src", "https://img.clerk.com/updated-org");
 });

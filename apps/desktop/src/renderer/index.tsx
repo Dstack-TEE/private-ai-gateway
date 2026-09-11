@@ -2456,7 +2456,7 @@ function ProfileEditorSheet({
     && profile.auth.kind === (authMethod === "account" ? "oauth" : "apiKey");
   const savedAccount = currentDetails?.auth.kind === "oauth" ? {
     ...currentDetails.auth,
-    scope: { organization: currentDetails.auth.scope?.organization ?? null,
+    scope: { organizationId: currentDetails.auth.scope?.organizationId ?? null, organization: currentDetails.auth.scope?.organization ?? null,
       workspace: savedScope?.workspace ?? null, workspaceId: savedScope?.workspaceId ?? null },
   } : profile?.auth.kind === "oauth" ? profile.auth : undefined;
   const selectedAccount = authorized?.kind === "oauth" ? authorized
@@ -2615,7 +2615,7 @@ function ProfileEditorSheet({
                 </div> : selectedAccount ? <>
                   <AccountTools key={login?.id ?? draft.id} api={desktopApi} provider={draft.provider}
                     target={authorized && login ? { kind: "login", id: login.id } : { kind: "profile", profileId: draft.id }}
-                    scope={accountScope} accountName={selectedAccount.accountName ?? selectedAccount.accountId} images={selectedAccount.images} onSignIn={() => void signIn()}
+                    scope={accountScope} images={selectedAccount.images} onSignIn={() => void signIn()}
                     credentialRef={profile?.credentialRef} disabled={working || frozen} />
                   {(workspaces?.length || accountScope?.workspace) && <FormField id="profile-workspace" label="Workspace">
                     {draft.provider === "redpill" ? <>
