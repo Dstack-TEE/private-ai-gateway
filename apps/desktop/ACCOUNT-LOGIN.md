@@ -3,7 +3,7 @@
 Phala and RedPill profiles offer account login alongside manual API keys. Custom
 endpoints use manual keys. Provider buttons with their icons stay in the form
 content; authorization stages credentials, and the footer offers Cancel and
-Save. Saving verifies the selected provider before persisting either an account or manual key. Preset service endpoints are hidden. The runtime owns the
+Save. Save persists either an account or manual key without starting gateway verification. Preset service endpoints are hidden. The runtime owns the
 browser authorization, verification and OS credential store; the renderer only
 receives presentation and non-secret account metadata.
 
@@ -48,7 +48,7 @@ deleting its budget or usage history. Stored recovery secrets are encrypted
 using each service's existing encryption configuration and never serialized in
 API responses.
 
-The runtime verifies the staged key before saving. A replacement is written to a
+Save validates the configuration and credential format. A replacement is written to a
 new OS credential-store entry, then the profile JSON atomically switches its
 non-secret credential reference. Failure before that switch keeps the previous
 credential selected. Account saves run independently of an individual IPC
@@ -106,7 +106,8 @@ after a key has been issued, changing workspace also requires fresh authorizatio
 
 Balances load automatically after authorization, when opening a saved account,
 and on the active profile's main card. The main card adds only a current-balance
-button beside the profile selector; clicking it refreshes the amount. Organization,
+button beside the profile selector; clicking it opens the provider billing page.
+Refresh remains in the account actions menu. Organization,
 workspace, promotional credits and Top up remain in the editor. The same component handles both surfaces,
 refreshing a visible main card every five minutes, an editor every minute, and
 on focus with a 30-second minimum interval. The runtime coalesces concurrent windows by login ID or profile ID plus
@@ -130,11 +131,47 @@ profile replaces its pending session, including one left by a closed native wind
 A save or balance operation cannot make a
 second begin request wait and unexpectedly launch another flow afterward. Users
 can intentionally create separate profiles for the same account. Browser OAuth
-success is not gateway verification: Save still verifies the selected
-provider before saving and never silently changes the selected tenant.
+success is not gateway verification: the runtime still verifies the selected
+provider when starting or reconnecting protection. Saving alone never claims the
+provider is verified and never silently changes the selected tenant.
 
 Top up opens the system browser at RedPill's `/credits` page or Phala's `/cost`
 page, both of which include recharge controls. These sites use their own browser
 session; the app shows which organization/workspace to select there. No invented
 tenant query parameters, credentials in URLs, automatic checkout, or payment
 mutation is used.
+
+
+## Callback fallback and CLI
+
+The browser callback uses the app's generated brand mark, system typography and
+light/dark appearance. It says Authorization received, not Connected: token
+exchange and local saving may still be pending. The page never echoes the code,
+state or error details; it has no scripts or external assets and sends no-store,
+no-referrer and restrictive CSP headers.
+
+If the automatic loopback redirect cannot reach this machine, expand Paste
+callback link in the RedPill account panel. Paste the complete URL from the
+browser. The runtime accepts only the registered callback origin/path, current
+state and optional issuer, using the same one-shot receiver and PKCE exchange as
+the HTTP callback. Wrong, expired and reused callbacks are rejected. The temporary
+password input is cleared immediately on submission and is not persisted. Copy
+sign-in link is available if the system browser launcher fails.
+
+CLI account login shares the runtime authorization and save state:
+
+```sh
+pap profiles login work --provider redpill
+pap profiles login personal --provider phala
+pap profiles login work --provider redpill --workspace 123 --no-browser --callback-stdin
+pap start --profile work
+```
+
+Login prints/opens the authorization URL. Multiple workspaces prompt in an
+interactive terminal; automation supplies --workspace. RedPill callback fallback
+reads a hidden terminal prompt or a bounded stdin stream, never a command-line
+credential argument. No-browser supports remote terminals. CLI JSON mode returns
+non-secret profile state; login links/prompts go to stderr. A lost save response
+is reconciled by operation ID. Explicit pap profiles verify remains available;
+normal UI Save does not verify. Starting protection always performs attestation
+and connection checks before exposing inference to agents.

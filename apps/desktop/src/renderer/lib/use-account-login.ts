@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AccountLogin, ConfidentialProfileInput, DesktopApi, AccountLoginDetails } from "../../shared/contracts";
 
-type LoginApi = Pick<DesktopApi, "beginAccountLogin" | "pollAccountLogin" | "cancelAccountLogin">;
+type LoginApi = Pick<DesktopApi, "beginAccountLogin" | "pollAccountLogin" | "cancelAccountLogin" | "completeAccountLogin">;
 type LoginState =
   | { phase: "idle" }
   | { phase: "authorizing"; session: AccountLogin }
@@ -65,6 +65,12 @@ export function useAccountLogin(api: LoginApi, onError: (error: unknown) => void
     setState({ phase: "authorizing", session: created });
   }), [api, discard, perform]);
 
+  const complete = useCallback((callbackUrl: string) => perform(async () => {
+    const current = session.current;
+    if (!current) throw new Error("Account login is no longer active");
+    await api.completeAccountLogin(current.id, callbackUrl);
+  }), [api, perform]);
+
   const pending = state.phase === "authorizing" ? state.session : undefined;
   useEffect(() => {
     if (!pending) return;
@@ -106,5 +112,6 @@ export function useAccountLogin(api: LoginApi, onError: (error: unknown) => void
     start,
     cancel,
     consume,
+    complete,
   };
 }

@@ -140,6 +140,8 @@ export const desktopApi: DesktopApi = {
     });
   },
 
+  saveConfiguration: (profile, requireProductionOs, key) => invoke("save_configuration", { profile, requireProductionOs, key }),
+  completeAccountLogin: (id, callbackUrl) => invoke("complete_account_login", { id, callbackUrl }),
   beginAccountLogin: (profile) => invoke("begin_account_login", { profile }),
   saveAccountLogin: (id, profile, requireProductionOs, workspaceId) => invoke("save_account_login", { id, profile, requireProductionOs, workspaceId }),
   getAccountBalance: (target) => invoke("account_balance", { target }),

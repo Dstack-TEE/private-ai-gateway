@@ -1787,7 +1787,7 @@ test("installed agents stay ordered and protection state is consistent across pa
   await expect(page.locator(".overview-module-title").filter({ has: page.getByRole("heading", { name: "Local API", exact: true }) })).toContainText("Unavailable");
 });
 
-test("editing a live profile reconnects, while a failed candidate stays unsaved and unprotected", async ({ page }) => {
+test("saving a profile preserves reconnect intent and allows an offline endpoint", async ({ page }) => {
   await page.goto("/?mock=ready");
   await page.getByRole("button", { name: "Profiles: RedPill" }).click();
   const profiles = page.getByRole("dialog", { name: "Profiles" });
@@ -1805,11 +1805,10 @@ test("editing a live profile reconnects, while a failed candidate stays unsaved 
   await candidate.getByLabel("Service endpoint").fill("https://unreachable.invalid");
   await candidate.getByLabel("API key", { exact: true }).fill("sk-test-candidate");
   await candidate.getByRole("button", { name: "Save" }).click();
-  await expect(candidate.getByRole("alert")).toContainText("did not answer");
-  await candidate.getByRole("button", { name: "Cancel" }).click();
-  await expect(profiles.locator(".profile-select")).toHaveCount(1);
+  await expect(candidate).toHaveCount(0);
+  await expect(profiles.locator(".profile-select")).toHaveCount(2);
   await profiles.getByRole("button", { name: "Done", exact: true }).click();
-  await expect(page.getByLabel("Protection status").getByText("Not protected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Profiles: Custom" })).toBeVisible();
 });
 
 test("a native proof error remains dismissible without a window close button", async ({ page }) => {
@@ -2037,7 +2036,7 @@ test("responsive, zoomed, dark, high-contrast, and reduced-motion layouts stay b
   expect(audit.nestedInteractive).toBe(0);
 });
 
-test("account sign-in stays in the form and requires explicit verification and save", async ({ page }) => {
+test("account sign-in stays in the form and requires explicit save", async ({ page }) => {
   for (const provider of ["Phala", "RedPill"]) {
     await page.goto("/?mock=no-profiles");
     await page.getByRole("switch", { name: "Start protection" }).click();
@@ -2102,6 +2101,9 @@ test("RedPill confirms workspace and exposes scoped balance and top-up actions",
   const mainCard = page.getByRole("region", { name: "Protection status" });
   const balanceButton = mainCard.getByRole("button", { name: "Current balance: $12.50", exact: true });
   await expect(balanceButton).toBeVisible();
+  await page.evaluate(() => { delete document.documentElement.dataset.topUpProvider; });
+  await balanceButton.click();
+  await expect(page.locator("html")).toHaveAttribute("data-top-up-provider", "redpill");
   await expect(mainCard.getByRole("button", { name: "Top up", exact: true })).toHaveCount(0);
   const profileButton = mainCard.getByRole("button", { name: "Profiles: RedPill" });
   const profileBox = await profileButton.boundingBox();
@@ -2196,4 +2198,23 @@ test("account save failure retries the staged grant and saved accounts can be de
   await saved.getByRole("button", { name: "Delete Profile" }).click();
   await expect(saved).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Edit Work" })).toHaveCount(0);
+});
+
+
+test("manual callback fallback completes sign-in without saving automatically", async ({ page }) => {
+  await page.goto("/?mock=oauth-manual-callback");
+  await page.getByRole("button", { name: "Set up profile" }).click();
+  const editor = page.getByRole("dialog", { name: "New profile" });
+  await editor.getByRole("button", { name: "RedPill", exact: true }).click();
+  await editor.getByRole("button", { name: "Sign in with RedPill" }).click();
+  await editor.getByText("Paste callback link", { exact: true }).click();
+  await editor.getByLabel("Callback URL").fill("https://wrong.example/callback?code=secret");
+  await editor.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(editor.getByText("Invalid callback link", { exact: true })).toBeVisible();
+  await expect(editor.getByLabel("Callback URL")).toHaveValue("");
+  await editor.getByLabel("Callback URL").fill("http://127.0.0.1:4181/oauth/callback?state=mock&code=secret");
+  await editor.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(editor.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
+  await expect(editor.getByText("Personal organization", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Profiles: RedPill" })).toHaveCount(0);
 });

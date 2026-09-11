@@ -306,6 +306,27 @@ impl Client {
         self.request(Command::SetPreference(change))
     }
 
+    pub async fn save_configuration(
+        self: &Arc<Self>,
+        profile: ConfidentialProfileInput,
+        require_production_os: bool,
+        key: Option<String>,
+    ) -> Result<GatewayState, String> {
+        self.background(Command::SaveConfiguration {
+            profile,
+            require_production_os,
+            key,
+        })
+        .await
+    }
+    pub async fn complete_account_login(
+        self: &Arc<Self>,
+        id: String,
+        callback_url: String,
+    ) -> Result<(), String> {
+        self.background(Command::CompleteAccountLogin { id, callback_url })
+            .await
+    }
     pub async fn begin_account_login(
         self: &Arc<Self>,
         profile: ConfidentialProfileInput,

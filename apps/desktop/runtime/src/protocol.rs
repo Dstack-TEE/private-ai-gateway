@@ -59,6 +59,15 @@ pub enum Command {
         require_production_os: bool,
         key: Option<String>,
     },
+    SaveConfiguration {
+        profile: ConfidentialProfileInput,
+        require_production_os: bool,
+        key: Option<String>,
+    },
+    CompleteAccountLogin {
+        id: String,
+        callback_url: String,
+    },
     BeginAccountLogin {
         profile: ConfidentialProfileInput,
     },

@@ -373,6 +373,8 @@ export interface DesktopApi {
   /** Use the platform confirmation dialog for destructive actions. */
   confirm(options: ConfirmationOptions): Promise<boolean>;
   start(config: StartGatewayConfig): Promise<GatewayState>;
+  saveConfiguration(profile: ConfidentialProfileInput, requireProductionOs: boolean, key?: string): Promise<GatewayState>;
+  completeAccountLogin(id: string, callbackUrl: string): Promise<void>;
   beginAccountLogin(profile: ConfidentialProfileInput): Promise<AccountLogin>;
   pollAccountLogin(id: string): Promise<AccountLoginDetails | null>;
   saveAccountLogin(id: string, profile: ConfidentialProfileInput, requireProductionOs: boolean, workspaceId?: number): Promise<GatewayState>;

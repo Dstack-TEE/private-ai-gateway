@@ -627,7 +627,7 @@ protocol is the service's own response, shown as such.
   (0600/0700; on Windows they inherit the per-user profile ACL) and tightened
   when read; config writes hold a cross-process file lock from the revision
   check to the final rename.
-- **AI service profiles** are verified before they are saved. A profile
+- **AI service profiles** are saved locally and verified when protection starts. A profile
   combines a user-visible name, provider, endpoint, and authentication method.
   A fresh install starts without a profile and stays on Overview. The protection
   switch opens New Profile when needed; every profile can be deleted, including the last one.
@@ -637,10 +637,10 @@ protocol is the service's own response, shown as such.
   written atomically. Phala and RedPill also offer browser account login; the
   shared runtime exchanges authorization for an inference key and stores only
   the key in the OS credential store. See [Account login](ACCOUNT-LOGIN.md). A successful
-  `Save` verifies and selects the profile and returns to the chooser. If protection
+  `Save` persists and selects the profile and returns to the chooser. If protection
   was off it stays off; if it was on, saving or switching profiles stops protection,
-  restores agent configs, and starts a freshly verified connection. A failed
-  verification keeps protection off and does not save the candidate. Selecting an existing
+  restores agent configs, and starts a freshly verified connection. Saving while stopped does not start verification; protection verifies the service
+  when started. Failed connection leaves the saved profile available for retry. Selecting an existing
   profile also closes the chooser. The window and native tray both route a
   missing or unavailable current profile back into this same flow. Legacy
   single-service settings are recognized at

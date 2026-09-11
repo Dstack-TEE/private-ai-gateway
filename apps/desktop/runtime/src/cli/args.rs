@@ -14,7 +14,7 @@ pub(super) struct Cli {
     /// Emit compact JSON instead of human-readable output.
     #[arg(long, global = true)]
     pub(super) json: bool,
-    /// Never prompt. Mutations still require --yes and credentials require --key-stdin.
+    /// Never prompt. Mutations require --yes; credential inputs use stdin flags.
     #[arg(long, visible_alias = "no-interactive", global = true)]
     pub(super) non_interactive: bool,
     /// Approve a command's documented mutation without prompting.
@@ -51,7 +51,7 @@ pub(super) enum Action {
         #[command(subcommand)]
         command: Service,
     },
-    /// List, inspect, verify, import, export, select, or delete service profiles.
+    /// Sign in, list, inspect, verify, import, export, select, or delete service profiles.
     Profiles {
         #[command(subcommand)]
         command: Profiles,
@@ -170,6 +170,28 @@ pub(super) enum Provider {
     Custom,
 }
 
+#[derive(Args)]
+pub(super) struct AccountLoginOptions {
+    /// Existing or new profile ID.
+    pub id: String,
+    /// Provider for a new profile (defaults to RedPill).
+    #[arg(long, value_enum)]
+    pub provider: Option<Provider>,
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Workspace ID; required if the organization has several workspaces.
+    #[arg(long)]
+    pub workspace: Option<i64>,
+    /// Read a pasted loopback callback URL from stdin (RedPill only).
+    #[arg(long)]
+    pub callback_stdin: bool,
+    /// Print the authorization URL without launching a browser.
+    #[arg(long)]
+    pub no_browser: bool,
+    #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u64).range(1..=900))]
+    pub timeout: u64,
+}
+
 #[derive(Subcommand)]
 pub(super) enum Profiles {
     /// List saved profile metadata. Credentials are never returned.
@@ -190,6 +212,8 @@ pub(super) enum Profiles {
         #[arg(long)]
         output: PathBuf,
     },
+    /// Sign in to Phala or RedPill and save an account profile. Protection starts separately.
+    Login(AccountLoginOptions),
     /// Verify and save a new profile and credential.
     Add {
         #[arg(long, help = "Unique profile ID")]

@@ -1004,17 +1004,44 @@ impl DesktopRuntime {
             .credential(&id, &profile, workspace_id)
             .await?;
         let saved = self
-            .verify_account_configuration(
+            .persist_configuration(
                 profile,
                 require_production_os,
                 Some(credential.key.clone()),
                 Some(credential.auth),
+                false,
             )
             .await?;
         if let Some(pending) = slot.as_mut() {
             pending.mark_saved();
         }
         *slot = None;
+        self.finish_configuration(saved)
+    }
+
+    pub async fn complete_account_login(
+        &self,
+        id: String,
+        callback_url: String,
+    ) -> Result<(), String> {
+        self.account_login
+            .lock()
+            .await
+            .as_ref()
+            .ok_or("Account login is no longer active")?
+            .complete_callback(&id, &callback_url)
+            .await
+    }
+
+    pub async fn save_configuration(
+        self: &Arc<Self>,
+        profile: ConfidentialProfileInput,
+        require_production_os: bool,
+        key: Option<String>,
+    ) -> Result<GatewayState, String> {
+        let saved = self
+            .persist_configuration(profile, require_production_os, key, None, false)
+            .await?;
         self.finish_configuration(saved)
     }
 
@@ -1084,7 +1111,7 @@ impl DesktopRuntime {
         key: Option<String>,
     ) -> Result<GatewayState, String> {
         let saved = self
-            .verify_account_configuration(profile, require_production_os, key, None)
+            .persist_configuration(profile, require_production_os, key, None, true)
             .await?;
         self.finish_configuration(saved)
     }
@@ -1100,12 +1127,13 @@ impl DesktopRuntime {
         }
     }
 
-    async fn verify_account_configuration(
+    async fn persist_configuration(
         self: &Arc<Self>,
         profile: ConfidentialProfileInput,
         require_production_os: bool,
         key: Option<String>,
         auth: Option<crate::contracts::ProfileAuth>,
+        verify: bool,
     ) -> Result<SavedConfiguration<'_>, String> {
         let _operation = self.configuration_change()?;
         let initial = self.manager.snapshot()?;
@@ -1125,7 +1153,7 @@ impl DesktopRuntime {
             .find(|entry| entry.id == profile.id)
             .cloned();
         let mut candidate =
-            service_config::resolve_profile(profile, Some(service_config::now_secs()))?;
+            service_config::resolve_profile(profile, verify.then(service_config::now_secs))?;
         if let Some(auth) = auth {
             candidate.auth = auth;
         } else if key.is_none() {
@@ -1182,40 +1210,45 @@ impl DesktopRuntime {
         let previous = self.manager.snapshot()?;
 
         self.codex_sync.reset()?;
-        self.proxy.set_api_key(Some(candidate_key.clone()));
-        let started = match self
-            .manager
-            .clone()
-            .begin_verification(config.clone(), profile_changed)
-        {
-            Ok(state) => state,
-            Err(error) => {
+        if verify {
+            self.proxy.set_api_key(Some(candidate_key.clone()));
+            let started = match self
+                .manager
+                .clone()
+                .begin_verification(config.clone(), profile_changed)
+            {
+                Ok(state) => state,
+                Err(error) => {
+                    self.proxy.set_api_key(None);
+                    return Err(error);
+                }
+            };
+            let Some(session_id) = started.session_id.clone() else {
+                let _ = self.manager.stop();
                 self.proxy.set_api_key(None);
+                self.manager.restore_snapshot(previous);
+                return Err("Configuration verification did not start".to_string());
+            };
+            let verified = self.manager.wait_for_verification(&session_id).await;
+            let stop_result = self.manager.stop_with_reconnect(initial.session_active);
+            if let Err(error) = verified {
+                self.proxy.set_api_key(None);
+                self.manager.restore_snapshot(previous);
+                return Err(match stop_result {
+                    Ok(_) => error,
+                    Err(stop_error) => {
+                        format!("{error}. The verifier also could not stop: {stop_error}")
+                    }
+                });
+            }
+            if let Err(error) = stop_result {
+                self.proxy.set_api_key(None);
+                self.manager.restore_snapshot(previous);
                 return Err(error);
             }
-        };
-        let Some(session_id) = started.session_id.clone() else {
-            let _ = self.manager.stop();
+        } else {
+            self.manager.stop_with_reconnect(initial.session_active)?;
             self.proxy.set_api_key(None);
-            self.manager.restore_snapshot(previous);
-            return Err("Configuration verification did not start".to_string());
-        };
-        let verified = self.manager.wait_for_verification(&session_id).await;
-        let stop_result = self.manager.stop_with_reconnect(initial.session_active);
-        if let Err(error) = verified {
-            self.proxy.set_api_key(None);
-            self.manager.restore_snapshot(previous);
-            return Err(match stop_result {
-                Ok(_) => error,
-                Err(stop_error) => {
-                    format!("{error}. The verifier also could not stop: {stop_error}")
-                }
-            });
-        }
-        if let Err(error) = stop_result {
-            self.proxy.set_api_key(None);
-            self.manager.restore_snapshot(previous);
-            return Err(error);
         }
 
         let retiring = existing
@@ -1283,7 +1316,7 @@ impl DesktopRuntime {
             settings.profiles,
             settings.active_profile_id,
             true,
-            true,
+            verify,
         );
         if let Err(error) = self.cleanup_retired().await {
             self.manager.report_error(error);
@@ -2250,6 +2283,52 @@ mod tests {
             serde_json::from_str(&runtime.secrets.get(&entries[0]).unwrap().unwrap()).unwrap();
         assert_eq!(pending.action, "revoke");
         assert!(directory.join("account-cleanup.pending").exists());
+    }
+
+    #[test]
+    fn saving_an_offline_profile_does_not_launch_verification() {
+        const CHILD: &str = "PAP_TEST_SAVE_WITHOUT_VERIFY";
+        if std::env::var_os(CHILD).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "controller::tests::saving_an_offline_profile_does_not_launch_verification",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env(desktop_gateway::agents::HOME_OVERRIDE_ENV, home.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let directory = app_data_dir().unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        let runtime = test_runtime(&executor, &directory);
+        let profile = ConfidentialProfileInput {
+            id: "offline".into(),
+            name: "Offline".into(),
+            provider: crate::contracts::ServiceProvider::Custom,
+            remote_url: "https://offline.invalid".into(),
+        };
+        let saved = executor
+            .block_on(runtime.save_configuration(profile, true, Some("test-key".into())))
+            .unwrap();
+        assert_eq!(saved.active_profile_id, "offline");
+        assert_eq!(saved.status, "stopped");
+        assert!(saved.profiles[0].verified_at.is_none());
+        assert!(service_config::profile_has_credential(&saved.profiles[0]));
+        assert!(
+            runtime.start(saved.config).is_err(),
+            "Start must invoke the missing verifier"
+        );
     }
 
     #[test]
