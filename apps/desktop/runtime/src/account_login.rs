@@ -142,7 +142,7 @@ impl Authorization {
 
 enum LoginState {
     Authorizing(JoinHandle<Result<Authorization, String>>),
-    Authorized(Authorization),
+    Authorized(Box<Authorization>),
     Failed(String),
 }
 
@@ -199,7 +199,7 @@ impl PendingLogin {
                 return Ok(None);
             }
             self.state = match task.await {
-                Ok(Ok(authorization)) => LoginState::Authorized(authorization),
+                Ok(Ok(authorization)) => LoginState::Authorized(Box::new(authorization)),
                 Ok(Err(error)) => LoginState::Failed(error),
                 Err(_) => LoginState::Failed("Account login stopped".into()),
             };
