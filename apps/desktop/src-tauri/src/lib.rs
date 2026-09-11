@@ -347,18 +347,18 @@ async fn save_account_login(
 }
 
 #[tauri::command]
-async fn account_workspaces(
+async fn account_details(
     client: State<'_, Arc<Client>>,
     profile_id: String,
-) -> Result<Vec<desktop_runtime::contracts::AccountWorkspace>, String> {
-    client.inner().clone().account_workspaces(profile_id).await
+) -> Result<desktop_runtime::contracts::AccountLoginDetails, String> {
+    client.inner().clone().account_details(profile_id).await
 }
 
 #[tauri::command]
 async fn account_balance(
     client: State<'_, Arc<Client>>,
     target: desktop_runtime::contracts::AccountBalanceTarget,
-) -> Result<desktop_runtime::contracts::AccountBalance, String> {
+) -> Result<Option<desktop_runtime::contracts::AccountBalance>, String> {
     client.inner().clone().account_balance(target).await
 }
 
@@ -366,9 +366,10 @@ async fn account_balance(
 async fn open_top_up(
     app: AppHandle,
     provider: desktop_runtime::contracts::ServiceProvider,
+    organization_id: Option<String>,
 ) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
-    let url = desktop_runtime::account_login::top_up_url(&provider)?;
+    let url = desktop_runtime::account_login::top_up_url(&provider, organization_id.as_deref())?;
     run_blocking(move || {
         app.opener()
             .open_url(url, None::<&str>)
@@ -832,7 +833,7 @@ pub fn run() {
             save_configuration,
             poll_account_login,
             save_account_login,
-            account_workspaces,
+            account_details,
             account_balance,
             open_top_up,
             cancel_account_login,
