@@ -172,8 +172,9 @@ upgrade/restart still require platform acceptance.
   events and VoiceOver still need macOS/Windows platform acceptance; browser
   dispatch tests verify the shared content guard, not the native event delivery.
 
-- Account identity displays current Clerk organization/user names and avatars,
-  with initials on image failure. Signed in as stays with the user avatar.
+- The organization card displays its current Clerk name and avatar, with initials
+  on image failure. Personal identity is not rendered. Manage and Switch are
+  organization menu actions; management links are bound to the Clerk organization ID.
 - Billing-read denial hides the balance and Top up; readers without billing
   management see only the balance. Permission grants take effect after refresh.
   Billing navigation is bound to the account's Clerk organization ID.

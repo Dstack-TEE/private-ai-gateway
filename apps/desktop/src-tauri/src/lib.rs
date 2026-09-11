@@ -368,12 +368,22 @@ async fn open_top_up(
     provider: desktop_runtime::contracts::ServiceProvider,
     organization_id: Option<String>,
 ) -> Result<(), String> {
-    use tauri_plugin_opener::OpenerExt;
     let url = desktop_runtime::account_login::top_up_url(&provider, organization_id.as_deref())?;
+    open_account_url(app, url).await
+}
+
+#[tauri::command]
+async fn open_organization(app: AppHandle, organization_id: String) -> Result<(), String> {
+    let url = desktop_runtime::account_login::organization_url(Some(&organization_id))?;
+    open_account_url(app, url).await
+}
+
+async fn open_account_url(app: AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
     run_blocking(move || {
         app.opener()
             .open_url(url, None::<&str>)
-            .map_err(|_| "Cannot open the billing page".into())
+            .map_err(|_| "Cannot open the account page".into())
     })
     .await
 }
@@ -836,6 +846,7 @@ pub fn run() {
             account_details,
             account_balance,
             open_top_up,
+            open_organization,
             cancel_account_login,
             activate_profile,
             delete_profile,

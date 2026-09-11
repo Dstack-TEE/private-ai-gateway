@@ -155,6 +155,8 @@ pub enum AccountSaveResult {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountScope {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<String>,
     pub organization: Option<String>,
     pub workspace: Option<String>,
     pub workspace_id: Option<i64>,

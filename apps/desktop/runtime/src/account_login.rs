@@ -116,6 +116,12 @@ impl Authorization {
                             _ => None,
                         },
                         scope: Some(AccountScope {
+                            organization_id: match &details.auth {
+                                ProfileAuth::OAuth { scope, .. } => {
+                                    scope.as_ref().and_then(|s| s.organization_id.clone())
+                                }
+                                _ => None,
+                            },
                             organization: Some(organization),
                             workspace: Some(string(&result, "workspace_name")?),
                             workspace_id: Some(selected),
@@ -888,6 +894,7 @@ fn redpill_details(account: &Value) -> Result<AccountLoginDetails, String> {
                 organization: avatar_url(account, "organization_image_url"),
             }),
             scope: Some(AccountScope {
+                organization_id: Some(string(account, "organization_id")?),
                 organization: Some(string(account, "organization_name")?),
                 ..AccountScope::default()
             }),
@@ -988,6 +995,7 @@ fn parse_account_balance(
             organization_id: Some(string(data, "organization_id")?),
             granted_usd: None,
             scope: AccountScope {
+                organization_id: Some(string(data, "organization_id")?),
                 organization: Some(string(data, "organization_name")?),
                 workspace: data
                     .get("workspace_name")
@@ -1005,18 +1013,20 @@ pub fn top_up_url(
 ) -> Result<String, String> {
     match provider {
         ServiceProvider::Phala => Ok("https://cloud.phala.com/cost".into()),
-        ServiceProvider::Redpill => {
-            let id = organization_id
-                .filter(|id| {
-                    id.strip_prefix("org_").is_some_and(|suffix| {
-                        !suffix.is_empty() && suffix.bytes().all(|c| c.is_ascii_alphanumeric())
-                    })
-                })
-                .ok_or("The billing organization is unavailable. Refresh the account balance.")?;
-            Ok(format!("https://redpill.ai/orgs/{id}/credits"))
-        }
+        ServiceProvider::Redpill => Ok(format!("{}/credits", organization_url(organization_id)?)),
         ServiceProvider::Custom => Err("Top up is only available for Phala and RedPill".into()),
     }
+}
+
+pub fn organization_url(organization_id: Option<&str>) -> Result<String, String> {
+    let id = organization_id
+        .filter(|id| {
+            id.strip_prefix("org_").is_some_and(|suffix| {
+                !suffix.is_empty() && suffix.bytes().all(|c| c.is_ascii_alphanumeric())
+            })
+        })
+        .ok_or("Organization unavailable. Sign in again.")?;
+    Ok(format!("https://redpill.ai/orgs/{id}"))
 }
 
 #[cfg(test)]
@@ -1028,7 +1038,7 @@ mod tests {
         let data = json!({
             "user_id": "user_alice", "user_name": "Alice Example",
             "user_image_url": "https://img.clerk.com/alice",
-            "organization_name": "Research", "organization_image_url": "https://images.clerk.dev/research",
+            "organization_id": "org_test", "organization_name": "Research", "organization_image_url": "https://images.clerk.dev/research",
             "workspaces": [{"id": 1, "name": "Default", "is_default": true}]
         });
         let details = redpill_details(&data).unwrap();
@@ -1078,6 +1088,10 @@ mod tests {
             .unwrap();
         assert_eq!(balance.balance_usd, "0");
         assert!(!balance.can_top_up);
+        assert_eq!(
+            organization_url(Some("org_test")).unwrap(),
+            "https://redpill.ai/orgs/org_test"
+        );
         let legacy: AccountBalance = serde_json::from_value(json!({"balanceUsd":"1", "grantedUsd":null, "scope":{"organization":null,"workspace":null,"workspaceId":null}})).unwrap();
         assert!(!legacy.can_top_up && legacy.organization_id.is_none());
         assert_eq!(
@@ -1096,6 +1110,7 @@ mod tests {
             Some("org_test?other"),
         ] {
             assert!(top_up_url(&ServiceProvider::Redpill, id).is_err());
+            assert!(organization_url(id).is_err());
         }
     }
 
