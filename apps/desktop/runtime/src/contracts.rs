@@ -157,6 +157,8 @@ pub enum AccountSaveResult {
 pub struct AccountScope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub organization_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_slug: Option<String>,
     pub organization: Option<String>,
     pub workspace: Option<String>,
     pub workspace_id: Option<i64>,
@@ -225,7 +227,7 @@ pub enum ProfileAuth {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         images: Option<AccountImages>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        scope: Option<AccountScope>,
+        scope: Option<Box<AccountScope>>,
     },
 }
 

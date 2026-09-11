@@ -29,7 +29,6 @@ export function AccountTools(props: Props) {
 
 function AccountDetailsView({ api, provider, target, scope, images, onSignIn, disabled = false, compact = false }: Props) {
   const [balance, setBalance] = useState<AccountBalance | null>();
-  const [error, setError] = useState<string>();
   const [linkError, setLinkError] = useState<string>();
   const [busy, setBusy] = useState(true);
   const [opening, setOpening] = useState(false);
@@ -50,9 +49,10 @@ function AccountDetailsView({ api, provider, target, scope, images, onSignIn, di
       setBusy(true);
       try {
         const value = await api.getAccountBalance(kind === "login" ? { kind, id } : { kind, profileId: id });
-        if (!disposed) { setBalance(value); setError(undefined); }
-      } catch (error) {
-        if (!disposed) { setBalance(undefined); setError(errorMessage(error)); }
+        if (!disposed) setBalance(value);
+      } catch {
+        // Optional billing data must not obscure the account form or protection state.
+        if (!disposed) setBalance(null);
       } finally {
         inFlight = false;
         if (!disposed) setBusy(false);
@@ -81,16 +81,17 @@ function AccountDetailsView({ api, provider, target, scope, images, onSignIn, di
     catch (error) { setLinkError(errorMessage(error)); returningFromAccountPage.current = false; }
     finally { openingRef.current = false; setOpening(false); }
   }, [disabled]);
-  const organizationId = balance?.organizationId ?? scope?.organizationId;
-  const openBilling = () => balance && openPage(() => api.openTopUp(provider, organizationId ?? undefined));
-  const manage = provider === "redpill" && organizationId ? () => void openPage(() => api.openOrganization(organizationId)) : undefined;
+  const organizationSlug = balance?.scope.organizationSlug ?? scope?.organizationSlug;
+  const canOpenBilling = provider === "phala" || Boolean(organizationSlug);
+  const openBilling = () => balance && canOpenBilling && openPage(() => api.openTopUp(provider, organizationSlug ?? undefined));
+  const manage = provider === "redpill" && organizationSlug ? () => void openPage(() => api.openOrganization(organizationSlug)) : undefined;
   const displayScope = provider === "redpill" && !compact ? scope ?? balance?.scope : balance?.scope ?? scope;
   const owner = displayScope?.organization ?? displayScope?.workspace;
-  const amount = balance ? currency(Number(balance.balanceUsd)) : busy ? "…" : "Unavailable";
-  if (compact && balance === null) return null;
+  if (compact && !balance) return null;
+  const amount = balance ? currency(Number(balance.balanceUsd)) : "";
   if (compact) return <Button type="button" variant="outline" size="sm" className="tabular-nums"
-    aria-label={`Current balance: ${amount}`} title={linkError ?? error ?? `${owner ?? "Account"} · Open billing`}
-    disabled={opening || !balance} onClick={() => void openBilling()}>{amount}</Button>;
+    aria-label={`Current balance: ${amount}`} title={linkError ?? `${owner ?? "Account"}${canOpenBilling ? " · Open billing" : ""}`}
+    disabled={opening || !balance || !canOpenBilling} onClick={() => void openBilling()}>{amount}</Button>;
   const name = owner ?? "Account";
   return <div aria-label="Account details">
     <Item variant="outline" size="sm" className="grid grid-cols-[2rem_minmax(0,_1fr)_auto] gap-x-3">
@@ -106,7 +107,7 @@ function AccountDetailsView({ api, provider, target, scope, images, onSignIn, di
         <AccountActions disabled={disabled || opening} onManage={manage} onSignIn={onSignIn} />
       </ItemActions>
     </Item>
-    <FieldError>{linkError ?? error}</FieldError>
+    <FieldError>{linkError}</FieldError>
   </div>;
 }
 
