@@ -75,6 +75,7 @@ export interface RequestActivity {
 export interface ModelSummary {
   id: string;
   name: string;
+  supportedEndpoints?: string[];
   contextLength?: number;
   maxOutputLength?: number;
   isTee?: boolean;

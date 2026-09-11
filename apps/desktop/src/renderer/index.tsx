@@ -931,7 +931,7 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
         const target = agentIntents.current.get(agent.id);
         if (target === undefined) break;
         if (changed.recorded !== target || (target && !changed.authorized && changed.attention)) {
-          const options = target && agent.id === "codex" && !agent.recorded ? { defaultModel: models[0]?.id } : {};
+          const options = {};
           const preview = await desktopApi.previewAgent(agent.id, target, options);
           const status = await desktopApi.applyAgent(agent.id, target, preview.revision, options);
           changed = status;

@@ -8,6 +8,7 @@ pub mod cli_install;
 pub mod client;
 pub mod contracts;
 pub mod controller;
+mod endpoint_inventory;
 pub mod gateway;
 #[cfg(unix)]
 mod helper_staging;

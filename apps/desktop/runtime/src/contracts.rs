@@ -103,6 +103,8 @@ pub struct UsageSummary {
 pub struct ModelSummary {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supported_endpoints: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_length: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -193,6 +195,12 @@ impl CatalogSummary {
             .map(|model| ModelSummary {
                 id: model.id().to_string(),
                 name: model.display_name().to_string(),
+                supported_endpoints: model.supported_surfaces.as_ref().map(|surfaces| {
+                    surfaces
+                        .iter()
+                        .map(|surface| surface.path().to_string())
+                        .collect()
+                }),
                 context_length: model.remote.context_length,
                 max_output_length: model.remote.max_output_length,
                 is_tee: model.bool_field("is_tee"),

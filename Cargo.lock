@@ -4126,6 +4126,7 @@ dependencies = [
  "libc",
  "netwatcher",
  "private-ai-proxy-gateway",
+ "reqwest",
  "rpassword",
  "rusqlite",
  "rustix",
