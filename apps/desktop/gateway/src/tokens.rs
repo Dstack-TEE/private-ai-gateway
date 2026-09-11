@@ -13,6 +13,8 @@ use std::{
 
 use rand::RngCore;
 
+use crate::{agents::Agent, catalog::Surface};
+
 const TOKEN_BYTES: usize = 32;
 pub const LOCAL_TOOLS_AGENT: &str = "local-tools";
 
@@ -30,13 +32,17 @@ pub fn agent_allows(agent: &str, path: &str) -> bool {
                 | "/v1/chat/completions"
         );
     }
-    match path {
-        "/v1/models" => true,
-        "/v1/responses" | "/v1/responses/compact" => matches!(agent, "codex" | "pi"),
-        "/v1/messages" | "/v1/messages/count_tokens" => agent == "claude-code",
-        "/v1/chat/completions" => matches!(agent, "opencode" | "hermes" | "openclaw" | "oh-my-pi"),
-        _ => false,
-    }
+    let Ok(agent) = Agent::from_id(agent) else {
+        return false;
+    };
+    let surface = match path {
+        "/v1/models" => return true,
+        "/v1/responses" | "/v1/responses/compact" => Surface::Responses,
+        "/v1/messages" | "/v1/messages/count_tokens" => Surface::Messages,
+        "/v1/chat/completions" => Surface::ChatCompletions,
+        _ => return false,
+    };
+    agent.surface() == surface
 }
 
 pub struct TokenFiles {
@@ -469,7 +475,9 @@ mod tests {
         assert!(agent_allows("oh-my-pi", "/v1/chat/completions"));
         assert!(!agent_allows("oh-my-pi", "/v1/responses"));
         assert!(!agent_allows("oh-my-pi", "/v1/messages"));
-        assert!(agent_allows("pi", "/v1/responses"));
+        assert!(agent_allows("pi", "/v1/chat/completions"));
+        assert!(!agent_allows("pi", "/v1/responses"));
+        assert!(!agent_allows("pi", "/v1/responses/compact"));
         assert!(agent_allows(LOCAL_TOOLS_AGENT, "/v1/messages"));
         assert!(agent_allows(LOCAL_TOOLS_AGENT, "/v1/responses"));
         assert!(agent_allows(LOCAL_TOOLS_AGENT, "/v1/chat/completions"));

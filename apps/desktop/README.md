@@ -647,6 +647,57 @@ protocol is the service's own response, shown as such.
   `/v1/models`, and a request whose `model` is not listed is refused before
   it leaves the machine. Models that disappear on a refresh are reported,
   never replaced.
+
+  The RedPill/Phala presets also intersect this list with the dated endpoint
+  observations in `gateway/src/endpoint-support.json`. RedPill was probed;
+  Phala inherits the inventory because the presets share the serving backend.
+  Only successful observations are offered: Codex uses Responses, Claude Code
+  uses Messages, and the other integrations use Chat Completions. Generated
+  configs, per-agent `/v1/models`, default selection, and local request admission
+  share this policy. Explicit or saved incompatible defaults are rejected, never
+  silently replaced. `supportedEndpoints` in the model summary exposes the
+  observed paths; it is absent for custom endpoints without an inventory.
+  Inconclusive results and newly listed models require a fresh probe and inventory
+  update before they are offered for these presets. This is a compatibility
+  snapshot, not continuous availability monitoring or a claim that an endpoint
+  returning a transient error is permanently unsupported.
+
+  Apps fetch this file from the repository's `main` branch when starting protection
+  or refreshing the model catalog (`pap models list --refresh`). The request runs
+  alongside model discovery, uses a separate unauthenticated HTTPS client, and has
+  a four-second deadline and a 1 MiB limit. ETag conditional requests reuse the
+  last validated inventory. Invalid schemas, incomplete observations, download
+  errors, and offline operation retain the last good local cache, or the bundled
+  inventory on first use. Cache replacement is atomic. Active agent projections
+  refresh through the existing configuration transaction and restoration journal.
+
+  To publish changes, review the full three-endpoint probe report and update
+  `gateway/src/endpoint-support.json` through a PR to `main`. A partial `--model`
+  or `--surface` diagnostic must be merged into the full inventory, not replace it.
+  Once clients have this loader, inventory-only changes need no app release.
+  Until the file reaches `main`, GitHub returns 404 and apps use their bundled copy.
+  The feed cannot add models absent from the verified service catalog, change
+  credentials or provider URLs, or bypass ACI verification. Updating compatibility
+  records may still require restarting an agent that only loads its config at startup.
+
+  Endpoint capability inventory can be checked explicitly from this directory:
+
+  ```sh
+  node scripts/probe-model-endpoints.mjs --endpoint https://tee.redpill.ai --key-env REDPILL_AI_API_KEY --json
+  node scripts/probe-model-endpoints.mjs --endpoint https://inference.phala.com --key-env PHALA_AI_API_KEY --json
+  ```
+
+  Supply the named key through the process environment, never a command-line
+  argument. The script reads the live catalog and sends one small, potentially
+  billable request per model to Chat Completions, Responses, and Messages.
+  `--model ID` and `--surface responses` limit the inventory; concurrency defaults to two (maximum four),
+  with a 20-second request timeout and no retries. Authentication and rate-limit
+  errors stop scheduling requests. Reports contain no credentials or response
+  text. Exit code 2 means some results remain inconclusive; those results must
+  not be treated as evidence of unsupported protocols. A successful response
+  establishes basic non-streaming protocol support only, not tool calling,
+  streaming, or receipt validity. This diagnostic calls the supplied endpoint
+  directly and does not run automatically during startup or modify agent configs.
 - **Usage history** is written to an owner-only SQLite database in the app
   data directory and has no automatic retention cutoff. Overview shows four
   recent rows plus a complete current-session summary aggregated from SQLite,

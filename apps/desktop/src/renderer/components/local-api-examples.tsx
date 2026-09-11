@@ -8,12 +8,13 @@ import { Field, FieldError, FieldLabel } from "./ui/field";
 import { ChoiceSelect } from "./choice-select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 
-export function LocalApiExamples({ endpoint, models, api, onCopy, onClose, onReady }: {
+export function LocalApiExamples({ endpoint, models: catalogModels, api, onCopy, onClose, onReady }: {
   api: Pick<DesktopApi, "getClientKey" | "onClientKeyChange">;
   endpoint?: string; models: ModelSummary[];
   onCopy(value: string): Promise<void>; onClose(): void;
   onReady?(): void;
 }) {
+  const models = catalogModels.filter((model) => model.supportedEndpoints?.includes("/v1/chat/completions") ?? true);
   const [language, setLanguage] = useState<ExampleLanguage>("javascript");
   const [selection, setSelection] = useState("");
   const [copied, setCopied] = useState<string>();
