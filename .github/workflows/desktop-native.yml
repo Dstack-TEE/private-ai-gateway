@@ -86,6 +86,7 @@ jobs:
           toolchain: stable
       - &restore-rust-cache
         name: Restore Rust dependencies
+        if: ${{ !inputs.production_macos && inputs.release_version == '' }}
         id: rust-cache
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
@@ -158,6 +159,8 @@ jobs:
   package:
     name: Package (${{ matrix.platform }})
     needs: verify
+    environment:
+      name: ${{ (inputs.production_macos || inputs.release_version != '') && 'desktop-release' || 'desktop-build' }}
     env:
       DESKTOP_RELEASE_VERSION: ${{ inputs.release_version }}
       PAP_BUILD_TARGET: ${{ matrix.target }}
@@ -644,6 +647,7 @@ jobs:
   draft-release:
     if: inputs.release_version != '' && inputs.production_macos
     needs: package
+    environment: desktop-release
     runs-on: ubuntu-24.04
     permissions:
       contents: write
