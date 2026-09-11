@@ -162,6 +162,7 @@ export interface AccountImages {
 
 export interface AccountScope {
   organizationId?: string | null;
+  organizationSlug?: string | null;
   organization: string | null;
   workspace: string | null;
   workspaceId: number | null;
@@ -389,8 +390,8 @@ export interface DesktopApi {
   saveAccountLogin(id: string, profile: ConfidentialProfileInput, requireProductionOs: boolean, workspaceId?: number): Promise<GatewayState>;
   getAccountDetails(profileId: string): Promise<AccountLoginDetails>;
   getAccountBalance(target: AccountBalanceTarget): Promise<AccountBalance | null>;
-  openOrganization(organizationId: string): Promise<void>;
-  openTopUp(provider: ServiceProvider, organizationId?: string): Promise<void>;
+  openOrganization(organizationSlug: string): Promise<void>;
+  openTopUp(provider: ServiceProvider, organizationSlug?: string): Promise<void>;
   cancelAccountLogin(id: string): Promise<void>;
   verifyConfiguration(profile: ConfidentialProfileInput, requireProductionOs: boolean, key?: string): Promise<GatewayState>;
   activateProfile(profileId: string): Promise<GatewayState>;

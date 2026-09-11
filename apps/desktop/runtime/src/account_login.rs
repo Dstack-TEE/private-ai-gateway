@@ -115,17 +115,23 @@ impl Authorization {
                             ProfileAuth::OAuth { images, .. } => images.clone(),
                             _ => None,
                         },
-                        scope: Some(AccountScope {
+                        scope: Some(Box::new(AccountScope {
                             organization_id: match &details.auth {
                                 ProfileAuth::OAuth { scope, .. } => {
                                     scope.as_ref().and_then(|s| s.organization_id.clone())
                                 }
                                 _ => None,
                             },
+                            organization_slug: match &details.auth {
+                                ProfileAuth::OAuth { scope, .. } => {
+                                    scope.as_ref().and_then(|s| s.organization_slug.clone())
+                                }
+                                _ => None,
+                            },
                             organization: Some(organization),
                             workspace: Some(string(&result, "workspace_name")?),
                             workspace_id: Some(selected),
-                        }),
+                        })),
                     },
                 })
             }
@@ -669,10 +675,10 @@ async fn phala_at(
                 account_id: account.clone(),
                 account_name: Some(account),
                 images: None,
-                scope: Some(AccountScope {
+                scope: Some(Box::new(AccountScope {
                     workspace: Some(workspace),
                     ..AccountScope::default()
-                }),
+                })),
             })
         });
         return Ok(Credential { key, auth: auth? });
@@ -853,7 +859,9 @@ pub async fn account_details(key: &str) -> Result<AccountLoginDetails, String> {
             .bearer_auth(key),
     )
     .await?;
-    redpill_details(&account)
+    redpill_details(&account).map_err(|_| {
+        "Account: Could not refresh account details. Try again or sign in again.".to_string()
+    })
 }
 
 fn avatar_url(data: &Value, field: &str) -> Option<String> {
@@ -877,11 +885,15 @@ fn redpill_details(account: &Value) -> Result<AccountLoginDetails, String> {
                 user: avatar_url(account, "user_image_url"),
                 organization: avatar_url(account, "organization_image_url"),
             }),
-            scope: Some(AccountScope {
+            scope: Some(Box::new(AccountScope {
                 organization_id: Some(string(account, "organization_id")?),
+                organization_slug: account
+                    .get("organization_slug")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
                 organization: Some(string(account, "organization_name")?),
                 ..AccountScope::default()
-            }),
+            })),
         },
         workspaces: parse_workspaces(account)?,
     })
@@ -976,10 +988,20 @@ fn parse_account_balance(
                 .get("can_top_up")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
-            organization_id: Some(string(data, "organization_id")?),
+            organization_id: data
+                .get("organization_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
             granted_usd: None,
             scope: AccountScope {
-                organization_id: Some(string(data, "organization_id")?),
+                organization_id: data
+                    .get("organization_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                organization_slug: data
+                    .get("organization_slug")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
                 organization: Some(string(data, "organization_name")?),
                 workspace: data
                     .get("workspace_name")
@@ -993,24 +1015,29 @@ fn parse_account_balance(
 
 pub fn top_up_url(
     provider: &ServiceProvider,
-    organization_id: Option<&str>,
+    organization_slug: Option<&str>,
 ) -> Result<String, String> {
     match provider {
         ServiceProvider::Phala => Ok("https://cloud.phala.com/cost".into()),
-        ServiceProvider::Redpill => Ok(format!("{}/credits", organization_url(organization_id)?)),
+        ServiceProvider::Redpill => Ok(format!("{}/credits", organization_url(organization_slug)?)),
         ServiceProvider::Custom => Err("Top up is only available for Phala and RedPill".into()),
     }
 }
 
-pub fn organization_url(organization_id: Option<&str>) -> Result<String, String> {
-    let id = organization_id
-        .filter(|id| {
-            id.strip_prefix("org_").is_some_and(|suffix| {
-                !suffix.is_empty() && suffix.bytes().all(|c| c.is_ascii_alphanumeric())
-            })
+pub fn organization_url(organization_slug: Option<&str>) -> Result<String, String> {
+    let slug = organization_slug
+        .filter(|slug| {
+            !slug.is_empty()
+                && slug.len() <= 255
+                && slug.split('-').all(|part| {
+                    !part.is_empty()
+                        && part
+                            .bytes()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+                })
         })
-        .ok_or("Organization unavailable. Sign in again.")?;
-    Ok(format!("https://redpill.ai/orgs/{id}"))
+        .ok_or("Refresh account details or sign in again to open this organization.")?;
+    Ok(format!("https://redpill.ai/{slug}"))
 }
 
 #[cfg(test)]
@@ -1022,7 +1049,7 @@ mod tests {
         let data = json!({
             "user_id": "user_alice", "user_name": "Alice Example",
             "user_image_url": "https://img.clerk.com/alice",
-            "organization_id": "org_test", "organization_name": "Research", "organization_image_url": "https://images.clerk.dev/research",
+            "organization_id": "org_test", "organization_slug": "research-team", "organization_name": "Research", "organization_image_url": "https://images.clerk.dev/research",
             "workspaces": [{"id": 1, "name": "Default", "is_default": true}]
         });
         let details = redpill_details(&data).unwrap();
@@ -1066,25 +1093,35 @@ mod tests {
             &json!({})
         )
         .is_err());
-        let data = json!({"balance_usd":"0", "organization_id":"org_test", "organization_name":"Research", "can_top_up":false});
+        let data = json!({"balance_usd":"0", "organization_id":"org_test", "organization_slug":"research-team", "organization_name":"Research", "can_top_up":false});
         let balance = parse_account_balance(&ServiceProvider::Redpill, StatusCode::OK, &data)
             .unwrap()
             .unwrap();
         assert_eq!(balance.balance_usd, "0");
         assert!(!balance.can_top_up);
         assert_eq!(
-            organization_url(Some("org_test")).unwrap(),
-            "https://redpill.ai/orgs/org_test"
+            organization_url(Some("research-team")).unwrap(),
+            "https://redpill.ai/research-team"
         );
         let legacy: AccountBalance = serde_json::from_value(json!({"balanceUsd":"1", "grantedUsd":null, "scope":{"organization":null,"workspace":null,"workspaceId":null}})).unwrap();
         assert!(!legacy.can_top_up && legacy.organization_id.is_none());
+        let older_api = parse_account_balance(
+            &ServiceProvider::Redpill,
+            StatusCode::OK,
+            &json!({"balance_usd":"12.5", "organization_name":"Research"}),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(older_api.balance_usd, "12.5");
+        assert!(older_api.organization_id.is_none());
+        assert!(older_api.scope.organization_slug.is_none());
         assert_eq!(
             top_up_url(
                 &ServiceProvider::Redpill,
-                balance.organization_id.as_deref()
+                balance.scope.organization_slug.as_deref()
             )
             .unwrap(),
-            "https://redpill.ai/orgs/org_test/credits"
+            "https://redpill.ai/research-team/credits"
         );
         for id in [
             None,

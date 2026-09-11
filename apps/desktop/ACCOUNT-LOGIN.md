@@ -195,6 +195,12 @@ balance response becomes a typed null result: no balance or Top up is rendered.
 A billing reader sees the balance but no Top up unless management is permitted.
 Permission changes are rechecked by the API on refresh, subject to the existing
 30-second runtime cache. Network failures remain errors, not zero balances or
-permission denials. Billing links use `/orgs/{Clerk organization ID}/credits`,
+permission denials. Balance request failures hide the balance entry and retry on
+the normal refresh schedule; they do not add a form error. Older API responses
+without navigation metadata still display the balance. Billing links use
+`/{organizationSlug}/credits`,
 so the browser's previously selected organization cannot redirect the user's
 intended billing scope. The billing website still authorizes all mutations.
+
+Manage opens `/{organizationSlug}`. Account and balance responses must supply
+`organization_slug` for these links; missing slugs do not fall back to another tenant.

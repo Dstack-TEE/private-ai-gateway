@@ -366,15 +366,15 @@ async fn account_balance(
 async fn open_top_up(
     app: AppHandle,
     provider: desktop_runtime::contracts::ServiceProvider,
-    organization_id: Option<String>,
+    organization_slug: Option<String>,
 ) -> Result<(), String> {
-    let url = desktop_runtime::account_login::top_up_url(&provider, organization_id.as_deref())?;
+    let url = desktop_runtime::account_login::top_up_url(&provider, organization_slug.as_deref())?;
     open_account_url(app, url).await
 }
 
 #[tauri::command]
-async fn open_organization(app: AppHandle, organization_id: String) -> Result<(), String> {
-    let url = desktop_runtime::account_login::organization_url(Some(&organization_id))?;
+async fn open_organization(app: AppHandle, organization_slug: String) -> Result<(), String> {
+    let url = desktop_runtime::account_login::organization_url(Some(&organization_slug))?;
     open_account_url(app, url).await
 }
 

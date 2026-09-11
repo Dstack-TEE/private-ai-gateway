@@ -358,8 +358,9 @@ export function mockApi(name: string | null): DesktopApi {
   let keyRotations = 0;
   let failedAccountSave = false;
   let billingRead = name !== "oauth-balance-denied";
+  let billingError = name === "oauth-balance-error";
   const billingManage = billingRead && name !== "oauth-balance-readonly";
-  window.addEventListener("mock:billing-read-granted", () => { billingRead = true; });
+  window.addEventListener("mock:billing-read-granted", () => { billingRead = true; billingError = false; });
   let login: { id: string; profile: ConfidentialProfileInput; polls: number } | undefined;
   return {
     startBackendService: async () => { state = { ...BASE, backendConnected: true }; publish(); return structuredClone(state); },
@@ -540,7 +541,7 @@ export function mockApi(name: string | null): DesktopApi {
       if (login.polls++ < 2) return null;
       if (name === "oauth-denied") throw new Error("Authorization was declined");
       return {
-        auth: { kind: "oauth", accountId: "preview-account", accountName: "Alice Example", images: { user: "https://img.clerk.com/user-avatar", organization: "https://img.clerk.com/org-avatar" }, scope: { organizationId: login.profile.provider === "redpill" ? "org_test" : null, organization: login.profile.provider === "redpill" ? "Personal organization" : null, workspace: login.profile.provider === "phala" ? "Phala workspace" : null, workspaceId: null } },
+        auth: { kind: "oauth", accountId: "preview-account", accountName: "Alice Example", images: { user: "https://img.clerk.com/user-avatar", organization: "https://img.clerk.com/org-avatar" }, scope: { organizationSlug: "research-team", organizationId: login.profile.provider === "redpill" ? "org_test" : null, organization: login.profile.provider === "redpill" ? "Personal organization" : null, workspace: login.profile.provider === "phala" ? "Phala workspace" : null, workspaceId: null } },
         workspaces: login.profile.provider === "redpill" ? [
           { id: 123, name: "Default", isDefault: true },
           ...(name === "oauth-workspaces" ? [{ id: 124, name: "Research", isDefault: false }] : []),
@@ -554,7 +555,7 @@ export function mockApi(name: string | null): DesktopApi {
         failedAccountSave = true;
         throw new Error("Could not store account credential");
       }
-      const saved: ConfidentialProfile = { ...profile, auth: { kind: "oauth", accountId: "preview-account", accountName: "Alice Example", images: { user: "https://img.clerk.com/user-avatar", organization: "https://img.clerk.com/org-avatar" }, scope: { organizationId: profile.provider === "redpill" ? "org_test" : null, organization: profile.provider === "redpill" ? "Personal organization" : null, workspace: profile.provider === "redpill" ? workspaceId === 124 ? "Research" : "Default" : "Phala workspace", workspaceId: workspaceId ?? null } }, credentialSaved: true, verifiedAt: Math.floor(Date.now() / 1000) };
+      const saved: ConfidentialProfile = { ...profile, auth: { kind: "oauth", accountId: "preview-account", accountName: "Alice Example", images: { user: "https://img.clerk.com/user-avatar", organization: "https://img.clerk.com/org-avatar" }, scope: { organizationSlug: "research-team", organizationId: profile.provider === "redpill" ? "org_test" : null, organization: profile.provider === "redpill" ? "Personal organization" : null, workspace: profile.provider === "redpill" ? workspaceId === 124 ? "Research" : "Default" : "Phala workspace", workspaceId: workspaceId ?? null } }, credentialSaved: true, verifiedAt: Math.floor(Date.now() / 1000) };
       credentialProfiles.add(saved.id);
       state = { ...state, profiles: [...state.profiles.filter((p) => p.id !== saved.id), saved], activeProfileId: saved.id, apiKeySaved: true, status: "stopped", configurationVerification: false, remoteUrl: saved.remoteUrl, config: { remoteUrl: saved.remoteUrl, requireProductionOs } };
       login = undefined;
@@ -567,18 +568,19 @@ export function mockApi(name: string | null): DesktopApi {
       const auth = name === "oauth-profile-updated" ? {
         ...profile.auth, accountName: "Alicia Updated",
         images: { user: "https://img.clerk.com/updated-user", organization: "https://img.clerk.com/updated-org" },
-        scope: { organizationId: "org_test", organization: "Updated organization", workspace: profile.auth.scope?.workspace ?? null, workspaceId: profile.auth.scope?.workspaceId ?? null },
+        scope: { organizationSlug: "research-team", organizationId: "org_test", organization: "Updated organization", workspace: profile.auth.scope?.workspace ?? null, workspaceId: profile.auth.scope?.workspaceId ?? null },
       } : profile.auth;
       return { auth, workspaces: [{ id: 123, name: "Default", isDefault: true }, { id: 124, name: "Research", isDefault: false }] };
     },
     getAccountBalance: async (target) => {
+      if (billingError) throw new Error("operation_failed: The operation could not complete.");
       if (!billingRead) return null;
       const profile = target.kind === "login" ? login?.id === target.id && login.polls >= 3 ? login.profile : undefined : state.profiles.find((p) => p.id === target.profileId);
       if (!profile) throw new Error("Account is unavailable");
       const saved = target.kind === "profile" ? state.profiles.find((p) => p.id === profile.id) : undefined;
       if (name === "oauth-balance-delayed") await new Promise<void>((resolve) => window.addEventListener("mock:release-balance", () => resolve(), { once: true }));
       return { balanceUsd: "12.50", organizationId: profile.provider === "redpill" ? "org_test" : null, canTopUp: billingManage, grantedUsd: profile.provider === "phala" ? "3.25" : null,
-        scope: saved?.auth.kind === "oauth" && saved.auth.scope ? saved.auth.scope : { organization: profile.provider === "redpill" ? "Personal organization" : null, workspace: profile.provider === "phala" ? "Phala workspace" : null, workspaceId: null } };
+        scope: saved?.auth.kind === "oauth" && saved.auth.scope ? saved.auth.scope : { organizationSlug: profile.provider === "redpill" ? "research-team" : null, organization: profile.provider === "redpill" ? "Personal organization" : null, workspace: profile.provider === "phala" ? "Phala workspace" : null, workspaceId: null } };
     },
     openOrganization: async (organizationId) => { window.dispatchEvent(new CustomEvent("mock:manage-organization", { detail: { organizationId } })); },
     openTopUp: async (provider, organizationId) => { window.dispatchEvent(new CustomEvent("mock:top-up", { detail: { provider, organizationId } })); },

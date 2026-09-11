@@ -2456,7 +2456,7 @@ function ProfileEditorSheet({
     && profile.auth.kind === (authMethod === "account" ? "oauth" : "apiKey");
   const savedAccount = currentDetails?.auth.kind === "oauth" ? {
     ...currentDetails.auth,
-    scope: { organizationId: currentDetails.auth.scope?.organizationId ?? null, organization: currentDetails.auth.scope?.organization ?? null,
+    scope: { organizationId: currentDetails.auth.scope?.organizationId ?? null, organizationSlug: currentDetails.auth.scope?.organizationSlug ?? null, organization: currentDetails.auth.scope?.organization ?? null,
       workspace: savedScope?.workspace ?? null, workspaceId: savedScope?.workspaceId ?? null },
   } : profile?.auth.kind === "oauth" ? profile.auth : undefined;
   const selectedAccount = authorized?.kind === "oauth" ? authorized

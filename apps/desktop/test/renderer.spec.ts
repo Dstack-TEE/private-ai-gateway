@@ -2105,7 +2105,7 @@ test("RedPill workspace and organization menu preserve billing scope", async ({ 
   await page.evaluate(() => { delete document.documentElement.dataset.topUpProvider; });
   await balanceButton.click();
   await expect(page.locator("html")).toHaveAttribute("data-top-up-provider", "redpill");
-  await expect(page.locator("html")).toHaveAttribute("data-top-up-organization", "org_test");
+  await expect(page.locator("html")).toHaveAttribute("data-top-up-organization", "research-team");
   await expect(mainCard.getByRole("button", { name: "Top up", exact: true })).toHaveCount(0);
   const profileButton = mainCard.getByRole("button", { name: "Profiles: RedPill" });
   const profileBox = await profileButton.boundingBox();
@@ -2148,12 +2148,13 @@ test("billing permissions hide billing actions but allow scoped organization man
     if (event instanceof CustomEvent) document.documentElement.dataset.managedOrganization = event.detail.organizationId;
   }));
   await page.clock.install();
-  for (const mode of ["oauth-balance-denied", "oauth-balance-readonly"]) {
+  for (const mode of ["oauth-balance-denied", "oauth-balance-error", "oauth-balance-readonly"]) {
     await page.goto(`/?mock=${mode}`);
     await page.getByRole("button", { name: "Set up profile" }).click();
     const fresh = page.getByRole("dialog", { name: "New profile" });
     await fresh.getByRole("button", { name: "RedPill", exact: true }).click();
     await fresh.getByRole("button", { name: "Sign in with RedPill" }).click();
+    await page.clock.fastForward(3_000);
     await expect(fresh.getByText("Personal organization", { exact: true })).toBeVisible();
     await fresh.getByRole("button", { name: "Save", exact: true }).click();
     await expect(fresh).toHaveCount(0);
@@ -2163,11 +2164,13 @@ test("billing permissions hide billing actions but allow scoped organization man
     await expect(editor.getByText("Personal organization", { exact: true })).toBeVisible();
     await expect(editor.getByRole("button", { name: "Top up", exact: true })).toHaveCount(0);
     await expect(editor.getByText(/\$0\.00/)).toHaveCount(0);
+    await expect(editor.getByText(/Unavailable|operation_failed/)).toHaveCount(0);
+    await expect(page.getByRole("region", { name: "Protection status" }).getByText("Unavailable", { exact: true })).toHaveCount(0);
     await editor.getByRole("button", { name: "Account actions" }).click();
     await expect(page.getByRole("menuitem", { name: "Switch", exact: true })).toBeVisible();
     await page.getByRole("menuitem", { name: "Manage", exact: true }).click();
-    await expect(page.locator("html")).toHaveAttribute("data-managed-organization", "org_test");
-    if (mode === "oauth-balance-denied") {
+    await expect(page.locator("html")).toHaveAttribute("data-managed-organization", "research-team");
+    if (mode !== "oauth-balance-readonly") {
       await expect(editor.getByLabel("Balance in USD")).toHaveCount(0);
       await editor.getByRole("button", { name: "Cancel", exact: true }).click();
       await page.getByRole("button", { name: "Done", exact: true }).click();
