@@ -2567,7 +2567,7 @@ function ProfileEditorSheet({
                       ...workspaces.map((workspace) => ({ value: String(workspace.id), label: workspace.name })),
                     ]} disabled={working || frozen || workspaces.length === 1} onChange={(value) => setWorkspaceId(Number(value))} /> : <Input id="profile-workspace" value={accountScope?.workspace ?? ""} readOnly />}
                   </FormField>}
-                </> : <Button type="button" variant="outline" className="w-full [&_.service-logo]:size-4" disabled={working || frozen || !draft.name.trim()} onClick={() => void signIn()}><ServiceLogo url={draft.remoteUrl} />Sign in with {selectedPreset?.name}</Button>}
+                </> : <Button type="button" variant="default" size="lg" className="w-full [&_.service-logo]:size-4" disabled={working || frozen || !draft.name.trim()} onClick={() => void signIn()}><ServiceLogo url={draft.remoteUrl} />Sign in with {selectedPreset?.name}</Button>}
               </FieldGroup>
             </TabsContent>
             <TabsContent value="apiKey">
