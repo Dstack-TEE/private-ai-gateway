@@ -13,7 +13,7 @@ receives presentation and non-secret account metadata.
 ## Authorization
 
 Phala uses device authorization at `cloud-api.phala.com`, with
-`client_id=private-ai-proxy`, `scope=redpill:api-key` and an installation UUID.
+`client_id=private-ai-proxy` and `scope=redpill:api-key`.
 Polling honors pending, slowdown and expiry. Its returned token is an inference
 key. Account metadata must load successfully before the authorization is ready.
 
@@ -34,22 +34,16 @@ required. The API rechecks workspace access during issuance.
 
 ## Stable credentials and saving
 
-Each device profile derives its installation UUID from a local installation ID
-and the profile ID. The installation ID is not exported with profiles, so imports
-on another machine do not share a device credential. Both providers issue one
-managed key per actor, tenant and installation. Concurrent requests and lost
-responses reuse the issued key; re-login preserves the key row, budgets and
-usage. RedPill replaces the secret when reconnecting a disconnected row; Phala
-reenables its existing upstream key. Administrative disable cannot be bypassed.
-Keys are named Private AI Proxy in the provider console and can be managed there.
+Phala uses ordinary inference keys. Each authorization creates a new key named
+with its `client_id`. There is no activation, remote cancellation, automatic key
+expiry or installation binding. Cancelling login, replacing a key or removing a
+profile only discards local credentials; unused keys must be managed in the Phala
+dashboard. New keys do not inherit the previous key's budget.
 
-The server owns pending, active and disconnected states. Save acknowledges the
-credential through activate; abort cannot disable an active key. Server workers
-expire abandoned pending credentials after one hour, independently of UI
-cancellation or process survival. Explicit revoke disconnects the key without
-deleting its budget or usage history. Stored recovery secrets are encrypted
-using each service's existing encryption configuration and never serialized in
-API responses.
+RedPill device profiles derive an installation UUID from the local installation
+and profile IDs. RedPill owns its managed credential lifecycle, including activation,
+revocation and expiry of abandoned pending credentials. The retry queue below
+applies to RedPill only.
 
 Save validates the configuration and credential format. A replacement is written to a
 new OS credential-store entry, then the profile JSON atomically switches its
@@ -59,7 +53,7 @@ request; the client polls an operation ID for a definite outcome. A concurrent
 save receives an explicit busy failure. Saving reconnects protection only if it
 was previously running.
 
-Remote activation and retirement use a persistent retry queue. Each record has
+RedPill activation and retirement use a persistent retry queue. Each record has
 its own OS credential-store item; an atomic, non-secret manifest holds only item
 names. This avoids Windows credential blob size limits. Cleanup compares secrets
 against every currently saved profile before revocation, so reselecting a stable
@@ -67,25 +61,24 @@ key cannot cause a stale queue entry to disable it. Activation precedes retireme
 Ordinary network failures retain records silently for bounded background retries;
 unavailable activation is reported once and requires sign-in again.
 
-Deleting a profile, clearing a credential, replacing an account key or changing
-workspace queues retirement of the old managed key. Local removal works offline;
+Deleting a RedPill profile, clearing its credential, replacing its account key or
+changing workspace queues retirement of the old managed key. Local removal works offline;
 remote revocation completes after connectivity returns while the runtime is
-running. Manual API keys are only removed locally. Cancelling staged login does
+running. Phala keys and manual API keys are only removed locally. Cancelling staged login does
 not revoke a saved credential. Aborting an unsaved issued key is best effort;
 a failed request never prevents closing the editor. Unfinished authorization is bounded by
 server expiry. No operation revokes the user's Clerk OAuth grant.
 
 ## Release dependencies and validation
 
-Deploy both provider changes before releasing desktop account login:
+RedPill requires its managed-credential backend; Phala uses its existing device flow:
 
 - [redpill-api #103](https://github.com/redpill-ai/redpill-api/pull/103): migration
   `98d712b3c4e5`, API and Celery worker/beat; existing `ENCRYPTION_KEY` configuration.
   Configure `OAUTH_CLIENTS` to allow public client `cGrHCOWG3S91oa0A` with label
   `Private AI Proxy`. The shared `/api/oauth` API isolates credentials per client.
 - [Phala #2138](https://github.com/Phala-Network/phala-cloud-monorepo/pull/2138):
-  migration `proxy_device_credentials`, API and pending-key expiry worker;
-  existing `WALLET_ENCRYPTION_PASSWORD` configuration.
+  client-based key naming only; no new migration, lifecycle endpoint or worker.
 
 The Clerk public app is registered, but registration does not deploy the API
 endpoints. No provider credentials belong in renderer state, profile JSON,

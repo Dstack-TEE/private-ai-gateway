@@ -305,7 +305,7 @@ impl PendingLogin {
 
     pub async fn cancel(&mut self) -> Result<(), String> {
         let provider = self.profile.provider.clone();
-        if self.saved {
+        if self.saved || provider != ServiceProvider::Redpill {
             return Ok(());
         }
         let action = "abort";
@@ -334,16 +334,13 @@ pub(crate) async fn transition_credential(
     key: &str,
     action: &str,
 ) -> Result<CredentialTransition, String> {
-    let base = match provider {
-        ServiceProvider::Redpill => KEY_URL,
-        ServiceProvider::Phala => "https://cloud-api.phala.com/api/v1/private_ai/credential",
-        ServiceProvider::Custom => return Ok(CredentialTransition::Applied),
-    };
-    transition_at(provider, key, action, base).await
+    if *provider != ServiceProvider::Redpill {
+        return Ok(CredentialTransition::Applied);
+    }
+    transition_at(key, action, KEY_URL).await
 }
 
 async fn transition_at(
-    provider: &ServiceProvider,
     key: &str,
     action: &str,
     base: &str,
@@ -351,7 +348,6 @@ async fn transition_at(
     let http = client()?;
     let request = match action {
         "activate" | "abort" => http.post(format!("{base}/{action}")),
-        "revoke" if *provider == ServiceProvider::Phala => http.post(format!("{base}/revoke")),
         "revoke" => http.delete(base),
         _ => return Err("Unsupported account operation".into()),
     };
@@ -496,7 +492,7 @@ pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<Pendi
             let data = response(
                 client
                     .post(format!("{PHALA_API}/api/v1/auth/device/code"))
-                    .json(&json!({"client_id":"private-ai-proxy", "scope":"redpill:api-key", "installation_id":installation_id(&profile.id)?.to_string()})),
+                    .json(&json!({"client_id":"private-ai-proxy", "scope":"redpill:api-key"})),
             )
             .await?;
             let device = string(&data, "device_code")?;
@@ -679,19 +675,7 @@ async fn phala_at(
                 }),
             })
         });
-        match auth {
-            Ok(auth) => return Ok(Credential { key, auth }),
-            Err(error) => {
-                transition_at(
-                    &ServiceProvider::Phala,
-                    &key,
-                    "abort",
-                    &format!("{base}/api/v1/private_ai/credential"),
-                )
-                .await?;
-                return Err(error);
-            }
-        }
+        return Ok(Credential { key, auth: auth? });
     }
 }
 
@@ -1198,7 +1182,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn phala_polling_and_credential_lifecycle_use_the_expected_wire_contract() {
+    async fn phala_polling_uses_the_device_authorization_contract() {
         use axum::{routing::post, Json};
         use std::sync::atomic::{AtomicUsize, Ordering};
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1232,17 +1216,6 @@ mod tests {
                     assert_eq!(headers["authorization"], "Bearer sk-test-credential");
                     Json(json!({"user":{"username":"alice"},"workspace":{"name":"Research"}}))
                 }),
-            )
-            .route(
-                "/api/v1/private_ai/credential/:action",
-                post(
-                    |axum::extract::Path(action): axum::extract::Path<String>,
-                     headers: HeaderMap| async move {
-                        assert!(matches!(action.as_str(), "activate" | "abort" | "revoke"));
-                        assert_eq!(headers["authorization"], "Bearer sk-test-credential");
-                        StatusCode::NO_CONTENT
-                    },
-                ),
             );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -1257,16 +1230,6 @@ mod tests {
         assert!(
             matches!(credential.auth, ProfileAuth::OAuth { ref account_id, .. } if account_id == "alice")
         );
-        for action in ["activate", "abort", "revoke"] {
-            transition_at(
-                &ServiceProvider::Phala,
-                &credential.key,
-                action,
-                &format!("{base}/api/v1/private_ai/credential"),
-            )
-            .await
-            .unwrap();
-        }
         server.abort();
     }
 

@@ -19,7 +19,7 @@ use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
 use crate::{
     contracts::{
         AgentPreview, AgentStatus, ConfidentialProfileInput, ConnectOptions, GatewayState,
-        LocalApiConfig, RequestActivity, StartGatewayConfig,
+        LocalApiConfig, RequestActivity, ServiceProvider, StartGatewayConfig,
     },
     gateway::{GatewayManager, SidecarLauncher},
     local_api::{self, ResolvedLocalApi},
@@ -1291,7 +1291,8 @@ impl DesktopRuntime {
                 provider: old.provider.clone(),
                 key: old_key.clone(),
                 entry: service_config::profile_credential_entry(old)?,
-                revoke: old_key != &candidate_key
+                revoke: old.provider == ServiceProvider::Redpill
+                    && old_key != &candidate_key
                     && matches!(old.auth, crate::contracts::ProfileAuth::OAuth { .. }),
             }) {
                 self.proxy.set_api_key(None);
@@ -1306,7 +1307,10 @@ impl DesktopRuntime {
                 return Err(error);
             }
         }
-        if replace_key && matches!(candidate.auth, crate::contracts::ProfileAuth::OAuth { .. }) {
+        if replace_key
+            && candidate.provider == ServiceProvider::Redpill
+            && matches!(candidate.auth, crate::contracts::ProfileAuth::OAuth { .. })
+        {
             if let Err(error) = self.queue_retired(RetiredCredential {
                 profile_id: candidate.id.clone(),
                 action: "activate".into(),
@@ -1425,7 +1429,9 @@ impl DesktopRuntime {
             .ok_or_else(|| "Confidential AI profile not found".to_string())?;
         let entry = service_config::profile_credential_entry(&removed)?;
         let removed_key = self.secrets.get(&entry)?;
-        if matches!(removed.auth, crate::contracts::ProfileAuth::OAuth { .. }) {
+        if removed.provider == ServiceProvider::Redpill
+            && matches!(removed.auth, crate::contracts::ProfileAuth::OAuth { .. })
+        {
             if let Some(key) = &removed_key {
                 self.queue_retired(RetiredCredential {
                     profile_id: removed.id.clone(),
@@ -1496,7 +1502,9 @@ impl DesktopRuntime {
             .iter()
             .find(|p| p.id == state.active_profile_id)
         {
-            if matches!(profile.auth, crate::contracts::ProfileAuth::OAuth { .. }) {
+            if profile.provider == ServiceProvider::Redpill
+                && matches!(profile.auth, crate::contracts::ProfileAuth::OAuth { .. })
+            {
                 if let Some(key) = &previous_key {
                     self.queue_retired(RetiredCredential {
                         profile_id: profile.id.clone(),
