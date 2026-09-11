@@ -16,7 +16,7 @@
         "create": false,
         "title": "Private AI Proxy",
         "width": 1052,
-        "height": 784,
+        "height": 752,
         "minWidth": 720,
         "minHeight": 600,
         "resizable": true,
