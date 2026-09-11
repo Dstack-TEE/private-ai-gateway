@@ -94,7 +94,13 @@ function AccountDetailsView({ api, provider, target, scope, accountName, images,
     disabled={opening || !balance} onClick={() => void topUp()}>{amount}</Button>;
   const organization = displayScope?.organization;
   const name = owner ?? accountName ?? "Account";
-  return <div aria-label="Account details">
+  return <div aria-label="Account details" className="space-y-3">
+    {accountName && <Item variant="outline" size="sm" aria-label="Signed-in user" className="grid grid-cols-[1.5rem_minmax(0,_1fr)] gap-x-2">
+      <AccountAvatar name={accountName} src={images?.user} />
+      <ItemContent className="min-h-8 min-w-0 justify-center">
+        <ItemDescription className="line-clamp-none wrap-anywhere">Signed in as <span className="text-foreground">{accountName}</span></ItemDescription>
+      </ItemContent>
+    </Item>}
     <Item variant="outline" size="sm" className="grid grid-cols-[1.5rem_minmax(0,_1fr)_auto] gap-x-2 gap-y-0">
       <AccountAvatar name={name} src={organization ? images?.organization : images?.user} />
       <ItemContent className="min-h-8 min-w-0 justify-center">
@@ -104,10 +110,6 @@ function AccountDetailsView({ api, provider, target, scope, accountName, images,
         {balance?.canTopUp && <Button type="button" size="sm" variant="outline" title={`Top up ${name}`} disabled={disabled || opening} onClick={() => void topUp()}>Top up<ExternalLink aria-hidden /></Button>}
         <AccountActions disabled={disabled} refreshing={busy} onRefresh={balance === null ? undefined : () => refresh.current()} onSignIn={onSignIn} />
       </ItemActions>
-      {accountName && <>
-        <AccountAvatar name={accountName} src={images?.user} />
-        <ItemDescription className="col-span-2 line-clamp-none wrap-anywhere">Signed in as {accountName}</ItemDescription>
-      </>}
       {balance && <ItemDescription className="col-span-2 col-start-2 line-clamp-none" role="status" aria-live="polite" aria-busy={busy}>
         Balance: <span className="tabular-nums" aria-label="Balance in USD">{currency(Number(balance.balanceUsd))}</span>
         {balance.grantedUsd != null && Number(balance.grantedUsd) > 0 && <> · {currency(Number(balance.grantedUsd))} promo credits</>}

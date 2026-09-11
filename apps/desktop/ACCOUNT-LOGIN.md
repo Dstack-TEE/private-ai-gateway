@@ -185,8 +185,9 @@ and connection checks before exposing inference to agents.
 
 ## Account identity and billing permissions
 
-The account item displays the organization and `Signed in as` user with official
-shadcn Avatar components. RedPill names and avatar URLs come from the API's
+A separate user card displays `Signed in as` with the user avatar. The organization
+card contains its name, avatar, balance and billing actions. Both use official
+shadcn Item and Avatar components with aligned avatar/text columns. RedPill names and avatar URLs come from the API's
 verified Clerk membership response; opening the editor refreshes saved identity
 metadata. Missing or failed avatars fall back to initials. Only HTTPS Clerk image
 hosts are accepted, allowed explicitly by CSP, and images send no referrer.
