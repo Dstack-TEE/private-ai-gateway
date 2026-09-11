@@ -2,8 +2,11 @@
 
 Phala and RedPill profiles offer account login alongside manual API keys. Custom
 endpoints use manual keys. Provider buttons with their icons stay in the form
-content; authorization stages credentials, and the footer offers Cancel and
-Save. Save persists either an account or manual key without starting gateway verification. Preset service endpoints are hidden. The runtime owns the
+content. Phala completes automatically after browser authorization, which already
+selects its workspace. RedPill also completes automatically with one workspace;
+multiple workspaces require one selection and confirmation. Failed persistence
+keeps the authorization available through Retry, without signing in again.
+Manual keys and ordinary profile edits use Save. Persistence does not start gateway verification. Preset service endpoints are hidden. The runtime owns the
 browser authorization, verification and OS credential store; the renderer only
 receives presentation and non-secret account metadata.
 
@@ -19,8 +22,8 @@ exact callback `http://127.0.0.1:4181/oauth/callback`. Discovery must support co
 flow, S256 PKCE and public token exchange. The callback checks Host, state, unique
 code and issuer when present. Requests do not follow redirects. The requested
 scopes are `openid profile user:org:read`; no client secret or refresh token is
-used. Clerk tokens stay in runtime memory. Sign in alone does not issue a
-RedPill inference key: Save exchanges the grant at
+used. Clerk tokens stay in runtime memory. Once the workspace is resolved,
+the runtime exchanges the grant for an inference key at
 `POST https://service.redpill.ai/api/oauth/key`.
 
 Organization selection is Clerk's OAuth extension, not an OAuth/OIDC standard.
@@ -99,10 +102,12 @@ inference and billed usage remain release acceptance checks.
 RedPill selects the organization in Clerk's OAuth consent screen. After sign-in,
 `GET /api/oauth/account` returns only workspaces accessible to that actor in
 that organization. One workspace is selected automatically; multiple workspaces
-require an explicit choice in the app. Save sends that workspace ID and the API
-rechecks its ownership and membership. The saved profile retains non-secret
+require an explicit choice and Confirm workspace in the app. Completion sends
+that workspace ID and the API rechecks its ownership and membership. The saved profile retains non-secret
 organization/workspace names. Changing organization requires signing in again;
-after a key has been issued, changing workspace also requires fresh authorization.
+the editor's Change workspace action starts fresh authorization and presents the
+workspace selector. Cancellation or failure preserves the saved profile. Phala
+has no separate organization tier: its workspace (team) is selected in the browser.
 
 Balances load automatically after authorization, when opening a saved account,
 and on the active profile's main card. The main card adds only a current-balance

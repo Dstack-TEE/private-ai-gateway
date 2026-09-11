@@ -2408,27 +2408,31 @@ function ProfileEditorSheet({
   }));
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [saving, setSaving] = useState(false);
+  const saveInFlight = useRef(false);
+  const autoSaveAttempt = useRef<string | undefined>(undefined);
   const [authMethod, setAuthMethod] = useState<"account" | "apiKey">(profile?.auth.kind === "apiKey" ? "apiKey" : "account");
   const [error, setError] = useState<string>();
   const reportLoginError = useCallback((error: unknown) => setError(errorMessage(error)), []);
   const account = useAccountLogin(desktopApi, reportLoginError);
   const { session: login, auth: authorized } = account;
-  const [workspaceId, setWorkspaceId] = useState<number>();
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<number>();
   const [callbackDraft, setCallbackDraft] = useState("");
   useEffect(() => setCallbackDraft(""), [login?.id]);
   const workspaces = account.details?.workspaces;
-  useEffect(() => {
-    setWorkspaceId(workspaces?.length === 1 ? workspaces.at(0)?.id : undefined);
-  }, [workspaces]);
+  useEffect(() => setSelectedWorkspaceId(undefined), [login?.id]);
+  const workspaceId = workspaces?.length === 1 ? workspaces[0]?.id : selectedWorkspaceId;
   const needsWorkspace = Boolean(authorized && draft.provider === "redpill" && workspaces?.length && workspaceId === undefined);
 
   const working = saving || account.busy;
   const closeEditor = async () => {
-    if (await account.cancel()) onClose();
+    if (!saveInFlight.current && await account.cancel()) onClose();
   };
-  const signIn = () => {
+  const signIn = async () => {
     setError(undefined);
-    return account.start(draft);
+    try {
+      if (running && !await desktopApi.confirm({ title: "Connect and restart protection?", message: "Connecting this account restarts protection. In-flight requests may be interrupted.", confirmLabel: "Continue" })) return;
+      await account.start(draft);
+    } catch (error) { setError(errorMessage(error)); }
   };
   const selectedPreset = SERVICE_PRESETS.find((service) => service.id === draft.provider);
   const keyLabel = selectedPreset?.keyLabel ?? "API key";
@@ -2486,13 +2490,13 @@ function ProfileEditorSheet({
     } catch (error) { setError(errorMessage(error)); }
     finally { setSaving(false); }
   };
-  const submit = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (working || frozen || needsAccountLogin || needsWorkspace) return;
+  const save = useCallback(async () => {
+    if (saveInFlight.current || working || frozen || needsAccountLogin || needsWorkspace) return;
+    saveInFlight.current = true;
     setSaving(true);
     setError(undefined);
     try {
-      if (running && profile?.id === state.activeProfileId && !await desktopApi.confirm({ title: "Save and reconnect?", message: "Saving this active profile restarts protection. In-flight requests may be interrupted.", confirmLabel: "Save and Reconnect" })) return;
+      if (!authorized && running && profile?.id === state.activeProfileId && !await desktopApi.confirm({ title: "Save and reconnect?", message: "Saving this active profile restarts protection. In-flight requests may be interrupted.", confirmLabel: "Save and Reconnect" })) return;
       if (authorized && login && authMethod === "account") {
         const saved = await desktopApi.saveAccountLogin(login.id, draft, state.config.requireProductionOs, workspaceId);
         account.consume();
@@ -2504,11 +2508,19 @@ function ProfileEditorSheet({
       if (message) setError(message);
       else onComplete();
     } catch (error) { setError(errorMessage(error)); }
-    finally { setSaving(false); }
-  };
+    finally { saveInFlight.current = false; setSaving(false); }
+  }, [working, frozen, needsAccountLogin, needsWorkspace, authorized, running, profile?.id, state.activeProfileId, login, authMethod, draft, state.config.requireProductionOs, workspaceId, account.consume, startAfterSave, onComplete, onSave, apiKeyDraft]);
+
+  useEffect(() => {
+    if (!authorized || !login || (workspaces?.length ?? 0) > 1 || working || frozen
+      || autoSaveAttempt.current === login.id) return;
+    autoSaveAttempt.current = login.id;
+    void save();
+  }, [authorized, login, workspaces, working, frozen, save]);
+
   return (
     <Sheet title={isNew ? "New profile" : "Edit profile"} className="profile-editor-sheet w-[min(480px,_calc(var(--window-dialog-width,_100vw)_-_32px))] [&_.sheet-scroll]:min-h-0 [&_.sheet-scroll]:overflow-y-auto [&_.sheet-footer]:flex-none [&[open]]:flex [&[open]]:flex-col [&_form]:min-h-0 [&_form]:flex [&_form]:flex-col form-sheet [&_>_.sheet-heading]:px-5 [&_>_.field-note]:mx-5 [&_.sheet-footer]:mx-5 [&_form_>_[data-slot=field-error]]:mx-5 [&_.sheet-scroll]:px-5" dismissible={!saving && !account.working} onClose={() => void closeEditor()}>
-      <form className="mt-4" onSubmit={(event) => void submit(event)}>
+      <form className="mt-4" onSubmit={(event) => { event.preventDefault(); void save(); }}>
         <div className="sheet-scroll py-1">
         <FieldGroup className="gap-4 [&_[data-slot=field]]:gap-2">
         <Field>
@@ -2565,7 +2577,7 @@ function ProfileEditorSheet({
                     {authorized && workspaces && workspaces.length > 0 ? <ChoiceSelect id="profile-workspace" label="Workspace" className="w-full" value={workspaceId === undefined ? "" : String(workspaceId)} options={[
                       { value: "", label: "Select workspace", disabled: true },
                       ...workspaces.map((workspace) => ({ value: String(workspace.id), label: workspace.name })),
-                    ]} disabled={working || frozen || workspaces.length === 1} onChange={(value) => setWorkspaceId(Number(value))} /> : <Input id="profile-workspace" value={accountScope?.workspace ?? ""} readOnly />}
+                    ]} disabled={working || frozen || workspaces.length === 1} onChange={(value) => setSelectedWorkspaceId(Number(value))} /> : <div className="flex items-center gap-2"><Input id="profile-workspace" value={accountScope?.workspace ?? ""} readOnly />{draft.provider === "redpill" && <Button type="button" variant="outline" disabled={working || frozen} onClick={() => void signIn()}>Change workspace</Button>}</div>}
                   </FormField>}
                 </> : <Button type="button" variant="default" size="lg" className="w-full [&_.service-logo]:size-4" disabled={working || frozen || !draft.name.trim()} onClick={() => void signIn()}><ServiceLogo url={draft.remoteUrl} />Sign in with {selectedPreset?.name}</Button>}
               </FieldGroup>
@@ -2581,7 +2593,7 @@ function ProfileEditorSheet({
         <FieldError className="mt-3">{error}</FieldError>
         <SheetActions leading={!isNew && <Button type="button" variant="destructive" disabled={working || frozen} onClick={() => void removeProfile()}><Trash2 size={14} />Delete Profile</Button>}>
           <Button type="button" variant="outline" onClick={() => void closeEditor()} disabled={saving || account.working}>Cancel</Button>
-          <Button type="submit" variant="default" disabled={working || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || Boolean(needsAccountLogin) || needsWorkspace || (!authorized && !savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Saving…" : "Save"}</Button>
+          {!needsAccountLogin && <Button type="submit" variant="default" disabled={working || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || needsWorkspace || (!authorized && !savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Saving…" : authorized ? (workspaces?.length ?? 0) > 1 ? "Confirm workspace" : "Retry" : "Save"}</Button>}
         </SheetActions>
       </form>
     </Sheet>
