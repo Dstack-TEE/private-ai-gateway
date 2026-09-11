@@ -2056,7 +2056,7 @@ test("Phala completes automatically while RedPill confirms its workspace with Sa
   }
 });
 
-test("RedPill confirms workspace and exposes scoped balance and top-up actions", async ({ page }) => {
+test("RedPill workspace and organization menu preserve billing scope", async ({ page }) => {
   await page.route("https://img.clerk.com/**", (route) => route.fulfill({ contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><circle cx="12" cy="12" r="12" fill="green"/></svg>' }));
   await page.goto("/?mock=oauth-workspaces");
   await page.evaluate(() => window.addEventListener("mock:top-up", (event) => {
@@ -2078,7 +2078,9 @@ test("RedPill confirms workspace and exposes scoped balance and top-up actions",
   await expect(accountSummary.getByRole("textbox")).toHaveCount(0);
   await accountSummary.getByRole("button", { name: "Account actions" }).click();
   await expect(page.getByRole("menuitem", { name: "Switch" })).toBeVisible();
-  await page.getByRole("menuitem", { name: "Refresh balance" }).click();
+  await expect(page.getByRole("menuitem")).toHaveCount(2);
+  await expect(page.getByRole("menuitem", { name: "Refresh balance" })).toHaveCount(0);
+  await page.keyboard.press("Escape");
   await expect(page.getByRole("menu")).toHaveCount(0);
   const save = editor.getByRole("button", { name: "Save" });
   await expect(save).toBeDisabled();
@@ -2095,9 +2097,7 @@ test("RedPill confirms workspace and exposes scoped balance and top-up actions",
   await research.click();
   await expect(save).toBeEnabled();
   await expect(editor.getByText("$12.50", { exact: true })).toBeInViewport();
-  await editor.getByRole("button", { name: "Top up", exact: true }).click();
-  await expect(page.locator("html")).toHaveAttribute("data-top-up-provider", "redpill");
-  await expect(page.locator("html")).toHaveAttribute("data-top-up-organization", "org_test");
+  await expect(editor.getByRole("button", { name: "Top up", exact: true })).toHaveCount(0);
   await save.click();
   const mainCard = page.getByRole("region", { name: "Protection status" });
   const balanceButton = mainCard.getByRole("button", { name: "Current balance: $12.50", exact: true });

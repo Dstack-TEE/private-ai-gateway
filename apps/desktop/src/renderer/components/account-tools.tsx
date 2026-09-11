@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeftRight, Ellipsis, ExternalLink, RefreshCw } from "lucide-react";
+import { ArrowLeftRight, Ellipsis, ExternalLink } from "lucide-react";
 import type { AccountBalance, AccountBalanceTarget, AccountImages, AccountScope, DesktopApi, ServiceProvider } from "../../shared/contracts";
 import { errorMessage } from "../lib/error-message";
 import { currency } from "../lib/usage-presentation";
 import { Avatar, AvatarFallback, AvatarImage } from "./ui/avatar";
 import { Button } from "./ui/button";
 import { FieldError } from "./ui/field";
-import { Item, ItemActions, ItemContent, ItemDescription, ItemTitle } from "./ui/item";
+import { Item, ItemActions, ItemContent, ItemTitle } from "./ui/item";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 
 type Props = {
@@ -33,7 +33,6 @@ function AccountDetailsView({ api, provider, target, scope, images, onSignIn, di
   const [linkError, setLinkError] = useState<string>();
   const [busy, setBusy] = useState(true);
   const [opening, setOpening] = useState(false);
-  const refresh = useRef<() => void>(() => {});
   const returningFromAccountPage = useRef(false);
   const openingRef = useRef(false);
   const kind = target.kind;
@@ -59,7 +58,6 @@ function AccountDetailsView({ api, provider, target, scope, images, onSignIn, di
         if (!disposed) setBusy(false);
       }
     };
-    refresh.current = () => { void load(true); };
     const onReturn = () => { void load(returningFromAccountPage.current); };
     window.addEventListener("focus", onReturn);
     document.addEventListener("visibilitychange", onReturn);
@@ -67,7 +65,6 @@ function AccountDetailsView({ api, provider, target, scope, images, onSignIn, di
     void load();
     return () => {
       disposed = true;
-      refresh.current = () => {};
       clearInterval(timer);
       window.removeEventListener("focus", onReturn);
       document.removeEventListener("visibilitychange", onReturn);
@@ -85,7 +82,7 @@ function AccountDetailsView({ api, provider, target, scope, images, onSignIn, di
     finally { openingRef.current = false; setOpening(false); }
   }, [disabled]);
   const organizationId = balance?.organizationId ?? scope?.organizationId;
-  const topUp = () => balance && openPage(() => api.openTopUp(provider, organizationId ?? undefined));
+  const openBilling = () => balance && openPage(() => api.openTopUp(provider, organizationId ?? undefined));
   const manage = provider === "redpill" && organizationId ? () => void openPage(() => api.openOrganization(organizationId)) : undefined;
   const displayScope = provider === "redpill" && !compact ? scope ?? balance?.scope : balance?.scope ?? scope;
   const owner = displayScope?.organization ?? displayScope?.workspace;
@@ -93,22 +90,21 @@ function AccountDetailsView({ api, provider, target, scope, images, onSignIn, di
   if (compact && balance === null) return null;
   if (compact) return <Button type="button" variant="outline" size="sm" className="tabular-nums"
     aria-label={`Current balance: ${amount}`} title={linkError ?? error ?? `${owner ?? "Account"} · Open billing`}
-    disabled={opening || !balance} onClick={() => void topUp()}>{amount}</Button>;
+    disabled={opening || !balance} onClick={() => void openBilling()}>{amount}</Button>;
   const name = owner ?? "Account";
   return <div aria-label="Account details">
-    <Item variant="outline" size="sm" className="grid grid-cols-[1.5rem_minmax(0,_1fr)_auto] gap-x-2 gap-y-0">
+    <Item variant="outline" size="sm" className="grid grid-cols-[2rem_minmax(0,_1fr)_auto] gap-x-3">
       <AccountAvatar name={name} src={images?.organization} />
       <ItemContent className="min-h-8 min-w-0 justify-center">
         <ItemTitle className="line-clamp-none wrap-anywhere">{name}</ItemTitle>
       </ItemContent>
       <ItemActions>
-        {balance?.canTopUp && <Button type="button" size="sm" variant="outline" title={`Top up ${name}`} disabled={disabled || opening} onClick={() => void topUp()}>Top up<ExternalLink aria-hidden /></Button>}
-        <AccountActions disabled={disabled || opening} refreshing={busy} onManage={manage} onRefresh={balance === null ? undefined : () => refresh.current()} onSignIn={onSignIn} />
+        {balance && <span className="text-sm font-medium tabular-nums" aria-label="Balance in USD" role="status" aria-live="polite" aria-busy={busy}
+          title={balance.grantedUsd != null && Number(balance.grantedUsd) > 0 ? `${currency(Number(balance.grantedUsd))} promo credits` : undefined}>
+          {currency(Number(balance.balanceUsd))}
+        </span>}
+        <AccountActions disabled={disabled || opening} onManage={manage} onSignIn={onSignIn} />
       </ItemActions>
-      {balance && <ItemDescription className="col-span-2 col-start-2 line-clamp-none" role="status" aria-live="polite" aria-busy={busy}>
-        Balance: <span className="tabular-nums" aria-label="Balance in USD">{currency(Number(balance.balanceUsd))}</span>
-        {balance.grantedUsd != null && Number(balance.grantedUsd) > 0 && <> · {currency(Number(balance.grantedUsd))} promo credits</>}
-      </ItemDescription>}
     </Item>
     <FieldError>{linkError ?? error}</FieldError>
   </div>;
@@ -116,16 +112,14 @@ function AccountDetailsView({ api, provider, target, scope, images, onSignIn, di
 
 function AccountAvatar({ name, src }: { name: string; src?: string | null }) {
   const initials = name.trim().split(/\s+/).slice(0, 2).map((part) => part.charAt(0)).join("").toUpperCase();
-  return <Avatar size="sm">
+  return <Avatar>
     {src && <AvatarImage src={src} alt={`${name} avatar`} referrerPolicy="no-referrer" />}
     <AvatarFallback>{initials}</AvatarFallback>
   </Avatar>;
 }
 
-function AccountActions({ disabled, refreshing, onRefresh, onSignIn, onManage }: {
+function AccountActions({ disabled, onSignIn, onManage }: {
   disabled: boolean;
-  refreshing: boolean;
-  onRefresh?(): void;
   onSignIn?(): void;
   onManage?(): void;
 }) {
@@ -136,7 +130,6 @@ function AccountActions({ disabled, refreshing, onRefresh, onSignIn, onManage }:
     <DropdownMenuContent align="end" container={container ?? undefined}>
       {onManage && <DropdownMenuItem onClick={onManage}><ExternalLink aria-hidden />Manage</DropdownMenuItem>}
       {onSignIn && <DropdownMenuItem onClick={onSignIn}><ArrowLeftRight aria-hidden />Switch</DropdownMenuItem>}
-      {onRefresh && <DropdownMenuItem disabled={refreshing} onClick={onRefresh}><RefreshCw aria-hidden />Refresh balance</DropdownMenuItem>}
     </DropdownMenuContent>
   </DropdownMenu>;
 }

@@ -187,8 +187,10 @@ and connection checks before exposing inference to agents.
 
 The organization card displays its name, avatar and permitted billing information
 using official shadcn Item and Avatar components. Personal identity is not rendered.
-Its menu offers Manage (the organization's console), Switch (fresh authorization)
-and Refresh balance when permitted. Manage uses the organization ID from the
+Its menu contains only Manage (the organization's console) and Switch (fresh
+authorization). The larger organization avatar, vertically centered name and
+right-aligned balance share one row. Balance refresh is automatic; the editor
+has no Top up or Refresh balance action. Manage uses the organization ID from the
 account response and remains available without billing-read permission. RedPill names and avatar URLs come from the API's
 verified Clerk membership response; opening the editor refreshes saved identity
 metadata. Missing or failed avatars fall back to initials. Only HTTPS Clerk image
