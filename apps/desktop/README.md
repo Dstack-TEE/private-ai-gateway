@@ -569,7 +569,7 @@ subsequent launches. No PKG installer is produced.
 ## Architecture
 
 ```
-Codex / Claude Code / OpenCode / Pi / Hermes
+Codex / Claude Code / OpenCode / Pi / Hermes / OpenClaw / Oh My Pi
         │  the agent's own API, a machine-local token
         ▼
 configured Local API    in-process Rust proxy: agent tokens, catalog check,
@@ -626,8 +626,8 @@ protocol is the service's own response, shown as such.
   mid-request.
 - **Agent tokens** are random per-agent secrets in owner-only files under the
   app data directory. A token is a capability for that agent's endpoints
-  (Claude Code: Messages and `count_tokens`; Codex and Pi: Responses and
-  `responses/compact`; OpenCode and Hermes: Chat Completions; `/v1/models`
+  (Claude Code: Messages and `count_tokens`; Codex: Responses and
+  `responses/compact`; OpenCode, Pi, Hermes, OpenClaw and Oh My Pi: Chat Completions; `/v1/models`
   for all) plus
   an attribution label the proxy sends as `x-aci-tag`, which the sidecar
   copies into its receipt event and strips before forwarding. It does not
@@ -635,8 +635,9 @@ protocol is the service's own response, shown as such.
   the same files or run the helper. Codex and Claude Code obtain their token
   through the bundled console helper
   (`private-ai-proxy-helper --agent-token <agent>`). OpenCode reads the
-  token file through its `{file:...}` reference; Pi and Hermes use their
-  supported command-backed provider credential mechanisms.
+  token file through its `{file:...}` reference; Pi, Hermes and Oh My Pi use their
+  supported command-backed provider credential mechanisms. OpenClaw uses its
+  exec SecretRef provider.
 - **AI service profile credentials** and any credential a connection
   takes over live only in the OS credential store (`keyring` 4). Each profile
   has its own credential entry; the profile JSON stores only its name,
@@ -839,6 +840,12 @@ usage history, system notification authorization, and installed CLI registration
 are retained. Partial failures are reported and leave the reset retryable; no
 unrelated agent edits are overwritten. The CLI counterpart `pap --yes settings reset`
 uses the same backend transaction but does not change the OS login item.
+During automatic network recovery and verification, agent routing stays pointed at
+Local API. The proxy clears agent authorization until protection is verified again;
+refreshing agent status cannot reauthorize those tokens. Explicit Stop, Disconnect,
+configuration changes and shutdown restore the original routing. Startup recovery
+also restores recorded configuration before any new protection session.
+
 `Disconnect` tombstones the record (disabled, cleanup pending), deletes the
 token file before any record or config is touched, and syncs the removal to
 the parent directory (on Windows, a directory-handle flush) before anything

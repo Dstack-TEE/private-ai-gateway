@@ -866,7 +866,7 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
           const preview = await desktopApi.previewAgent(agent.id, target, options);
           const status = await desktopApi.applyAgent(agent.id, target, preview.revision, options);
           changed = status;
-                await client.cancelQueries({ queryKey: ["agents"] });
+          await client.cancelQueries({ queryKey: ["agents"] });
           client.setQueryData<AgentStatus[]>(["agents"], (current) => current?.map((entry) => entry.id === status.id ? status : entry));
         }
         if (agentIntents.current.get(agent.id) === target) {

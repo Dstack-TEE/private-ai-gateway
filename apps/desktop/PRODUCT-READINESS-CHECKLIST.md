@@ -16,7 +16,7 @@ platform verification result.
 
 - [x] Usage persists in an owner-only SQLite database across app restarts.
 - [x] Usage has no automatic retention cutoff and is removed only by explicit Clear History.
-- [x] The Overview session resets on a new protection session, shows up to five recent records, and aggregates the complete session from SQLite.
+- [x] The Overview session resets on a new protection session, shows up to ten recent records, and aggregates the complete session from SQLite.
 - [x] The Usage page filters by agent, model, and time range.
 - [x] Usage provides cursor pagination, request/token/cost/protected summaries, and a chart.
 - [x] Token and cost values are captured from real response usage only; unavailable values remain unknown.
@@ -32,7 +32,7 @@ platform verification result.
 
 ## Agents
 
-- [x] Codex, Claude Code, OpenCode, Pi, and Hermes are detected from real executables.
+- [x] Codex, Claude Code, OpenCode, Pi, Hermes, OpenClaw, and Oh My Pi are detected from real executables.
 - [x] Detection covers PATH and common macOS/user package-manager binary locations.
 - [x] Connections use native discovery or an app-owned catalog generated from the verified service.
 - [x] Codex requires a verified default model; other agents may choose after connecting; no full model list is handwritten in source.

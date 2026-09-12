@@ -1199,37 +1199,39 @@ test("agent icons remain visible in both themes without connection-state fading"
   }
 });
 
-test("five agents connect and disconnect directly from the verified discovered catalog", async ({ page }) => {
+test("seven agents connect and disconnect directly from the verified discovered catalog", async ({ page }) => {
   await page.setViewportSize({ width: 940, height: 720 });
-  await page.goto("/?mock=ready");
+  await page.goto("/?mock=all-agent-icons");
   await nav(page, "Agents").click();
 
   const rows = page.locator(".agent-block");
-  await expect(rows).toHaveCount(5);
-  for (const name of ["Codex", "Claude Code", "OpenCode", "Pi", "Hermes"]) {
-    await expect(rows.filter({ hasText: name })).toBeVisible();
+  await expect(rows).toHaveCount(7);
+  for (const name of ["Codex", "Claude Code", "OpenCode", "Pi", "Hermes Agent", "OpenClaw", "Oh My Pi"]) {
+    await expect(rows.filter({ has: page.getByText(name, { exact: true }) })).toBeVisible();
   }
   const agentImageElements = rows.locator(".mark img");
-  await expect(agentImageElements).toHaveCount(5);
+  await expect(agentImageElements).toHaveCount(7);
   await expect.poll(() => agentImageElements.evaluateAll((images) =>
     images.every((image) => image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0),
   )).toBe(true);
   const iconResults = await agentImageElements.evaluateAll((images) =>
     images.map((image) => ({ source: (image as HTMLImageElement).currentSrc })),
   );
-  expect(iconResults).toHaveLength(5);
+  expect(iconResults).toHaveLength(7);
   expect(iconResults.every(({ source }) => source.includes("/assets/") && !source.startsWith("data:"))).toBe(true);
 
-  const codex = rows.filter({ hasText: "Codex" });
-  await codex.getByRole("switch", { name: "Connect Codex" }).click();
-  await expect(page.getByRole("dialog")).toHaveCount(0);
-  await expect(codex.getByText("Connected", { exact: true })).toBeVisible();
-
-  const pi = rows.filter({ hasText: "Pi" });
-  await pi.getByRole("switch", { name: "Connect Pi" }).click();
-  await expect(pi.getByText("Connected", { exact: true })).toBeVisible();
-  await pi.getByRole("switch", { name: "Disconnect Pi" }).click();
-  await expect(pi.getByText("Not connected", { exact: true })).toBeVisible();
+  for (const toggle of await page.getByRole("switch", { name: /^Disconnect / }).all()) {
+    await toggle.click();
+  }
+  for (const name of ["Codex", "Claude Code", "OpenCode", "Pi", "Hermes Agent", "OpenClaw", "Oh My Pi"]) {
+    const row = rows.filter({ has: page.getByRole("switch", { name: `Connect ${name}`, exact: true }) });
+    await row.getByRole("switch").click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    const connected = rows.filter({ has: page.getByRole("switch", { name: `Disconnect ${name}`, exact: true }) });
+    await expect(connected.getByText("Connected", { exact: true })).toBeVisible();
+    await connected.getByRole("switch").click();
+    await expect(row.getByText("Not connected", { exact: true })).toBeVisible();
+  }
 
   await nav(page, "Settings").click();
   await page.getByRole("button", { name: "Advanced", exact: true }).click();

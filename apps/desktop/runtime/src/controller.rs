@@ -562,7 +562,17 @@ impl DesktopRuntime {
             return Ok(());
         }
         self.recovery.clear_wait();
-        if let Err(error) = self.stop_with_reconnect(true) {
+        let paused = (|| {
+            let _guard = self
+                .agent_policy
+                .lock()
+                .map_err(|_| "Agent state unavailable")?;
+            let result = self.manager.stop_with_reconnect(true);
+            self.proxy.set_api_key(None);
+            self.publish_agent_tokens(TokenSet::default())?;
+            result
+        })();
+        if let Err(error) = paused {
             self.manager.cancel_reconnection();
             self.recovery.cancel();
             return Err(error);
@@ -687,6 +697,21 @@ impl DesktopRuntime {
         self.projector(&self.manager.local_api()?.endpoint)
     }
 
+    // Call under agent_policy so scans cannot reauthorize during recovery.
+    fn publish_agent_tokens(&self, tokens: TokenSet) -> Result<bool, String> {
+        let protected =
+            protection_active(&self.manager.snapshot()?) && self.proxy.session().verified;
+        self.proxy.set_tokens(with_client_token(
+            if protected {
+                tokens
+            } else {
+                TokenSet::default()
+            },
+            &self.credentials,
+        )?);
+        Ok(protected)
+    }
+
     fn reload_agent_tokens(&self) -> Result<(), String> {
         let projector = self.current_projector()?;
         projector.migrate_legacy()?;
@@ -695,8 +720,7 @@ impl DesktopRuntime {
             return Err(agent_failures(failures));
         }
         let (_, tokens) = projector.scan(None)?;
-        self.proxy
-            .set_tokens(with_client_token(tokens, &self.credentials)?);
+        self.publish_agent_tokens(tokens)?;
         Ok(())
     }
 
@@ -1769,6 +1793,11 @@ impl DesktopRuntime {
         let catalog = session.verified.then_some(session.catalog).flatten();
         let projector = self.current_projector()?;
         let (mut statuses, tokens) = projector.scan(catalog.as_ref())?;
+        if !protection_active(&self.manager.snapshot()?) || !session.verified {
+            for status in &mut statuses {
+                status.authorized = false;
+            }
+        }
         if self.instance.is_none() {
             return Ok(statuses);
         }
@@ -1788,8 +1817,7 @@ impl DesktopRuntime {
                 }
             }
         }
-        self.proxy
-            .set_tokens(with_client_token(tokens, &self.credentials)?);
+        self.publish_agent_tokens(tokens)?;
         Ok(statuses)
     }
 
@@ -1830,16 +1858,13 @@ impl DesktopRuntime {
             self.proxy
                 .set_tokens(self.proxy.tokens().without(agent.id()));
         }
-        let status = projector.apply(agent, connect, &revision, catalog.as_ref(), &options)?;
+        let mut status = projector.apply(agent, connect, &revision, catalog.as_ref(), &options)?;
         if agent == Agent::Codex && connect {
             if let Some(catalog) = catalog.as_ref() {
                 self.codex_sync.remember_success(&catalog.revision)?;
             }
         }
-        self.proxy.set_tokens(with_client_token(
-            projector.scan(None)?.1,
-            &self.credentials,
-        )?);
+        status.authorized &= self.publish_agent_tokens(projector.scan(None)?.1)?;
         Ok(status)
     }
 
@@ -1865,8 +1890,7 @@ impl DesktopRuntime {
             )),
             Ok(failures) => {
                 let (statuses, tokens) = projector.scan(None)?;
-                self.proxy
-                    .set_tokens(with_client_token(tokens, &self.credentials)?);
+                self.publish_agent_tokens(tokens)?;
                 if failures.is_empty() {
                     Ok(statuses)
                 } else {
@@ -1923,12 +1947,15 @@ impl DesktopRuntime {
         let state = self.manager.snapshot()?;
         let session = self.proxy.session();
         let protected = protection_active(&state) && session.verified;
+        if !protected && (state.reconnecting || state.status == "verifying") {
+            self.publish_agent_tokens(TokenSet::default())?;
+            return Ok(());
+        }
         let catalog = if protected { session.catalog } else { None };
         let projector = self.current_projector()?;
         let failures = projector.reconcile(catalog.as_ref())?;
         let tokens = projector.scan(catalog.as_ref())?.1;
-        self.proxy
-            .set_tokens(with_client_token(tokens, &self.credentials)?);
+        self.publish_agent_tokens(tokens)?;
         if failures.is_empty() {
             Ok(())
         } else {
@@ -2420,6 +2447,114 @@ mod tests {
                 )
                 .unwrap_err(),
             "The app is closing"
+        );
+    }
+
+    #[test]
+    fn recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them() {
+        const CHILD: &str = "PAP_TEST_RECOVERY_ROUTES";
+        if std::env::var_os(CHILD).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "controller::tests::recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them", "--nocapture"])
+                .env(CHILD, "1").env(desktop_gateway::agents::HOME_OVERRIDE_ENV, home.path()).output().unwrap();
+            assert!(
+                output.status.success(),
+                "{} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let directory = app_data_dir().unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut runtime = test_runtime(&executor, &directory);
+        Arc::get_mut(&mut runtime).unwrap().instance = lock::instance(&directory).unwrap();
+        let home = std::path::PathBuf::from(
+            std::env::var_os(desktop_gateway::agents::HOME_OVERRIDE_ENV).unwrap(),
+        );
+        let cli = home.join(".local/bin").join(if cfg!(windows) {
+            "claude.exe"
+        } else {
+            "claude"
+        });
+        std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+        for path in [&cli, &runtime.helper_path] {
+            std::fs::write(path, "#!/bin/sh\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+        }
+        let agent = Agent::ClaudeCode;
+        let path = home.join(".claude/settings.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = r#"{"env":{"ANTHROPIC_BASE_URL":"https://api.anthropic.com"}}"#;
+        std::fs::write(&path, original).unwrap();
+        let catalog =
+            Catalog::from_remote(&serde_json::json!({"data":[{"id":"test/model"}]}), 1).unwrap();
+        let projector = runtime.current_projector().unwrap();
+        let options = ConnectOptions {
+            default_model: Some("test/model".into()),
+        };
+        let preview = projector
+            .preview(agent, true, Some(&catalog), &options)
+            .unwrap();
+        projector
+            .apply(agent, true, &preview.revision, Some(&catalog), &options)
+            .unwrap();
+        let projected = std::fs::read(&path).unwrap();
+        let files = TokenFiles::new(&directory);
+        let token = files.read(agent.id()).unwrap().unwrap();
+        let verified = GatewayState {
+            status: "verified".into(),
+            api_key_saved: true,
+            session_active: true,
+            config: StartGatewayConfig {
+                remote_url: "https://inference.phala.com".into(),
+                require_production_os: true,
+            },
+            ..Default::default()
+        };
+        runtime.manager.restore_snapshot(verified.clone());
+        runtime.proxy.publish(proxy::Session {
+            verified: true,
+            catalog: Some(catalog.clone()),
+            ..Default::default()
+        });
+        runtime
+            .publish_agent_tokens(projector.scan(Some(&catalog)).unwrap().1)
+            .unwrap();
+        assert_eq!(runtime.proxy.tokens().agent_for(&token), Some(agent.id()));
+        runtime.recovery.available.store(false, Ordering::Release);
+        runtime.recover_network().unwrap();
+        let statuses = runtime.list_agents().unwrap();
+        assert!(statuses.iter().all(|status| !status.authorized));
+        assert!(runtime.proxy.tokens().agent_for(&token).is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), projected);
+        runtime.manager.restore_snapshot(verified);
+        runtime.proxy.publish(proxy::Session {
+            verified: true,
+            catalog: Some(catalog),
+            ..Default::default()
+        });
+        assert!(runtime
+            .list_agents()
+            .unwrap()
+            .iter()
+            .any(|status| status.id == agent.id() && status.authorized));
+        assert_eq!(
+            files.read(agent.id()).unwrap().as_deref(),
+            Some(token.as_str())
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), projected);
+        runtime.stop().unwrap();
+        assert!(files.read(agent.id()).unwrap().is_none());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(path).unwrap()).unwrap(),
+            serde_json::from_str::<serde_json::Value>(original).unwrap()
         );
     }
 
