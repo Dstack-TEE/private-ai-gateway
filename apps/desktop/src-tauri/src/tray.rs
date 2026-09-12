@@ -353,8 +353,8 @@ fn sync_inner(app: &AppHandle, state: &GatewayState) {
         if menu.protected_icon.load(Ordering::Relaxed) != protected {
             if let Some(tray) = app.tray_by_id("gateway") {
                 if let Ok(icon) = tray_icon(protected) {
-                    // Preserve native macOS tinting; other platforms keep the
-                    // colored icon when protection changes.
+                    // Preserve native macOS tinting when the shared monochrome
+                    // icon changes protection state.
                     if tray
                         .set_icon_with_as_template(Some(icon), cfg!(target_os = "macos"))
                         .is_ok()
@@ -371,14 +371,15 @@ fn sync_inner(app: &AppHandle, state: &GatewayState) {
 }
 
 fn tray_icon(protected: bool) -> tauri::Result<tauri::image::Image<'static>> {
-    #[cfg(target_os = "macos")]
     let bytes = include_bytes!("../../assets/tray/trayTemplate@2x.png");
-    #[cfg(not(target_os = "macos"))]
-    let bytes = include_bytes!("../icons/windows-linux/32x32.png");
     let image = tauri::image::Image::from_bytes(bytes)?;
     let mut rgba = image.rgba().to_vec();
-    if !protected {
-        for pixel in rgba.as_chunks_mut::<4>().0 {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
+        // Only macOS tints template images. Neutral gray keeps the same glyph
+        // visible on common light and dark Windows/Linux panels, without a tile.
+        #[cfg(not(target_os = "macos"))]
+        pixel[..3].fill(128);
+        if !protected {
             pixel[3] = (u16::from(pixel[3]) * 45 / 100) as u8;
         }
     }

@@ -291,7 +291,7 @@ exact version, and Wry is resolved through Tauri rather than overridden separate
 The dstack macOS 26+ icon uses the owner's hand-edited Icon Composer project,
 including its gradient, foreground placement and native appearance materials.
 Legacy macOS icons derive from the approved default PNG export. Windows/Linux
-application, installer and tray icons use the dark PNG export. The renderer
+application and installer icons use the dark PNG export. The renderer
 selects the approved light or dark export using the app's appearance.
 The build does not synthesize a replacement icon design.
 Disabled controls are reserved for in-flight mutations, missing/invalid inputs,
@@ -478,8 +478,9 @@ the image resets that flag in the underlying tray implementation and can make
 the icon disappear against a dark menu bar.
 The tray uses a 36px template raster for Tauri's 18pt macOS image, with a 16pt
 mark. Protected uses the full template alpha; stopped or verifying uses 45%
-alpha, tinted by macOS. Windows/Linux use the colored dark-export icon with the
-same alpha states, without template tinting. There is no status badge. The Dock
+alpha, tinted by macOS. Windows/Linux use the same transparent monochrome glyph with the
+same alpha states. Since template tinting is macOS-only, their foreground is
+neutral gray for common light and dark panels. There is no status badge. The Dock
 app icon is independent of protection status. The native tray menu offers endpoint/key copying, profile selection,
 agent connection checkmarks, and elapsed protection time. Actions use the same
 runtime operations as the main window, including profile reconnection and config restoration.
@@ -902,7 +903,7 @@ outer margin; the native macOS asset supplies system appearance variants.
 The scripts validate
 their inputs and fail fast on a missing field, asset, digest, or named app
 icon. The macOS tray uses the updated monochrome SVG template. Windows/Linux
-tray icons use the 32px dark-export PNG without template tinting. Inactive states
+tray icons use the same template glyph in neutral gray without a background tile. Inactive states
 reduce alpha without changing the silhouette or adding a badge.
 
 The default brand uses the official Dstack logo kit from
