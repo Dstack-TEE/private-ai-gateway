@@ -501,7 +501,7 @@ mod platform {
             assert!(registration.on_path);
             assert_eq!(
                 registration.command_path,
-                directory.join("private-ai-proxy")
+                directory.canonicalize().unwrap().join("private-ai-proxy")
             );
             assert_eq!(directory.join("pap").canonicalize().unwrap(), executable);
             assert!(matches!(
