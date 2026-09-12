@@ -677,7 +677,7 @@ protocol is the service's own response, shown as such.
   snapshot, not continuous availability monitoring or a claim that an endpoint
   returning a transient error is permanently unsupported.
 
-  Apps fetch this file from the repository's `main` branch when starting protection
+  Apps fetch this file from the repository's `feat/private-ai-gateway-native-clients` branch when starting protection
   or refreshing the model catalog (`pap models list --refresh`). The request runs
   alongside model discovery, uses a separate unauthenticated HTTPS client, and has
   a four-second deadline and a 1 MiB limit. ETag conditional requests reuse the
@@ -687,10 +687,9 @@ protocol is the service's own response, shown as such.
   refresh through the existing configuration transaction and restoration journal.
 
   To publish changes, review the full three-endpoint probe report and update
-  `gateway/src/endpoint-support.json` through a PR to `main`. A partial `--model`
+  `gateway/src/endpoint-support.json` through a PR to `feat/private-ai-gateway-native-clients`. A partial `--model`
   or `--surface` diagnostic must be merged into the full inventory, not replace it.
   Once clients have this loader, inventory-only changes need no app release.
-  Until the file reaches `main`, GitHub returns 404 and apps use their bundled copy.
   The feed cannot add models absent from the verified service catalog, change
   credentials or provider URLs, or bypass ACI verification. Updating compatibility
   records may still require restarting an agent that only loads its config at startup.
