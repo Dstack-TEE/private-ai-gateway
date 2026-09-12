@@ -38,9 +38,12 @@ tokio = { version = "1", features = ["sync", "time"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 auto-launch = "0.6"
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+futures-util = "0.3"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.61", features = ["UI_Notifications"] }
+windows = { version = "0.61", features = ["Foundation", "UI_Notifications", "UI_ViewManagement"] }
+windows-registry = "0.6.1"
 auto-launch-windows = { package = "auto-launch", version = "0.5.0" }
 
 [target.'cfg(target_os = "macos")'.dependencies]

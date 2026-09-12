@@ -46,11 +46,18 @@ Windows and Linux sidebars do not reserve a macOS traffic-light region.
 
 Windows uses Tauri's NSIS template with generated 150x57 header and 164x314
 sidebar artwork and the branded application icon for installation and removal.
+Installer branding is the approved app icon with "Private AI Proxy" and
+"by dstack TEE", matching the application header. The product wordmarks are
+outlined vectors; the standalone upstream Dstack wordmark is not used.
 The official NSIS hooks stop the backend and maintain current-user CLI registration.
 macOS uses a generated 660x440 DMG background with native app and Applications
 icons. Artwork uses the approved icon exports and vector wordmarks, without system fonts.
 CI sets Tauri's `TAURI_BUNDLER_DMG_IGNORE_CI=true` on macOS so the official
 Finder customization step actually applies the background and icon positions.
+The app and Applications centers are (180, 230) and (480, 230), with the arrow
+centered between them in a 660x440 window. CI mounts the built DMG read-only
+and verifies both Finder positions, window dimensions and selected background
+using `scripts/verify-dmg-layout.mjs`, then detaches it.
 Linux DEB/RPM packages use the branded application icons and metadata in the
 system package manager; they do not have a custom installer wizard.
 See [Tauri DMG configuration](https://v2.tauri.app/reference/config/#dmgconfig)
@@ -290,9 +297,9 @@ exact version, and Wry is resolved through Tauri rather than overridden separate
 
 The dstack macOS 26+ icon uses the owner's hand-edited Icon Composer project,
 including its gradient, foreground placement and native appearance materials.
-Legacy macOS icons derive from the approved default PNG export. Windows/Linux
-application and installer icons use the dark PNG export. The renderer
-selects the approved light or dark export using the app's appearance.
+Every static application and installer icon uses the approved Light PNG.
+Only macOS dark appearance uses the Dark artwork, through the native .icon
+project and the macOS renderer.
 The build does not synthesize a replacement icon design.
 Disabled controls are reserved for in-flight mutations, missing/invalid inputs,
 unavailable data, pagination boundaries and dependent settings. Development OS
@@ -473,15 +480,17 @@ The initial state is consumed synchronously for the first render. Windows that
 still need a credential or historical record stay hidden without a transient
 Loading/Cancel page; errors remain actionable and dismissible.
 
-macOS tray image updates preserve the template flag atomically; replacing only
-the image resets that flag in the underlying tray implementation and can make
-the icon disappear against a dark menu bar.
-The tray uses a 36px template raster for Tauri's 18pt macOS image, with a 16pt
-mark. Protected uses the full template alpha; stopped or verifying uses 45%
-alpha, tinted by macOS. Windows/Linux use the same transparent monochrome glyph with the
-same alpha states. Since template tinting is macOS-only, their foreground is
-neutral gray for common light and dark panels. There is no status badge. The Dock
-app icon is independent of protection status. The native tray menu offers endpoint/key copying, profile selection,
+The tray uses the same transparent monochrome glyph on every platform.
+Protected uses full opacity; stopped or verifying uses 45% alpha. The inactive
+opacity is a product convention, not an Apple-mandated value. macOS uses a
+36px black-and-clear template for Tauri's 18pt image, with a 16pt mark; the system
+controls tint. Windows observes native system color changes and reads
+`SystemUsesLightTheme`, independently of the app's theme. Linux subscribes to
+XDG desktop-portal `color-scheme` changes (1 means dark, 2 means light).
+Dark mode uses white and light mode uses black, without a tile or outline.
+Observers are stopped on application exit. Linux panels with a theme independent
+of the portal preference may require desktop-specific acceptance; the app does
+not pretend the portal describes every custom panel. The native tray menu offers endpoint/key copying, profile selection,
 agent connection checkmarks, and elapsed protection time. Actions use the same
 runtime operations as the main window, including profile reconnection and config restoration.
 
@@ -886,8 +895,8 @@ identifier, category, and descriptions, the accent colours, and the official
 asset files next to it. `npm run prepare:brand` (run automatically by
 `check`, `build`, `dev`, and `dist`; `PRIVATE_AI_PROXY_BRAND=<id>` selects a
 brand, default `dstack`) projects it into `src/renderer/generated/` (the
-`brand.ts` module plus the light and dark wordmark SVGs, imported as Vite
-assets so they ship self-hosted under the production CSP),
+`brand.ts` module and appearance PNGs, imported as Vite assets so they ship
+self-hosted under the production CSP),
 `gateway/src/brand.rs`, the cross-platform fallback icons and macOS Icon
 Composer asset in `src-tauri/icons`, the template tray icon in `assets/tray`,
 and an ignored
@@ -900,28 +909,31 @@ committed outputs are for the default brand; CI regenerates them and fails on
 drift. With Xcode 26, `prepare-macos-icon.mjs` compiles the `.icon` source into
 the native `Assets.car`. The complete hand-edited project is copied from
 `brand/dstack/icon/AppIcon.icon` without changing its layers or manifest.
-The default export generates legacy macOS icons; the dark export generates
-`src-tauri/icons/windows-linux` for Windows/Linux application, installer and
-uninstaller icons. Both sets retain the existing 100px transparent desktop
-margin on a 1024px canvas, so full-bleed iOS exports do not appear oversized.
-Both sets are generated on every host and checked for drift in CI.
-The renderer uses 256px versions of the approved light/dark PNGs without that
-outer margin; the native macOS asset supplies system appearance variants.
-The scripts validate
-their inputs and fail fast on a missing field, asset, digest, or named app
-icon. The macOS tray uses the updated monochrome SVG template. Windows/Linux
-tray icons use the same template glyph in neutral gray without a background tile. Inactive states
-reduce alpha without changing the silhouette or adding a badge.
+The Light export generates the shared static PNG, ICO and ICNS files, retaining
+the existing 100px transparent desktop margin on a 1024px canvas. This keeps
+full-bleed exports from appearing oversized. Original Icon Composer PNGs carry
+a Display P3 profile: Sharp transforms them to sRGB before resizing and before
+Tauri/resvg can strip color metadata. Original PNGs and the .icon remain intact.
+The renderer uses 256px images without that outer margin. It uses Light on
+Windows/Linux, and follows appearance on macOS. Installer artwork uses the
+same Light icon with the product name and byline on a neutral background.
+Required inputs, hashes and generated asset drift are checked before release.
+The tray uses the SVG-derived template with native/system-preference black/white
+selection and inactive alpha, rather than a colored app tile.
 
 The default brand uses the official Dstack logo kit from
 [Dstack-TEE/dstack](https://github.com/Dstack-TEE/dstack) at commit
 `982621521b435cc10b535cb8646efecb8c3fc255` (`docs/assets/dstack-logo-kit/`),
-with the source paths, licence, and SHA-256 digests recorded in
-`brand/dstack/brand.json`. Its app icon is the owner's `Archive.zip` design;
+with its upstream origin and license recorded in `brand/dstack/brand.json`. Its app icon is the owner's `Archive.zip` design;
 archive provenance and per-file hashes are recorded separately in `iconSource`.
 To update it, replace the complete source `.icon`, both appearance PNG exports,
 and the transparent tray SVG in `brand/dstack/icon`, update their hashes, then
 run `npm run prepare:brand`. Never edit the generated copies in `src-tauri/icons`.
+`product-wordmark-light.svg` contains the outlined product name and byline,
+authored with Liberation Sans (SIL OFL 1.1); builds do not need that font
+installed. Keep its artwork labels aligned with
+`productName` and `byline` in the brand configuration. Unused upstream logo-kit files and duplicate Windows/Linux dark icon outputs
+are removed; source provenance remains in the brand metadata.
 `brand/redpill` and `brand/phala` are templates: add the official assets and
 Icon Composer project they reference before selecting them.
 

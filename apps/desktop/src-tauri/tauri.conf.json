@@ -65,7 +65,7 @@
         "installMode": "currentUser",
         "headerImage": "installer/brand-header.bmp",
         "sidebarImage": "installer/brand-sidebar.bmp",
-        "installerIcon": "icons/windows-linux/icon.ico",
+        "installerIcon": "icons/icon.ico",
         "installerHooks": "installer/windows.nsh"
       }
     },

@@ -8,7 +8,10 @@ use axum::{
     routing::get,
     Router,
 };
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine,
+};
 use rand::RngCore;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -784,8 +787,20 @@ fn callback_page(accepted: bool) -> String {
         )
         .replace("__PRODUCT__", &product)
         .replace(
+            "__BYLINE__",
+            &desktop_gateway::brand::BYLINE
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;"),
+        )
+        .replace(
             "__LOGO__",
-            include_str!("../../src/renderer/generated/tray-mark.svg"),
+            &format!(
+                r#"<img src="data:image/png;base64,{}" alt="">"#,
+                STANDARD.encode(include_bytes!(
+                    "../../src/renderer/generated/app-icon-light.png"
+                ))
+            ),
         )
         .replace(
             "__TITLE__",
@@ -815,7 +830,7 @@ async fn callback(
     let accepted = state.accept(&uri, &headers).await.is_ok();
     (if accepted { StatusCode::OK } else { StatusCode::BAD_REQUEST }, [
         ("Cache-Control".into(), "no-store".into()),
-        ("Content-Security-Policy".into(), "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'".into()),
+        ("Content-Security-Policy".into(), "default-src 'none'; img-src data:; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'".into()),
         ("Referrer-Policy".into(), "no-referrer".into()),
         ("X-Content-Type-Options".into(), "nosniff".into()),
     ], Html(callback_page(accepted)))

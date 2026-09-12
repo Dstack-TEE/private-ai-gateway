@@ -85,20 +85,23 @@ are macOS-only and are verified by the macOS package job.
 ## Branding
 
 `brand/<id>/brand.json` is the single source. `scripts/prepare-brand.mjs`
-generates the renderer module and the self-hosted wordmark SVGs (Vite assets,
+generates the renderer module and self-hosted appearance PNGs (Vite assets,
 so the production CSP stays `img-src 'self'`), the Rust constants (tray,
 menus, data directory), the Tauri config overlay, the desktop icons, and the
 tray template.
 The default brand is `dstack`, using the official Dstack logo kit from
 `Dstack-TEE/dstack` at commit `982621521b435cc10b535cb8646efecb8c3fc255`
-(`docs/assets/dstack-logo-kit/`, Apache-2.0 alongside; SHA-256 recorded in
-`brand.json`). The owner-authored icon project and default/dark PNG exports
+(`docs/assets/dstack-logo-kit/`, Apache-2.0 alongside). The owner-authored icon project and default/dark PNG exports
 live in `brand/dstack/icon`, with their hashes under `iconSource`. The native
-project is copied intact and compiled by Apple's tooling. Legacy macOS icons
-use the default export; Windows/Linux application and installer icons
-use the dark export. In-app icons follow the selected appearance. The macOS
-tray uses a monochrome template from the owner's foreground SVG; Windows/Linux
-use the same glyph in neutral gray, without a background tile or template tinting. Protection controls alpha, not shape.
+project is copied intact and compiled by Apple's tooling. All static application
+and installer icons use the Light export; only macOS dark appearance uses Dark.
+Display P3 PNGs are color-managed to sRGB before conversion; originals remain intact.
+The tray uses one transparent glyph. macOS tints the template; Windows follows
+system/taskbar preference, and Linux follows the XDG portal appearance preference.
+Protected is fully opaque; inactive uses 45% alpha as a product convention.
+Installer branding matches the app header: the approved icon, Private AI Proxy,
+and by dstack TEE. Product wordmarks are outlined SVGs, without system-font
+dependencies or the standalone original Dstack wordmark.
 Outside branded artwork, green indicates protection and verification state; the action accent is
 applied only to the primary action, selection, and links; the rest of the
 palette is system-neutral. `redpill` and `phala` are configuration

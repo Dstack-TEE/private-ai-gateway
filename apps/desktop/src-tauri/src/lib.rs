@@ -3,6 +3,8 @@ mod menu;
 mod native_dialog;
 mod notifications;
 mod tray;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+mod tray_theme;
 mod updates;
 
 use std::{path::PathBuf, sync::Arc};
@@ -955,6 +957,11 @@ pub fn run() {
             });
             if let Err(error) = tray::setup(app.handle()) {
                 client.report_error(format!("The system tray is unavailable: {error}"));
+            } else {
+                #[cfg(any(target_os = "windows", target_os = "linux"))]
+                if let Err(error) = tray_theme::setup(app.handle()) {
+                    eprintln!("Cannot observe system tray appearance: {error}");
+                }
             }
             if let Err(error) = menu::setup(app.handle()) {
                 client.report_error(format!("The application menu is unavailable: {error}"));
@@ -995,6 +1002,8 @@ pub fn run() {
         .expect("error while building Tauri application");
 
     app.run(|_app, event| match event {
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        tauri::RunEvent::Exit => tray_theme::shutdown(_app),
         #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen { .. } => tray::show_window(_app),
         _ => {}
