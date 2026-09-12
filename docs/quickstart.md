@@ -131,7 +131,7 @@ cargo run --bin aci -- audit --report report.json --nonce "$NONCE"
 ## 3. Use it as a local endpoint
 
 ```bash
-cargo run --bin aci -- serve "$ACI_URL" --verify-receipts
+cargo run --bin aci -- serve "$ACI_URL"
 ```
 
 `aci serve` verifies the service first, prints the transcript, and refuses

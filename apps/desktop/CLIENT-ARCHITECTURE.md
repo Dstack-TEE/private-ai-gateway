@@ -17,7 +17,9 @@ Status: implemented; modular layout updated 2026-09-12.
 `pap` composes the managed CLI's Clap command tree with the existing ACI
 commands. Management command execution and output live in
 `apps/desktop/runtime/src/cli`. ACI modules are compiled from
-their existing source paths: no verifier implementation is copied or modified.
+their existing source paths, so both executables use one verifier implementation.
+Desktop integration adds opt-in lifecycle events and receipt withholding; the
+original `aci` entry point and default streaming behavior remain available.
 The explicit `desktop-client` Cargo feature keeps desktop dependencies out of
 ordinary service and standalone ACI builds.
 
@@ -50,6 +52,57 @@ helper. They do not contain an independent `aci` executable.
   excluded; authorization, recovery, ownership, accounting and cache isolation
   remain covered. Self-spawned tests retain explicit, checked test selectors.
 
+## Lifecycle
+
+- `status`, `doctor`, and help/version do not launch the backend. `service start`
+  and `start` explicitly launch it without opening a window.
+- Closing or quitting the UI leaves the backend and gateway running. The tray's
+  Stop All and Quit action requests confirmation, then shuts down the backend.
+- A disconnected UI offers Start backend. It does not silently restart a service
+  during an updater operation or replay an earlier mutation.
+- Connect on launch belongs to backend startup, not opening/reopening a UI.
+  Login startup remains an explicit desktop OS preference.
+- Native wake monitoring also belongs to the backend: IOKit on macOS, power
+  callbacks on Windows, and login1 on Linux. Recovery does not need an open UI.
+- The service acquires its instance lock before loading or migrating state.
+  Client startup and update replacement share an additional pre-spawn gate.
+- Shutdown enters draining before taking the exclusive operation gate, waits
+  for existing mutations, restores managed agent configuration, stops listeners,
+  and awaits process exit. Failure to restore leaves management available for
+  recovery instead of closing the inference listener halfway through shutdown.
+- A parent-pipe supervisor owns ACI. Backend death closes the pipe in the kernel;
+  the supervisor terminates and reaps its ACI child. Normal stop waits for the
+  supervisor; reap timeout preserves the completion handle for a later retry.
+
+## Security and Protocol
+
+Local management uses bounded, versioned NDJSON over Unix sockets or Windows
+named pipes. It is separate from the local inference HTTP API. An inference key
+never authorizes administration.
+
+Unix endpoints live in a validated private per-user directory and authenticate
+peer UID in both directions. Endpoint paths are shortened for Unix socket limits.
+Only an instance-lock owner may reclaim a stale socket, and only the socket inode
+owned by a listener is removed when it closes.
+
+Windows uses a protected current-user DACL, rejects remote clients, protects the
+first pipe instance, and verifies both peer process token SIDs. Read/write
+operations use overlapped I/O with timeout cancellation and completion draining.
+Same-user malicious code and OS administrators are outside this isolation boundary.
+
+Clients validate the server handshake before sending requests. Shutdown includes
+the expected instance ID on that same authenticated connection. Update validation
+also checks that the running executable belongs to the current installation.
+The service bounds frame sizes, frame deadlines, clients, subscriptions, and
+exports. Slow or malformed clients cannot close the service. Subscriptions have
+a separate quota so they cannot consume every short-request slot.
+
+Agent changes retain preview/revision/apply validation. CSV exports are streamed
+one row at a time into a newly created private file; existing targets and symlinks
+are not overwritten. OS credential stores remain the only persistent provider
+credential store. UI-free operation does not imply an unlocked credential store
+on an unattended machine; there is no plaintext fallback.
+
 ## Application identity
 
 The display name is Private AI Proxy, with by dstack TEE attribution.
@@ -69,3 +122,14 @@ Repository: https://github.com/Dstack-TEE/private-ai-gateway
 Main integrated before this change: `c2d31a8`.
 Primary contracts: `src/bin/aci/args.rs`, `apps/desktop/runtime/src/cli/args.rs`,
 `apps/desktop/runtime/src/process.rs`, `apps/desktop/scripts/package-cli.mjs`.
+
+Official contracts: [Rust file locks](https://doc.rust-lang.org/1.89.0/std/fs/struct.File.html#method.try_lock),
+[Tauri sidecars](https://v2.tauri.app/develop/sidecar/),
+[Tauri NSIS hooks](https://v2.tauri.app/distribute/windows-installer/),
+[Windows pipe security](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights),
+[XDG runtime directories](https://specifications.freedesktop.org/basedir/latest/),
+[Secret Service](https://specifications.freedesktop.org/secret-service/latest/ch01.html),
+[Apple power notifications](https://developer.apple.com/library/archive/qa/qa1340/_index.html),
+[CoreFoundation run-loop sources](https://github.com/apple-oss-distributions/CF/blob/main/CFRunLoop.h),
+[Windows power callbacks](https://learn.microsoft.com/en-us/windows/win32/api/powerbase/nf-powerbase-powerregistersuspendresumenotification),
+[login1 signals](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.login1.html).
