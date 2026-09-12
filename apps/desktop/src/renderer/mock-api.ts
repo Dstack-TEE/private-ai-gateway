@@ -379,11 +379,12 @@ export function mockApi(name: string | null): DesktopApi {
     setUpdateChannel: async (channel) => { updateChannel = channel; return channel; },
     checkUpdate: async () => {
       updateAttempts += 1;
+      if (name === "update-install-error-offline" && updateAttempts > 1) throw new Error("offline");
       if (name === "update-offline" || (name === "update-recover" && updateAttempts === 1)) throw new Error("offline");
-      return { enabled: true, currentVersion: "0.1.0", channelPublished: name !== "update-unpublished", version: name === "update-available" || name === "update-install-error" ? updateChannel === "beta" ? "0.3.0-beta.1" : "0.2.0" : null };
+      return { enabled: true, currentVersion: "0.1.0", channelPublished: name !== "update-unpublished", version: name === "update-available" || name?.startsWith("update-install-error") ? updateChannel === "beta" ? "0.3.0-beta.1" : "0.2.0" : null };
     },
     installUpdate: async () => {
-      if (name === "update-install-error") {
+      if (name?.startsWith("update-install-error")) {
         updateListeners.forEach((listener) => listener({ downloaded: 40, total: 100 }));
         await new Promise<void>((resolve) => window.addEventListener("mock:finish-update", () => resolve(), { once: true }));
         throw new Error("Installation failed");
