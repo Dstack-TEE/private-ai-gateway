@@ -10,7 +10,13 @@
     "noFallthroughCasesInSwitch": true,
     "skipLibCheck": true,
     "paths": { "@/*": ["./src/renderer/*"] },
-    "types": ["node", "vite/client"]
+    "types": ["node", "vite/client"],
+    "noUnusedLocals": true
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "vite.config.ts",
+    "test/**/*.ts"
+  ]
 }

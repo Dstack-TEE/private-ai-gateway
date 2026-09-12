@@ -989,9 +989,9 @@ Playwright against the stateful in-page mock. It covers protection start/stop,
 agent discovery and reversible config previews, current-session Overview
 usage, persistent-history filters and cursor pagination,
 proof and local-block semantics, profile management, system confirmation boundaries,
-dark/high-contrast/reduced-motion
-media, 200% zoom, and
-940/720/540/320 widths. Renderer UI checks, TypeScript, release manifest tests,
+account cancellation, cache isolation and updates. Tests are grouped by these
+behaviors; visual layout is reviewed separately. TypeScript checks include the
+core test code and reject unused locals. Renderer checks, release manifest tests,
 and Rust checks run on every desktop CI build. Windows package jobs also execute
 the shared libraries' tests. NSIS/DEB installation checks exercise the bundled
 CLI, backend and helper, then uninstall the package; temporary

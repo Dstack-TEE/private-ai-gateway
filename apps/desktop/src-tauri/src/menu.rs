@@ -120,7 +120,9 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             let app = app.clone();
             let target = event.id().as_ref().to_string();
             tauri::async_runtime::spawn(async move {
-                if let Err(error) = crate::open_about_link(app.clone(), target).await {
+                if let Err(error) =
+                    crate::commands::desktop::open_about_link(app.clone(), target).await
+                {
                     use tauri::Manager;
                     app.state::<std::sync::Arc<desktop_runtime::client::Client>>()
                         .report_error(error);

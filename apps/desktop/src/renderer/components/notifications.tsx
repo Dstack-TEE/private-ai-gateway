@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type PropsWithChildren } from "react";
 import { useQuery } from "@tanstack/react-query";
-import type { DesktopApi, NotificationConfiguration, NotificationPreferences } from "../../shared/contracts";
+import type { DesktopApi, NotificationPreferences } from "../../shared/contracts";
 import { SettingsList, SettingsToggle } from "./settings";
 import { Sheet, SheetActions } from "./sheet";
 import { Alert, AlertDescription } from "./ui/alert";
