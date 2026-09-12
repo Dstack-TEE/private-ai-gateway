@@ -1,7 +1,8 @@
 # PAP CLI Distribution
 
-The desktop bundle and the standalone CLI distribution contain the same three
-release executables:
+There is one user-facing CLI: `pap`, including all five ACI commands. The
+desktop bundle and standalone CLI distribution do not ship a separate `aci`.
+They contain the same three executables:
 
 - `pap`: user-facing CLI, backend client and integrated ACI verifier (`pap serve`).
 - `pap-service`: persistent per-user backend.
