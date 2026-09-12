@@ -210,20 +210,31 @@ Linux reconnects and re-subscribes every five seconds after subscription failure
 or stream termination, with cancellation on backend exit. Monitor availability is
 visible in Settings and redacted diagnostics. Environments without login1 retain
 network recovery but cannot report wake until the service becomes available.
-Recovery revokes the old transport generation and restores agent configurations
-before fresh verification. The user session is independent of that transport:
+Recovery revokes the old transport generation and holds agent routing at Local API
+until fresh verification succeeds. The user session is independent of that transport:
 network/wake recovery, interrupted-verification retries, profile changes and Local
 API restarts preserve its ID, start time and usage. SQLite stores the current
 session marker so an abnormal backend exit does not silently split usage. Restart
 loads its usage summary but never restores a verified identity or forwarding
-permission. Manual stop, explicit backend shutdown and Reset settings end it.
+permission. An interrupted session resumes automatically after verification.
+Manual stop, explicit backend shutdown, Reset settings and security blocks end its
+persistent resume marker. A blocked candidate configuration does not end the
+original profile session.
 If all non-loopback addresses disappear it waits for an address to
 return. Address presence is not a claim of internet reachability; a failed fresh
-verification requires user attention, not unlimited retries. Events survive a busy
+verification retries after 3, 6, 12 and 24 seconds, then at most once every 30 seconds
+while connection intent remains active. Protection startup times out after 120
+seconds instead of hanging indefinitely; configuration verification keeps its
+45-second budget. Successful verification resets the backoff.
+A failed local listener retries the same configured address and port; it never
+chooses a different endpoint automatically.
+Structured security blocks require user intervention and are never retried by the
+controller, including after a backend restart. Events survive a busy
 lifecycle lock or in-progress verification and are revisited by the existing
 reconciliation loop without busy-waiting. Manual start/stop, backend exit/install and
 successful active-profile changes cancel recovery intent; failed and no-op imports
-do not. Loopback services are exempt.
+do not. Address changes do not interrupt loopback services; failed local services
+can still retry without an external network address.
 Real sleep/wake, VPN changes and per-platform notification delivery still require
 installed-app acceptance tests.
 
@@ -852,8 +863,11 @@ uses the same backend transaction but does not change the OS login item.
 During automatic network recovery and verification, agent routing stays pointed at
 Local API. The proxy clears agent authorization until protection is verified again;
 refreshing agent status cannot reauthorize those tokens. Explicit Stop, Disconnect,
-configuration changes and shutdown restore the original routing. Startup recovery
-also restores recorded configuration before any new protection session.
+configuration changes and shutdown restore the original routing. An interrupted
+active session retains its routing across backend restart until reverified; a
+previously stopped session remains stopped. Temporary agent connection failures
+retry after 30 seconds, while ownership or native configuration conflicts wait
+for explicit repair.
 
 `Disconnect` tombstones the record (disabled, cleanup pending), deletes the
 token file before any record or config is touched, and syncs the removal to
