@@ -1,5 +1,7 @@
 import React, { createContext, lazy, memo, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ViewCache } from "./lib/view-cache";
+import { QueryClientProvider, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryClient } from "./lib/query-client";
+import { useGatewayState } from "./lib/use-gateway-state";
 import { useWindowReady } from "./lib/use-window-ready";
 import { useAccountLogin } from "./lib/use-account-login";
 import { AccountTools } from "./components/account-tools";
@@ -287,9 +289,12 @@ function useNativeGatewayWindow(title: string, contentReady = true): {
   close(): void;
 } {
   const initialState = useContext(NativeStateContext);
-  const [state, setState] = useState<GatewayState>(initialState ?? INITIAL_STATE);
-  const [loaded, setLoaded] = useState(Boolean(initialState));
-  const [loadError, setLoadError] = useState<string>();
+  const gateway = useGatewayState(desktopApi, initialState ?? INITIAL_STATE);
+  const state = gateway.data ?? initialState ?? INITIAL_STATE;
+  const setState = gateway.setState;
+  const loaded = Boolean(initialState) || !gateway.isLoading;
+  const [presentationError, setLoadError] = useState<string>();
+  const loadError = presentationError ?? (gateway.error ? errorMessage(gateway.error) : undefined);
   const [closed, setClosed] = useState(false);
   useWindowReady(loaded && (contentReady || Boolean(loadError)) && !closed, desktopApi.nativeDialogReady, setLoadError);
 
@@ -297,29 +302,7 @@ function useNativeGatewayWindow(title: string, contentReady = true): {
     document.title = `${title} - ${brand.productName}`;
     const root = document.documentElement;
     root.classList.add("is-native-dialog");
-    let active = true;
-    let receivedState = false;
-    const unsubscribe = desktopApi.onStateChange((nextState) => {
-      receivedState = true;
-      if (active) setState(nextState);
-    });
-    void desktopApi.getState().then(
-      (nextState) => {
-        if (!active) return;
-        if (!receivedState) setState(nextState);
-        setLoaded(true);
-      },
-      (error: unknown) => {
-        if (!active) return;
-        setLoadError(errorMessage(error));
-        setLoaded(true);
-      },
-    );
-    return () => {
-      active = false;
-      unsubscribe();
-      root.classList.remove("is-native-dialog");
-    };
+    return () => { root.classList.remove("is-native-dialog"); };
   }, [title]);
 
   const close = () => {
@@ -543,20 +526,13 @@ function NativeLocalApiWindow(): React.JSX.Element {
 function NativeUsageProofWindow({ initialRecordId }: { initialRecordId: string }): React.JSX.Element {
   const [recordId, setRecordId] = useState(initialRecordId);
   const initialState = useContext(NativeStateContext);
-  const [activity, setActivity] = useState<RequestActivity | undefined>(() => initialState?.activity.find((item) => item.id === initialRecordId));
-  const [error, setError] = useState<string>();
+  const { data: activity, error: recordError } = useQuery({
+    queryKey: ["usage-record", recordId], queryFn: () => desktopApi.getUsageRecord(recordId),
+    initialData: initialState?.activity.find((item) => item.id === recordId),
+  });
+  const error = recordError ? errorMessage(recordError) : undefined;
   const native = useNativeGatewayWindow("Usage Proof", Boolean(activity || error));
   useEffect(() => desktopApi.onUsageProofRequest(setRecordId), []);
-  useEffect(() => {
-    let active = true;
-    setActivity((current) => current?.id === recordId ? current : undefined);
-    setError(undefined);
-    void desktopApi.getUsageRecord(recordId).then(
-      (record) => active && setActivity(record),
-      (loadError: unknown) => active && setError(errorMessage(loadError)),
-    );
-    return () => { active = false; };
-  }, [recordId]);
   if (native.closed) return <NativeDialogHost  aria-label="Usage proof closed" />;
   if (!activity || error || native.loadError) return <NativeDialogStatus label="usage proof" error={error ?? native.loadError} onClose={native.close} />;
   return <NativeDialogHost ><UsageEvidenceSheet activity={activity} onClose={native.close} /></NativeDialogHost>;
@@ -567,10 +543,13 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
   const [view, setView] = useState<View>(initialView);
   const [settingsTarget, setSettingsTarget] = useState<SettingsTarget>();
   const [profileEditorId, setProfileEditorId] = useState<string>();
-  const [state, setState] = useState<GatewayState>(INITIAL_STATE);
-  const [stateLoaded, setStateLoaded] = useState(false);
+  const gateway = useGatewayState(desktopApi, INITIAL_STATE);
+  const state = gateway.error ? unavailableState(gateway.error) : gateway.data ?? INITIAL_STATE;
+  const setState = gateway.setState;
+  const stateLoaded = !gateway.isLoading;
   const [allowDevelopmentOs, setAllowDevelopmentOs] = useState(false);
-  const [launchPreferences, setLaunchPreferences] = useState<LaunchPreferences>();
+  const client = useQueryClient();
+  const { data: launchPreferences } = useQuery({ queryKey: ["launch-preferences"], queryFn: () => desktopApi.getLaunchPreferences() });
   const [savingPreference, setSavingPreference] = useState(false);
   const [connectingBackend, setConnectingBackend] = useState(false);
   const [actionError, setActionError] = useState<string>();
@@ -579,12 +558,14 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
   const [copied, setCopied] = useState<string>();
   const [clientKey, setClientKey] = useState("");
   const [clientKeyVisible, setClientKeyVisible] = useState(false);
-  const [agents, setAgents] = useState<AgentStatus[]>([]);
+  const { data: agents = [], error: agentsError } = useQuery({
+    queryKey: ["agents"], queryFn: () => desktopApi.listAgents(), staleTime: 0,
+    refetchInterval: view === "agents" ? 15_000 : false,
+  });
+  useEffect(() => { if (agentsError) setActionError(errorMessage(agentsError)); }, [agentsError]);
   const [pendingAgentChanges, setPendingAgentChanges] = useState<Record<string, boolean>>({});
   const agentOperations = useRef(new Set<string>());
   const agentIntents = useRef(new Map<string, boolean>());
-  const agentScanFlight = useRef<Promise<AgentStatus[] | undefined> | undefined>(undefined);
-  const agentScanQueued = useRef(false);
   const [applying, setApplying] = useState(false);
   const [selectedUsage, setSelectedUsage] = useState<RequestActivity>();
   const [notice, setNotice] = useState<{ id: number; text: string } | undefined>(() => initialView === "settings" ? { id: Date.now(), text: "Settings reset" } : undefined);
@@ -602,27 +583,20 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
   const [previewTrayOpen, setPreviewTrayOpen] = useState(false);
   const copyTimer = useRef<number | undefined>(undefined);
   const [startAfterSetup, setStartAfterSetup] = useState(false);
-  const agentScan = useRef(0);
   const busy = state.status === "verifying";
   const running = !state.configurationVerification && (state.status === "verified" || state.status === "blocked");
   const verified = !state.configurationVerification && state.status === "verified";
   const endpointDown = Boolean(state.endpointError);
   const models = state.catalog?.models ?? [];
 
-  useEffect(() => {
-    let active = true;
-    void desktopApi.getLaunchPreferences().then(
-      (value) => { if (active) setLaunchPreferences(value); },
-      (error: unknown) => { if (active) setActionError(errorMessage(error)); },
-    );
-    const unsubscribe = desktopApi.onLaunchPreferencesChange(setLaunchPreferences);
-    return () => { active = false; unsubscribe(); };
-  }, []);
+  useEffect(() => desktopApi.onLaunchPreferencesChange((next) => {
+    void client.cancelQueries({ queryKey: ["launch-preferences"] }).then(() => client.setQueryData(["launch-preferences"], next));
+  }), [client]);
 
   const saveLaunchPreference = async (name: keyof LaunchPreferences, enabled: boolean) => {
     setSavingPreference(true);
     setActionError(undefined);
-    try { setLaunchPreferences(await desktopApi.setLaunchPreference(name, enabled)); }
+    try { await client.cancelQueries({ queryKey: ["launch-preferences"] }); client.setQueryData(["launch-preferences"], await desktopApi.setLaunchPreference(name, enabled)); }
     catch (error) { setActionError(errorMessage(error)); }
     finally { setSavingPreference(false); }
   };
@@ -675,12 +649,6 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
 
   useEffect(() => {
     let active = true;
-    const unsubscribe = desktopApi.onStateChange((nextState) => {
-      if (active) {
-        setState(nextState);
-        setStateLoaded(true);
-      }
-    });
     const unsubscribeNavigate = desktopApi.onNavigate((section) => {
       if (active) {
         setSettingsTarget(undefined);
@@ -688,19 +656,6 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
         window.requestAnimationFrame(() => document.getElementById(`page-title-${section}`)?.focus());
       }
     });
-    void desktopApi.getState().then(
-      (nextState) => {
-        if (!active) return;
-        setState(nextState);
-        setStateLoaded(true);
-      },
-      (error: unknown) => {
-        if (!active) return;
-        setState(unavailableState(error));
-        setStateLoaded(true);
-        setActionError(errorMessage(error));
-      },
-    );
     let keyRead = 0;
     const loadClientKey = () => {
       const read = ++keyRead;
@@ -732,7 +687,6 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
     return () => {
       active = false;
       if (copyTimer.current !== undefined) window.clearTimeout(copyTimer.current);
-      unsubscribe();
       unsubscribeNavigate();
       unsubscribeClientKey();
     };
@@ -745,43 +699,11 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
     setAllowDevelopmentOs(!configuredPolicy);
   }, [configuredPolicy]);
 
-  const loadAgents = useCallback((fresh = false) => {
-    if (agentScanFlight.current) {
-      if (fresh) agentScanQueued.current = true;
-      return agentScanFlight.current;
-    }
-    const request = (async () => {
-      let next: AgentStatus[] | undefined;
-      do {
-        agentScanQueued.current = false;
-        const scan = ++agentScan.current;
-        try {
-          next = await desktopApi.listAgents();
-          if (scan === agentScan.current) setAgents(next);
-        } catch (error) {
-          next = undefined;
-          if (scan === agentScan.current) setActionError(errorMessage(error));
-        }
-      } while (agentScanQueued.current);
-      return next;
-    })().finally(() => { agentScanFlight.current = undefined; });
-    agentScanFlight.current = request;
-    return request;
-  }, []);
-
-  useEffect(() => {
-    const refresh = () => { agentScan.current += 1; void loadAgents(true); };
-    window.addEventListener("focus", refresh);
-    return () => window.removeEventListener("focus", refresh);
-  }, [loadAgents]);
-  useEffect(() => {
-    if (view !== "agents") return;
-    void loadAgents(true);
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") void loadAgents(true);
-    }, 15_000);
-    return () => window.clearInterval(timer);
-  }, [view, loadAgents]);
+  const loadAgents = useCallback(async () => {
+    try { return await client.fetchQuery({ queryKey: ["agents"], queryFn: () => desktopApi.listAgents(), staleTime: 0 }); }
+    catch (error) { setActionError(errorMessage(error)); return undefined; }
+  }, [client]);
+  useEffect(() => { if (view === "agents") void loadAgents(); }, [view, loadAgents]);
 
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
@@ -795,23 +717,9 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
     return () => window.removeEventListener("keydown", shortcut);
   }, []);
 
-  // Agent status depends on the verified catalog, so reload with the session.
   const catalogRevision = state.catalog?.revision;
-  useEffect(() => {
-    let active = true;
-    let timer: number | undefined;
-    const refresh = async (fresh = false) => {
-      await loadAgents(fresh);
-      if (active) timer = window.setTimeout(() => void refresh(), 5_000);
-    };
-    agentScan.current += 1;
-    void refresh(true);
-    return () => { active = false; window.clearTimeout(timer); };
-  }, [loadAgents, catalogRevision, verified]);
-  useEffect(() => desktopApi.onAgentsChange(() => {
-    agentScan.current += 1;
-    void loadAgents(true);
-  }), [loadAgents]);
+  useEffect(() => { void loadAgents(); }, [loadAgents, catalogRevision, verified]);
+  useEffect(() => desktopApi.onAgentsChange(() => { void loadAgents(); }), [loadAgents]);
 
   const run = async (action: () => Promise<GatewayState | void>) => {
     setActionError(undefined);
@@ -946,7 +854,6 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
     setPendingAgentChanges((current) => ({ ...current, [agent.id]: connect }));
     if (agentOperations.current.has(agent.id)) return;
     agentOperations.current.add(agent.id);
-    agentScan.current += 1;
     setActionError(undefined);
     try {
       let changed = agent;
@@ -959,8 +866,8 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
           const preview = await desktopApi.previewAgent(agent.id, target, options);
           const status = await desktopApi.applyAgent(agent.id, target, preview.revision, options);
           changed = status;
-          agentScan.current += 1;
-          setAgents((current) => current.map((entry) => entry.id === status.id ? status : entry));
+                await client.cancelQueries({ queryKey: ["agents"] });
+          client.setQueryData<AgentStatus[]>(["agents"], (current) => current?.map((entry) => entry.id === status.id ? status : entry));
         }
         if (agentIntents.current.get(agent.id) === target) {
           agentIntents.current.delete(agent.id);
@@ -973,7 +880,7 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
       agentIntents.current.delete(agent.id);
       agentOperations.current.delete(agent.id);
       setPendingAgentChanges((current) => { const next = { ...current }; delete next[agent.id]; return next; });
-      void loadAgents(true);
+      void loadAgents();
     }
   };
 
@@ -1870,8 +1777,6 @@ function AgentWebsite({ agent }: { agent: AgentStatus }): React.JSX.Element {
   }}>Website<ExternalLink size={14} aria-hidden="true" /></Button>{error && <span className="row-note flex-[1_0_100%] block text-muted-foreground text-xs wrap-anywhere [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [code&]:overflow-hidden [code&]:text-ellipsis [code&]:whitespace-nowrap" role="alert">{error}</span>}</span>;
 }
 
-const usageSnapshots = new ViewCache<UsagePage>();
-
 function UsageView({
   state,
   agents,
@@ -1889,54 +1794,22 @@ function UsageView({
   const [pageSize, setPageSize] = useState(20);
   const [metric, setMetric] = useState<UsageMetric>("tokens");
   const [cursors, setCursors] = useState<(string | undefined)[]>([undefined]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string>();
   const focusAfterPage = useRef(false);
-  const requestGeneration = useRef(0);
   const currentCursor = cursors[cursors.length - 1];
   const bounds = usageDateBounds(range);
   const { since, until } = bounds;
-  const queryKey = JSON.stringify([agent, model, since, until, currentCursor, pageSize]);
-  const cacheKey = `${queryKey}:${state.usageRevision}`;
-  const [loadedPage, setLoadedPage] = useState<{ query: string; data: UsagePage } | undefined>(() => {
-    const data = usageSnapshots.get(cacheKey);
-    return data ? { query: queryKey, data } : undefined;
+  const usageQuery = { agent: agent || undefined, model: model || undefined, since, until, cursor: currentCursor, limit: pageSize };
+  const { data: page, error: queryError, isPending: loading } = useQuery({
+    queryKey: ["usage", usageQuery], queryFn: () => desktopApi.queryUsage(usageQuery),
   });
-  const page = loadedPage?.query === queryKey ? loadedPage.data : usageSnapshots.get(cacheKey);
-
-  const load = useCallback(async () => {
-    const generation = ++requestGeneration.current;
-    setLoading(true);
-    setError(undefined);
-    try {
-      const result = await desktopApi.queryUsage({
-        agent: agent || undefined,
-        model: model || undefined,
-        since,
-        until,
-        cursor: currentCursor,
-        limit: pageSize,
-      });
-      if (generation === requestGeneration.current) {
-        usageSnapshots.set(cacheKey, result);
-        setLoadedPage({ query: queryKey, data: result });
-      }
-    } catch (loadError) {
-      if (generation === requestGeneration.current) {
-        setError(errorMessage(loadError));
-      }
-    } finally {
-      if (generation === requestGeneration.current) {
-        setLoading(false);
-        if (focusAfterPage.current) {
-          focusAfterPage.current = false;
-          window.requestAnimationFrame(() => document.getElementById("usage-history-title")?.focus());
-        }
-      }
+  const error = queryError ? errorMessage(queryError) : undefined;
+  useEffect(() => {
+    if (!loading && focusAfterPage.current) {
+      focusAfterPage.current = false;
+      window.requestAnimationFrame(() => document.getElementById("usage-history-title")?.focus());
     }
-  }, [agent, model, since, until, currentCursor, pageSize, cacheKey, queryKey]);
+  }, [loading, page, queryError]);
 
-  useEffect(() => { void load(); }, [load, state.usageRevision]);
   const resetPagination = () => {
     setCursors([undefined]);
   };
@@ -2108,35 +1981,20 @@ function UsageEvidenceSheet({ activity, onClose }: { activity: RequestActivity; 
 }
 
 function CliRegistrationControl(): React.JSX.Element {
-  const [registration, setRegistration] = useState<CliRegistration>();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
-
-  useEffect(() => {
-    let active = true;
-    void desktopApi.getCliRegistration().then(
-      (status) => {
-        if (!active) return;
-        setRegistration(status);
-      },
-      (loadError: unknown) => active && setError(errorMessage(loadError)),
-    );
-    return () => { active = false; };
-  }, []);
-
+  const client = useQueryClient();
+  const { data: registration, error: readError } = useQuery({ queryKey: ["cli-registration"], queryFn: () => desktopApi.getCliRegistration() });
+  const mutation = useMutation({
+    mutationFn: (installed: boolean) => desktopApi.setCliRegistration(installed),
+    onMutate: () => client.cancelQueries({ queryKey: ["cli-registration"] }),
+    onSuccess: (next) => { client.setQueryData(["cli-registration"], next); },
+  });
+  const busy = mutation.isPending;
+  const error = mutation.error || readError ? errorMessage(mutation.error ?? readError) : undefined;
   const change = async () => {
     if (!registration || busy) return;
-    setBusy(true);
-    setError(undefined);
-    try {
-      setRegistration(await desktopApi.setCliRegistration(!registration.installed));
-    } catch (changeError) {
-      setError(errorMessage(changeError));
-    } finally {
-      setBusy(false);
-    }
+    try { await mutation.mutateAsync(!registration.installed); }
+    catch { /* The mutation error is rendered below. */ }
   };
-
   const directory = registration ? parentDirectory(registration.commandPath) : undefined;
   const description = error
     ?? registration?.startupError
@@ -2429,19 +2287,10 @@ function ProfileEditorSheet({
   const account = useAccountLogin(desktopApi, reportLoginError);
   const { session: login, auth: authorized } = account;
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<number>();
-  const [savedDetails, setSavedDetails] = useState<{ key: string; details: AccountLoginDetails }>();
   const profileKey = `${profile?.id}:${profile?.credentialRef}`;
-  const currentDetails = savedDetails?.key === profileKey ? savedDetails.details : undefined;
-  const [workspaceError, setWorkspaceError] = useState<string>();
   const pendingWorkspaceSave = useRef<number | undefined>(undefined);
   const [callbackDraft, setCallbackDraft] = useState("");
   useEffect(() => setCallbackDraft(""), [login?.id]);
-  const workspaces = account.details?.workspaces ?? currentDetails?.workspaces;
-  const savedScope = profile?.auth.kind === "oauth" ? profile.auth.scope : undefined;
-  const workspaceId = selectedWorkspaceId ?? (authorized
-    ? workspaces?.length === 1 ? workspaces[0]?.id : undefined
-    : savedScope?.workspaceId ?? undefined);
-  const needsWorkspace = Boolean(authorized && draft.provider === "redpill" && workspaces?.length && workspaceId === undefined);
 
   const working = saving || account.busy;
   const closeEditor = async () => {
@@ -2466,6 +2315,19 @@ function ProfileEditorSheet({
     && profileHasCredential(profile)
     && !profileChanged
     && profile.auth.kind === (authMethod === "account" ? "oauth" : "apiKey");
+  const detailsEnabled = savedCredentialApplies && draft.provider === "redpill" && authMethod === "account" && Boolean(profile?.id);
+  const { data: currentDetails, error: detailsError } = useQuery({
+    queryKey: detailsEnabled ? ["account-details", profile?.id, profile?.credentialRef] : ["account-details", null],
+    queryFn: () => desktopApi.getAccountDetails(profile?.id ?? ""), enabled: detailsEnabled, staleTime: 30_000,
+  });
+  const workspaceError = detailsError ? errorMessage(detailsError) : undefined;
+  const workspaces = account.details?.workspaces ?? currentDetails?.workspaces;
+  const savedScope = profile?.auth.kind === "oauth" ? profile.auth.scope : undefined;
+  const workspaceId = selectedWorkspaceId ?? (authorized
+    ? workspaces?.length === 1 ? workspaces[0]?.id : undefined
+    : savedScope?.workspaceId ?? undefined);
+  const needsWorkspace = Boolean(authorized && draft.provider === "redpill" && workspaces?.length && workspaceId === undefined);
+
   const savedAccount = currentDetails?.auth.kind === "oauth" ? {
     ...currentDetails.auth,
     scope: { organizationId: currentDetails.auth.scope?.organizationId ?? null, organizationSlug: currentDetails.auth.scope?.organizationSlug ?? null, organization: currentDetails.auth.scope?.organization ?? null,
@@ -2477,18 +2339,6 @@ function ProfileEditorSheet({
   const needsAccountLogin = draft.provider !== "custom" && authMethod === "account"
     && !authorized && (!savedCredentialApplies || profile?.auth.kind !== "oauth");
 
-  useEffect(() => {
-    let disposed = false;
-    setSavedDetails(undefined);
-    setWorkspaceError(undefined);
-    if (savedCredentialApplies && draft.provider === "redpill" && authMethod === "account" && profile?.id) {
-      void desktopApi.getAccountDetails(profile.id).then(
-        (details) => { if (!disposed) setSavedDetails({ key: profileKey, details }); },
-        (error: unknown) => { if (!disposed) setWorkspaceError(errorMessage(error)); },
-      );
-    }
-    return () => { disposed = true; };
-  }, [savedCredentialApplies, draft.provider, authMethod, profile?.id, profile?.credentialRef, profileKey]);
 
   const chooseService = async (next: ServicePreset) => {
     if (!await account.cancel()) return;
@@ -3060,7 +2910,7 @@ function WindowContent({ reset }: { reset: boolean }): React.JSX.Element {
 export function Renderer(): React.JSX.Element {
   const [interactionError, setInteractionError] = useState("");
   const [settingsRevision, setSettingsRevision] = useState(0);
-  useEffect(() => desktopApi.onSettingsReset(() => setSettingsRevision((value) => value + 1)), []);
+  useEffect(() => desktopApi.onSettingsReset(() => { queryClient.clear(); setSettingsRevision((value) => value + 1); }), []);
   useEffect(() => installNativeInteractions(desktopApi, setInteractionError), []);
-  return <TooltipProvider><AppearanceProvider key={settingsRevision} api={desktopApi}><DialogCloseProvider api={desktopApi}><WindowContent reset={settingsRevision > 0} /></DialogCloseProvider>{interactionError && <span className="sr-only" role="alert">{interactionError}</span>}</AppearanceProvider></TooltipProvider>;
+  return <QueryClientProvider client={queryClient}><TooltipProvider><AppearanceProvider key={settingsRevision} api={desktopApi}><DialogCloseProvider api={desktopApi}><WindowContent reset={settingsRevision > 0} /></DialogCloseProvider>{interactionError && <span className="sr-only" role="alert">{interactionError}</span>}</AppearanceProvider></TooltipProvider></QueryClientProvider>;
 }

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeftRight, Ellipsis, ExternalLink } from "lucide-react";
 import type { AccountBalance, AccountBalanceTarget, AccountImages, AccountScope, DesktopApi, ServiceProvider } from "../../shared/contracts";
-import { ViewCache } from "../lib/view-cache";
+import { useQuery } from "@tanstack/react-query";
 import { errorMessage } from "../lib/error-message";
 import { currency } from "../lib/usage-presentation";
 import { Avatar, AvatarFallback, AvatarImage } from "./ui/avatar";
@@ -22,8 +22,6 @@ type Props = {
   compact?: boolean;
 };
 
-const balanceSnapshots = new ViewCache<AccountBalance | null>();
-
 /** Changing account or credential must never display the previous account's balance. */
 export function AccountTools(props: Props) {
   const id = props.target.kind === "login" ? props.target.id : props.target.profileId;
@@ -32,48 +30,27 @@ export function AccountTools(props: Props) {
 }
 
 function AccountDetailsView({ cacheKey, api, provider, target, scope, images, onSignIn, disabled = false, compact = false }: Props & { cacheKey: string }) {
-  const [balance, setBalance] = useState<AccountBalance | null | undefined>(() => balanceSnapshots.get(cacheKey));
   const [linkError, setLinkError] = useState<string>();
-  const [busy, setBusy] = useState(true);
   const [opening, setOpening] = useState(false);
-  const returningFromAccountPage = useRef(false);
   const openingRef = useRef(false);
-  const kind = target.kind;
-  const id = target.kind === "login" ? target.id : target.profileId;
-
+  const returningFromAccountPage = useRef(false);
+  const { data: balance, isFetching: busy, refetch } = useQuery({
+    queryKey: ["account-balance", cacheKey], queryFn: () => api.getAccountBalance(target),
+    refetchInterval: compact ? 300_000 : 60_000, staleTime: 30_000, retry: false,
+  });
   useEffect(() => {
-    let disposed = false;
-    let inFlight = false;
-    let lastAttempt = 0;
-    const load = async (force = false) => {
-      if (disposed || inFlight || document.visibilityState === "hidden" || (!force && Date.now() - lastAttempt < 30_000)) return;
-      inFlight = true;
-      lastAttempt = Date.now();
+    const refreshAfterBilling = () => {
+      if (!returningFromAccountPage.current || document.visibilityState === "hidden") return;
       returningFromAccountPage.current = false;
-      setBusy(true);
-      try {
-        const value = await api.getAccountBalance(kind === "login" ? { kind, id } : { kind, profileId: id });
-        if (!disposed) { balanceSnapshots.set(cacheKey, value); setBalance(value); }
-      } catch {
-        // Optional billing data must not obscure the account form or protection state.
-        if (!disposed) setBalance((previous) => previous ?? null);
-      } finally {
-        inFlight = false;
-        if (!disposed) setBusy(false);
-      }
+      void refetch();
     };
-    const onReturn = () => { void load(returningFromAccountPage.current); };
-    window.addEventListener("focus", onReturn);
-    document.addEventListener("visibilitychange", onReturn);
-    const timer = setInterval(() => void load(), compact ? 300_000 : 60_000);
-    void load();
+    window.addEventListener("focus", refreshAfterBilling);
+    document.addEventListener("visibilitychange", refreshAfterBilling);
     return () => {
-      disposed = true;
-      clearInterval(timer);
-      window.removeEventListener("focus", onReturn);
-      document.removeEventListener("visibilitychange", onReturn);
+      window.removeEventListener("focus", refreshAfterBilling);
+      document.removeEventListener("visibilitychange", refreshAfterBilling);
     };
-  }, [api, kind, id, compact, cacheKey]);
+  }, [refetch]);
 
   const openPage = useCallback(async (action: () => Promise<void>) => {
     if (openingRef.current || disabled) return;

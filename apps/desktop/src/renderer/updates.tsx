@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Download } from "lucide-react";
 import type { DesktopApi, UpdateInfo, UpdateProgress, UpdateChannel } from "../shared/contracts";
 import { Button } from "./components/ui/button";
@@ -9,71 +10,49 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Progress } from "./components/ui/progress";
 
 export function useUpdates(api: DesktopApi, native = false) {
-  const [info, setInfo] = useState<UpdateInfo>();
-  const [currentVersion, setCurrentVersion] = useState<string>();
-  const [busy, setBusy] = useState<"checking" | "installing" | "changing">();
-  const [channel, setChannel] = useState<UpdateChannel>();
-  const [error, setError] = useState<string>();
+  const [operation, setBusy] = useState<"installing" | "changing">();
+  const [mutationError, setError] = useState<string>();
   const [progress, setProgress] = useState<UpdateProgress>();
   const [installDialogOpen, setInstallDialogOpen] = useState(false);
   const [installError, setInstallError] = useState<string>();
   const mounted = useRef(false);
   const inFlight = useRef(false);
-  const lastCheck = useRef(0);
-
+  const readUpdate = useCallback(async () => {
+    const channel = await api.getUpdateChannel();
+    return { channel, info: await api.checkUpdate() };
+  }, [api]);
+  const client = useQueryClient();
+  const { data: snapshot, error: checkError, isFetching: checking } = useQuery<{
+    channel: UpdateChannel; info?: UpdateInfo;
+  }>({ queryKey: ["app-update"], queryFn: readUpdate, enabled: !operation,
+    refetchInterval: (query) => query.state.error ? 60_000 : 6 * 60 * 60_000, staleTime: 15 * 60_000, retry: false,
+  });
+  const { data: installedVersion } = useQuery({ queryKey: ["app-version"], queryFn: () => api.getAppVersion(), staleTime: Infinity });
+  const info = checkError && snapshot?.info ? { ...snapshot.info, version: null } : snapshot?.info;
+  const channel = snapshot?.channel;
+  const currentVersion = installedVersion ?? info?.currentVersion;
+  const busy = operation ?? (checking ? "checking" : undefined);
+  const error = mutationError ?? (checkError ? "Could not check for updates. Retrying automatically." : undefined);
   const refresh = useCallback(async () => {
     setError(undefined);
-    setInfo((current) => current ? { ...current, version: null } : current);
-    try {
-      const selected = await api.getUpdateChannel();
-      if (mounted.current) setChannel(selected);
-      const next = await api.checkUpdate();
-      if (mounted.current) { setInfo(next); setCurrentVersion(next.currentVersion); }
-    } catch {
-      if (mounted.current) setError("Could not check for updates. Retrying automatically.");
-    } finally {
-      lastCheck.current = Date.now();
-    }
-  }, [api]);
-
-  const check = useCallback(async () => {
-    if (inFlight.current) return;
-    inFlight.current = true;
-    setBusy("checking");
-    try { await refresh(); }
-    finally { inFlight.current = false; if (mounted.current) setBusy(undefined); }
-  }, [refresh]);
-
+    try { await client.cancelQueries({ queryKey: ["app-update"] }); client.setQueryData(["app-update"], await readUpdate()); }
+    catch { if (mounted.current) setError("Could not check for updates. Retrying automatically."); }
+  }, [client, readUpdate]);
   useEffect(() => {
     mounted.current = true;
     const unsubscribe = api.onUpdateProgress(setProgress);
-    void api.getAppVersion().then((version) => { if (mounted.current) setCurrentVersion(version); }).catch(() => {
-      // A successful update check can still supply the installed version.
-    });
-    void check();
-    const online = () => { void check(); };
-    const focus = () => { if (Date.now() - lastCheck.current >= 15 * 60_000) void check(); };
-    const timer = window.setInterval(() => { void check(); }, 6 * 60 * 60_000);
-    window.addEventListener("online", online);
-    window.addEventListener("focus", focus);
-    return () => {
-      mounted.current = false;
-      unsubscribe();
-      window.clearInterval(timer);
-      window.removeEventListener("online", online);
-      window.removeEventListener("focus", focus);
-    };
-  }, [api, check]);
+    return () => { mounted.current = false; unsubscribe(); };
+  }, [api]);
 
   const changeChannel = async (next: UpdateChannel) => {
-    if (inFlight.current || next === channel) return;
+    if (inFlight.current || checking || next === channel) return;
     inFlight.current = true;
     setBusy("changing");
     setError(undefined);
     try {
       const saved = await api.setUpdateChannel(next);
       if (!mounted.current) return;
-      setChannel(saved);
+      client.setQueryData(["app-update"], { channel: saved });
       await refresh();
     } catch {
       if (mounted.current) setError("Could not save update channel.");
@@ -84,7 +63,7 @@ export function useUpdates(api: DesktopApi, native = false) {
   };
 
   const install = async () => {
-    if (inFlight.current || !info?.version) return;
+    if (inFlight.current || checking || !info?.version) return;
     inFlight.current = true;
     setError(undefined);
     setBusy("installing");
