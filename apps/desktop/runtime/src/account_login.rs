@@ -241,7 +241,7 @@ impl PendingLogin {
         }
         let authorization = self.resolve().await?.ok_or("Finish signing in first")?;
         let credential = authorization.issue(profile, workspace_id).await?;
-        // Verification retries reuse the issued key instead of rotating it again.
+        // Save retries reuse this authorization’s issued key.
         *authorization = Authorization::Inference(credential.clone());
         Ok(credential)
     }
@@ -753,6 +753,11 @@ impl CallbackState {
     }
 }
 
+/// A window-activation link only; OAuth credentials stay on the loopback channel.
+pub fn account_return_url() -> String {
+    format!("{}://oauth/return", desktop_gateway::brand::APP_IDENTIFIER)
+}
+
 fn callback_page(accepted: bool) -> String {
     let product = desktop_gateway::brand::PRODUCT_NAME
         .replace('&', "&amp;")
@@ -760,6 +765,18 @@ fn callback_page(accepted: bool) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;");
     include_str!("account-callback.html")
+        .replace(
+            "__OPEN_APP__",
+            if accepted {
+                format!(
+                    "<a class=\"open-app\" href=\"{}\">Open {product}</a>",
+                    account_return_url()
+                )
+            } else {
+                String::new()
+            }
+            .as_str(),
+        )
         .replace("__PRODUCT__", &product)
         .replace(
             "__LOGO__",
@@ -1301,6 +1318,10 @@ mod tests {
         assert_eq!(receiver.await.unwrap().unwrap(), "secret");
         assert!(pending.complete_callback("login", url).await.is_err());
         assert!(!callback_page(true).contains("secret"));
+        assert!(callback_page(true).contains(&account_return_url()));
+        assert!(!callback_page(false).contains(&account_return_url()));
+        let return_url = Url::parse(&account_return_url()).unwrap();
+        assert!(return_url.query().is_none() && return_url.fragment().is_none());
     }
 
     #[test]

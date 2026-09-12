@@ -608,7 +608,7 @@ export function mockApi(name: string | null): DesktopApi {
         ...profile,
         auth: key?.trim() ? { kind: "apiKey" } : existing?.auth ?? { kind: "apiKey" },
         credentialSaved: true,
-        verifiedAt: Math.floor(Date.now() / 1000),
+        verifiedAt: undefined,
       };
       const profiles = existing
         ? state.profiles.map((entry) => entry.id === profile.id ? savedProfile : entry)

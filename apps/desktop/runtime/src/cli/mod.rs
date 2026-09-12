@@ -213,7 +213,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                     crate::service_config::resolve_profile(profile.clone(), None)?;
                     confirm(
                         cli,
-                        "Verify and save this profile? This selects it as active and may restart protection.",
+                        "Save this profile? This selects it as active and may restart protection.",
                     )?;
                     Client::ensure_service()?;
                     if client.state()?.profiles.iter().any(|saved| saved.id == *id) {
@@ -235,17 +235,14 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                         .ok_or("Profile not found")?;
                     confirm(
                         cli,
-                        "Verify and save this profile? This selects it as active and may restart protection.",
+                        "Save this profile? This selects it as active and may restart protection.",
                     )?;
-                    let key = if *key_stdin
-                        || !profile
-                            .credential_saved
-                            .unwrap_or(profile.verified_at.is_some())
-                    {
-                        Some(read_key(cli, *key_stdin)?)
-                    } else {
-                        None
-                    };
+                    let key =
+                        if *key_stdin || !crate::service_config::profile_has_credential(&profile) {
+                            Some(read_key(cli, *key_stdin)?)
+                        } else {
+                            None
+                        };
                     client.request(Command::Verify {
                         profile: ConfidentialProfileInput {
                             id: profile.id,
@@ -283,12 +280,10 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                     let resolved = crate::service_config::resolve_profile(profile.clone(), None)?;
                     let target_changed = resolved.provider != saved.provider
                         || resolved.remote_url != saved.remote_url;
-                    let credential_saved = saved
-                        .credential_saved
-                        .unwrap_or(saved.verified_at.is_some());
+                    let credential_saved = crate::service_config::profile_has_credential(saved);
                     confirm(
                         cli,
-                        "Verify and save these profile changes? This selects the profile as active and may restart protection.",
+                        "Save these profile changes? This selects the profile as active and may restart protection.",
                     )?;
                     let key = if *key_stdin || target_changed || !credential_saved {
                         Some(read_key(cli, *key_stdin)?)

@@ -205,3 +205,18 @@ intended billing scope. The billing website still authorizes all mutations.
 
 Manage opens `/{organizationSlug}`. Account and balance responses must supply
 `organization_slug` for these links; missing slugs do not fall back to another tenant.
+
+## Readiness and returning from authorization
+
+Profile readiness means a saved credential is available, not that a previous
+verification timestamp exists. The main view, profile list, tray and CLI use that
+rule. Saving a profile does not perform attestation; starting protection does.
+
+RedPill authorization codes still return to the loopback callback and undergo
+state/issuer/PKCE checks. After receipt, the page offers an Open App button using
+`{bundle identifier}://oauth/return`. The Tauri deep-link plugin registers the
+scheme for the packaged app and integrates with single-instance handling. This
+link only focuses the app and open account editor; it carries no code or token
+and cannot finish authorization. CLI users can return to their terminal instead.
+Native scheme registration and browser-to-app focus require packaged platform
+acceptance; a browser may ask permission to open the application.

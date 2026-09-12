@@ -541,7 +541,7 @@ test("Usage chart preserves its layout while the initial query is pending", asyn
   expect(await chart.boundingBox()).toEqual(before);
 });
 
-test("profile imports require confirmation, stay unverified and preserve the active profile", async ({ page }) => {
+test("profile imports require confirmation, need credentials and preserve the active profile", async ({ page }) => {
   await page.goto("/?mock=ready&native-dialog=profiles");
   const profiles = page.getByRole("dialog", { name: "Profiles" });
   page.once("dialog", (dialog) => dialog.dismiss());
@@ -551,7 +551,7 @@ test("profile imports require confirmation, stay unverified and preserve the act
   await profiles.getByRole("button", { name: "Import profile configurations" }).click();
   await expect(profiles.getByRole("status")).toHaveText("1 imported, 0 duplicates skipped.");
   const imported = profiles.locator(".profile-list-row", { hasText: "Imported Phala" });
-  await expect(imported).toContainText("Credential unavailable");
+  await expect(imported).toContainText("Sign in or add an API key");
   await expect(profiles.locator(".profile-select", { hasText: "RedPill" })).toHaveAttribute("aria-pressed", "true");
   page.once("dialog", (dialog) => dialog.accept());
   await profiles.getByRole("button", { name: "Import profile configurations" }).click();

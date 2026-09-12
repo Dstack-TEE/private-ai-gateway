@@ -214,7 +214,7 @@ pub(super) enum Profiles {
     },
     /// Sign in to Phala or RedPill and save an account profile. Protection starts separately.
     Login(AccountLoginOptions),
-    /// Verify and save a new profile and credential.
+    /// Save a new profile and credential; protection verifies it when started.
     Add {
         #[arg(long, help = "Unique profile ID")]
         id: String,
@@ -231,7 +231,7 @@ pub(super) enum Profiles {
         #[arg(long)]
         allow_development_os: bool,
     },
-    /// Re-verify a saved profile, optionally replacing its credential.
+    /// Validate and save a profile, optionally replacing its credential.
     Verify {
         /// Saved profile ID.
         id: String,
@@ -239,9 +239,9 @@ pub(super) enum Profiles {
         #[arg(long)]
         key_stdin: bool,
     },
-    /// Edit, verify, and save an existing profile.
+    /// Edit and save an existing profile.
     #[command(
-        long_about = "Edit an existing profile and verify the resulting configuration before saving it. Changing provider or endpoint requires a new credential via --key-stdin or a hidden terminal prompt; the old credential is never sent to a new target."
+        long_about = "Edit and save an existing profile. Protection verifies the configuration when started. Changing provider or endpoint requires a new credential via --key-stdin or a hidden terminal prompt; the old credential is never sent to a new target."
     )]
     Edit {
         /// Saved profile ID.
