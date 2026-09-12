@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeftRight, Ellipsis, ExternalLink } from "lucide-react";
 import type { AccountBalance, AccountBalanceTarget, AccountImages, AccountScope, DesktopApi, ServiceProvider } from "../../shared/contracts";
+import { ViewCache } from "../lib/view-cache";
 import { errorMessage } from "../lib/error-message";
 import { currency } from "../lib/usage-presentation";
 import { Avatar, AvatarFallback, AvatarImage } from "./ui/avatar";
@@ -21,14 +22,17 @@ type Props = {
   compact?: boolean;
 };
 
+const balanceSnapshots = new ViewCache<AccountBalance | null>();
+
 /** Changing account or credential must never display the previous account's balance. */
 export function AccountTools(props: Props) {
   const id = props.target.kind === "login" ? props.target.id : props.target.profileId;
-  return <AccountDetailsView key={`${props.provider}:${props.target.kind}:${id}:${props.credentialRef ?? ""}`} {...props} />;
+  const cacheKey = `${props.provider}:${props.target.kind}:${id}:${props.credentialRef ?? ""}`;
+  return <AccountDetailsView key={cacheKey} cacheKey={cacheKey} {...props} />;
 }
 
-function AccountDetailsView({ api, provider, target, scope, images, onSignIn, disabled = false, compact = false }: Props) {
-  const [balance, setBalance] = useState<AccountBalance | null>();
+function AccountDetailsView({ cacheKey, api, provider, target, scope, images, onSignIn, disabled = false, compact = false }: Props & { cacheKey: string }) {
+  const [balance, setBalance] = useState<AccountBalance | null | undefined>(() => balanceSnapshots.get(cacheKey));
   const [linkError, setLinkError] = useState<string>();
   const [busy, setBusy] = useState(true);
   const [opening, setOpening] = useState(false);
@@ -49,10 +53,10 @@ function AccountDetailsView({ api, provider, target, scope, images, onSignIn, di
       setBusy(true);
       try {
         const value = await api.getAccountBalance(kind === "login" ? { kind, id } : { kind, profileId: id });
-        if (!disposed) setBalance(value);
+        if (!disposed) { balanceSnapshots.set(cacheKey, value); setBalance(value); }
       } catch {
         // Optional billing data must not obscure the account form or protection state.
-        if (!disposed) setBalance(null);
+        if (!disposed) setBalance((previous) => previous ?? null);
       } finally {
         inFlight = false;
         if (!disposed) setBusy(false);
@@ -69,7 +73,7 @@ function AccountDetailsView({ api, provider, target, scope, images, onSignIn, di
       window.removeEventListener("focus", onReturn);
       document.removeEventListener("visibilitychange", onReturn);
     };
-  }, [api, kind, id, compact]);
+  }, [api, kind, id, compact, cacheKey]);
 
   const openPage = useCallback(async (action: () => Promise<void>) => {
     if (openingRef.current || disabled) return;

@@ -1,4 +1,5 @@
 import React, { createContext, lazy, memo, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { ViewCache } from "./lib/view-cache";
 import { useWindowReady } from "./lib/use-window-ready";
 import { useAccountLogin } from "./lib/use-account-login";
 import { AccountTools } from "./components/account-tools";
@@ -1869,6 +1870,8 @@ function AgentWebsite({ agent }: { agent: AgentStatus }): React.JSX.Element {
   }}>Website<ExternalLink size={14} aria-hidden="true" /></Button>{error && <span className="row-note flex-[1_0_100%] block text-muted-foreground text-xs wrap-anywhere [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [code&]:overflow-hidden [code&]:text-ellipsis [code&]:whitespace-nowrap" role="alert">{error}</span>}</span>;
 }
 
+const usageSnapshots = new ViewCache<UsagePage>();
+
 function UsageView({
   state,
   agents,
@@ -1885,7 +1888,6 @@ function UsageView({
   const [range, setRange] = useState<UsageDateSelection>({ preset: "7d" });
   const [pageSize, setPageSize] = useState(20);
   const [metric, setMetric] = useState<UsageMetric>("tokens");
-  const [page, setPage] = useState<UsagePage>();
   const [cursors, setCursors] = useState<(string | undefined)[]>([undefined]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
@@ -1894,6 +1896,13 @@ function UsageView({
   const currentCursor = cursors[cursors.length - 1];
   const bounds = usageDateBounds(range);
   const { since, until } = bounds;
+  const queryKey = JSON.stringify([agent, model, since, until, currentCursor, pageSize]);
+  const cacheKey = `${queryKey}:${state.usageRevision}`;
+  const [loadedPage, setLoadedPage] = useState<{ query: string; data: UsagePage } | undefined>(() => {
+    const data = usageSnapshots.get(cacheKey);
+    return data ? { query: queryKey, data } : undefined;
+  });
+  const page = loadedPage?.query === queryKey ? loadedPage.data : usageSnapshots.get(cacheKey);
 
   const load = useCallback(async () => {
     const generation = ++requestGeneration.current;
@@ -1909,11 +1918,11 @@ function UsageView({
         limit: pageSize,
       });
       if (generation === requestGeneration.current) {
-        setPage(result);
+        usageSnapshots.set(cacheKey, result);
+        setLoadedPage({ query: queryKey, data: result });
       }
     } catch (loadError) {
       if (generation === requestGeneration.current) {
-        setPage(undefined);
         setError(errorMessage(loadError));
       }
     } finally {
@@ -1925,7 +1934,7 @@ function UsageView({
         }
       }
     }
-  }, [agent, model, since, until, currentCursor, pageSize]);
+  }, [agent, model, since, until, currentCursor, pageSize, cacheKey, queryKey]);
 
   useEffect(() => { void load(); }, [load, state.usageRevision]);
   const resetPagination = () => {
@@ -1956,14 +1965,14 @@ function UsageView({
             <CardTitle><h2 id="usage-chart-title">Usage over time</h2></CardTitle>
             <CardAction className="max-[440px]:col-start-1 max-[440px]:row-start-2 max-[440px]:justify-self-start"><TabsList aria-label="Chart metric"><TabsTrigger value="tokens">Tokens</TabsTrigger><TabsTrigger value="cost">Cost</TabsTrigger><TabsTrigger value="requests">Requests</TabsTrigger></TabsList></CardAction>
           </CardHeader>
-          <CardContent><TabsContent value={metric}><UsageChart page={page} loading={loading} range={range.preset} bounds={bounds} metric={metric} /></TabsContent></CardContent>
+          <CardContent><TabsContent value={metric}><UsageChart page={page} loading={loading && !page} range={range.preset} bounds={bounds} metric={metric} /></TabsContent></CardContent>
         </Tabs>
       </Card>
       <Card size="sm" role="region" className="usage-history mt-4" aria-labelledby="usage-history-title">
         <CardHeader><CardTitle><h2 id="usage-history-title" tabIndex={-1}>Usage history</h2></CardTitle>
           <CardDescription aria-live="polite">{loading ? "Loading" : page ? `${page.summary.requests} records · kept on this Mac` : "Unavailable"}</CardDescription>
         </CardHeader>
-        <CardContent><Suspense fallback={<div className="h-80" aria-busy="true" />}><UsageTable items={page?.items ?? []} loading={loading} pageIndex={cursors.length - 1} pageSize={pageSize} total={page?.summary.requests ?? 0} onInspect={onInspect} /></Suspense>
+        <CardContent><Suspense fallback={<div className="h-80" aria-busy="true" />}><UsageTable items={page?.items ?? []} loading={loading && !page} pageIndex={cursors.length - 1} pageSize={pageSize} total={page?.summary.requests ?? 0} onInspect={onInspect} /></Suspense>
         <div className="pagination mt-2.5 flex flex-wrap items-center justify-center gap-3 [&_>_span]:min-w-32 [&_>_span]:text-muted-foreground [&_>_span]:text-center">
           <Field orientation="horizontal" className="w-auto">
             <FieldLabel htmlFor="usage-page-size">Rows per page</FieldLabel>

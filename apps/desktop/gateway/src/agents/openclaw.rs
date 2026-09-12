@@ -684,8 +684,8 @@ mod tests {
             doc.get_value(&["agents", "defaults", "model", "fallbacks"]),
             Some(ConfigValue::List(vec!["external/new-fallback".into()]))
         );
-        assert!(doc.get_value(PROVIDER_PATH).is_none());
-        assert!(doc.get_value(SECRET_PATH).is_none());
+        assert!(doc.get_value(PROVIDER_PATH).is_some());
+        assert!(doc.get_value(SECRET_PATH).is_some());
         assert!(doc
             .render()
             .unwrap()

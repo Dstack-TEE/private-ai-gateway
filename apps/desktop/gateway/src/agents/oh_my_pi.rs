@@ -340,7 +340,7 @@ mod tests {
             .contains("location changed"));
         disconnect(&sandbox, agent);
         let restored = ConfigDoc::parse(Format::Yaml, &fs::read_to_string(&path).unwrap()).unwrap();
-        assert!(!restored.contains(PROVIDER_PATH));
+        assert!(restored.contains(PROVIDER_PATH));
         assert!(fs::read_to_string(&path)
             .unwrap()
             .contains("other: {apiKey: 'user-owned', models: []} # keep this"));

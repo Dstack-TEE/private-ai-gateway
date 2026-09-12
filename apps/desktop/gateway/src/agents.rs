@@ -23,6 +23,7 @@ use std::process::Command;
 
 mod oh_my_pi;
 mod openclaw;
+mod selection;
 
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -245,13 +246,13 @@ impl Agent {
 
     fn note(self, connect: bool) -> &'static str {
         if !connect {
-            return "Only fields written by this app are restored; credentials taken \
+            return "Proxy provider definitions are retained. Default routing and credentials taken \
                     over at connect come back from the system credential store; edits made \
                     since are left in place. The agent's local token is revoked.";
         }
         match self {
             Agent::OpenClaw => "OpenClaw uses a native-host provider and an executable SecretRef for its local gateway token. Restart OpenClaw after applying.",
-            Agent::OhMyPi => "Oh My Pi uses its own local token and native models YAML. Choose a model in omp and restart after applying. CLI/profile/dotenv overrides must use the same native directory; native defaults and auth storage are not changed.",
+            Agent::OhMyPi => "Oh My Pi uses its own local token and native models YAML. Connect selects a compatible default; Disconnect restores the previous selection while keeping the provider. Restart omp after applying. Named profiles and conflicting overrides are not modified.",
             Agent::Codex => {
                 "Codex will use its official custom model provider with the Responses API, the \
                  selected model from the verified catalog, command-backed authentication, and \
@@ -334,6 +335,9 @@ fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
         .as_deref()
         .map(str::trim)
         .filter(|model| !model.is_empty());
+    if inputs.options.default_model.is_some() && default_model.is_none() {
+        return Err("Choose a non-empty model ID".into());
+    }
     if default_model.is_some_and(|model| catalog.get(model).is_none()) {
         return Err(format!(
             "`{}` is not in the verified model list compatible with {} ({})",
@@ -882,7 +886,9 @@ struct Connection {
     #[serde(default)]
     config_path: Option<PathBuf>,
     fields: Vec<OwnedField>,
-    /// User intent survives protection sessions; suspended links own no config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selection: Option<selection::Journal>,
+    /// User intent survives protection sessions; suspended links retain only provider definitions.
     #[serde(default)]
     suspended: bool,
     #[serde(default)]
@@ -898,8 +904,53 @@ struct Connection {
     cleanup_pending: bool,
 }
 
+// Definitions are passive after the local token is revoked. Global selectors
+// and credentials are always restored; pre-existing provider fields are too.
+fn provider_namespace(path: &[String]) -> Option<&[String]> {
+    match path {
+        [root, name, ..]
+            if (root == "model_providers" && name == "private_ai_proxy")
+                || ((root == "provider" || root == "providers") && name == "private-ai-proxy") =>
+        {
+            Some(&path[..2])
+        }
+        [root, providers, name, ..]
+            if (root == "models" || root == "secrets")
+                && providers == "providers"
+                && name == "private-ai-proxy" =>
+        {
+            Some(&path[..3])
+        }
+        _ => None,
+    }
+}
+
+fn retain_provider_field(field: &OwnedField, fields: &[OwnedField]) -> bool {
+    provider_namespace(&field.path).is_some_and(|prefix| {
+        !fields
+            .iter()
+            .any(|other| other.path.starts_with(prefix) && other.previous.is_some())
+    })
+}
+
 impl Connection {
+    fn restored(&self) -> bool {
+        self.suspended
+            && self.selection.is_none()
+            && self
+                .fields
+                .iter()
+                .all(|field| retain_provider_field(field, &self.fields))
+    }
+
+    fn disconnected(&self) -> bool {
+        self.disabled && !self.cleanup_pending && self.restored()
+    }
+
     fn validate_recovery(&self) -> Result<(), String> {
+        if let Some(selection) = &self.selection {
+            selection.validate()?;
+        }
         if self
             .fields
             .iter()
@@ -945,6 +996,7 @@ struct PendingSecret {
 }
 
 struct Edit {
+    selection: Option<selection::Edit>,
     changes: Vec<ConfigChange>,
     record: Option<Connection>,
     pending_secrets: Vec<PendingSecret>,
@@ -1156,12 +1208,14 @@ impl Projector {
         let mut restore_problem = path.as_ref().err().cloned();
         let edit = match ConfigDoc::parse(agent.format(), text.as_deref().unwrap_or_default()) {
             _ if !connect && path.is_err() => Edit {
+                selection: None,
                 changes: Vec::new(),
                 record: None,
                 pending_secrets: Vec::new(),
                 consumed_secrets: Vec::new(),
             },
             Ok(_) if connect && catalog.is_none() => Edit {
+                selection: None,
                 changes: Vec::new(),
                 record: None,
                 pending_secrets: Vec::new(),
@@ -1172,6 +1226,7 @@ impl Projector {
                 Err(error) if !connect && store.contains_key(agent.id()) => {
                     restore_problem = Some(error);
                     Edit {
+                        selection: None,
                         changes: Vec::new(),
                         record: None,
                         pending_secrets: Vec::new(),
@@ -1187,6 +1242,7 @@ impl Projector {
                     .get(agent.id())
                     .ok_or_else(|| format!("{} is not connected", agent.name()))?;
                 Edit {
+                    selection: None,
                     changes: Vec::new(),
                     record: None,
                     pending_secrets: Vec::new(),
@@ -1266,10 +1322,15 @@ impl Projector {
                     } else {
                         options.clone()
                     };
+                    let fields = store
+                        .get(agent.id())
+                        .map(|record| record.fields.clone())
+                        .unwrap_or_default();
                     store.insert(
                         agent.id().to_string(),
                         Connection {
                             config_path: Some(path),
+                            fields,
                             suspended: true,
                             options: saved_options,
                             ..Connection::default()
@@ -1334,6 +1395,9 @@ impl Projector {
                 let Some(record) = store.get(agent.id()).cloned() else {
                     continue;
                 };
+                if record.disconnected() {
+                    continue;
+                }
                 let status = self.status(agent, &store, catalog);
                 let result = if record.cleanup_pending {
                     self.cleanup(agent, &mut store)
@@ -1362,6 +1426,10 @@ impl Projector {
                 } else if !record.suspended
                     && catalog.is_some_and(|catalog| {
                         record.catalog_revision.as_deref() != Some(catalog.revision.as_str())
+                            || (record.attention.is_none()
+                                && (record.options.default_model.is_none()
+                                    || (matches!(agent, Agent::Pi | Agent::OhMyPi)
+                                        && record.selection.is_none())))
                     })
                 {
                     (|| {
@@ -1395,7 +1463,7 @@ impl Projector {
         let Some(record) = store.get_mut(agent.id()) else {
             return Ok(());
         };
-        if record.suspended && record.fields.is_empty() {
+        if record.restored() {
             return Ok(());
         }
         self.tokens.revoke(agent.id())?;
@@ -1410,6 +1478,20 @@ impl Projector {
             return Ok(());
         }
         let path = record.restore_path()?;
+        if let Some(journal) = &record.selection {
+            if let Some(selection) =
+                selection::restoration(agent, path, journal, self.secrets.as_ref())?
+            {
+                if !selection.changes.is_empty() {
+                    write_atomic(
+                        &selection.path,
+                        &selection.after,
+                        Some(selection.before.as_deref()),
+                    )
+                    .map_err(|error| format!("Cannot restore native model settings: {error}"))?;
+                }
+            }
+        }
         let text = self.read_config_at(agent, path)?;
         let mut doc = ConfigDoc::parse(agent.format(), text.as_deref().unwrap_or_default())
             .map_err(|reason| {
@@ -1427,6 +1509,7 @@ impl Projector {
             // A removed config is an uninstall/user action, not a request to
             // recreate fields the gateway previously removed.
             Edit {
+                selection: None,
                 changes: Vec::new(),
                 record: None,
                 pending_secrets: Vec::new(),
@@ -1448,8 +1531,12 @@ impl Projector {
             self.secrets.delete(entry)?;
         }
         if let Some(record) = store.get_mut(agent.id()) {
-            record.fields.clear();
+            let fields = record.fields.clone();
+            record
+                .fields
+                .retain(|field| retain_provider_field(field, &fields));
             record.options.default_model = default_model;
+            record.selection = None;
         }
         self.save_store(store)
     }
@@ -1467,10 +1554,9 @@ impl Projector {
     ) -> Result<(), String> {
         let doc = self.parse_config(agent, text.as_deref())?;
         let options = connection_options(agent, &doc, store.get(agent.id()), catalog, options);
-        if store
-            .get(agent.id())
-            .is_some_and(|record| record.disabled || record.cleanup_pending)
-        {
+        if store.get(agent.id()).is_some_and(|record| {
+            record.cleanup_pending || (record.disabled && !record.disconnected())
+        }) {
             return Err(format!(
                 "{} has a disconnect in progress; finish it before connecting again",
                 agent.name()
@@ -1483,6 +1569,11 @@ impl Projector {
                 catalog.ok_or_else(|| "The verified model list is not available".to_string())?,
             )?;
         }
+        let previous_record = store.get(agent.id()).cloned();
+        let mut next_record = edit.record.clone().ok_or("Missing connection journal")?;
+        next_record.config_path = Some(path.to_path_buf());
+        next_record.options = options.clone();
+        next_record.catalog_revision = catalog.map(|catalog| catalog.revision.clone());
         let mut guard = Rollback::default();
         let result = (|| -> Result<(), String> {
             // A fresh token on every new connection; a leftover file from an
@@ -1497,25 +1588,53 @@ impl Projector {
                 guard.revoke_token = true;
             }
             for secret in &edit.pending_secrets {
+                let previous = self.secrets.get(&secret.entry)?;
                 self.secrets.set(&secret.entry, &secret.value)?;
-                guard.delete_secrets.push(secret.entry.clone());
+                guard.secrets.push((secret.entry.clone(), previous));
             }
+            // Persist recovery before either file changes. An interrupted apply
+            // is never authorized and must restore before another connection.
+            let mut pending = next_record.clone();
+            pending.suspended = true;
+            pending.cleanup_pending = true;
+            pending.disabled = true;
+            store.insert(agent.id().to_string(), pending);
+            self.save_store(store)?;
             if !edit.changes.is_empty() {
                 write_atomic(path, &doc.render()?, Some(text.as_deref())).map_err(|error| {
                     format!("Cannot write the {} config: {error}", agent.name())
                 })?;
-                guard.config = Some((path.to_path_buf(), text.clone()));
+                guard.configs.push((path.to_path_buf(), text.clone()));
             }
-            if let Some(mut record) = edit.record {
-                record.config_path = Some(path.to_path_buf());
-                record.options = options.clone();
-                record.catalog_revision = catalog.map(|catalog| catalog.revision.clone());
-                store.insert(agent.id().to_string(), record);
+            if let Some(selection) = &edit.selection {
+                if !selection.changes.is_empty() {
+                    write_atomic(
+                        &selection.path,
+                        &selection.after,
+                        Some(selection.before.as_deref()),
+                    )
+                    .map_err(|error| format!("Cannot write native model settings: {error}"))?;
+                    guard
+                        .configs
+                        .push((selection.path.clone(), selection.before.clone()));
+                }
             }
+            store.insert(agent.id().to_string(), next_record);
             self.save_store(store)
         })();
         if let Err(error) = result {
             let rollback = self.rollback(agent, guard);
+            if rollback.is_ok() {
+                match previous_record {
+                    Some(record) => {
+                        store.insert(agent.id().to_string(), record);
+                    }
+                    None => {
+                        store.remove(agent.id());
+                    }
+                }
+                self.save_store(store)?;
+            }
             return Err(match rollback {
                 Ok(()) => format!("{error}; nothing was changed"),
                 Err(rollback) => format!("{error}; rolling back also failed: {rollback}"),
@@ -1545,13 +1664,21 @@ impl Projector {
     fn cleanup(&self, agent: Agent, store: &mut Store) -> Result<(), String> {
         self.suspend(agent, store)?;
         self.tokens.revoke(agent.id())?;
-        store.remove(agent.id());
+        if let Some(record) = store.get_mut(agent.id()) {
+            if record.fields.is_empty() {
+                store.remove(agent.id());
+            } else {
+                record.disabled = true;
+                record.cleanup_pending = false;
+                record.attention = None;
+            }
+        }
         self.save_store(store)
     }
 
     fn rollback(&self, agent: Agent, guard: Rollback) -> Result<(), String> {
         let mut first_error = None;
-        if let Some((path, original)) = guard.config {
+        for (path, original) in guard.configs.into_iter().rev() {
             let restored = match original {
                 Some(original) => write_atomic(&path, &original, None),
                 None => fs::remove_file(&path),
@@ -1560,8 +1687,12 @@ impl Projector {
                 first_error.get_or_insert(format!("cannot restore the config: {error}"));
             }
         }
-        for entry in guard.delete_secrets {
-            if let Err(error) = self.secrets.delete(&entry) {
+        for (entry, previous) in guard.secrets.into_iter().rev() {
+            let restored = match previous {
+                Some(value) => self.secrets.set(&entry, &value),
+                None => self.secrets.delete(&entry),
+            };
+            if let Err(error) = restored {
                 first_error.get_or_insert(error);
             }
         }
@@ -1598,7 +1729,19 @@ impl Projector {
             let record = store
                 .get(agent.id())
                 .ok_or_else(|| format!("{} is not connected", agent.name()))?;
-            return restore(doc, record, self.secrets.as_ref());
+            let mut edit = restore(doc, record, self.secrets.as_ref())?;
+            if let Some(journal) = &record.selection {
+                edit.selection = selection::restoration(
+                    agent,
+                    record.restore_path()?,
+                    journal,
+                    self.secrets.as_ref(),
+                )?;
+                if let Some(selection) = &edit.selection {
+                    edit.changes.extend(selection.changes.clone());
+                }
+            }
+            return Ok(edit);
         }
         if catalog.is_none() {
             return Err(format!(
@@ -1625,7 +1768,24 @@ impl Projector {
             options: &options,
         };
         let fields = fields(agent, &inputs)?;
-        let edit = project(doc, &fields, store.get(agent.id()), agent)?;
+        let mut edit = project(doc, &fields, store.get(agent.id()), agent)?;
+        if let Some(model) = options.default_model.as_deref() {
+            let config_path = self.action_path(agent, store.get(agent.id()), true)?;
+            edit.selection = selection::prepare(
+                agent,
+                &config_path,
+                store
+                    .get(agent.id())
+                    .and_then(|record| record.selection.as_ref()),
+                model.trim(),
+            )?;
+            if let Some(selection) = &edit.selection {
+                edit.changes.extend(selection.changes.clone());
+                if let Some(record) = &mut edit.record {
+                    record.selection = Some(selection.journal.clone());
+                }
+            }
+        }
         if agent == Agent::OpenCode {
             self.check_opencode_merge(doc, fields.iter().any(|field| field.path == ["model"]))?;
         }
@@ -1881,6 +2041,10 @@ impl Projector {
         let Some(record) = record else {
             return status;
         };
+        if record.disconnected() {
+            status.recorded = false;
+            return status;
+        }
         if record.suspended && !record.cleanup_pending {
             status.connected = true;
             status.attention = record.attention.clone().or_else(|| {
@@ -1892,7 +2056,7 @@ impl Projector {
             if status.attention.is_some() && installed && status.error.is_none() {
                 status.repair_action = Some(AgentRepairAction::Reconnect);
             }
-            if !record.fields.is_empty() {
+            if !record.restored() {
                 status.repair_action = Some(AgentRepairAction::Disconnect);
                 status.attention = Some(
                     "Configuration restoration is incomplete; retry stopping protection"
@@ -2076,8 +2240,8 @@ impl Projector {
 #[derive(Default)]
 struct Rollback {
     revoke_token: bool,
-    delete_secrets: Vec<String>,
-    config: Option<(PathBuf, Option<String>)>,
+    secrets: Vec<(String, Option<String>)>,
+    configs: Vec<(PathBuf, Option<String>)>,
 }
 
 fn read_auth_document(path: &Path) -> Result<serde_json::Value, String> {
@@ -2141,6 +2305,13 @@ fn revision(
     part(&[u8::from(connect)]);
     part(path.map_or(&[][..], |path| path.as_os_str().as_encoded_bytes()));
     part(text.unwrap_or_default().as_bytes());
+    if let Some(path) = path {
+        part(
+            selection::fingerprint(agent, path, record.and_then(|r| r.selection.as_ref()))
+                .unwrap_or_else(|error| error)
+                .as_bytes(),
+        );
+    }
     part(
         serde_json::to_string(&record)
             .unwrap_or_default()
@@ -2254,6 +2425,7 @@ fn project(
         });
     }
     Ok(Edit {
+        selection: None,
         changes,
         record: Some(record),
         pending_secrets,
@@ -2302,15 +2474,18 @@ fn restore(
     let mut changes = Vec::new();
     let mut consumed_secrets = Vec::new();
     for field in &record.fields {
+        if retain_provider_field(field, &record.fields) {
+            continue;
+        }
         let path = refs(&field.path);
         let current = doc.get_value(&path);
+        if let Some(Previous::Secret { secret_ref }) = &field.previous {
+            consumed_secrets.push(secret_ref.clone());
+        }
         if current != field.value {
             continue;
         }
         let sensitive = is_sensitive(&field.path);
-        if let Some(Previous::Secret { secret_ref }) = &field.previous {
-            consumed_secrets.push(secret_ref.clone());
-        }
         let (restored, after_label) = match &field.previous {
             Some(Previous::Plain(value)) => (Some(value.clone()), None),
             Some(Previous::Secret { secret_ref }) => match secrets.get(secret_ref)? {
@@ -2343,6 +2518,7 @@ fn restore(
         });
     }
     Ok(Edit {
+        selection: None,
         changes,
         record: None,
         pending_secrets: Vec::new(),
@@ -2394,11 +2570,16 @@ fn connection_options(
     catalog: Option<&Catalog>,
     options: &ConnectOptions,
 ) -> ConnectOptions {
-    if !matches!(agent, Agent::Codex | Agent::ClaudeCode) || options.default_model.is_some() {
+    if options.default_model.is_some() {
         return options.clone();
     }
-    let current = selected_model(agent, Some(doc))
-        .filter(|model| catalog.is_some_and(|catalog| catalog.get(model).is_some()));
+    let current = selected_model(agent, Some(doc)).filter(|model| {
+        catalog.is_some_and(|catalog| {
+            catalog
+                .get(model)
+                .is_some_and(|entry| entry.supports(agent.surface()))
+        })
+    });
     let saved = prior.and_then(|record| record.options.default_model.clone());
     let preferred = if prior.is_some_and(|record| record.suspended && record.attention.is_none()) {
         saved.or(current)
@@ -2819,7 +3000,7 @@ mod tests {
             .preview(agent, true, Some(&catalog), &options)
             .is_err());
         disconnect(&sandbox, agent);
-        assert!(sandbox.projector.load_store().unwrap().is_empty());
+        assert!(sandbox.projector.load_store().unwrap()[agent.id()].disconnected());
     }
 
     #[test]
@@ -3261,6 +3442,265 @@ mod tests {
     }
 
     #[test]
+    fn every_agent_switches_conservatively_and_reconnects_without_namespace_conflicts() {
+        for agent in Agent::ALL {
+            let mut sandbox = sandbox(&format!("conservative-{}", agent.id()));
+            if agent == Agent::OpenClaw {
+                sandbox.projector.helper_exe = sandbox
+                    .projector
+                    .data_dir
+                    .join("helpers")
+                    .join(helper_binary_name());
+            }
+            let config = agent.config_path(&sandbox.home, false);
+            let original = match agent {
+                Agent::Codex => "model_provider = 'original'\nmodel = 'native'\nmodel_catalog_json = 'native-catalog.json'\n",
+                Agent::ClaudeCode => r#"{"env":{"ANTHROPIC_BASE_URL":"https://original.invalid","ANTHROPIC_MODEL":"native","ANTHROPIC_AUTH_TOKEN":"old-secret"},"model":"native"}"#,
+                Agent::OpenCode => r#"{"model":"original/native","provider":{"original":{"name":"User provider"}}}"#,
+                Agent::Hermes => "model:\n  provider: original\n  default: native\ntheme: dark\n",
+                Agent::OpenClaw => r#"{"agents":{"defaults":{"model":{"primary":"original/native","fallbacks":["original/fallback"]}}}}"#,
+                Agent::Pi => "{}",
+                Agent::OhMyPi => "theme: dark\n",
+            };
+            write(&config, original);
+            let defaults = match agent {
+                Agent::Pi => Some((config.with_file_name("settings.json"), Format::Json, r#"{"defaultProvider":"original","defaultModel":"native","theme":"dark"}"#)),
+                Agent::OhMyPi => Some((config.with_file_name("config.yaml"), Format::Yaml, "modelRoles:\n  default: original/native\n  smol: original/small\ntheme: dark\n")),
+                _ => None,
+            };
+            if let Some((path, _, text)) = &defaults {
+                write(path, text);
+            }
+            let catalog = catalog();
+            let options = ConnectOptions::default();
+            let enable = |projector: &Projector| {
+                let preview = projector
+                    .preview(agent, true, Some(&catalog), &options)
+                    .unwrap();
+                projector
+                    .apply(agent, true, &preview.revision, Some(&catalog), &options)
+                    .unwrap()
+            };
+            assert!(enable(&sandbox.projector).authorized, "{}", agent.id());
+            let first_token = sandbox.projector.tokens.read(agent.id()).unwrap().unwrap();
+            let connected = fs::read_to_string(&config).unwrap();
+            if let Some((path, _, _)) = &defaults {
+                assert!(fs::read_to_string(path)
+                    .unwrap()
+                    .contains("private-ai-proxy"));
+            }
+            disconnect(&sandbox, agent);
+            assert!(sandbox.projector.tokens.read(agent.id()).unwrap().is_none());
+            let (statuses, tokens) = sandbox.projector.scan(Some(&catalog)).unwrap();
+            let status = statuses
+                .iter()
+                .find(|status| status.id == agent.id())
+                .unwrap();
+            assert!(!status.connected && !status.authorized);
+            assert!(tokens.agent_for(&first_token).is_none());
+            let mut restored = doc(&sandbox, agent);
+            let record = sandbox
+                .projector
+                .load_store()
+                .unwrap()
+                .get(agent.id())
+                .cloned();
+            if agent == Agent::ClaudeCode {
+                assert!(record.is_none());
+            } else {
+                let record = record.unwrap();
+                assert!(record.disconnected());
+                for field in &record.fields {
+                    assert_eq!(restored.get_value(&refs(&field.path)), field.value);
+                }
+                let roots: Vec<_> = record
+                    .fields
+                    .iter()
+                    .filter_map(|field| provider_namespace(&field.path).map(|path| path.to_vec()))
+                    .collect();
+                for root in roots {
+                    restored.remove(&refs(&root)).unwrap();
+                }
+            }
+            let mut before = ConfigDoc::parse(agent.format(), original).unwrap();
+            if agent == Agent::OpenClaw {
+                before
+                    .set_value(
+                        &["models", "providers"],
+                        &ConfigValue::Json(serde_json::json!({})),
+                    )
+                    .unwrap();
+                before
+                    .set_value(
+                        &["secrets", "providers"],
+                        &ConfigValue::Json(serde_json::json!({})),
+                    )
+                    .unwrap();
+            }
+            assert_eq!(
+                restored.get_value(&[]),
+                before.get_value(&[]),
+                "{}",
+                agent.id()
+            );
+            if let Some((path, format, original)) = &defaults {
+                let restored =
+                    ConfigDoc::parse(*format, &fs::read_to_string(path).unwrap()).unwrap();
+                assert_eq!(
+                    restored.get_value(&[]),
+                    ConfigDoc::parse(*format, original).unwrap().get_value(&[])
+                );
+            }
+            let stopped_files = fs::read_to_string(&config).unwrap();
+            sandbox.projector.reconcile(Some(&catalog)).unwrap();
+            assert_eq!(fs::read_to_string(&config).unwrap(), stopped_files);
+            assert!(sandbox.projector.tokens.read(agent.id()).unwrap().is_none());
+            assert!(enable(&sandbox.projector).authorized);
+            assert_ne!(
+                sandbox.projector.tokens.read(agent.id()).unwrap().unwrap(),
+                first_token
+            );
+            assert_eq!(fs::read_to_string(&config).unwrap(), connected);
+            assert!(sandbox.projector.disconnect_all().unwrap().is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_secondary_selection_write_rolls_back_provider_and_revokes_token() {
+        let sandbox = sandbox("selection-write-failure");
+        let agent = Agent::Pi;
+        let config = agent.config_path(&sandbox.home, false);
+        write(&config, "{}");
+        let target = sandbox.home.join("user-settings.json");
+        write(
+            &target,
+            r#"{"defaultProvider":"original","defaultModel":"native"}"#,
+        );
+        let defaults = config.with_file_name("settings.json");
+        std::os::unix::fs::symlink(&target, &defaults).unwrap();
+        let original = fs::read(&target).unwrap();
+        let catalog = catalog();
+        let options = ConnectOptions::default();
+        let preview = sandbox
+            .projector
+            .preview(agent, true, Some(&catalog), &options)
+            .unwrap();
+        assert!(sandbox
+            .projector
+            .apply(agent, true, &preview.revision, Some(&catalog), &options)
+            .is_err());
+        assert_eq!(fs::read_to_string(&config).unwrap(), "{}");
+        assert_eq!(fs::read(&target).unwrap(), original);
+        assert!(sandbox.projector.tokens.read(agent.id()).unwrap().is_none());
+        assert!(sandbox.projector.load_store().unwrap().is_empty());
+    }
+
+    #[test]
+    fn interrupted_two_file_connection_restores_from_the_persisted_journal() {
+        let sandbox = sandbox("selection-crash");
+        let agent = Agent::Pi;
+        let config = agent.config_path(&sandbox.home, false);
+        write(&config, "{}");
+        let defaults = config.with_file_name("settings.json");
+        let original = r#"{"defaultProvider":"original","defaultModel":"native"}"#;
+        write(&defaults, original);
+        let catalog = catalog();
+        let mut doc = ConfigDoc::parse(agent.format(), "{}").unwrap();
+        let edit = sandbox
+            .projector
+            .edit(
+                agent,
+                true,
+                &mut doc,
+                &Store::new(),
+                Some(&catalog),
+                &ConnectOptions::default(),
+            )
+            .unwrap();
+        let mut record = edit.record.unwrap();
+        record.config_path = Some(config.clone());
+        record.disabled = true;
+        record.cleanup_pending = true;
+        record.suspended = true;
+        let store = BTreeMap::from([(agent.id().to_string(), record)]);
+        sandbox.projector.save_store(&store).unwrap();
+        sandbox.projector.tokens.rotate(agent.id()).unwrap();
+        write_atomic(&config, &doc.render().unwrap(), Some(Some("{}"))).unwrap();
+        // The process ended after the provider write but before the selection file.
+        assert!(sandbox
+            .projector
+            .reconcile(Some(&catalog))
+            .unwrap()
+            .is_empty());
+        assert_eq!(fs::read_to_string(&defaults).unwrap(), original);
+        assert!(sandbox.projector.tokens.read(agent.id()).unwrap().is_none());
+        assert!(sandbox.projector.load_store().unwrap()[agent.id()].disconnected());
+        let preview = sandbox
+            .projector
+            .preview(agent, true, Some(&catalog), &ConnectOptions::default())
+            .unwrap();
+        assert!(
+            sandbox
+                .projector
+                .apply(
+                    agent,
+                    true,
+                    &preview.revision,
+                    Some(&catalog),
+                    &ConnectOptions::default()
+                )
+                .unwrap()
+                .authorized
+        );
+    }
+
+    #[test]
+    fn native_model_settings_edits_invalidate_preview_and_survive_disconnect() {
+        let sandbox = sandbox("selection-drift");
+        let agent = Agent::Pi;
+        let config = agent.config_path(&sandbox.home, false);
+        write(&config, "{}");
+        let defaults = config.with_file_name("settings.json");
+        write(
+            &defaults,
+            r#"{"defaultProvider":"original","defaultModel":"native"}"#,
+        );
+        let catalog = catalog();
+        let options = ConnectOptions::default();
+        let preview = sandbox
+            .projector
+            .preview(agent, true, Some(&catalog), &options)
+            .unwrap();
+        write(
+            &defaults,
+            r#"{"defaultProvider":"edited","defaultModel":"edited-model"}"#,
+        );
+        assert!(sandbox
+            .projector
+            .apply(agent, true, &preview.revision, Some(&catalog), &options)
+            .unwrap_err()
+            .contains("changed since the preview"));
+        let preview = sandbox
+            .projector
+            .preview(agent, true, Some(&catalog), &options)
+            .unwrap();
+        sandbox
+            .projector
+            .apply(agent, true, &preview.revision, Some(&catalog), &options)
+            .unwrap();
+        write(
+            &defaults,
+            r#"{"defaultProvider":"user-choice","defaultModel":"user-model"}"#,
+        );
+        disconnect(&sandbox, agent);
+        assert!(fs::read_to_string(&defaults)
+            .unwrap()
+            .contains("user-choice"));
+        assert!(sandbox.projector.tokens.read(agent.id()).unwrap().is_none());
+    }
+
+    #[test]
     fn links_survive_stop_restart_and_uninstall_without_owning_inactive_configs() {
         let sandbox = sandbox("link-lifecycle");
         let agent = Agent::ClaudeCode;
@@ -3505,12 +3945,16 @@ mod tests {
         disconnect(&sandbox, Agent::OpenCode);
         let mut restored = original;
         restored["provider"]["other"]["name"] = json!("Edited outside the app");
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&fs::read(&path).unwrap()).unwrap(),
-            restored
-        );
+        let mut actual: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(actual["provider"]
+            .as_object_mut()
+            .unwrap()
+            .remove("private-ai-proxy")
+            .is_some());
+        assert_eq!(actual, restored);
         assert_eq!(fs::read(&jsonc).unwrap(), jsonc_before);
-        assert!(sandbox.projector.load_store().unwrap().is_empty());
+        assert!(sandbox.projector.load_store().unwrap()["opencode"].disconnected());
         assert!(!token_path.exists());
     }
 
@@ -3697,9 +4141,17 @@ mod tests {
             fs::remove_file(&sandbox.projector.helper_exe).unwrap();
             disconnect(&sandbox, agent);
             assert_eq!(fs::read_to_string(foreign).unwrap(), projected);
+            let mut actual: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+            if agent == Agent::OpenCode {
+                assert!(actual["provider"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("private-ai-proxy")
+                    .is_some());
+            }
             assert_eq!(
-                serde_json::from_str::<serde_json::Value>(&fs::read_to_string(path).unwrap())
-                    .unwrap(),
+                actual,
                 serde_json::from_str::<serde_json::Value>(original).unwrap()
             );
         }
@@ -3933,7 +4385,7 @@ mod tests {
                 Some(&catalog),
                 &ConnectOptions::default()
             )
-            .is_err());
+            .is_ok());
         assert!(sandbox
             .projector
             .preview(
@@ -4158,7 +4610,7 @@ mod tests {
         disconnect(&sandbox, agent);
         assert!(doc(&sandbox, agent)
             .get_value(&["providers", "private-ai-proxy"])
-            .is_none());
+            .is_some());
         assert_eq!(
             doc(&sandbox, agent).get_value(&["custom"]),
             Some(ConfigValue::Bool(true))
@@ -4436,7 +4888,9 @@ mod tests {
         let restored = fs::read_to_string(path).unwrap();
         assert!(restored.contains("# keep this comment"));
         assert!(restored.contains("theme: dark"));
-        assert!(!restored.contains("private-ai-proxy"));
+        assert!(restored.contains("private-ai-proxy"));
+        let restored = ConfigDoc::parse(Format::Yaml, &restored).unwrap();
+        assert!(restored.get_str(&["model", "provider"]).is_none());
 
         let fresh = self::sandbox("fresh-hermes");
         assert!(fresh
@@ -4447,7 +4901,7 @@ mod tests {
                 Some(&catalog),
                 &ConnectOptions::default()
             )
-            .is_err());
+            .is_ok());
         let preview = fresh
             .projector
             .preview(Agent::Hermes, true, Some(&catalog), &options)
