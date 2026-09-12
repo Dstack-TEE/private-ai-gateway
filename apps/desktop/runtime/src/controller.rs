@@ -148,7 +148,7 @@ impl EndpointRuntime {
             .task
             .lock()
             .map_err(|_| "The Local API runtime is unavailable".to_string())?;
-        if runtime.is_some() {
+        if runtime.as_ref().is_some_and(|task| !task.is_finished()) {
             return Err("The Local API runtime is already active".to_string());
         }
         *runtime = Some(self.task_runtime.spawn(async move {
@@ -386,9 +386,7 @@ impl DesktopRuntime {
                 }
                 let Some(runtime) = weak.upgrade() else { break };
                 let result = tokio::task::spawn_blocking(move || {
-                    if runtime.recovery.needs_check() {
-                        if let Err(error) = runtime.recover_network() { runtime.report_error(error); }
-                    }
+                    if let Err(error) = runtime.recover_network() { runtime.report_error(error); }
                     if let Err(error) = runtime.reconcile_agents() {
                         if runtime
                             .state()
@@ -539,15 +537,25 @@ impl DesktopRuntime {
             return Ok(());
         }
         let state = self.manager.snapshot()?;
+        if protection_active(&state) && self.proxy.session().verified {
+            self.recovery.reset_retry();
+        }
+        let retry = crate::recovery::should_retry(&state)
+            || (state.reconnecting && state.status == "stopped" && self.recovery.pending());
+        if !retry && !self.recovery.needs_check() {
+            return Ok(());
+        }
         if state.status == "verifying" && self.recovery.online() {
             return Ok(());
         }
         self.recovery.clear_request();
-        if !crate::recovery::should_recover(
-            &state.status,
-            state.configuration_verification,
-            self.recovery.pending(),
-        ) {
+        if !retry
+            && !crate::recovery::should_recover(
+                &state.status,
+                state.configuration_verification,
+                self.recovery.pending(),
+            )
+        {
             return Ok(());
         }
         let remote = url::Url::parse(&state.config.remote_url)
@@ -558,7 +566,10 @@ impl DesktopRuntime {
             Some(url::Host::Ipv6(address)) => address.is_loopback(),
             None => false,
         };
-        if local_service {
+        if local_service && !retry {
+            return Ok(());
+        }
+        if retry && ((!local_service && !self.recovery.online()) || !self.recovery.retry_due()) {
             return Ok(());
         }
         self.recovery.clear_wait();
@@ -577,14 +588,25 @@ impl DesktopRuntime {
             self.recovery.cancel();
             return Err(error);
         }
-        if !self.recovery.online() {
+        if !local_service && !self.recovery.online() {
             self.recovery.wait();
             self.manager.report_error("Network unavailable. Connect to a network; protection will resume automatically after verification.".into());
             return Ok(());
         }
-        if let Err(error) = self.start_inner(state.config) {
-            self.manager.cancel_reconnection();
-            return Err(format!("Could not reconnect. Check the network and active profile, then enable protection again: {error}"));
+        let resumed = (|| {
+            if state.endpoint_error.is_some() {
+                let resolved = local_api::resolve(state.local_api)?;
+                self.restore_endpoint(resolved.clone())?;
+                self.manager
+                    .set_endpoint(resolved.config, Ok(resolved.endpoint));
+            }
+            self.start_inner(state.config)
+        })();
+        if let Err(error) = resumed {
+            self.recovery.wait();
+            return Err(format!(
+                "Could not reconnect; retrying automatically: {error}"
+            ));
         }
         Ok(())
     }
@@ -715,9 +737,11 @@ impl DesktopRuntime {
     fn reload_agent_tokens(&self) -> Result<(), String> {
         let projector = self.current_projector()?;
         projector.migrate_legacy()?;
-        let failures = projector.reconcile(None)?;
-        if !failures.is_empty() {
-            return Err(agent_failures(failures));
+        if !crate::recovery::connection_intended(&self.manager.snapshot()?) {
+            let failures = projector.reconcile(None)?;
+            if !failures.is_empty() {
+                return Err(agent_failures(failures));
+            }
         }
         let (_, tokens) = projector.scan(None)?;
         self.publish_agent_tokens(tokens)?;
@@ -1282,7 +1306,10 @@ impl DesktopRuntime {
                 self.manager.restore_snapshot(previous);
                 return Err("Configuration verification did not start".to_string());
             };
-            let verified = self.manager.wait_for_verification(&session_id).await;
+            let verified = self
+                .manager
+                .wait_for_verification(&session_id, std::time::Duration::from_secs(45))
+                .await;
             let stop_result = self.manager.stop_with_reconnect(initial.session_active);
             if let Err(error) = verified {
                 self.proxy.set_api_key(None);
@@ -1947,13 +1974,22 @@ impl DesktopRuntime {
         let state = self.manager.snapshot()?;
         let session = self.proxy.session();
         let protected = protection_active(&state) && session.verified;
-        if !protected && (state.reconnecting || state.status == "verifying") {
+        if !protected && crate::recovery::connection_intended(&state) {
             self.publish_agent_tokens(TokenSet::default())?;
             return Ok(());
         }
         let catalog = if protected { session.catalog } else { None };
+        if protected && !self.recovery.agents_ready() {
+            return Ok(());
+        }
         let projector = self.current_projector()?;
-        let failures = projector.reconcile(catalog.as_ref())?;
+        let outcome = projector.reconcile(catalog.as_ref());
+        self.recovery.agents_finished(
+            outcome
+                .as_ref()
+                .map_or(true, |failures| !failures.is_empty()),
+        );
+        let failures = outcome?;
         let tokens = projector.scan(catalog.as_ref())?.1;
         self.publish_agent_tokens(tokens)?;
         if failures.is_empty() {
@@ -2451,6 +2487,58 @@ mod tests {
     }
 
     #[test]
+    fn finished_local_listener_can_restart_at_the_same_address() {
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(&executor, directory.path());
+        executor.block_on(async {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let config = LocalApiConfig {
+                port: listener.local_addr().unwrap().port(),
+                ..Default::default()
+            };
+            let resolved = local_api::resolve(config.clone()).unwrap();
+            runtime
+                .endpoint
+                .start(
+                    runtime.manager.clone(),
+                    runtime.proxy.clone(),
+                    listener,
+                    config,
+                )
+                .unwrap();
+            runtime
+                .endpoint
+                .task
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .abort();
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while !runtime
+                    .endpoint
+                    .task
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .is_finished()
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            runtime.restore_endpoint(resolved.clone()).unwrap();
+            assert!(std::net::TcpListener::bind(resolved.bind).is_err());
+            assert!(runtime.restore_endpoint(resolved.clone()).is_err());
+            runtime.endpoint.stop().await.unwrap();
+            assert!(std::net::TcpListener::bind(resolved.bind).is_ok());
+        });
+    }
+
+    #[test]
     fn recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them() {
         const CHILD: &str = "PAP_TEST_RECOVERY_ROUTES";
         if std::env::var_os(CHILD).is_none() {
@@ -2529,11 +2617,26 @@ mod tests {
             .unwrap();
         assert_eq!(runtime.proxy.tokens().agent_for(&token), Some(agent.id()));
         runtime.recovery.available.store(false, Ordering::Release);
+        runtime.recovery.request();
         runtime.recover_network().unwrap();
         let statuses = runtime.list_agents().unwrap();
         assert!(statuses.iter().all(|status| !status.authorized));
         assert!(runtime.proxy.tokens().agent_for(&token).is_none());
         assert_eq!(std::fs::read(&path).unwrap(), projected);
+        for status in ["error", "stopped"] {
+            runtime.manager.restore_snapshot(GatewayState {
+                status: status.into(),
+                ..verified.clone()
+            });
+            runtime.reload_agent_tokens().unwrap();
+            assert!(runtime
+                .list_agents()
+                .unwrap()
+                .iter()
+                .all(|status| !status.authorized));
+            assert!(runtime.proxy.tokens().agent_for(&token).is_none());
+            assert_eq!(std::fs::read(&path).unwrap(), projected);
+        }
         runtime.manager.restore_snapshot(verified);
         runtime.proxy.publish(proxy::Session {
             verified: true,

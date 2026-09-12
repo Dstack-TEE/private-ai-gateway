@@ -107,8 +107,9 @@ impl GatewayManager {
                 state.session_id = Some(id);
                 state.protected_since = Some(started_at);
                 state.session_active = true;
+                state.reconnecting = true;
                 if state.error.is_none() {
-                    state.error = Some("The previous protection session was interrupted. Start protection to verify the service and resume it.".into());
+                    state.error = Some("The previous protection session was interrupted. Protection will resume after verification.".into());
                 }
             }
             Err(error) => state.error = Some(error),
@@ -259,17 +260,28 @@ impl GatewayManager {
         self.proxy.publish(Session {
             generation,
             epoch: 0,
-            session_id: Some(session_id),
+            session_id: Some(session_id.clone()),
             ..Session::default()
         });
         self.publish();
         spawn_event_reader(Arc::clone(self), generation, receiver);
+        let manager = Arc::clone(self);
+        self.task_runtime.spawn(async move {
+            let budget = Duration::from_secs(if verification_only { 45 } else { 120 });
+            if let Err(error) = manager.wait_for_verification(&session_id, budget).await {
+                let _ = manager.fail_if(generation, Some("verifying"), error);
+            }
+        });
         Ok(state)
     }
 
-    pub async fn wait_for_verification(&self, session_id: &str) -> Result<GatewayState, String> {
+    pub async fn wait_for_verification(
+        &self,
+        session_id: &str,
+        budget: Duration,
+    ) -> Result<GatewayState, String> {
         let mut states = self.state_tx.subscribe();
-        tokio::time::timeout(Duration::from_secs(45), async {
+        tokio::time::timeout(budget, async {
             loop {
                 let state = states.borrow().clone();
                 if state.session_id.as_deref() != Some(session_id) {
@@ -292,7 +304,7 @@ impl GatewayManager {
             }
         })
         .await
-        .map_err(|_| "Configuration verification timed out".to_string())?
+        .map_err(|_| "Service verification timed out".to_string())?
     }
 
     pub fn restore_snapshot(&self, mut state: GatewayState) {
@@ -724,6 +736,7 @@ impl GatewayManager {
 
         let mut load_catalog = false;
         let mut persist = None;
+        let mut end_session = false;
         match event_type.as_str() {
             // Identity in (or rotated): a new epoch; the session stays closed
             // until the catalog read through this identity is in too.
@@ -747,6 +760,7 @@ impl GatewayManager {
             // read still in flight can neither publish nor clear this error,
             // and the identity must be reported again before anything opens.
             "blocked" => {
+                end_session = !runtime.verification_only;
                 runtime.epoch += 1;
                 runtime.identity_ready = false;
                 runtime.state.status = "blocked".to_string();
@@ -759,10 +773,12 @@ impl GatewayManager {
                 );
             }
             "fatal" => {
-                runtime.state.reconnecting = false;
                 runtime.epoch += 1;
                 runtime.identity_ready = false;
-                runtime.state.status = "error".to_string();
+                if runtime.state.status != "blocked" {
+                    runtime.state.status = "error".to_string();
+                }
+                runtime.state.reconnecting = crate::recovery::connection_intended(&runtime.state);
                 runtime.state.progress = None;
                 runtime.state.catalog = None;
                 runtime.state.error = Some(
@@ -783,7 +799,13 @@ impl GatewayManager {
                 ..Session::default()
             });
         }
+        // Use the same runtime -> usage lock order as start_inner, so this
+        // blocked event cannot delete the resume marker of a newer Start.
+        if end_session && self.usage.end_session().is_err() {
+            eprintln!("Could not persist the end of a blocked protection session");
+        }
         drop(runtime);
+
         if let Some(activity) = persist {
             let summary = self
                 .usage
@@ -837,11 +859,9 @@ impl GatewayManager {
         runtime.epoch += 1;
         runtime.identity_ready = false;
         runtime.verification_only = false;
-        runtime.state.configuration_verification = false;
         runtime.state.catalog = None;
         runtime.state.progress = None;
-        runtime.state.reconnecting = false;
-        if runtime.state.status != "error" {
+        if !matches!(runtime.state.status.as_str(), "error" | "blocked") {
             let diagnostic =
                 String::from_utf8_lossy(&runtime.diagnostic.iter().copied().collect::<Vec<_>>())
                     .trim()
@@ -853,6 +873,7 @@ impl GatewayManager {
                 format!("ACI stopped unexpectedly: {diagnostic}")
             });
         }
+        runtime.state.reconnecting = crate::recovery::connection_intended(&runtime.state);
         let epoch = runtime.epoch;
         let session_id = runtime.session_id.clone();
         drop(runtime);
@@ -867,17 +888,29 @@ impl GatewayManager {
     }
 
     fn fail(&self, generation: u64, message: String) -> Result<(), String> {
+        self.fail_if(generation, None, message)
+    }
+
+    fn fail_if(
+        &self,
+        generation: u64,
+        status: Option<&str>,
+        message: String,
+    ) -> Result<(), String> {
         let mut runtime = self.lock()?;
-        if runtime.generation != generation {
+        if runtime.generation != generation
+            || status.is_some_and(|status| runtime.state.status != status)
+        {
             return Ok(());
         }
         let child = runtime.child.take();
         runtime.epoch += 1;
         runtime.identity_ready = false;
         runtime.verification_only = false;
-        runtime.state.configuration_verification = false;
-        runtime.state.reconnecting = false;
-        runtime.state.status = "error".to_string();
+        if runtime.state.status != "blocked" {
+            runtime.state.status = "error".to_string();
+        }
+        runtime.state.reconnecting = crate::recovery::connection_intended(&runtime.state);
         runtime.state.progress = None;
         runtime.state.catalog = None;
         runtime.state.error = Some(message);
@@ -1150,6 +1183,92 @@ mod tests {
         ) -> Result<(Receiver<SidecarEvent>, Box<dyn SidecarChild>), String> {
             let (sender, receiver) = tokio::sync::mpsc::channel(1);
             Ok((receiver, Box::new(WaitingChild(Some(sender)))))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn silent_verifier_times_out_without_stopping_a_completed_verification() {
+        let (events, _) = tokio::sync::mpsc::channel(8);
+        let proxy = ProxyState::new(events).unwrap();
+        let manager = Arc::new(GatewayManager::new(
+            proxy.clone(),
+            Arc::new(UsageStore::memory().unwrap()),
+            Arc::new(WaitingSidecar),
+            Handle::current(),
+            GatewayState::default(),
+        ));
+        let config = StartGatewayConfig {
+            remote_url: "https://inference.phala.com".into(),
+            require_production_os: true,
+        };
+        manager.start(config.clone()).unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(46)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(manager.snapshot().unwrap().status, "verifying");
+        tokio::time::advance(Duration::from_secs(75)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(manager.snapshot().unwrap().status, "error");
+        assert!(crate::recovery::should_retry(&manager.snapshot().unwrap()));
+        assert!(!proxy.session().verified);
+        manager.start(config).unwrap();
+        let generation = proxy.session().generation;
+        let mut complete = manager.snapshot().unwrap();
+        complete.status = "verified".into();
+        manager.restore_snapshot(complete);
+        manager
+            .fail_if(generation, Some("verifying"), "late timeout".into())
+            .unwrap();
+        tokio::time::advance(Duration::from_secs(121)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(manager.snapshot().unwrap().status, "verified");
+        manager.stop().unwrap();
+    }
+
+    #[test]
+    fn security_blocks_survive_process_failure_without_cancelling_candidate_sessions() {
+        for verification_only in [false, true] {
+            let executor = tokio::runtime::Runtime::new().unwrap();
+            let (events, _) = tokio::sync::mpsc::channel(8);
+            let proxy = ProxyState::new(events).unwrap();
+            let usage = Arc::new(UsageStore::memory().unwrap());
+            let manager = Arc::new(GatewayManager::new(
+                proxy.clone(),
+                usage.clone(),
+                Arc::new(WaitingSidecar),
+                executor.handle().clone(),
+                GatewayState::default(),
+            ));
+            let config = StartGatewayConfig {
+                remote_url: "https://inference.phala.com".into(),
+                require_production_os: true,
+            };
+            manager.start(config.clone()).unwrap();
+            if verification_only {
+                manager.stop_with_reconnect(true).unwrap();
+                manager.begin_verification(config, true).unwrap();
+            }
+            let generation = proxy.session().generation;
+            manager
+                .handle_line(
+                    generation,
+                    r#"{"schema_version":1,"type":"blocked","reason":"identity rejected"}"#,
+                )
+                .unwrap();
+            assert_eq!(usage.active_session().unwrap().is_some(), verification_only);
+            manager
+                .handle_line(
+                    generation,
+                    r#"{"schema_version":1,"type":"fatal","message":"process failed"}"#,
+                )
+                .unwrap();
+            manager.terminated(generation).unwrap();
+            manager.fail(generation, "reader failed".into()).unwrap();
+            let state = manager.snapshot().unwrap();
+            assert_eq!(state.status, "blocked");
+            assert_eq!(state.configuration_verification, verification_only);
+            assert!(!crate::recovery::should_retry(&state));
+            assert!(!proxy.session().verified);
         }
     }
 

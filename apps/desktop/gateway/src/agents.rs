@@ -877,6 +877,30 @@ fn is_sensitive(path: &[String]) -> bool {
     .any(|needle| last.contains(needle))
 }
 
+#[derive(Debug)]
+enum ConnectFailure {
+    Conflict(String),
+    Unavailable(String),
+}
+
+impl From<String> for ConnectFailure {
+    fn from(message: String) -> Self {
+        Self::Unavailable(message)
+    }
+}
+impl From<&str> for ConnectFailure {
+    fn from(message: &str) -> Self {
+        Self::Unavailable(message.to_string())
+    }
+}
+impl ConnectFailure {
+    fn message(self) -> String {
+        match self {
+            Self::Conflict(message) | Self::Unavailable(message) => message,
+        }
+    }
+}
+
 /// What a connection wrote, kept so a disconnect can restore exactly that.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Connection {
@@ -1352,7 +1376,8 @@ impl Projector {
                 }
                 if catalog.is_some() {
                     self.require_helper()?;
-                    self.connect(agent, &mut store, text, &path, catalog, options)?;
+                    self.connect(agent, &mut store, text, &path, catalog, options)
+                        .map_err(ConnectFailure::message)?;
                 } else {
                     if self.current_record(agent, store.get(agent.id())).is_some() {
                         self.suspend(agent, &mut store)?;
@@ -1443,6 +1468,7 @@ impl Projector {
                 let status = self.status(agent, &store, catalog);
                 let result = if record.cleanup_pending {
                     self.cleanup(agent, &mut store)
+                        .map_err(ConnectFailure::Unavailable)
                 } else if catalog.is_none()
                     || !status.installed
                     || status.error.is_some()
@@ -1450,6 +1476,7 @@ impl Projector {
                 {
                     if catalog.is_some()
                         && status.installed
+                        && status.error.is_none()
                         && !record.suspended
                         && !status.authorized
                     {
@@ -1458,13 +1485,18 @@ impl Projector {
                         }
                     }
                     self.suspend(agent, &mut store)
+                        .map_err(ConnectFailure::Unavailable)
                 } else if record.suspended && record.attention.is_none() {
-                    self.suspend(agent, &mut store).and_then(|()| {
-                        self.require_helper()?;
-                        let text = self.read_config(agent)?;
-                        let path = self.action_path(agent, store.get(agent.id()), true)?;
-                        self.connect(agent, &mut store, text, &path, catalog, &record.options)
-                    })
+                    self.suspend(agent, &mut store)
+                        .map_err(ConnectFailure::Unavailable)
+                        .and_then(|()| {
+                            self.require_helper()?;
+                            let text = self.read_config(agent)?;
+                            let path = self
+                                .action_path(agent, store.get(agent.id()), true)
+                                .map_err(ConnectFailure::Conflict)?;
+                            self.connect(agent, &mut store, text, &path, catalog, &record.options)
+                        })
                 } else if !record.suspended
                     && catalog.is_some_and(|catalog| {
                         record.catalog_revision.as_deref() != Some(catalog.revision.as_str())
@@ -1477,24 +1509,31 @@ impl Projector {
                     (|| {
                         self.require_helper()?;
                         let text = self.read_config(agent)?;
-                        let doc = self.parse_config(agent, text.as_deref())?;
+                        let doc = self
+                            .parse_config(agent, text.as_deref())
+                            .map_err(ConnectFailure::Conflict)?;
                         let options = ConnectOptions {
                             default_model: selected_model(agent, Some(&doc))
                                 .or_else(|| record.options.default_model.clone()),
                         };
-                        let path = self.action_path(agent, store.get(agent.id()), true)?;
+                        let path = self
+                            .action_path(agent, store.get(agent.id()), true)
+                            .map_err(ConnectFailure::Conflict)?;
                         self.connect(agent, &mut store, text, &path, catalog, &options)
                     })()
                 } else {
                     Ok(())
                 };
                 if let Err(error) = result {
-                    if let Some(record) = store.get_mut(agent.id()) {
-                        record.attention = Some(error.clone());
-                        record.catalog_revision = catalog.map(|catalog| catalog.revision.clone());
+                    if let ConnectFailure::Conflict(message) = &error {
+                        if let Some(record) = store.get_mut(agent.id()) {
+                            record.attention = Some(message.clone());
+                            record.catalog_revision =
+                                catalog.map(|catalog| catalog.revision.clone());
+                        }
+                        self.save_store(&store)?;
                     }
-                    self.save_store(&store)?;
-                    failures.push((agent.id().to_string(), error));
+                    failures.push((agent.id().to_string(), error.message()));
                 }
             }
             Ok(failures)
@@ -1599,8 +1638,10 @@ impl Projector {
         path: &Path,
         catalog: Option<&Catalog>,
         options: &ConnectOptions,
-    ) -> Result<(), String> {
-        let doc = self.parse_config(agent, text.as_deref())?;
+    ) -> Result<(), ConnectFailure> {
+        let doc = self
+            .parse_config(agent, text.as_deref())
+            .map_err(ConnectFailure::Conflict)?;
         let options = connection_options(
             agent,
             &doc,
@@ -1611,13 +1652,17 @@ impl Projector {
         if store.get(agent.id()).is_some_and(|record| {
             record.cleanup_pending || (record.disabled && !record.disconnected())
         }) {
-            return Err(format!(
+            return Err(ConnectFailure::Conflict(format!(
                 "{} has a disconnect in progress; finish it before connecting again",
                 agent.name()
-            ));
+            )));
         }
-        let mut doc = self.parse_config(agent, text.as_deref())?;
-        let edit = self.edit(agent, true, &mut doc, store, catalog, &options)?;
+        let mut doc = self
+            .parse_config(agent, text.as_deref())
+            .map_err(ConnectFailure::Conflict)?;
+        let edit = self
+            .edit(agent, true, &mut doc, store, catalog, &options)
+            .map_err(ConnectFailure::Conflict)?;
         if agent == Agent::Codex {
             self.sync_codex_catalog(
                 catalog.ok_or_else(|| "The verified model list is not available".to_string())?,
@@ -1689,10 +1734,10 @@ impl Projector {
                 }
                 self.save_store(store)?;
             }
-            return Err(match rollback {
+            return Err(ConnectFailure::Unavailable(match rollback {
                 Ok(()) => format!("{error}; nothing was changed"),
                 Err(rollback) => format!("{error}; rolling back also failed: {rollback}"),
-            });
+            }));
         }
         Ok(())
     }
@@ -3897,6 +3942,71 @@ mod tests {
         );
         disconnect(&sandbox, agent);
         assert!(sandbox.projector.load_store().unwrap().is_empty());
+    }
+
+    #[test]
+    fn temporary_connection_failure_retries_without_clearing_user_conflicts() {
+        let sandbox = sandbox("transient-connect");
+        let agent = Agent::OpenCode;
+        write(
+            &sandbox.home.join(".opencode/bin").join(if cfg!(windows) {
+                "opencode.exe"
+            } else {
+                "opencode"
+            }),
+            "test cli",
+        );
+        let options = ConnectOptions::default();
+        let catalog = catalog();
+        let preview = sandbox
+            .projector
+            .preview(agent, true, None, &options)
+            .unwrap();
+        sandbox
+            .projector
+            .apply(agent, true, &preview.revision, None, &options)
+            .unwrap();
+        let token = sandbox.projector.tokens.path(agent.id());
+        fs::create_dir_all(&token).unwrap();
+        assert!(!sandbox
+            .projector
+            .reconcile(Some(&catalog))
+            .unwrap()
+            .is_empty());
+        assert!(sandbox.projector.load_store().unwrap()[agent.id()]
+            .attention
+            .is_none());
+        fs::remove_dir(&token).unwrap();
+        assert!(sandbox
+            .projector
+            .reconcile(Some(&catalog))
+            .unwrap()
+            .is_empty());
+        assert!(sandbox
+            .projector
+            .scan(Some(&catalog))
+            .unwrap()
+            .0
+            .into_iter()
+            .any(|status| status.id == agent.id() && status.authorized));
+        sandbox.projector.reconcile(None).unwrap();
+        let path = agent.config_path(&sandbox.home, false);
+        let foreign = r#"{"provider":{"private-ai-proxy":{"name":"User-owned"}}}"#;
+        write(&path, foreign);
+        assert!(!sandbox
+            .projector
+            .reconcile(Some(&catalog))
+            .unwrap()
+            .is_empty());
+        assert!(sandbox.projector.load_store().unwrap()[agent.id()]
+            .attention
+            .is_some());
+        assert!(sandbox
+            .projector
+            .reconcile(Some(&catalog))
+            .unwrap()
+            .is_empty());
+        assert_eq!(fs::read_to_string(path).unwrap(), foreign);
     }
 
     #[test]
