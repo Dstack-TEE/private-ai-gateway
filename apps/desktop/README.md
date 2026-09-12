@@ -290,8 +290,9 @@ exact version, and Wry is resolved through Tauri rather than overridden separate
 
 The dstack macOS 26+ icon uses the owner's hand-edited Icon Composer project,
 including its gradient, foreground placement and native appearance materials.
-Static ICNS/PNG/ICO assets derive from the approved default PNG export. The
-renderer selects the approved light or dark export using the app's appearance.
+Legacy macOS icons derive from the approved default PNG export. Windows/Linux
+application, installer and tray icons use the dark PNG export. The renderer
+selects the approved light or dark export using the app's appearance.
 The build does not synthesize a replacement icon design.
 Disabled controls are reserved for in-flight mutations, missing/invalid inputs,
 unavailable data, pagination boundaries and dependent settings. Development OS
@@ -477,8 +478,9 @@ the image resets that flag in the underlying tray implementation and can make
 the icon disappear against a dark menu bar.
 The tray uses a 36px template raster for Tauri's 18pt macOS image, with a 16pt
 mark. Protected uses the full template alpha; stopped or verifying uses 45%
-alpha, tinted by macOS. There is no status badge. The Dock app icon is independent
-and unchanged. The native tray menu offers endpoint/key copying, profile selection,
+alpha, tinted by macOS. Windows/Linux use the colored dark-export icon with the
+same alpha states, without template tinting. There is no status badge. The Dock
+app icon is independent of protection status. The native tray menu offers endpoint/key copying, profile selection,
 agent connection checkmarks, and elapsed protection time. Actions use the same
 runtime operations as the main window, including profile reconnection and config restoration.
 
@@ -890,15 +892,18 @@ committed outputs are for the default brand; CI regenerates them and fails on
 drift. With Xcode 26, `prepare-macos-icon.mjs` compiles the `.icon` source into
 the native `Assets.car`. The complete hand-edited project is copied from
 `brand/dstack/icon/AppIcon.icon` without changing its layers or manifest.
-The approved default export generates static PNG, ICO and ICNS formats with
-the existing 100px transparent desktop margin on a 1024px canvas. This keeps
-full-bleed iOS exports from appearing oversized as legacy desktop icons.
+The default export generates legacy macOS icons; the dark export generates
+`src-tauri/icons/windows-linux` for Windows/Linux application, installer and
+uninstaller icons. Both sets retain the existing 100px transparent desktop
+margin on a 1024px canvas, so full-bleed iOS exports do not appear oversized.
+Both sets are generated on every host and checked for drift in CI.
 The renderer uses 256px versions of the approved light/dark PNGs without that
 outer margin; the native macOS asset supplies system appearance variants.
 The scripts validate
 their inputs and fail fast on a missing field, asset, digest, or named app
-icon. The tray uses a single local template mark; inactive states reduce its
-alpha without changing its silhouette or adding a badge.
+icon. The macOS tray uses the updated monochrome SVG template. Windows/Linux
+tray icons use the 32px dark-export PNG without template tinting. Inactive states
+reduce alpha without changing the silhouette or adding a badge.
 
 The default brand uses the official Dstack logo kit from
 [Dstack-TEE/dstack](https://github.com/Dstack-TEE/dstack) at commit

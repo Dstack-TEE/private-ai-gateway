@@ -94,7 +94,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let icon = tray_icon(false)?;
     TrayIconBuilder::with_id("gateway")
         .icon(icon)
-        .icon_as_template(true)
+        .icon_as_template(cfg!(target_os = "macos"))
         .tooltip(format!("{APP_NAME} - {status_line}"))
         .menu(&menu)
         .show_menu_on_left_click(true)
@@ -353,9 +353,12 @@ fn sync_inner(app: &AppHandle, state: &GatewayState) {
         if menu.protected_icon.load(Ordering::Relaxed) != protected {
             if let Some(tray) = app.tray_by_id("gateway") {
                 if let Ok(icon) = tray_icon(protected) {
-                    // Only replace NSImage on a state transition, preserving its
-                    // template flag so macOS controls light/dark menu-bar tint.
-                    if tray.set_icon_with_as_template(Some(icon), true).is_ok() {
+                    // Preserve native macOS tinting; other platforms keep the
+                    // colored icon when protection changes.
+                    if tray
+                        .set_icon_with_as_template(Some(icon), cfg!(target_os = "macos"))
+                        .is_ok()
+                    {
                         menu.protected_icon.store(protected, Ordering::Relaxed);
                     }
                 }
@@ -368,8 +371,11 @@ fn sync_inner(app: &AppHandle, state: &GatewayState) {
 }
 
 fn tray_icon(protected: bool) -> tauri::Result<tauri::image::Image<'static>> {
-    let image =
-        tauri::image::Image::from_bytes(include_bytes!("../../assets/tray/trayTemplate@2x.png"))?;
+    #[cfg(target_os = "macos")]
+    let bytes = include_bytes!("../../assets/tray/trayTemplate@2x.png");
+    #[cfg(not(target_os = "macos"))]
+    let bytes = include_bytes!("../icons/windows-linux/32x32.png");
+    let image = tauri::image::Image::from_bytes(bytes)?;
     let mut rgba = image.rgba().to_vec();
     if !protected {
         for pixel in rgba.as_chunks_mut::<4>().0 {

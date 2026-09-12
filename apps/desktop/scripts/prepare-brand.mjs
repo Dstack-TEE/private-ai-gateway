@@ -30,6 +30,7 @@ const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const brandId = process.env.PRIVATE_AI_PROXY_BRAND ?? "dstack";
 /** Cross-platform and legacy icon files listed alongside the native `.icon` asset. */
 const LEGACY_DESKTOP_ICONS = ["32x32.png", "128x128.png", "128x128@2x.png", "icon.png", "icon.icns", "icon.ico"];
+const WINDOWS_LINUX_ICONS = LEGACY_DESKTOP_ICONS.filter((file) => file !== "icon.icns");
 if (!/^[a-z][a-z0-9-]*$/.test(brandId)) {
   throw new Error(`PRIVATE_AI_PROXY_BRAND must be a lowercase id, got ${JSON.stringify(brandId)}`);
 }
@@ -108,6 +109,7 @@ const trayTemplateSvg = composeTrayTemplate(await asset("trayTemplate"));
 // Preserve the exported artwork; only add the existing desktop canvas margin.
 // PNG data URLs are used during offline rendering, never in the shipped UI.
 const desktopIconSvg = pngIconSvg(appIconDefault, 100);
+const windowsLinuxIconSvg = pngIconSvg(appIconDark, 100);
 
 // --- renderer -------------------------------------------------------------
 // Renderer images are generated next to the module and imported as Vite assets,
@@ -132,7 +134,7 @@ const installerArtwork = [
   ["sidebar", 164, 314, `
     <rect width="164" height="314" fill="${brand.theme.iconBackground}"/>
     <path d="M-60 250L180 10M-40 290L200 50M-20 330L220 90" stroke="${brand.theme.brandColor}" stroke-opacity=".10" stroke-width="22"/>
-    ${placeSvg(desktopIconSvg, 18, 44, 128, 128)}
+    ${placeSvg(windowsLinuxIconSvg, 18, 44, 128, 128)}
     <rect x="0" y="248" width="164" height="66" fill="#f3f6f2"/>
     ${placeSvg(wordmark, 22, 265, 120, 31)}`],
 ];
@@ -267,12 +269,17 @@ await writeFile(
             applicationFolderPosition: { x: 480, y: 230 },
           },
         },
-        windows: { nsis: { uninstallerIcon: "icons/icon.ico" } },
+        windows: {
+          nsis: {
+            installerIcon: "icons/windows-linux/icon.ico",
+            uninstallerIcon: "icons/windows-linux/icon.ico",
+          },
+        },
         ...(process.platform === "darwin"
           ? {
               icon: [...LEGACY_DESKTOP_ICONS.map((file) => `icons/${file}`), "icons/Assets.car"],
             }
-          : {}),
+          : { icon: WINDOWS_LINUX_ICONS.map((file) => `icons/windows-linux/${file}`) }),
       },
     },
     null,
@@ -287,27 +294,31 @@ const composerDir = path.join(appRoot, "src-tauri/icons/AppIcon.icon");
 await rm(composerDir, { recursive: true, force: true });
 await cp(composerSource, composerDir, { recursive: true });
 
-// Static desktop formats use the approved default export. macOS 26 uses the
-// layered document above; the renderer selects the approved light/dark exports.
+// Generate both static sets on every host so CI can detect drift. macOS keeps
+// the default fallback, while Windows/Linux use the approved dark export.
 const scratch = path.join(appRoot, "brand/.generated");
 await rm(scratch, { recursive: true, force: true });
 await mkdir(scratch, { recursive: true });
 try {
-  const appIconPng = path.join(scratch, "app-icon.png");
-  await writeFile(appIconPng, render(desktopIconSvg, 1024));
-  // `tauri icon` renders every platform; only the desktop files the bundle
-  // lists (tauri.conf.json `bundle.icon`) are copied into the tracked set.
-  const iconSet = path.join(scratch, "icons");
-  execFileSync(process.execPath, [path.join(appRoot, "node_modules/@tauri-apps/cli/tauri.js"), "icon", appIconPng, "-o", iconSet], { stdio: "ignore" });
-  for (const file of LEGACY_DESKTOP_ICONS) {
-    const source = path.join(iconSet, file);
-    const target = path.join(appRoot, "src-tauri/icons", file);
-    if (file === "icon.icns") {
-      // `tauri icon` writes the icns entries in hash order; sort them so the
-      // tracked file is byte-for-byte reproducible.
-      await writeFile(target, normalizeIcns(await readFile(source)));
-    } else {
-      await copyFile(source, target);
+  for (const [directory, svg, files] of [
+    ["", desktopIconSvg, LEGACY_DESKTOP_ICONS],
+    ["windows-linux", windowsLinuxIconSvg, WINDOWS_LINUX_ICONS],
+  ]) {
+    const appIconPng = path.join(scratch, "app-icon.png");
+    await writeFile(appIconPng, render(svg, 1024));
+    const iconSet = path.join(scratch, "icons", directory);
+    execFileSync(process.execPath, [path.join(appRoot, "node_modules/@tauri-apps/cli/tauri.js"), "icon", appIconPng, "-o", iconSet], { stdio: "ignore" });
+    const destination = path.join(appRoot, "src-tauri/icons", directory);
+    await mkdir(destination, { recursive: true });
+    for (const file of files) {
+      const source = path.join(iconSet, file);
+      const target = path.join(destination, file);
+      if (file === "icon.icns") {
+        // Tauri writes ICNS entries in hash order; sort for reproducibility.
+        await writeFile(target, normalizeIcns(await readFile(source)));
+      } else {
+        await copyFile(source, target);
+      }
     }
   }
 

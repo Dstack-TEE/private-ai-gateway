@@ -94,10 +94,11 @@ The default brand is `dstack`, using the official Dstack logo kit from
 (`docs/assets/dstack-logo-kit/`, Apache-2.0 alongside; SHA-256 recorded in
 `brand.json`). The owner-authored icon project and default/dark PNG exports
 live in `brand/dstack/icon`, with their hashes under `iconSource`. The native
-project is copied intact and compiled by Apple's tooling. Static desktop
-formats derive from the default export; in-app icons follow the selected
-appearance. The tray uses a small monochrome template from the owner's foreground SVG,
-at full alpha while protected and reduced alpha otherwise, without a badge.
+project is copied intact and compiled by Apple's tooling. Legacy macOS icons
+use the default export; Windows/Linux application, installer and tray icons
+use the dark export. In-app icons follow the selected appearance. The macOS
+tray uses a monochrome template from the owner's foreground SVG; Windows/Linux
+use a colored PNG without template tinting. Protection controls alpha, not shape.
 Outside branded artwork, green indicates protection and verification state; the action accent is
 applied only to the primary action, selection, and links; the rest of the
 palette is system-neutral. `redpill` and `phala` are configuration
