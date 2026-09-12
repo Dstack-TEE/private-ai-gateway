@@ -1090,6 +1090,18 @@ impl Projector {
         self.data_dir.join(CODEX_CATALOG_FILE)
     }
 
+    fn current_record<'a>(
+        &self,
+        agent: Agent,
+        record: Option<&'a Connection>,
+    ) -> Option<&'a Connection> {
+        record.filter(|record| {
+            !record.disconnected()
+                || record.config_path.as_deref()
+                    == Some(agent.config_path(&self.home, self.tool_env).as_path())
+        })
+    }
+
     fn action_path(
         &self,
         agent: Agent,
@@ -1114,7 +1126,9 @@ impl Projector {
         if current.to_str().is_none() {
             return Err("The agent config path must be valid Unicode".to_string());
         }
-        if let Some(record) = record.filter(|record| !record.fields.is_empty()) {
+        if let Some(record) =
+            record.filter(|record| !record.disconnected() && !record.fields.is_empty())
+        {
             record.validate_recovery()?;
             let previous = record.restore_path()?;
             if previous != current {
@@ -1340,19 +1354,18 @@ impl Projector {
                     self.require_helper()?;
                     self.connect(agent, &mut store, text, &path, catalog, options)?;
                 } else {
-                    if store.contains_key(agent.id()) {
+                    if self.current_record(agent, store.get(agent.id())).is_some() {
                         self.suspend(agent, &mut store)?;
                     }
+                    let prior = self.current_record(agent, store.get(agent.id()));
                     let saved_options = if options.default_model.is_none() {
-                        store
-                            .get(agent.id())
+                        prior
                             .map(|record| record.options.clone())
                             .unwrap_or_default()
                     } else {
                         options.clone()
                     };
-                    let fields = store
-                        .get(agent.id())
+                    let fields = prior
                         .map(|record| record.fields.clone())
                         .unwrap_or_default();
                     store.insert(
@@ -1588,7 +1601,13 @@ impl Projector {
         options: &ConnectOptions,
     ) -> Result<(), String> {
         let doc = self.parse_config(agent, text.as_deref())?;
-        let options = connection_options(agent, &doc, store.get(agent.id()), catalog, options);
+        let options = connection_options(
+            agent,
+            &doc,
+            self.current_record(agent, store.get(agent.id())),
+            catalog,
+            options,
+        );
         if store.get(agent.id()).is_some_and(|record| {
             record.cleanup_pending || (record.disabled && !record.disconnected())
         }) {
@@ -1785,14 +1804,15 @@ impl Projector {
                 agent.name()
             ));
         }
+        let prior = self.current_record(agent, store.get(agent.id()));
         if agent == Agent::OpenClaw {
             openclaw::validate_host(&self.home, self.tool_env)?;
             openclaw::validate_helper(&self.helper_exe, &self.tokens.path(agent.id()))?;
-            openclaw::validate_config(doc, store.get(agent.id()))?;
+            openclaw::validate_config(doc, prior)?;
             openclaw::validate_selection(doc, options)?;
         }
-        let options = connection_options(agent, doc, store.get(agent.id()), catalog, options);
-        self.validate_native_config(agent, doc, store.get(agent.id()), &options, catalog)?;
+        let options = connection_options(agent, doc, prior, catalog, options);
+        self.validate_native_config(agent, doc, prior, &options, catalog)?;
         let codex_catalog_path = self.codex_catalog_path();
         let inputs = Inputs {
             endpoint: &self.endpoint,
@@ -1803,15 +1823,13 @@ impl Projector {
             options: &options,
         };
         let fields = fields(agent, &inputs)?;
-        let mut edit = project(doc, &fields, store.get(agent.id()), agent)?;
+        let mut edit = project(doc, &fields, prior, agent)?;
         if let Some(model) = options.default_model.as_deref() {
-            let config_path = self.action_path(agent, store.get(agent.id()), true)?;
+            let config_path = self.action_path(agent, prior, true)?;
             edit.selection = selection::prepare(
                 agent,
                 &config_path,
-                store
-                    .get(agent.id())
-                    .and_then(|record| record.selection.as_ref()),
+                prior.and_then(|record| record.selection.as_ref()),
                 model.trim(),
             )?;
             if let Some(selection) = &edit.selection {
@@ -2017,14 +2035,14 @@ impl Projector {
     fn status(&self, agent: Agent, store: &Store, catalog: Option<&Catalog>) -> AgentStatus {
         let path = agent.config_path(&self.home, self.tool_env);
         let installed = cli_installed(agent, &self.home, self.tool_env);
-        let record = store.get(agent.id());
+        let record = self.current_record(agent, store.get(agent.id()));
         let mut status = AgentStatus {
             id: agent.id().to_string(),
             name: agent.name().to_string(),
             config_path: path.display().to_string(),
             installed,
             connected: false,
-            recorded: record.is_some(),
+            recorded: record.is_some_and(|record| !record.disconnected()),
             authorized: false,
             attention: None,
             error: None,
@@ -2674,6 +2692,8 @@ fn cli_paths(home: &Path, tool_env: bool) -> Vec<PathBuf> {
     };
     paths.extend([
         home.join(".local/bin"),
+        home.join(".local/share/pnpm"),
+        home.join(".cargo/bin"),
         home.join(".opencode/bin"),
         home.join(".npm-global/bin"),
         home.join(".volta/bin"),
@@ -2682,6 +2702,14 @@ fn cli_paths(home: &Path, tool_env: bool) -> Vec<PathBuf> {
         PathBuf::from("/opt/homebrew/bin"),
         PathBuf::from("/usr/local/bin"),
     ]);
+    if cfg!(windows) {
+        let app_data = tool_env
+            .then(|| env::var_os("APPDATA"))
+            .flatten()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join("AppData/Roaming"));
+        paths.push(app_data.join("npm"));
+    }
     paths.extend(versioned_runtime_bins(
         &home.join(".nvm/versions/node"),
         &["bin"],
@@ -4221,6 +4249,92 @@ mod tests {
                 actual,
                 serde_json::from_str::<serde_json::Value>(original).unwrap()
             );
+        }
+    }
+
+    #[test]
+    fn disconnected_provider_ownership_does_not_follow_a_new_config_path() {
+        for agent in [
+            Agent::Codex,
+            Agent::OpenCode,
+            Agent::Pi,
+            Agent::Hermes,
+            Agent::OpenClaw,
+            Agent::OhMyPi,
+        ] {
+            let mut sandbox = sandbox(&format!("disconnected-path-{}", agent.id()));
+            let catalog = catalog();
+            let options = ConnectOptions::default();
+            let original = agent.config_path(&sandbox.home, false);
+            let preview = sandbox
+                .projector
+                .preview(agent, true, Some(&catalog), &options)
+                .unwrap();
+            sandbox
+                .projector
+                .apply(agent, true, &preview.revision, Some(&catalog), &options)
+                .unwrap();
+            disconnect(&sandbox, agent);
+            let retained = fs::read_to_string(&original).unwrap();
+            sandbox.projector.home = sandbox.home.join("new-home");
+            let target = agent.config_path(&sandbox.projector.home, false);
+            // Identical retained definitions in a different file are user data,
+            // not an extension of the old ownership journal.
+            write(&target, &retained);
+            let status = sandbox
+                .projector
+                .scan(None)
+                .unwrap()
+                .0
+                .into_iter()
+                .find(|s| s.id == agent.id())
+                .unwrap();
+            assert!(!status.recorded);
+            assert!(!status
+                .attention
+                .as_deref()
+                .is_some_and(|s| s.contains("location changed")));
+            if agent == Agent::OpenCode {
+                assert!(sandbox
+                    .projector
+                    .preview(agent, true, Some(&catalog), &options)
+                    .unwrap_err()
+                    .contains("already exists"));
+                let deferred = sandbox
+                    .projector
+                    .preview(agent, true, None, &options)
+                    .unwrap();
+                sandbox
+                    .projector
+                    .apply(agent, true, &deferred.revision, None, &options)
+                    .unwrap();
+                assert!(sandbox.projector.load_store().unwrap()[agent.id()]
+                    .fields
+                    .is_empty());
+                assert!(sandbox
+                    .projector
+                    .preview(agent, true, Some(&catalog), &options)
+                    .unwrap_err()
+                    .contains("already exists"));
+                disconnect(&sandbox, agent);
+            }
+            fs::remove_file(&target).unwrap();
+            let preview = sandbox
+                .projector
+                .preview(agent, true, Some(&catalog), &options)
+                .unwrap();
+            sandbox
+                .projector
+                .apply(agent, true, &preview.revision, Some(&catalog), &options)
+                .unwrap();
+            disconnect(&sandbox, agent);
+            assert_eq!(
+                sandbox.projector.load_store().unwrap()[agent.id()]
+                    .config_path
+                    .as_deref(),
+                Some(target.as_path())
+            );
+            assert_eq!(fs::read_to_string(&original).unwrap(), retained);
         }
     }
 

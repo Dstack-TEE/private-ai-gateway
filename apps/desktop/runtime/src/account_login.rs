@@ -785,8 +785,7 @@ fn callback_page(accepted: bool) -> String {
         .replace("__PRODUCT__", &product)
         .replace(
             "__LOGO__",
-            &include_str!("../../src/renderer/generated/brand-mark-light.svg")
-                .replace("#303236", "currentColor"),
+            include_str!("../../src/renderer/generated/tray-mark.svg"),
         )
         .replace(
             "__TITLE__",
