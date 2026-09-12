@@ -135,7 +135,7 @@ success is not gateway verification: the runtime still verifies the selected
 provider when starting or reconnecting protection. Saving alone never claims the
 provider is verified and never silently changes the selected tenant.
 
-Top up opens the system browser at RedPill's `/credits` page or Phala's `/cost`
+Top up opens the system browser at RedPill's `/credits` page or Phala's `/{workspaceSlug}/billing`
 page, both of which include recharge controls. These sites use their own browser
 session; the app shows which organization/workspace to select there. No invented
 tenant query parameters, credentials in URLs, automatic checkout, or payment
@@ -220,3 +220,6 @@ link only focuses the app and open account editor; it carries no code or token
 and cannot finish authorization. CLI users can return to their terminal instead.
 Native scheme registration and browser-to-app focus require packaged platform
 acceptance; a browser may ask permission to open the application.
+
+Phala billing links use the workspace slug returned by `/private_ai/self`;
+`/cost` is Usage History and must not be used for topping up.

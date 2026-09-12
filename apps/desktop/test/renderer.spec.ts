@@ -370,6 +370,27 @@ test("system dark styling is present before React initializes", async ({ page })
   await expect(page.locator("body")).toHaveCSS("background-color", "oklch(0.145 0 0)");
 });
 
+test("visible Agents detects a newly installed OpenCode without reopening the page", async ({ page }) => {
+  await page.clock.install();
+  await page.goto("/?mock=agent-installed");
+  await nav(page, "Agents").click();
+  await expect(page.getByRole("region", { name: "Not installed", exact: true })).toContainText("OpenCode");
+  await page.evaluate(() => { document.documentElement.dataset.mockAgentInstalled = "true"; });
+  await page.clock.fastForward(15_000);
+  await expect(page.getByRole("switch", { name: "Connect OpenCode", exact: true })).toBeVisible();
+});
+
+test("recent usage keeps ten rows in an internally scrollable card", async ({ page }) => {
+  await page.setViewportSize({ width: 1100, height: 1040 });
+  await page.goto("/?mock=recent-usage");
+  const list = page.getByRole("region", { name: "Recent requests", exact: true });
+  await expect(list.locator(".usage-row")).toHaveCount(10);
+  expect(await list.evaluate((node) => node.scrollHeight > node.clientHeight)).toBe(true);
+  await list.evaluate((node) => { node.scrollTop = node.scrollHeight; });
+  await expect(list.locator(".usage-row").last()).toBeInViewport();
+  await expect(page.getByRole("heading", { name: "Recent usage", exact: true })).toBeInViewport();
+});
+
 test("window activation redetects an uninstalled connected agent", async ({ page }) => {
   await page.goto("/?mock=agent-uninstalled");
   await nav(page, "Agents").click();
@@ -1234,7 +1255,7 @@ test("five agents connect and disconnect directly from the verified discovered c
   await expect(page.getByRole("switch", { name: /^Disconnect / })).toHaveCount(0);
 });
 
-test("overview shows three agents, four current-session records, truthful copy surfaces, and session totals", async ({ page }) => {
+test("overview shows three agents, current-session records, truthful copy surfaces, and session totals", async ({ page }) => {
   await page.setViewportSize({ width: 1100, height: 1040 });
   await page.goto("/?mock=ready");
 
@@ -1242,7 +1263,7 @@ test("overview shows three agents, four current-session records, truthful copy s
   await expect(agentsModule.locator(".agent-block")).toHaveCount(3);
   await expect(agentsModule.locator(".agent-block").last()).toBeVisible();
   const usageModule = page.locator(".overview-module", { has: page.getByRole("heading", { name: "Recent usage" }) });
-  await expect(usageModule.locator(".usage-row")).toHaveCount(4);
+  await expect(usageModule.locator(".usage-row")).toHaveCount(5);
   await expect(usageModule.locator(".usage-row").last()).toBeVisible();
   expect(await agentsModule.locator(".module").evaluate((node) => node.scrollHeight <= node.clientHeight)).toBe(true);
   expect(await usageModule.locator(".module").evaluate((node) => node.scrollHeight <= node.clientHeight)).toBe(true);
@@ -2053,6 +2074,13 @@ test("Phala completes automatically while RedPill confirms its workspace with Sa
     await expect(editor).toHaveCount(0);
     await expect(page.getByRole("switch", { name: "Stop protection" })).toBeVisible();
     await expect(page.getByRole("button", { name: `Profiles: ${provider}` })).toBeVisible();
+    if (provider === "Phala") {
+      await page.evaluate(() => window.addEventListener("mock:top-up", (event) => {
+        if (event instanceof CustomEvent) document.documentElement.dataset.billingScope = event.detail.organizationId;
+      }));
+      await page.getByRole("button", { name: "Current balance: $12.50", exact: true }).click();
+      await expect(page.locator("html")).toHaveAttribute("data-billing-scope", "phala-research");
+    }
     await page.getByRole("switch", { name: "Stop protection" }).click();
     await expect(page.getByRole("switch", { name: "Start protection" })).toBeVisible();
     await page.getByRole("button", { name: `Profiles: ${provider}` }).click();

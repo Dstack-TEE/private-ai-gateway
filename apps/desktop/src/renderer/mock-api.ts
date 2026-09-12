@@ -312,6 +312,8 @@ export function mockApi(name: string | null): DesktopApi {
   const known: MockScenario[] = ["backend-disconnected", "ready", "no-profiles", "no-key", "verifying", "configuration-verifying", "error", "empty-catalog", "blocked", "needs-attention", "endpoint-busy", "interactive"];
   const picked = name?.startsWith("oauth-") ? "no-profiles" : known.find((candidate) => candidate === name) ?? "ready";
   let { state, agents } = scenario(picked);
+  if (name === "recent-usage") state = { ...state, activity: USAGE_HISTORY.slice(0, 12) };
+  if (name === "agent-installed") agents = agents.map((agent) => agent.id === "opencode" ? { ...agent, installed: false } : agent);
   if (name === "reconnecting") state = { ...state, status: "stopped", reconnecting: true, protectedSince: now - 600, error: "Network unavailable. Connect to a network; protection resumes after verification." };
   if (name === "all-agent-icons") agents = [...agents,
     { ...PI, id: "oh-my-pi", name: "Oh My Pi", configPath: "/Users/dev/.omp/agent/models.json" },
@@ -541,7 +543,7 @@ export function mockApi(name: string | null): DesktopApi {
       if (login.polls++ < 2) return null;
       if (name === "oauth-denied") throw new Error("Authorization was declined");
       return {
-        auth: { kind: "oauth", accountId: "preview-account", accountName: "Alice Example", images: { user: "https://img.clerk.com/user-avatar", organization: "https://img.clerk.com/org-avatar" }, scope: { organizationSlug: "research-team", organizationId: login.profile.provider === "redpill" ? "org_test" : null, organization: login.profile.provider === "redpill" ? "Personal organization" : null, workspace: login.profile.provider === "phala" ? "Phala workspace" : null, workspaceId: null } },
+        auth: { kind: "oauth", accountId: "preview-account", accountName: "Alice Example", images: { user: "https://img.clerk.com/user-avatar", organization: "https://img.clerk.com/org-avatar" }, scope: { workspaceSlug: "phala-research", organizationSlug: "research-team", organizationId: login.profile.provider === "redpill" ? "org_test" : null, organization: login.profile.provider === "redpill" ? "Personal organization" : null, workspace: login.profile.provider === "phala" ? "Phala workspace" : null, workspaceId: null } },
         workspaces: login.profile.provider === "redpill" ? [
           { id: 123, name: "Default", isDefault: true },
           ...(name === "oauth-workspaces" ? [{ id: 124, name: "Research", isDefault: false }] : []),
@@ -555,7 +557,7 @@ export function mockApi(name: string | null): DesktopApi {
         failedAccountSave = true;
         throw new Error("Could not store account credential");
       }
-      const saved: ConfidentialProfile = { ...profile, auth: { kind: "oauth", accountId: "preview-account", accountName: "Alice Example", images: { user: "https://img.clerk.com/user-avatar", organization: "https://img.clerk.com/org-avatar" }, scope: { organizationSlug: "research-team", organizationId: profile.provider === "redpill" ? "org_test" : null, organization: profile.provider === "redpill" ? "Personal organization" : null, workspace: profile.provider === "redpill" ? workspaceId === 124 ? "Research" : "Default" : "Phala workspace", workspaceId: workspaceId ?? null } }, credentialSaved: true, verifiedAt: undefined };
+      const saved: ConfidentialProfile = { ...profile, auth: { kind: "oauth", accountId: "preview-account", accountName: "Alice Example", images: { user: "https://img.clerk.com/user-avatar", organization: "https://img.clerk.com/org-avatar" }, scope: { workspaceSlug: "phala-research", organizationSlug: "research-team", organizationId: profile.provider === "redpill" ? "org_test" : null, organization: profile.provider === "redpill" ? "Personal organization" : null, workspace: profile.provider === "redpill" ? workspaceId === 124 ? "Research" : "Default" : "Phala workspace", workspaceId: workspaceId ?? null } }, credentialSaved: true, verifiedAt: undefined };
       credentialProfiles.add(saved.id);
       state = { ...state, profiles: [...state.profiles.filter((p) => p.id !== saved.id), saved], activeProfileId: saved.id, apiKeySaved: true, status: "stopped", configurationVerification: false, remoteUrl: saved.remoteUrl, config: { remoteUrl: saved.remoteUrl, requireProductionOs } };
       login = undefined;
@@ -568,7 +570,7 @@ export function mockApi(name: string | null): DesktopApi {
       const auth = name === "oauth-profile-updated" ? {
         ...profile.auth, accountName: "Alicia Updated",
         images: { user: "https://img.clerk.com/updated-user", organization: "https://img.clerk.com/updated-org" },
-        scope: { organizationSlug: "research-team", organizationId: "org_test", organization: "Updated organization", workspace: profile.auth.scope?.workspace ?? null, workspaceId: profile.auth.scope?.workspaceId ?? null },
+        scope: { workspaceSlug: "phala-research", organizationSlug: "research-team", organizationId: "org_test", organization: "Updated organization", workspace: profile.auth.scope?.workspace ?? null, workspaceId: profile.auth.scope?.workspaceId ?? null },
       } : profile.auth;
       return { auth, workspaces: [{ id: 123, name: "Default", isDefault: true }, { id: 124, name: "Research", isDefault: false }] };
     },
@@ -580,7 +582,7 @@ export function mockApi(name: string | null): DesktopApi {
       const saved = target.kind === "profile" ? state.profiles.find((p) => p.id === profile.id) : undefined;
       if (name === "oauth-balance-delayed") await new Promise<void>((resolve) => window.addEventListener("mock:release-balance", () => resolve(), { once: true }));
       return { balanceUsd: "12.50", organizationId: profile.provider === "redpill" ? "org_test" : null, canTopUp: billingManage, grantedUsd: profile.provider === "phala" ? "3.25" : null,
-        scope: saved?.auth.kind === "oauth" && saved.auth.scope ? saved.auth.scope : { organizationSlug: profile.provider === "redpill" ? "research-team" : null, organization: profile.provider === "redpill" ? "Personal organization" : null, workspace: profile.provider === "phala" ? "Phala workspace" : null, workspaceId: null } };
+        scope: saved?.auth.kind === "oauth" && saved.auth.scope ? saved.auth.scope : { workspaceSlug: "phala-research", organizationSlug: profile.provider === "redpill" ? "research-team" : null, organization: profile.provider === "redpill" ? "Personal organization" : null, workspace: profile.provider === "phala" ? "Phala workspace" : null, workspaceId: null } };
     },
     openOrganization: async (organizationId) => { window.dispatchEvent(new CustomEvent("mock:manage-organization", { detail: { organizationId } })); },
     openTopUp: async (provider, organizationId) => { window.dispatchEvent(new CustomEvent("mock:top-up", { detail: { provider, organizationId } })); },
@@ -775,6 +777,9 @@ export function mockApi(name: string | null): DesktopApi {
     },
     refreshCatalog: async () => state,
     listAgents: async () => {
+      if (name === "agent-installed" && document.documentElement.dataset.mockAgentInstalled === "true") {
+        agents = agents.map((agent) => agent.id === "opencode" ? { ...agent, installed: true } : agent);
+      }
       if (name === "agent-uninstalled" && document.documentElement.dataset.mockAgentRemoved === "true") {
         agents = agents.map((agent) => agent.id === "claude-code" ? { ...agent, installed: false, authorized: false, attention: "CLI not found; previous configuration restored" } : agent);
       }

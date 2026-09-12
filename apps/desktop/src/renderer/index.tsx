@@ -773,7 +773,14 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
     window.addEventListener("focus", refresh);
     return () => window.removeEventListener("focus", refresh);
   }, [loadAgents]);
-  useEffect(() => { if (view === "agents") void loadAgents(true); }, [view, loadAgents]);
+  useEffect(() => {
+    if (view !== "agents") return;
+    void loadAgents(true);
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void loadAgents(true);
+    }, 15_000);
+    return () => window.clearInterval(timer);
+  }, [view, loadAgents]);
 
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
@@ -1453,7 +1460,7 @@ function Overview({
 }): React.JSX.Element {
   const protectedNow = isProtected(state);
   const localAvailable = isProtected(state) && Boolean(state.proxyUrl) && !state.endpointError;
-  const recent = protectedNow || state.sessionActive || state.reconnecting ? state.activity.slice(0, 4) : [];
+  const recent = protectedNow || state.sessionActive || state.reconnecting ? state.activity.slice(0, 10) : [];
   return (
     <div className="overview-page max-w-240 min-h-full mt-0 mr-auto mb-0 ml-auto flex flex-col @container/overview @max-[600px]/overview:[&_.overview-grid_>_.overview-module:nth-child(n)]:col-auto @max-[600px]/overview:[&_.overview-grid_>_.overview-module:nth-child(n)]:row-auto">
       <div className="overview-top grid *:h-36 grid-cols-2 gap-4 items-stretch [&_.status-surface.status-compact]:min-w-0 @max-[600px]/overview:grid-cols-1">
@@ -1509,7 +1516,7 @@ function Overview({
           action="View all"
           onAction={onUsage}
         >
-          <div className="preview-list [&_>_:last-child]:border-b-0">
+          <div className="preview-list max-h-80 min-h-0 overflow-y-auto overscroll-contain [&_>_:last-child]:border-b-0" role="region" tabIndex={0} aria-label="Recent requests">
             {recent.length === 0 && (
               <EmptyState text={running || state.sessionActive || state.reconnecting ? "No requests in this session yet." : "Start protection to begin a new session."} />
             )}

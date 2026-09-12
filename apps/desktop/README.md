@@ -977,3 +977,13 @@ the nested sidecars and app with hardened runtime, notarizes and staples the
 app, then signs the DMG. CI submits and staples the final DMG separately because
 it is the downloaded distribution container. The release artifact is uploaded
 only after `codesign`, Gatekeeper assessment, and stapler validation all pass.
+
+Claude Code gateway discovery only lists IDs containing `claude` or `anthropic`.
+Connect therefore selects an explicit Messages-compatible `ANTHROPIC_MODEL` from
+the verified catalog, rather than relying on discovery to select non-Claude models.
+Restart an existing Claude Code process after changing its settings. `/model` and
+`--model`, shell credentials and higher-priority project/managed settings can still
+override a user configuration; check `/status` in the affected Claude Code session.
+OpenCode's official `~/.opencode/bin` installation is scanned even when the desktop
+app's PATH does not include the terminal's PATH. The visible Agents page rescans
+every 15 seconds and on window focus.

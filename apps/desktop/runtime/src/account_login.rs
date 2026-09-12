@@ -130,6 +130,7 @@ impl Authorization {
                             },
                             organization: Some(organization),
                             workspace: Some(string(&result, "workspace_name")?),
+                            workspace_slug: None,
                             workspace_id: Some(selected),
                         })),
                     },
@@ -677,6 +678,10 @@ async fn phala_at(
                 images: None,
                 scope: Some(Box::new(AccountScope {
                     workspace: Some(workspace),
+                    workspace_slug: Some(string(
+                        metadata.get("workspace").ok_or("Missing workspace")?,
+                        "slug",
+                    )?),
                     ..AccountScope::default()
                 })),
             })
@@ -988,6 +993,10 @@ fn parse_account_balance(
                 organization_id: None,
                 granted_usd: Some(amount(credits, "granted_balance")?),
                 scope: AccountScope {
+                    workspace_slug: Some(string(
+                        data.get("workspace").ok_or("Missing workspace")?,
+                        "slug",
+                    )?),
                     workspace: Some(string(
                         data.get("workspace").ok_or("Missing workspace")?,
                         "name",
@@ -1012,37 +1021,41 @@ fn parse_account_balance(
                     .get("workspace_name")
                     .and_then(Value::as_str)
                     .map(str::to_owned),
+                workspace_slug: None,
                 workspace_id: data.get("workspace_id").and_then(Value::as_i64),
             },
         })),
     }
 }
 
-pub fn top_up_url(
-    provider: &ServiceProvider,
-    organization_slug: Option<&str>,
-) -> Result<String, String> {
+pub fn top_up_url(provider: &ServiceProvider, scope_slug: Option<&str>) -> Result<String, String> {
+    let slug = validated_scope_slug(scope_slug)?;
     match provider {
-        ServiceProvider::Phala => Ok("https://cloud.phala.com/cost".into()),
-        ServiceProvider::Redpill => Ok(format!("{}/credits", organization_url(organization_slug)?)),
-        ServiceProvider::Custom => Err("Top up is only available for Phala and RedPill".into()),
+        ServiceProvider::Phala => Ok(format!("https://cloud.phala.com/{slug}/billing")),
+        ServiceProvider::Redpill => Ok(format!("https://redpill.ai/{slug}/credits")),
+        ServiceProvider::Custom => Err("Billing is only available for Phala and RedPill".into()),
     }
 }
 
 pub fn organization_url(organization_slug: Option<&str>) -> Result<String, String> {
-    let slug = organization_slug
-        .filter(|slug| {
-            !slug.is_empty()
-                && slug.len() <= 255
-                && slug.split('-').all(|part| {
-                    !part.is_empty()
-                        && part
-                            .bytes()
-                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-                })
-        })
-        .ok_or("Refresh account details or sign in again to open this organization.")?;
-    Ok(format!("https://redpill.ai/{slug}"))
+    Ok(format!(
+        "https://redpill.ai/{}",
+        validated_scope_slug(organization_slug)?
+    ))
+}
+
+fn validated_scope_slug(slug: Option<&str>) -> Result<&str, String> {
+    slug.filter(|slug| {
+        !slug.is_empty()
+            && slug.len() <= 255
+            && slug.split('-').all(|part| {
+                !part.is_empty()
+                    && part
+                        .bytes()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+            })
+    })
+    .ok_or("Refresh account details or sign in again to open billing.".into())
 }
 
 #[cfg(test)]
@@ -1103,6 +1116,17 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(balance.balance_usd, "0");
+        let phala = parse_account_balance(&ServiceProvider::Phala, StatusCode::OK,
+            &json!({"workspace":{"name":"Research","slug":"phala-research"},"credits":{"balance":"2","granted_balance":"0"}})
+        ).unwrap().unwrap();
+        assert_eq!(
+            top_up_url(
+                &ServiceProvider::Phala,
+                phala.scope.workspace_slug.as_deref()
+            )
+            .unwrap(),
+            "https://cloud.phala.com/phala-research/billing"
+        );
         assert!(!balance.can_top_up);
         assert_eq!(
             organization_url(Some("research-team")).unwrap(),
@@ -1132,6 +1156,7 @@ mod tests {
             Some("org_test?other"),
         ] {
             assert!(top_up_url(&ServiceProvider::Redpill, id).is_err());
+            assert!(top_up_url(&ServiceProvider::Phala, id).is_err());
             assert!(organization_url(id).is_err());
         }
     }
@@ -1252,7 +1277,7 @@ mod tests {
                 "/api/v1/private_ai/self",
                 get(|headers: HeaderMap| async move {
                     assert_eq!(headers["authorization"], "Bearer sk-test-credential");
-                    Json(json!({"user":{"username":"alice"},"workspace":{"name":"Research"}}))
+                    Json(json!({"user":{"username":"alice"},"workspace":{"name":"Research","slug":"research-team"}}))
                 }),
             );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
