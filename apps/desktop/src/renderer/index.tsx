@@ -187,7 +187,7 @@ function profileHasCredential(profile: ConfidentialProfile): boolean {
 }
 
 function profileIsAvailable(profile: ConfidentialProfile | undefined, state: GatewayState): boolean {
-  return Boolean(profile?.verifiedAt && profileHasCredential(profile) && (profile.id !== state.activeProfileId || state.apiKeySaved));
+  return Boolean(profile && profileHasCredential(profile) && (profile.id !== state.activeProfileId || state.apiKeySaved));
 }
 
 function isProtected(state: GatewayState): boolean {
@@ -2189,7 +2189,7 @@ function SettingsView({
           <SettingsLink title="Notifications" aria-label="Notifications" aria-haspopup="dialog" onClick={() => onOpen("notifications")} />
       </SettingsSection>
       <SettingsSection title="Connections">
-          <SettingsLink title="Profiles" aria-label="Profiles" aria-haspopup="dialog" onClick={() => onOpen("confidential")} description={activeProfile ? `${activeProfile.name} · ${serviceHost(activeProfile.remoteUrl)} · ${isProtected(state) ? "Protected" : profileIsAvailable(activeProfile, state) ? "Ready" : "Verification required"}` : "No provider configured"} />
+          <SettingsLink title="Profiles" aria-label="Profiles" aria-haspopup="dialog" onClick={() => onOpen("confidential")} description={activeProfile ? `${activeProfile.name} · ${serviceHost(activeProfile.remoteUrl)} · ${isProtected(state) ? "Protected" : profileIsAvailable(activeProfile, state) ? "Ready" : "Sign in or add an API key"}` : "No provider configured"} />
           <SettingsLink title="Local API" description="Listener and client access" aria-label="Local API settings" aria-haspopup="dialog" onClick={() => onOpen("local-api")} />
       </SettingsSection>
 
@@ -2328,22 +2328,18 @@ function ProfileListSheet({
   };
   return (
     <Sheet title="Profiles" className="profiles-sheet w-[min(560px,_calc(var(--window-dialog-width,_100vw)_-_32px))] h-[min(500px,_calc(var(--window-dialog-height,_100vh)_-_32px))] [&[open]]:flex [&[open]]:flex-col" dismissible={!workingProfileId && !transferBusy} onClose={onClose}>
-      <p className="sheet-text mt-3 text-sm [&.error]:text-destructive">Choose the verified service and credential used when protection starts.</p>
+      <p className="sheet-text mt-3 text-sm [&.error]:text-destructive">Choose the service used when protection starts.</p>
       {!activeProfileAvailable && (
         <p className="banner pt-2.25 pr-3 pb-2.25 pl-3 flex items-start gap-1.75 text-destructive bg-[var(--danger-bg)] rounded-lg wrap-anywhere sheet-banner mt-2.5 profile-availability text-warning bg-[var(--warning-bg)]">
           <TriangleAlert size={15} aria-hidden="true" />
-          {activeProfile ? `“${activeProfile.name}” cannot start protection until it is verified with an available credential.` : "Choose a verified profile before starting protection."}
+          {activeProfile ? `Sign in or add an API key for “${activeProfile.name}” to start protection.` : "Add a profile to start protection."}
         </p>
       )}
       <div className="profile-list min-h-0 mt-3.5 flex-auto overflow-auto bg-card border border-border rounded-2xl" role="list" aria-label="AI service profiles">
         {state.profiles.map((profile) => {
           const active = profile.id === state.activeProfileId;
           const working = profile.id === workingProfileId;
-          const status = !profileHasCredential(profile)
-            ? "Credential unavailable"
-            : profile.verifiedAt
-              ? "Ready"
-              : "Verification required";
+          const status = profileIsAvailable(profile, state) ? "Ready" : "Sign in or add an API key";
           return (
             <div className={`profile-list-row min-w-0 grid grid-cols-[minmax(0,_1fr)_52px] items-center border-b border-b-border [&.is-active]:bg-muted [&.is-active_.profile-select]:bg-transparent last:border-b-0 [&_>_button:last-child]:justify-self-center ${active ? " is-active" : ""}`} role="listitem" key={profile.id}>
               <ActionItem
