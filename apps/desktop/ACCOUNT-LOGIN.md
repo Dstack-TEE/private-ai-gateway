@@ -161,10 +161,10 @@ sign-in link is available if the system browser launcher fails.
 CLI account login shares the runtime authorization and save state:
 
 ```sh
-pap profiles login work --provider redpill
-pap profiles login personal --provider phala
-pap profiles login work --provider redpill --workspace 123 --no-browser --callback-stdin
-pap start --profile work
+private-ai-proxy profiles login work --provider redpill
+private-ai-proxy profiles login personal --provider phala
+private-ai-proxy profiles login work --provider redpill --workspace 123 --no-browser --callback-stdin
+private-ai-proxy start --profile work
 ```
 
 Login prints/opens the authorization URL. Multiple workspaces prompt in an
@@ -172,7 +172,7 @@ interactive terminal; automation supplies --workspace. RedPill callback fallback
 reads a hidden terminal prompt or a bounded stdin stream, never a command-line
 credential argument. No-browser supports remote terminals. CLI JSON mode returns
 non-secret profile state; login links/prompts go to stderr. A lost save response
-is reconciled by operation ID. Explicit pap profiles verify remains available;
+is reconciled by operation ID. Explicit private-ai-proxy profiles verify remains available;
 normal UI Save does not verify. Starting protection always performs attestation
 and connection checks before exposing inference to agents.
 

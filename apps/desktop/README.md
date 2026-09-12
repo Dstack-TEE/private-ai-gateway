@@ -1,6 +1,6 @@
 # Private AI Proxy
 
-Cross-platform Tauri desktop app that turns the bundled `pap serve` verifier
+Cross-platform Tauri desktop app that turns the bundled `private-ai-proxy serve` verifier
 into a local gateway for Codex, Claude Code, OpenCode, Pi, Hermes, OpenClaw, and
 Oh My Pi. One Rust
 runtime owns policy, persistence, credentials, usage, agent projection, and
@@ -12,11 +12,11 @@ system.
 The app is now Private AI Proxy; the remote inference service remains Private AI
 Gateway. This is a fresh application identity (`org.dstack.private-ai-proxy`)
 with its own data and credential namespace; old beta configuration is not migrated.
-The only installed CLI is `pap`. It combines local management with ACI's `verify`,
+The only installed CLI is `private-ai-proxy`. It combines local management with ACI's `verify`,
 `audit`, `sessions`, `send` and `serve` commands using the same Rust source.
 The existing standalone `aci` binary is unchanged in the repository but is no
-longer bundled. The backend launches `pap serve` with strict receipt enforcement.
-Build the unified CLI with `cargo build --features desktop-client --bin pap`;
+longer bundled. The backend launches `private-ai-proxy serve` with strict receipt enforcement.
+Build the unified CLI with `cargo build --features desktop-client --bin private-ai-proxy`;
 ordinary server and standalone ACI builds do not acquire desktop dependencies.
 
 macOS releases provide separate Apple Silicon (`arm64`) and Intel (`x64`)
@@ -68,8 +68,8 @@ embedded in the manifest; duplicate archives and CLI DEB/RPM builds remain CI
 artifacts rather than additional release downloads.
 
 The CLI archives are independent distributions: no Tauri UI or desktop installation
-is required. Extract all three executables together, then use `pap --help` or
-`pap --json schema`. A working profile can be configured entirely through `pap`.
+is required. Extract all three executables together, then use `private-ai-proxy --help` or
+`private-ai-proxy --json schema`. A working profile can be configured entirely through `private-ai-proxy`.
 
 Profiles, Local API settings, Privacy verification, and Usage proof open as
 document-modal AppKit sheets on macOS, without traffic lights or an independent
@@ -516,12 +516,12 @@ automatic connection. Uninstalled agents stay linked but inactive; deleted
 configs are not recreated, and external edits are preserved. Failed restoration
 keeps its journal for retry and prevents backend shutdown from silently discarding it.
 Closing or quitting only the desktop UI leaves protection and the backend running;
-use Stop All and Quit or `pap --yes service stop` to shut down both.
+use Stop All and Quit or `private-ai-proxy --yes service stop` to shut down both.
 
 Ordinary CLI output uses short status summaries, lists, and operation results.
 See the [CLI guide](CLI.md) for command discovery, profile editing, reviewed
 agent changes and a core-capability coverage matrix.
-For automation, use `pap --json --non-interactive <command>`. JSON mode never
+For automation, use `private-ai-proxy --json --non-interactive <command>`. JSON mode never
 prompts; successful results go to stdout, structured errors to stderr.
 `status --watch --json` emits one JSON object per line. Argument errors exit
 with code 2; command failures exit with code 1. Help and version retain Clap's
@@ -579,7 +579,7 @@ builds, set `TAURI_UPDATER_PUBLIC_KEY`, `TAURI_UPDATER_ENDPOINT` (HTTPS), and th
 Tauri signing secret; the brand overlay enables updater artifacts only when
 both public settings are present. No signing secrets are embedded in the app.
 
-The macOS DMG app automatically attempts user-level `pap` registration after it
+The macOS DMG app automatically attempts user-level `private-ai-proxy` registration after it
 is launched from a stable location. Mounted disk images and App Translocation are
 rejected so they cannot leave a broken command link. It does not request
 administrator privileges or edit shell profiles. Settings > Advanced retains
@@ -598,7 +598,7 @@ Codex / Claude Code / OpenCode / Pi / Hermes / OpenClaw / Oh My Pi
 configured Local API    in-process Rust proxy: agent tokens, catalog check,
         │               limits, revocation gate, activity; relays unchanged
         ▼
-127.0.0.1:<dynamic>     bundled `pap serve`: TEE identity, pinned channel,
+127.0.0.1:<dynamic>     bundled `private-ai-proxy serve`: TEE identity, pinned channel,
         │               policy, forwarding, receipt verification
         ▼
 https://tee.redpill.ai
@@ -718,7 +718,7 @@ protocol is the service's own response, shown as such.
   returning a transient error is permanently unsupported.
 
   Apps fetch this file from the repository's `main` branch when starting protection
-  or refreshing the model catalog (`pap models list --refresh`). The request runs
+  or refreshing the model catalog (`private-ai-proxy models list --refresh`). The request runs
   alongside model discovery, uses a separate unauthenticated HTTPS client, and has
   a four-second deadline and a 1 MiB limit. ETag conditional requests reuse the
   last validated inventory. Invalid schemas, incomplete observations, download
@@ -864,7 +864,7 @@ window size and position, and refreshes
 all preference controls. Profiles, provider credentials, the local client key,
 usage history, system notification authorization, and installed CLI registration
 are retained. Partial failures are reported and leave the reset retryable; no
-unrelated agent edits are overwritten. The CLI counterpart `pap --yes settings reset`
+unrelated agent edits are overwritten. The CLI counterpart `private-ai-proxy --yes settings reset`
 uses the same backend transaction but does not change the OS login item.
 During automatic network recovery and verification, agent routing stays pointed at
 Local API. The proxy clears agent authorization until protection is verified again;
@@ -970,7 +970,7 @@ npm ci
 npm run dev
 ```
 
-The persistent backend launches the target-triple-specific bundled `pap serve`
+The persistent backend launches the target-triple-specific bundled `private-ai-proxy serve`
 process. No independent ACI executable is included.
 The development command builds debug sidecars; packaged builds compile release
 sidecars from this repository. `npm run dist` produces the native bundle for
@@ -1001,12 +1001,12 @@ credential-store fixtures are separate from real provider credentials.
 
 `npm run dist` builds the release sidecars and runs `tauri build`. Xcode 26 or
 newer is required to package the adaptive macOS app icon. The platform bundle
-contains the shared renderer, `pap`, the persistent `pap-service`, and
-the credential helper. The ACI verifier runs through `pap serve`. The UI and CLI are clients of the same per-user backend;
+contains the shared renderer, `private-ai-proxy`, the persistent `private-ai-proxy-service`, and
+the credential helper. The ACI verifier runs through `private-ai-proxy serve`. The UI and CLI are clients of the same per-user backend;
 there is no second GUI process.
 
-`scripts/bundle-sidecars.mjs` builds three executables with `--locked`: `pap`,
-`pap-service`, and `private-ai-proxy-helper`, a console
+`scripts/bundle-sidecars.mjs` builds three executables with `--locked`: `private-ai-proxy`,
+`private-ai-proxy-service`, and `private-ai-proxy-helper`, a console
 binary from the gateway crate that prints an agent's local token (kept separate
 from the GUI app so stdout works on Windows). A release build passes
 `DESKTOP_RELEASE_VERSION` to the CLI/backend as `PAP_BUILD_VERSION`; ordinary

@@ -20,7 +20,7 @@ fn argument_errors_are_machine_readable_in_json_mode() {
         vec!["--json", "--non-interactive", "unknown-command"],
         vec!["status", "--json", "--no-interactive", "--unknown-option"],
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_pap"))
+        let output = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
             .args(args)
             .stdin(Stdio::null())
             .output()
@@ -34,7 +34,7 @@ fn argument_errors_are_machine_readable_in_json_mode() {
 
 #[test]
 fn command_discovery_is_detailed_and_machine_readable() {
-    let settings = Command::new(env!("CARGO_BIN_EXE_pap"))
+    let settings = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
         .args(["settings", "set", "--help"])
         .output()
         .unwrap();
@@ -49,7 +49,7 @@ fn command_discovery_is_detailed_and_machine_readable() {
         assert!(settings.contains(key), "missing settings key {key}");
     }
 
-    let usage = Command::new(env!("CARGO_BIN_EXE_pap"))
+    let usage = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
         .args(["usage", "export", "--help"])
         .output()
         .unwrap();
@@ -59,13 +59,13 @@ fn command_discovery_is_detailed_and_machine_readable() {
     assert!(!usage.contains("--cursor"));
     assert!(!usage.contains("--limit"));
 
-    let schema = Command::new(env!("CARGO_BIN_EXE_pap"))
+    let schema = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
         .arg("schema")
         .output()
         .unwrap();
     assert_success(&schema);
     let schema: Value = serde_json::from_slice(&schema.stdout).unwrap();
-    assert_eq!(schema["name"], "pap");
+    assert_eq!(schema["name"], "private-ai-proxy");
     let json_flag = schema["arguments"]
         .as_array()
         .unwrap()
@@ -81,16 +81,16 @@ fn command_discovery_is_detailed_and_machine_readable() {
         .iter()
         .any(|command| command["name"] == "profiles"));
 
-    let completion = Command::new(env!("CARGO_BIN_EXE_pap"))
+    let completion = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
         .args(["completions", "bash"])
         .output()
         .unwrap();
     assert_success(&completion);
     assert!(String::from_utf8(completion.stdout)
         .unwrap()
-        .contains("pap"));
+        .contains("private-ai-proxy"));
 
-    let conflict = Command::new(env!("CARGO_BIN_EXE_pap"))
+    let conflict = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
         .args([
             "agents",
             "connect",
@@ -107,7 +107,7 @@ fn command_discovery_is_detailed_and_machine_readable() {
 #[test]
 fn adding_a_profile_requires_consent_before_startup_or_credential_input() {
     let home = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_pap"))
+    let output = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
         .args([
             "--json",
             "profiles",
@@ -143,8 +143,16 @@ impl Backend {
                 name.into()
             })
         };
-        fs::copy(env!("CARGO_BIN_EXE_pap"), binary("pap")).unwrap();
-        fs::copy(env!("CARGO_BIN_EXE_pap-service"), binary("pap-service")).unwrap();
+        fs::copy(
+            env!("CARGO_BIN_EXE_private-ai-proxy"),
+            binary("private-ai-proxy"),
+        )
+        .unwrap();
+        fs::copy(
+            env!("CARGO_BIN_EXE_private-ai-proxy-service"),
+            binary("private-ai-proxy-service"),
+        )
+        .unwrap();
         // No test requests agent credentials. Keep this unused helper tiny:
         // startup durably stages it, so copying a debug CLI would fsync hundreds
         // of megabytes per backend before its management endpoint becomes ready.
@@ -168,7 +176,7 @@ impl Backend {
             &format!(r#"{{"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":{port}}}"#),
         )
         .unwrap();
-        let child = Command::new(binary("pap-service"))
+        let child = Command::new(binary("private-ai-proxy-service"))
             .env(desktop_gateway::agents::HOME_OVERRIDE_ENV, &home)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -209,9 +217,11 @@ impl Backend {
         )
     }
     fn cli(&self) -> PathBuf {
-        self.directory
-            .path()
-            .join(if cfg!(windows) { "pap.exe" } else { "pap" })
+        self.directory.path().join(if cfg!(windows) {
+            "private-ai-proxy.exe"
+        } else {
+            "private-ai-proxy"
+        })
     }
     fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(self.cli());
@@ -415,7 +425,7 @@ fn malformed_client_and_watch_disconnect_do_not_stop_backend() {
     let home = backend.directory.path().join("diagnostic-home");
     let command_dir = home.join(".local/bin");
     fs::create_dir_all(&command_dir).unwrap();
-    fs::write(command_dir.join("pap"), "unrelated command").unwrap();
+    fs::write(command_dir.join("private-ai-proxy"), "unrelated command").unwrap();
     let diagnostic = backend
         .command(&["doctor", "--json"])
         .env("HOME", &home)

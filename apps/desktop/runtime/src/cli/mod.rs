@@ -142,12 +142,13 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                         "verifying" => {}
                         _ => {
                             return Err(
-                                "Gateway did not become verified. Inspect pap status.".into()
+                                "Gateway did not become verified. Inspect private-ai-proxy status."
+                                    .into(),
                             )
                         }
                     }
                     if Instant::now() >= deadline {
-                        return Err("Verification wait timed out; the backend may still be verifying. Inspect pap status before retrying.".into());
+                        return Err("Verification wait timed out; the backend may still be verifying. Inspect private-ai-proxy status before retrying.".into());
                     }
                     std::thread::sleep(Duration::from_millis(200));
                 }
@@ -449,7 +450,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                 value(crate::cli_install::install(directory.clone())?)?
             }
             Registration::Uninstall { directory } => {
-                confirm(cli, "Unregister the pap command?")?;
+                confirm(cli, "Unregister the private-ai-proxy command?")?;
                 value(crate::cli_install::uninstall(directory.clone())?)?
             }
         },
@@ -707,10 +708,11 @@ mod tests {
     #[test]
     fn automation_modes_never_prompt_or_imply_consent() {
         for mode in ["--json", "--non-interactive", "--no-interactive"] {
-            let cli = Cli::try_parse_from(["pap", mode, "status"]).unwrap();
+            let cli = Cli::try_parse_from(["private-ai-proxy", mode, "status"]).unwrap();
             assert!(confirm(&cli, "Confirm?").unwrap_err().contains("--yes"));
             assert!(read_key(&cli, false).unwrap_err().contains("--key-stdin"));
-            let approved = Cli::try_parse_from(["pap", mode, "--yes", "status"]).unwrap();
+            let approved =
+                Cli::try_parse_from(["private-ai-proxy", mode, "--yes", "status"]).unwrap();
             assert!(confirm(&approved, "Confirm?").is_ok());
         }
     }

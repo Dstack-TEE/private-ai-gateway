@@ -5,10 +5,10 @@ use clap_complete::Shell;
 
 #[derive(Parser)]
 #[command(
-    name = "pap",
+    name = "private-ai-proxy",
     version = crate::protocol::BUILD_VERSION,
     about = "Control the Private AI Proxy",
-    long_about = "Control the Private AI Proxy backend, protected connection, profiles, and coding-agent integrations. `pap start` explicitly starts protection and waits for verification. `pap service start` starts the backend; saved connect-on-launch behavior may then start protection automatically."
+    long_about = "Control the Private AI Proxy backend, protected connection, profiles, and coding-agent integrations. `private-ai-proxy start` explicitly starts protection and waits for verification. `private-ai-proxy service start` starts the backend; saved connect-on-launch behavior may then start protection automatically."
 )]
 pub(super) struct Cli {
     /// Emit compact JSON instead of human-readable output.
@@ -81,7 +81,7 @@ pub(super) enum Action {
         #[command(subcommand)]
         command: Token,
     },
-    /// Manage installation of the pap command.
+    /// Manage installation of the private-ai-proxy command.
     Cli {
         #[command(subcommand)]
         command: Registration,
@@ -127,15 +127,15 @@ pub(super) enum App {
 
 #[derive(Subcommand)]
 pub(super) enum Registration {
-    /// Show whether pap is registered on PATH.
+    /// Show whether private-ai-proxy is registered on PATH.
     Status,
-    /// Register pap in a user-writable directory.
+    /// Register private-ai-proxy in a user-writable directory.
     Install {
         /// Installation directory; omit to use the platform default.
         #[arg(long)]
         directory: Option<PathBuf>,
     },
-    /// Remove a pap registration previously installed by this app.
+    /// Remove a private-ai-proxy registration previously installed by this app.
     Uninstall {
         /// Registration directory; omit to use the platform default.
         #[arg(long)]
@@ -277,7 +277,7 @@ pub(super) enum Agents {
     List,
     /// Connect an agent to the Local API.
     Connect {
-        /// Agent ID reported by `pap agents list`.
+        /// Agent ID reported by `private-ai-proxy agents list`.
         id: String,
         /// Optional default model from the verified catalog.
         #[arg(long)]
@@ -291,7 +291,7 @@ pub(super) enum Agents {
     },
     /// Disconnect an agent and restore its managed configuration.
     Disconnect {
-        /// Agent ID reported by `pap agents list`.
+        /// Agent ID reported by `private-ai-proxy agents list`.
         id: String,
         /// Preview changes and return a revision without applying them.
         #[arg(long, conflicts_with = "revision")]

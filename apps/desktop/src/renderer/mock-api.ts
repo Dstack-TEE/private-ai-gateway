@@ -347,12 +347,12 @@ export function mockApi(name: string | null): DesktopApi {
   const claude = () => agents.find((agent) => agent.id === "claude-code") ?? CLAUDE_OFF;
   let launchPreferences = { openAtLogin: false, connectOnLaunch: false };
   let cliRegistration: CliRegistration = {
-    executable: "/Applications/Private AI Proxy.app/Contents/MacOS/pap",
-    commandPath: "/Users/dev/.local/bin/pap",
+    executable: "/Applications/Private AI Proxy.app/Contents/MacOS/private-ai-proxy",
+    commandPath: "/Users/dev/.local/bin/private-ai-proxy",
     installed: false,
     onPath: false,
     ...(name === "cli-startup-error" ? {
-      startupError: "Command-line registration failed: Move Private AI Proxy to a stable location before registering pap",
+      startupError: "Command-line registration failed: Move Private AI Proxy to a stable location before registering private-ai-proxy",
     } : {}),
   };
   let updateChannel: "beta" | "stable" = "stable";

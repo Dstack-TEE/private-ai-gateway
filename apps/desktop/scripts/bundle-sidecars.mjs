@@ -38,9 +38,9 @@ await mkdir(destinationDir, { recursive: true });
 // Executables embedded by the Tauri shell. The helper remains a console
 // process so credential commands work on Windows.
 const sidecars = [
-  { name: "pap", manifestPath: path.join(repoRoot, "Cargo.toml") },
+  { name: "private-ai-proxy", manifestPath: path.join(repoRoot, "Cargo.toml") },
   {
-    name: "pap-service",
+    name: "private-ai-proxy-service",
     manifestPath: path.join(repoRoot, "Cargo.toml"),
   },
   {
@@ -53,7 +53,7 @@ for (const sidecar of sidecars) {
   for (const target of targets) {
     const buildArgs = ["build", "--locked", "--manifest-path", sidecar.manifestPath, "--bin", sidecar.name];
     if (explicitTarget) buildArgs.push("--target", target);
-    if (sidecar.name.startsWith("pap")) buildArgs.push("--features", "desktop-client");
+    if (sidecar.manifestPath === path.join(repoRoot, "Cargo.toml")) buildArgs.push("--features", "desktop-client");
     if (!debug) buildArgs.push("--release");
     const build = spawnSync(cargo, buildArgs, { cwd: repoRoot, env: buildEnv, stdio: "inherit" });
     if (build.error) throw build.error;

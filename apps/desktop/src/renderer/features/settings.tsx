@@ -37,12 +37,12 @@ function CliRegistrationControl(): React.JSX.Element {
     ?? registration?.startupError
     ?? (registration?.installed
       ? registration.onPath
-        ? `Installed at ${directory}. This app can resolve pap; terminal PATH may differ.`
+        ? `Installed at ${directory}. This app can resolve private-ai-proxy; terminal PATH may differ.`
         : `Installed at ${directory}. Ensure this directory is in your terminal PATH.`
       : directory ? `Default location: ${directory}` : "Command registration is unavailable.");
   return <Item>
     <ItemContent>
-      <ItemTitle>pap command</ItemTitle>
+      <ItemTitle>private-ai-proxy command</ItemTitle>
       <ItemDescription>{description}</ItemDescription>
     </ItemContent>
     <ItemActions>

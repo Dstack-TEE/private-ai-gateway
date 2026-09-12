@@ -29,10 +29,10 @@ use clap::{FromArgMatches, Subcommand};
 #[tokio::main]
 async fn main() {
     let command = args::Command::augment_subcommands(managed::cli_command())
-        .name("pap")
+        .name("private-ai-proxy")
         .about("Private AI Proxy: manage local protection and verify confidential AI services")
         .long_about("Manage profiles, coding agents and local protection, or verify and audit ACI services without starting the managed backend.")
-        .mut_subcommand("cli", |command| command.about("Manage installation of the pap command"))
+        .mut_subcommand("cli", |command| command.about("Manage installation of the private-ai-proxy command"))
         .mut_subcommand("serve", |command| command.about("Run a local verifying proxy; withhold responses until their receipts verify"))
         .arg(clap::Arg::new("require_production_os").long("require-production-os").help("Require an attested production OS image").global(true).action(clap::ArgAction::SetTrue));
     let json = std::env::args_os()
@@ -73,7 +73,7 @@ async fn main() {
                     serde_json::json!({"error":{"code":"command_failed","message":error}})
                 );
             } else {
-                eprintln!("pap: {error}");
+                eprintln!("private-ai-proxy: {error}");
             }
             1
         }

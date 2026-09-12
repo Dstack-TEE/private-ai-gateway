@@ -14,13 +14,13 @@ name = "private-ai-gateway"
 path = "src/main.rs"
 
 [[bin]]
-name = "pap"
-path = "src/bin/pap/main.rs"
+name = "private-ai-proxy"
+path = "src/bin/private-ai-proxy/main.rs"
 required-features = ["desktop-client"]
 
 [[bin]]
-name = "pap-service"
-path = "src/bin/pap-service/main.rs"
+name = "private-ai-proxy-service"
+path = "src/bin/private-ai-proxy-service/main.rs"
 required-features = ["desktop-client"]
 
 [features]

@@ -89,26 +89,40 @@ Var PapStartupLockPath
   ${EndIf}
 !macroend
 
-!macro NSIS_HOOK_PREINSTALL
-  !insertmacro PAP_ACQUIRE_STARTUP_LOCK
-
-  SearchPath $R0 "pap.exe"
+!macro PAP_CHECK_CLI NAME
+  SearchPath $R0 "${NAME}"
   ${If} $R0 != ""
     ${StrCase} $R1 "$R0" "L"
-    ${StrCase} $R2 "$INSTDIR\pap.exe" "L"
+    ${StrCase} $R2 "$INSTDIR\${NAME}" "L"
     ${If} $R1 != $R2
-      !insertmacro PAP_FAIL "A different pap executable is already on PATH at $R0. Remove that installation before installing ${PRODUCTNAME}."
+      !insertmacro PAP_FAIL "A different ${NAME} executable is already on PATH at $R0. Remove that installation before installing ${PRODUCTNAME}."
     ${EndIf}
   ${EndIf}
-
-  ${If} ${FileExists} "$INSTDIR\pap.exe"
+  ${If} ${FileExists} "$INSTDIR\${NAME}"
     ReadRegStr $R0 SHCTX "${MANUPRODUCTKEY}" ""
     ${StrCase} $R1 "$R0" "L"
     ${StrCase} $R2 "$INSTDIR" "L"
     ${If} $R1 != $R2
-      !insertmacro PAP_FAIL "An unrelated pap executable exists at $INSTDIR\pap.exe. Choose another install directory or remove the conflicting file."
+      !insertmacro PAP_FAIL "An unrelated ${NAME} executable exists at $INSTDIR\${NAME}. Choose another install directory or remove the conflicting file."
     ${EndIf}
-    ExecWait '"$INSTDIR\pap.exe" --yes service stop' $R0
+  ${EndIf}
+!macroend
+
+!macro PAP_EXISTING_CLI
+  StrCpy $R4 "$INSTDIR\private-ai-proxy.exe"
+  ${IfNot} ${FileExists} "$R4"
+    StrCpy $R4 "$INSTDIR\pap.exe"
+  ${EndIf}
+!macroend
+
+!macro NSIS_HOOK_PREINSTALL
+  !insertmacro PAP_ACQUIRE_STARTUP_LOCK
+  !insertmacro PAP_CHECK_CLI "private-ai-proxy.exe"
+  !insertmacro PAP_CHECK_CLI "pap.exe"
+  !insertmacro PAP_CHECK_CLI "pap.cmd"
+  !insertmacro PAP_EXISTING_CLI
+  ${If} ${FileExists} "$R4"
+    ExecWait '"$R4" --yes service stop' $R0
     ${If} $R0 != 0
       !insertmacro PAP_FAIL "The existing Private AI Proxy backend could not be stopped. The installation was not replaced."
     ${EndIf}
@@ -116,9 +130,12 @@ Var PapStartupLockPath
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
-  ExecWait '"$INSTDIR\pap.exe" cli install' $R0
+  ExecWait '"$INSTDIR\private-ai-proxy.exe" cli install' $R0
   ${If} $R0 != 0
-    !insertmacro PAP_FAIL "Private AI Proxy was installed, but pap could not be registered in the current user's PATH."
+    !insertmacro PAP_FAIL "Private AI Proxy was installed, but its CLI could not be registered in the current user's PATH."
+  ${EndIf}
+  ${IfNot} ${FileExists} "$INSTDIR\pap.cmd"
+    !insertmacro PAP_FAIL "Private AI Proxy was installed, but its pap shortcut is missing."
   ${EndIf}
   !insertmacro PAP_RELEASE_STARTUP_LOCK
 !macroend
@@ -126,16 +143,16 @@ Var PapStartupLockPath
 !macro NSIS_HOOK_PREUNINSTALL
   !insertmacro PAP_ACQUIRE_STARTUP_LOCK
 
-  ${If} ${FileExists} "$INSTDIR\pap.exe"
-    ExecWait '"$INSTDIR\pap.exe" --yes service stop' $R0
+  !insertmacro PAP_EXISTING_CLI
+  ${If} ${FileExists} "$R4"
+    ExecWait '"$R4" --yes service stop' $R0
     ${If} $R0 != 0
       !insertmacro PAP_FAIL "The Private AI Proxy backend could not be stopped. Uninstall was cancelled."
     ${EndIf}
-    ${If} $UpdateMode != 1
-      ExecWait '"$INSTDIR\pap.exe" --yes cli uninstall' $R0
-      ${If} $R0 != 0
-        !insertmacro PAP_FAIL "pap could not remove its current-user PATH registration. Uninstall was cancelled."
-      ${EndIf}
+    ; Remove the owned alias on upgrades too, before replacing the canonical executable.
+    ExecWait '"$R4" --yes cli uninstall' $R0
+    ${If} $R0 != 0
+      !insertmacro PAP_FAIL "Private AI Proxy could not remove its CLI registration. Uninstall was cancelled."
     ${EndIf}
   ${EndIf}
 !macroend

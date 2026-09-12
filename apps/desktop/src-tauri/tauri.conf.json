@@ -46,8 +46,8 @@
     "category": "DeveloperTool",
     "shortDescription": "Verified local AI proxy",
     "externalBin": [
-      "binaries/pap",
-      "binaries/pap-service",
+      "binaries/private-ai-proxy",
+      "binaries/private-ai-proxy-service",
       "binaries/private-ai-proxy-helper"
     ],
     "icon": [
@@ -72,11 +72,13 @@
     "linux": {
       "deb": {
         "preInstallScript": "installer/deb-pre-install.sh",
-        "preRemoveScript": "installer/deb-pre-remove.sh"
+        "preRemoveScript": "installer/deb-pre-remove.sh",
+        "files": { "/usr/bin/pap": "installer/pap.sh" }
       },
       "rpm": {
         "preInstallScript": "installer/rpm-pre-install.sh",
-        "preRemoveScript": "installer/rpm-pre-remove.sh"
+        "preRemoveScript": "installer/rpm-pre-remove.sh",
+        "files": { "/usr/bin/pap": "installer/pap.sh" }
       }
     },
     "android": {
