@@ -396,23 +396,6 @@ impl GatewayManager {
         }
     }
 
-    /// Tray switch: stop when a sidecar is running, otherwise start with the
-    /// last configuration. Failures surface in the state instead of a result.
-    pub fn toggle(self: &Arc<Self>) {
-        let (running, config) = match self.lock() {
-            Ok(runtime) => (runtime.child.is_some(), runtime.state.config.clone()),
-            Err(_) => return,
-        };
-        let result = if running {
-            self.stop()
-        } else {
-            self.start(config)
-        };
-        if let Err(message) = result {
-            self.report_error(message);
-        }
-    }
-
     pub fn set_api_key_saved(&self, saved: bool) {
         self.update(|state| state.api_key_saved = saved);
     }
@@ -737,6 +720,7 @@ impl GatewayManager {
         let mut load_catalog = false;
         let mut persist = None;
         let mut end_session = false;
+        let mut retired_child = None;
         match event_type.as_str() {
             // Identity in (or rotated): a new epoch; the session stays closed
             // until the catalog read through this identity is in too.
@@ -760,11 +744,16 @@ impl GatewayManager {
             // read still in flight can neither publish nor clear this error,
             // and the identity must be reported again before anything opens.
             "blocked" => {
-                end_session = !runtime.verification_only;
+                let rotating = optional_string(object, "code").as_deref() == Some("keyset_changed")
+                    && runtime.state.status != "blocked";
+                end_session = !rotating && !runtime.verification_only;
                 runtime.epoch += 1;
                 runtime.identity_ready = false;
-                runtime.state.status = "blocked".to_string();
-                runtime.state.reconnecting = false;
+                runtime.state.status = if rotating { "error" } else { "blocked" }.to_string();
+                runtime.state.reconnecting = crate::recovery::connection_intended(&runtime.state);
+                if rotating {
+                    retired_child = runtime.child.take();
+                }
                 runtime.state.progress = None;
                 runtime.state.catalog = None;
                 runtime.state.error = Some(
@@ -805,6 +794,11 @@ impl GatewayManager {
             eprintln!("Could not persist the end of a blocked protection session");
         }
         drop(runtime);
+        if let Some(mut child) = retired_child {
+            child
+                .kill()
+                .map_err(|_| "Could not stop the previous verifier")?;
+        }
 
         if let Some(activity) = persist {
             let summary = self
@@ -1088,7 +1082,11 @@ fn merge_activity(state: &mut GatewayState, mut incoming: RequestActivity) {
         incoming.model = incoming.model.or_else(|| existing.model.clone());
         incoming.receipt_id = incoming.receipt_id.or_else(|| existing.receipt_id.clone());
         incoming.verified = incoming.verified.or(existing.verified);
-        if incoming.detail.is_empty() {
+        let failed = existing.status != 0 && !(200..300).contains(&existing.status);
+        if failed {
+            incoming.status = existing.status;
+        }
+        if incoming.detail.is_empty() || (failed && !existing.detail.is_empty()) {
             incoming.detail = existing.detail.clone();
         }
         incoming.locally_constrained = incoming
@@ -1226,6 +1224,34 @@ mod tests {
     }
 
     #[test]
+    fn keyset_change_requests_fresh_verification_without_ending_the_session() {
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let (events, _) = tokio::sync::mpsc::channel(8);
+        let proxy = ProxyState::new(events).unwrap();
+        let usage = Arc::new(UsageStore::memory().unwrap());
+        let manager = Arc::new(GatewayManager::new(
+            proxy.clone(),
+            usage.clone(),
+            Arc::new(WaitingSidecar),
+            executor.handle().clone(),
+            GatewayState::default(),
+        ));
+        manager
+            .start(StartGatewayConfig {
+                remote_url: "https://inference.phala.com".into(),
+                require_production_os: true,
+            })
+            .unwrap();
+        manager.handle_line(proxy.session().generation, r#"{"schema_version":1,"type":"blocked","code":"keyset_changed","reason":"rotation"}"#).unwrap();
+        let state = manager.snapshot().unwrap();
+        assert_eq!(state.status, "error");
+        assert!(state.reconnecting && crate::recovery::should_retry(&state));
+        assert!(!manager.is_running().unwrap());
+        assert!(!proxy.session().verified);
+        assert!(usage.active_session().unwrap().is_some());
+    }
+
+    #[test]
     fn security_blocks_survive_process_failure_without_cancelling_candidate_sessions() {
         for verification_only in [false, true] {
             let executor = tokio::runtime::Runtime::new().unwrap();
@@ -1256,6 +1282,11 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(usage.active_session().unwrap().is_some(), verification_only);
+            let running = manager.is_running().unwrap();
+            manager.handle_line(generation, r#"{"schema_version":1,"type":"blocked","code":"keyset_changed","reason":"late rotation"}"#).unwrap();
+            assert_eq!(manager.snapshot().unwrap().status, "blocked");
+            assert_eq!(usage.active_session().unwrap().is_some(), verification_only);
+            assert_eq!(manager.is_running().unwrap(), running);
             manager
                 .handle_line(
                     generation,
@@ -1494,5 +1525,36 @@ mod tests {
         assert_eq!(item.cache_read_tokens, Some(512));
         assert_eq!(item.cache_write_tokens, Some(64));
         assert_eq!(item.cost_usd, Some(0.0042));
+        let mut timeout = item.clone();
+        timeout.status = 504;
+        timeout.detail = "Client delivery timed out".into();
+        merge_activity(&mut state, timeout);
+        apply_request_event(&mut state, verdict.as_object().unwrap()).unwrap();
+        assert_eq!(state.activity[0].status, 504);
+        assert_eq!(state.activity[0].detail, "Client delivery timed out");
+        assert_eq!(state.activity[0].input_tokens, Some(1_024));
+        let mut pending = state.activity[0].clone();
+        pending.id = "req-proof".into();
+        pending.status = 502;
+        pending.detail.clear();
+        pending.verified = None;
+        merge_activity(&mut state, pending);
+        let mut withheld = verdict.clone();
+        withheld["tag"] = json!("pap:req-proof:session-merge:claude-code");
+        withheld["status"] = json!(502);
+        withheld["detail"] = json!("Response withheld: receipt verification failed");
+        withheld["verified"] = json!(false);
+        apply_request_event(&mut state, withheld.as_object().unwrap()).unwrap();
+        let proof = state
+            .activity
+            .iter()
+            .find(|item| item.id == "req-proof")
+            .unwrap();
+        assert_eq!(proof.status, 502);
+        assert_eq!(
+            proof.detail,
+            "Response withheld: receipt verification failed"
+        );
+        assert_eq!(proof.verified, Some(false));
     }
 }

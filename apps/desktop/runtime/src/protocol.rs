@@ -201,6 +201,7 @@ impl RpcError {
         }
         for prefix in [
             "Stop protection before",
+            "Gateway is already running",
             "Create a Confidential AI profile",
             "Add a credential",
             "Enter an API key",

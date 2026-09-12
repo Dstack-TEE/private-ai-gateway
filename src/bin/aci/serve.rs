@@ -1258,6 +1258,7 @@ fn rotation_gate(state: &ProxyState, trusted_digest: &str, headers: &HeaderMap) 
             );
             (state.event_sink)(json!({
                 "type": "blocked",
+                "code": "keyset_changed",
                 "schema_version": SERVE_EVENT_SCHEMA_VERSION,
                 "reason": reason,
             }));
@@ -1583,6 +1584,35 @@ mod tests {
         assert_eq!(event["method"], "POST");
         assert_eq!(event["receipt_id"], "rcpt-1");
         assert_eq!(event["verified"], true);
+    }
+
+    #[tokio::test]
+    async fn keyset_change_and_verification_failure_have_distinct_events() {
+        let upstream =
+            spawn_server(Router::new().fallback(|| async { StatusCode::SERVICE_UNAVAILABLE }))
+                .await;
+        let (outcomes, _) = mpsc::unbounded_channel();
+        let mut state = state_over(upstream, outcomes);
+        let (events, mut received) = mpsc::unbounded_channel();
+        Arc::get_mut(&mut state).unwrap().event_sink = Arc::new(move |event| {
+            let _ = events.send(event);
+        });
+        let previous = state.delivery.lock().unwrap().clone();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-aci-keyset-digest", "new-keyset".parse().unwrap());
+        rotation_gate(&state, "old-keyset", &headers);
+        assert!(previous.is_cancelled());
+        assert_eq!(received.recv().await.unwrap()["code"], "keyset_changed");
+        let proxy = spawn_server(build_proxy_router(state)).await;
+        let response = reqwest::Client::new()
+            .get(format!("{proxy}/v1/models"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let failure = received.recv().await.unwrap();
+        assert_eq!(failure["type"], "blocked");
+        assert!(failure.get("code").is_none());
     }
 
     #[test]

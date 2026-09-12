@@ -1048,6 +1048,7 @@ struct PendingSecret {
     value: String,
 }
 
+#[derive(Default)]
 struct Edit {
     selection: Option<selection::Edit>,
     changes: Vec<ConfigChange>,
@@ -1274,31 +1275,13 @@ impl Projector {
         }
         let mut restore_problem = path.as_ref().err().cloned();
         let edit = match ConfigDoc::parse(agent.format(), text.as_deref().unwrap_or_default()) {
-            _ if !connect && path.is_err() => Edit {
-                selection: None,
-                changes: Vec::new(),
-                record: None,
-                pending_secrets: Vec::new(),
-                consumed_secrets: Vec::new(),
-            },
-            Ok(_) if connect && catalog.is_none() => Edit {
-                selection: None,
-                changes: Vec::new(),
-                record: None,
-                pending_secrets: Vec::new(),
-                consumed_secrets: Vec::new(),
-            },
+            _ if !connect && path.is_err() => Edit::default(),
+            Ok(_) if connect && catalog.is_none() => Edit::default(),
             Ok(mut doc) => match self.edit(agent, connect, &mut doc, &store, catalog, options) {
                 Ok(edit) => edit,
                 Err(error) if !connect && store.contains_key(agent.id()) => {
                     restore_problem = Some(error);
-                    Edit {
-                        selection: None,
-                        changes: Vec::new(),
-                        record: None,
-                        pending_secrets: Vec::new(),
-                        consumed_secrets: Vec::new(),
-                    }
+                    Edit::default()
                 }
                 Err(error) => return Err(error),
             },
@@ -1308,13 +1291,7 @@ impl Projector {
                 store
                     .get(agent.id())
                     .ok_or_else(|| format!("{} is not connected", agent.name()))?;
-                Edit {
-                    selection: None,
-                    changes: Vec::new(),
-                    record: None,
-                    pending_secrets: Vec::new(),
-                    consumed_secrets: Vec::new(),
-                }
+                Edit::default()
             }
             Err(reason) => return Err(self.parse_error(agent, &reason)),
         };
@@ -1639,7 +1616,7 @@ impl Projector {
         catalog: Option<&Catalog>,
         options: &ConnectOptions,
     ) -> Result<(), ConnectFailure> {
-        let doc = self
+        let mut doc = self
             .parse_config(agent, text.as_deref())
             .map_err(ConnectFailure::Conflict)?;
         let options = connection_options(
@@ -1657,9 +1634,6 @@ impl Projector {
                 agent.name()
             )));
         }
-        let mut doc = self
-            .parse_config(agent, text.as_deref())
-            .map_err(ConnectFailure::Conflict)?;
         let edit = self
             .edit(agent, true, &mut doc, store, catalog, &options)
             .map_err(ConnectFailure::Conflict)?;

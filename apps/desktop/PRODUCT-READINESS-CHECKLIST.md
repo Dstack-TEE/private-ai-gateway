@@ -1,4 +1,4 @@
-# Private AI Gateway Desktop Product Readiness
+# Private AI Proxy Product Readiness
 
 This checklist is the release contract for the desktop app. A checked item has
 an automated assertion, a focused code-level test, or an explicitly documented
@@ -35,7 +35,7 @@ platform verification result.
 - [x] Codex, Claude Code, OpenCode, Pi, Hermes, OpenClaw, and Oh My Pi are detected from real executables.
 - [x] Detection covers PATH and common macOS/user package-manager binary locations.
 - [x] Connections use native discovery or an app-owned catalog generated from the verified service.
-- [x] Codex requires a verified default model; other agents may choose after connecting; no full model list is handwritten in source.
+- [x] Each agent receives a default model compatible with its API surface from the verified catalog; no full model list is handwritten in source.
 - [x] Generated provider catalogs are summarized in previews instead of rendering serialized JSON.
 - [x] Preview/apply uses a revision and refuses stale config or catalog inputs.
 - [x] Disconnect and Restore All revoke tokens before config cleanup and preserve unrelated user config.
@@ -70,3 +70,12 @@ Linux verification note (September 3, 2026): the host has no Rust toolchain or
 Tauri system packages. An isolated Rust 1.89 container with the required Linux
 build libraries passed all Tauri tests without installing global packages.
 Native macOS behavior remains a required release check on macOS.
+
+## Signed Build Acceptance Still Required
+
+- [ ] Complete authenticated inference with all seven official CLI versions on supported platforms, including project and shell overrides.
+- [ ] Verify Claude Code credential-helper quoting in a Windows shell.
+- [ ] Verify macOS Keychain prompts after signing and version changes, including automatic recovery.
+- [ ] Exercise sleep/wake, VPN changes and IPv6 temporary-address rotation on real machines.
+- [ ] Verify service keyset rotation triggers fresh verification and real verification failures remain blocked.
+- [ ] Complete Windows distribution signing checks; updater signatures do not replace Authenticode.

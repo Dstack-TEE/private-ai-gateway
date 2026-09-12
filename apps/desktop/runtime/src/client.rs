@@ -112,9 +112,13 @@ impl Client {
     }
 
     pub fn attach(handle: tokio::runtime::Handle) -> Result<Arc<Self>, String> {
-        Self::ensure_service()?;
         let client = Arc::new(Self::new());
-        client.states.send_replace(client.state()?);
+        match Self::ensure_service().and_then(|()| client.state()) {
+            Ok(state) => {
+                client.states.send_replace(state);
+            }
+            Err(error) => client.report_disconnect(error),
+        }
         let weak = Arc::downgrade(&client);
         handle.spawn_blocking(move || loop {
             if weak.strong_count() == 0 {
@@ -202,6 +206,10 @@ impl Client {
         )
         .map_err(connection_error)?;
         decode(&mut reader, id)
+    }
+
+    pub fn cached_state(&self) -> GatewayState {
+        self.states.borrow().clone()
     }
 
     pub fn subscribe(&self) -> watch::Receiver<GatewayState> {
@@ -431,7 +439,7 @@ impl Client {
     }
     pub fn toggle(&self) {
         let result = self.state().and_then(|state| {
-            if matches!(state.status.as_str(), "verifying" | "verified" | "blocked") {
+            if state.should_stop_protection() {
                 self.stop()
             } else {
                 self.start(state.config)
@@ -580,6 +588,38 @@ fn connection_error(error: io::Error) -> String {
 mod tests {
     use super::export_path;
     use std::{ffi::OsString, os::unix::ffi::OsStringExt, path::PathBuf};
+
+    #[test]
+    fn attach_keeps_a_disconnected_client_when_backend_startup_fails() {
+        const CHILD: &str = "PAP_TEST_ATTACH_FAILURE";
+        if std::env::var_os(CHILD).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "client::tests::attach_keeps_a_disconnected_client_when_backend_startup_fails",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env(desktop_gateway::agents::HOME_OVERRIDE_ENV, home.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        assert!(crate::launch::service_executable().is_err());
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let client = super::Client::attach(runtime.handle().clone()).unwrap();
+        assert_eq!(client.cached_state().backend_connected, Some(false));
+        assert!(client.cached_state().error.is_some());
+        drop(client);
+        runtime.shutdown_timeout(std::time::Duration::from_secs(3));
+    }
 
     #[test]
     fn only_the_intentionally_stopped_instance_disconnects_without_a_fault() {

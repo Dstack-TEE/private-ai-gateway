@@ -1,14 +1,13 @@
 # PAP CLI Distribution
 
-The desktop bundle and the standalone CLI distribution contain the same four
+The desktop bundle and the standalone CLI distribution contain the same three
 release executables:
 
-- `pap`: user-facing CLI and backend client.
+- `pap`: user-facing CLI, backend client and integrated ACI verifier (`pap serve`).
 - `pap-service`: persistent per-user backend.
-- `aci`: verifier process spawned by `pap-service`.
 - `private-ai-proxy-helper`: local agent credential helper.
 
-The backend resolves `aci` and the helper next to the canonical
+The backend resolves `pap` and the helper next to the canonical
 `pap-service` executable. The CLI resolves `pap-service` next to the canonical
 `pap` executable. These sibling paths are a packaging contract, not a PATH
 lookup.
@@ -17,9 +16,9 @@ lookup.
 
 | Platform | Desktop package | Executable location | CLI registration |
 | --- | --- | --- | --- |
-| Windows | NSIS | The four executables are siblings in the selected app directory | The installer calls `pap cli install`. It records ownership only when it inserts a current-user PATH entry. |
-| macOS | DMG app | `Private AI Gateway.app/Contents/MacOS` | The app registers the bundled CLI automatically on startup without elevation. |
-| Linux | DEB or RPM | `/usr/bin` | The package manager owns all four paths; no registration command is required. |
+| Windows | NSIS | The three executables are siblings in the selected app directory | The installer calls `pap cli install`. It records ownership only when it inserts a current-user PATH entry. |
+| macOS | DMG app | `Private AI Proxy.app/Contents/MacOS` | The app registers the bundled CLI automatically on startup without elevation. |
+| Linux | DEB or RPM | `/usr/bin` | The package manager owns all three paths; no registration command is required. |
 
 Windows install, upgrade, and uninstall hooks call `pap --yes service stop`
 before replacing or removing files. The installer holds the same `startup.lock`
@@ -44,7 +43,7 @@ The registration is idempotent and never replaces an unrelated command. To
 register manually without opening the app:
 
 ```bash
-"/Applications/Private AI Gateway.app/Contents/MacOS/pap" cli install
+"/Applications/Private AI Proxy.app/Contents/MacOS/pap" cli install
 ```
 
 The default command path is `~/.local/bin/pap`. The command creates a symlink
@@ -56,17 +55,17 @@ administrator context; `pap` never requests elevation itself.
 
 ## Standalone CLI
 
-Every platform publishes a portable archive containing the four sibling
+Every platform publishes a portable archive containing the three sibling
 executables and no desktop UI. Windows uses ZIP; macOS and Linux use tar.gz.
 Run `pap cli install` from a stable extracted location when PATH registration
 is wanted.
 
-Linux also publishes CLI-only DEB and RPM packages. They install the four real
+Linux also publishes CLI-only DEB and RPM packages. They install the three real
 executables under `/usr/libexec/private-ai-proxy` and a package-owned
 `/usr/bin/pap` symlink. This relies on `pap` canonicalizing itself before it
 locates `pap-service`. Package lifecycle scripts reject an unrelated owner of
 `/usr/bin/pap` and refuse replacement or removal while an exact bundled backend,
-ACI, or helper executable is still running. They do not invoke a user backend as
+verifier, or helper executable is still running. They do not invoke a user backend as
 root. Run `pap --yes service stop` as the owning user before a manual package
 upgrade; the in-app updater performs that user-context stop before invoking the
 native installer.

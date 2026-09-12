@@ -49,8 +49,8 @@ pub const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_IN_FLIGHT: usize = 64;
 const BODY_READ_TIMEOUT: Duration = Duration::from_secs(60);
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// Idle limit between upstream bytes; matches Claude Code's stream watchdog.
-const UPSTREAM_READ_TIMEOUT: Duration = Duration::from_secs(300);
+/// Receipt-verified responses may be held for 600 seconds; allow delivery overhead.
+const UPSTREAM_READ_TIMEOUT: Duration = Duration::from_secs(660);
 // Match the gateway's SSE limit: Responses terminal events repeat the full output.
 const MAX_USAGE_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SSE_LINE_BYTES: usize = MAX_USAGE_CAPTURE_BYTES;

@@ -85,6 +85,9 @@ fn load_launch_preferences(app: &AppHandle, client: &Client) -> Result<LaunchPre
 }
 
 fn refresh_preferences(app: &AppHandle, client: &Arc<Client>) {
+    if client.cached_state().backend_connected == Some(false) {
+        return;
+    }
     let app = app.clone();
     let client = client.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -717,10 +720,13 @@ async fn register_cli_on_startup(app: &AppHandle) {
     if state.attempted {
         return;
     }
-    state.attempted = true;
     let reader = app.state::<Arc<Client>>().inner().clone();
+    if reader.cached_state().backend_connected == Some(false) {
+        return;
+    }
     let enabled =
         run_blocking(move || Ok(reader.preferences()?.auto_cli_registration.unwrap_or(true))).await;
+    state.attempted = enabled.is_ok();
     let result = match enabled {
         Ok(true) => match allow_automatic_cli_registration() {
             Ok(()) => run_pap_cli(app, vec!["cli", "install", "--json"])

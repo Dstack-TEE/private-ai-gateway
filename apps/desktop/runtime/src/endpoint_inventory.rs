@@ -13,7 +13,7 @@ use reqwest::{
 use serde::Serialize;
 use tokio::sync::Mutex;
 
-const SOURCE: &str = "https://raw.githubusercontent.com/Dstack-TEE/private-ai-gateway/feat/private-ai-gateway-native-clients/apps/desktop/gateway/src/endpoint-support.json";
+const SOURCE: &str = "https://raw.githubusercontent.com/Dstack-TEE/private-ai-gateway/main/apps/desktop/gateway/src/endpoint-support.json";
 const MAX_BYTES: usize = 1024 * 1024;
 
 #[derive(Serialize)]

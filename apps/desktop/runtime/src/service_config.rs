@@ -1,7 +1,6 @@
 use std::{
     collections::HashSet,
     fs,
-    net::IpAddr,
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -287,12 +286,12 @@ fn normalize_url(value: &str) -> Result<String, String> {
                 .to_string(),
         );
     }
-    let loopback = url.host_str().is_some_and(|host| {
-        host.eq_ignore_ascii_case("localhost")
-            || host
-                .parse::<IpAddr>()
-                .is_ok_and(|address| address.is_loopback())
-    });
+    let loopback = match url.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    };
     if url.scheme() != "https" && !loopback {
         return Err(
             "Gateway URL must use HTTPS unless it points to localhost or a loopback address"
@@ -368,6 +367,8 @@ mod tests {
         assert!(resolve_profile(input("https://token@private.example.com"), None).is_err());
         assert!(resolve_profile(input("file:///tmp/gateway"), None).is_err());
         assert!(resolve_profile(input("http://private.example.com"), None).is_err());
+        assert!(resolve_profile(input("http://[::1]:8090"), None).is_ok());
+        assert!(resolve_profile(input("http://[fd00::1]:8090"), None).is_err());
         assert_eq!(
             resolve_profile(input("http://127.0.0.1:8090/"), None)
                 .unwrap()

@@ -62,9 +62,7 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
     let startup = runtime.clone();
     tasks.spawn_blocking(move || match preferences::load() {
         Ok(saved) if saved.connect_on_launch => {
-            let result = startup
-                .state()
-                .and_then(|state| startup.start(state.config));
+            let result = startup.start_on_launch();
             if let Err(error) = result {
                 startup.report_error(error);
             }

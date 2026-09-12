@@ -106,7 +106,8 @@ impl Observer {
         now: Instant,
     ) -> Vec<(&'static str, &'static str)> {
         let faults = [
-            matches!(state.status.as_str(), "blocked" | "error") || state.error.is_some(),
+            !state.reconnecting
+                && (matches!(state.status.as_str(), "blocked" | "error") || state.error.is_some()),
             state.endpoint_error.is_some(),
         ];
         let proof = if self.session == state.session_id {
