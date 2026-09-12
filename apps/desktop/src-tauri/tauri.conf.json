@@ -16,7 +16,7 @@
         "create": false,
         "title": "Private AI Proxy",
         "width": 1052,
-        "height": 784,
+        "height": 752,
         "minWidth": 720,
         "minHeight": 600,
         "resizable": true,
@@ -33,9 +33,12 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'",
-      "devCsp": "default-src 'self'; connect-src ipc: http://ipc.localhost ws://127.0.0.1:1420; img-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-src 'none'"
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' https://img.clerk.com https://images.clerk.dev https://clerk.redpill.ai; style-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'",
+      "devCsp": "default-src 'self'; connect-src ipc: http://ipc.localhost ws://127.0.0.1:1420; img-src 'self' https://img.clerk.com https://images.clerk.dev https://clerk.redpill.ai; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-src 'none'"
     }
+  },
+  "plugins": {
+    "deep-link": { "desktop": { "schemes": ["org.dstack.private-ai-proxy"] } }
   },
   "bundle": {
     "active": true,

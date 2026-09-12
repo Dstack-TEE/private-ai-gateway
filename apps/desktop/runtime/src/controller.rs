@@ -19,7 +19,7 @@ use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
 use crate::{
     contracts::{
         AgentPreview, AgentStatus, ConfidentialProfileInput, ConnectOptions, GatewayState,
-        LocalApiConfig, RequestActivity, StartGatewayConfig,
+        LocalApiConfig, RequestActivity, ServiceProvider, StartGatewayConfig,
     },
     gateway::{GatewayManager, SidecarLauncher},
     local_api::{self, ResolvedLocalApi},
@@ -34,6 +34,14 @@ pub struct RuntimeOptions {
 }
 
 pub struct DesktopRuntime {
+    balances: crate::balance_cache::BalanceCache,
+    account_login: tokio::sync::Mutex<Option<crate::account_login::PendingLogin>>,
+    account_save: Mutex<
+        Option<(
+            String,
+            tokio::sync::watch::Receiver<crate::contracts::AccountSaveResult>,
+        )>,
+    >,
     manager: Arc<GatewayManager>,
     proxy: Arc<ProxyState>,
     usage: Arc<UsageStore>,
@@ -48,6 +56,23 @@ pub struct DesktopRuntime {
     recovery: crate::recovery::Recovery,
     helper_path: PathBuf,
     instance: Option<lock::InstanceLock>,
+}
+
+struct SavedConfiguration<'a> {
+    config: StartGatewayConfig,
+    reconnect: bool,
+    // Keep mutations serialized until the post-save restart has completed.
+    _operation: tokio::sync::MutexGuard<'a, ()>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RetiredCredential {
+    profile_id: String,
+    action: String,
+    provider: crate::contracts::ServiceProvider,
+    key: String,
+    entry: String,
+    revoke: bool,
 }
 
 struct ClientCredentials(Mutex<ClientCredentialState>);
@@ -293,6 +318,9 @@ impl DesktopRuntime {
             usage,
             secrets,
             credentials: ClientCredentials::new()?,
+            account_login: tokio::sync::Mutex::new(None),
+            account_save: Mutex::new(None),
+            balances: crate::balance_cache::BalanceCache::default(),
             legacy_credential_pending: Mutex::new(migrated_legacy),
             endpoint: EndpointRuntime::new(task_runtime.clone()),
             codex_sync: CodexCatalogSync::default(),
@@ -385,6 +413,25 @@ impl DesktopRuntime {
                 events_runtime.manager.record_proxy_event(event);
             }
         });
+        let weak = Arc::downgrade(&runtime);
+        task_runtime.spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                let Some(runtime) = weak.upgrade() else {
+                    break;
+                };
+                if runtime.exiting.load(Ordering::Acquire) {
+                    break;
+                }
+                if app_data_dir().is_ok_and(|path| path.join("account-cleanup.pending").exists()) {
+                    if let Ok(_operation) = runtime.lifecycle.try_lock() {
+                        if let Err(error) = runtime.cleanup_retired().await {
+                            runtime.manager.report_error(error);
+                        }
+                    }
+                }
+            }
+        });
         Ok(runtime)
     }
 
@@ -428,7 +475,14 @@ impl DesktopRuntime {
     }
 
     fn load_profile_key(&self, profile_id: &str) -> Result<Option<String>, String> {
-        let entry = service_config::credential_entry(profile_id)?;
+        let profile = self
+            .manager
+            .snapshot()?
+            .profiles
+            .into_iter()
+            .find(|p| p.id == profile_id)
+            .ok_or("Profile not found")?;
+        let entry = service_config::profile_credential_entry(&profile)?;
         let stored_key = self.secrets.get(&entry)?;
 
         let mut pending = self
@@ -675,12 +729,441 @@ impl DesktopRuntime {
         self.manager.report_error(message);
     }
 
+    fn cleanup_manifest(&self) -> Result<Vec<String>, String> {
+        let path = app_data_dir()?.join("account-cleanup.pending");
+        match std::fs::read_to_string(&path) {
+            Ok(value) => match serde_json::from_str(&value) {
+                Ok(entries) => Ok(entries),
+                Err(_) => {
+                    let quarantine =
+                        path.with_extension(format!("{}.corrupt", uuid::Uuid::new_v4()));
+                    std::fs::rename(&path, quarantine).map_err(|_| {
+                        "Account: Cannot isolate damaged credential cleanup manifest."
+                    })?;
+                    self.manager.report_error("Account: Damaged credential cleanup records were isolated. Review unused Private AI Proxy keys in your provider console.".into());
+                    Ok(Vec::new())
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(_) => Err("Account: Cannot read credential cleanup manifest.".into()),
+        }
+    }
+
+    fn save_cleanup_manifest(&self, entries: &[String]) -> Result<(), String> {
+        let path = app_data_dir()?.join("account-cleanup.pending");
+        if entries.is_empty() {
+            if path.exists() {
+                std::fs::remove_file(path).map_err(|_| "Cannot finish credential cleanup")?;
+            }
+            return Ok(());
+        }
+        desktop_gateway::agents::write_atomic(
+            &path,
+            &serde_json::to_string(entries).map_err(|_| "Cannot encode cleanup manifest")?,
+            None,
+        )
+        .map_err(|_| "Cannot save credential cleanup manifest".into())
+    }
+
+    fn queue_retired(&self, retired: RetiredCredential) -> Result<(), String> {
+        let mut entries = self.cleanup_manifest()?;
+        for entry in &entries {
+            if let Some(value) = self.secrets.get(entry)? {
+                let previous: RetiredCredential = serde_json::from_str(&value)
+                    .map_err(|_| "Account: Credential cleanup record needs repair.")?;
+                if previous.key == retired.key && previous.action == retired.action {
+                    // Re-login may select a new local ref for the same stable key.
+                    self.secrets.set(
+                        entry,
+                        &serde_json::to_string(&retired).map_err(|_| "Cannot encode cleanup")?,
+                    )?;
+                    return Ok(());
+                }
+            }
+        }
+        if entries.len() >= 128 {
+            return Err(
+                "Account: Credential cleanup queue is full. Reconnect and retry cleanup.".into(),
+            );
+        }
+        let entry = format!("account-cleanup-{}", uuid::Uuid::new_v4());
+        entries.push(entry.clone());
+        // Manifest first: interrupted enqueue leaves at most a missing entry,
+        // never a secret with no recoverable cleanup reference.
+        self.save_cleanup_manifest(&entries)?;
+        self.secrets.set(
+            &entry,
+            &serde_json::to_string(&retired).map_err(|_| "Cannot encode cleanup")?,
+        )
+    }
+
+    async fn cleanup_retired(&self) -> Result<(), String> {
+        let mut records = Vec::new();
+        for entry in self.cleanup_manifest()? {
+            if let Some(value) = self.secrets.get(&entry)? {
+                let record: RetiredCredential = serde_json::from_str(&value)
+                    .map_err(|_| "Account: Credential cleanup record needs repair.")?;
+                records.push((entry, record));
+            }
+        }
+        records.sort_by_key(|(_, record)| record.action != "activate");
+        let profiles = self.manager.snapshot()?.profiles;
+        let mut selected = Vec::new();
+        for profile in profiles
+            .iter()
+            .filter(|p| service_config::profile_has_credential(p))
+        {
+            let entry = service_config::profile_credential_entry(profile)?;
+            if let Some(secret) = self.secrets.get(&entry)? {
+                selected.push((entry, secret));
+            }
+        }
+        let mut remaining = Vec::new();
+        let mut waiting_activation = std::collections::HashSet::new();
+        for (index, (entry, record)) in records.into_iter().enumerate() {
+            if index >= 4 {
+                remaining.push(entry);
+                continue;
+            }
+            let in_use = selected.iter().any(|(_, key)| key == &record.key);
+            let referenced = selected.iter().any(|(active, _)| active == &record.entry);
+            if (record.action == "activate" && !in_use) || (record.action == "revoke" && in_use) {
+                if !referenced {
+                    self.secrets.delete(&record.entry)?;
+                }
+                self.secrets.delete(&entry)?;
+                continue;
+            }
+            if record.action == "revoke" && waiting_activation.contains(&record.profile_id) {
+                remaining.push(entry);
+                continue;
+            }
+            if record.revoke {
+                match crate::account_login::transition_credential(
+                    &record.provider,
+                    &record.key,
+                    &record.action,
+                )
+                .await
+                {
+                    Err(_) => {
+                        if record.action == "activate" {
+                            waiting_activation.insert(record.profile_id);
+                        }
+                        remaining.push(entry);
+                        continue;
+                    }
+                    Ok(crate::account_login::CredentialTransition::Unavailable)
+                        if record.action == "activate" =>
+                    {
+                        self.manager.report_error("Account: This device authorization is no longer active. Sign in again to reconnect.".into());
+                    }
+                    _ => {}
+                }
+            }
+            if !referenced {
+                self.secrets.delete(&record.entry)?;
+            }
+            self.secrets.delete(&entry)?;
+        }
+        self.save_cleanup_manifest(&remaining)
+    }
+
+    async fn cancel_pending(
+        &self,
+        pending: &mut crate::account_login::PendingLogin,
+    ) -> Result<(), String> {
+        let profile =
+            self.manager.snapshot()?.profiles.into_iter().find(|p| {
+                p.id == pending.profile_id() && service_config::profile_has_credential(p)
+            });
+        let key = match profile {
+            Some(profile) => self
+                .secrets
+                .get(&service_config::profile_credential_entry(&profile)?)?,
+            None => None,
+        };
+        pending.protect_saved_key(key.as_deref()).await;
+        pending.cancel().await
+    }
+
+    pub async fn begin_account_login(
+        self: &Arc<Self>,
+        profile: ConfidentialProfileInput,
+    ) -> Result<crate::account_login::LoginPresentation, String> {
+        let mut slot = self.account_login.try_lock().map_err(|_| {
+            "Account: An account operation is in progress. Finish it before signing in again."
+        })?;
+        if let Some(pending) = slot.as_mut() {
+            if pending.is_active() && pending.profile_id() != profile.id {
+                return Err(
+                    "Account: Another sign-in is open. Finish or cancel it in the other window."
+                        .into(),
+                );
+            }
+            self.cancel_pending(pending).await?;
+        }
+        *slot = None;
+        let pending = crate::account_login::begin(profile).await?;
+        let presentation = pending.presentation.clone();
+        *slot = Some(pending);
+        Ok(presentation)
+    }
+
+    pub async fn poll_account_login(
+        self: &Arc<Self>,
+        id: String,
+    ) -> Result<Option<crate::contracts::AccountLoginDetails>, String> {
+        self.account_login
+            .lock()
+            .await
+            .as_mut()
+            .ok_or("Account login is no longer active")?
+            .poll(&id)
+            .await
+    }
+
+    pub fn begin_account_save(
+        self: &Arc<Self>,
+        operation_id: String,
+        id: String,
+        profile: ConfidentialProfileInput,
+        require_production_os: bool,
+        workspace_id: Option<i64>,
+    ) -> Result<crate::contracts::AccountSaveResult, String> {
+        use crate::contracts::AccountSaveResult;
+        uuid::Uuid::parse_str(&operation_id).map_err(|_| "Invalid save operation ID")?;
+        let mut operation = self
+            .account_save
+            .lock()
+            .map_err(|_| "Account save unavailable")?;
+        if let Some((previous_id, result)) = operation.as_ref() {
+            if previous_id == &operation_id {
+                return Ok(result.borrow().clone());
+            }
+            if matches!(*result.borrow(), AccountSaveResult::Running) {
+                return Ok(AccountSaveResult::Failed {
+                    error: "Account: Another save is in progress. Wait for it to finish.".into(),
+                });
+            }
+        }
+        let (sender, receiver) = tokio::sync::watch::channel(AccountSaveResult::Running);
+        *operation = Some((operation_id, receiver));
+        let runtime = self.clone();
+        // The operation belongs to the service, not to the lifetime of an IPC
+        // request. A reconnect can read its final outcome without issuing again.
+        tokio::spawn(async move {
+            let result = match runtime
+                .save_account_login(id, profile, require_production_os, workspace_id)
+                .await
+            {
+                Ok(state) => AccountSaveResult::Complete {
+                    state: Box::new(state),
+                },
+                Err(error) => AccountSaveResult::Failed {
+                    error: crate::protocol::RpcError::operation(&error).message,
+                },
+            };
+            sender.send_replace(result);
+        });
+        Ok(AccountSaveResult::Running)
+    }
+
+    pub fn account_save_result(
+        &self,
+        operation_id: &str,
+    ) -> Result<crate::contracts::AccountSaveResult, String> {
+        let operation = self
+            .account_save
+            .lock()
+            .map_err(|_| "Account save unavailable")?;
+        let (_, result) = operation
+            .as_ref()
+            .filter(|(id, _)| id == operation_id)
+            .ok_or(
+                "Account: Save outcome is unavailable. Check the saved profile before retrying.",
+            )?;
+        let outcome = result.borrow().clone();
+        if matches!(outcome, crate::contracts::AccountSaveResult::Running)
+            && result.has_changed().is_err()
+        {
+            return Ok(crate::contracts::AccountSaveResult::Failed {
+                error: "Account: Save was interrupted. Check the saved profile before retrying."
+                    .into(),
+            });
+        }
+        Ok(outcome)
+    }
+
+    pub async fn save_account_login(
+        self: &Arc<Self>,
+        id: String,
+        profile: ConfidentialProfileInput,
+        require_production_os: bool,
+        workspace_id: Option<i64>,
+    ) -> Result<GatewayState, String> {
+        let mut slot = self.account_login.lock().await;
+        let credential = slot
+            .as_mut()
+            .ok_or("Account login is no longer active")?
+            .credential(&id, &profile, workspace_id)
+            .await?;
+        let saved = self
+            .persist_configuration(
+                profile,
+                require_production_os,
+                Some(credential.key.clone()),
+                Some(credential.auth),
+                false,
+            )
+            .await?;
+        if let Some(pending) = slot.as_mut() {
+            pending.mark_saved();
+        }
+        *slot = None;
+        self.finish_configuration(saved)
+    }
+
+    pub async fn complete_account_login(
+        &self,
+        id: String,
+        callback_url: String,
+    ) -> Result<(), String> {
+        self.account_login
+            .lock()
+            .await
+            .as_ref()
+            .ok_or("Account login is no longer active")?
+            .complete_callback(&id, &callback_url)
+            .await
+    }
+
+    pub async fn save_configuration(
+        self: &Arc<Self>,
+        profile: ConfidentialProfileInput,
+        require_production_os: bool,
+        key: Option<String>,
+    ) -> Result<GatewayState, String> {
+        let saved = self
+            .persist_configuration(profile, require_production_os, key, None, false)
+            .await?;
+        self.finish_configuration(saved)
+    }
+
+    pub async fn account_details(
+        &self,
+        profile_id: String,
+    ) -> Result<crate::contracts::AccountLoginDetails, String> {
+        use crate::contracts::{ProfileAuth, ServiceProvider};
+        let state = self.manager.snapshot()?;
+        let profile = state
+            .profiles
+            .iter()
+            .find(|p| p.id == profile_id)
+            .ok_or("Profile not found")?;
+        if profile.provider != ServiceProvider::Redpill
+            || !matches!(profile.auth, ProfileAuth::OAuth { .. })
+        {
+            return Err("Sign in with RedPill to select a workspace".into());
+        }
+        let entry = service_config::profile_credential_entry(profile)?;
+        let key = self
+            .secrets
+            .get(&entry)?
+            .ok_or("This profile has no saved credential")?;
+        crate::account_login::account_details(&key).await
+    }
+
+    pub async fn account_balance(
+        &self,
+        target: crate::contracts::AccountBalanceTarget,
+    ) -> Result<Option<crate::contracts::AccountBalance>, String> {
+        use crate::contracts::{AccountBalanceTarget, ProfileAuth};
+        match target {
+            AccountBalanceTarget::Login { id } => {
+                self.balances
+                    .get(format!("login:{id}"), async {
+                        let (provider, secret) = self
+                            .account_login
+                            .lock()
+                            .await
+                            .as_mut()
+                            .ok_or("Account login is no longer active")?
+                            .balance_credential(&id)
+                            .await?;
+                        crate::account_login::account_balance(&provider, &secret).await
+                    })
+                    .await
+            }
+            AccountBalanceTarget::Profile { profile_id } => {
+                let state = self.manager.snapshot()?;
+                let profile = state
+                    .profiles
+                    .iter()
+                    .find(|p| p.id == profile_id)
+                    .ok_or("Profile not found")?;
+                if !matches!(profile.auth, ProfileAuth::OAuth { .. })
+                    || !service_config::profile_has_credential(profile)
+                {
+                    return Err("Sign in with an account to view its balance".into());
+                }
+                let entry = service_config::profile_credential_entry(profile)?;
+                self.balances
+                    .get(format!("profile:{profile_id}:{entry}"), async {
+                        let key = self
+                            .secrets
+                            .get(&entry)?
+                            .ok_or("This profile has no saved credential")?;
+                        crate::account_login::account_balance(&profile.provider, &key).await
+                    })
+                    .await
+            }
+        }
+    }
+
+    pub async fn cancel_account_login(&self, id: String) -> Result<(), String> {
+        let mut slot = self.account_login.lock().await;
+        if let Some(pending) = slot
+            .as_mut()
+            .filter(|pending| pending.presentation.id == id)
+        {
+            self.cancel_pending(pending).await?;
+            *slot = None;
+        }
+        Ok(())
+    }
+
     pub async fn verify_configuration(
         self: &Arc<Self>,
         profile: ConfidentialProfileInput,
         require_production_os: bool,
         key: Option<String>,
     ) -> Result<GatewayState, String> {
+        let saved = self
+            .persist_configuration(profile, require_production_os, key, None, true)
+            .await?;
+        self.finish_configuration(saved)
+    }
+
+    fn finish_configuration(
+        self: &Arc<Self>,
+        saved: SavedConfiguration<'_>,
+    ) -> Result<GatewayState, String> {
+        if saved.reconnect {
+            self.start_inner(saved.config)
+        } else {
+            self.manager.snapshot()
+        }
+    }
+
+    async fn persist_configuration(
+        self: &Arc<Self>,
+        profile: ConfidentialProfileInput,
+        require_production_os: bool,
+        key: Option<String>,
+        auth: Option<crate::contracts::ProfileAuth>,
+        verify: bool,
+    ) -> Result<SavedConfiguration<'_>, String> {
         let _operation = self.configuration_change()?;
         let initial = self.manager.snapshot()?;
         if initial.status == "verifying" {
@@ -699,20 +1182,33 @@ impl DesktopRuntime {
             .find(|entry| entry.id == profile.id)
             .cloned();
         let mut candidate =
-            service_config::resolve_profile(profile, Some(service_config::now_secs()))?;
+            service_config::resolve_profile(profile, verify.then(service_config::now_secs))?;
+        if let Some(auth) = auth {
+            candidate.auth = auth;
+        } else if key.is_none() {
+            if let Some(existing) = &existing {
+                candidate.auth = existing.auth.clone();
+            }
+        }
         let profile_changed = existing.as_ref().is_none_or(|existing| {
             existing.provider != candidate.provider
                 || existing.remote_url != candidate.remote_url
                 || existing.auth != candidate.auth
         });
-        let candidate_entry = service_config::credential_entry(&candidate.id)?;
         let replace_key = key.is_some();
-        let stored_candidate_key = if replace_key {
-            self.secrets.get(&candidate_entry)?
-        } else if !profile_changed {
-            self.load_profile_key(&candidate.id)?
+        candidate.credential_ref = if replace_key {
+            Some(format!("credential-{}", uuid::Uuid::new_v4()))
         } else {
-            None
+            existing.as_ref().and_then(|p| p.credential_ref.clone())
+        };
+        let candidate_entry = service_config::profile_credential_entry(&candidate)?;
+        let previous_entry = existing
+            .as_ref()
+            .map(service_config::profile_credential_entry)
+            .transpose()?;
+        let stored_candidate_key = match &previous_entry {
+            Some(entry) => self.secrets.get(entry)?,
+            None => None,
         };
         let candidate_key = match key {
             Some(key) => validate_api_key(&key)?,
@@ -743,42 +1239,67 @@ impl DesktopRuntime {
         let previous = self.manager.snapshot()?;
 
         self.codex_sync.reset()?;
-        self.proxy.set_api_key(Some(candidate_key.clone()));
-        let started = match self
-            .manager
-            .clone()
-            .begin_verification(config.clone(), profile_changed)
-        {
-            Ok(state) => state,
-            Err(error) => {
+        if verify {
+            self.proxy.set_api_key(Some(candidate_key.clone()));
+            let started = match self
+                .manager
+                .clone()
+                .begin_verification(config.clone(), profile_changed)
+            {
+                Ok(state) => state,
+                Err(error) => {
+                    self.proxy.set_api_key(None);
+                    return Err(error);
+                }
+            };
+            let Some(session_id) = started.session_id.clone() else {
+                let _ = self.manager.stop();
                 self.proxy.set_api_key(None);
+                self.manager.restore_snapshot(previous);
+                return Err("Configuration verification did not start".to_string());
+            };
+            let verified = self.manager.wait_for_verification(&session_id).await;
+            let stop_result = self.manager.stop_with_reconnect(initial.session_active);
+            if let Err(error) = verified {
+                self.proxy.set_api_key(None);
+                self.manager.restore_snapshot(previous);
+                return Err(match stop_result {
+                    Ok(_) => error,
+                    Err(stop_error) => {
+                        format!("{error}. The verifier also could not stop: {stop_error}")
+                    }
+                });
+            }
+            if let Err(error) = stop_result {
+                self.proxy.set_api_key(None);
+                self.manager.restore_snapshot(previous);
                 return Err(error);
             }
-        };
-        let Some(session_id) = started.session_id.clone() else {
-            let _ = self.manager.stop();
+        } else {
+            self.manager.stop_with_reconnect(initial.session_active)?;
             self.proxy.set_api_key(None);
-            self.manager.restore_snapshot(previous);
-            return Err("Configuration verification did not start".to_string());
-        };
-        let verified = self.manager.wait_for_verification(&session_id).await;
-        let stop_result = self.manager.stop_with_reconnect(initial.session_active);
-        if let Err(error) = verified {
-            self.proxy.set_api_key(None);
-            self.manager.restore_snapshot(previous);
-            return Err(match stop_result {
-                Ok(_) => error,
-                Err(stop_error) => {
-                    format!("{error}. The verifier also could not stop: {stop_error}")
-                }
-            });
-        }
-        if let Err(error) = stop_result {
-            self.proxy.set_api_key(None);
-            self.manager.restore_snapshot(previous);
-            return Err(error);
         }
 
+        let retiring = existing
+            .as_ref()
+            .zip(stored_candidate_key.as_ref())
+            .filter(|_| replace_key);
+        if let Some((old, old_key)) = retiring {
+            if let Err(error) = self.queue_retired(RetiredCredential {
+                profile_id: candidate.id.clone(),
+                action: "revoke".into(),
+                provider: old.provider.clone(),
+                key: old_key.clone(),
+                entry: service_config::profile_credential_entry(old)?,
+                revoke: old.provider == ServiceProvider::Redpill
+                    && old_key != &candidate_key
+                    && matches!(old.auth, crate::contracts::ProfileAuth::OAuth { .. }),
+            }) {
+                self.proxy.set_api_key(None);
+                self.manager.restore_snapshot(previous);
+                return Err(error);
+            }
+        }
         if replace_key {
             if let Err(error) = self.secrets.set(&candidate_entry, &candidate_key) {
                 self.proxy.set_api_key(None);
@@ -786,19 +1307,32 @@ impl DesktopRuntime {
                 return Err(error);
             }
         }
+        if replace_key
+            && candidate.provider == ServiceProvider::Redpill
+            && matches!(candidate.auth, crate::contracts::ProfileAuth::OAuth { .. })
+        {
+            if let Err(error) = self.queue_retired(RetiredCredential {
+                profile_id: candidate.id.clone(),
+                action: "activate".into(),
+                provider: candidate.provider.clone(),
+                key: candidate_key.clone(),
+                entry: candidate_entry.clone(),
+                revoke: true,
+            }) {
+                let cleanup = self.secrets.delete(&candidate_entry);
+                self.proxy.set_api_key(None);
+                self.manager.restore_snapshot(previous);
+                return Err(cleanup.err().unwrap_or(error));
+            }
+        }
         let settings = match service_config::save(settings) {
             Ok(settings) => settings,
             Err(error) => {
-                let restore_error = replace_key
-                    .then(|| {
-                        restore_secret_entry(
-                            &*self.secrets,
-                            &candidate_entry,
-                            stored_candidate_key.as_deref(),
-                        )
-                        .err()
-                    })
-                    .flatten();
+                let restore_error = if replace_key {
+                    self.secrets.delete(&candidate_entry).err()
+                } else {
+                    None
+                };
                 self.proxy.set_api_key(None);
                 self.manager.restore_snapshot(previous);
                 return Err(match restore_error {
@@ -815,13 +1349,16 @@ impl DesktopRuntime {
             settings.profiles,
             settings.active_profile_id,
             true,
-            true,
+            verify,
         );
-        if reconnect {
-            self.start_inner(config)
-        } else {
-            self.manager.snapshot()
+        if let Err(error) = self.cleanup_retired().await {
+            self.manager.report_error(error);
         }
+        Ok(SavedConfiguration {
+            config,
+            reconnect,
+            _operation,
+        })
     }
 
     pub fn activate_profile(self: &Arc<Self>, profile_id: String) -> Result<GatewayState, String> {
@@ -872,7 +1409,7 @@ impl DesktopRuntime {
         }
     }
 
-    pub fn delete_profile(&self, profile_id: String) -> Result<GatewayState, String> {
+    pub async fn delete_profile(&self, profile_id: String) -> Result<GatewayState, String> {
         let _operation = self.configuration_change()?;
         if self.manager.is_running()? {
             return Err("Stop protection before deleting a profile".to_string());
@@ -890,8 +1427,22 @@ impl DesktopRuntime {
             .find(|profile| profile.id == profile_id)
             .cloned()
             .ok_or_else(|| "Confidential AI profile not found".to_string())?;
-        let entry = service_config::credential_entry(&removed.id)?;
+        let entry = service_config::profile_credential_entry(&removed)?;
         let removed_key = self.secrets.get(&entry)?;
+        if removed.provider == ServiceProvider::Redpill
+            && matches!(removed.auth, crate::contracts::ProfileAuth::OAuth { .. })
+        {
+            if let Some(key) = &removed_key {
+                self.queue_retired(RetiredCredential {
+                    profile_id: removed.id.clone(),
+                    action: "revoke".into(),
+                    provider: removed.provider.clone(),
+                    key: key.clone(),
+                    entry: entry.clone(),
+                    revoke: true,
+                })?;
+            }
+        }
         self.secrets.delete(&entry)?;
         settings.profiles.retain(|profile| profile.id != profile_id);
         if settings.profiles.is_empty() {
@@ -930,7 +1481,7 @@ impl DesktopRuntime {
         self.manager.snapshot()
     }
 
-    pub fn clear_api_key(&self) -> Result<GatewayState, String> {
+    pub async fn clear_api_key(&self) -> Result<GatewayState, String> {
         let _operation = self.configuration_change()?;
         if self.manager.is_running()? {
             return Err("Stop protection before deleting a profile credential".to_string());
@@ -939,8 +1490,33 @@ impl DesktopRuntime {
         if state.active_profile_id.is_empty() {
             return Err("There is no active Confidential AI profile".to_string());
         }
-        let entry = service_config::credential_entry(&state.active_profile_id)?;
+        let profile = state
+            .profiles
+            .iter()
+            .find(|p| p.id == state.active_profile_id)
+            .ok_or("Profile not found")?;
+        let entry = service_config::profile_credential_entry(profile)?;
         let previous_key = self.secrets.get(&entry)?;
+        if let Some(profile) = state
+            .profiles
+            .iter()
+            .find(|p| p.id == state.active_profile_id)
+        {
+            if profile.provider == ServiceProvider::Redpill
+                && matches!(profile.auth, crate::contracts::ProfileAuth::OAuth { .. })
+            {
+                if let Some(key) = &previous_key {
+                    self.queue_retired(RetiredCredential {
+                        profile_id: profile.id.clone(),
+                        action: "revoke".into(),
+                        provider: profile.provider.clone(),
+                        key: key.clone(),
+                        entry: entry.clone(),
+                        revoke: true,
+                    })?;
+                }
+            }
+        }
         self.secrets.delete(&entry)?;
         let mut settings = service_config::settings_from_state(
             state.profiles,
@@ -1522,8 +2098,11 @@ mod tests {
             manager,
             proxy,
             usage,
-            secrets: Arc::new(KeyringStore),
+            secrets: Arc::new(desktop_gateway::secrets::MemoryStore::default()),
             credentials: ClientCredentials::from_files(TokenFiles::new(directory)),
+            account_login: tokio::sync::Mutex::new(None),
+            account_save: Mutex::new(None),
+            balances: crate::balance_cache::BalanceCache::default(),
             legacy_credential_pending: Mutex::new(false),
             endpoint: EndpointRuntime::new(executor.handle().clone()),
             codex_sync: CodexCatalogSync::default(),
@@ -1534,6 +2113,289 @@ mod tests {
             recovery: crate::recovery::Recovery::default(),
             instance: None,
         })
+    }
+
+    #[test]
+    fn completed_authorization_is_staged_until_explicit_save_and_bound_to_its_provider() {
+        use crate::{
+            account_login::{Authorization, Credential, LoginPresentation, PendingLogin},
+            contracts::{ProfileAuth, ServiceProvider},
+        };
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(&executor, directory.path());
+        executor.block_on(async {
+            let profile = ConfidentialProfileInput {
+                id: "profile-test".into(),
+                name: "Phala".into(),
+                provider: ServiceProvider::Phala,
+                remote_url: "https://inference.phala.com".into(),
+            };
+            let auth = ProfileAuth::OAuth {
+                account_id: "account-test".into(),
+                account_name: Some("Personal".into()),
+                images: None,
+                scope: None,
+            };
+            let expected = auth.clone();
+            let worker = tokio::spawn(async move {
+                Ok(Authorization::Inference(Credential {
+                    key: "secret-not-for-the-renderer".into(),
+                    auth,
+                }))
+            });
+            *runtime.account_login.lock().await = Some(PendingLogin::new(
+                LoginPresentation {
+                    id: "login-test".into(),
+                    url: "https://cloud.phala.com/cli/verify".into(),
+                    user_code: None,
+                },
+                profile.clone(),
+                worker,
+            ));
+            let completed = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                loop {
+                    if let Some(auth) = runtime
+                        .poll_account_login("login-test".into())
+                        .await
+                        .unwrap()
+                    {
+                        break auth;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(completed.auth, expected);
+            assert!(!serde_json::to_string(&completed)
+                .unwrap()
+                .contains("secret-not-for-the-renderer"));
+            assert_eq!(
+                runtime
+                    .poll_account_login("login-test".into())
+                    .await
+                    .unwrap()
+                    .map(|details| details.auth),
+                Some(expected)
+            );
+            assert!(runtime.state().unwrap().profiles.is_empty());
+            let different_provider = ConfidentialProfileInput {
+                provider: ServiceProvider::Redpill,
+                remote_url: "https://tee.redpill.ai".into(),
+                ..profile
+            };
+            assert_eq!(
+                runtime
+                    .save_account_login("login-test".into(), different_provider, true, None)
+                    .await
+                    .unwrap_err(),
+                "Sign in again for the selected provider"
+            );
+            // A different editor must not replace the active authorization.
+            let other = ConfidentialProfileInput {
+                id: "another-profile".into(),
+                name: "Other".into(),
+                provider: ServiceProvider::Custom,
+                remote_url: "https://example.com".into(),
+            };
+            assert!(runtime
+                .begin_account_login(other.clone())
+                .await
+                .err()
+                .unwrap()
+                .contains("other window"));
+            // Simulate a saved authorization left behind by a closed window.
+            runtime
+                .account_login
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .mark_saved();
+            let reopened = ConfidentialProfileInput {
+                id: "profile-test".into(),
+                ..other
+            };
+            assert_eq!(
+                runtime.begin_account_login(reopened).await.err().unwrap(),
+                "Account login is only available for Phala and RedPill"
+            );
+            assert!(runtime.state().unwrap().profiles.is_empty());
+            assert!(runtime.account_login.lock().await.is_none());
+            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        });
+    }
+
+    #[test]
+    fn offline_removal_queues_cleanup_and_uncommitted_retirement_preserves_active_key() {
+        const CHILD: &str = "PAP_TEST_CREDENTIAL_CLEANUP";
+        if std::env::var_os(CHILD).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "controller::tests::offline_removal_queues_cleanup_and_uncommitted_retirement_preserves_active_key", "--nocapture"])
+                .env(CHILD, "1").env(desktop_gateway::agents::HOME_OVERRIDE_ENV, home.path()).output().unwrap();
+            assert!(
+                output.status.success(),
+                "{} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let directory = app_data_dir().unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        let runtime = test_runtime(&executor, &directory);
+        std::fs::write(directory.join("account-cleanup.pending"), "invalid JSON").unwrap();
+        assert!(runtime.cleanup_manifest().unwrap().is_empty());
+        assert!(!directory.join("account-cleanup.pending").exists());
+        assert!(runtime.cleanup_manifest().unwrap().is_empty());
+        let mut profile = service_config::resolve_profile(
+            ConfidentialProfileInput {
+                id: "profile-test".into(),
+                name: "Test".into(),
+                provider: crate::contracts::ServiceProvider::Redpill,
+                remote_url: "https://tee.redpill.ai".into(),
+            },
+            Some(1),
+        )
+        .unwrap();
+        profile.credential_ref = Some("credential-old".into());
+        profile.credential_saved = Some(true);
+        profile.auth = crate::contracts::ProfileAuth::OAuth {
+            account_id: "user_test".into(),
+            account_name: None,
+            images: None,
+            scope: None,
+        };
+        let entry = service_config::profile_credential_entry(&profile).unwrap();
+        runtime.secrets.set(&entry, "old-secret").unwrap();
+        let config = StartGatewayConfig {
+            remote_url: profile.remote_url.clone(),
+            require_production_os: true,
+        };
+        runtime.manager.set_service_configuration(
+            config,
+            vec![profile.clone()],
+            profile.id.clone(),
+            true,
+            false,
+        );
+        runtime
+            .queue_retired(RetiredCredential {
+                profile_id: profile.id.clone(),
+                action: "revoke".into(),
+                provider: profile.provider.clone(),
+                key: "old-secret".into(),
+                entry: entry.clone(),
+                revoke: true,
+            })
+            .unwrap();
+        // A new local ref can select the same stable provider secret.
+        let mut reselected = profile.clone();
+        reselected.credential_ref = Some("credential-new".into());
+        let selected_entry = service_config::profile_credential_entry(&reselected).unwrap();
+        runtime.secrets.set(&selected_entry, "old-secret").unwrap();
+        let config = runtime.state().unwrap().config;
+        runtime.manager.set_service_configuration(
+            config,
+            vec![reselected],
+            profile.id.clone(),
+            true,
+            false,
+        );
+        executor.block_on(runtime.cleanup_retired()).unwrap();
+        assert!(runtime.secrets.get(&entry).unwrap().is_none());
+        assert_eq!(
+            runtime.secrets.get(&selected_entry).unwrap().as_deref(),
+            Some("old-secret")
+        );
+        executor
+            .block_on(runtime.delete_profile(profile.id))
+            .unwrap();
+        assert!(runtime.state().unwrap().profiles.is_empty());
+        assert!(runtime.secrets.get(&entry).unwrap().is_none());
+        let entries = runtime.cleanup_manifest().unwrap();
+        assert_eq!(entries.len(), 1);
+        let pending: RetiredCredential =
+            serde_json::from_str(&runtime.secrets.get(&entries[0]).unwrap().unwrap()).unwrap();
+        assert_eq!(pending.action, "revoke");
+        assert!(directory.join("account-cleanup.pending").exists());
+    }
+
+    #[test]
+    fn saving_an_offline_profile_does_not_launch_verification() {
+        const CHILD: &str = "PAP_TEST_SAVE_WITHOUT_VERIFY";
+        if std::env::var_os(CHILD).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "controller::tests::saving_an_offline_profile_does_not_launch_verification",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env(desktop_gateway::agents::HOME_OVERRIDE_ENV, home.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let directory = app_data_dir().unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        let runtime = test_runtime(&executor, &directory);
+        let profile = ConfidentialProfileInput {
+            id: "offline".into(),
+            name: "Offline".into(),
+            provider: crate::contracts::ServiceProvider::Custom,
+            remote_url: "https://offline.invalid".into(),
+        };
+        let saved = executor
+            .block_on(runtime.save_configuration(profile, true, Some("test-key".into())))
+            .unwrap();
+        assert_eq!(saved.active_profile_id, "offline");
+        assert_eq!(saved.status, "stopped");
+        assert!(saved.profiles[0].verified_at.is_none());
+        assert!(service_config::profile_has_credential(&saved.profiles[0]));
+        assert!(
+            runtime.start(saved.config).is_err(),
+            "Start must invoke the missing verifier"
+        );
+    }
+
+    #[test]
+    fn busy_save_is_a_definite_rejection_not_an_unknown_operation() {
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(&executor, directory.path());
+        let (_sender, receiver) =
+            tokio::sync::watch::channel(crate::contracts::AccountSaveResult::Running);
+        *runtime.account_save.lock().unwrap() = Some((uuid::Uuid::new_v4().to_string(), receiver));
+        let profile = ConfidentialProfileInput {
+            id: "profile-test".into(),
+            name: "Test".into(),
+            provider: crate::contracts::ServiceProvider::Redpill,
+            remote_url: "https://tee.redpill.ai".into(),
+        };
+        let result = runtime
+            .begin_account_save(
+                uuid::Uuid::new_v4().to_string(),
+                "login-test".into(),
+                profile,
+                true,
+                None,
+            )
+            .unwrap();
+        assert!(
+            matches!(result, crate::contracts::AccountSaveResult::Failed { error } if error.contains("Another save"))
+        );
     }
 
     #[test]

@@ -34,6 +34,21 @@ macOS acceptance testing. Browser geometry checks cannot replace that work.
 | Sheets | Clear dismissal and one default action | Complex dialogs use native child-window hosts with HTML content; browser previews use HTML dialog elements. OS confirmation and file pickers use Tauri plugins. |
 | Accessibility | Don't rely on colour alone; keyboard access | State labels remain explicit even without an icon. Focus, contrast and reduced-motion behavior have renderer coverage; VoiceOver remains a native acceptance item. |
 
+## Account form consistency
+
+Provider selection uses three outlined buttons with provider icons. Account and
+API key use the shared Tabs components with the default segmented appearance.
+Organization and balance use the official Item composition: icon, title and
+balance description, then ItemActions. Top up is the visible action; Refresh
+balance and Switch account use the standard Dropdown Menu. Workspace is the account section's only form
+control; it is selectable when the grant provides alternatives. The footer uses
+Save for both account and manual-key configuration, including verification.
+
+The main status card retains its original two-row layout and height. It adds only
+one current-balance button immediately after the profile selector; clicking the
+button refreshes the balance. Billing details and Top up remain in the editor.
+Buttons, inputs and select triggers share their control radius and field spacing.
+
 ## What was taken from reference products
 
 - **Tailscale / WARP / Mullvad**: one verdict, one switch, a short list of

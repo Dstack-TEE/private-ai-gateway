@@ -268,7 +268,10 @@ await writeFile(
       productName: brand.productName,
       identifier: brand.bundle.identifier,
       ...(releaseVersion ? { version: releaseVersion } : {}),
-      ...(nativeUpdater ? { plugins: { updater: { pubkey: updaterKey, endpoints: [updaterEndpoint] } } } : {}),
+      plugins: {
+        "deep-link": { desktop: { schemes: [brand.bundle.identifier] } },
+        ...(nativeUpdater ? { updater: { pubkey: updaterKey, endpoints: [updaterEndpoint] } } : {}),
+      },
       bundle: {
         createUpdaterArtifacts: nativeUpdater,
         category: brand.bundle.category,

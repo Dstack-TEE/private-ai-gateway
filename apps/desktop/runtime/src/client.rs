@@ -306,6 +306,93 @@ impl Client {
         self.request(Command::SetPreference(change))
     }
 
+    pub async fn save_configuration(
+        self: &Arc<Self>,
+        profile: ConfidentialProfileInput,
+        require_production_os: bool,
+        key: Option<String>,
+    ) -> Result<GatewayState, String> {
+        self.background(Command::SaveConfiguration {
+            profile,
+            require_production_os,
+            key,
+        })
+        .await
+    }
+    pub async fn complete_account_login(
+        self: &Arc<Self>,
+        id: String,
+        callback_url: String,
+    ) -> Result<(), String> {
+        self.background(Command::CompleteAccountLogin { id, callback_url })
+            .await
+    }
+    pub async fn begin_account_login(
+        self: &Arc<Self>,
+        profile: ConfidentialProfileInput,
+    ) -> Result<crate::account_login::LoginPresentation, String> {
+        self.background(Command::BeginAccountLogin { profile })
+            .await
+    }
+    pub async fn poll_account_login(
+        self: &Arc<Self>,
+        id: String,
+    ) -> Result<Option<AccountLoginDetails>, String> {
+        self.background(Command::PollAccountLogin { id }).await
+    }
+    pub async fn save_account_login(
+        self: &Arc<Self>,
+        id: String,
+        profile: ConfidentialProfileInput,
+        require_production_os: bool,
+        workspace_id: Option<i64>,
+    ) -> Result<GatewayState, String> {
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let initial = self
+            .background::<AccountSaveResult>(Command::SaveAccountLogin {
+                operation_id: operation_id.clone(),
+                id,
+                profile,
+                require_production_os,
+                workspace_id,
+            })
+            .await;
+        let mut outcome = match initial {
+            Ok(result) => result,
+            Err(_) => {
+                self.background(Command::AccountSaveResult {
+                    operation_id: operation_id.clone(),
+                })
+                .await?
+            }
+        };
+        loop {
+            match outcome {
+                AccountSaveResult::Complete { state } => return Ok(*state),
+                AccountSaveResult::Failed { error } => return Err(error),
+                AccountSaveResult::Running => tokio::time::sleep(Duration::from_millis(500)).await,
+            }
+            outcome = self.background(Command::AccountSaveResult { operation_id: operation_id.clone() }).await
+                .map_err(|_| "Account: Save outcome is not yet confirmed. Reconnect to the backend and check the profile before retrying.".to_string())?;
+        }
+    }
+    pub async fn account_details(
+        self: &Arc<Self>,
+        profile_id: String,
+    ) -> Result<AccountLoginDetails, String> {
+        self.background(Command::AccountDetails { profile_id })
+            .await
+    }
+    pub async fn account_balance(
+        self: &Arc<Self>,
+        target: AccountBalanceTarget,
+    ) -> Result<Option<AccountBalance>, String> {
+        self.background(Command::AccountBalance { target }).await
+    }
+    pub async fn cancel_account_login(self: &Arc<Self>, id: String) -> Result<(), String> {
+        self.background(Command::CancelAccountLogin { id }).await
+    }
+
     pub async fn verify_configuration(
         self: &Arc<Self>,
         profile: ConfidentialProfileInput,

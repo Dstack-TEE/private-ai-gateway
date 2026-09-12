@@ -340,9 +340,48 @@ async fn dispatch(runtime: &Arc<DesktopRuntime>, command: Command) -> Result<Val
                     .verify_configuration(profile, require_production_os, key)
                     .await?,
             ),
+            Command::SaveConfiguration {
+                profile,
+                require_production_os,
+                key,
+            } => value(
+                runtime
+                    .save_configuration(profile, require_production_os, key)
+                    .await?,
+            ),
+            Command::CompleteAccountLogin { id, callback_url } => {
+                value(runtime.complete_account_login(id, callback_url).await?)
+            }
+            Command::BeginAccountLogin { profile } => {
+                value(runtime.begin_account_login(profile).await?)
+            }
+            Command::SaveAccountLogin {
+                operation_id,
+                id,
+                profile,
+                require_production_os,
+                workspace_id,
+            } => value(runtime.begin_account_save(
+                operation_id,
+                id,
+                profile,
+                require_production_os,
+                workspace_id,
+            )?),
+            Command::AccountSaveResult { operation_id } => {
+                value(runtime.account_save_result(&operation_id)?)
+            }
+            Command::AccountDetails { profile_id } => {
+                value(runtime.account_details(profile_id).await?)
+            }
+            Command::AccountBalance { target } => value(runtime.account_balance(target).await?),
+            Command::PollAccountLogin { id } => value(runtime.poll_account_login(id).await?),
+            Command::CancelAccountLogin { id } => value(runtime.cancel_account_login(id).await?),
             Command::ActivateProfile { profile_id } => value(runtime.activate_profile(profile_id)?),
-            Command::DeleteProfile { profile_id } => value(runtime.delete_profile(profile_id)?),
-            Command::ClearApiKey => value(runtime.clear_api_key()?),
+            Command::DeleteProfile { profile_id } => {
+                value(runtime.delete_profile(profile_id).await?)
+            }
+            Command::ClearApiKey => value(runtime.clear_api_key().await?),
             Command::ImportProfiles(backup) => value(runtime.import_profiles(backup)?),
             Command::ExportProfiles { path } => {
                 let path = std::path::PathBuf::from(path);

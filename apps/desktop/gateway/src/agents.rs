@@ -267,7 +267,7 @@ impl Agent {
                     return "Claude Code uses apiKeyHelper with a local token. Windows shell compatibility has not been verified with the real Claude CLI. Shell credentials and managed settings may override this projection. Anthropic does not officially support non-Claude models.";
                 }
                 "Claude Code will authenticate through apiKeyHelper with a machine-local token \
-                 and discover models from the verified service. Credentials set in this settings file are taken over and restored on \
+                 and use an explicit Messages-compatible model from the verified service. Restart Claude Code after applying. Credentials set in this settings file are taken over and restored on \
                  disconnect; a token exported in your shell would still take priority, so unset \
                  ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY there. A claude.ai login is not \
                  used through the gateway. Anthropic does not officially support non-Claude models."
@@ -2394,7 +2394,7 @@ fn connection_options(
     catalog: Option<&Catalog>,
     options: &ConnectOptions,
 ) -> ConnectOptions {
-    if agent != Agent::Codex || options.default_model.is_some() {
+    if !matches!(agent, Agent::Codex | Agent::ClaudeCode) || options.default_model.is_some() {
         return options.clone();
     }
     let current = selected_model(agent, Some(doc))
@@ -2444,6 +2444,7 @@ fn cli_paths(home: &Path, tool_env: bool) -> Vec<PathBuf> {
     };
     paths.extend([
         home.join(".local/bin"),
+        home.join(".opencode/bin"),
         home.join(".npm-global/bin"),
         home.join(".volta/bin"),
         home.join("Library/pnpm"),
@@ -4161,6 +4162,70 @@ mod tests {
         assert_eq!(
             doc(&sandbox, agent).get_value(&["custom"]),
             Some(ConfigValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn claude_connect_selects_a_messages_model_without_discovery() {
+        let sandbox = sandbox("claude-model-selection");
+        let path = Agent::ClaudeCode.config_path(&sandbox.home, false);
+        write(&path, r#"{"model":"opus","env":{"KEEP":"value"}}"#);
+        let mut catalog = catalog();
+        catalog.models[0].supported_surfaces = Some(vec![Surface::Responses]);
+        catalog.models[1].supported_surfaces = Some(vec![Surface::Messages]);
+        let options = ConnectOptions::default();
+        let preview = sandbox
+            .projector
+            .preview(Agent::ClaudeCode, true, Some(&catalog), &options)
+            .unwrap();
+        sandbox
+            .projector
+            .apply(
+                Agent::ClaudeCode,
+                true,
+                &preview.revision,
+                Some(&catalog),
+                &options,
+            )
+            .unwrap();
+        let connected = doc(&sandbox, Agent::ClaudeCode);
+        assert_eq!(
+            connected.get_str(&["env", "ANTHROPIC_MODEL"]).as_deref(),
+            Some(catalog.models[1].id())
+        );
+        assert_eq!(
+            connected.get_str(&["env", "ANTHROPIC_BASE_URL"]).as_deref(),
+            Some(ENDPOINT)
+        );
+        assert_eq!(
+            connected.get_str(&["env", "KEEP"]).as_deref(),
+            Some("value")
+        );
+        disconnect(&sandbox, Agent::ClaudeCode);
+        assert_eq!(
+            doc(&sandbox, Agent::ClaudeCode)
+                .get_str(&["model"])
+                .as_deref(),
+            Some("opus")
+        );
+        assert!(doc(&sandbox, Agent::ClaudeCode)
+            .get_str(&["env", "ANTHROPIC_MODEL"])
+            .is_none());
+    }
+
+    #[test]
+    fn finds_opencode_installed_by_the_official_script_without_shell_path() {
+        let sandbox = sandbox("opencode-native-install");
+        assert!(find_cli(Agent::OpenCode, &sandbox.home, false).is_none());
+        let executable = sandbox.home.join(".opencode/bin").join(if cfg!(windows) {
+            "opencode.exe"
+        } else {
+            "opencode"
+        });
+        write(&executable, "test executable");
+        assert_eq!(
+            find_cli(Agent::OpenCode, &sandbox.home, false),
+            Some(executable)
         );
     }
 

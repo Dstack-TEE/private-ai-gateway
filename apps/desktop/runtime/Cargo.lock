@@ -1040,6 +1040,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -1606,21 +1607,26 @@ dependencies = [
 name = "private-ai-proxy-runtime"
 version = "0.1.0"
 dependencies = [
+ "axum",
+ "base64",
  "clap",
  "clap_complete",
  "futures-util",
  "libc",
  "netwatcher",
  "private-ai-proxy-gateway",
+ "rand 0.8.8",
  "reqwest",
  "rpassword",
  "rusqlite",
  "rustix",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "socket2",
  "tempfile",
  "tokio",
+ "tokio-util",
  "url",
  "uuid",
  "windows-sys 0.61.2",
@@ -1840,6 +1846,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -1939,9 +1946,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.43"
+version = "0.23.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
+checksum = "6725596c3f2c3a0aef021139e145d4eafe314a6623e4680ca83852b2c67ab2ba"
 dependencies = [
  "once_cell",
  "ring",
@@ -2393,6 +2400,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]
@@ -2706,6 +2714,15 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]

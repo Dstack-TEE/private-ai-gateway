@@ -141,10 +141,11 @@ export type ServiceProvider = "phala" | "redpill" | "custom";
 
 export type ProfileAuth =
   | { kind: "apiKey" }
-  | { kind: "oauth"; accountId: string; accountName?: string };
+  | { kind: "oauth"; accountId: string; accountName?: string; images?: AccountImages; scope?: AccountScope };
 
 export interface ConfidentialProfile {
   id: string;
+  credentialRef?: string;
   name: string;
   provider: ServiceProvider;
   remoteUrl: string;
@@ -152,6 +153,47 @@ export interface ConfidentialProfile {
   /** Non-secret presence metadata; absent on profiles saved by early betas. */
   credentialSaved?: boolean;
   verifiedAt?: number;
+}
+
+export interface AccountImages {
+  user: string | null;
+  organization: string | null;
+}
+
+export interface AccountScope {
+  organizationId?: string | null;
+  organizationSlug?: string | null;
+  organization: string | null;
+  workspace: string | null;
+  workspaceSlug?: string | null;
+  workspaceId: number | null;
+}
+
+export interface AccountWorkspace {
+  id: number;
+  name: string;
+  isDefault: boolean;
+}
+
+export interface AccountLoginDetails {
+  auth: ProfileAuth;
+  workspaces: AccountWorkspace[];
+}
+
+export type AccountBalanceTarget = { kind: "login"; id: string } | { kind: "profile"; profileId: string };
+
+export interface AccountBalance {
+  balanceUsd: string;
+  canTopUp: boolean;
+  organizationId: string | null;
+  grantedUsd: string | null;
+  scope: AccountScope;
+}
+
+export interface AccountLogin {
+  id: string;
+  url: string;
+  userCode: string | null;
 }
 
 export interface ConfidentialProfileInput {
@@ -342,6 +384,16 @@ export interface DesktopApi {
   /** Use the platform confirmation dialog for destructive actions. */
   confirm(options: ConfirmationOptions): Promise<boolean>;
   start(config: StartGatewayConfig): Promise<GatewayState>;
+  saveConfiguration(profile: ConfidentialProfileInput, requireProductionOs: boolean, key?: string): Promise<GatewayState>;
+  completeAccountLogin(id: string, callbackUrl: string): Promise<void>;
+  beginAccountLogin(profile: ConfidentialProfileInput): Promise<AccountLogin>;
+  pollAccountLogin(id: string): Promise<AccountLoginDetails | null>;
+  saveAccountLogin(id: string, profile: ConfidentialProfileInput, requireProductionOs: boolean, workspaceId?: number): Promise<GatewayState>;
+  getAccountDetails(profileId: string): Promise<AccountLoginDetails>;
+  getAccountBalance(target: AccountBalanceTarget): Promise<AccountBalance | null>;
+  openOrganization(organizationSlug: string): Promise<void>;
+  openTopUp(provider: ServiceProvider, scopeSlug?: string): Promise<void>;
+  cancelAccountLogin(id: string): Promise<void>;
   verifyConfiguration(profile: ConfidentialProfileInput, requireProductionOs: boolean, key?: string): Promise<GatewayState>;
   activateProfile(profileId: string): Promise<GatewayState>;
   deleteProfile(profileId: string): Promise<GatewayState>;

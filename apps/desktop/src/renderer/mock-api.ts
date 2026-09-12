@@ -3,6 +3,7 @@ import type {
   AgentStatus,
   CliRegistration,
   ConfidentialProfile,
+  ConfidentialProfileInput,
   DesktopApi,
   GatewayState,
   RequestActivity,
@@ -309,8 +310,10 @@ function scenario(name: MockScenario): { state: GatewayState; agents: AgentStatu
 
 export function mockApi(name: string | null): DesktopApi {
   const known: MockScenario[] = ["backend-disconnected", "ready", "no-profiles", "no-key", "verifying", "configuration-verifying", "error", "empty-catalog", "blocked", "needs-attention", "endpoint-busy", "interactive"];
-  const picked = known.find((candidate) => candidate === name) ?? "ready";
+  const picked = name?.startsWith("oauth-") ? "no-profiles" : known.find((candidate) => candidate === name) ?? "ready";
   let { state, agents } = scenario(picked);
+  if (name === "recent-usage") state = { ...state, activity: USAGE_HISTORY.slice(0, 12) };
+  if (name === "agent-installed") agents = agents.map((agent) => agent.id === "opencode" ? { ...agent, installed: false } : agent);
   if (name === "reconnecting") state = { ...state, status: "stopped", reconnecting: true, protectedSince: now - 600, error: "Network unavailable. Connect to a network; protection resumes after verification." };
   if (name === "all-agent-icons") agents = [...agents,
     { ...PI, id: "oh-my-pi", name: "Oh My Pi", configPath: "/Users/dev/.omp/agent/models.json" },
@@ -355,6 +358,12 @@ export function mockApi(name: string | null): DesktopApi {
   let updateChannel: "beta" | "stable" = "stable";
   let updateAttempts = 0;
   let keyRotations = 0;
+  let failedAccountSave = false;
+  let billingRead = name !== "oauth-balance-denied";
+  let billingError = name === "oauth-balance-error";
+  const billingManage = billingRead && name !== "oauth-balance-readonly";
+  window.addEventListener("mock:billing-read-granted", () => { billingRead = true; billingError = false; });
+  let login: { id: string; profile: ConfidentialProfileInput; polls: number } | undefined;
   return {
     startBackendService: async () => { state = { ...BASE, backendConnected: true }; publish(); return structuredClone(state); },
     showEditMenu: async (editable) => { window.dispatchEvent(new CustomEvent("mock:edit-menu", { detail: { editable } })); },
@@ -508,6 +517,76 @@ export function mockApi(name: string | null): DesktopApi {
       }, 350);
       return state;
     },
+    saveConfiguration: async (profile, requireProductionOs, key) => {
+      const existing = state.profiles.find((entry) => entry.id === profile.id);
+      if (!key?.trim() && !credentialProfiles.has(profile.id)) throw new Error("Enter an API key");
+      const reconnect = !state.configurationVerification && (state.status === "verified" || state.status === "blocked");
+      const saved: ConfidentialProfile = { ...profile, auth: key?.trim() ? { kind: "apiKey" } : existing?.auth ?? { kind: "apiKey" }, credentialSaved: true };
+      credentialProfiles.add(profile.id);
+      state = { ...state, profiles: [...state.profiles.filter((entry) => entry.id !== profile.id), saved], activeProfileId: profile.id, apiKeySaved: true, status: reconnect ? "verified" : "stopped", configurationVerification: false, config: { remoteUrl: profile.remoteUrl, requireProductionOs } };
+      publish();
+      return structuredClone(state);
+    },
+    completeAccountLogin: async (id, callbackUrl) => {
+      if (!login || login.id !== id) throw new Error("Account login is no longer active");
+      const url = new URL(callbackUrl);
+      if (url.origin !== "http://127.0.0.1:4181" || url.pathname !== "/oauth/callback" || !url.searchParams.get("code")) throw new Error("Invalid callback link");
+      login.polls = 3;
+    },
+    beginAccountLogin: async (profile) => {
+      login = { id: crypto.randomUUID(), profile, polls: 0 };
+      return { id: login.id, url: "https://example.invalid/sign-in", userCode: profile.provider === "phala" ? "ABCD-EFGH" : null };
+    },
+    pollAccountLogin: async (id) => {
+      if (!login || login.id !== id) throw new Error("Account login is no longer active");
+      if (name === "oauth-manual-callback" && login.polls < 3) return null;
+      if (login.polls++ < 2) return null;
+      if (name === "oauth-denied") throw new Error("Authorization was declined");
+      return {
+        auth: { kind: "oauth", accountId: "preview-account", accountName: "Alice Example", images: { user: "https://img.clerk.com/user-avatar", organization: "https://img.clerk.com/org-avatar" }, scope: { workspaceSlug: "phala-research", organizationSlug: "research-team", organizationId: login.profile.provider === "redpill" ? "org_test" : null, organization: login.profile.provider === "redpill" ? "Personal organization" : null, workspace: login.profile.provider === "phala" ? "Phala workspace" : null, workspaceId: null } },
+        workspaces: login.profile.provider === "redpill" ? [
+          { id: 123, name: "Default", isDefault: true },
+          ...(name === "oauth-workspaces" ? [{ id: 124, name: "Research", isDefault: false }] : []),
+        ] : [],
+      };
+    },
+    saveAccountLogin: async (id, profile, requireProductionOs, workspaceId) => {
+      if (!login || login.id !== id || login.polls < 3 || profile.id !== login.profile.id || profile.provider !== login.profile.provider) throw new Error("Finish signing in first");
+      if (profile.provider === "redpill" && workspaceId !== 123 && workspaceId !== 124) throw new Error("Choose a workspace before saving");
+      if (name === "oauth-save-retry" && !failedAccountSave) {
+        failedAccountSave = true;
+        throw new Error("Could not store account credential");
+      }
+      const saved: ConfidentialProfile = { ...profile, auth: { kind: "oauth", accountId: "preview-account", accountName: "Alice Example", images: { user: "https://img.clerk.com/user-avatar", organization: "https://img.clerk.com/org-avatar" }, scope: { workspaceSlug: "phala-research", organizationSlug: "research-team", organizationId: profile.provider === "redpill" ? "org_test" : null, organization: profile.provider === "redpill" ? "Personal organization" : null, workspace: profile.provider === "redpill" ? workspaceId === 124 ? "Research" : "Default" : "Phala workspace", workspaceId: workspaceId ?? null } }, credentialSaved: true, verifiedAt: undefined };
+      credentialProfiles.add(saved.id);
+      state = { ...state, profiles: [...state.profiles.filter((p) => p.id !== saved.id), saved], activeProfileId: saved.id, apiKeySaved: true, status: "stopped", configurationVerification: false, remoteUrl: saved.remoteUrl, config: { remoteUrl: saved.remoteUrl, requireProductionOs } };
+      login = undefined;
+      publish();
+      return structuredClone(state);
+    },
+    getAccountDetails: async (profileId) => {
+      const profile = state.profiles.find((item) => item.id === profileId);
+      if (!profile || profile.provider !== "redpill" || profile.auth.kind !== "oauth") throw new Error("Sign in with RedPill to select a workspace");
+      const auth = name === "oauth-profile-updated" ? {
+        ...profile.auth, accountName: "Alicia Updated",
+        images: { user: "https://img.clerk.com/updated-user", organization: "https://img.clerk.com/updated-org" },
+        scope: { workspaceSlug: "phala-research", organizationSlug: "research-team", organizationId: "org_test", organization: "Updated organization", workspace: profile.auth.scope?.workspace ?? null, workspaceId: profile.auth.scope?.workspaceId ?? null },
+      } : profile.auth;
+      return { auth, workspaces: [{ id: 123, name: "Default", isDefault: true }, { id: 124, name: "Research", isDefault: false }] };
+    },
+    getAccountBalance: async (target) => {
+      if (billingError) throw new Error("operation_failed: The operation could not complete.");
+      if (!billingRead) return null;
+      const profile = target.kind === "login" ? login?.id === target.id && login.polls >= 3 ? login.profile : undefined : state.profiles.find((p) => p.id === target.profileId);
+      if (!profile) throw new Error("Account is unavailable");
+      const saved = target.kind === "profile" ? state.profiles.find((p) => p.id === profile.id) : undefined;
+      if (name === "oauth-balance-delayed") await new Promise<void>((resolve) => window.addEventListener("mock:release-balance", () => resolve(), { once: true }));
+      return { balanceUsd: "12.50", organizationId: profile.provider === "redpill" ? "org_test" : null, canTopUp: billingManage, grantedUsd: profile.provider === "phala" ? "3.25" : null,
+        scope: saved?.auth.kind === "oauth" && saved.auth.scope ? saved.auth.scope : { workspaceSlug: "phala-research", organizationSlug: profile.provider === "redpill" ? "research-team" : null, organization: profile.provider === "redpill" ? "Personal organization" : null, workspace: profile.provider === "phala" ? "Phala workspace" : null, workspaceId: null } };
+    },
+    openOrganization: async (organizationId) => { window.dispatchEvent(new CustomEvent("mock:manage-organization", { detail: { organizationId } })); },
+    openTopUp: async (provider, organizationId) => { window.dispatchEvent(new CustomEvent("mock:top-up", { detail: { provider, organizationId } })); },
+    cancelAccountLogin: async (id) => { if (login?.id === id) login = undefined; },
     verifyConfiguration: async (profile, requireProductionOs, key) => {
       const reconnect = !state.configurationVerification && (state.status === "verified" || state.status === "blocked");
       const existing = state.profiles.find((entry) => entry.id === profile.id);
@@ -529,9 +608,9 @@ export function mockApi(name: string | null): DesktopApi {
       }
       const savedProfile: ConfidentialProfile = {
         ...profile,
-        auth: { kind: "apiKey" },
+        auth: key?.trim() ? { kind: "apiKey" } : existing?.auth ?? { kind: "apiKey" },
         credentialSaved: true,
-        verifiedAt: Math.floor(Date.now() / 1000),
+        verifiedAt: undefined,
       };
       const profiles = existing
         ? state.profiles.map((entry) => entry.id === profile.id ? savedProfile : entry)
@@ -698,6 +777,9 @@ export function mockApi(name: string | null): DesktopApi {
     },
     refreshCatalog: async () => state,
     listAgents: async () => {
+      if (name === "agent-installed" && document.documentElement.dataset.mockAgentInstalled === "true") {
+        agents = agents.map((agent) => agent.id === "opencode" ? { ...agent, installed: true } : agent);
+      }
       if (name === "agent-uninstalled" && document.documentElement.dataset.mockAgentRemoved === "true") {
         agents = agents.map((agent) => agent.id === "claude-code" ? { ...agent, installed: false, authorized: false, attention: "CLI not found; previous configuration restored" } : agent);
       }
@@ -709,9 +791,6 @@ export function mockApi(name: string | null): DesktopApi {
     },
     previewAgent: async (agentId, connect, options): Promise<AgentPreview> => {
       const agent = agents.find((candidate) => candidate.id === agentId) ?? CLAUDE_OFF;
-      if (connect && state.status === "verified" && agent.id === "codex" && !options.defaultModel) {
-        throw new Error("Choose a verified default model for Codex");
-      }
       return {
         agent,
         connect,

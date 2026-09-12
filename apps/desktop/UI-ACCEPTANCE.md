@@ -10,7 +10,7 @@ runtime tests exercise filesystem, SQLite, local HTTP and policy behavior.
 - Beta.19 (`c03eec2`) passed 66 renderer tests and all three native CI jobs.
   macOS Developer ID signing, notarization and package inspection passed in
   https://github.com/Dstack-TEE/private-ai-gateway/actions/runs/34182726717.
-- At the default 1052x784 content size, Overview's content scroll height equals
+- At the default 1052x752 content size, Overview's content scroll height equals
   its client height; all three agent rows fit. This is browser layout
   evidence, not native multi-monitor restoration evidence.
 - Main `c2d31a8` was subsequently merged into the candidate branch. It includes
@@ -94,8 +94,10 @@ Naming and CLI integration proposal: [Client architecture](CLIENT-ARCHITECTURE.m
 - Settings, profiles and usage share an Item-based action row with full-row hover.
   Provider logos are 18px; chart metrics use standard Tabs with visible selection.
 - Profile forms omit the credential-delete action and verification badge.
-  Verify and Save remains intentional: invalid replacement credentials must not
-  overwrite a working profile or trigger an unverified reconnection.
+  Phala login completes automatically after browser workspace selection. RedPill
+  always uses a workspace selector and Save, including edits of saved profiles.
+  Workspace changes authorize during Save; cancellation preserves the old profile.
+  Failed persistence remains retryable. Manual edits use Save; reconnection still verifies the gateway.
 - Agent detection is automatic on startup and window activation; connection mutations show optimistic
   state and progress without disabling unrelated agents. Restore all is locked
   during a connection mutation. Model-sync filler text is removed.
@@ -169,3 +171,10 @@ upgrade/restart still require platform acceptance.
   position/size/maximization only. Monitor-detachment restoration, actual OS close
   events and VoiceOver still need macOS/Windows platform acceptance; browser
   dispatch tests verify the shared content guard, not the native event delivery.
+
+- The organization card displays its current Clerk name and avatar, with initials
+  on image failure. Personal identity is not rendered. Manage and Switch are
+  organization menu actions; management links are bound to the Clerk organization ID.
+- Billing-read denial hides the balance and Top up; readers without billing
+  management see only the balance. Permission grants take effect after refresh.
+  Billing navigation is bound to the account's Clerk organization ID.
