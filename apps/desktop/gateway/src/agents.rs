@@ -933,6 +933,35 @@ fn retain_provider_field(field: &OwnedField, fields: &[OwnedField]) -> bool {
     })
 }
 
+fn inactive_provider_value(field: &OwnedField) -> Option<ConfigValue> {
+    match &field.value {
+        Some(ConfigValue::Json(value)) => {
+            let mut value = value.clone();
+            if let Some(object) = value.as_object_mut() {
+                object.remove("apiKey");
+                if let Some(options) = object
+                    .get_mut("options")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    options.remove("apiKey");
+                }
+            }
+            Some(ConfigValue::Json(value))
+        }
+        _ if field.path.last().is_some_and(|key| key == "key_cmd") => {
+            Some(ConfigValue::Str(String::new()))
+        }
+        _ if field
+            .path
+            .last()
+            .is_some_and(|key| key == "discover_models") =>
+        {
+            Some(ConfigValue::Bool(false))
+        }
+        _ => field.value.clone(),
+    }
+}
+
 impl Connection {
     fn restored(&self) -> bool {
         self.suspended
@@ -1535,6 +1564,12 @@ impl Projector {
             record
                 .fields
                 .retain(|field| retain_provider_field(field, &fields));
+            for field in &mut record.fields {
+                let inactive = inactive_provider_value(field);
+                if doc.get_value(&refs(&field.path)) == inactive {
+                    field.value = inactive;
+                }
+            }
             record.options.default_model = default_model;
             record.selection = None;
         }
@@ -2475,6 +2510,20 @@ fn restore(
     let mut consumed_secrets = Vec::new();
     for field in &record.fields {
         if retain_provider_field(field, &record.fields) {
+            let path = refs(&field.path);
+            let inactive = inactive_provider_value(field);
+            if doc.get_value(&path) == field.value && inactive != field.value {
+                match &inactive {
+                    Some(value) => doc.set_value(&path, value)?,
+                    None => doc.remove(&path)?,
+                }
+                changes.push(ConfigChange {
+                    key: path.join("."),
+                    before: Some("Connected provider".into()),
+                    after: Some("Provider retained without active credentials".into()),
+                    sensitive: false,
+                });
+            }
             continue;
         }
         let path = refs(&field.path);
@@ -3499,6 +3548,24 @@ mod tests {
             assert!(!status.connected && !status.authorized);
             assert!(tokens.agent_for(&first_token).is_none());
             let mut restored = doc(&sandbox, agent);
+            match agent {
+                Agent::OpenCode => assert!(restored
+                    .get_value(&["provider", "private-ai-proxy", "options", "apiKey"])
+                    .is_none()),
+                Agent::Pi | Agent::OhMyPi => assert!(restored
+                    .get_value(&["providers", "private-ai-proxy", "apiKey"])
+                    .is_none()),
+                Agent::Hermes => assert_eq!(
+                    restored
+                        .get_str(&["providers", "private-ai-proxy", "key_cmd"])
+                        .as_deref(),
+                    Some("")
+                ),
+                Agent::OpenClaw => assert!(restored
+                    .get_value(&["models", "providers", "private-ai-proxy", "apiKey"])
+                    .is_none()),
+                _ => {}
+            }
             let record = sandbox
                 .projector
                 .load_store()
