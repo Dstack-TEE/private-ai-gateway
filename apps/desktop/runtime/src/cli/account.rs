@@ -222,7 +222,7 @@ mod tests {
     #[test]
     fn oauth_login_supports_headless_callback_without_a_secret_argument() {
         let parsed = super::super::Cli::try_parse_from([
-            "pap",
+            "private-ai-proxy",
             "--yes",
             "profiles",
             "login",
@@ -245,7 +245,7 @@ mod tests {
         assert_eq!(options.workspace, Some(123));
         assert!(options.no_browser && options.callback_stdin);
         assert!(super::super::Cli::try_parse_from([
-            "pap",
+            "private-ai-proxy",
             "profiles",
             "login",
             "work",

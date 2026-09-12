@@ -9,12 +9,12 @@ Status: implemented; modular layout updated 2026-09-12.
 | Private AI Gateway | Remote attested inference service and signed receipts | `src/aggregator`, `src/middleware` |
 | Private AI Proxy | Desktop profiles, agent connections, verification and usage | `apps/desktop/src/renderer` |
 | Local backend | Sessions, configuration transactions, local API and process ownership | `apps/desktop/runtime`, `apps/desktop/gateway` |
-| `pap` | Unified managed-client and ACI protocol commands | `src/bin/pap` |
+| `private-ai-proxy` | Unified managed-client and ACI protocol commands | `src/bin/private-ai-proxy` |
 | `aci` | Existing standalone protocol reference CLI, unchanged and not bundled | `src/bin/aci` |
 
 ## Shared implementation
 
-`pap` composes the managed CLI's Clap command tree with the existing ACI
+`private-ai-proxy` composes the managed CLI's Clap command tree with the existing ACI
 commands. Management command execution and output live in
 `apps/desktop/runtime/src/cli`. ACI modules are compiled from
 their existing source paths, so both executables use one verifier implementation.
@@ -23,16 +23,16 @@ original `aci` entry point and default streaming behavior remain available.
 The explicit `desktop-client` Cargo feature keeps desktop dependencies out of
 ordinary service and standalone ACI builds.
 
-`pap verify/audit/sessions/send` do not initialize the managed backend or
-credential store. `pap serve` runs the standalone local verifier and always
-enforces receipt verification before response delivery. `pap --json serve`
+`private-ai-proxy verify/audit/sessions/send` do not initialize the managed backend or
+credential store. `private-ai-proxy serve` runs the standalone local verifier and always
+enforces receipt verification before response delivery. `private-ai-proxy --json serve`
 emits lifecycle JSON events. The original `aci` interface stays unchanged.
 
-`pap start/stop` retain managed profiles, user-session continuity and reversible
+`private-ai-proxy start/stop` retain managed profiles, user-session continuity and reversible
 agent configuration. The backend's supervised verifier process now runs
-`pap serve`, replacing the old ACI executable. Ownership-pipe and child-reaping
+`private-ai-proxy serve`, replacing the old ACI executable. Ownership-pipe and child-reaping
 behavior is preserved; a backend crash must not leave a verifier listening.
-Packages contain `pap`, `pap-service` and the credential
+Packages contain `private-ai-proxy`, `private-ai-proxy-service` and the credential
 helper. They do not contain an independent `aci` executable.
 
 ## Module boundaries
@@ -109,7 +109,7 @@ The display name is Private AI Proxy, with by dstack TEE attribution.
 The application identifier is `org.dstack.private-ai-proxy`; storage and
 credential services use the new identity and local keys use `sk-pap-`.
 Old beta configuration is not migrated. Command registration installs only
-`pap` and refuses unrelated existing commands.
+`private-ai-proxy` and refuses unrelated existing commands.
 
 Windows uses the official Tauri NSIS template with branded artwork and
 no legacy-installation branches. Linux packages use the Private AI Proxy name.

@@ -105,7 +105,7 @@ impl Client {
                 // Never kill an unrelated winner or retry a mutation after an ambiguous timeout.
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("Backend readiness timed out. Run pap doctor.".into());
+                return Err("Backend readiness timed out. Run private-ai-proxy doctor.".into());
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -160,7 +160,7 @@ impl Client {
         state.proxy_url = None;
         state.error = Some(error);
         state.endpoint_error =
-            Some("Backend disconnected. Start it with pap service start.".into());
+            Some("Backend disconnected. Start it with private-ai-proxy service start.".into());
         self.states.send_replace(state);
     }
 
@@ -538,7 +538,7 @@ fn open() -> io::Result<(BufReader<Stream>, Hello)> {
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "Incompatible PAP backend; update the client and backend together",
+            "Incompatible Private AI Proxy backend; update the client and backend together",
         ));
     }
     Ok((reader, hello))
@@ -566,7 +566,7 @@ fn absent(error: &io::Error) -> bool {
 fn connection_error(error: io::Error) -> String {
     match error.kind() {
         io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
-            "Backend is not running. Run pap service start.".into()
+            "Backend is not running. Run private-ai-proxy service start.".into()
         }
         io::ErrorKind::PermissionDenied => {
             "Management endpoint access denied. Use the same OS user as the backend.".into()
@@ -579,7 +579,7 @@ fn connection_error(error: io::Error) -> String {
             "Incompatible or invalid management protocol. Update the client and backend together."
                 .into()
         }
-        _ => "Management connection failed. Run pap doctor; do not automatically retry mutations."
+        _ => "Management connection failed. Run private-ai-proxy doctor; do not automatically retry mutations."
             .into(),
     }
 }

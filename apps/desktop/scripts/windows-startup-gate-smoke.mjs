@@ -31,7 +31,7 @@ const data = path.join(appData, identifier);
 const acquired = path.join(scratch, "acquired");
 const release = path.join(scratch, "release");
 const fixture = path.join(scratch, "gate-fixture.exe");
-const pap = path.join(portable, "pap.exe");
+const pap = path.join(portable, "private-ai-proxy.exe");
 const env = {
   ...process.env,
   APPDATA: appData,

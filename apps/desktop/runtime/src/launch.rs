@@ -9,7 +9,7 @@ use std::{
 
 use crate::process::sibling_executable;
 
-const SERVICE_BINARY: &str = "pap-service";
+const SERVICE_BINARY: &str = "private-ai-proxy-service";
 
 pub fn service_executable() -> Result<PathBuf, String> {
     sibling_executable(SERVICE_BINARY)

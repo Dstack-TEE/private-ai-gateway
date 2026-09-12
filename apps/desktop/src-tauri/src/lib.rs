@@ -105,23 +105,25 @@ async fn open_account_url(app: AppHandle, url: String) -> Result<(), String> {
     .await
 }
 
-async fn run_pap_cli(app: &AppHandle, arguments: Vec<&str>) -> Result<Registration, String> {
+async fn run_cli_command(app: &AppHandle, arguments: Vec<&str>) -> Result<Registration, String> {
     let output = app
         .shell()
-        .sidecar("pap")
-        .map_err(|_| "The bundled pap command is unavailable in this installation")?
+        .sidecar("private-ai-proxy")
+        .map_err(|_| "The bundled private-ai-proxy command is unavailable in this installation")?
         .args(arguments)
         .output()
         .await
-        .map_err(|_| "The pap command could not complete")?;
+        .map_err(|_| "The private-ai-proxy command could not complete")?;
     if !output.status.success() {
-        return Err("The pap command could not update command-line access".to_string());
+        return Err(
+            "The private-ai-proxy command could not update command-line access".to_string(),
+        );
     }
     if output.stdout.len() > 64 * 1024 {
-        return Err("The pap command returned an invalid response".to_string());
+        return Err("The private-ai-proxy command returned an invalid response".to_string());
     }
     serde_json::from_slice(&output.stdout)
-        .map_err(|_| "The pap command returned an invalid response".to_string())
+        .map_err(|_| "The private-ai-proxy command returned an invalid response".to_string())
 }
 
 #[derive(Default)]
@@ -158,7 +160,8 @@ fn allow_automatic_cli_registration() -> Result<(), String> {
         .map_err(|_| "Cannot locate the installed application".to_string())?;
     if transient_macos_app_path(&executable) {
         return Err(
-            "Move Private AI Proxy to a stable location before registering pap".to_string(),
+            "Move Private AI Proxy to a stable location before registering private-ai-proxy"
+                .to_string(),
         );
     }
     Ok(())
@@ -180,7 +183,7 @@ async fn register_cli_on_startup(app: &AppHandle) {
     state.attempted = enabled.is_ok();
     let result = match enabled {
         Ok(true) => match allow_automatic_cli_registration() {
-            Ok(()) => run_pap_cli(app, vec!["cli", "install", "--json"])
+            Ok(()) => run_cli_command(app, vec!["cli", "install", "--json"])
                 .await
                 .map(|_| ()),
             Err(error) => Err(error),

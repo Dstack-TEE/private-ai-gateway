@@ -23,7 +23,7 @@ use tokio::{
     sync::mpsc::{self, Receiver, Sender},
 };
 
-const ACI_BINARY: &str = "pap";
+const ACI_BINARY: &str = "private-ai-proxy";
 const SUPERVISOR_ARGUMENT: &str = "--pap-internal-aci-supervisor-v1";
 const EVENT_BUFFER: usize = 256;
 const PIPE_BUFFER: usize = 8 * 1024;

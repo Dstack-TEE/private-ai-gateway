@@ -31,9 +31,9 @@ on:
       - 'apps/desktop/**'
       - 'src/aci/**'
       - 'src/bin/aci/**'
-      - 'src/bin/pap/**'
-      - 'src/bin/pap-service/**'
-      - 'tests/pap_cli.rs'
+      - 'src/bin/private-ai-proxy/**'
+      - 'src/bin/private-ai-proxy-service/**'
+      - 'tests/private_ai_proxy_cli.rs'
       - 'src/http/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
@@ -45,9 +45,9 @@ on:
       - 'apps/desktop/**'
       - 'src/aci/**'
       - 'src/bin/aci/**'
-      - 'src/bin/pap/**'
-      - 'src/bin/pap-service/**'
-      - 'tests/pap_cli.rs'
+      - 'src/bin/private-ai-proxy/**'
+      - 'src/bin/private-ai-proxy-service/**'
+      - 'tests/private_ai_proxy_cli.rs'
       - 'src/http/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
@@ -145,8 +145,8 @@ jobs:
           cargo +1.89 test --locked --manifest-path apps/desktop/runtime/Cargo.toml
           cargo +1.89 test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
           cargo test --locked --bin aci
-          cargo test --locked --bin pap --features desktop-client
-          cargo test --locked --test pap_cli --features desktop-client
+          cargo test --locked --bin private-ai-proxy --features desktop-client
+          cargo test --locked --test private_ai_proxy_cli --features desktop-client
           cargo test --locked --test aci_cli
       - &save-rust-cache
         name: Save Rust dependencies
@@ -308,14 +308,14 @@ jobs:
           test -n "$app_bundle"
           architecture=arm64
           if [[ "$PAP_BUILD_TARGET" == x86_64-apple-darwin ]]; then architecture=x86_64; fi
-          for binary in private-ai-proxy-desktop pap pap-service private-ai-proxy-helper; do
+          for binary in private-ai-proxy-desktop private-ai-proxy private-ai-proxy-service private-ai-proxy-helper; do
             test "$(xcrun lipo -archs "$app_bundle/Contents/MacOS/$binary")" = "$architecture"
           done
           if [[ "$architecture" == x86_64 ]] && ! arch -x86_64 /usr/bin/true 2>/dev/null; then
             softwareupdate --install-rosetta --agree-to-license
           fi
-          arch "-$architecture" "$app_bundle/Contents/MacOS/pap" --version
-          arch "-$architecture" "$app_bundle/Contents/MacOS/pap-service" --version
+          arch "-$architecture" "$app_bundle/Contents/MacOS/private-ai-proxy" --version
+          arch "-$architecture" "$app_bundle/Contents/MacOS/private-ai-proxy-service" --version
           arch "-$architecture" "$app_bundle/Contents/MacOS/private-ai-proxy-helper" --help
 
       - name: Package CLI-only distribution
@@ -383,11 +383,11 @@ jobs:
           trap 'rm -rf "$scratch"' EXIT
           mkdir "$scratch/deb" "$scratch/rpm"
           dpkg-deb -x "${deb[0]}" "$scratch/deb"
-          node scripts/cli-package-smoke.mjs "$scratch/deb/usr/libexec/private-ai-proxy" "$version"
-          test "$(readlink "$scratch/deb/usr/bin/pap")" = ../libexec/private-ai-proxy/pap
+          node scripts/cli-package-smoke.mjs "$scratch/deb/usr/libexec/private-ai-proxy" "$version" "$scratch/deb/usr/bin"
+          test "$(readlink "$scratch/deb/usr/bin/private-ai-proxy")" = ../libexec/private-ai-proxy/private-ai-proxy
           (cd "$scratch/rpm" && rpm2cpio "$GITHUB_WORKSPACE/apps/desktop/${rpm[0]}" | cpio -idm --quiet)
-          node scripts/cli-package-smoke.mjs "$scratch/rpm/usr/libexec/private-ai-proxy" "$version"
-          test "$(readlink "$scratch/rpm/usr/bin/pap")" = ../libexec/private-ai-proxy/pap
+          node scripts/cli-package-smoke.mjs "$scratch/rpm/usr/libexec/private-ai-proxy" "$version" "$scratch/rpm/usr/bin"
+          test "$(readlink "$scratch/rpm/usr/bin/private-ai-proxy")" = ../libexec/private-ai-proxy/private-ai-proxy
 
       - name: Notarize production macOS disk image
         if: runner.os == 'macOS' && inputs.production_macos
@@ -452,10 +452,10 @@ jobs:
             Run-Installer $installers[0].FullName "/S /D=$installDir"
             node scripts/packaged-sidecars-smoke.mjs $installDir
             if ($LASTEXITCODE -ne 0) { throw 'Installed sidecar checks failed' }
-            $registration = (& "$installDir/pap.exe" --json cli status | ConvertFrom-Json)
-            if ($LASTEXITCODE -ne 0 -or !$registration.installed) { throw 'NSIS did not register pap in the user PATH' }
-            if ([IO.Path]::GetFullPath($registration.commandPath) -ne [IO.Path]::GetFullPath("$installDir/pap.exe")) {
-              throw 'pap reported an unexpected registered command path'
+            $registration = (& "$installDir/private-ai-proxy.exe" --json cli status | ConvertFrom-Json)
+            if ($LASTEXITCODE -ne 0 -or !$registration.installed) { throw 'NSIS did not register private-ai-proxy in the user PATH' }
+            if ([IO.Path]::GetFullPath($registration.commandPath) -ne [IO.Path]::GetFullPath("$installDir/private-ai-proxy.exe")) {
+              throw 'private-ai-proxy reported an unexpected registered command path'
             }
             $env:PAP_TEST_HELPER_PATH = "$installDir/private-ai-proxy-helper.exe"
             cargo test --release --locked --manifest-path gateway/Cargo.toml --lib -- --ignored hermes_windows_installed_command_round_trip
@@ -466,11 +466,11 @@ jobs:
             if (Test-Path "$installDir/uninstall.exe") {
               Run-Installer "$installDir/uninstall.exe" "/S _?=$installDir"
             }
-            foreach ($binary in @('private-ai-proxy-desktop.exe', 'pap.exe', 'pap-service.exe', 'private-ai-proxy-helper.exe')) {
+            foreach ($binary in @('private-ai-proxy-desktop.exe', 'private-ai-proxy.exe', 'pap.cmd', 'private-ai-proxy-service.exe', 'private-ai-proxy-helper.exe')) {
               if (Test-Path "$installDir/$binary") { throw "Uninstall left $binary" }
             }
             $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-            if (($userPath -split ';') -contains $installDir) { throw 'Uninstall left the NSIS-owned pap PATH entry' }
+            if (($userPath -split ';') -contains $installDir) { throw 'Uninstall left the NSIS-owned private-ai-proxy PATH entry' }
           }
 
       - name: Check installed Linux sidecars without UI
@@ -492,7 +492,7 @@ jobs:
             if dpkg-query -W "$package" >/dev/null 2>&1; then
               sudo apt-get remove -y "$package" || status=1
             fi
-            for binary in private-ai-proxy-desktop pap pap-service private-ai-proxy-helper; do
+            for binary in private-ai-proxy-desktop private-ai-proxy private-ai-proxy-service private-ai-proxy-helper; do
               if [[ -e "/usr/bin/$binary" ]]; then status=1; fi
             done
             rm -rf "$scratch"
@@ -525,8 +525,8 @@ jobs:
           dmg="$(find "$PAP_BUNDLE_DIR/dmg" -type f -name '*.dmg' -print -quit)"
           test -d "$app_bundle"
           test -f "$dmg"
-          test -x "$app_bundle/Contents/MacOS/pap"
-          test -x "$app_bundle/Contents/MacOS/pap-service"
+          test -x "$app_bundle/Contents/MacOS/private-ai-proxy"
+          test -x "$app_bundle/Contents/MacOS/private-ai-proxy-service"
           test ! -e "$app_bundle/Contents/MacOS/aci"
           test -x "$app_bundle/Contents/MacOS/private-ai-proxy-helper"
           test -f "$app_bundle/Contents/Resources/Assets.car"
@@ -577,7 +577,7 @@ jobs:
               fi
             fi
             if HOME="$registration_home" PRIVATE_AI_PROXY_HOME="$registration_home" \
-              "$app_bundle/Contents/MacOS/pap" --yes service stop >"$registration_stop_log" 2>&1; then
+              "$app_bundle/Contents/MacOS/private-ai-proxy" --yes service stop >"$registration_stop_log" 2>&1; then
               rm -rf "$registration_home"
             else
               echo "Packaged backend cleanup failed; isolated state retained at $registration_home" >&2
@@ -590,14 +590,14 @@ jobs:
           }
           trap cleanup_registration EXIT
           registration_before="$(HOME="$registration_home" PRIVATE_AI_PROXY_HOME="$registration_home" \
-            "$app_bundle/Contents/MacOS/pap" --json cli status)"
+            "$app_bundle/Contents/MacOS/private-ai-proxy" --json cli status)"
           node -e 'const value = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (value.installed !== false) process.exit(1)' \
             <<<"$registration_before"
           HOME="$registration_home" PRIVATE_AI_PROXY_HOME="$registration_home" \
             "$app_bundle/Contents/MacOS/private-ai-proxy-desktop" >"$registration_log" 2>&1 &
           registration_pid=$!
           for _ in {1..100}; do
-            [[ -L "$registration_home/.local/bin/pap" ]] && break
+            [[ -L "$registration_home/.local/bin/private-ai-proxy" ]] && break
             if ! kill -0 "$registration_pid" 2>/dev/null; then
               cat "$registration_log"
               exit 1
@@ -605,9 +605,11 @@ jobs:
             sleep 0.1
           done
           test -L "$registration_home/.local/bin/pap"
-          test "$(readlink "$registration_home/.local/bin/pap")" = "$(realpath "$app_bundle/Contents/MacOS/pap")"
+          test "$(readlink "$registration_home/.local/bin/pap")" = "$(realpath "$app_bundle/Contents/MacOS/private-ai-proxy")"
+          test -L "$registration_home/.local/bin/private-ai-proxy"
+          test "$(readlink "$registration_home/.local/bin/private-ai-proxy")" = "$(realpath "$app_bundle/Contents/MacOS/private-ai-proxy")"
           registration_after="$(HOME="$registration_home" PRIVATE_AI_PROXY_HOME="$registration_home" \
-            "$app_bundle/Contents/MacOS/pap" --json cli status)"
+            "$app_bundle/Contents/MacOS/private-ai-proxy" --json cli status)"
           node -e 'const value = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (value.installed !== true) process.exit(1)' \
             <<<"$registration_after"
           kill -0 "$registration_pid"

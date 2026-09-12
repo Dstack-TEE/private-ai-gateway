@@ -142,7 +142,7 @@ pub(crate) async fn export_diagnostics(
 pub(crate) async fn get_cli_registration(app: AppHandle) -> Result<CliRegistration, String> {
     #[cfg(target_os = "macos")]
     register_cli_on_startup(&app).await;
-    let registration = run_pap_cli(&app, vec!["cli", "status", "--json"]).await?;
+    let registration = run_cli_command(&app, vec!["cli", "status", "--json"]).await?;
     let startup_error = app.state::<CliStartup>().0.lock().await.last_error.clone();
     Ok(CliRegistration {
         registration,
@@ -165,9 +165,9 @@ pub(crate) async fn set_cli_registration(
         run_blocking(move || writer.set_preference(Preference::AutoCliRegistration(false))).await?;
     }
     let registration = if installed {
-        run_pap_cli(&app, vec!["cli", "install", "--json"]).await
+        run_cli_command(&app, vec!["cli", "install", "--json"]).await
     } else {
-        run_pap_cli(&app, vec!["cli", "uninstall", "--json", "--yes"]).await
+        run_cli_command(&app, vec!["cli", "uninstall", "--json", "--yes"]).await
     }?;
     if installed {
         run_blocking(move || client.set_preference(Preference::AutoCliRegistration(true))).await?;

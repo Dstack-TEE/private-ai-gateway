@@ -33,7 +33,7 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
         Action::Profiles {
             command: Profiles::Login(_),
         } => format!(
-            "Account saved. Use pap start to enable protection.\n{}",
+            "Account saved. Use private-ai-proxy start to enable protection.\n{}",
             status(value)
         ),
         Action::Profiles {
@@ -122,7 +122,7 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
 
 fn status(value: &Value) -> String {
     if value["status"] == "not_running" {
-        return "Backend not running.\nStart backend: pap service start\nStart protection: pap start".into();
+        return "Backend not running.\nStart backend: private-ai-proxy service start\nStart protection: private-ai-proxy start".into();
     }
     let state = value.get("gateway").unwrap_or(value);
     let status = match state["status"].as_str() {
@@ -412,7 +412,7 @@ mod tests {
 
     #[test]
     fn status_includes_operational_context_without_credentials_or_activity() {
-        assert!(status(&json!({"status":"not_running"})).contains("pap service start"));
+        assert!(status(&json!({"status":"not_running"})).contains("private-ai-proxy service start"));
         let value = json!({
             "backend": {"processId":42,"version":"0.1.0"},
             "gateway": {

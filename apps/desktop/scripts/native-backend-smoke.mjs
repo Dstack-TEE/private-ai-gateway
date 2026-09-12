@@ -16,7 +16,7 @@ const home = await mkdtemp(path.join(tmpdir(), "pap-native-"));
 const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: path.join(home, "config"), XDG_DATA_HOME: path.join(home, "data"), XDG_CACHE_HOME: path.join(home, "cache"), PRIVATE_AI_PROXY_HOME: home };
 const children = [];
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const cli = async (...args) => JSON.parse((await exec(path.join(binaries, "pap"), [...args, "--json"], { env, timeout: 25_000, maxBuffer: 1_048_576 })).stdout);
+const cli = async (...args) => JSON.parse((await exec(path.join(binaries, "private-ai-proxy"), [...args, "--json"], { env, timeout: 25_000, maxBuffer: 1_048_576 })).stdout);
 
 function start(name) {
   const child = spawn(path.join(binaries, name), [], { env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
@@ -51,7 +51,7 @@ try {
   const data = path.join(home, ".private-ai-proxy");
   await mkdir(data, { mode: 0o700 });
   await writeFile(path.join(data, "local-api.json"), JSON.stringify({ listenAddress: "127.0.0.1", allowNetworkAccess: false, port: address.port }), { mode: 0o600 });
-  const backend = start("pap-service");
+  const backend = start("private-ai-proxy-service");
   let state;
   for (let count = 0; count < 100; count++) {
     assert.equal(backend.exitCode, null, "Backend exited before readiness");

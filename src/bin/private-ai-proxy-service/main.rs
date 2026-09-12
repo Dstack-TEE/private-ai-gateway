@@ -6,13 +6,13 @@ use desktop_runtime::{
 use std::sync::Arc;
 
 #[derive(Parser)]
-#[command(name = "pap-service", version = desktop_runtime::protocol::BUILD_VERSION, about = "Run the per-user Private AI Proxy backend in the foreground")]
+#[command(name = "private-ai-proxy-service", version = desktop_runtime::protocol::BUILD_VERSION, about = "Run the per-user Private AI Proxy backend in the foreground")]
 struct Arguments {}
 
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
-        eprintln!("PAP backend: {error}");
+        eprintln!("Private AI Proxy backend: {error}");
         std::process::exit(1);
     }
 }
@@ -36,7 +36,9 @@ async fn run() -> Result<(), String> {
             name.to_string()
         }
     };
-    let launcher = Arc::new(TokioSidecarLauncher::new(directory.join(name("pap")))?);
+    let launcher = Arc::new(TokioSidecarLauncher::new(
+        directory.join(name("private-ai-proxy")),
+    )?);
     let options = RuntimeOptions {
         launcher,
         helper_path: directory.join(name("private-ai-proxy-helper")),

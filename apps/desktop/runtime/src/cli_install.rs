@@ -24,10 +24,100 @@ pub fn uninstall(directory: Option<PathBuf>) -> Result<Registration, String> {
 }
 
 fn current_executable() -> Result<PathBuf, String> {
-    let executable = std::env::current_exe().map_err(|_| "Cannot locate pap".to_string())?;
-    executable
+    let executable =
+        std::env::current_exe().map_err(|_| "Cannot locate private-ai-proxy".to_string())?;
+    let executable = executable
         .canonicalize()
-        .map_err(|_| "Cannot resolve the pap executable path".to_string())
+        .map_err(|_| "Cannot resolve the private-ai-proxy executable path".to_string())?;
+    Ok(executable)
+}
+
+#[cfg(any(windows, test))]
+mod windows_alias {
+    use std::fs::{self, OpenOptions};
+    use std::io::{self, Write};
+    use std::path::Path;
+
+    const SCRIPT: &[u8] = b"@echo off\r\n\"%~dp0private-ai-proxy.exe\" %*\r\n";
+
+    pub(super) fn install(executable: &Path) -> Result<(), String> {
+        reject_legacy_executable(executable)?;
+        let alias = executable.with_file_name("pap.cmd");
+        match OpenOptions::new().write(true).create_new(true).open(&alias) {
+            Ok(mut file) => {
+                let written = file.write_all(SCRIPT).and_then(|()| file.sync_all());
+                drop(file);
+                if written.is_err() {
+                    fs::remove_file(&alias)
+                        .map_err(|_| "Cannot clean up the incomplete pap.cmd alias".to_string())?;
+                    return Err("Cannot write the pap.cmd alias".to_string());
+                }
+                Ok(())
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                if matches(&alias)? {
+                    Ok(())
+                } else {
+                    Err("Refusing to replace an unrelated pap.cmd".to_string())
+                }
+            }
+            Err(_) => Err("Cannot create the pap.cmd alias".to_string()),
+        }
+    }
+
+    pub(super) fn uninstall(executable: &Path) -> Result<(), String> {
+        let alias = executable.with_file_name("pap.cmd");
+        match fs::symlink_metadata(&alias) {
+            Ok(_) if matches(&alias)? => {
+                fs::remove_file(alias).map_err(|_| "Cannot remove the pap.cmd alias".to_string())
+            }
+            Ok(_) => Err("Refusing to remove an unrelated pap.cmd".to_string()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err("Cannot inspect the pap.cmd alias".to_string()),
+        }
+    }
+
+    pub(super) fn reject_legacy_executable(executable: &Path) -> Result<(), String> {
+        match fs::symlink_metadata(executable.with_file_name("pap.exe")) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Ok(_) => Err("A legacy pap.exe shadows the pap alias; remove the old installation or extract this release into a clean directory".to_string()),
+            Err(_) => Err("Cannot inspect the legacy pap.exe command".to_string()),
+        }
+    }
+
+    pub(super) fn matches(alias: &Path) -> Result<bool, String> {
+        fs::read(alias)
+            .map(|bytes| bytes == SCRIPT)
+            .map_err(|_| "Cannot verify the pap.cmd alias".to_string())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn registration_accepts_only_the_matching_alias() {
+            let root = tempfile::tempdir().unwrap();
+            let executable = root.path().join("private-ai-proxy.exe");
+            let alias = root.path().join("pap.cmd");
+            fs::write(&executable, b"cli").unwrap();
+            install(&executable).unwrap();
+            install(&executable).unwrap();
+            assert_eq!(fs::read(&alias).unwrap(), SCRIPT);
+            uninstall(&executable).unwrap();
+            assert!(!alias.exists());
+            assert!(executable.exists());
+            fs::write(&alias, b"other").unwrap();
+            assert!(install(&executable).is_err());
+            assert!(uninstall(&executable).is_err());
+            assert_eq!(fs::read(alias).unwrap(), b"other");
+            let legacy = executable.with_file_name("pap.exe");
+            fs::write(&legacy, b"old cli").unwrap();
+            assert!(reject_legacy_executable(&executable).is_err());
+            assert!(install(&executable).is_err());
+            assert_eq!(fs::read(legacy).unwrap(), b"old cli");
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -44,6 +134,7 @@ mod platform {
     enum CommandState {
         Missing,
         ManagedLink,
+        LegacyLink(PathBuf),
         Executable,
     }
 
@@ -61,26 +152,7 @@ mod platform {
             }
         }
         let directory = prepare_directory(directory)?;
-        let command_path = directory.join("pap");
-
-        match command_state(&executable, &command_path)? {
-            CommandState::Missing => {
-                symlink(&executable, &command_path).map_err(|error| {
-                    if error.kind() == ErrorKind::AlreadyExists {
-                        "The pap command path changed while it was being registered".to_string()
-                    } else if error.kind() == ErrorKind::PermissionDenied {
-                        format!(
-                            "Cannot register pap in {} without an authorized installer",
-                            directory.display()
-                        )
-                    } else {
-                        format!("Cannot register pap in {}", directory.display())
-                    }
-                })?;
-                sync_directory(&directory)?;
-            }
-            CommandState::ManagedLink | CommandState::Executable => {}
-        }
+        register_commands(&executable, &directory)?;
 
         inspect(&executable, &directory, env::var_os("PATH").as_deref())
     }
@@ -89,26 +161,30 @@ mod platform {
         let executable = current_executable()?;
         if directory.is_none() && managed_system_directory(&executable).is_some() {
             return Err(
-                "The pap command is owned by a system package; uninstall the package to remove it"
+                "The private-ai-proxy command is owned by a system package; uninstall the package to remove it"
                     .to_string(),
             );
         }
         let directory = resolve_directory(directory)?;
-        let command_path = directory.join("pap");
-
-        match command_state(&executable, &command_path)? {
-            CommandState::Missing => {}
-            CommandState::ManagedLink => {
-                fs::remove_file(&command_path)
-                    .map_err(|_| format!("Cannot remove {}", command_path.display()))?;
-                sync_directory(&directory)?;
-            }
-            CommandState::Executable => {
+        let commands = command_states(&executable, &directory)?;
+        for (path, state) in &commands {
+            if matches!(state, CommandState::Executable) {
                 return Err(format!(
-                    "{} is the pap executable itself and must be removed by its package or installer",
-                    command_path.display()
+                    "{} is the executable itself and must be removed by its package or installer",
+                    path.display()
                 ));
             }
+        }
+        for (path, state) in commands {
+            if matches!(
+                state,
+                CommandState::ManagedLink | CommandState::LegacyLink(_)
+            ) {
+                fs::remove_file(&path).map_err(|_| format!("Cannot remove {}", path.display()))?;
+            }
+        }
+        if directory.exists() {
+            sync_directory(&directory)?;
         }
 
         inspect(&executable, &directory, env::var_os("PATH").as_deref())
@@ -119,17 +195,62 @@ mod platform {
         directory: &Path,
         path_value: Option<&std::ffi::OsStr>,
     ) -> Result<Registration, String> {
-        let command_path = directory.join("pap");
-        let installed = !matches!(
-            command_state(executable, &command_path)?,
-            CommandState::Missing
-        );
+        let command_path = directory.join("private-ai-proxy");
+        let installed = command_states(executable, directory)?
+            .iter()
+            .all(|(_, state)| {
+                matches!(state, CommandState::ManagedLink | CommandState::Executable)
+            });
         Ok(Registration {
             executable: executable.to_path_buf(),
             command_path,
             installed,
             on_path: installed && path_contains(directory, path_value),
         })
+    }
+
+    fn command_states(
+        executable: &Path,
+        directory: &Path,
+    ) -> Result<Vec<(PathBuf, CommandState)>, String> {
+        ["private-ai-proxy", "pap"]
+            .into_iter()
+            .map(|name| {
+                let path = directory.join(name);
+                command_state(executable, &path).map(|state| (path, state))
+            })
+            .collect()
+    }
+
+    fn register_commands(executable: &Path, directory: &Path) -> Result<(), String> {
+        // Check both names before changing either, including an existing legacy pap link.
+        let commands = command_states(executable, directory)?;
+        let mut created: Vec<PathBuf> = Vec::new();
+        for (path, state) in commands {
+            let previous = match state {
+                CommandState::Missing => None,
+                CommandState::LegacyLink(target) => {
+                    fs::remove_file(&path)
+                        .map_err(|_| format!("Cannot update {}", path.display()))?;
+                    Some(target)
+                }
+                CommandState::ManagedLink | CommandState::Executable => continue,
+            };
+            if symlink(executable, &path).is_err() {
+                if let Some(target) = previous {
+                    symlink(target, &path)
+                        .map_err(|_| format!("Cannot restore {}", path.display()))?;
+                }
+                for path in created {
+                    fs::remove_file(&path).map_err(|_| {
+                        format!("Cannot roll back registration of {}", path.display())
+                    })?;
+                }
+                return Err(format!("Cannot register {}", path.display()));
+            }
+            created.push(path);
+        }
+        sync_directory(directory)
     }
 
     fn command_state(executable: &Path, command_path: &Path) -> Result<CommandState, String> {
@@ -140,6 +261,30 @@ mod platform {
         };
 
         if metadata.file_type().is_symlink() {
+            // A renamed bundle leaves the old pap link dangling beside its replacement.
+            // Only that exact missing sibling is ours; arbitrary broken links stay untouched.
+            if command_path.file_name().is_some_and(|name| name == "pap") {
+                let target = fs::read_link(command_path)
+                    .map_err(|_| format!("Cannot read {}", command_path.display()))?;
+                let resolved = if target.is_absolute() {
+                    target.clone()
+                } else {
+                    command_path
+                        .parent()
+                        .unwrap_or(Path::new("."))
+                        .join(&target)
+                };
+                if resolved.file_name().is_some_and(|name| name == "pap")
+                    && resolved
+                        .parent()
+                        .and_then(|parent| parent.canonicalize().ok())
+                        == executable.parent().map(Path::to_path_buf)
+                    && fs::symlink_metadata(&resolved)
+                        .is_err_and(|error| error.kind() == ErrorKind::NotFound)
+                {
+                    return Ok(CommandState::LegacyLink(target));
+                }
+            }
             let target = command_path.canonicalize().map_err(|_| {
                 format!(
                     "Refusing to replace broken or inaccessible link {}",
@@ -159,6 +304,15 @@ mod platform {
         let target = command_path
             .canonicalize()
             .map_err(|_| format!("Cannot resolve {}", command_path.display()))?;
+        #[cfg(target_os = "linux")]
+        if executable == Path::new("/usr/bin/private-ai-proxy")
+            && target == Path::new("/usr/bin/pap")
+            && metadata.permissions().mode() & 0o111 != 0
+            && fs::read(&target)
+                .is_ok_and(|bytes| bytes == b"#!/bin/sh\nexec /usr/bin/private-ai-proxy \"$@\"\n")
+        {
+            return Ok(CommandState::Executable);
+        }
         if target == executable {
             Ok(CommandState::Executable)
         } else {
@@ -199,7 +353,8 @@ mod platform {
                 .any(|part| part == Component::ParentDir)
         {
             return Err(
-                "The pap command directory must be an absolute normalized path".to_string(),
+                "The private-ai-proxy command directory must be an absolute normalized path"
+                    .to_string(),
             );
         }
         let directory = validate_owned_directory(&directory)?;
@@ -209,7 +364,10 @@ mod platform {
         if directory.starts_with(&home) || allowed_system_directory(&directory) {
             Ok(directory)
         } else {
-            Err("The pap command directory must be inside the current user's home".to_string())
+            Err(
+                "The private-ai-proxy command directory must be inside the current user's home"
+                    .to_string(),
+            )
         }
     }
 
@@ -265,18 +423,18 @@ mod platform {
     #[cfg(target_os = "macos")]
     fn managed_system_directory(executable: &Path) -> Option<PathBuf> {
         let directory = PathBuf::from("/usr/local/bin");
-        match command_state(executable, &directory.join("pap")) {
+        match command_state(executable, &directory.join("private-ai-proxy")) {
             Ok(CommandState::ManagedLink | CommandState::Executable) => Some(directory),
-            Ok(CommandState::Missing) | Err(_) => None,
+            Ok(CommandState::Missing | CommandState::LegacyLink(_)) | Err(_) => None,
         }
     }
 
     #[cfg(not(target_os = "macos"))]
     fn managed_system_directory(executable: &Path) -> Option<PathBuf> {
         let directory = PathBuf::from("/usr/bin");
-        match command_state(executable, &directory.join("pap")) {
+        match command_state(executable, &directory.join("private-ai-proxy")) {
             Ok(CommandState::ManagedLink | CommandState::Executable) => Some(directory),
-            Ok(CommandState::Missing) | Err(_) => None,
+            Ok(CommandState::Missing | CommandState::LegacyLink(_)) | Err(_) => None,
         }
     }
 
@@ -312,12 +470,12 @@ mod platform {
 
         use tempfile::tempdir;
 
-        use super::{command_state, inspect, sync_directory, CommandState};
+        use super::{command_state, inspect, register_commands, CommandState};
 
         fn executable(root: &std::path::Path) -> std::path::PathBuf {
-            let executable = root.join("runtime/pap");
+            let executable = root.join("runtime/private-ai-proxy");
             fs::create_dir_all(executable.parent().unwrap()).unwrap();
-            fs::write(&executable, b"pap").unwrap();
+            fs::write(&executable, b"private-ai-proxy").unwrap();
             fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
             executable.canonicalize().unwrap()
         }
@@ -328,8 +486,10 @@ mod platform {
             let executable = executable(root.path());
             let directory = root.path().join("bin");
             fs::create_dir(&directory).unwrap();
-            std::os::unix::fs::symlink(&executable, directory.join("pap")).unwrap();
-            sync_directory(&directory).unwrap();
+            std::os::unix::fs::symlink(executable.with_file_name("pap"), directory.join("pap"))
+                .unwrap();
+            register_commands(&executable, &directory).unwrap();
+            register_commands(&executable, &directory).unwrap();
 
             let registration = inspect(
                 &executable,
@@ -339,8 +499,13 @@ mod platform {
             .unwrap();
             assert!(registration.installed);
             assert!(registration.on_path);
+            assert_eq!(
+                registration.command_path,
+                directory.join("private-ai-proxy")
+            );
+            assert_eq!(directory.join("pap").canonicalize().unwrap(), executable);
             assert!(matches!(
-                command_state(&executable, &directory.join("pap")).unwrap(),
+                command_state(&executable, &directory.join("private-ai-proxy")).unwrap(),
                 CommandState::ManagedLink
             ));
         }
@@ -353,16 +518,17 @@ mod platform {
             fs::create_dir(&directory).unwrap();
             fs::write(directory.join("pap"), b"other").unwrap();
 
-            let error = inspect(&executable, &directory, None).unwrap_err();
+            let error = register_commands(&executable, &directory).unwrap_err();
             assert!(error.contains("Refusing to replace unrelated command"));
             assert_eq!(fs::read(directory.join("pap")).unwrap(), b"other");
+            assert!(!directory.join("private-ai-proxy").exists());
         }
 
         #[test]
         fn broken_link_is_never_replaced() {
             let root = tempdir().unwrap();
             let executable = executable(root.path());
-            let command = root.path().join("pap");
+            let command = root.path().join("private-ai-proxy");
             std::os::unix::fs::symlink(root.path().join("missing"), &command).unwrap();
 
             let error = command_state(&executable, &command).unwrap_err();
@@ -399,7 +565,7 @@ mod platform {
         },
     };
 
-    use super::{current_executable, Registration};
+    use super::{current_executable, windows_alias, Registration};
 
     const ENVIRONMENT_KEY: &str = "Environment";
     const PATH_VALUE: &str = "Path";
@@ -415,6 +581,7 @@ mod platform {
         let executable = current_executable()?;
         let directory = executable_directory(&executable, directory)?;
         reject_path_conflict(&executable)?;
+        windows_alias::install(&executable)?;
         let (path_value, value_type) = read_user_path()?;
         if path_entries(&path_value)
             .iter()
@@ -426,7 +593,7 @@ mod platform {
         if let Some(owner) = read_ownership()? {
             if !same_path_text(&owner, &directory) {
                 return Err(format!(
-                    "Another pap installation owns the PATH registration at {owner}"
+                    "Another private-ai-proxy installation owns the PATH registration at {owner}"
                 ));
             }
         }
@@ -442,7 +609,8 @@ mod platform {
         write_user_path(&updated, value_type)?;
         if let Err(error) = write_ownership(&directory_text) {
             write_user_path(&path_value, value_type).map_err(|_| {
-                "Cannot record or roll back pap PATH registration ownership".to_string()
+                "Cannot record or roll back private-ai-proxy PATH registration ownership"
+                    .to_string()
             })?;
             return Err(error);
         }
@@ -453,6 +621,7 @@ mod platform {
     pub(super) fn uninstall(directory: Option<PathBuf>) -> Result<Registration, String> {
         let executable = current_executable()?;
         let directory = executable_directory(&executable, directory)?;
+        windows_alias::uninstall(&executable)?;
         let Some(owner) = read_ownership()? else {
             return registration(executable, Some(directory));
         };
@@ -471,7 +640,8 @@ mod platform {
             write_user_path(&updated, value_type)?;
             if let Err(error) = delete_ownership() {
                 write_user_path(&path_value, value_type).map_err(|_| {
-                    "Cannot remove or roll back pap PATH registration ownership".to_string()
+                    "Cannot remove or roll back private-ai-proxy PATH registration ownership"
+                        .to_string()
                 })?;
                 return Err(error);
             }
@@ -487,16 +657,20 @@ mod platform {
         directory: Option<PathBuf>,
     ) -> Result<Registration, String> {
         let directory = executable_directory(&executable, directory)?;
-        let command_path = directory.join("pap.exe");
+        let command_path = directory.join("private-ai-proxy.exe");
+        windows_alias::reject_legacy_executable(&executable)?;
         let (path_value, _) = read_user_path()?;
         let installed = path_entries(&path_value)
             .iter()
-            .any(|entry| same_path_text(entry, &directory));
+            .any(|entry| same_path_text(entry, &directory))
+            && windows_alias::matches(&directory.join("pap.cmd")).unwrap_or(false);
         Ok(Registration {
             executable: PathBuf::from(path_text(&executable)?),
             command_path: PathBuf::from(path_text(&command_path)?),
             installed,
-            on_path: installed && resolves_from_process_path(&executable),
+            on_path: installed
+                && resolves_from_process_path(&executable)
+                && reject_path_conflict(&executable).is_ok(),
         })
     }
 
@@ -506,34 +680,57 @@ mod platform {
     ) -> Result<PathBuf, String> {
         let actual = executable
             .parent()
-            .ok_or_else(|| "Cannot locate the pap executable directory".to_string())?
+            .ok_or_else(|| "Cannot locate the private-ai-proxy executable directory".to_string())?
             .to_path_buf();
         let Some(requested) = requested else {
             return Ok(actual);
         };
-        let requested = requested
-            .canonicalize()
-            .map_err(|_| "Cannot resolve the requested pap command directory".to_string())?;
-        let candidate = requested.join("pap.exe");
+        let requested = requested.canonicalize().map_err(|_| {
+            "Cannot resolve the requested private-ai-proxy command directory".to_string()
+        })?;
+        let candidate = requested.join("private-ai-proxy.exe");
         let candidate = candidate.canonicalize().map_err(|_| {
-            "The requested command directory does not contain this pap executable".to_string()
+            "The requested command directory does not contain this private-ai-proxy executable"
+                .to_string()
         })?;
         if candidate != executable {
             return Err(
-                "The requested command directory contains a different pap executable".to_string(),
+                "The requested command directory contains a different private-ai-proxy executable"
+                    .to_string(),
             );
         }
         Ok(requested)
     }
 
     fn reject_path_conflict(executable: &Path) -> Result<(), String> {
-        if let Some(found) = first_process_path_command("pap.exe") {
-            let found = found
-                .canonicalize()
-                .map_err(|_| "Cannot resolve the pap command already on PATH".to_string())?;
+        if let Some(found) = first_process_path_command("private-ai-proxy.exe") {
+            let found = found.canonicalize().map_err(|_| {
+                "Cannot resolve the private-ai-proxy command already on PATH".to_string()
+            })?;
             if found != executable {
                 return Err(format!(
-                    "A different pap executable is already on PATH at {}",
+                    "A different private-ai-proxy executable is already on PATH at {}",
+                    found.display()
+                ));
+            }
+        }
+        if let Some(found) = first_process_path_command("pap.exe") {
+            if found.parent().and_then(|path| path.canonicalize().ok())
+                != executable.parent().map(Path::to_path_buf)
+            {
+                return Err(format!(
+                    "An unrelated pap.exe is already on PATH at {}",
+                    found.display()
+                ));
+            }
+        }
+        if let Some(found) = first_process_path_command("pap.cmd") {
+            if found.parent().and_then(|path| path.canonicalize().ok())
+                != executable.parent().map(Path::to_path_buf)
+                || !windows_alias::matches(&found)?
+            {
+                return Err(format!(
+                    "An unrelated pap.cmd is already on PATH at {}",
                     found.display()
                 ));
             }
@@ -542,7 +739,7 @@ mod platform {
     }
 
     fn resolves_from_process_path(executable: &Path) -> bool {
-        first_process_path_command("pap.exe")
+        first_process_path_command("private-ai-proxy.exe")
             .and_then(|path| path.canonicalize().ok())
             .is_some_and(|path| path == executable)
     }
@@ -590,10 +787,13 @@ mod platform {
             return Ok(None);
         }
         if queried != ERROR_SUCCESS && queried != ERROR_MORE_DATA {
-            return Err("Cannot read pap registration settings".to_string());
+            return Err("Cannot read private-ai-proxy registration settings".to_string());
         }
         if value_type != REG_SZ && value_type != REG_EXPAND_SZ {
-            return Err("A pap registration setting has an unsupported registry type".to_string());
+            return Err(
+                "A private-ai-proxy registration setting has an unsupported registry type"
+                    .to_string(),
+            );
         }
         let mut buffer = vec![0_u16; (bytes as usize).div_ceil(2).max(1)];
         // SAFETY: the buffer has the byte capacity reported by the first query.
@@ -608,7 +808,7 @@ mod platform {
             )
         };
         if queried != ERROR_SUCCESS {
-            return Err("Cannot read pap registration settings".to_string());
+            return Err("Cannot read private-ai-proxy registration settings".to_string());
         }
         let length = buffer
             .iter()
@@ -627,7 +827,7 @@ mod platform {
 
     fn write_ownership(value: &str) -> Result<(), String> {
         write_registry_string(OWNERSHIP_KEY, OWNERSHIP_VALUE, value, REG_SZ, true)
-            .map_err(|_| "Cannot record pap PATH registration ownership".to_string())
+            .map_err(|_| "Cannot record private-ai-proxy PATH registration ownership".to_string())
     }
 
     fn write_registry_string(
@@ -662,7 +862,7 @@ mod platform {
             )
         };
         if written != ERROR_SUCCESS {
-            return Err("Cannot update pap registration settings".to_string());
+            return Err("Cannot update private-ai-proxy registration settings".to_string());
         }
         Ok(())
     }
@@ -675,7 +875,7 @@ mod platform {
         // SAFETY: the key and null-terminated value name remain valid for the call.
         let deleted = unsafe { RegDeleteValueW(key.0, value_name.as_ptr()) };
         if deleted != ERROR_SUCCESS && deleted != ERROR_FILE_NOT_FOUND {
-            return Err("Cannot remove pap PATH registration ownership".to_string());
+            return Err("Cannot remove private-ai-proxy PATH registration ownership".to_string());
         }
         Ok(())
     }
@@ -694,7 +894,7 @@ mod platform {
             return Ok(None);
         }
         if opened != ERROR_SUCCESS {
-            return Err("Cannot open pap registration settings".to_string());
+            return Err("Cannot open private-ai-proxy registration settings".to_string());
         }
         Ok(Some(RegistryKey(key)))
     }
@@ -717,7 +917,7 @@ mod platform {
             )
         };
         if created != ERROR_SUCCESS {
-            return Err("Cannot create pap registration settings".to_string());
+            return Err("Cannot create private-ai-proxy registration settings".to_string());
         }
         Ok(RegistryKey(key))
     }
@@ -766,13 +966,15 @@ mod platform {
     fn path_text(path: &Path) -> Result<String, String> {
         let value = path
             .to_str()
-            .ok_or("The pap executable path is not valid Unicode")?;
+            .ok_or("The private-ai-proxy executable path is not valid Unicode")?;
         let value = match value.strip_prefix(r"\\?\UNC\") {
             Some(unc) => format!(r"\\{unc}"),
             None => value.strip_prefix(r"\\?\").unwrap_or(value).to_string(),
         };
         if value.contains(';') {
-            return Err("The pap executable directory cannot contain a semicolon".to_string());
+            return Err(
+                "The private-ai-proxy executable directory cannot contain a semicolon".to_string(),
+            );
         }
         Ok(value)
     }
@@ -820,16 +1022,19 @@ mod platform {
         #[test]
         fn path_entries_are_compared_without_case_or_separator_noise() {
             assert_eq!(
-                normalize_path_text(r#""C:/Users/Alice/PAP/""#),
-                normalize_path_text(r"c:\users\alice\pap")
+                normalize_path_text(r#""C:/Users/Alice/Private-AI-Proxy/""#),
+                normalize_path_text(r"c:\users\alice\private-ai-proxy")
             );
             assert_eq!(
-                path_text(std::path::Path::new(r"\\?\D:\Tools\pap.exe")).unwrap(),
-                r"D:\Tools\pap.exe"
+                path_text(std::path::Path::new(r"\\?\D:\Tools\private-ai-proxy.exe")).unwrap(),
+                r"D:\Tools\private-ai-proxy.exe"
             );
             assert_eq!(
-                path_text(std::path::Path::new(r"\\?\UNC\server\tools\pap.exe")).unwrap(),
-                r"\\server\tools\pap.exe"
+                path_text(std::path::Path::new(
+                    r"\\?\UNC\server\tools\private-ai-proxy.exe"
+                ))
+                .unwrap(),
+                r"\\server\tools\private-ai-proxy.exe"
             );
             assert_eq!(
                 normalize_path_text(r"\\?\UNC\server\tools"),
@@ -856,13 +1061,16 @@ mod tests {
     #[test]
     fn registration_uses_the_cli_json_contract() {
         let value = serde_json::to_value(Registration {
-            executable: PathBuf::from("/opt/pap/pap"),
-            command_path: PathBuf::from("/home/user/.local/bin/pap"),
+            executable: PathBuf::from("/opt/private-ai-proxy/private-ai-proxy"),
+            command_path: PathBuf::from("/home/user/.local/bin/private-ai-proxy"),
             installed: true,
             on_path: false,
         })
         .unwrap();
-        assert_eq!(value["commandPath"], "/home/user/.local/bin/pap");
+        assert_eq!(
+            value["commandPath"],
+            "/home/user/.local/bin/private-ai-proxy"
+        );
         assert_eq!(value["installed"], true);
         assert_eq!(value["onPath"], false);
         assert!(value.get("command_path").is_none());

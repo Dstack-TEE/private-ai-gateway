@@ -19,7 +19,7 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const binaries = ["pap", "pap-service", "private-ai-proxy-helper"];
+export const binaries = ["private-ai-proxy", "private-ai-proxy-service", "private-ai-proxy-helper"];
 
 const scriptPath = fileURLToPath(import.meta.url);
 const appRoot = path.resolve(path.dirname(scriptPath), "..");
@@ -58,6 +58,11 @@ export async function stagePortable({ sourceDir, targetTriple, platform, destina
       await chmod(target, 0o755);
     }
   }
+  if (platform === "windows") {
+    await writeFile(path.join(destination, "pap.cmd"), '@echo off\r\n"%~dp0private-ai-proxy.exe" %*\r\n');
+  } else {
+    await symlink("private-ai-proxy", path.join(destination, "pap"));
+  }
 }
 
 export async function stageLinuxPackageRoot(portableDirectory, packageRoot) {
@@ -70,7 +75,9 @@ export async function stageLinuxPackageRoot(portableDirectory, packageRoot) {
     await copyFile(path.join(portableDirectory, name), target);
     await chmod(target, 0o755);
   }
-  await symlink("../libexec/private-ai-proxy/pap", path.join(bin, "pap"));
+  for (const name of ["private-ai-proxy", "pap"]) {
+    await symlink("../libexec/private-ai-proxy/private-ai-proxy", path.join(bin, name));
+  }
 }
 
 async function main() {
@@ -193,7 +200,7 @@ async function createRpm(options, scratch, portable) {
   const spec = path.join(specs, "private-ai-proxy-cli.spec");
   await writeFile(
     spec,
-    `Name: private-ai-proxy-cli\nVersion: ${rpmVersion}\nRelease: ${rpmRelease}\nSummary: Private AI Proxy command line client and user backend\nLicense: Apache-2.0\nURL: https://github.com/Dstack-TEE/private-ai-gateway\nBuildArch: ${architecture}\nAutoReqProv: no\n\n%description\nPrivate AI Proxy CLI, user-owned backend, verifier, and credential helper.\n\n%install\nrm -rf %{buildroot}\nmkdir -p %{buildroot}/usr/libexec/private-ai-proxy %{buildroot}/usr/bin\ninstall -m 0755 %{_sourcedir}/pap-service %{buildroot}/usr/libexec/private-ai-proxy/pap-service\ninstall -m 0755 %{_sourcedir}/pap %{buildroot}/usr/libexec/private-ai-proxy/pap\ninstall -m 0755 %{_sourcedir}/private-ai-proxy-helper %{buildroot}/usr/libexec/private-ai-proxy/private-ai-proxy-helper\nln -s ../libexec/private-ai-proxy/pap %{buildroot}/usr/bin/pap\n\n%pre\n${preInstall}\n\n%preun\n${preRemove}\n\n%files\n/usr/bin/pap\n/usr/libexec/private-ai-proxy/pap\n/usr/libexec/private-ai-proxy/pap-service\n/usr/libexec/private-ai-proxy/private-ai-proxy-helper\n`,
+    `Name: private-ai-proxy-cli\nVersion: ${rpmVersion}\nRelease: ${rpmRelease}\nSummary: Private AI Proxy command line client and user backend\nLicense: Apache-2.0\nURL: https://github.com/Dstack-TEE/private-ai-gateway\nBuildArch: ${architecture}\nAutoReqProv: no\n\n%description\nPrivate AI Proxy CLI, user-owned backend, verifier, and credential helper.\n\n%install\nrm -rf %{buildroot}\nmkdir -p %{buildroot}/usr/libexec/private-ai-proxy %{buildroot}/usr/bin\ninstall -m 0755 %{_sourcedir}/private-ai-proxy-service %{buildroot}/usr/libexec/private-ai-proxy/private-ai-proxy-service\ninstall -m 0755 %{_sourcedir}/private-ai-proxy %{buildroot}/usr/libexec/private-ai-proxy/private-ai-proxy\ninstall -m 0755 %{_sourcedir}/private-ai-proxy-helper %{buildroot}/usr/libexec/private-ai-proxy/private-ai-proxy-helper\nln -s ../libexec/private-ai-proxy/private-ai-proxy %{buildroot}/usr/bin/private-ai-proxy\nln -s private-ai-proxy %{buildroot}/usr/bin/pap\n\n%pre\n${preInstall}\n\n%preun\n${preRemove}\n\n%files\n/usr/bin/private-ai-proxy\n/usr/bin/pap\n/usr/libexec/private-ai-proxy/private-ai-proxy\n/usr/libexec/private-ai-proxy/private-ai-proxy-service\n/usr/libexec/private-ai-proxy/private-ai-proxy-helper\n`,
   );
   execFileSync("rpmbuild", ["-bb", "--define", `_topdir ${topDir}`, "--target", architecture, spec], {
     stdio: "inherit",
