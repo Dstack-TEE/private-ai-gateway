@@ -30,12 +30,13 @@ try {
         set windowBounds to bounds of container window of volumeFolder
         set viewOptions to icon view options of container window of volumeFolder
         set iconSize to icon size of viewOptions
-        set backdrop to POSIX path of (background picture of viewOptions as alias)
+        set backdrop to get background picture of viewOptions
         set viewWidth to (item 3 of windowBounds) - (item 1 of windowBounds)
         set viewHeight to (item 4 of windowBounds) - (item 2 of windowBounds)
         close container window of volumeFolder
-        return (item 1 of appPoint as text) & "," & (item 2 of appPoint as text) & "," & (item 1 of folderPoint as text) & "," & (item 2 of folderPoint as text) & "," & (viewWidth as text) & "," & (viewHeight as text) & "," & (iconSize as text) & linefeed & backdrop
       end tell
+      set backdropPath to POSIX path of (backdrop as alias)
+      return (item 1 of appPoint as text) & "," & (item 2 of appPoint as text) & "," & (item 1 of folderPoint as text) & "," & (item 2 of folderPoint as text) & "," & (viewWidth as text) & "," & (viewHeight as text) & "," & (iconSize as text) & linefeed & backdropPath
     end run`,
   });
   const [coordinates, backdrop] = output.trim().split(/\r?\n/);
