@@ -82,8 +82,9 @@ function AccountDetailsView({ api, provider, target, scope, images, onSignIn, di
     finally { openingRef.current = false; setOpening(false); }
   }, [disabled]);
   const organizationSlug = balance?.scope.organizationSlug ?? scope?.organizationSlug;
-  const canOpenBilling = provider === "phala" || Boolean(organizationSlug);
-  const openBilling = () => balance && canOpenBilling && openPage(() => api.openTopUp(provider, organizationSlug ?? undefined));
+  const billingSlug = provider === "phala" ? balance?.scope.workspaceSlug ?? scope?.workspaceSlug : organizationSlug;
+  const canOpenBilling = Boolean(billingSlug);
+  const openBilling = () => balance && canOpenBilling && openPage(() => api.openTopUp(provider, billingSlug ?? undefined));
   const manage = provider === "redpill" && organizationSlug ? () => void openPage(() => api.openOrganization(organizationSlug)) : undefined;
   const displayScope = provider === "redpill" && !compact ? scope ?? balance?.scope : balance?.scope ?? scope;
   const owner = displayScope?.organization ?? displayScope?.workspace;

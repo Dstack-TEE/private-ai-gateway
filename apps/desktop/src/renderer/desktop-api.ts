@@ -147,7 +147,7 @@ export const desktopApi: DesktopApi = {
   getAccountDetails: (profileId) => invoke("account_details", { profileId }),
   getAccountBalance: (target) => invoke("account_balance", { target }),
   openOrganization: (organizationSlug) => invoke("open_organization", { organizationSlug }),
-  openTopUp: (provider, organizationSlug) => invoke("open_top_up", { provider, organizationSlug }),
+  openTopUp: (provider, scopeSlug) => invoke("open_top_up", { provider, scopeSlug }),
   pollAccountLogin: (id) => invoke("poll_account_login", { id }),
   cancelAccountLogin: (id) => invoke("cancel_account_login", { id }),
   start(config: StartGatewayConfig): Promise<GatewayState> {

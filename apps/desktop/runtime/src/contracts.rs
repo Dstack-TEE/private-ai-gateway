@@ -161,6 +161,8 @@ pub struct AccountScope {
     pub organization_slug: Option<String>,
     pub organization: Option<String>,
     pub workspace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_slug: Option<String>,
     pub workspace_id: Option<i64>,
 }
 
