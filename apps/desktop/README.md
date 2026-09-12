@@ -45,7 +45,16 @@ and saving; opening profile settings manually never opts into protection.
 Windows and Linux sidebars do not reserve a macOS traffic-light region.
 
 Windows uses Tauri's NSIS template with generated 150x57 header and 164x314
-sidebar artwork. There are no legacy installation hooks or compatibility binaries.
+sidebar artwork and the branded application icon for installation and removal.
+The official NSIS hooks stop the backend and maintain current-user CLI registration.
+macOS uses a generated 660x440 DMG background with native app and Applications
+icons. All artwork comes from the existing vector brand kit, without system fonts.
+CI sets Tauri's `TAURI_BUNDLER_DMG_IGNORE_CI=true` on macOS so the official
+Finder customization step actually applies the background and icon positions.
+Linux DEB/RPM packages use the branded application icons and metadata in the
+system package manager; they do not have a custom installer wizard.
+See [Tauri DMG configuration](https://v2.tauri.app/reference/config/#dmgconfig)
+and [NSIS customization](https://v2.tauri.app/distribute/windows-installer/#customizing-the-nsis-installer).
 Published releases keep installers, required updater archives, three portable CLI
 archives, `latest.json` and one `SHA256SUMS`. Detached updater signatures remain
 embedded in the manifest; duplicate archives and CLI DEB/RPM builds remain CI
@@ -505,7 +514,10 @@ protection stopped. Linux updater manifests use separate
 the matching native installer with user authorization. AppImage is not shipped;
 existing AppImage users must manually migrate to DEB or RPM.
 
-Update signatures are separate from Apple Developer ID signing/notarization.
+Update signatures are separate from Apple Developer ID signing/notarization
+and Windows Authenticode. The current Windows release workflow does not provide
+Authenticode signing; installer artwork and publisher metadata do not remove
+SmartScreen warnings. See [Tauri Windows signing](https://v2.tauri.app/distribute/sign/windows/).
 Release administrators must provision these repository settings:
 
 - Secret `TAURI_SIGNING_PRIVATE_KEY`, generated with the Tauri signer and retained securely.
