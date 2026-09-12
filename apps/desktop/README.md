@@ -22,7 +22,7 @@ ordinary server and standalone ACI builds do not acquire desktop dependencies.
 macOS releases provide separate Apple Silicon (`arm64`) and Intel (`x64`)
 packages. Local builds default to the host architecture; pass `--target` to
 build for another target after installing it with `rustup target add`.
-CI checks the architecture of all four executables and runs Intel packages
+CI checks the architecture of the app and its three bundled executables, and runs Intel packages
 through Rosetta on macOS 26. Explicit `--target universal-apple-darwin` builds
 remain available when both Rust targets are installed.
 
@@ -228,8 +228,11 @@ seconds instead of hanging indefinitely; configuration verification keeps its
 45-second budget. Successful verification resets the backoff.
 A failed local listener retries the same configured address and port; it never
 chooses a different endpoint automatically.
-Structured security blocks require user intervention and are never retried by the
-controller, including after a backend restart. Events survive a busy
+A structured `keyset_changed` event requests fresh verification without ending
+connection intent. Actual verification failures and unknown security blocks
+require user intervention; the controller never retries them as normal rotation.
+An explicit Protect on launch preference can start a new, fully verified session
+when the backend is launched again. Events survive a busy
 lifecycle lock or in-progress verification and are revisited by the existing
 reconciliation loop without busy-waiting. Manual start/stop, backend exit/install and
 successful active-profile changes cancel recovery intent; failed and no-op imports
@@ -714,7 +717,7 @@ protocol is the service's own response, shown as such.
   snapshot, not continuous availability monitoring or a claim that an endpoint
   returning a transient error is permanently unsupported.
 
-  Apps fetch this file from the repository's `feat/private-ai-gateway-native-clients` branch when starting protection
+  Apps fetch this file from the repository's `main` branch when starting protection
   or refreshing the model catalog (`pap models list --refresh`). The request runs
   alongside model discovery, uses a separate unauthenticated HTTPS client, and has
   a four-second deadline and a 1 MiB limit. ETag conditional requests reuse the
@@ -724,7 +727,7 @@ protocol is the service's own response, shown as such.
   refresh through the existing configuration transaction and restoration journal.
 
   To publish changes, review the full three-endpoint probe report and update
-  `gateway/src/endpoint-support.json` through a PR to `feat/private-ai-gateway-native-clients`. A partial `--model`
+  `gateway/src/endpoint-support.json` through a PR to `main`. A partial `--model`
   or `--surface` diagnostic must be merged into the full inventory, not replace it.
   Once clients have this loader, inventory-only changes need no app release.
   The feed cannot add models absent from the verified service catalog, change
@@ -750,7 +753,7 @@ protocol is the service's own response, shown as such.
   streaming, or receipt validity. This diagnostic calls the supplied endpoint
   directly and does not run automatically during startup or modify agent configs.
 - **Usage history** is written to an owner-only SQLite database in the app
-  data directory and has no automatic retention cutoff. Overview shows four
+  data directory and has no automatic retention cutoff. Overview shows ten
   recent rows plus a complete current-session summary aggregated from SQLite,
   rather than from the 50-row in-memory activity preview. Usage keeps history
   across app restarts, supports agent/model/time filters and cursor pagination,
@@ -784,9 +787,12 @@ protocol is the service's own response, shown as such.
   return HTTP 502 without the provider response body. SSE framing is preserved,
   but tokens are delivered only after the entire response is verified. Neither
   request nor response buffers are written to disk. Verification has a 600 s
-  upper bound; the desktop transport can time out earlier while waiting.
+  upper bound; the desktop allows 660 s without response bytes for delivery
+  overhead. Agents can impose shorter timeouts, including Claude Code's stream
+  watchdog. Late receipts enrich metadata without replacing an already recorded
+  HTTP failure with success.
   At most 64 requests are in flight (`429`); upstream connect 5 s,
-  idle read 300 s (`504`). Standard hop-by-hop headers plus any named by
+  idle read 660 s (`504`). Standard hop-by-hop headers plus any named by
   `Connection`, `Proxy-Connection`, the agent credential, and the attribution
   tag are removed in both directions by both proxies. The helper endpoints
   are gated exactly like inference: token scope, verified session, and a

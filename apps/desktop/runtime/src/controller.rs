@@ -611,6 +611,20 @@ impl DesktopRuntime {
         Ok(())
     }
 
+    /// Called only by the server's blocking startup worker, after IPC is bound.
+    pub fn start_on_launch(self: &Arc<Self>) -> Result<(), String> {
+        let _operation = self.lifecycle.blocking_lock();
+        if self.exiting.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let state = self.manager.snapshot()?;
+        if self.manager.is_running()? || state.reconnecting {
+            return Ok(());
+        }
+        self.recovery.cancel();
+        self.start_inner(state.config).map(|_| ())
+    }
+
     pub fn start(self: &Arc<Self>, config: StartGatewayConfig) -> Result<GatewayState, String> {
         let _operation = self.configuration_change()?;
         self.recovery.cancel();
@@ -674,23 +688,6 @@ impl DesktopRuntime {
             return Err(agent_failures(failures));
         }
         result
-    }
-
-    pub fn toggle(self: &Arc<Self>) {
-        let state = match self.manager.snapshot() {
-            Ok(state) => state,
-            Err(_) => return,
-        };
-        let running = state.reconnecting
-            || matches!(state.status.as_str(), "verifying" | "verified" | "blocked");
-        let result = if running {
-            self.stop()
-        } else {
-            self.start(state.config)
-        };
-        if let Err(error) = result {
-            self.manager.report_error(error);
-        }
     }
 
     pub fn report_error(&self, message: String) {

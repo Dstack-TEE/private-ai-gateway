@@ -133,9 +133,6 @@ fn perform_action(app: &AppHandle, id: String) {
         let client = app.state::<Arc<Client>>().inner().clone();
         let result = (|| -> Result<(), String> {
             match id.as_str() {
-                "toggle" => {
-                    client.toggle();
-                }
                 "copy-endpoint" => {
                     let endpoint = client
                         .state()?
@@ -181,9 +178,8 @@ fn perform_action(app: &AppHandle, id: String) {
             client.report_error(error);
             show_window(&app);
         }
-        if let Ok(state) = client.state() {
-            sync(&app, &state);
-        }
+        let state = client.state().unwrap_or_else(|_| client.cached_state());
+        sync(&app, &state);
         if id.starts_with("agent:") {
             if let Ok(agents) = client.list_agents() {
                 sync_agents(&app, &agents);
@@ -279,6 +275,7 @@ fn toggle_or_open_settings(app: &AppHandle) {
     tauri::async_runtime::spawn_blocking(move || {
         let client = app.state::<std::sync::Arc<Client>>();
         let Ok(state) = client.state() else {
+            sync(&app, &client.cached_state());
             show_window(&app);
             return;
         };
@@ -300,9 +297,8 @@ fn toggle_or_open_settings(app: &AppHandle) {
             return;
         }
         client.toggle();
-        if let Ok(state) = client.state() {
-            sync(&app, &state);
-        }
+        let state = client.state().unwrap_or_else(|_| client.cached_state());
+        sync(&app, &state);
     });
 }
 
@@ -487,9 +483,7 @@ pub fn show_window(app: &AppHandle) {
 }
 
 fn should_stop(state: &GatewayState) -> bool {
-    !state.configuration_verification
-        && (state.reconnecting
-            || matches!(state.status.as_str(), "verifying" | "verified" | "blocked"))
+    state.should_stop_protection()
 }
 
 fn protection_action_enabled(state: &GatewayState) -> bool {
@@ -573,38 +567,40 @@ mod tests {
 
     #[test]
     fn tray_assets_are_retina_sized_without_excessive_padding() {
-        for protected in [false, true] {
-            let icon = tray_icon(protected).unwrap();
-            assert_eq!((icon.width(), icon.height()), (36, 36));
-            let mut bounds = (36, 36, 0, 0);
-            for (index, pixel) in icon.rgba().as_chunks::<4>().0.iter().enumerate() {
-                if pixel[3] > 0 {
-                    let (x, y) = (index % 36, index / 36);
-                    bounds = (
-                        bounds.0.min(x),
-                        bounds.1.min(y),
-                        bounds.2.max(x),
-                        bounds.3.max(y),
-                    );
+        for dark in [false, true] {
+            for protected in [false, true] {
+                let icon = tray_icon(protected, dark).unwrap();
+                assert_eq!((icon.width(), icon.height()), (36, 36));
+                let mut bounds = (36, 36, 0, 0);
+                for (index, pixel) in icon.rgba().as_chunks::<4>().0.iter().enumerate() {
+                    if pixel[3] > 0 {
+                        let (x, y) = (index % 36, index / 36);
+                        bounds = (
+                            bounds.0.min(x),
+                            bounds.1.min(y),
+                            bounds.2.max(x),
+                            bounds.3.max(y),
+                        );
+                    }
                 }
+                assert!(bounds.2 - bounds.0 >= 29 && bounds.3 - bounds.1 >= 29);
             }
-            assert!(bounds.2 - bounds.0 >= 29 && bounds.3 - bounds.1 >= 29);
-        }
-        assert_ne!(
-            tray_icon(false).unwrap().rgba(),
-            tray_icon(true).unwrap().rgba()
-        );
-        let active = tray_icon(true).unwrap();
-        let inactive = tray_icon(false).unwrap();
-        for (on, off) in active
-            .rgba()
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .zip(inactive.rgba().as_chunks::<4>().0.iter())
-        {
-            assert_eq!(&on[..3], &off[..3]);
-            assert_eq!(u16::from(off[3]), u16::from(on[3]) * 45 / 100);
+            assert_ne!(
+                tray_icon(false, dark).unwrap().rgba(),
+                tray_icon(true, dark).unwrap().rgba()
+            );
+            let active = tray_icon(true, dark).unwrap();
+            let inactive = tray_icon(false, dark).unwrap();
+            for (on, off) in active
+                .rgba()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(inactive.rgba().as_chunks::<4>().0.iter())
+            {
+                assert_eq!(&on[..3], &off[..3]);
+                assert_eq!(u16::from(off[3]), u16::from(on[3]) * 45 / 100);
+            }
         }
     }
 
@@ -630,6 +626,14 @@ mod tests {
         assert!(should_stop(&state("verifying", false)));
         assert!(should_stop(&state("blocked", true)));
         assert!(!should_stop(&state("error", true)));
+        for status in ["stopped", "error"] {
+            let mut reconnecting = state(status, true);
+            reconnecting.reconnecting = true;
+            assert!(should_stop(&reconnecting));
+            assert_eq!(protection_action(&reconnecting), "Cancel reconnection");
+            reconnecting.configuration_verification = true;
+            assert!(!should_stop(&reconnecting));
+        }
     }
 
     #[test]

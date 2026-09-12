@@ -150,11 +150,11 @@ impl UsageStore {
                    model = coalesce(excluded.model, usage_records.model),
                    method = excluded.method,
                    path = excluded.path,
-                   status = excluded.status,
+                   status = CASE WHEN usage_records.status = 0 OR usage_records.status BETWEEN 200 AND 299 THEN excluded.status ELSE usage_records.status END,
                    streamed = max(usage_records.streamed, excluded.streamed),
                    receipt_id = coalesce(excluded.receipt_id, usage_records.receipt_id),
                    verified = coalesce(excluded.verified, usage_records.verified),
-                   detail = CASE WHEN excluded.detail = '' THEN usage_records.detail ELSE excluded.detail END,
+                   detail = CASE WHEN (usage_records.status != 0 AND usage_records.status NOT BETWEEN 200 AND 299 AND usage_records.detail != '') OR excluded.detail = '' THEN usage_records.detail ELSE excluded.detail END,
                    locally_constrained = coalesce(excluded.locally_constrained, usage_records.locally_constrained),
                    rewritten = coalesce(excluded.rewritten, usage_records.rewritten),
                    left_device = max(usage_records.left_device, excluded.left_device),
@@ -466,7 +466,7 @@ fn summary(
                 "SELECT count(*), coalesce(sum(input_tokens), 0), coalesce(sum(output_tokens), 0),
                         coalesce(sum(cache_read_tokens), 0), coalesce(sum(cache_write_tokens), 0),
                         coalesce(sum(cost_usd), 0),
-                        coalesce(sum(CASE WHEN verified = 1 THEN 1 ELSE 0 END), 0),
+                        coalesce(sum(CASE WHEN verified = 1 AND status BETWEEN 200 AND 299 THEN 1 ELSE 0 END), 0),
                         coalesce(sum(CASE WHEN left_device = 0 THEN 1 ELSE 0 END), 0),
                         coalesce(sum(CASE WHEN verified = 0 THEN 1 ELSE 0 END), 0)
                  FROM usage_records {where_sql}"
@@ -663,6 +663,43 @@ mod tests {
             cache_write_tokens: None,
             cost_usd: Some(0.0125),
         }
+    }
+
+    #[test]
+    fn late_receipt_preserves_failed_delivery_and_does_not_count_as_protected() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("usage.sqlite3");
+        let store = UsageStore::open(path.clone()).unwrap();
+        let receipt = item("late", 10, "codex", "model-a");
+        let mut failure = receipt.clone();
+        failure.status = 504;
+        failure.verified = None;
+        failure.receipt_id = None;
+        failure.detail = "Client delivery timed out".into();
+        store.upsert(&failure).unwrap();
+        store.upsert(&receipt).unwrap();
+        drop(store);
+        let store = UsageStore::open(path).unwrap();
+        let saved = store.get("late").unwrap().unwrap();
+        assert_eq!(saved.status, 504);
+        assert_eq!(saved.detail, failure.detail);
+        assert_eq!(saved.receipt_id, receipt.receipt_id);
+        let summary = store.page(&UsageQuery::default()).unwrap().summary;
+        assert_eq!(summary.protected, 0);
+        assert_eq!(summary.input_tokens, 100);
+        assert!(summary.cost_usd > 0.0);
+        let mut withheld = item("proof", 11, "codex", "model-a");
+        withheld.status = 502;
+        withheld.detail.clear();
+        withheld.verified = None;
+        store.upsert(&withheld).unwrap();
+        withheld.detail = "Response withheld: receipt verification failed".into();
+        withheld.verified = Some(false);
+        store.upsert(&withheld).unwrap();
+        let saved = store.get("proof").unwrap().unwrap();
+        assert_eq!(saved.status, 502);
+        assert_eq!(saved.detail, withheld.detail);
+        assert_eq!(saved.verified, Some(false));
     }
 
     #[test]

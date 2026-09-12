@@ -373,6 +373,15 @@ pub struct GatewayState {
     pub catalog: Option<CatalogSummary>,
 }
 
+impl GatewayState {
+    /// Shared by the native action label and the management client's toggle.
+    pub fn should_stop_protection(&self) -> bool {
+        !self.configuration_verification
+            && (self.reconnecting
+                || matches!(self.status.as_str(), "verifying" | "verified" | "blocked"))
+    }
+}
+
 impl Default for GatewayState {
     fn default() -> Self {
         Self {

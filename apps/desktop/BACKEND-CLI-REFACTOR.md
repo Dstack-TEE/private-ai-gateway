@@ -7,11 +7,11 @@ or writes backend configuration directly.
 
 ```text
 React -> Tauri commands -> Rust Client --+
-                                       +-> private IPC -> pap-service -> aci
+                                       +-> private IPC -> pap-service -> pap serve
 pap --------------------> Rust Client --+
 ```
 
-This is stacked on desktop PR #177. It retains the shared renderer and existing
+This architecture retains the shared renderer and existing
 gateway/verifier implementation; it does not restore the older experimental
 native clients or their stdio runtime.
 

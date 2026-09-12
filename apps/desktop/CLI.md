@@ -1,7 +1,7 @@
 # PAP CLI
 
 `pap` manages the same per-user backend as the desktop app. It does not require
-an open window. Installations must keep `pap`, `pap-service`, `aci`, and the
+an open window. Installations must keep `pap` (including the verifier), `pap-service`, and the
 credential helper together; see [distribution](CLI-DISTRIBUTION.md).
 
 ## Discover Commands
