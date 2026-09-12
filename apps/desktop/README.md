@@ -792,7 +792,7 @@ secrets in previews or ordinary connection records.
 Oh My Pi is a separate integration: it detects `omp` and manages
 `~/.omp/agent/models.yml` or `models.yaml` with its own `oh-my-pi` token and
 connection record. YAML comments and unrelated providers are preserved. It uses
-Chat Completions; Pi keeps its independent Responses configuration. Select the
+Chat Completions; Pi keeps its independent Chat Completions configuration. Select the
 provider/model in Oh My Pi and restart it after reconnecting, because command
 credentials can be cached by the CLI process. Named profiles and pending legacy
 JSON migration are refused rather than silently redirected or rewritten.
@@ -803,9 +803,9 @@ execution and real inference are not claimed by those checks.
 | Agent | Config written | Credential reference |
 | --- | --- | --- |
 | Codex | `~/.codex/config.toml`: required verified `model`, `model_provider`, and a `model_providers.private_ai_proxy` Responses provider | helper command |
-| Claude Code | `~/.claude/settings.json`: `env.ANTHROPIC_BASE_URL`, gateway model discovery, `apiKeyHelper`; optional `env.ANTHROPIC_MODEL`; higher-priority exported credentials must be unset | helper command |
+| Claude Code | `~/.claude/settings.json`: `env.ANTHROPIC_BASE_URL`, `apiKeyHelper` and an explicit Messages-compatible `env.ANTHROPIC_MODEL`; higher-priority exported credentials must be unset | helper command |
 | OpenCode | `opencode.json`: an app-owned `@ai-sdk/openai-compatible` provider whose model map is generated from the verified catalog; optional default | token file |
-| Pi | `~/.pi/agent/models.json`: an app-owned Responses provider whose models, limits, modalities, reasoning flag, and prices come from the verified catalog | helper command |
+| Pi | `~/.pi/agent/models.json`: an app-owned Chat Completions provider whose models, limits, modalities, reasoning flag, and prices come from the verified catalog | helper command |
 | Hermes | `~/.hermes/config.yaml`: a comment-preserving custom Chat Completions provider with `discover_models`, optional default, and command-backed auth | helper command |
 
 Codex's default model is a user preference, separate from connection authorization.
