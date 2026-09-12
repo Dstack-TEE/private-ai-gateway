@@ -24,10 +24,12 @@
     "iconBackground": "#1a0d0e"
   },
   "assets": {
-    "appIconMark": "icon.svg",
     "trayTemplate": "icon-mono.svg",
     "wordmarkLight": "wordmark.svg",
-    "wordmarkDark": "wordmark-dark.svg"
+    "wordmarkDark": "wordmark-dark.svg",
+    "appIconDefault": "icon/default.png",
+    "appIconDark": "icon/dark.png",
+    "appIconComposer": "icon/AppIcon.icon/icon.json"
   },
   "source": {
     "repository": "",

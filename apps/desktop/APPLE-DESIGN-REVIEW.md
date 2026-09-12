@@ -92,14 +92,13 @@ tray template.
 The default brand is `dstack`, using the official Dstack logo kit from
 `Dstack-TEE/dstack` at commit `982621521b435cc10b535cb8646efecb8c3fc255`
 (`docs/assets/dstack-logo-kit/`, Apache-2.0 alongside; SHA-256 recorded in
-`brand.json`). The app icon uses a soft-white mark on one graphite
-rounded square in every appearance. Window marks use charcoal in light mode
-and soft white in dark mode, without a tile or shadow. The original source
-assets are unchanged; direct vector path paints and an even-odd clip preserve
-the transparent eye without SVG filters. The native mark layer disables blur,
-translucency, specular effects and shadow. The tray uses a smaller monochrome
-template mark at full alpha while protected and reduced alpha otherwise, without
-a badge. Green is reserved for protection and verification state; the action accent is
+`brand.json`). The owner-authored icon project and default/dark PNG exports
+live in `brand/dstack/icon`, with their hashes under `iconSource`. The native
+project is copied intact and compiled by Apple's tooling. Static desktop
+formats derive from the default export; in-app icons follow the selected
+appearance. The tray uses a small monochrome template from the owner's foreground SVG,
+at full alpha while protected and reduced alpha otherwise, without a badge.
+Outside branded artwork, green indicates protection and verification state; the action accent is
 applied only to the primary action, selection, and links; the rest of the
 palette is system-neutral. `redpill` and `phala` are configuration
 templates; the script refuses to build them until their official assets are
