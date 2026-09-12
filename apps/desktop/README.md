@@ -902,6 +902,8 @@ maintenance under the apply lock.
 
 ## Branding
 
+See the [final material previews](brand/dstack/previews/README.md) for installer artwork, tray states, and the original/generated color comparison.
+
 `brand/<id>/brand.json` is the single source of truth for everything that
 names or draws the product: product and organization names, tagline, support
 and homepage URLs, the default service URL and key label, the bundle
