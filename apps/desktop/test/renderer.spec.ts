@@ -516,18 +516,7 @@ test("public preview frames the Tauri renderer as a macOS window and exposes the
     images.map((image) => ({ source: (image as HTMLImageElement).currentSrc })),
   );
   expect(brandIcons).toHaveLength(2);
-  expect(brandIcons.every(({ source }) => /brand-mark-(light|dark)/.test(source) && !source.startsWith("data:"))).toBe(true);
-  for (const source of new Set(brandIcons.map((icon) => icon.source))) {
-    const vector = await page.evaluate(async (url) => {
-      const response = await fetch(url);
-      const document = new DOMParser().parseFromString(await response.text(), "image/svg+xml");
-      return {
-        rasterEffects: document.querySelectorAll("filter, mask, image").length,
-        vectorCutout: document.querySelector('clipPath path[clip-rule="evenodd"]') !== null,
-      };
-    }, source);
-    expect(vector).toEqual({ rasterEffects: 0, vectorCutout: true });
-  }
+  expect(brandIcons.every(({ source }) => /app-icon-(light|dark)/.test(source) && !source.startsWith("data:"))).toBe(true);
   await expect(page.locator(".tray-template-icon")).toHaveClass(/is-protected/);
   await expect(page.locator(".tray-template-icon")).toHaveCSS("mask-image", /tray-mark/);
   await expect(page.locator(".tray-template-icon")).toHaveCSS("opacity", "1");
@@ -1496,28 +1485,35 @@ test("agent actions report progress without disabling unrelated switches", async
   await expect(page.locator("html")).toHaveAttribute("data-agent-writes", "2");
 });
 
-test("update installation uses a progress dialog and exposes failure without a fake cancel", async ({ page }) => {
-  await page.goto("/?mock=update-install-error");
-  await nav(page, "Settings").click();
-  const about = page.getByRole("region", { name: "About", exact: true, includeHidden: true });
-  page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("button", { name: "Update available", exact: true }).click();
-  const progress = page.getByRole("dialog", { name: "Installing update", exact: true });
-  await expect(progress).toBeVisible();
-  await expect(progress.getByRole("progressbar", { name: "Update progress" })).toHaveAttribute("aria-valuenow", "40");
-  await expect(about).not.toContainText("Downloading");
-  await expect(about).not.toContainText("Preparing update");
-  await page.keyboard.press("Escape");
-  await expect(progress).toBeVisible();
-  await expect(progress.getByRole("button", { name: "Cancel" })).toHaveCount(0);
-  await page.evaluate(() => window.dispatchEvent(new Event("mock:finish-update")));
-  const failure = page.getByRole("dialog", { name: "Update failed", exact: true });
-  await expect(failure).toBeVisible();
-  await expect(about).not.toContainText("installation failed");
-  await failure.getByRole("button", { name: "Done" }).click();
-  await expect(failure).toHaveCount(0);
-  await expect(about.getByRole("button", { name: "Install and Restart" })).toBeEnabled();
-});
+for (const offline of [false, true]) {
+  test(`update installation exposes failure and refreshes its handle (offline=${offline})`, async ({ page }) => {
+    await page.goto(`/?mock=update-install-error${offline ? "-offline" : ""}`);
+    await nav(page, "Settings").click();
+    const about = page.getByRole("region", { name: "About", exact: true, includeHidden: true });
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.getByRole("button", { name: "Update available", exact: true }).click();
+    const progress = page.getByRole("dialog", { name: "Installing update", exact: true });
+    await expect(progress).toBeVisible();
+    await expect(progress.getByRole("progressbar", { name: "Update progress" })).toHaveAttribute("aria-valuenow", "40");
+    await expect(about).not.toContainText("Downloading");
+    await expect(about).not.toContainText("Preparing update");
+    await page.keyboard.press("Escape");
+    await expect(progress).toBeVisible();
+    await expect(progress.getByRole("button", { name: "Cancel" })).toHaveCount(0);
+    await page.evaluate(() => window.dispatchEvent(new Event("mock:finish-update")));
+    const failure = page.getByRole("dialog", { name: "Update failed", exact: true });
+    await expect(failure).toBeVisible();
+    await expect(about).not.toContainText("installation failed");
+    await failure.getByRole("button", { name: "Done" }).click();
+    await expect(failure).toHaveCount(0);
+    if (offline) {
+      await expect(about.getByRole("button", { name: "Install and Restart" })).toHaveCount(0);
+      await expect(about).toContainText("Could not check for updates. Retrying automatically.");
+    } else {
+      await expect(about.getByRole("button", { name: "Install and Restart" })).toBeEnabled();
+    }
+  });
+}
 
 test("model stacks render under production-style CSP without dynamic style tags", async ({ page }) => {
   await page.route((url) => url.pathname === "/", async (route) => {
@@ -2069,7 +2065,9 @@ test("responsive, zoomed, dark, high-contrast, and reduced-motion layouts stay b
   await nav(page, "Overview").click();
   expect(await overflow(page), "Overview at 200% zoom").toBeLessThanOrEqual(0);
   await expect(page.locator(".track-strip").first()).toHaveCSS("animation-name", "none");
-  expect(await page.locator(".brand-logo img").first().evaluate((image) => (image as HTMLImageElement).currentSrc)).toContain("brand-mark-dark");
+  await expect.poll(() => page.locator(".brand-logo img").first().evaluate((image) =>
+    image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0 && image.currentSrc.includes("app-icon-dark"),
+  )).toBe(true);
 
   const audit = await page.evaluate(() => {
     const productText = [...document.querySelectorAll<HTMLElement>("body *")]

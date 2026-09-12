@@ -22,7 +22,7 @@ export function useUpdates(api: DesktopApi, native = false) {
     return { channel, info: await api.checkUpdate() };
   }, [api]);
   const client = useQueryClient();
-  const { data: snapshot, error: checkError, isFetching: checking } = useQuery<{
+  const { data: snapshot, error: checkError, isFetching: checking, refetch } = useQuery<{
     channel: UpdateChannel; info?: UpdateInfo;
   }>({ queryKey: ["app-update"], queryFn: readUpdate, enabled: !operation,
     refetchInterval: (query) => query.state.error ? 60_000 : 6 * 60 * 60_000, staleTime: 15 * 60_000, retry: false,
@@ -35,9 +35,9 @@ export function useUpdates(api: DesktopApi, native = false) {
   const error = mutationError ?? (checkError ? "Could not check for updates. Retrying automatically." : undefined);
   const refresh = useCallback(async () => {
     setError(undefined);
-    try { await client.cancelQueries({ queryKey: ["app-update"] }); client.setQueryData(["app-update"], await readUpdate()); }
-    catch { if (mounted.current) setError("Could not check for updates. Retrying automatically."); }
-  }, [client, readUpdate]);
+    await client.cancelQueries({ queryKey: ["app-update"] });
+    await refetch();
+  }, [client, refetch]);
   useEffect(() => {
     mounted.current = true;
     const unsubscribe = api.onUpdateProgress(setProgress);
