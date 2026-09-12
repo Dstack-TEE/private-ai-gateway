@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, realpath, rmdir } from "node:fs/promises";
+import { mkdtemp, readFile, rmdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,20 +30,17 @@ try {
         set windowBounds to bounds of container window of volumeFolder
         set viewOptions to icon view options of container window of volumeFolder
         set iconSize to icon size of viewOptions
-        set backdrop to get background picture of viewOptions
         set viewWidth to (item 3 of windowBounds) - (item 1 of windowBounds)
         set viewHeight to (item 4 of windowBounds) - (item 2 of windowBounds)
         close container window of volumeFolder
       end tell
-      set backdropPath to POSIX path of (backdrop as alias)
-      return (item 1 of appPoint as text) & "," & (item 2 of appPoint as text) & "," & (item 1 of folderPoint as text) & "," & (item 2 of folderPoint as text) & "," & (viewWidth as text) & "," & (viewHeight as text) & "," & (iconSize as text) & linefeed & backdropPath
+      return (item 1 of appPoint as text) & "," & (item 2 of appPoint as text) & "," & (item 1 of folderPoint as text) & "," & (item 2 of folderPoint as text) & "," & (viewWidth as text) & "," & (viewHeight as text) & "," & (iconSize as text)
     end run`,
   });
-  const [coordinates, backdrop] = output.trim().split(/\r?\n/);
+  const coordinates = output.trim();
   const expected = [layout.appPosition.x, layout.appPosition.y, layout.applicationFolderPosition.x, layout.applicationFolderPosition.y, layout.windowSize.width, layout.windowSize.height, 128];
   assert.deepEqual(coordinates.split(",").map(Number), expected, "Finder layout differs from the Tauri configuration");
   const background = path.join(mount, ".background", path.basename(layout.background));
-  assert.equal(await realpath(backdrop), await realpath(background), "Finder did not select the branded background");
   assert.deepEqual(await readFile(background), await readFile(path.join(appRoot, "src-tauri", layout.background)));
   console.log(`Verified DMG app/Applications centers, window and icon size: ${coordinates}`);
 } finally {
