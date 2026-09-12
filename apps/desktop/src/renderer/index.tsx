@@ -239,8 +239,8 @@ function BrandMark({ className = "", busy = false }: { className?: string; busy?
   const classes = ["brand-logo inline-grid place-items-center flex-none [&>img]:block [&>img]:size-full [&>img]:object-contain motion-reduce:animate-none", className, busy ? "is-busy animate-brand-icon-pulse" : ""].filter(Boolean).join(" ");
   return (
     <picture className={classes} aria-hidden="true">
-      {appearance === "system" && <source media="(prefers-color-scheme: dark)" srcSet={brand.mark.dark} />}
-      <img src={appearance === "dark" ? brand.mark.dark : brand.mark.light} alt="" />
+      {appearance === "system" && <source media="(prefers-color-scheme: dark)" srcSet={brand.appIcon.dark} />}
+      <img src={appearance === "dark" ? brand.appIcon.dark : brand.appIcon.light} alt="" />
     </picture>
   );
 }

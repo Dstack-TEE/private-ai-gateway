@@ -48,7 +48,7 @@ Windows uses Tauri's NSIS template with generated 150x57 header and 164x314
 sidebar artwork and the branded application icon for installation and removal.
 The official NSIS hooks stop the backend and maintain current-user CLI registration.
 macOS uses a generated 660x440 DMG background with native app and Applications
-icons. All artwork comes from the existing vector brand kit, without system fonts.
+icons. Artwork uses the approved icon exports and vector wordmarks, without system fonts.
 CI sets Tauri's `TAURI_BUNDLER_DMG_IGNORE_CI=true` on macOS so the official
 Finder customization step actually applies the background and icon positions.
 Linux DEB/RPM packages use the branded application icons and metadata in the
@@ -288,10 +288,11 @@ Keep dependency updates within [Tauri's version compatibility rules](https://v2.
 the JavaScript API and Rust crate share a minor version, paired plugins share an
 exact version, and Wry is resolved through Tauri rather than overridden separately.
 
-The dstack macOS 26+ icon uses Apple Icon Composer specular highlights, restrained
-translucency, and a layer shadow. Its near-black green background and source mark
-remain unchanged. Legacy ICNS/PNG/ICO assets remain flat; the material is rendered
-by Apple's asset compiler, not baked into the source artwork.
+The dstack macOS 26+ icon uses the owner's hand-edited Icon Composer project,
+including its gradient, foreground placement and native appearance materials.
+Static ICNS/PNG/ICO assets derive from the approved default PNG export. The
+renderer selects the approved light or dark export using the app's appearance.
+The build does not synthesize a replacement icon design.
 Disabled controls are reserved for in-flight mutations, missing/invalid inputs,
 unavailable data, pagination boundaries and dependent settings. Development OS
 changes and deleting a profile during protection use explicit stop-and-confirm
@@ -887,8 +888,14 @@ and CI pass to the Tauri CLI as
 neutral, and the window title is set at run time from `brand.rs`. The
 committed outputs are for the default brand; CI regenerates them and fails on
 drift. With Xcode 26, `prepare-macos-icon.mjs` compiles the `.icon` source into
-the native `Assets.car`; it and the PNG, ICO, and ICNS fallbacks all use one
-dark-green app icon with the original green Dstack mark. The scripts validate
+the native `Assets.car`. The complete hand-edited project is copied from
+`brand/dstack/icon/AppIcon.icon` without changing its layers or manifest.
+The approved default export generates static PNG, ICO and ICNS formats with
+the existing 100px transparent desktop margin on a 1024px canvas. This keeps
+full-bleed iOS exports from appearing oversized as legacy desktop icons.
+The renderer uses 256px versions of the approved light/dark PNGs without that
+outer margin; the native macOS asset supplies system appearance variants.
+The scripts validate
 their inputs and fail fast on a missing field, asset, digest, or named app
 icon. The tray uses a single local template mark; inactive states reduce its
 alpha without changing its silhouette or adding a badge.
@@ -897,8 +904,13 @@ The default brand uses the official Dstack logo kit from
 [Dstack-TEE/dstack](https://github.com/Dstack-TEE/dstack) at commit
 `982621521b435cc10b535cb8646efecb8c3fc255` (`docs/assets/dstack-logo-kit/`),
 with the source paths, licence, and SHA-256 digests recorded in
-`brand/dstack/brand.json`. `brand/redpill` and `brand/phala` are templates:
-add the official assets they reference before selecting them.
+`brand/dstack/brand.json`. Its app icon is the owner's `Archive.zip` design;
+archive provenance and per-file hashes are recorded separately in `iconSource`.
+To update it, replace the complete source `.icon`, both appearance PNG exports,
+and the transparent tray SVG in `brand/dstack/icon`, update their hashes, then
+run `npm run prepare:brand`. Never edit the generated copies in `src-tauri/icons`.
+`brand/redpill` and `brand/phala` are templates: add the official assets and
+Icon Composer project they reference before selecting them.
 
 ## Development
 
