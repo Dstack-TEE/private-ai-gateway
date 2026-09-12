@@ -469,7 +469,7 @@ export function mockApi(name: string | null): DesktopApi {
         state = { ...state, usageRevision: (state.usageRevision ?? 0) + 1 };
         publish();
       };
-      if (name === "usage-live-refresh") window.addEventListener("mock:refresh-usage", refreshUsage);
+      if (name === "usage-live-refresh" || name === "usage-cache") window.addEventListener("mock:refresh-usage", refreshUsage);
       return () => {
         listeners.delete(listener);
         window.removeEventListener("mock:refresh-usage", refreshUsage);
@@ -575,6 +575,9 @@ export function mockApi(name: string | null): DesktopApi {
       return { auth, workspaces: [{ id: 123, name: "Default", isDefault: true }, { id: 124, name: "Research", isDefault: false }] };
     },
     getAccountBalance: async (target) => {
+      if (name === "oauth-balance-cache" && document.documentElement.dataset.holdBalance === "true") {
+        await new Promise<void>((resolve) => window.addEventListener("mock:release-balance", () => resolve(), { once: true }));
+      }
       if (billingError) throw new Error("operation_failed: The operation could not complete.");
       if (!billingRead) return null;
       const profile = target.kind === "login" ? login?.id === target.id && login.polls >= 3 ? login.profile : undefined : state.profiles.find((p) => p.id === target.profileId);
@@ -714,6 +717,9 @@ export function mockApi(name: string | null): DesktopApi {
     requestNotificationPermission: async () => { document.documentElement.dataset.notificationPermissionRequested = "true"; localStorage.setItem("mock:notifications:permission", "granted"); return { permission: "granted", alertsEnabled: true }; },
     openNotificationSettings: async () => { document.documentElement.dataset.notificationSettingsOpened = "true"; },
     queryUsage: async (query: UsageQuery) => {
+      if (name === "usage-cache" && document.documentElement.dataset.holdUsage === "true") {
+        await new Promise<void>((resolve) => window.addEventListener("mock:finish-usage-query", () => resolve(), { once: true }));
+      }
       if (name === "usage-query-pending") await new Promise<void>((resolve) => window.addEventListener("mock:finish-usage-query", () => resolve(), { once: true }));
       if (name === "usage-query-error" && query.model) throw new Error("Usage database temporarily unavailable");
       const filtered = filteredHistory(query);

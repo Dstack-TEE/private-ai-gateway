@@ -1616,6 +1616,41 @@ test("local copy hover follows the grouped row shape and profiles open their dia
   await expect(profile).toBeFocused();
 });
 
+test("usage snapshots survive navigation without showing another query's rows", async ({ page }) => {
+  await page.goto("/?mock=usage-cache");
+  await nav(page, "Usage").click();
+  const rows = page.locator(".usage-history tbody tr");
+  await expect(rows).toHaveCount(20);
+  const first = await rows.first().textContent();
+  await page.evaluate(() => { document.documentElement.dataset.holdUsage = "true"; });
+  await nav(page, "Overview").click();
+  await nav(page, "Usage").click();
+  await expect(rows).toHaveCount(20);
+  await expect(rows.first()).toHaveText(first);
+  await page.evaluate(() => window.dispatchEvent(new Event("mock:refresh-usage")));
+  await expect(rows).toHaveCount(20);
+  await expect(page.getByText("Loading usage history…", { exact: true })).toHaveCount(0);
+  await choose(page, page.getByRole("combobox", { name: "Agent", exact: true }), "Pi");
+  await expect(page.getByText("Loading usage history…", { exact: true })).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new Event("mock:finish-usage-query")));
+  await expect(page.getByText("Loading usage history…", { exact: true })).toHaveCount(0);
+});
+
+test("saved balance remains visible while reopening Overview refreshes it", async ({ page }) => {
+  await page.goto("/?mock=oauth-balance-cache");
+  await page.getByRole("switch", { name: "Start protection" }).click();
+  const editor = page.getByRole("dialog", { name: "New profile" });
+  await editor.getByRole("button", { name: "Sign in with Phala" }).click();
+  await expect(editor).toHaveCount(0);
+  const balance = page.getByRole("button", { name: "Current balance: $12.50", exact: true });
+  await expect(balance).toBeVisible();
+  await page.evaluate(() => { document.documentElement.dataset.holdBalance = "true"; });
+  await nav(page, "Agents").click();
+  await nav(page, "Overview").click();
+  await expect(balance).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new Event("mock:release-balance")));
+});
+
 test("usage history filters, paginates and inspects proof boundaries", async ({ page }) => {
   await page.clock.setFixedTime(new Date("2026-09-06T12:00:00"));
   await page.setViewportSize({ width: 940, height: 760 });

@@ -792,8 +792,8 @@ secrets in previews or ordinary connection records.
 Oh My Pi is a separate integration: it detects `omp` and manages
 `~/.omp/agent/models.yml` or `models.yaml` with its own `oh-my-pi` token and
 connection record. YAML comments and unrelated providers are preserved. It uses
-Chat Completions; Pi keeps its independent Chat Completions configuration. Select the
-provider/model in Oh My Pi and restart it after reconnecting, because command
+Chat Completions; Pi keeps its independent Chat Completions configuration. Connect selects the
+default model in the native settings file; restart after reconnecting, because command
 credentials can be cached by the CLI process. Named profiles and pending legacy
 JSON migration are refused rather than silently redirected or rewritten.
 Official Oh My Pi v18.1.12 was checked offline on Linux for generated configuration
@@ -817,10 +817,10 @@ repair actions; reconnect and incomplete-disconnect recovery are distinct.
 An already-running CLI may retain old configuration: after repair or disconnect,
 restart it to reload the file. The helper never creates or restores credentials.
 
-The verified catalog is the only model source. Codex requires a selected
-verified default because it does not discover this custom provider's model
-catalog; the other agents may choose after connecting through native discovery
-or an app-owned catalog generated from the verified service. `Connect` previews
+The verified catalog is the only model source. Connect selects an explicit
+compatible default for every integration. Pi stores the selection in settings.json;
+Oh My Pi uses modelRoles.default in config.yml (or its existing config.yaml).
+These secondary files participate in the preview fingerprint and recovery journal. `Connect` previews
 the exact fields with a revision of the inputs; generated model maps are shown
 as a concise catalog summary instead of serialized JSON. `Apply` refuses if any
 moved. Token, parked secrets, config, and record are applied as one transaction
@@ -840,8 +840,20 @@ token file before any record or config is touched, and syncs the removal to
 the parent directory (on Windows, a directory-handle flush) before anything
 else runs: revoking the capability itself is durable, so no later failure can
 leave an agent authorized, while the record stays visible for an idempotent
-retry. A failed sync fails the disconnect closed. `Disconnect` removes token,
-record, and consumed parked secrets and leaves an unreadable config untouched.
+retry. A failed sync fails the disconnect closed. Disconnect restores only defaults
+and global routing/authentication fields; app-created provider definitions remain
+with their ownership journal and an explicitly disconnected state. Tokens and
+consumed parked secrets are removed. Reconciliation never reconnects an explicitly
+disconnected agent. Reconnecting updates only definitions still owned by the app,
+rotates its local token and records the currently selected native defaults. Existing
+provider values and user edits are restored or left untouched, never adopted as
+unmanaged structured backups. Unreadable configuration leaves recovery retryable.
+
+Before Connect changes either config file, its disabled recovery journal is persisted.
+A crash or partial write therefore cannot create an authorized half-applied connection.
+Claude Code has no separate provider registry: its base URL, helper and model must
+all be restored on Disconnect. Existing CLI sessions still need restart; this edits
+native defaults, not an already-running process or project-level overrides.
 Install detection requires a real executable on `PATH` or in common per-user
 and macOS package-manager binary directories; a config directory alone does
 not count as an installation. Detection is informational only and never gates
@@ -999,3 +1011,9 @@ override a user configuration; check `/status` in the affected Claude Code sessi
 OpenCode's official `~/.opencode/bin` installation is scanned even when the desktop
 app's PATH does not include the terminal's PATH. The visible Agents page rescans
 every 15 seconds and on window focus.
+
+Overview balance and Usage retain bounded in-memory view snapshots while refreshing.
+Balances are keyed by provider, login/profile and credential reference. Usage pages
+are keyed by filters, cursor, page size and usage revision; changed queries never
+show another query's data. Permission denial clears a balance snapshot. Network
+errors retain the last successful balance; the cache stores no credentials.

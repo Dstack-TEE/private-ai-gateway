@@ -975,6 +975,9 @@ fn parse_account_balance(
     status: StatusCode,
     data: &Value,
 ) -> Result<Option<AccountBalance>, String> {
+    if status == StatusCode::UNAUTHORIZED {
+        return Ok(None);
+    }
     if status == StatusCode::FORBIDDEN
         && (*provider == ServiceProvider::Phala
             || protocol_error(data) == Some("billing_permission_required"))
@@ -1100,6 +1103,13 @@ mod tests {
     #[test]
     fn billing_permissions_hide_denied_balances_and_bind_links_to_the_organization() {
         let denied = json!({"detail":{"error":"billing_permission_required"}});
+        assert!(parse_account_balance(
+            &ServiceProvider::Redpill,
+            StatusCode::UNAUTHORIZED,
+            &json!({})
+        )
+        .unwrap()
+        .is_none());
         assert!(
             parse_account_balance(&ServiceProvider::Redpill, StatusCode::FORBIDDEN, &denied)
                 .unwrap()
