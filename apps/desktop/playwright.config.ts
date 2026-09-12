@@ -7,6 +7,8 @@ import { defineConfig } from "@playwright/test";
  */
 export default defineConfig({
   testDir: "test",
+  workers: 2,
+  forbidOnly: Boolean(process.env.CI),
   outputDir: "playwright-artifacts",
   timeout: 30_000,
   use: { baseURL: "http://127.0.0.1:4173" },

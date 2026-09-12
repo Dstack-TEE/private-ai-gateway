@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeftRight, Ellipsis, ExternalLink } from "lucide-react";
-import type { AccountBalance, AccountBalanceTarget, AccountImages, AccountScope, DesktopApi, ServiceProvider } from "../../shared/contracts";
+import type { AccountBalanceTarget, AccountImages, AccountScope, DesktopApi, ServiceProvider } from "../../shared/contracts";
 import { useQuery } from "@tanstack/react-query";
 import { errorMessage } from "../lib/error-message";
 import { currency } from "../lib/usage-presentation";

@@ -1,6 +1,6 @@
 # Private AI Proxy architecture
 
-Status: implemented on the desktop feature branch, 2026-09-08.
+Status: implemented; modular layout updated 2026-09-12.
 
 ## Responsibilities
 
@@ -33,6 +33,23 @@ behavior is preserved; a backend crash must not leave a verifier listening.
 Packages contain `pap`, `pap-service` and the credential
 helper. They do not contain an independent `aci` executable.
 
+## Module boundaries
+
+- Renderer `index.tsx` owns bootstrap; `app.tsx` composes the window. `features/`
+  contains pages and forms, `windows/` adapts them to native windows, `hooks/`
+  owns reusable interactions, and `lib/` contains presentation rules and the
+  single live/preview API selection. Features never import the app or windows.
+- Runtime `controller.rs` owns shared state and launch; its private modules group
+  lifecycle, profiles, account login, credentials, agents and local endpoints.
+  The same locks and transaction guards span these implementation modules.
+- Agent registry, provider data, projection, discovery and validation are separate
+  modules. Apply, disconnect, recovery and rollback stay together in transactions.
+- OAuth provider/HTTP/billing helpers and verifier events are separate from their
+  session owners. Tauri command modules adapt the shared runtime to IPC.
+- Core tests are grouped by behavior. Layout, color and asset-name assertions are
+  excluded; authorization, recovery, ownership, accounting and cache isolation
+  remain covered. Self-spawned tests retain explicit, checked test selectors.
+
 ## Application identity
 
 The display name is Private AI Proxy, with by dstack TEE attribution.
@@ -41,7 +58,7 @@ credential services use the new identity and local keys use `sk-pap-`.
 Old beta configuration is not migrated. Command registration installs only
 `pap` and refuses unrelated existing commands.
 
-Windows uses the official Tauri NSIS template with branded artwork and an
+Windows uses the official Tauri NSIS template with branded artwork and
 no legacy-installation branches. Linux packages use the Private AI Proxy name.
 Beta and stable remain separate. Independent CLI archives contain the three
 console executables and do not require the desktop UI.

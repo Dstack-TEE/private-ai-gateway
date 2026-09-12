@@ -552,7 +552,7 @@ fn activate_app() {}
 
 #[cfg(test)]
 mod tests {
-    use super::{menu_state, protection_action, protection_action_enabled, should_stop, tray_icon};
+    use super::{menu_state, protection_action, protection_action_enabled, should_stop};
     use desktop_runtime::contracts::{
         ConfidentialProfile, GatewayState, ProfileAuth, ServiceProvider,
     };
@@ -562,45 +562,6 @@ mod tests {
             status: status.to_string(),
             api_key_saved,
             ..GatewayState::default()
-        }
-    }
-
-    #[test]
-    fn tray_assets_are_retina_sized_without_excessive_padding() {
-        for dark in [false, true] {
-            for protected in [false, true] {
-                let icon = tray_icon(protected, dark).unwrap();
-                assert_eq!((icon.width(), icon.height()), (36, 36));
-                let mut bounds = (36, 36, 0, 0);
-                for (index, pixel) in icon.rgba().as_chunks::<4>().0.iter().enumerate() {
-                    if pixel[3] > 0 {
-                        let (x, y) = (index % 36, index / 36);
-                        bounds = (
-                            bounds.0.min(x),
-                            bounds.1.min(y),
-                            bounds.2.max(x),
-                            bounds.3.max(y),
-                        );
-                    }
-                }
-                assert!(bounds.2 - bounds.0 >= 29 && bounds.3 - bounds.1 >= 29);
-            }
-            assert_ne!(
-                tray_icon(false, dark).unwrap().rgba(),
-                tray_icon(true, dark).unwrap().rgba()
-            );
-            let active = tray_icon(true, dark).unwrap();
-            let inactive = tray_icon(false, dark).unwrap();
-            for (on, off) in active
-                .rgba()
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .zip(inactive.rgba().as_chunks::<4>().0.iter())
-            {
-                assert_eq!(&on[..3], &off[..3]);
-                assert_eq!(u16::from(off[3]), u16::from(on[3]) * 45 / 100);
-            }
         }
     }
 
