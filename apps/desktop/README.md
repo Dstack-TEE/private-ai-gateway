@@ -917,12 +917,12 @@ credential-store fixtures are separate from real provider credentials.
 
 `npm run dist` builds the release sidecars and runs `tauri build`. Xcode 26 or
 newer is required to package the adaptive macOS app icon. The platform bundle
-contains the shared renderer, `pap`, the persistent `pap-service`, `aci`, and
-the credential helper. The UI and CLI are clients of the same per-user backend;
+contains the shared renderer, `pap`, the persistent `pap-service`, and
+the credential helper. The ACI verifier runs through `pap serve`. The UI and CLI are clients of the same per-user backend;
 there is no second GUI process.
 
-`scripts/bundle-sidecars.mjs` builds four executables with `--locked`: `pap`,
-`pap-service`, the `aci` verifier, and `private-ai-proxy-helper`, a console
+`scripts/bundle-sidecars.mjs` builds three executables with `--locked`: `pap`,
+`pap-service`, and `private-ai-proxy-helper`, a console
 binary from the gateway crate that prints an agent's local token (kept separate
 from the GUI app so stdout works on Windows). A release build passes
 `DESKTOP_RELEASE_VERSION` to the CLI/backend as `PAP_BUILD_VERSION`; ordinary
