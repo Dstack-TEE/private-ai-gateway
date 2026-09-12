@@ -1,5 +1,9 @@
 import React, { createContext, lazy, memo, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useWindowReady } from "./lib/use-window-ready";
+import { useAccountLogin } from "./lib/use-account-login";
+import { AccountTools } from "./components/account-tools";
+import { ToggleGroup, ToggleGroupItem } from "./components/ui/toggle-group";
+import { errorMessage } from "./lib/error-message";
 import {
   BatteryMedium,
   Bot,
@@ -78,10 +82,10 @@ import { IconButton, SwitchControl } from "./components/controls";
 import { Sheet, SheetActions, DismissSheetAction, NativeDialogHost } from "./components/sheet";
 import { SettingsSection, SettingsList, SettingsLink, SettingsToggle, FormField } from "./components/settings";
 import { ChoiceSelect } from "./components/choice-select";
-import { ToggleGroup, ToggleGroupItem } from "./components/ui/toggle-group";
 import type {
   AgentStatus,
   CliRegistration,
+  AccountLoginDetails,
   ConfidentialProfile,
   ConfidentialProfileInput,
   DesktopApi,
@@ -183,7 +187,7 @@ function profileHasCredential(profile: ConfidentialProfile): boolean {
 }
 
 function profileIsAvailable(profile: ConfidentialProfile | undefined, state: GatewayState): boolean {
-  return Boolean(profile?.verifiedAt && profileHasCredential(profile) && (profile.id !== state.activeProfileId || state.apiKeySaved));
+  return Boolean(profile && profileHasCredential(profile) && (profile.id !== state.activeProfileId || state.apiKeySaved));
 }
 
 function isProtected(state: GatewayState): boolean {
@@ -382,8 +386,9 @@ function NativeProfilesWindow({ repair, editor = false, profileId, startAfterSav
   if (editor) return <NativeDialogHost ><ProfileEditorSheet
     state={native.state} busy={busy} running={running}
     profile={editingProfile}
-    onVerify={(profile, key) => run(async () => {
-      const saved = await desktopApi.verifyConfiguration(profile, native.state.config.requireProductionOs, key);
+    startAfterSave={startAfterSave}
+    onSave={(profile, key) => run(async () => {
+      const saved = await desktopApi.saveConfiguration(profile, native.state.config.requireProductionOs, key);
       return startAfterSave ? desktopApi.start(saved.config) : saved;
     })}
     onDelete={(profileId) => run(() => desktopApi.deleteProfile(profileId))}
@@ -398,7 +403,7 @@ function NativeProfilesWindow({ repair, editor = false, profileId, startAfterSav
         busy={busy}
         running={running}
         initialEditorProfileId={repairRequest ? native.state.activeProfileId || undefined : undefined}
-        onVerify={(profile, key) => run(() => desktopApi.verifyConfiguration(profile, native.state.config.requireProductionOs, key))}
+        onSave={(profile, key) => run(() => desktopApi.saveConfiguration(profile, native.state.config.requireProductionOs, key))}
         onActivate={(profileId) => run(() => desktopApi.activateProfile(profileId))}
         onDelete={(profileId) => run(() => desktopApi.deleteProfile(profileId))}
         onClose={native.close}
@@ -582,6 +587,17 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
   const [applying, setApplying] = useState(false);
   const [selectedUsage, setSelectedUsage] = useState<RequestActivity>();
   const [notice, setNotice] = useState<{ id: number; text: string } | undefined>(() => initialView === "settings" ? { id: Date.now(), text: "Settings reset" } : undefined);
+  const previousProfiles = useRef<ConfidentialProfile[] | undefined>(undefined);
+  useEffect(() => {
+    if (!stateLoaded) return;
+    const previous = previousProfiles.current;
+    previousProfiles.current = state.profiles;
+    if (!previous) return;
+    const saved = state.profiles.find((profile) => profile.auth.kind === "oauth" && profile.credentialSaved &&
+      !previous.some((old) => old.id === profile.id && old.credentialRef === profile.credentialRef && old.verifiedAt === profile.verifiedAt));
+    if (saved) setNotice({ id: Date.now(), text: `${saved.name} saved` });
+  }, [state.profiles, stateLoaded]);
+
   const [previewTrayOpen, setPreviewTrayOpen] = useState(false);
   const copyTimer = useRef<number | undefined>(undefined);
   const [startAfterSetup, setStartAfterSetup] = useState(false);
@@ -757,7 +773,14 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
     window.addEventListener("focus", refresh);
     return () => window.removeEventListener("focus", refresh);
   }, [loadAgents]);
-  useEffect(() => { if (view === "agents") void loadAgents(true); }, [view, loadAgents]);
+  useEffect(() => {
+    if (view !== "agents") return;
+    void loadAgents(true);
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void loadAgents(true);
+    }, 15_000);
+    return () => window.clearInterval(timer);
+  }, [view, loadAgents]);
 
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
@@ -838,13 +861,13 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
     finally { setApplying(false); }
   };
 
-  const verifyConfiguration = async (profile: ConfidentialProfileInput, key?: string): Promise<string | undefined> => {
+  const saveConfiguration = async (profile: ConfidentialProfileInput, key?: string): Promise<string | undefined> => {
     setActionError(undefined);
     try {
-      const saved = await desktopApi.verifyConfiguration(profile, !allowDevelopmentOs, key);
+      const saved = await desktopApi.saveConfiguration(profile, !allowDevelopmentOs, key);
       setState(startAfterSetup ? await desktopApi.start(saved.config) : saved);
       setStartAfterSetup(false);
-      setNotice({ id: Date.now(), text: `${profile.name.trim()} verified and saved` });
+      setNotice({ id: Date.now(), text: `${profile.name.trim()} saved` });
       return undefined;
     } catch (error) {
       const message = errorMessage(error);
@@ -1107,7 +1130,8 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
           busy={busy}
           running={running}
           initialEditorProfileId={profileEditorId}
-          onVerify={verifyConfiguration}
+          startAfterSave={startAfterSetup}
+          onSave={saveConfiguration}
           onActivate={activateProfile}
           onDelete={deleteProfile}
           onClose={() => {
@@ -1157,7 +1181,7 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
   return (
     <div className="desktop-preview relative w-full h-full min-w-50 pt-12 pr-6 pb-6 pl-6 grid place-items-center overflow-hidden bg-background bg-[url('/macos-wallpaper.webp')] bg-center bg-cover bg-no-repeat max-[620px]:pt-10 max-[620px]:pr-2 max-[620px]:pb-2 max-[620px]:pl-2">
       <MacMenuBar protected={isProtected(state)} trayOpen={previewTrayOpen} onTray={() => setPreviewTrayOpen((open) => !open)} />
-      <div className="desktop-window relative box-content w-[min(1052px,_calc(100%_-_2px))] h-[min(784px,_calc(100vh_-_74px))] min-h-140 overflow-hidden bg-background border border-[color-mix(in_srgb,_var(--color-black)_20%,_transparent)] rounded-lg [box-shadow:0_22px_60px_color-mix(in_srgb,_var(--color-black)_30%,_transparent),_0_2px_8px_color-mix(in_srgb,_var(--color-black)_16%,_transparent)] max-[620px]:w-[calc(100vw_-_16px)] max-[620px]:h-[calc(100vh_-_48px)] max-[620px]:min-h-0">{windowContent}</div>
+      <div className="desktop-window relative box-content w-[min(1052px,_calc(100%_-_2px))] h-[min(752px,_calc(100vh_-_74px))] min-h-140 overflow-hidden bg-background border border-[color-mix(in_srgb,_var(--color-black)_20%,_transparent)] rounded-lg [box-shadow:0_22px_60px_color-mix(in_srgb,_var(--color-black)_30%,_transparent),_0_2px_8px_color-mix(in_srgb,_var(--color-black)_16%,_transparent)] max-[620px]:w-[calc(100vw_-_16px)] max-[620px]:h-[calc(100vh_-_48px)] max-[620px]:min-h-0">{windowContent}</div>
       {previewTrayOpen && (
         <PreviewTrayMenu
           state={state}
@@ -1436,7 +1460,7 @@ function Overview({
 }): React.JSX.Element {
   const protectedNow = isProtected(state);
   const localAvailable = isProtected(state) && Boolean(state.proxyUrl) && !state.endpointError;
-  const recent = protectedNow || state.sessionActive || state.reconnecting ? state.activity.slice(0, 4) : [];
+  const recent = protectedNow || state.sessionActive || state.reconnecting ? state.activity.slice(0, 10) : [];
   return (
     <div className="overview-page max-w-240 min-h-full mt-0 mr-auto mb-0 ml-auto flex flex-col @container/overview @max-[600px]/overview:[&_.overview-grid_>_.overview-module:nth-child(n)]:col-auto @max-[600px]/overview:[&_.overview-grid_>_.overview-module:nth-child(n)]:row-auto">
       <div className="overview-top grid *:h-36 grid-cols-2 gap-4 items-stretch [&_.status-surface.status-compact]:min-w-0 @max-[600px]/overview:grid-cols-1">
@@ -1458,7 +1482,7 @@ function Overview({
           <TriangleAlert size={15} aria-hidden="true" /> {problem}
         </p>
       )}
-      <div className="overview-grid flex-1 mt-4 grid grid-cols-2 grid-rows-[minmax(212px,_1fr)_auto] gap-4 @max-[540px]/overview:grid-cols-1 [&_>_.overview-module:first-child]:col-start-1 [&_>_.overview-module:first-child]:row-start-1 [&_>_.overview-module:nth-child(2)]:col-start-1 [&_>_.overview-module:nth-child(2)]:row-start-2 [&_>_.overview-module:nth-child(3)]:col-start-2 [&_>_.overview-module:nth-child(3)]:row-[1_/_span_2] max-[780px]:grid-cols-1 max-[440px]:gap-3">
+      <div className="overview-grid mt-4 grid grid-cols-2 grid-rows-[auto_auto] gap-4 @max-[540px]/overview:grid-cols-1 [&_>_.overview-module:first-child]:col-start-1 [&_>_.overview-module:first-child]:row-start-1 [&_>_.overview-module:nth-child(2)]:col-start-1 [&_>_.overview-module:nth-child(2)]:row-start-2 [&_>_.overview-module:nth-child(3)]:col-start-2 [&_>_.overview-module:nth-child(3)]:row-[1_/_span_2] max-[780px]:grid-cols-1 max-[440px]:gap-3">
         <OverviewModule title="Local API" titleAdornment={<Hint content="Local API examples"><Badge variant="ghost" className="size-6 p-0 [&>svg]:size-4!" render={<button type="button" />} aria-label="Local API examples" aria-haspopup="dialog" onClick={onLocalExamples}><CircleHelp aria-hidden="true" /></Badge></Hint>} status={<StateLabel tone={localAvailable ? "success" : "neutral"} text={localAvailable ? "Available" : "Unavailable"} />}>
           <LocalApiPanel
             proxyUrl={state.proxyUrl}
@@ -1492,7 +1516,7 @@ function Overview({
           action="View all"
           onAction={onUsage}
         >
-          <div className="preview-list [&_>_:last-child]:border-b-0">
+          <div className="preview-list max-h-80 min-h-0 overflow-y-auto overscroll-contain [&_>_:last-child]:border-b-0" role="region" tabIndex={0} aria-label="Recent requests">
             {recent.length === 0 && (
               <EmptyState text={running || state.sessionActive || state.reconnecting ? "No requests in this session yet." : "Start protection to begin a new session."} />
             )}
@@ -1543,6 +1567,9 @@ function StatusSurface({
           <span>{activeProfile?.name ?? "Set up"}</span>
           {activeProfile && <ChevronDown aria-hidden="true" />}
         </Button>
+        {activeProfile?.auth.kind === "oauth" && profileHasCredential(activeProfile) && <AccountTools
+          api={desktopApi} provider={activeProfile.provider} target={{ kind: "profile", profileId: activeProfile.id }}
+          credentialRef={activeProfile.credentialRef} scope={activeProfile.auth.scope} compact />}
         <IconButton size="icon-sm" label="Privacy verification" aria-haspopup="dialog" onClick={onPrivacy}><Info aria-hidden="true" /></IconButton>
         </div>
         <ProtectedControl state={state} busy={busy} running={running} endpointDown={endpointDown} developmentMode={developmentMode} onToggle={onToggle} iconOnly />
@@ -1659,8 +1686,8 @@ function LocalApiPanel({
   const endpointLabel = "Local endpoint";
   const keyLabel = "Client key";
   return (
-    <div className="copy-rows relative h-full grid grid-rows-[repeat(2,_minmax(64px,_1fr))] gap-3">
-      <Item variant="muted" size="xs" className="copy-row relative min-w-0 min-h-16 overflow-hidden">
+    <div className="copy-rows relative grid auto-rows-auto gap-3">
+      <Item variant="muted" size="xs" className="copy-row relative min-w-0 h-14 overflow-hidden">
         <Button variant="ghost"
           className="copy-surface absolute inset-0 min-w-0 min-h-0 pt-2.25 pr-[min(100px,_40%)] pb-2.25 pl-3 flex flex-col items-start justify-center gap-0.5 bg-transparent border-0 text-left [&_>_*]:max-w-full [&_>_.row-title-line]:w-full [&_>_.row-title-line]:min-w-0 [&_>_.row-note]:w-full [&_>_.row-note]:min-w-0 [&_>_.row-title-line]:overflow-hidden [&_>_.row-title-line_>_*]:min-w-0 [&_>_.row-title-line_>_*]:overflow-hidden [&_>_.row-title-line_>_*]:text-ellipsis [&_>_.row-title-line_>_*]:whitespace-nowrap [&_>_.row-note]:flex-none [&_.row-title]:text-muted-foreground [&_.row-title]:text-xs [&_.row-title]:font-normal [&_code.row-note]:text-foreground [&_code.row-note]:text-sm hover:bg-muted [&_code]:max-w-full [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [&:hover_.copy-feedback]:opacity-100 [&:focus-visible_.copy-feedback]:opacity-100 h-full w-full rounded-none"
           disabled={!proxyUrl}
@@ -1675,7 +1702,7 @@ function LocalApiPanel({
         </Button>
         <IconButton className="row-action relative z-2 ml-auto" label="Local API settings" aria-haspopup="dialog" onClick={onSettings}><Settings size={16} /></IconButton>
       </Item>
-      <Item variant="muted" size="xs" className="copy-row relative min-w-0 min-h-16 overflow-hidden">
+      <Item variant="muted" size="xs" className="copy-row relative min-w-0 h-14 overflow-hidden">
         <Button variant="ghost" className="copy-surface absolute inset-0 min-w-0 min-h-0 pt-2.25 pr-[min(100px,_40%)] pb-2.25 pl-3 flex flex-col items-start justify-center gap-0.5 bg-transparent border-0 text-left [&_>_*]:max-w-full [&_>_.row-title-line]:w-full [&_>_.row-title-line]:min-w-0 [&_>_.row-note]:w-full [&_>_.row-note]:min-w-0 [&_>_.row-title-line]:overflow-hidden [&_>_.row-title-line_>_*]:min-w-0 [&_>_.row-title-line_>_*]:overflow-hidden [&_>_.row-title-line_>_*]:text-ellipsis [&_>_.row-title-line_>_*]:whitespace-nowrap [&_>_.row-note]:flex-none [&_.row-title]:text-muted-foreground [&_.row-title]:text-xs [&_.row-title]:font-normal [&_code.row-note]:text-foreground [&_code.row-note]:text-sm hover:bg-muted [&_code]:max-w-full [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [&:hover_.copy-feedback]:opacity-100 [&:focus-visible_.copy-feedback]:opacity-100 h-full w-full rounded-none" disabled={!clientKey} aria-label={`${keyLabel}: ${clientKeyVisible ? clientKey : "hidden"}. Copy`} onClick={() => clientKey && void onCopy(keyLabel, clientKey)}>
           <span className="row-title-line max-w-full flex items-center flex-wrap gap-y-1 gap-x-2">
             <span className="row-title">Client key</span>
@@ -1980,11 +2007,11 @@ function UsageStats({ page }: { page?: UsagePage }): React.JSX.Element {
   const stats = [
     ["Requests", summary ? summary.requests.toLocaleString() : "—", summary ? `${failedOrRejected.toLocaleString()} failed or rejected` : "—"],
     ["Tokens", summary ? formatTokens(totalTokens) : "—", summary ? `${formatTokens(summary.inputTokens)} in · ${formatTokens(summary.outputTokens)} out` : "—"],
-    ["Cost", summary ? currency(summary.costUsd) : "—", "Estimated from model prices"],
+    ["Estimated cost", summary ? currency(summary.costUsd) : "—", "Based on model prices"],
     ["Protected", forwarded ? `${Math.round(protectedRate * 100)}%` : "—", summary ? `${summary.protected} of ${forwarded} responses` : "—"],
   ];
   return <div className="usage-stats mt-4 grid grid-cols-4 gap-4 max-[780px]:grid-cols-2">
-    {stats.map(([label, value, detail]) => <Card key={label} size="sm" className="min-w-0"><CardContent className="grid gap-1"><span className="text-xs text-muted-foreground">{label}</span><strong className="truncate text-xl font-semibold tabular-nums">{value}</strong><small className="text-xs text-muted-foreground">{detail}</small></CardContent></Card>)}
+    {stats.map(([label, value, detail]) => <Card key={label} size="sm" className="min-w-0"><CardContent className="grid gap-1"><span className="text-xs text-muted-foreground">{label}</span><strong className="truncate text-xl font-semibold tabular-nums">{value}</strong><small className="truncate text-xs text-muted-foreground">{detail}</small></CardContent></Card>)}
   </div>;
 }
 
@@ -2169,7 +2196,7 @@ function SettingsView({
           <SettingsLink title="Notifications" aria-label="Notifications" aria-haspopup="dialog" onClick={() => onOpen("notifications")} />
       </SettingsSection>
       <SettingsSection title="Connections">
-          <SettingsLink title="Profiles" aria-label="Profiles" aria-haspopup="dialog" onClick={() => onOpen("confidential")} description={activeProfile ? `${activeProfile.name} · ${serviceHost(activeProfile.remoteUrl)} · ${isProtected(state) ? "Protected" : profileIsAvailable(activeProfile, state) ? "Ready" : "Verification required"}` : "No provider configured"} />
+          <SettingsLink title="Profiles" aria-label="Profiles" aria-haspopup="dialog" onClick={() => onOpen("confidential")} description={activeProfile ? `${activeProfile.name} · ${serviceHost(activeProfile.remoteUrl)} · ${isProtected(state) ? "Protected" : profileIsAvailable(activeProfile, state) ? "Ready" : "Sign in or add an API key"}` : "No provider configured"} />
           <SettingsLink title="Local API" description="Listener and client access" aria-label="Local API settings" aria-haspopup="dialog" onClick={() => onOpen("local-api")} />
       </SettingsSection>
 
@@ -2201,7 +2228,8 @@ function ProfilesSheet({
   busy,
   running,
   initialEditorProfileId,
-  onVerify,
+  startAfterSave = false,
+  onSave,
   onActivate,
   onDelete,
   onClose,
@@ -2210,7 +2238,8 @@ function ProfilesSheet({
   busy: boolean;
   running: boolean;
   initialEditorProfileId?: string;
-  onVerify(profile: ConfidentialProfileInput, key?: string): Promise<string | undefined>;
+  startAfterSave?: boolean;
+  onSave(profile: ConfidentialProfileInput, key?: string): Promise<string | undefined>;
   onActivate(profileId: string): Promise<string | undefined>;
   onDelete(profileId: string): Promise<string | undefined>;
   onClose(): void;
@@ -2249,7 +2278,8 @@ function ProfilesSheet({
           busy={busy}
           running={running}
           profile={editor?.kind === "edit" ? state.profiles.find((profile) => profile.id === editor.profileId) : undefined}
-          onVerify={onVerify}
+          startAfterSave={startAfterSave}
+          onSave={onSave}
           onDelete={onDelete}
           onComplete={state.profiles.length === 0 ? onClose : completeEditor}
           onDeleted={state.profiles.length === 1 ? onClose : completeEditor}
@@ -2305,22 +2335,18 @@ function ProfileListSheet({
   };
   return (
     <Sheet title="Profiles" className="profiles-sheet w-[min(560px,_calc(var(--window-dialog-width,_100vw)_-_32px))] h-[min(500px,_calc(var(--window-dialog-height,_100vh)_-_32px))] [&[open]]:flex [&[open]]:flex-col" dismissible={!workingProfileId && !transferBusy} onClose={onClose}>
-      <p className="sheet-text mt-3 text-sm [&.error]:text-destructive">Choose the verified service and credential used when protection starts.</p>
+      <p className="sheet-text mt-3 text-sm [&.error]:text-destructive">Choose the service used when protection starts.</p>
       {!activeProfileAvailable && (
         <p className="banner pt-2.25 pr-3 pb-2.25 pl-3 flex items-start gap-1.75 text-destructive bg-[var(--danger-bg)] rounded-lg wrap-anywhere sheet-banner mt-2.5 profile-availability text-warning bg-[var(--warning-bg)]">
           <TriangleAlert size={15} aria-hidden="true" />
-          {activeProfile ? `“${activeProfile.name}” cannot start protection until it is verified with an available credential.` : "Choose a verified profile before starting protection."}
+          {activeProfile ? `Sign in or add an API key for “${activeProfile.name}” to start protection.` : "Add a profile to start protection."}
         </p>
       )}
       <div className="profile-list min-h-0 mt-3.5 flex-auto overflow-auto bg-card border border-border rounded-2xl" role="list" aria-label="AI service profiles">
         {state.profiles.map((profile) => {
           const active = profile.id === state.activeProfileId;
           const working = profile.id === workingProfileId;
-          const status = !profileHasCredential(profile)
-            ? "Credential unavailable"
-            : profile.verifiedAt
-              ? "Ready"
-              : "Verification required";
+          const status = profileIsAvailable(profile, state) ? "Ready" : "Sign in or add an API key";
           return (
             <div className={`profile-list-row min-w-0 grid grid-cols-[minmax(0,_1fr)_52px] items-center border-b border-b-border [&.is-active]:bg-muted [&.is-active_.profile-select]:bg-transparent last:border-b-0 [&_>_button:last-child]:justify-self-center ${active ? " is-active" : ""}`} role="listitem" key={profile.id}>
               <ActionItem
@@ -2358,7 +2384,8 @@ function ProfileEditorSheet({
   busy,
   running,
   profile,
-  onVerify,
+  startAfterSave = false,
+  onSave,
   onDelete,
   onComplete,
   onDeleted,
@@ -2368,7 +2395,8 @@ function ProfileEditorSheet({
   busy: boolean;
   running: boolean;
   profile?: ConfidentialProfile;
-  onVerify(profile: ConfidentialProfileInput, key?: string): Promise<string | undefined>;
+  startAfterSave?: boolean;
+  onSave(profile: ConfidentialProfileInput, key?: string): Promise<string | undefined>;
   onDelete(profileId: string): Promise<string | undefined>;
   onComplete(): void;
   onDeleted(): void;
@@ -2384,7 +2412,41 @@ function ProfileEditorSheet({
   }));
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [saving, setSaving] = useState(false);
+  const saveInFlight = useRef(false);
+  const autoSaveAttempt = useRef<string | undefined>(undefined);
+  const [authMethod, setAuthMethod] = useState<"account" | "apiKey">(profile?.auth.kind === "apiKey" ? "apiKey" : "account");
   const [error, setError] = useState<string>();
+  const reportLoginError = useCallback((error: unknown) => setError(errorMessage(error)), []);
+  const account = useAccountLogin(desktopApi, reportLoginError);
+  const { session: login, auth: authorized } = account;
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<number>();
+  const [savedDetails, setSavedDetails] = useState<{ key: string; details: AccountLoginDetails }>();
+  const profileKey = `${profile?.id}:${profile?.credentialRef}`;
+  const currentDetails = savedDetails?.key === profileKey ? savedDetails.details : undefined;
+  const [workspaceError, setWorkspaceError] = useState<string>();
+  const pendingWorkspaceSave = useRef<number | undefined>(undefined);
+  const [callbackDraft, setCallbackDraft] = useState("");
+  useEffect(() => setCallbackDraft(""), [login?.id]);
+  const workspaces = account.details?.workspaces ?? currentDetails?.workspaces;
+  const savedScope = profile?.auth.kind === "oauth" ? profile.auth.scope : undefined;
+  const workspaceId = selectedWorkspaceId ?? (authorized
+    ? workspaces?.length === 1 ? workspaces[0]?.id : undefined
+    : savedScope?.workspaceId ?? undefined);
+  const needsWorkspace = Boolean(authorized && draft.provider === "redpill" && workspaces?.length && workspaceId === undefined);
+
+  const working = saving || account.busy;
+  const closeEditor = async () => {
+    if (!saveInFlight.current && await account.cancel()) onClose();
+  };
+  const signIn = async () => {
+    pendingWorkspaceSave.current = undefined;
+    setSelectedWorkspaceId(undefined);
+    setError(undefined);
+    try {
+      if (running && !await desktopApi.confirm({ title: "Connect and restart protection?", message: "Connecting this account restarts protection. In-flight requests may be interrupted.", confirmLabel: "Continue" })) return;
+      await account.start(draft);
+    } catch (error) { setError(errorMessage(error)); }
+  };
   const selectedPreset = SERVICE_PRESETS.find((service) => service.id === draft.provider);
   const keyLabel = selectedPreset?.keyLabel ?? "API key";
   const draftUrl = draft.remoteUrl.trim().replace(/\/$/, "");
@@ -2393,9 +2455,36 @@ function ProfileEditorSheet({
     || profile.remoteUrl.replace(/\/$/, "") !== draftUrl;
   const savedCredentialApplies = !isNew
     && profileHasCredential(profile)
-    && !profileChanged;
+    && !profileChanged
+    && profile.auth.kind === (authMethod === "account" ? "oauth" : "apiKey");
+  const savedAccount = currentDetails?.auth.kind === "oauth" ? {
+    ...currentDetails.auth,
+    scope: { organizationId: currentDetails.auth.scope?.organizationId ?? null, organizationSlug: currentDetails.auth.scope?.organizationSlug ?? null, organization: currentDetails.auth.scope?.organization ?? null,
+      workspace: savedScope?.workspace ?? null, workspaceId: savedScope?.workspaceId ?? null },
+  } : profile?.auth.kind === "oauth" ? profile.auth : undefined;
+  const selectedAccount = authorized?.kind === "oauth" ? authorized
+    : !account.busy && savedCredentialApplies ? savedAccount : undefined;
+  const accountScope = selectedAccount?.scope;
+  const needsAccountLogin = draft.provider !== "custom" && authMethod === "account"
+    && !authorized && (!savedCredentialApplies || profile?.auth.kind !== "oauth");
 
-  const chooseService = (next: ServicePreset) => {
+  useEffect(() => {
+    let disposed = false;
+    setSavedDetails(undefined);
+    setWorkspaceError(undefined);
+    if (savedCredentialApplies && draft.provider === "redpill" && authMethod === "account" && profile?.id) {
+      void desktopApi.getAccountDetails(profile.id).then(
+        (details) => { if (!disposed) setSavedDetails({ key: profileKey, details }); },
+        (error: unknown) => { if (!disposed) setWorkspaceError(errorMessage(error)); },
+      );
+    }
+    return () => { disposed = true; };
+  }, [savedCredentialApplies, draft.provider, authMethod, profile?.id, profile?.credentialRef, profileKey]);
+
+  const chooseService = async (next: ServicePreset) => {
+    if (!await account.cancel()) return;
+    pendingWorkspaceSave.current = undefined;
+    setSelectedWorkspaceId(undefined);
     const preset = SERVICE_PRESETS.find((service) => service.id === next);
     setDraft((current) => ({
       ...current,
@@ -2405,11 +2494,18 @@ function ProfileEditorSheet({
         : current.name,
       remoteUrl: preset?.url ?? (servicePreset(current.remoteUrl) ? "" : current.remoteUrl),
     }));
+    setAuthMethod(next === "custom" ? "apiKey" : "account");
     setApiKeyDraft("");
     setError(undefined);
   };
+  const chooseAuthMethod = async (next: "account" | "apiKey") => {
+    if (!await account.cancel()) return;
+    pendingWorkspaceSave.current = undefined;
+    setAuthMethod(next);
+    setError(undefined);
+  };
   const removeProfile = async () => {
-    if (saving || frozen) return;
+    if (working || frozen) return;
     setSaving(true);
     setError(undefined);
     try {
@@ -2417,37 +2513,66 @@ function ProfileEditorSheet({
       const needsStop = !current.configurationVerification && ["verified", "blocked", "verifying"].includes(current.status);
       const confirmed = await desktopApi.confirm({
         title: `Delete “${draft.name}”?`,
-        message: needsStop ? "Protection will stop and connected agent configurations will be restored. This profile and its saved credential will be permanently deleted." : "The profile and its saved credential will be permanently removed from this device.",
+        message: needsStop ? "Protection will stop and connected agent configurations will be restored. This profile will be deleted and its account credential revoked." : "The profile will be deleted. An account credential will also be revoked at its provider.",
         confirmLabel: needsStop ? "Stop and Delete" : "Delete Profile",
       });
       if (!confirmed) return;
       if (needsStop) await desktopApi.stop();
       const message = await onDelete(draft.id);
       if (message) setError(message);
-      else onDeleted();
+      else { await account.cancel(); onDeleted(); }
     } catch (error) { setError(errorMessage(error)); }
     finally { setSaving(false); }
   };
-  const submit = async (event: React.FormEvent) => {
-    event.preventDefault();
+  const save = useCallback(async () => {
+    if (saveInFlight.current || working || frozen || needsAccountLogin || needsWorkspace) return;
+    saveInFlight.current = true;
     setSaving(true);
     setError(undefined);
     try {
-      if (running && profile?.id === state.activeProfileId && !await desktopApi.confirm({ title: "Save and reconnect?", message: "Saving this active profile restarts protection. In-flight requests may be interrupted.", confirmLabel: "Save and Reconnect" })) return;
-      const message = await onVerify(draft, apiKeyDraft.trim() || undefined);
+      if (!authorized && running && profile?.id === state.activeProfileId && !await desktopApi.confirm({ title: "Save and reconnect?", message: "Saving this active profile restarts protection. In-flight requests may be interrupted.", confirmLabel: "Save and Reconnect" })) return;
+      if (!authorized && authMethod === "account" && draft.provider === "redpill"
+        && workspaceId !== undefined && workspaceId !== savedScope?.workspaceId) {
+        pendingWorkspaceSave.current = workspaceId;
+        if (!await account.start(draft)) pendingWorkspaceSave.current = undefined;
+        return;
+      }
+      if (authorized && login && authMethod === "account") {
+        const saved = await desktopApi.saveAccountLogin(login.id, draft, state.config.requireProductionOs, workspaceId);
+        account.consume();
+        if (startAfterSave) await desktopApi.start(saved.config);
+        onComplete();
+        return;
+      }
+      const message = await onSave(draft, authMethod === "apiKey" || draft.provider === "custom" ? apiKeyDraft.trim() || undefined : undefined);
       if (message) setError(message);
       else onComplete();
     } catch (error) { setError(errorMessage(error)); }
-    finally { setSaving(false); }
-  };
+    finally { saveInFlight.current = false; setSaving(false); }
+  }, [working, frozen, needsAccountLogin, needsWorkspace, authorized, running, profile?.id, state.activeProfileId, login, authMethod, draft, state.config.requireProductionOs, workspaceId, account.consume, startAfterSave, onComplete, onSave, apiKeyDraft, savedScope?.workspaceId, account.start]);
+
+  useEffect(() => {
+    if (!authorized || !login || working || frozen || autoSaveAttempt.current === login.id) return;
+    const pendingWorkspace = pendingWorkspaceSave.current;
+    if (draft.provider !== "phala" && pendingWorkspace === undefined) return;
+    pendingWorkspaceSave.current = undefined;
+    autoSaveAttempt.current = login.id;
+    if (pendingWorkspace !== undefined && !workspaces?.some((item) => item.id === pendingWorkspace)) {
+      setSelectedWorkspaceId(undefined);
+      setError("The selected workspace is no longer available. Choose a workspace and save again.");
+      return;
+    }
+    void save();
+  }, [authorized, login, draft.provider, workspaces, working, frozen, save]);
+
   return (
-    <Sheet title={isNew ? "New Profile" : "Edit Profile"} label={isNew ? "New profile" : "Edit profile"} className="profile-editor-sheet w-[min(620px,_calc(var(--window-dialog-width,_100vw)_-_32px))] [&[open]]:flex [&[open]]:flex-col [&_form]:min-h-0 [&_form]:flex [&_form]:flex-col form-sheet [&_>_.sheet-heading]:px-5 [&_>_.field-note]:mx-5 [&_.sheet-footer]:mx-5 [&_form_>_[data-slot=field-error]]:mx-5 [&_.sheet-scroll]:px-5" dismissible={!saving} onClose={onClose}>
-      <form className="mt-4" onSubmit={(event) => void submit(event)}>
+    <Sheet title={isNew ? "New profile" : "Edit profile"} className="profile-editor-sheet w-[min(480px,_calc(var(--window-dialog-width,_100vw)_-_32px))] [&_.sheet-scroll]:min-h-0 [&_.sheet-scroll]:overflow-y-auto [&_.sheet-footer]:flex-none [&[open]]:flex [&[open]]:flex-col [&_form]:min-h-0 [&_form]:flex [&_form]:flex-col form-sheet [&_>_.sheet-heading]:px-5 [&_>_.field-note]:mx-5 [&_.sheet-footer]:mx-5 [&_form_>_[data-slot=field-error]]:mx-5 [&_.sheet-scroll]:px-5" dismissible={!saving && !account.working} onClose={() => void closeEditor()}>
+      <form className="mt-4" onSubmit={(event) => { event.preventDefault(); void save(); }}>
         <div className="sheet-scroll py-1">
-        <FieldGroup>
+        <FieldGroup className="gap-4 [&_[data-slot=field]]:gap-2">
         <Field>
         <FieldLabel id="profile-provider-label">Provider</FieldLabel>
-        <ToggleGroup variant="outline" className="service-presets w-full grid grid-cols-3 gap-2 max-[440px]:grid-cols-1" value={[draft.provider]} disabled={frozen || saving} aria-labelledby="profile-provider-label" onValueChange={([value]) => { if (value === "phala" || value === "redpill" || value === "custom") chooseService(value); }}>
+        <ToggleGroup variant="outline" className="service-presets w-full grid grid-cols-3 gap-2 max-[440px]:grid-cols-1" value={[draft.provider]} disabled={frozen || working} aria-labelledby="profile-provider-label" onValueChange={([value]) => { if (value === "phala" || value === "redpill" || value === "custom") void chooseService(value); }}>
           {SERVICE_PRESETS.map((service) => (
             <ToggleGroupItem key={service.id} value={service.id} className="service-preset min-w-0 text-left [&_.service-logo]:w-4.5 [&_.service-logo]:h-4.5 [&_.service-custom-icon]:w-4.5 [&_.service-custom-icon]:h-4.5 [&_strong]:min-w-0 [&_strong]:flex-auto [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_>_svg]:flex-none [&_>_svg]:text-foreground" aria-label={service.name}>
               <ServiceLogo url={service.url} />
@@ -2462,19 +2587,65 @@ function ProfileEditorSheet({
           </ToggleGroupItem>
         </ToggleGroup>
         </Field>
-          <FormField id="profile-name" label="Profile name"><Input id="profile-name" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} disabled={frozen || saving} autoComplete="off" /></FormField>
-          <FormField id="profile-endpoint" label="Service endpoint"><Input id="profile-endpoint" value={draft.remoteUrl} onChange={(event) => setDraft((current) => ({ ...current, remoteUrl: event.target.value }))} disabled={frozen || saving} readOnly={draft.provider !== "custom"} spellCheck={false} /></FormField>
-          <Field>
-            <FieldLabel htmlFor="profile-key">{keyLabel}</FieldLabel>
-            <Input id="profile-key" type="password" value={apiKeyDraft} onChange={(event) => setApiKeyDraft(event.target.value)} placeholder={savedCredentialApplies ? "Replace the saved key" : `Paste your ${keyLabel}`} disabled={frozen || saving} autoComplete="off" spellCheck={false} aria-describedby="profile-key-note" />
-            <FieldDescription id="profile-key-note">{savedCredentialApplies ? "Using this profile's saved key. Enter a new one to replace it after verification." : profileChanged ? "A key is required for a new provider or endpoint." : "The key is stored in the system credential store and never written into agent configs."}</FieldDescription>
-          </Field>
+          <FormField id="profile-name" label="Profile name"><Input id="profile-name" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} disabled={frozen || working} autoComplete="off" /></FormField>
+          {draft.provider === "custom" && <FormField id="profile-endpoint" label="Service endpoint"><Input id="profile-endpoint" value={draft.remoteUrl} onChange={(event) => setDraft((current) => ({ ...current, remoteUrl: event.target.value }))} disabled={frozen || working} spellCheck={false} /></FormField>}
+          <Tabs value={draft.provider === "custom" ? "apiKey" : authMethod} className="gap-4"
+            onValueChange={(next) => { if (next === "account" || next === "apiKey") void chooseAuthMethod(next); }}>
+            {draft.provider !== "custom" && <TabsList aria-label="Sign-in method" className="w-full">
+              <TabsTrigger value="account" disabled={working || frozen}>Account</TabsTrigger>
+              <TabsTrigger value="apiKey" disabled={working || frozen}>API key</TabsTrigger>
+            </TabsList>}
+            <TabsContent value="account">
+              <FieldGroup className="gap-4">
+                {login && !authorized ? <div className="space-y-3">
+                  <div className="flex items-center justify-between gap-3" role="status" aria-live="polite">
+                  <div className="space-y-1 text-sm"><p>Continue in your browser</p>{login.userCode && <p className="font-mono text-muted-foreground">{login.userCode}</p>}</div>
+                  <div className="flex items-center gap-1">
+                    <IconButton size="icon-sm" label="Copy sign-in link" onClick={() => void desktopApi.copyText(login.url).catch((error: unknown) => setError(errorMessage(error)))}><Copy aria-hidden /></IconButton>
+                    <Button type="button" variant="ghost" size="sm" disabled={account.working} onClick={() => void account.cancel()}>Cancel Sign-in</Button>
+                  </div>
+                  </div>
+                  {draft.provider === "redpill" && <details>
+                    <summary className="cursor-pointer text-sm text-muted-foreground">Paste callback link</summary>
+                    <div className="mt-3 space-y-2">
+                      <FormField id="account-callback" label="Callback URL">
+                        <Input id="account-callback" type="password" value={callbackDraft} autoComplete="off" spellCheck={false} disabled={account.working}
+                          placeholder="http://127.0.0.1:4181/oauth/callback?…" onChange={(event) => setCallbackDraft(event.target.value)} />
+                      </FormField>
+                      <Button type="button" variant="outline" disabled={account.working || !callbackDraft.trim()} onClick={() => { const value = callbackDraft; setCallbackDraft(""); setError(undefined); void account.complete(value); }}>Continue</Button>
+                    </div>
+                  </details>}
+                </div> : selectedAccount ? <>
+                  <AccountTools key={login?.id ?? draft.id} api={desktopApi} provider={draft.provider}
+                    target={authorized && login ? { kind: "login", id: login.id } : { kind: "profile", profileId: draft.id }}
+                    scope={accountScope} images={selectedAccount.images} onSignIn={() => void signIn()}
+                    credentialRef={profile?.credentialRef} disabled={working || frozen} />
+                  {(workspaces?.length || accountScope?.workspace) && <FormField id="profile-workspace" label="Workspace">
+                    {draft.provider === "redpill" ? <>
+                      <ChoiceSelect id="profile-workspace" label="Workspace" className="w-full" value={workspaceId === undefined ? "" : String(workspaceId)} options={[
+                        { value: "", label: "Select workspace", disabled: true },
+                        ...(workspaces ?? []).map((workspace) => ({ value: String(workspace.id), label: workspace.name })),
+                        ...(!authorized && savedScope?.workspaceId != null && !workspaces?.some((item) => item.id === savedScope.workspaceId)
+                          ? [{ value: String(savedScope.workspaceId), label: savedScope.workspace ?? "Current workspace", disabled: true }] : []),
+                      ]} disabled={working || frozen || !workspaces?.length} onChange={(value) => setSelectedWorkspaceId(Number(value))} />
+                      {!authorized && workspaceError && <FieldError>{workspaceError}</FieldError>}
+                    </> : <Input id="profile-workspace" value={accountScope?.workspace ?? ""} readOnly />}
+                  </FormField>}
+                </> : <Button type="button" variant="default" size="lg" className="w-full [&_.service-logo]:size-4" disabled={working || frozen || !draft.name.trim()} onClick={() => void signIn()}><ServiceLogo url={draft.remoteUrl} />Sign in with {selectedPreset?.name}</Button>}
+              </FieldGroup>
+            </TabsContent>
+            <TabsContent value="apiKey">
+              <FormField id="profile-key" label={keyLabel} description={savedCredentialApplies ? "Leave blank to keep the saved key." : "Stored securely on this device."}>
+                <Input id="profile-key" type="password" value={apiKeyDraft} onChange={(event) => setApiKeyDraft(event.target.value)} placeholder={savedCredentialApplies ? "Replace the saved key" : `Paste your ${keyLabel}`} disabled={frozen || working} autoComplete="off" spellCheck={false} aria-describedby="profile-key-note" />
+              </FormField>
+            </TabsContent>
+          </Tabs>
         </FieldGroup>
         </div>
         <FieldError className="mt-3">{error}</FieldError>
-        <SheetActions leading={!isNew && <Button type="button" variant="destructive" disabled={saving || frozen} onClick={() => void removeProfile()}><Trash2 size={14} />Delete Profile</Button>}>
-          <Button type="button" variant="outline" onClick={onClose} disabled={saving}>Cancel</Button>
-          <Button type="submit" variant="default" disabled={saving || busy || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || (!savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Verifying…" : "Verify and Save"}</Button>
+        <SheetActions leading={!isNew && <Button type="button" variant="destructive" disabled={working || frozen} onClick={() => void removeProfile()}><Trash2 size={14} />Delete Profile</Button>}>
+          <Button type="button" variant="outline" onClick={() => void closeEditor()} disabled={saving || account.working}>Cancel</Button>
+          {!needsAccountLogin && <Button type="submit" variant="default" disabled={working || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || needsWorkspace || (!authorized && !savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Saving…" : authorized && draft.provider === "phala" ? "Retry" : "Save"}</Button>}
         </SheetActions>
       </form>
     </Sheet>
@@ -2833,13 +3004,6 @@ function formatTimestamp(value: number, date = false): string {
   return new Intl.DateTimeFormat(undefined, options).format(new Date(value));
 }
 
-function errorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
-  if (!message || /undefined|invoke|__TAURI_INTERNALS__/i.test(message)) {
-    return "Desktop bridge unavailable";
-  }
-  return message;
-}
 
 function NativeWindowContent(): React.JSX.Element | null {
   const nativeDialog = query.get("native-dialog");

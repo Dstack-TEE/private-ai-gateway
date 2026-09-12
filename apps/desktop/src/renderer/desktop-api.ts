@@ -140,6 +140,16 @@ export const desktopApi: DesktopApi = {
     });
   },
 
+  saveConfiguration: (profile, requireProductionOs, key) => invoke("save_configuration", { profile, requireProductionOs, key }),
+  completeAccountLogin: (id, callbackUrl) => invoke("complete_account_login", { id, callbackUrl }),
+  beginAccountLogin: (profile) => invoke("begin_account_login", { profile }),
+  saveAccountLogin: (id, profile, requireProductionOs, workspaceId) => invoke("save_account_login", { id, profile, requireProductionOs, workspaceId }),
+  getAccountDetails: (profileId) => invoke("account_details", { profileId }),
+  getAccountBalance: (target) => invoke("account_balance", { target }),
+  openOrganization: (organizationSlug) => invoke("open_organization", { organizationSlug }),
+  openTopUp: (provider, scopeSlug) => invoke("open_top_up", { provider, scopeSlug }),
+  pollAccountLogin: (id) => invoke("poll_account_login", { id }),
+  cancelAccountLogin: (id) => invoke("cancel_account_login", { id }),
   start(config: StartGatewayConfig): Promise<GatewayState> {
     return invoke("start_gateway", { config });
   },

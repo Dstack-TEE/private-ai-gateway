@@ -97,13 +97,13 @@ pub fn open(
         "profile-editor" | "setup-profile" => DialogSpec {
             label: PROFILE_EDITOR_LABEL,
             title: if profile_id.is_some() {
-                "Edit Profile"
+                "Edit profile"
             } else {
-                "New Profile"
+                "New profile"
             },
-            width: 580.0,
+            width: 480.0,
             height: 560.0,
-            min_width: 520.0,
+            min_width: 440.0,
             min_height: 460.0,
             query: format!(
                 "index.html?native-dialog=profile-editor&profile={}&start={}",
@@ -335,6 +335,15 @@ pub fn request_close(window: &tauri::WebviewWindow) -> Result<(), String> {
 
 pub fn open_profiles(app: &AppHandle, repair: bool) -> Result<(), String> {
     open(app, "profiles", repair, None, None)
+}
+
+pub fn focus_account_editor(app: &AppHandle) -> Result<(), String> {
+    if let Some(window) = active_window(app, PROFILE_EDITOR_LABEL) {
+        window.unminimize().map_err(window_error)?;
+        window.show().map_err(window_error)?;
+        window.set_focus().map_err(window_error)?;
+    }
+    Ok(())
 }
 
 fn focus_if_visible(window: &tauri::WebviewWindow) -> Result<(), String> {

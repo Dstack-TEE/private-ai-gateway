@@ -20,6 +20,7 @@ use desktop_runtime::{
 };
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_clipboard_manager::ClipboardExt;
+use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_shell::ShellExt;
 
 pub(crate) async fn run_blocking<T: Send + 'static>(
@@ -278,6 +279,119 @@ async fn verify_configuration(
         .clone()
         .verify_configuration(profile, require_production_os, key)
         .await
+}
+
+#[tauri::command]
+async fn save_configuration(
+    client: State<'_, Arc<Client>>,
+    profile: ConfidentialProfileInput,
+    require_production_os: bool,
+    key: Option<String>,
+) -> Result<GatewayState, String> {
+    client
+        .inner()
+        .clone()
+        .save_configuration(profile, require_production_os, key)
+        .await
+}
+
+#[tauri::command]
+async fn complete_account_login(
+    client: State<'_, Arc<Client>>,
+    id: String,
+    callback_url: String,
+) -> Result<(), String> {
+    client
+        .inner()
+        .clone()
+        .complete_account_login(id, callback_url)
+        .await
+}
+
+#[tauri::command]
+async fn begin_account_login(
+    app: AppHandle,
+    client: State<'_, Arc<Client>>,
+    profile: ConfidentialProfileInput,
+) -> Result<desktop_runtime::account_login::LoginPresentation, String> {
+    use tauri_plugin_opener::OpenerExt;
+    let client = client.inner().clone();
+    let login = client.begin_account_login(profile).await?;
+    if app.opener().open_url(&login.url, None::<&str>).is_err() {
+        // Keep the authorization available for the copy-link/manual callback path.
+        eprintln!("Cannot open sign-in browser; use the manual sign-in link");
+    }
+    Ok(login)
+}
+
+#[tauri::command]
+async fn poll_account_login(
+    client: State<'_, Arc<Client>>,
+    id: String,
+) -> Result<Option<desktop_runtime::contracts::AccountLoginDetails>, String> {
+    client.inner().clone().poll_account_login(id).await
+}
+
+#[tauri::command]
+async fn save_account_login(
+    client: State<'_, Arc<Client>>,
+    id: String,
+    profile: ConfidentialProfileInput,
+    require_production_os: bool,
+    workspace_id: Option<i64>,
+) -> Result<GatewayState, String> {
+    client
+        .inner()
+        .clone()
+        .save_account_login(id, profile, require_production_os, workspace_id)
+        .await
+}
+
+#[tauri::command]
+async fn account_details(
+    client: State<'_, Arc<Client>>,
+    profile_id: String,
+) -> Result<desktop_runtime::contracts::AccountLoginDetails, String> {
+    client.inner().clone().account_details(profile_id).await
+}
+
+#[tauri::command]
+async fn account_balance(
+    client: State<'_, Arc<Client>>,
+    target: desktop_runtime::contracts::AccountBalanceTarget,
+) -> Result<Option<desktop_runtime::contracts::AccountBalance>, String> {
+    client.inner().clone().account_balance(target).await
+}
+
+#[tauri::command]
+async fn open_top_up(
+    app: AppHandle,
+    provider: desktop_runtime::contracts::ServiceProvider,
+    scope_slug: Option<String>,
+) -> Result<(), String> {
+    let url = desktop_runtime::account_login::top_up_url(&provider, scope_slug.as_deref())?;
+    open_account_url(app, url).await
+}
+
+#[tauri::command]
+async fn open_organization(app: AppHandle, organization_slug: String) -> Result<(), String> {
+    let url = desktop_runtime::account_login::organization_url(Some(&organization_slug))?;
+    open_account_url(app, url).await
+}
+
+async fn open_account_url(app: AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    run_blocking(move || {
+        app.opener()
+            .open_url(url, None::<&str>)
+            .map_err(|_| "Cannot open the account page".into())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn cancel_account_login(client: State<'_, Arc<Client>>, id: String) -> Result<(), String> {
+    client.inner().clone().cancel_account_login(id).await
 }
 
 #[tauri::command]
@@ -666,14 +780,42 @@ async fn stop_all_and_quit(app: AppHandle, client: State<'_, Arc<Client>>) -> Re
     Ok(())
 }
 
+fn configure_account_return(app: &tauri::App) {
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    if let Err(error) = app.deep_link().register_all() {
+        eprintln!("Cannot register app return link: {error}");
+    }
+    let handle = app.handle().clone();
+    app.deep_link().on_open_url(move |event| {
+        let expected = desktop_runtime::account_login::account_return_url();
+        if !event.urls().iter().any(|url| url.as_str() == expected) {
+            return;
+        }
+        tray::show_window(&handle);
+        let app = handle.clone();
+        if let Err(error) = handle.run_on_main_thread(move || {
+            if let Err(error) = native_dialog::focus_account_editor(&app) {
+                eprintln!("Cannot focus account editor: {error}");
+            }
+        }) {
+            eprintln!("Cannot return to account editor: {error}");
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let show_on_launch =
         !std::env::args_os().any(|argument| argument == std::ffi::OsStr::new(AUTOSTART_ARG));
 
     let app =
-        tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            tray::show_window(app);
+        tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if !args
+                .iter()
+                .any(|arg| arg == &desktop_runtime::account_login::account_return_url())
+            {
+                tray::show_window(app);
+            }
         }));
     #[cfg(target_os = "macos")]
     let app = app.plugin(tauri_plugin_autostart::init(
@@ -681,6 +823,7 @@ pub fn run() {
         Some(vec![AUTOSTART_ARG]),
     ));
     let app = app
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
@@ -725,6 +868,16 @@ pub fn run() {
             set_launch_preference,
             start_gateway,
             verify_configuration,
+            begin_account_login,
+            complete_account_login,
+            save_configuration,
+            poll_account_login,
+            save_account_login,
+            account_details,
+            account_balance,
+            open_top_up,
+            open_organization,
+            cancel_account_login,
             activate_profile,
             delete_profile,
             stop_gateway,
@@ -773,6 +926,8 @@ pub fn run() {
                 register_cli_on_startup(&registration_app).await;
             });
             notifications::initialize(app.handle());
+
+            configure_account_return(app);
 
             // The renderer invokes backend commands on mount. Create it only
             // after Client and native services are registered in managed state.

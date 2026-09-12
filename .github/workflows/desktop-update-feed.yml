@@ -19,6 +19,7 @@ concurrency:
 jobs:
   publish:
     if: inputs.tag != '' || startsWith(github.event.release.tag_name, 'desktop-v')
+    environment: desktop-release
     runs-on: ubuntu-24.04
     env:
       GH_REPO: ${{ github.repository }}

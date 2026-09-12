@@ -59,6 +59,40 @@ pub enum Command {
         require_production_os: bool,
         key: Option<String>,
     },
+    SaveConfiguration {
+        profile: ConfidentialProfileInput,
+        require_production_os: bool,
+        key: Option<String>,
+    },
+    CompleteAccountLogin {
+        id: String,
+        callback_url: String,
+    },
+    BeginAccountLogin {
+        profile: ConfidentialProfileInput,
+    },
+    SaveAccountLogin {
+        operation_id: String,
+        id: String,
+        profile: ConfidentialProfileInput,
+        require_production_os: bool,
+        workspace_id: Option<i64>,
+    },
+    AccountSaveResult {
+        operation_id: String,
+    },
+    AccountDetails {
+        profile_id: String,
+    },
+    AccountBalance {
+        target: AccountBalanceTarget,
+    },
+    PollAccountLogin {
+        id: String,
+    },
+    CancelAccountLogin {
+        id: String,
+    },
     ActivateProfile {
         profile_id: String,
     },
@@ -148,6 +182,10 @@ impl RpcError {
     }
 
     pub fn operation(message: &str) -> Self {
+        // Only locally mapped account errors carry this prefix; never raw provider bodies.
+        if message.starts_with("Account: ") && message.len() < 512 {
+            return Self::new("account_error", message);
+        }
         // Return actionable product errors, never arbitrary OS/SQL/provider details.
         if message.contains("in progress") || message.contains("busy") {
             return Self::new(

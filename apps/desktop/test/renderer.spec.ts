@@ -370,6 +370,27 @@ test("system dark styling is present before React initializes", async ({ page })
   await expect(page.locator("body")).toHaveCSS("background-color", "oklch(0.145 0 0)");
 });
 
+test("visible Agents detects a newly installed OpenCode without reopening the page", async ({ page }) => {
+  await page.clock.install();
+  await page.goto("/?mock=agent-installed");
+  await nav(page, "Agents").click();
+  await expect(page.getByRole("region", { name: "Not installed", exact: true })).toContainText("OpenCode");
+  await page.evaluate(() => { document.documentElement.dataset.mockAgentInstalled = "true"; });
+  await page.clock.fastForward(15_000);
+  await expect(page.getByRole("switch", { name: "Connect OpenCode", exact: true })).toBeVisible();
+});
+
+test("recent usage keeps ten rows in an internally scrollable card", async ({ page }) => {
+  await page.setViewportSize({ width: 1100, height: 1040 });
+  await page.goto("/?mock=recent-usage");
+  const list = page.getByRole("region", { name: "Recent requests", exact: true });
+  await expect(list.locator(".usage-row")).toHaveCount(10);
+  expect(await list.evaluate((node) => node.scrollHeight > node.clientHeight)).toBe(true);
+  await list.evaluate((node) => { node.scrollTop = node.scrollHeight; });
+  await expect(list.locator(".usage-row").last()).toBeInViewport();
+  await expect(page.getByRole("heading", { name: "Recent usage", exact: true })).toBeInViewport();
+});
+
 test("window activation redetects an uninstalled connected agent", async ({ page }) => {
   await page.goto("/?mock=agent-uninstalled");
   await nav(page, "Agents").click();
@@ -541,7 +562,7 @@ test("Usage chart preserves its layout while the initial query is pending", asyn
   expect(await chart.boundingBox()).toEqual(before);
 });
 
-test("profile imports require confirmation, stay unverified and preserve the active profile", async ({ page }) => {
+test("profile imports require confirmation, need credentials and preserve the active profile", async ({ page }) => {
   await page.goto("/?mock=ready&native-dialog=profiles");
   const profiles = page.getByRole("dialog", { name: "Profiles" });
   page.once("dialog", (dialog) => dialog.dismiss());
@@ -551,7 +572,7 @@ test("profile imports require confirmation, stay unverified and preserve the act
   await profiles.getByRole("button", { name: "Import profile configurations" }).click();
   await expect(profiles.getByRole("status")).toHaveText("1 imported, 0 duplicates skipped.");
   const imported = profiles.locator(".profile-list-row", { hasText: "Imported Phala" });
-  await expect(imported).toContainText("Credential unavailable");
+  await expect(imported).toContainText("Sign in or add an API key");
   await expect(profiles.locator(".profile-select", { hasText: "RedPill" })).toHaveAttribute("aria-pressed", "true");
   page.once("dialog", (dialog) => dialog.accept());
   await profiles.getByRole("button", { name: "Import profile configurations" }).click();
@@ -841,11 +862,13 @@ test("reused native dialog discards drafts and credentials before reopening", as
   await page.goto("/?mock=ready&native-dialog=profile-editor");
   const name = page.getByRole("textbox", { name: "Profile name" });
   await name.fill("Unsaved draft");
+  await page.getByRole("tab", { name: "API key", exact: true }).click();
   await page.getByLabel("Phala AI API key").fill("sk-test-discard");
   await page.evaluate(() => window.dispatchEvent(new Event("mock:dialog-dismissed")));
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await page.evaluate(() => window.dispatchEvent(new Event("mock:dialog-open")));
   await expect(name).toHaveValue("Phala");
+  await page.getByRole("tab", { name: "API key", exact: true }).click();
   await expect(page.getByLabel("Phala AI API key")).toHaveValue("");
   await name.fill("Another draft");
   await page.evaluate(() => {
@@ -925,7 +948,7 @@ test("complex dialogs render as native child-window surfaces", async ({ page }) 
       size: { width: 580, height: 560 },
       path: "/?mock=ready&native-dialog=profile-editor",
       name: "New profile",
-      text: "Verify and Save",
+      text: "Sign in with Phala",
     },
     {
       size: { width: 700, height: 680 },
@@ -1139,9 +1162,10 @@ test("protection flow, page headers, and focus follow the native desktop contrac
   await page.getByRole("switch", { name: "Start protection" }).click();
   editor = page.getByRole("dialog", { name: "New profile" });
   await expect(editor).toBeVisible();
-  await expect(editor.getByRole("button", { name: "Phala" })).toHaveAttribute("aria-pressed", "true");
+  await expect(editor.getByRole("button", { name: "Phala", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await editor.getByRole("tab", { name: "API key", exact: true }).click();
   await editor.getByLabel("Phala AI API key").fill("sk-test-123");
-  await editor.getByRole("button", { name: "Verify and Save" }).click();
+  await editor.getByRole("button", { name: "Save" }).click();
   await expect(editor).toHaveCount(0);
   await expect(page.getByRole("dialog", { name: "Profiles" })).toHaveCount(0);
 
@@ -1231,7 +1255,7 @@ test("five agents connect and disconnect directly from the verified discovered c
   await expect(page.getByRole("switch", { name: /^Disconnect / })).toHaveCount(0);
 });
 
-test("overview shows three agents, four current-session records, truthful copy surfaces, and session totals", async ({ page }) => {
+test("overview shows three agents, current-session records, truthful copy surfaces, and session totals", async ({ page }) => {
   await page.setViewportSize({ width: 1100, height: 1040 });
   await page.goto("/?mock=ready");
 
@@ -1239,7 +1263,7 @@ test("overview shows three agents, four current-session records, truthful copy s
   await expect(agentsModule.locator(".agent-block")).toHaveCount(3);
   await expect(agentsModule.locator(".agent-block").last()).toBeVisible();
   const usageModule = page.locator(".overview-module", { has: page.getByRole("heading", { name: "Recent usage" }) });
-  await expect(usageModule.locator(".usage-row")).toHaveCount(4);
+  await expect(usageModule.locator(".usage-row")).toHaveCount(5);
   await expect(usageModule.locator(".usage-row").last()).toBeVisible();
   expect(await agentsModule.locator(".module").evaluate((node) => node.scrollHeight <= node.clientHeight)).toBe(true);
   expect(await usageModule.locator(".module").evaluate((node) => node.scrollHeight <= node.clientHeight)).toBe(true);
@@ -1371,7 +1395,7 @@ test("updates are discovered on launch and installation requires confirmation", 
 });
 
 test("success colors, list separators, control sizes and About alignment are consistent", async ({ page }) => {
-  await page.setViewportSize({ width: 1052, height: 784 });
+  await page.setViewportSize({ width: 1052, height: 752 });
   for (const colorScheme of ["light", "dark"] as const) {
     await page.emulateMedia({ colorScheme });
     await page.goto("/?mock=ready");
@@ -1784,7 +1808,7 @@ test("installed agents stay ordered and protection state is consistent across pa
   await expect(page.locator(".overview-module-title").filter({ has: page.getByRole("heading", { name: "Local API", exact: true }) })).toContainText("Unavailable");
 });
 
-test("editing a live profile reconnects, while a failed candidate stays unsaved and unprotected", async ({ page }) => {
+test("saving a profile preserves reconnect intent and allows an offline endpoint", async ({ page }) => {
   await page.goto("/?mock=ready");
   await page.getByRole("button", { name: "Profiles: RedPill" }).click();
   const profiles = page.getByRole("dialog", { name: "Profiles" });
@@ -1793,7 +1817,7 @@ test("editing a live profile reconnects, while a failed candidate stays unsaved 
   await expect(editor.getByLabel("RedPill API key")).toBeEnabled();
   await expect(editor.getByText(/Saving briefly stops protection/)).toHaveCount(0);
   page.once("dialog", (dialog) => dialog.accept());
-  await editor.getByRole("button", { name: "Verify and Save" }).click();
+  await editor.getByRole("button", { name: "Save" }).click();
   await expect(profiles).toBeVisible();
   await profiles.getByRole("button", { name: "New Profile" }).click();
   const candidate = page.getByRole("dialog", { name: "New profile" });
@@ -1801,12 +1825,11 @@ test("editing a live profile reconnects, while a failed candidate stays unsaved 
   await candidate.getByRole("button", { name: "Custom", exact: true }).click();
   await candidate.getByLabel("Service endpoint").fill("https://unreachable.invalid");
   await candidate.getByLabel("API key", { exact: true }).fill("sk-test-candidate");
-  await candidate.getByRole("button", { name: "Verify and Save" }).click();
-  await expect(candidate.getByRole("alert")).toContainText("did not answer");
-  await candidate.getByRole("button", { name: "Cancel" }).click();
-  await expect(profiles.locator(".profile-select")).toHaveCount(1);
+  await candidate.getByRole("button", { name: "Save" }).click();
+  await expect(candidate).toHaveCount(0);
+  await expect(profiles.locator(".profile-select")).toHaveCount(2);
   await profiles.getByRole("button", { name: "Done", exact: true }).click();
-  await expect(page.getByLabel("Protection status").getByText("Not protected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Profiles: Custom" })).toBeVisible();
 });
 
 test("a native proof error remains dismissible without a window close button", async ({ page }) => {
@@ -1874,12 +1897,10 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
   await expect(redpill).toHaveAttribute("aria-pressed", "true");
   await profiles.getByRole("button", { name: "Edit RedPill" }).click();
   let editor = page.getByRole("dialog", { name: "Edit profile" });
-  await expect(editor.getByRole("button", { name: "RedPill" })).toHaveAttribute("aria-pressed", "true");
-  await expect(editor.getByLabel("Service endpoint")).toHaveValue("https://tee.redpill.ai");
-  await expect(editor.getByLabel("Service endpoint")).toHaveAttribute("readonly", "");
-  await expect(editor.getByLabel("Service endpoint")).toBeEnabled();
+  await expect(editor.getByRole("button", { name: "RedPill", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(editor.getByLabel("Service endpoint")).toHaveCount(0);
 
-  await editor.getByRole("button", { name: "Phala" }).click();
+  await editor.getByRole("button", { name: "Phala", exact: true }).click();
   await expect(editor.getByText("Provider", { exact: true })).toBeVisible();
   await expect(editor.getByLabel("Profile name")).toHaveValue("Phala");
   const fieldSpacing = await editor.evaluate((element) => {
@@ -1895,12 +1916,13 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
   });
   expect(fieldSpacing.provider).not.toBeNull();
   expect(fieldSpacing.provider).toBe(fieldSpacing.name);
-  await expect(editor.getByLabel("Service endpoint")).toHaveValue("https://inference.phala.com");
+  await expect(editor.getByLabel("Service endpoint")).toHaveCount(0);
+  await editor.getByRole("tab", { name: "API key", exact: true }).click();
   await expect(editor.getByLabel("Phala AI API key")).toBeVisible();
-  await expect(editor.getByText("A key is required for a new provider or endpoint.")).toBeVisible();
-  await expect(editor.getByRole("button", { name: "Verify and Save" })).toBeDisabled();
+  await expect(editor.getByText("Stored securely on this device.")).toBeVisible();
+  await expect(editor.getByRole("button", { name: "Save" })).toBeDisabled();
 
-  await editor.getByRole("button", { name: "Custom" }).click();
+  await editor.getByRole("button", { name: "Custom", exact: true }).click();
   await expect(editor.getByLabel("Profile name")).toHaveValue("Custom");
   await expect(editor.getByLabel("Service endpoint")).toBeEnabled();
   await editor.getByLabel("Service endpoint").fill("https://private.example.com");
@@ -1917,13 +1939,13 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
   await editor.getByRole("button", { name: "RedPill", exact: true }).click();
   await expect(editor.getByLabel("Profile name")).toHaveValue("Research account");
   await editor.getByRole("button", { name: "Phala", exact: true }).click();
-  await expect(editor.getByRole("button", { name: "Phala" })).toHaveAttribute("aria-pressed", "true");
-  await expect(editor.getByRole("button", { name: "Verify and Save" })).toBeVisible();
+  await expect(editor.getByRole("button", { name: "Phala", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(editor.getByRole("button", { name: "Sign in with Phala" })).toBeVisible();
   await editor.getByLabel("Profile name").fill("Private Lab");
-  await editor.getByRole("button", { name: "Custom" }).click();
+  await editor.getByRole("button", { name: "Custom", exact: true }).click();
   await editor.getByLabel("Service endpoint").fill("https://private.example.com");
   await editor.getByLabel("API key").fill("sk-profile-test");
-  await editor.getByRole("button", { name: "Verify and Save" }).click();
+  await editor.getByRole("button", { name: "Save" }).click();
   await expect(editor).toHaveCount(0);
   await expect(profiles).toBeVisible();
   const reopenedProfiles = page.getByRole("dialog", { name: "Profiles" });
@@ -2033,4 +2055,281 @@ test("responsive, zoomed, dark, high-contrast, and reduced-motion layouts stay b
   expect(audit.tooSmall).toEqual([]);
   expect(audit.clippedControls).toEqual([]);
   expect(audit.nestedInteractive).toBe(0);
+});
+
+test("Phala completes automatically while RedPill confirms its workspace with Save", async ({ page }) => {
+  for (const provider of ["Phala", "RedPill"]) {
+    await page.goto("/?mock=no-profiles");
+    await page.getByRole("switch", { name: "Start protection" }).click();
+    const editor = page.getByRole("dialog", { name: "New profile" });
+    await editor.getByRole("button", { name: provider, exact: true }).click();
+    const signIn = editor.locator(".sheet-scroll").getByRole("button", { name: `Sign in with ${provider}`, exact: true });
+    await expect(signIn.locator("img")).toHaveCount(1);
+    await expect(editor.locator(".sheet-footer").getByRole("button", { name: /Sign in|Save/ })).toHaveCount(0);
+    await signIn.click();
+    if (provider === "RedPill") {
+      await expect(editor.getByRole("combobox", { name: "Workspace" })).toContainText("Default");
+      await editor.getByRole("button", { name: "Save", exact: true }).click();
+    }
+    await expect(editor).toHaveCount(0);
+    await expect(page.getByRole("switch", { name: "Stop protection" })).toBeVisible();
+    await expect(page.getByRole("button", { name: `Profiles: ${provider}` })).toBeVisible();
+    if (provider === "Phala") {
+      await page.evaluate(() => window.addEventListener("mock:top-up", (event) => {
+        if (event instanceof CustomEvent) document.documentElement.dataset.billingScope = event.detail.organizationId;
+      }));
+      await page.getByRole("button", { name: "Current balance: $12.50", exact: true }).click();
+      await expect(page.locator("html")).toHaveAttribute("data-billing-scope", "phala-research");
+    }
+    await page.getByRole("switch", { name: "Stop protection" }).click();
+    await expect(page.getByRole("switch", { name: "Start protection" })).toBeVisible();
+    await page.getByRole("button", { name: `Profiles: ${provider}` }).click();
+    const profiles = page.getByRole("dialog", { name: "Profiles", exact: true });
+    await expect(profiles.getByText(/Verification required|cannot start protection/)).toHaveCount(0);
+    await expect(profiles.getByText(/Ready/)).toBeVisible();
+    await profiles.getByRole("button", { name: "Done", exact: true }).click();
+    await page.getByRole("switch", { name: "Start protection" }).click();
+    await expect(page.getByRole("switch", { name: "Stop protection" })).toBeVisible();
+    await expect(page.getByRole("dialog", { name: "Edit profile" })).toHaveCount(0);
+  }
+});
+
+test("RedPill workspace and organization menu preserve billing scope", async ({ page }) => {
+  await page.route("https://img.clerk.com/**", (route) => route.fulfill({ contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><circle cx="12" cy="12" r="12" fill="green"/></svg>' }));
+  await page.goto("/?mock=oauth-workspaces");
+  await page.evaluate(() => window.addEventListener("mock:top-up", (event) => {
+    if (event instanceof CustomEvent) {
+      document.documentElement.dataset.topUpProvider = event.detail.provider;
+      document.documentElement.dataset.topUpOrganization = event.detail.organizationId ?? "";
+    }
+  }));
+  await page.getByRole("button", { name: "Set up profile" }).click();
+  const editor = page.getByRole("dialog", { name: "New profile" });
+  await editor.getByRole("button", { name: "RedPill", exact: true }).click();
+  await editor.getByRole("button", { name: "Sign in with RedPill" }).click();
+  const accountSummary = editor.getByLabel("Account details");
+  await expect(accountSummary.getByText("Personal organization", { exact: true })).toBeVisible();
+  await expect(accountSummary.getByText("Signed in as Alice Example", { exact: true })).toHaveCount(0);
+  await expect(accountSummary.getByRole("img", { name: "Personal organization avatar" })).toBeVisible();
+  await expect(accountSummary.getByRole("img", { name: "Alice Example avatar" })).toHaveCount(0);
+  await expect(accountSummary.getByText("$12.50", { exact: true })).toBeVisible();
+  await expect(accountSummary.getByRole("textbox")).toHaveCount(0);
+  await accountSummary.getByRole("button", { name: "Account actions" }).click();
+  await expect(page.getByRole("menuitem", { name: "Switch" })).toBeVisible();
+  await expect(page.getByRole("menuitem")).toHaveCount(2);
+  await expect(page.getByRole("menuitem", { name: "Refresh balance" })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("menu")).toHaveCount(0);
+  const save = editor.getByRole("button", { name: "Save" });
+  await expect(save).toBeDisabled();
+  await editor.getByRole("combobox", { name: "Workspace" }).click();
+  const research = page.getByRole("option", { name: "Research", exact: true });
+  await expect(research).toBeInViewport();
+  await expect.poll(() => research.evaluate((option) => {
+    const dialog = option.closest("dialog");
+    if (!dialog) return false;
+    const item = option.getBoundingClientRect();
+    const frame = dialog.getBoundingClientRect();
+    return dialog.scrollLeft === 0 && item.left >= frame.left && item.right <= frame.right && item.bottom <= frame.bottom;
+  })).toBe(true);
+  await research.click();
+  await expect(save).toBeEnabled();
+  await expect(editor.getByText("$12.50", { exact: true })).toBeInViewport();
+  await expect(editor.getByRole("button", { name: "Top up", exact: true })).toHaveCount(0);
+  await save.click();
+  const mainCard = page.getByRole("region", { name: "Protection status" });
+  const balanceButton = mainCard.getByRole("button", { name: "Current balance: $12.50", exact: true });
+  await expect(balanceButton).toBeVisible();
+  await page.evaluate(() => { delete document.documentElement.dataset.topUpProvider; });
+  await balanceButton.click();
+  await expect(page.locator("html")).toHaveAttribute("data-top-up-provider", "redpill");
+  await expect(page.locator("html")).toHaveAttribute("data-top-up-organization", "research-team");
+  await expect(mainCard.getByRole("button", { name: "Top up", exact: true })).toHaveCount(0);
+  const profileButton = mainCard.getByRole("button", { name: "Profiles: RedPill" });
+  const profileBox = await profileButton.boundingBox();
+  const balanceBox = await balanceButton.boundingBox();
+  expect(profileBox?.y).toBe(balanceBox?.y);
+  expect(balanceBox && profileBox && balanceBox.x > profileBox.x).toBe(true);
+  await page.getByRole("button", { name: "Profiles: RedPill" }).click();
+  await page.getByRole("button", { name: "Edit RedPill" }).click();
+  const saved = page.getByRole("dialog", { name: "Edit profile" });
+  await expect(saved.getByRole("combobox", { name: "Workspace" })).toContainText("Research");
+  await saved.getByRole("tab", { name: "API key", exact: true }).click();
+  await expect(saved.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+  await saved.getByLabel("RedPill API key").fill("sk-manual-replacement");
+  await expect(saved.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
+  await saved.getByRole("tab", { name: "Account", exact: true }).click();
+  await expect(saved.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
+  await expect(saved.getByText("$12.50", { exact: true })).toBeInViewport();
+  await expect(saved.getByRole("button", { name: "Change workspace" })).toHaveCount(0);
+  await choose(page, saved.getByRole("combobox", { name: "Workspace" }), "Default");
+  await saved.getByRole("button", { name: "Save", exact: true }).click();
+  await saved.getByRole("button", { name: "Cancel Sign-in", exact: true }).click();
+  await saved.getByRole("button", { name: "Phala", exact: true }).click();
+  await expect(saved.getByText("Personal organization", { exact: true })).toHaveCount(0);
+  await expect(saved.getByRole("button", { name: "Sign in with Phala" })).toBeVisible();
+  await saved.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.getByRole("button", { name: "Edit RedPill" }).click();
+  await expect(saved.getByRole("combobox", { name: "Workspace" })).toContainText("Research");
+  await choose(page, saved.getByRole("combobox", { name: "Workspace" }), "Default");
+  await saved.getByRole("button", { name: "Save" }).click();
+  await page.getByRole("button", { name: "Edit RedPill" }).click();
+  await expect(saved.getByRole("combobox", { name: "Workspace" })).toContainText("Default");
+  await saved.getByRole("button", { name: "Account actions" }).click();
+  await page.getByRole("menuitem", { name: "Switch", exact: true }).click();
+  await saved.getByRole("button", { name: "Cancel Sign-in", exact: true }).click();
+  await expect(saved.getByRole("combobox", { name: "Workspace" })).toContainText("Default");
+});
+
+test("billing permissions hide billing actions but allow scoped organization management", async ({ page }) => {
+  await page.addInitScript(() => window.addEventListener("mock:manage-organization", (event) => {
+    if (event instanceof CustomEvent) document.documentElement.dataset.managedOrganization = event.detail.organizationId;
+  }));
+  await page.clock.install();
+  for (const mode of ["oauth-balance-denied", "oauth-balance-error", "oauth-balance-readonly"]) {
+    await page.goto(`/?mock=${mode}`);
+    await page.getByRole("button", { name: "Set up profile" }).click();
+    const fresh = page.getByRole("dialog", { name: "New profile" });
+    await fresh.getByRole("button", { name: "RedPill", exact: true }).click();
+    await fresh.getByRole("button", { name: "Sign in with RedPill" }).click();
+    await page.clock.fastForward(3_000);
+    await expect(fresh.getByText("Personal organization", { exact: true })).toBeVisible();
+    await fresh.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(fresh).toHaveCount(0);
+    await page.getByRole("button", { name: "Profiles: RedPill" }).click();
+    await page.getByRole("button", { name: "Edit RedPill" }).click();
+    const editor = page.getByRole("dialog", { name: "Edit profile" });
+    await expect(editor.getByText("Personal organization", { exact: true })).toBeVisible();
+    await expect(editor.getByRole("button", { name: "Top up", exact: true })).toHaveCount(0);
+    await expect(editor.getByText(/\$0\.00/)).toHaveCount(0);
+    await expect(editor.getByText(/Unavailable|operation_failed/)).toHaveCount(0);
+    await expect(page.getByRole("region", { name: "Protection status" }).getByText("Unavailable", { exact: true })).toHaveCount(0);
+    await editor.getByRole("button", { name: "Account actions" }).click();
+    await expect(page.getByRole("menuitem", { name: "Switch", exact: true })).toBeVisible();
+    await page.getByRole("menuitem", { name: "Manage", exact: true }).click();
+    await expect(page.locator("html")).toHaveAttribute("data-managed-organization", "research-team");
+    if (mode !== "oauth-balance-readonly") {
+      await expect(editor.getByLabel("Balance in USD")).toHaveCount(0);
+      await editor.getByRole("button", { name: "Cancel", exact: true }).click();
+      await page.getByRole("button", { name: "Done", exact: true }).click();
+      await expect(page.getByRole("button", { name: /^Current balance:/ })).toHaveCount(0);
+      await page.clock.fastForward(31_000);
+      await page.evaluate(() => {
+        window.dispatchEvent(new Event("mock:billing-read-granted"));
+        window.dispatchEvent(new Event("focus"));
+      });
+      await expect(page.getByRole("button", { name: "Current balance: $12.50", exact: true })).toBeVisible();
+      await page.getByRole("button", { name: "Profiles: RedPill" }).click();
+      await page.getByRole("button", { name: "Edit RedPill" }).click();
+      await expect(editor.getByLabel("Balance in USD")).toHaveText("$12.50");
+      await expect(editor.getByRole("button", { name: "Top up", exact: true })).toHaveCount(0);
+    } else {
+      await expect(editor.getByLabel("Balance in USD")).toHaveText("$12.50");
+    }
+  }
+});
+
+
+test("a delayed balance cannot appear after changing provider", async ({ page }) => {
+  await page.goto("/?mock=oauth-balance-delayed");
+  await page.getByRole("button", { name: "Set up profile" }).click();
+  await page.getByRole("button", { name: "Sign in with Phala" }).click();
+  await expect(page.getByRole("dialog", { name: "New profile" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Profiles: Phala" }).click();
+  await page.getByRole("button", { name: "Edit Phala" }).click();
+  const editor = page.getByRole("dialog", { name: "Edit profile" });
+  await expect(editor.getByRole("button", { name: "Account actions" })).toBeVisible();
+  await expect(editor.getByLabel("Account details")).toBeVisible();
+  await editor.getByRole("button", { name: "RedPill", exact: true }).click();
+  await page.evaluate(() => window.dispatchEvent(new Event("mock:release-balance")));
+  await expect(editor.getByRole("button", { name: "Sign in with RedPill" })).toBeVisible();
+  await expect(editor.getByLabel("Account details")).toHaveCount(0);
+  await expect(editor.getByText("$12.50", { exact: true })).toHaveCount(0);
+});
+
+
+test("cancelled and declined authorizations leave the form reusable", async ({ page }) => {
+  await page.goto("/?mock=oauth-denied");
+  await page.getByRole("button", { name: "Set up profile" }).click();
+  const editor = page.getByRole("dialog", { name: "New profile" });
+  const signIn = editor.getByRole("button", { name: "Sign in with Phala" });
+  await signIn.click();
+  await editor.getByRole("button", { name: "Cancel Sign-in" }).click();
+  await expect(signIn).toBeEnabled();
+  await expect(editor.getByRole("button", { name: "Save", exact: true })).toHaveCount(0);
+  await signIn.click();
+  await expect(editor.getByText("Authorization was declined", { exact: true })).toBeVisible();
+  await expect(signIn).toBeEnabled();
+  await editor.getByRole("tab", { name: "API key", exact: true }).click();
+  await expect(editor.getByLabel("Phala AI API key")).toBeEnabled();
+  await editor.getByRole("tab", { name: "Account", exact: true }).click();
+  await expect(signIn).toBeEnabled();
+  await editor.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.getByRole("button", { name: "Set up profile" }).click();
+  await expect(signIn).toBeEnabled();
+});
+
+test("account save failure retries the staged grant and saved accounts can be deleted", async ({ page }) => {
+  await page.goto("/?mock=oauth-save-retry");
+  await page.getByRole("button", { name: "Set up profile" }).click();
+  const editor = page.getByRole("dialog", { name: "New profile" });
+  await editor.getByRole("button", { name: "RedPill", exact: true }).click();
+  await editor.getByRole("button", { name: "Sign in with RedPill" }).click();
+  const save = editor.getByRole("button", { name: "Save", exact: true });
+  await expect(save).toBeEnabled();
+  await save.click();
+  await expect(editor.getByText("Could not store account credential", { exact: true })).toBeVisible();
+  await expect(editor.getByLabel("Account details").getByText("Personal organization", { exact: true })).toBeVisible();
+  await save.click();
+  await expect(editor).toHaveCount(0);
+  await page.getByRole("button", { name: "Profiles: RedPill" }).click();
+  await page.getByRole("button", { name: "Edit RedPill" }).click();
+  const saved = page.getByRole("dialog", { name: "Edit profile" });
+  await saved.getByLabel("Profile name").fill("Work");
+  await saved.getByRole("button", { name: "Save", exact: true }).click();
+  await page.getByRole("button", { name: "Edit Work" }).click();
+  page.once("dialog", (dialog) => dialog.accept());
+  await saved.getByRole("button", { name: "Delete Profile" }).click();
+  await expect(saved).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Edit Work" })).toHaveCount(0);
+});
+
+
+test("manual callback fallback keeps RedPill workspace confirmation", async ({ page }) => {
+  await page.goto("/?mock=oauth-manual-callback");
+  await page.getByRole("button", { name: "Set up profile" }).click();
+  const editor = page.getByRole("dialog", { name: "New profile" });
+  await editor.getByRole("button", { name: "RedPill", exact: true }).click();
+  await editor.getByRole("button", { name: "Sign in with RedPill" }).click();
+  await editor.getByText("Paste callback link", { exact: true }).click();
+  await editor.getByLabel("Callback URL").fill("https://wrong.example/callback?code=secret");
+  await editor.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(editor.getByText("Invalid callback link", { exact: true })).toBeVisible();
+  await expect(editor.getByLabel("Callback URL")).toHaveValue("");
+  await editor.getByLabel("Callback URL").fill("http://127.0.0.1:4181/oauth/callback?state=mock&code=secret");
+  await editor.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(editor.getByRole("combobox", { name: "Workspace" })).toContainText("Default");
+  await editor.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Profiles: RedPill" })).toBeVisible();
+});
+
+
+test("saved organization refreshes its Clerk name and avatar independently of balance", async ({ page }) => {
+  await page.route("https://img.clerk.com/**", (route) => route.fulfill({ contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><circle cx="12" cy="12" r="12" fill="green"/></svg>' }));
+  await page.goto("/?mock=oauth-profile-updated");
+  await page.getByRole("button", { name: "Set up profile" }).click();
+  const fresh = page.getByRole("dialog", { name: "New profile" });
+  await fresh.getByRole("button", { name: "RedPill", exact: true }).click();
+  await fresh.getByRole("button", { name: "Sign in with RedPill" }).click();
+  await expect(fresh.getByText("Personal organization", { exact: true })).toBeVisible();
+  await fresh.getByRole("button", { name: "Save", exact: true }).click();
+  await page.getByRole("button", { name: "Profiles: RedPill" }).click();
+  await page.getByRole("button", { name: "Edit RedPill" }).click();
+  const editor = page.getByRole("dialog", { name: "Edit profile" });
+  await expect(editor.getByText("Signed in as Alicia Updated", { exact: true })).toHaveCount(0);
+  await expect(editor.getByText("Updated organization", { exact: true })).toBeVisible();
+  await expect(editor.getByLabel("Balance in USD")).toHaveText("$12.50");
+  await expect(editor.getByRole("img", { name: "Alicia Updated avatar" })).toHaveCount(0);
+  await expect(editor.getByRole("img", { name: "Updated organization avatar" })).toHaveAttribute("src", "https://img.clerk.com/updated-org");
 });
