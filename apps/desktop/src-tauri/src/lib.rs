@@ -20,6 +20,7 @@ use desktop_runtime::{
 };
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_clipboard_manager::ClipboardExt;
+use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_shell::ShellExt;
 
 pub(crate) async fn run_blocking<T: Send + 'static>(
@@ -779,14 +780,42 @@ async fn stop_all_and_quit(app: AppHandle, client: State<'_, Arc<Client>>) -> Re
     Ok(())
 }
 
+fn configure_account_return(app: &tauri::App) {
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    if let Err(error) = app.deep_link().register_all() {
+        eprintln!("Cannot register app return link: {error}");
+    }
+    let handle = app.handle().clone();
+    app.deep_link().on_open_url(move |event| {
+        let expected = desktop_runtime::account_login::account_return_url();
+        if !event.urls().iter().any(|url| url.as_str() == expected) {
+            return;
+        }
+        tray::show_window(&handle);
+        let app = handle.clone();
+        if let Err(error) = handle.run_on_main_thread(move || {
+            if let Err(error) = native_dialog::focus_account_editor(&app) {
+                eprintln!("Cannot focus account editor: {error}");
+            }
+        }) {
+            eprintln!("Cannot return to account editor: {error}");
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let show_on_launch =
         !std::env::args_os().any(|argument| argument == std::ffi::OsStr::new(AUTOSTART_ARG));
 
     let app =
-        tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            tray::show_window(app);
+        tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if !args
+                .iter()
+                .any(|arg| arg == &desktop_runtime::account_login::account_return_url())
+            {
+                tray::show_window(app);
+            }
         }));
     #[cfg(target_os = "macos")]
     let app = app.plugin(tauri_plugin_autostart::init(
@@ -794,6 +823,7 @@ pub fn run() {
         Some(vec![AUTOSTART_ARG]),
     ));
     let app = app
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
@@ -896,6 +926,8 @@ pub fn run() {
                 register_cli_on_startup(&registration_app).await;
             });
             notifications::initialize(app.handle());
+
+            configure_account_return(app);
 
             // The renderer invokes backend commands on mount. Create it only
             // after Client and native services are registered in managed state.

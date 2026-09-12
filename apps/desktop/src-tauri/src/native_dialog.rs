@@ -337,6 +337,15 @@ pub fn open_profiles(app: &AppHandle, repair: bool) -> Result<(), String> {
     open(app, "profiles", repair, None, None)
 }
 
+pub fn focus_account_editor(app: &AppHandle) -> Result<(), String> {
+    if let Some(window) = active_window(app, PROFILE_EDITOR_LABEL) {
+        window.unminimize().map_err(window_error)?;
+        window.show().map_err(window_error)?;
+        window.set_focus().map_err(window_error)?;
+    }
+    Ok(())
+}
+
 fn focus_if_visible(window: &tauri::WebviewWindow) -> Result<(), String> {
     if window.is_visible().map_err(window_error)? {
         window.set_focus().map_err(window_error)?;

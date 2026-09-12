@@ -266,8 +266,7 @@ fn sync_profiles(app: &AppHandle, state: &GatewayState, menu: &TrayMenu) -> taur
             .set_checked(profile.id == state.active_profile_id);
         let _ = entry.item.set_enabled(
             state.status != "verifying"
-                && profile.verified_at.is_some()
-                && profile.credential_saved.unwrap_or(true),
+                && desktop_runtime::service_config::profile_has_credential(profile),
         );
     }
     Ok(())
@@ -500,8 +499,7 @@ fn active_profile_ready(state: &GatewayState) -> bool {
     state.api_key_saved
         && state.profiles.iter().any(|profile| {
             profile.id == state.active_profile_id
-                && profile.verified_at.is_some()
-                && profile.credential_saved.unwrap_or(true)
+                && desktop_runtime::service_config::profile_has_credential(profile)
         })
 }
 
@@ -596,7 +594,7 @@ mod tests {
     }
 
     #[test]
-    fn stopped_state_requires_a_verified_active_profile() {
+    fn stopped_state_requires_a_saved_active_credential() {
         let mut ready = state("stopped", true);
         ready.active_profile_id = "profile-1".to_string();
         ready.profiles.push(ConfidentialProfile {
@@ -607,7 +605,7 @@ mod tests {
             remote_url: "https://private.example.com".to_string(),
             auth: ProfileAuth::ApiKey,
             credential_saved: Some(true),
-            verified_at: Some(1),
+            verified_at: None,
         });
         assert_eq!(menu_state(&ready), "Not protected");
         assert_eq!(protection_action(&ready), "Start protection");
