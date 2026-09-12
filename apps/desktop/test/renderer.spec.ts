@@ -2053,6 +2053,16 @@ test("Phala completes automatically while RedPill confirms its workspace with Sa
     await expect(editor).toHaveCount(0);
     await expect(page.getByRole("switch", { name: "Stop protection" })).toBeVisible();
     await expect(page.getByRole("button", { name: `Profiles: ${provider}` })).toBeVisible();
+    await page.getByRole("switch", { name: "Stop protection" }).click();
+    await expect(page.getByRole("switch", { name: "Start protection" })).toBeVisible();
+    await page.getByRole("button", { name: `Profiles: ${provider}` }).click();
+    const profiles = page.getByRole("dialog", { name: "Profiles", exact: true });
+    await expect(profiles.getByText(/Verification required|cannot start protection/)).toHaveCount(0);
+    await expect(profiles.getByText(/Ready/)).toBeVisible();
+    await profiles.getByRole("button", { name: "Done", exact: true }).click();
+    await page.getByRole("switch", { name: "Start protection" }).click();
+    await expect(page.getByRole("switch", { name: "Stop protection" })).toBeVisible();
+    await expect(page.getByRole("dialog", { name: "Edit profile" })).toHaveCount(0);
   }
 });
 
