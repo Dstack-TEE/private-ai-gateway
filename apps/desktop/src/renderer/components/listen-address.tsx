@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import ipaddr from "ipaddr.js";
 import type { DesktopApi } from "../../shared/contracts";
 import { Combobox, ComboboxContent, ComboboxEmpty, ComboboxInput, ComboboxItem, ComboboxList } from "./ui/combobox";
@@ -15,16 +16,12 @@ export function ListenAddress({ api, value, disabled, onChange }: {
   disabled: boolean;
   onChange(value: string): void;
 }) {
-  const [addresses, setAddresses] = useState<Awaited<ReturnType<DesktopApi["listListenAddresses"]>>>([]);
-  const [error, setError] = useState<string>();
+  const { data: addresses = [], error: addressError } = useQuery({
+    queryKey: ["listen-addresses"], queryFn: () => api.listListenAddresses(), staleTime: 0,
+  });
+  const error = addressError ? "Network interfaces unavailable. Enter an IP address manually." : undefined;
   const [container, setContainer] = useState<HTMLDialogElement | null>(null);
   const input = useRef<HTMLInputElement>(null);
-  useEffect(() => {
-    let current = true;
-    void api.listListenAddresses().then((items) => { if (current) setAddresses(items); })
-      .catch(() => { if (current) setError("Network interfaces unavailable. Enter an IP address manually."); });
-    return () => { current = false; };
-  }, [api]);
   const options = [...new Set(["127.0.0.1", "::1", ...addresses.map((item) => item.address), "0.0.0.0", "::"])];
   return <>
     <Combobox items={options} inputValue={value} onInputValueChange={onChange} value={value}

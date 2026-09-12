@@ -842,7 +842,9 @@ else runs: revoking the capability itself is durable, so no later failure can
 leave an agent authorized, while the record stays visible for an idempotent
 retry. A failed sync fails the disconnect closed. Disconnect restores only defaults
 and global routing/authentication fields; app-created provider definitions remain
-with their ownership journal and an explicitly disconnected state. Tokens and
+with their ownership journal and an explicitly disconnected state. File/command
+credential references and automatic discovery are removed or disabled in inactive
+providers, so deleted token files do not break the agent configuration loader. Tokens and
 consumed parked secrets are removed. Reconciliation never reconnects an explicitly
 disconnected agent. Reconnecting updates only definitions still owned by the app,
 rotates its local token and records the currently selected native defaults. Existing
@@ -1012,8 +1014,21 @@ OpenCode's official `~/.opencode/bin` installation is scanned even when the desk
 app's PATH does not include the terminal's PATH. The visible Agents page rescans
 every 15 seconds and on window focus.
 
-Overview balance and Usage retain bounded in-memory view snapshots while refreshing.
-Balances are keyed by provider, login/profile and credential reference. Usage pages
-are keyed by filters, cursor, page size and usage revision; changed queries never
-show another query's data. Permission denial clears a balance snapshot. Network
-errors retain the last successful balance; the cache stores no credentials.
+Frontend asynchronous reads use TanStack Query, not a custom snapshot cache.
+Queries retain same-key data while revalidating on mount, focus, reconnect or
+runtime change notifications. Account balances include provider, login/profile
+and credential reference in their key; Usage keys include filters and pagination.
+A changed query does not display another query's data. Permission denial clears
+balance data, while transient errors retain the last successful result.
+
+Tauri commands remain the transport and Rust remains the state authority. Runtime
+events cancel older reads and update the gateway query cache. Local IPC queries and
+mutations use networkMode=always so offline desktop settings remain operable;
+mutations are not automatically retried. Appearance/registration mutations update
+or invalidate their query data. Install progress, form drafts and operation queues
+remain local UI state. Credentials are not stored in the general query cache.
+
+The implementation follows TanStack Query's query keys, invalidation and focusManager
+APIs and Tauri's commands/events/state-management boundaries. A QueryClient belongs
+to each WebView; cross-window correctness comes from runtime state and its events,
+not from pretending JavaScript caches are shared across windows.

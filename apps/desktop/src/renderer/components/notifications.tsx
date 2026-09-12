@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type PropsWithChildren } from "react";
+import { useQuery } from "@tanstack/react-query";
 import type { DesktopApi, NotificationConfiguration, NotificationPreferences } from "../../shared/contracts";
 import { SettingsList, SettingsToggle } from "./settings";
 import { Sheet, SheetActions } from "./sheet";
@@ -6,10 +7,12 @@ import { Alert, AlertDescription } from "./ui/alert";
 import { Button } from "./ui/button";
 
 function useNotificationSettings(api: DesktopApi) {
-  const [data, setData] = useState<NotificationConfiguration>();
-  const [error, setError] = useState<string>();
+  const { data, error: readError, refetch } = useQuery({
+    queryKey: ["notifications"], queryFn: () => api.getNotificationSettings(), staleTime: 0,
+  });
+  const [mutationError, setError] = useState<string>();
+  const error = mutationError ?? (readError ? "Could not read notification settings." : undefined);
   const [busy, setBusy] = useState(false);
-  const generation = useRef(0);
   const startupRequested = useRef(false);
   useEffect(() => {
     if (!data || new URLSearchParams(window.location.search).has("native-dialog") || startupRequested.current) return;
@@ -20,19 +23,13 @@ function useNotificationSettings(api: DesktopApi) {
     return () => { active = false; };
   }, [api, data]);
   const refresh = useCallback(async () => {
-    const run = ++generation.current;
-    try { const value = await api.getNotificationSettings(); if (run === generation.current) { setData(value); setError(undefined); } }
-    catch { if (run === generation.current) setError("Could not read notification settings."); }
-  }, [api]);
-  useEffect(() => {
-    void refresh();
-    const focus = () => { void refresh(); };
-    window.addEventListener("focus", focus);
-    return () => { generation.current++; window.removeEventListener("focus", focus); };
-  }, [refresh]);
+    setError(undefined);
+    try { await refetch({ throwOnError: true }); }
+    catch { setError("Could not read notification settings."); }
+  }, [refetch]);
   const change = async (key: keyof NotificationPreferences, enabled: boolean) => {
     if (!data || busy) return;
-    setBusy(true); setError(undefined); generation.current++;
+    setBusy(true); setError(undefined);
     try {
       await api.saveNotificationSettings({ ...data.preferences, [key]: enabled });
       let permissionFailed = false;

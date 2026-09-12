@@ -1564,7 +1564,7 @@ test("settings keep the installed version visible without manual update controls
   await nav(page, "Settings").click();
   const status = page.getByRole("region", { name: "About", exact: true }).getByRole("status");
   await expect(status).toContainText("Retrying automatically");
-  await page.evaluate(() => window.dispatchEvent(new Event("online")));
+  await page.evaluate(() => { window.dispatchEvent(new Event("offline")); window.dispatchEvent(new Event("online")); });
   await expect(status).toHaveText("You're up to date");
 });
 

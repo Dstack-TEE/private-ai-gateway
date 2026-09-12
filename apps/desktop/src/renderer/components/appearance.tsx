@@ -1,4 +1,5 @@
-import { createContext, useContext, useEffect, useLayoutEffect, useState, type PropsWithChildren } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, type PropsWithChildren } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { initialAppearance } from "../desktop-api";
 import { Hint } from "./hint";
 import type { Appearance, DesktopApi } from "../../shared/contracts";
@@ -10,20 +11,20 @@ import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group";
 const AppearanceContext = createContext({ value: "system" as Appearance, ready: false, busy: false, error: "", change: (_value: Appearance) => {} });
 
 export function AppearanceProvider({ api, children }: PropsWithChildren<{ api: DesktopApi }>) {
-  const [value, setValue] = useState<Appearance>(initialAppearance ?? "system");
-  const [ready, setReady] = useState(initialAppearance !== undefined);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  useEffect(() => {
-    let active = true;
-    let received = false;
-    const unsubscribe = api.onAppearanceChange((next) => { received = true; if (active) setValue(next); });
-    void api.getAppearance()
-      .then((next) => { if (active && !received) setValue(next); })
-      .catch(() => { if (active) setError("Could not read appearance settings."); })
-      .finally(() => { if (active) setReady(true); });
-    return () => { active = false; unsubscribe(); };
-  }, [api]);
+  const client = useQueryClient();
+  const { data, error: readError, isPending } = useQuery({
+    queryKey: ["appearance"], queryFn: () => api.getAppearance(), initialData: initialAppearance,
+  });
+  const value = data ?? initialAppearance ?? "system";
+  const ready = initialAppearance !== undefined || !isPending;
+  const mutation = useMutation({
+    mutationFn: (next: Appearance) => api.setAppearance(next),
+    onMutate: () => client.cancelQueries({ queryKey: ["appearance"] }),
+    onSuccess: (_, next) => { client.setQueryData(["appearance"], next); },
+  });
+  const busy = mutation.isPending;
+  const error = mutation.error ? "Could not save appearance settings." : readError ? "Could not read appearance settings." : "";
+  useEffect(() => api.onAppearanceChange((next) => { void client.cancelQueries({ queryKey: ["appearance"] }).then(() => client.setQueryData(["appearance"], next)); }), [api, client]);
   useLayoutEffect(() => {
     document.documentElement.dataset.appearance = value;
     const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -38,11 +39,8 @@ export function AppearanceProvider({ api, children }: PropsWithChildren<{ api: D
   }, [value]);
   const change = async (next: Appearance) => {
     if (busy) return;
-    setBusy(true);
-    setError("");
-    try { await api.setAppearance(next); setValue(next); }
-    catch { setError("Could not save appearance settings."); }
-    finally { setBusy(false); }
+    try { await mutation.mutateAsync(next); }
+    catch { /* The mutation error is rendered by AppearanceControl. */ }
   };
   return <AppearanceContext.Provider value={{ value, ready, busy, error, change: (next) => void change(next) }}>{children}</AppearanceContext.Provider>;
 }
