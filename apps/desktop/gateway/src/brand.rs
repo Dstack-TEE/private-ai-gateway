@@ -4,6 +4,7 @@ pub const ID: &str = "dstack";
 pub const PRODUCT_NAME: &str = "Private AI Proxy";
 pub const SHORT_NAME: &str = "Proxy";
 pub const ORGANIZATION_NAME: &str = "Dstack TEE";
+pub const BYLINE: &str = "by dstack TEE";
 pub const TAGLINE: &str = "The open framework for confidential AI";
 pub const HOMEPAGE_URL: &str = "https://dstack.org";
 pub const SUPPORT_URL: &str =

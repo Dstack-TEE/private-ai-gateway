@@ -107,6 +107,7 @@ const query = new URLSearchParams(window.location.search);
 const UsageDatePicker = lazy(() => import("./components/usage-date-picker").then((module) => ({ default: module.UsageDatePicker })));
 const UsageTable = lazy(() => import("./components/usage-table").then((module) => ({ default: module.UsageTable })));
 const previewMode = query.has("mock");
+const macOS = previewMode || /Macintosh|Mac OS X/.test(navigator.userAgent);
 const desktopApi: DesktopApi = previewMode ? mockApi(query.get("mock")) : liveApi;
 
 const INITIAL_STATE: GatewayState = {
@@ -235,7 +236,8 @@ function ProtectionStatus({ state, label }: { state: GatewayState; label: string
 }
 
 function BrandMark({ className = "", busy = false }: { className?: string; busy?: boolean }): React.JSX.Element {
-  const appearance = useAppearance();
+  const selectedAppearance = useAppearance();
+  const appearance = macOS ? selectedAppearance : "light";
   const classes = ["brand-logo inline-grid place-items-center flex-none [&>img]:block [&>img]:size-full [&>img]:object-contain motion-reduce:animate-none", className, busy ? "is-busy animate-brand-icon-pulse" : ""].filter(Boolean).join(" ");
   return (
     <picture className={classes} aria-hidden="true">
@@ -1146,7 +1148,7 @@ function Sidebar({
     (event.currentTarget.querySelector(`#nav-${next}`) as HTMLElement | null)?.focus();
   };
   return (
-    <aside className={previewMode || /Macintosh|Mac OS X/.test(navigator.userAgent) ? "sidebar min-w-0 pt-3 pr-2 pb-3 pl-2 flex flex-col gap-0.5 bg-sidebar border-r border-r-sidebar-border [&_nav]:grid [&_nav]:gap-0.5 max-[620px]:pl-2 max-[620px]:pr-2 max-[440px]:pl-1.5 max-[440px]:pr-1.5" : "sidebar min-w-0 pt-3 pr-2 pb-3 pl-2 flex flex-col gap-0.5 bg-sidebar border-r border-r-sidebar-border [&_nav]:grid [&_nav]:gap-0.5 max-[620px]:pl-2 max-[620px]:pr-2 max-[440px]:pl-1.5 max-[440px]:pr-1.5 sidebar-standard [&_.sidebar-drag]:hidden"}>
+    <aside className={macOS ? "sidebar min-w-0 pt-3 pr-2 pb-3 pl-2 flex flex-col gap-0.5 bg-sidebar border-r border-r-sidebar-border [&_nav]:grid [&_nav]:gap-0.5 max-[620px]:pl-2 max-[620px]:pr-2 max-[440px]:pl-1.5 max-[440px]:pr-1.5" : "sidebar min-w-0 pt-3 pr-2 pb-3 pl-2 flex flex-col gap-0.5 bg-sidebar border-r border-r-sidebar-border [&_nav]:grid [&_nav]:gap-0.5 max-[620px]:pl-2 max-[620px]:pr-2 max-[440px]:pl-1.5 max-[440px]:pr-1.5 sidebar-standard [&_.sidebar-drag]:hidden"}>
       <div className="sidebar-drag relative flex-[0_0_28px]" data-tauri-drag-region>
         {previewControls && (
           <span className="traffic-lights absolute inset-0 p-1 flex items-center gap-2 [&_>_span]:w-3 [&_>_span]:h-3 [&_>_span]:border-[0.5px] [&_>_span]:border-[color-mix(in_srgb,_var(--color-black)_16%,_transparent)] [&_>_span]:rounded-full [&_>_span]:[box-shadow:inset_0_0_0_0.5px_color-mix(in_srgb,_var(--color-white)_18%,_transparent)] max-[440px]:top-5.5 max-[440px]:left-1/2 max-[440px]:gap-1 max-[440px]:-translate-x-1/2 max-[440px]:[&_>_span]:w-2 max-[440px]:[&_>_span]:h-2" aria-hidden="true">
@@ -1158,7 +1160,7 @@ function Sidebar({
       </div>
       <div className="sidebar-brand min-h-9.5 mt-0 mr-1.5 mb-5 ml-1.5 flex items-center gap-2.25 font-semibold whitespace-nowrap overflow-hidden [&_>_*]:pointer-events-none [&_span]:overflow-hidden [&_span]:text-ellipsis max-[780px]:[&_>_span:last-child]:text-xs max-[620px]:justify-center max-[620px]:p-0 max-[620px]:[&_>_span:last-child]:hidden" data-tauri-drag-region>
         <BrandMark className="brand-mark w-7.5 h-7.5" />
-        <span className="sidebar-brand-copy min-w-0 flex flex-col gap-0.5 leading-4.5 [&_small]:text-xs [&_small]:font-normal [&_small]:text-muted-foreground"><span>{brand.productName}</span><small>by dstack TEE</small></span>
+        <span className="sidebar-brand-copy min-w-0 flex flex-col gap-0.5 leading-4.5 [&_small]:text-xs [&_small]:font-normal [&_small]:text-muted-foreground"><span>{brand.productName}</span><small>{brand.byline}</small></span>
       </div>
       <SidebarProvider keyboardShortcut={false} className="min-h-0 flex-col">
       <nav className="w-full" aria-label="Main navigation" onKeyDown={onKeyDown}>

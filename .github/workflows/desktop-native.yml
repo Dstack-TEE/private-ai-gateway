@@ -114,7 +114,7 @@ jobs:
         working-directory: apps/desktop
         run: |
           npm run prepare:brand
-          status="$(git status --porcelain=v1 --untracked-files=all -- src/renderer/generated gateway/src/brand.rs src-tauri/icons/32x32.png src-tauri/icons/128x128.png src-tauri/icons/128x128@2x.png src-tauri/icons/icon.png src-tauri/icons/icon.icns src-tauri/icons/icon.ico src-tauri/icons/AppIcon.icon src-tauri/icons/windows-linux src-tauri/installer/brand-*.bmp src-tauri/installer/brand-dmg-background.png assets/tray)"
+          status="$(git status --porcelain=v1 --untracked-files=all -- src/renderer/generated gateway/src/brand.rs src-tauri/icons/32x32.png src-tauri/icons/128x128.png src-tauri/icons/128x128@2x.png src-tauri/icons/icon.png src-tauri/icons/icon.icns src-tauri/icons/icon.ico src-tauri/icons/AppIcon.icon src-tauri/installer/brand-*.bmp src-tauri/installer/brand-dmg-background.png assets/tray)"
           if [[ -n "$status" ]]; then
             printf '%s\n' "$status"
             git diff -- src/renderer/generated gateway/src/brand.rs src-tauri/icons src-tauri/installer assets/tray
@@ -613,6 +613,7 @@ jobs:
           kill -0 "$registration_pid"
           cleanup_registration
           hdiutil verify "$dmg"
+          node scripts/verify-dmg-layout.mjs "$dmg"
           base="private-ai-proxy-${DESKTOP_RELEASE_VERSION:-0.1.0}-macos-${{ matrix.cli_arch }}"
           cp "$dmg" "release/$base.dmg"
           if [[ -n "$DESKTOP_RELEASE_VERSION" ]]; then

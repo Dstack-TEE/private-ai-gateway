@@ -23,6 +23,7 @@ pub struct TrayMenu {
     profiles: Submenu<Wry>,
     profile_items: Mutex<Option<Vec<ProfileMenuItem>>>,
     protected_icon: AtomicBool,
+    dark_icon: AtomicBool,
 }
 
 struct ProfileMenuItem {
@@ -89,9 +90,10 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         profiles,
         profile_items: Mutex::new(None),
         protected_icon: AtomicBool::new(false),
+        dark_icon: AtomicBool::new(false),
     });
 
-    let icon = tray_icon(false)?;
+    let icon = tray_icon(false, false)?;
     TrayIconBuilder::with_id("gateway")
         .icon(icon)
         .icon_as_template(cfg!(target_os = "macos"))
@@ -351,17 +353,13 @@ fn sync_inner(app: &AppHandle, state: &GatewayState) {
         }
         let protected = is_protected(state);
         if menu.protected_icon.load(Ordering::Relaxed) != protected {
-            if let Some(tray) = app.tray_by_id("gateway") {
-                if let Ok(icon) = tray_icon(protected) {
-                    // Preserve native macOS tinting when the shared monochrome
-                    // icon changes protection state.
-                    if tray
-                        .set_icon_with_as_template(Some(icon), cfg!(target_os = "macos"))
-                        .is_ok()
-                    {
-                        menu.protected_icon.store(protected, Ordering::Relaxed);
-                    }
-                }
+            if let Err(error) = apply_icon(
+                app,
+                &menu,
+                protected,
+                menu.dark_icon.load(Ordering::Relaxed),
+            ) {
+                eprintln!("Cannot update tray protection state: {error}");
             }
         }
     }
@@ -370,15 +368,49 @@ fn sync_inner(app: &AppHandle, state: &GatewayState) {
     }
 }
 
-fn tray_icon(protected: bool) -> tauri::Result<tauri::image::Image<'static>> {
-    let bytes = include_bytes!("../../assets/tray/trayTemplate@2x.png");
-    let image = tauri::image::Image::from_bytes(bytes)?;
+/// System theme observers call this independently of the application's theme.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn set_dark(app: &AppHandle, dark: bool) -> tauri::Result<()> {
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        if let Some(menu) = handle.try_state::<TrayMenu>() {
+            if menu.dark_icon.load(Ordering::Relaxed) != dark {
+                if let Err(error) = apply_icon(
+                    &handle,
+                    &menu,
+                    menu.protected_icon.load(Ordering::Relaxed),
+                    dark,
+                ) {
+                    eprintln!("Cannot update tray system theme: {error}");
+                }
+            }
+        }
+    })
+}
+
+fn apply_icon(app: &AppHandle, menu: &TrayMenu, protected: bool, dark: bool) -> tauri::Result<()> {
+    if let Some(tray) = app.tray_by_id("gateway") {
+        tray.set_icon_with_as_template(
+            Some(tray_icon(protected, dark)?),
+            cfg!(target_os = "macos"),
+        )?;
+        menu.protected_icon.store(protected, Ordering::Relaxed);
+        menu.dark_icon.store(dark, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+fn tray_icon(protected: bool, dark: bool) -> tauri::Result<tauri::image::Image<'static>> {
+    let image =
+        tauri::image::Image::from_bytes(include_bytes!("../../assets/tray/trayTemplate@2x.png"))?;
     let mut rgba = image.rgba().to_vec();
+    let foreground = if !cfg!(target_os = "macos") && dark {
+        255
+    } else {
+        0
+    };
     for pixel in rgba.as_chunks_mut::<4>().0 {
-        // Only macOS tints template images. Neutral gray keeps the same glyph
-        // visible on common light and dark Windows/Linux panels, without a tile.
-        #[cfg(not(target_os = "macos"))]
-        pixel[..3].fill(128);
+        pixel[..3].fill(foreground);
         if !protected {
             pixel[3] = (u16::from(pixel[3]) * 45 / 100) as u8;
         }

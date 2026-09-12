@@ -3714,6 +3714,7 @@ dependencies = [
  "auto-launch 0.5.0",
  "auto-launch 0.6.0",
  "block2",
+ "futures-util",
  "if-addrs",
  "objc2",
  "objc2-app-kit",
@@ -3740,6 +3741,8 @@ dependencies = [
  "tempfile",
  "tokio",
  "windows 0.61.3",
+ "windows-registry 0.6.1",
+ "zbus",
 ]
 
 [[package]]
