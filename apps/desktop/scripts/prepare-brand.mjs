@@ -132,24 +132,49 @@ const trayTemplateSvg = composeTrayTemplate(traySource, appIconWhiteAsCutout);
 const generatedDir = path.join(appRoot, "src/renderer/generated");
 await mkdir(generatedDir, { recursive: true });
 await writeFile(path.join(generatedDir, "app-icon.svg"), appIconSvg);
-// Standard NSIS artwork dimensions; keep its native wizard and controls.
-for (const [name, width, height, x, y, size] of [
-  ["header", 150, 57, 93, 0, 57],
-  ["sidebar", 164, 314, 12, 45, 140],
-]) {
-  const background = name === "header" ? "#ffffff" : brand.theme.iconBackground;
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="100%" height="100%" fill="${background}"/><svg x="${x}" y="${y}" width="${size}" height="${size}" viewBox="0 0 1024 1024">${appIconSvg.replace(/^.*?<svg[^>]*>/s, "").replace(/<\/svg>$/, "")}</svg></svg>`;
-  const rendered = new Resvg(svg).render();
-  const pixels = rendered.pixels;
+// Use vector wordmarks instead of system fonts so generated artwork is identical
+// on Linux, Windows and macOS. Native installer/Finder labels remain accessible.
+const wordmark = await asset("wordmarkLight");
+const placeSvg = (svg, x, y, width, height) => {
+  const size = svgSize(svg);
+  return `<svg x="${x}" y="${y}" width="${width}" height="${height}" viewBox="0 0 ${size.width} ${size.height}">${inner(svg)}</svg>`;
+};
+const installerDir = path.join(appRoot, "src-tauri/installer");
+await mkdir(installerDir, { recursive: true });
+// Official NSIS bitmap sizes; retain Tauri's standard wizard and controls.
+const installerArtwork = [
+  ["header", 150, 57, `<rect width="150" height="57" fill="#ffffff"/>${placeSvg(wordmark, 14, 13, 122, 32)}`],
+  ["sidebar", 164, 314, `
+    <rect width="164" height="314" fill="${brand.theme.iconBackground}"/>
+    <path d="M-60 250L180 10M-40 290L200 50M-20 330L220 90" stroke="${brand.theme.brandColor}" stroke-opacity=".10" stroke-width="22"/>
+    ${placeSvg(appIconSvg, 18, 44, 128, 128)}
+    <rect x="0" y="248" width="164" height="66" fill="#f3f6f2"/>
+    ${placeSvg(wordmark, 22, 265, 120, 31)}`],
+];
+for (const [name, width, height, content] of installerArtwork) {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">${content}</svg>`;
+  const pixels = new Resvg(svg).render().pixels;
   const data = Buffer.alloc(pixels.length);
+  // resvg returns RGBA; bmp-js expects ABGR and encodes a 24-bit bitmap.
   for (let offset = 0; offset < pixels.length; offset += 4) {
     data[offset] = pixels[offset + 3];
     data[offset + 1] = pixels[offset + 2];
     data[offset + 2] = pixels[offset + 1];
     data[offset + 3] = pixels[offset];
   }
-  await writeFile(path.join(appRoot, "src-tauri/installer", `brand-${name}.bmp`), bmp.encode({ data, width, height }).data);
+  await writeFile(path.join(installerDir, `brand-${name}.bmp`), bmp.encode({ data, width, height }).data);
 }
+// Leave the two drop targets and their Finder labels on a light, uncluttered
+// surface. The arrow sits between the real icons, never baked-in stand-ins.
+const dmgBackground = `<svg xmlns="http://www.w3.org/2000/svg" width="660" height="440">
+  <rect width="660" height="440" fill="#f3f6f2"/>
+  ${placeSvg(wordmark, 44, 36, 164, 43)}
+  <path d="M44 108H616" stroke="${brand.theme.iconBackground}" stroke-opacity=".10"/>
+  <path d="M300 230H360M348 218L360 230L348 242" fill="none" stroke="${brand.theme.accentLight}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect y="392" width="660" height="48" fill="${brand.theme.iconBackground}"/>
+  <rect y="392" width="660" height="2" fill="${brand.theme.brandColor}"/>
+</svg>`;
+await writeFile(path.join(installerDir, "brand-dmg-background.png"), render(dmgBackground, 660));
 await rm(path.join(generatedDir, "app-icon-light.svg"), { force: true });
 await rm(path.join(generatedDir, "app-icon-dark.svg"), { force: true });
 await writeFile(path.join(generatedDir, "brand-mark-light.svg"), standaloneMark(uiMarkLight, appIconWhiteAsCutout, brand.theme.markLight));
@@ -255,6 +280,15 @@ await writeFile(
         publisher: brand.organizationName,
         homepage: brand.homepageUrl,
         linux: { rpm: { preInstallScript: "installer/rpm-pre-install.generated.sh" } },
+        macOS: {
+          dmg: {
+            background: "installer/brand-dmg-background.png",
+            windowSize: { width: 660, height: 440 },
+            appPosition: { x: 180, y: 230 },
+            applicationFolderPosition: { x: 480, y: 230 },
+          },
+        },
+        windows: { nsis: { uninstallerIcon: "icons/icon.ico" } },
         ...(process.platform === "darwin"
           ? {
               icon: [...LEGACY_DESKTOP_ICONS.map((file) => `icons/${file}`), "icons/Assets.car"],
