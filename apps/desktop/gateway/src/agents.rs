@@ -1097,8 +1097,8 @@ impl Projector {
     ) -> Option<&'a Connection> {
         record.filter(|record| {
             !record.disconnected()
-                || record.config_path.as_deref()
-                    == Some(agent.config_path(&self.home, self.tool_env).as_path())
+                || std::path::absolute(agent.config_path(&self.home, self.tool_env))
+                    .is_ok_and(|path| record.config_path.as_ref() == Some(&path))
         })
     }
 
