@@ -412,16 +412,14 @@ export function ProfileEditorSheet({
                     target={authorized && login ? { kind: "login", id: login.id } : { kind: "profile", profileId: draft.id }}
                     scope={accountScope} images={selectedAccount.images} onSignIn={() => void signIn()}
                     credentialRef={profile?.credentialRef} disabled={working || frozen} />
-                  {(workspaces?.length || accountScope?.workspace) && <FormField id="profile-workspace" label="Workspace">
-                    {draft.provider === "redpill" ? <>
-                      <ChoiceSelect id="profile-workspace" label="Workspace" className="w-full" value={workspaceId === undefined ? "" : String(workspaceId)} options={[
-                        { value: "", label: "Select workspace", disabled: true },
-                        ...(workspaces ?? []).map((workspace) => ({ value: String(workspace.id), label: workspace.name })),
-                        ...(!authorized && savedScope?.workspaceId != null && !workspaces?.some((item) => item.id === savedScope.workspaceId)
-                          ? [{ value: String(savedScope.workspaceId), label: savedScope.workspace ?? "Current workspace", disabled: true }] : []),
-                      ]} disabled={working || frozen || !workspaces?.length} onChange={(value) => setSelectedWorkspaceId(Number(value))} />
-                      {!authorized && workspaceError && <FieldError>{workspaceError}</FieldError>}
-                    </> : <Input id="profile-workspace" value={accountScope?.workspace ?? ""} readOnly />}
+                  {draft.provider === "redpill" && Boolean(workspaces?.length || accountScope?.workspace) && <FormField id="profile-workspace" label="Workspace">
+                    <ChoiceSelect id="profile-workspace" label="Workspace" className="w-full" value={workspaceId === undefined ? "" : String(workspaceId)} options={[
+                      { value: "", label: "Select workspace", disabled: true },
+                      ...(workspaces ?? []).map((workspace) => ({ value: String(workspace.id), label: workspace.name })),
+                      ...(!authorized && savedScope?.workspaceId != null && !workspaces?.some((item) => item.id === savedScope.workspaceId)
+                        ? [{ value: String(savedScope.workspaceId), label: savedScope.workspace ?? "Current workspace", disabled: true }] : []),
+                    ]} disabled={working || frozen || !workspaces?.length} onChange={(value) => setSelectedWorkspaceId(Number(value))} />
+                    {!authorized && workspaceError && <FieldError>{workspaceError}</FieldError>}
                   </FormField>}
                 </> : <Button type="button" variant="default" size="lg" className="w-full [&_.service-logo]:size-4" disabled={working || frozen || !draft.name.trim()} onClick={() => void signIn()}><ServiceLogo url={draft.remoteUrl} />Sign in with {selectedPreset?.name}</Button>}
               </FieldGroup>
