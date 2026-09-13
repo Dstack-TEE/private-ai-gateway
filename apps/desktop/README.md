@@ -834,10 +834,12 @@ execution and real inference are not claimed by those checks.
 | Agent | Config written | Credential reference |
 | --- | --- | --- |
 | Codex | `~/.codex/config.toml`: required verified `model`, `model_provider`, and a `model_providers.private_ai_proxy` Responses provider | helper command |
-| Claude Code | `~/.claude/settings.json`: `env.ANTHROPIC_BASE_URL`, `apiKeyHelper` and an explicit Messages-compatible `env.ANTHROPIC_MODEL`; higher-priority exported credentials must be unset | helper command |
+| Claude Code | `~/.claude/settings.json`: `env.ANTHROPIC_BASE_URL`, `apiKeyHelper`, an explicit Messages-compatible `env.ANTHROPIC_MODEL`, and verified `modelPicker` options (Claude Code 2.1.242+); higher-priority exported credentials must be unset | helper command |
 | OpenCode | `opencode.json`: an app-owned `@ai-sdk/openai-compatible` provider whose model map is generated from the verified catalog; optional default | token file |
 | Pi | `~/.pi/agent/models.json`: an app-owned Chat Completions provider whose models, limits, modalities, reasoning flag, and prices come from the verified catalog | helper command |
 | Hermes | `~/.hermes/config.yaml`: a comment-preserving custom Chat Completions provider with `discover_models`, optional default, and command-backed auth | helper command |
+| OpenClaw | `~/.openclaw/openclaw.json`: an app-owned Chat Completions provider with a verified catalog and native primary model | exec SecretRef helper |
+| Oh My Pi | `~/.omp/agent/models.yml` (or existing `models.yaml`): an independent Chat Completions provider; native `modelRoles.default` selection | helper command |
 
 Codex's default model is a user preference, separate from connection authorization.
 Changing it does not revoke the helper credential; endpoint, provider, and auth
