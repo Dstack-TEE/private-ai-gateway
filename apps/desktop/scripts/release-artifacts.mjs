@@ -4,8 +4,11 @@ export const desktopPackages = [
   { platform: "macos", arch: "arm64", suffix: ".app.tar.gz", targets: ["darwin-aarch64"] },
   { platform: "macos", arch: "x64", suffix: ".app.tar.gz", targets: ["darwin-x86_64"] },
   { platform: "windows", arch: "x64", suffix: ".exe", targets: ["windows-x86_64"] },
+  { platform: "windows", arch: "arm64", suffix: ".exe", targets: ["windows-aarch64"] },
   { platform: "linux", arch: "x64", suffix: ".deb", targets: ["linux-x86_64-deb"] },
   { platform: "linux", arch: "x64", suffix: ".rpm", targets: ["linux-x86_64-rpm"] },
+  { platform: "linux", arch: "arm64", suffix: ".deb", targets: ["linux-aarch64-deb"] },
+  { platform: "linux", arch: "arm64", suffix: ".rpm", targets: ["linux-aarch64-rpm"] },
 ];
 
 export function artifactName({ version, platform, arch, suffix = "", cli = false }) {

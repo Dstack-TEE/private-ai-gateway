@@ -21,9 +21,7 @@ for (const specification of desktopPackages) {
   if (requested && !requested.has(packageId)) continue;
   const { suffix, targets } = specification;
   const filename = artifactName({ version, ...specification });
-  const candidates = files.filter((file) => specification.platform === "macos"
-    ? path.basename(file) === filename
-    : file.endsWith(suffix) && !path.basename(file).startsWith("private-ai-proxy-cli"));
+  const candidates = files.filter((file) => path.basename(file) === filename);
   if (candidates.length !== 1) throw new Error(`Expected one ${suffix} update package; found ${candidates.length}`);
   const file = candidates[0];
   const signature = (await readFile(`${file}.sig`, "utf8")).trim();

@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
+import { artifactName, desktopPackages } from "./release-artifacts.mjs";
 
 for (const [channel, version] of [["stable", "0.1.2"], ["beta", "0.1.2-beta.10"]]) {
 test(`${channel} manifests use signed platform artifacts and reject incomplete releases`, async () => {
@@ -11,7 +12,8 @@ test(`${channel} manifests use signed platform artifacts and reject incomplete r
   const directory = await mkdtemp(path.resolve("playwright-artifacts/update-manifest-"));
   const run = () => promisify(execFile)(process.execPath, ["scripts/create-update-manifest.mjs", directory, version, "Dstack-TEE/private-ai-gateway", channel]);
   try {
-    for (const file of [`private-ai-proxy-${version}-macos-arm64.app.tar.gz`, `private-ai-proxy-${version}-macos-x64.app.tar.gz`, "Gateway Setup.exe", "Gateway.deb", "Gateway.rpm"]) {
+    for (const specification of desktopPackages) {
+      const file = artifactName({ version, ...specification });
       await writeFile(path.join(directory, file), "fixture");
       await writeFile(path.join(directory, `${file}.sig`), `${file}-signature\n`);
     }
@@ -24,11 +26,15 @@ test(`${channel} manifests use signed platform artifacts and reject incomplete r
     assert.deepEqual(Object.keys(manifest.platforms).sort(), [
       "darwin-aarch64",
       "darwin-x86_64",
+      "linux-aarch64-deb",
+      "linux-aarch64-rpm",
       "linux-x86_64-deb",
       "linux-x86_64-rpm",
+      "windows-aarch64",
       "windows-x86_64",
     ]);
     assert.ok(manifest.platforms["windows-x86_64"].url.endsWith(`/desktop-v${version}/private-ai-proxy-${version}-windows-x64.exe`));
+    assert.ok(manifest.platforms["windows-aarch64"].url.endsWith(`/desktop-v${version}/private-ai-proxy-${version}-windows-arm64.exe`));
     assert.ok(manifest.platforms["darwin-aarch64"].url.endsWith(`-macos-arm64.app.tar.gz`));
     assert.ok(manifest.platforms["darwin-x86_64"].url.endsWith(`-macos-x64.app.tar.gz`));
     assert.notEqual(manifest.platforms["darwin-aarch64"].signature, manifest.platforms["darwin-x86_64"].signature);

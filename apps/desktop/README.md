@@ -566,7 +566,8 @@ Release administrators must provision these settings:
 Dispatch `desktop-native.yml` with `production_macos=true`, `release_channel`
 (`beta` by default), and a matching `release_version`. Set `release_platforms`
 to `all` or a comma-separated subset of `macos-arm64`, `macos-x64`,
-`windows-x64`, and `linux-x64`. The updater manifest contains only selected
+`windows-arm64`, `windows-x64`, `linux-arm64`, and `linux-x64`. ARM64 uses
+GitHub's official `windows-11-arm` and `ubuntu-24.04-arm` hosted runners. The updater manifest contains only selected
 platform entries. CI requires signing settings and creates macOS, Windows,
 Linux DEB, and Linux RPM signatures plus `latest.json` for the selected targets.
 Publishing requires `publish_release=true` or explicitly publishing the draft.

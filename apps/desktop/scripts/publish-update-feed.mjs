@@ -6,6 +6,7 @@ import { desktopPackages } from "./release-artifacts.mjs";
 
 const repo = process.env.GH_REPO;
 const tag = process.env.TAG;
+const selectedPlatforms = process.env.RELEASE_PLATFORMS?.trim() || "all";
 if (!/^[\w.-]+\/[\w.-]+$/.test(repo ?? "")) throw new Error("Invalid repository");
 const gh = (...args) => execFileSync("gh", [...args, "--repo", repo], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 const metadata = JSON.parse(gh("release", "view", tag, "--json", "tagName,isDraft,isPrerelease"));
@@ -17,9 +18,17 @@ const request = async (url, options = {}) => {
   if (!response.ok) throw new Error(`Update asset unavailable (${response.status}): ${url}`);
   return response;
 };
-const manifest = await (await request(`${prefix}latest.json`)).json();
+let manifest = await (await request(`${prefix}latest.json`)).json();
 if (manifest.version !== release.version || manifest.channel !== release.channel) throw new Error("Manifest and release channel do not match");
-for (const platform of desktopPackages.flatMap((entry) => entry.targets)) {
+const selected = selectedPlatforms === "all" ? null : new Set(selectedPlatforms.split(",").map((value) => value.trim()).filter(Boolean));
+if (selected && [...selected].some((platform) => !desktopPackages.some((entry) => `${entry.platform}-${entry.arch}` === platform))) {
+  throw new Error("Unknown release platform");
+}
+const selectedTargets = desktopPackages
+  .filter((entry) => !selected || selected.has(`${entry.platform}-${entry.arch}`))
+  .flatMap((entry) => entry.targets);
+if (selected && selectedTargets.length === 0) throw new Error("At least one release platform is required");
+for (const platform of selectedTargets) {
   const entry = manifest.platforms?.[platform];
   if (typeof entry?.signature !== "string" || !entry.signature.trim() || typeof entry.url !== "string" || !entry.url.startsWith(prefix)) throw new Error(`Invalid update entry: ${platform}`);
   await request(entry.url, { method: "HEAD" });
@@ -35,6 +44,19 @@ let current;
 if (feed?.assets.some((asset) => asset.name === "latest.json")) {
   current = await (await request(`https://github.com/${repo}/releases/download/${release.feedTag}/latest.json`)).json();
   if (current.channel !== release.channel) throw new Error("Existing feed belongs to another channel");
+}
+if (current && selected) {
+  manifest = { ...manifest, platforms: { ...current.platforms, ...manifest.platforms } };
+}
+if (selected && !current && selectedTargets.length !== desktopPackages.flatMap((entry) => entry.targets).length) {
+  throw new Error("A partial platform feed requires an existing complete feed");
+}
+for (const platform of desktopPackages.flatMap((entry) => entry.targets)) {
+  const entry = manifest.platforms?.[platform];
+  if (typeof entry?.signature !== "string" || !entry.signature.trim() || typeof entry.url !== "string") {
+    throw new Error(`Invalid combined update entry: ${platform}`);
+  }
+  await request(entry.url, { method: "HEAD" });
 }
 if (!shouldAdvance(release.version, current?.version, release.channel)) {
   console.log(`Keeping newer or equal ${release.channel} feed`);
