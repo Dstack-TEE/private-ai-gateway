@@ -19,7 +19,7 @@ export const brand = {
     },
     "theme": {
       "accentLight": "#83B83F",
-      "accentDark": "#8CC247",
+      "accentDark": "#B3E26B",
       "brandColor": "#83B83F",
       "iconBackground": "#579532"
     }
