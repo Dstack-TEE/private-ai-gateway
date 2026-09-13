@@ -380,7 +380,7 @@ export function ProfileEditorSheet({
         </ToggleGroup>
         </Field>
           <FormField id="profile-name" label="Profile name"><Input id="profile-name" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} disabled={frozen || working} autoComplete="off" /></FormField>
-          {draft.provider === "custom" && <FormField id="profile-endpoint" label="Service endpoint"><Input id="profile-endpoint" value={draft.remoteUrl} onChange={(event) => setDraft((current) => ({ ...current, remoteUrl: event.target.value }))} disabled={frozen || working} spellCheck={false} /></FormField>}
+          {draft.provider === "custom" && <FormField id="profile-endpoint" label="Service endpoint" description="Requires ACI (Attested Confidential Inference) support, including verifiable attestation and signed response receipts. An OpenAI-compatible API alone is not sufficient."><Input id="profile-endpoint" aria-describedby="profile-endpoint-note" value={draft.remoteUrl} onChange={(event) => setDraft((current) => ({ ...current, remoteUrl: event.target.value }))} disabled={frozen || working} spellCheck={false} /></FormField>}
           <Tabs value={draft.provider === "custom" ? "apiKey" : authMethod} className="gap-4"
             onValueChange={(next) => { if (next === "account" || next === "apiKey") void chooseAuthMethod(next); }}>
             {draft.provider !== "custom" && <TabsList aria-label="Sign-in method" className="w-full">
