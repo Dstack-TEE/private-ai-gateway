@@ -22,7 +22,9 @@ test("fail-closed states stay explicit and never show the success effects", asyn
   await page.goto("/?mock=blocked");
   const status = page.getByLabel("Protection status");
   await expect(status.getByText("Protection blocked", { exact: true })).toBeVisible();
-  await expect(page.getByText(/identity changed after verification/i)).toBeVisible();
+  await expect(status.getByRole("alert")).toContainText(/identity changed after verification/i);
+  await expect(status.locator(".protection-duration")).toHaveCount(0);
+  await expect(page.locator(".overview-banner")).toHaveCount(0);
   await expect(page.getByRole("switch", { name: "Stop protection" })).toHaveAttribute("aria-checked", "true");
   await expect(page.locator(".tracks-left, .status-glow")).toHaveCount(0);
   for (const name of ["Agents", "Usage", "Settings"]) {

@@ -4,7 +4,7 @@ import { SwitchControl } from "./controls";
 import type { GatewayState } from "../../shared/contracts";
 import { isProtected } from "../lib/protection";
 
-export function ProtectionStatus({ state, label }: { state: GatewayState; label: string }): React.JSX.Element {
+export function ProtectionStatus({ state, label, problem }: { state: GatewayState; label: string; problem?: string }): React.JSX.Element {
   const active = isProtected(state);
   const since = active ? state.protectedSince : undefined;
   const [now, setNow] = useState(() => Date.now());
@@ -30,7 +30,7 @@ export function ProtectionStatus({ state, label }: { state: GatewayState; label:
     <span className="protection-status inline-flex items-center justify-center gap-1.25 max-w-full flex-wrap [&_>_svg]:flex-none">
       {active ? <ShieldCheck size={14} aria-hidden="true" /> : state.reconnecting ? <RefreshCw size={14} aria-hidden="true" /> : <ShieldX size={14} aria-hidden="true" />}
       <span aria-live="polite">{label}</span>
-      {elapsed !== undefined && <time className="protection-duration w-[8ch] font-medium text-xs leading-4.5 font-mono tabular-nums text-muted-foreground whitespace-nowrap" dateTime={`PT${seconds}S`} aria-label={`Session elapsed ${elapsed}`}>{elapsed}</time>}
+      {problem ? <span className="col-start-2 text-xs leading-4.5 font-normal text-destructive wrap-anywhere" role="alert">{problem}</span> : elapsed !== undefined && <time className="protection-duration w-[8ch] font-medium text-xs leading-4.5 font-mono tabular-nums text-muted-foreground whitespace-nowrap" dateTime={`PT${seconds}S`} aria-label={`Session elapsed ${elapsed}`}>{elapsed}</time>}
     </span>
   );
 }
