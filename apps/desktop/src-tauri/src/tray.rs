@@ -262,10 +262,9 @@ fn sync_profiles(app: &AppHandle, state: &GatewayState, menu: &TrayMenu) -> taur
         let _ = entry
             .item
             .set_checked(profile.id == state.active_profile_id);
-        let _ = entry.item.set_enabled(
-            state.status != "verifying"
-                && desktop_runtime::service_config::profile_has_credential(profile),
-        );
+        let _ = entry
+            .item
+            .set_enabled(state.status != "verifying" && profile.credential_saved);
     }
     Ok(())
 }
@@ -530,10 +529,10 @@ fn menu_state(state: &GatewayState) -> &'static str {
 
 fn active_profile_ready(state: &GatewayState) -> bool {
     state.api_key_saved
-        && state.profiles.iter().any(|profile| {
-            profile.id == state.active_profile_id
-                && desktop_runtime::service_config::profile_has_credential(profile)
-        })
+        && state
+            .profiles
+            .iter()
+            .any(|profile| profile.id == state.active_profile_id && profile.credential_saved)
 }
 
 #[cfg(target_os = "macos")]

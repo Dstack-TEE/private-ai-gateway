@@ -38,12 +38,8 @@ export function unavailableState(error: unknown): GatewayState {
   };
 }
 
-export function profileHasCredential(profile: ConfidentialProfile): boolean {
-  return profile.credentialSaved;
-}
-
 export function profileIsAvailable(profile: ConfidentialProfile | undefined, state: GatewayState): boolean {
-  return Boolean(profile && profileHasCredential(profile) && (profile.id !== state.activeProfileId || state.apiKeySaved));
+  return Boolean(profile && profile.credentialSaved && (profile.id !== state.activeProfileId || state.apiKeySaved));
 }
 
 export function protectionFlags(state: GatewayState) {

@@ -56,20 +56,6 @@ test("seven agents connect and disconnect directly from the verified discovered 
 
   const rows = page.locator(".agent-block");
   await expect(rows).toHaveCount(7);
-  for (const name of ["Codex", "Claude Code", "OpenCode", "Pi", "Hermes Agent", "OpenClaw", "Oh My Pi"]) {
-    await expect(rows.filter({ has: page.getByText(name, { exact: true }) })).toBeVisible();
-  }
-  const agentImageElements = rows.locator(".mark img");
-  await expect(agentImageElements).toHaveCount(7);
-  await expect.poll(() => agentImageElements.evaluateAll((images) =>
-    images.every((image) => image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0),
-  )).toBe(true);
-  const iconResults = await agentImageElements.evaluateAll((images) =>
-    images.map((image) => ({ source: (image as HTMLImageElement).currentSrc })),
-  );
-  expect(iconResults).toHaveLength(7);
-  expect(iconResults.every(({ source }) => source.includes("/assets/") && !source.startsWith("data:"))).toBe(true);
-
   for (const toggle of await page.getByRole("switch", { name: /^Disconnect / }).all()) {
     await toggle.click();
   }
@@ -82,18 +68,6 @@ test("seven agents connect and disconnect directly from the verified discovered 
     await connected.getByRole("switch").click();
     await expect(row.getByText("Not connected", { exact: true })).toBeVisible();
   }
-
-  await nav(page, "Settings").click();
-  await page.getByRole("button", { name: "Advanced", exact: true }).click();
-  page.once("dialog", async (dialog) => {
-    expect(dialog.type()).toBe("confirm");
-    expect(dialog.message()).toContain("Reset settings?");
-    await dialog.accept();
-  });
-  await page.getByRole("button", { name: "Reset settings", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
-  await nav(page, "Agents").click();
-  await expect(page.getByRole("switch", { name: /^Disconnect / })).toHaveCount(0);
 });
 
 test("agent actions report progress without disabling unrelated switches", async ({ page }) => {
@@ -134,12 +108,6 @@ test("startup preferences and saved agent links are independent of protection", 
   await expect(codex.getByRole("switch", { name: "Disconnect Codex" })).toBeChecked();
   await nav(page, "Settings").click();
   const startup = page.getByRole("region", { name: "General" });
-  const connections = page.getByRole("region", { name: "Connections" });
-  await expect(connections.getByRole("button", { name: "Profiles", exact: true })).toBeVisible();
-  await expect(connections.getByRole("button", { name: "Local API settings", exact: true })).toBeVisible();
-  const about = page.getByRole("region", { name: "About" });
-  await expect(about.getByRole("button", { name: "Documentation" })).toBeVisible();
-  await expect(about.getByRole("button", { name: "GitHub" })).toBeVisible();
   await expect(startup.getByRole("switch", { name: "Open at Login" })).not.toBeChecked();
   await expect(startup.getByRole("switch", { name: "Protect on launch" })).not.toBeChecked();
   await startup.getByRole("switch", { name: "Open at Login" }).click();

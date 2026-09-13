@@ -79,10 +79,6 @@ impl ServiceSettings {
     }
 }
 
-pub fn profile_has_credential(profile: &ConfidentialProfile) -> bool {
-    profile.credential_saved
-}
-
 pub fn set_profile_credential_saved(
     settings: &mut ServiceSettings,
     profile_id: &str,
@@ -348,7 +344,7 @@ mod tests {
     #[test]
     fn credential_presence_is_explicit_and_profile_scoped() {
         let profile = resolve_profile(input("https://private.example.com"), Some(42)).unwrap();
-        assert!(!profile_has_credential(&profile));
+        assert!(!profile.credential_saved);
         let mut incomplete = serde_json::to_value(&profile).unwrap();
         incomplete
             .as_object_mut()
@@ -361,9 +357,9 @@ mod tests {
             ..ServiceSettings::default()
         };
 
-        assert!(!profile_has_credential(settings.active_profile().unwrap()));
+        assert!(!settings.active_profile().unwrap().credential_saved);
         assert!(set_profile_credential_saved(&mut settings, "work-profile", true).unwrap());
-        assert!(profile_has_credential(settings.active_profile().unwrap()));
+        assert!(settings.active_profile().unwrap().credential_saved);
         assert!(!set_profile_credential_saved(&mut settings, "work-profile", true).unwrap());
         assert!(set_profile_credential_saved(&mut settings, "missing", true).is_err());
     }

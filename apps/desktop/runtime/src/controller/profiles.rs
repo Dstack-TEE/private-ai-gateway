@@ -275,7 +275,7 @@ impl DesktopRuntime {
         let config = settings.runtime_config()?;
         let credential_saved = settings
             .active_profile()
-            .is_ok_and(service_config::profile_has_credential);
+            .is_ok_and(|profile| profile.credential_saved);
         self.proxy.set_api_key(None);
         self.recovery.cancel();
         self.manager.set_service_configuration(
@@ -349,7 +349,7 @@ impl DesktopRuntime {
         let config = settings.runtime_config()?;
         let credential_saved = settings
             .active_profile()
-            .is_ok_and(service_config::profile_has_credential);
+            .is_ok_and(|profile| profile.credential_saved);
         self.proxy.set_api_key(None);
         if affects_active {
             self.recovery.cancel();

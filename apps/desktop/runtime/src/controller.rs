@@ -260,7 +260,7 @@ impl DesktopRuntime {
         };
         let credential_saved = settings
             .active_profile()
-            .is_ok_and(service_config::profile_has_credential);
+            .is_ok_and(|profile| profile.credential_saved);
 
         let (local, local_error) = match local_api::load() {
             Ok(config) => (config, None),

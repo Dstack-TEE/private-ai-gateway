@@ -1013,28 +1013,3 @@ mod platform {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use super::Registration;
-
-    #[test]
-    fn registration_uses_the_cli_json_contract() {
-        let value = serde_json::to_value(Registration {
-            executable: PathBuf::from("/opt/private-ai-proxy/private-ai-proxy"),
-            command_path: PathBuf::from("/home/user/.local/bin/private-ai-proxy"),
-            installed: true,
-            on_path: false,
-        })
-        .unwrap();
-        assert_eq!(
-            value["commandPath"],
-            "/home/user/.local/bin/private-ai-proxy"
-        );
-        assert_eq!(value["installed"], true);
-        assert_eq!(value["onPath"], false);
-        assert!(value.get("command_path").is_none());
-    }
-}

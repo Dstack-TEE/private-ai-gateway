@@ -18,7 +18,7 @@ import { FormField } from "../components/settings";
 import { ChoiceSelect } from "../components/choice-select";
 import type { ConfidentialProfile, ConfidentialProfileInput, GatewayState } from "../../shared/contracts";
 import { desktopApi, previewMode } from "../lib/environment";
-import { profileHasCredential, profileIsAvailable } from "../lib/protection";
+import { profileIsAvailable } from "../lib/protection";
 import { ServiceLogo } from "../components/brand";
 import { serviceHost } from "../lib/format";
 import { SERVICE_PRESETS, servicePreset } from "../lib/services";
@@ -245,7 +245,7 @@ export function ProfileEditorSheet({
     || profile.provider !== draft.provider
     || profile.remoteUrl.replace(/\/$/, "") !== draftUrl;
   const savedCredentialApplies = !isNew
-    && profileHasCredential(profile)
+    && profile.credentialSaved
     && !profileChanged
     && profile.auth.kind === (authMethod === "account" ? "oauth" : "apiKey");
   const detailsEnabled = savedCredentialApplies && draft.provider === "redpill" && authMethod === "account" && Boolean(profile?.id);

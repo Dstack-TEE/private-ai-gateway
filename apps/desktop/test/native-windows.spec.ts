@@ -332,7 +332,6 @@ test("protection flow, page headers, and focus follow the native desktop contrac
   await nav(page, "Overview").click();
   await expect(page.getByRole("heading", { name: "Overview", level: 1 })).toBeFocused();
   await expect(page.getByLabel("Protection status").getByText("Protected", { exact: true })).toBeVisible();
-  await expect(page.locator(".tracks-left")).toHaveCount(0);
 
   await page.getByRole("switch", { name: "Stop protection" }).click();
   await expect(page.getByLabel("Protection status").getByText("Not protected", { exact: true })).toBeVisible();

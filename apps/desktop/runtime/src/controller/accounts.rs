@@ -5,10 +5,12 @@ impl DesktopRuntime {
         &self,
         pending: &mut crate::account_login::PendingLogin,
     ) -> Result<(), String> {
-        let profile =
-            self.manager.snapshot()?.profiles.into_iter().find(|p| {
-                p.id == pending.profile_id() && service_config::profile_has_credential(p)
-            });
+        let profile = self
+            .manager
+            .snapshot()?
+            .profiles
+            .into_iter()
+            .find(|p| p.id == pending.profile_id() && p.credential_saved);
         let key = match profile {
             Some(profile) => self
                 .secrets
@@ -222,9 +224,7 @@ impl DesktopRuntime {
                     .iter()
                     .find(|p| p.id == profile_id)
                     .ok_or("Profile not found")?;
-                if !matches!(profile.auth, ProfileAuth::OAuth { .. })
-                    || !service_config::profile_has_credential(profile)
-                {
+                if !matches!(profile.auth, ProfileAuth::OAuth { .. }) || !profile.credential_saved {
                     return Err("Sign in with an account to view its balance".into());
                 }
                 let entry = service_config::profile_credential_entry(profile)?;

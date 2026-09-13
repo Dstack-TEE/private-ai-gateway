@@ -10,7 +10,7 @@ import { Card, CardHeader, CardTitle, CardDescription, CardAction, CardContent }
 import { Separator } from "../components/ui/separator";
 import { IconButton } from "../components/controls";
 import type { AgentStatus, GatewayState, RequestActivity, UsageSummary } from "../../shared/contracts";
-import { isProtected, presentation, profileHasCredential } from "../lib/protection";
+import { isProtected, presentation } from "../lib/protection";
 import { LocalApiPanel } from "./local-api";
 import { EmptyState } from "../components/detail";
 import { AgentRow } from "./agents";
@@ -91,7 +91,6 @@ export function Overview({
       <div className="overview-top grid *:min-h-36 grid-cols-2 gap-4 items-stretch [&_.status-surface.status-compact]:min-w-0 @max-[600px]/overview:grid-cols-1">
       <StatusSurface
         state={state}
-        agents={agents}
         busy={busy}
         running={running}
         endpointDown={endpointDown}
@@ -153,7 +152,6 @@ export function Overview({
 
 function StatusSurface({
   state,
-  agents,
   busy,
   running,
   endpointDown,
@@ -164,7 +162,6 @@ function StatusSurface({
   onPrivacy,
 }: {
   state: GatewayState;
-  agents: AgentStatus[];
   busy: boolean;
   running: boolean;
   endpointDown: boolean;
@@ -190,7 +187,7 @@ function StatusSurface({
           <span>{activeProfile?.name ?? "Set up"}</span>
           {activeProfile && <ChevronDown aria-hidden="true" />}
         </Button>
-        {activeProfile?.auth.kind === "oauth" && profileHasCredential(activeProfile) && <AccountTools
+        {activeProfile?.auth.kind === "oauth" && activeProfile.credentialSaved && <AccountTools
           api={desktopApi} provider={activeProfile.provider} target={{ kind: "profile", profileId: activeProfile.id }}
           credentialRef={activeProfile.credentialRef} scope={activeProfile.auth.scope} compact />}
         <IconButton size="icon-sm" label="Privacy verification" aria-haspopup="dialog" onClick={onPrivacy}><Info aria-hidden="true" /></IconButton>

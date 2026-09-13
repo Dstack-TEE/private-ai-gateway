@@ -357,7 +357,7 @@ fn saving_an_offline_profile_does_not_launch_verification() {
     assert_eq!(saved.active_profile_id, "offline");
     assert_eq!(saved.status, "stopped");
     assert!(saved.profiles[0].verified_at.is_none());
-    assert!(service_config::profile_has_credential(&saved.profiles[0]));
+    assert!(saved.profiles[0].credential_saved);
     assert!(
         runtime.start(saved.config).is_err(),
         "Start must invoke the missing verifier"

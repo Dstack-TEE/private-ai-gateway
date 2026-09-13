@@ -114,10 +114,7 @@ impl DesktopRuntime {
         records.sort_by_key(|(_, record)| record.action != "activate");
         let profiles = self.manager.snapshot()?.profiles;
         let mut selected = Vec::new();
-        for profile in profiles
-            .iter()
-            .filter(|p| service_config::profile_has_credential(p))
-        {
+        for profile in profiles.iter().filter(|p| p.credential_saved) {
             let entry = service_config::profile_credential_entry(profile)?;
             if let Some(secret) = self.secrets.get(&entry)? {
                 selected.push((entry, secret));
