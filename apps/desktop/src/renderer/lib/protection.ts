@@ -39,7 +39,7 @@ export function unavailableState(error: unknown): GatewayState {
 }
 
 export function profileHasCredential(profile: ConfidentialProfile): boolean {
-  return profile.credentialSaved ?? Boolean(profile.verifiedAt);
+  return profile.credentialSaved;
 }
 
 export function profileIsAvailable(profile: ConfidentialProfile | undefined, state: GatewayState): boolean {

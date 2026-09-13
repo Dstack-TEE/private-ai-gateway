@@ -430,7 +430,7 @@ impl GatewayManager {
                 .iter_mut()
                 .find(|profile| profile.id == profile_id)
             {
-                profile.credential_saved = Some(saved);
+                profile.credential_saved = saved;
             }
             if state.active_profile_id == profile_id {
                 state.api_key_saved = saved;

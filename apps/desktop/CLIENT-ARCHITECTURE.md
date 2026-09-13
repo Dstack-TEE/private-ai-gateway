@@ -64,7 +64,7 @@ helper. They do not contain an independent `aci` executable.
   Login startup remains an explicit desktop OS preference.
 - Native wake monitoring also belongs to the backend: IOKit on macOS, power
   callbacks on Windows, and login1 on Linux. Recovery does not need an open UI.
-- The service acquires its instance lock before loading or migrating state.
+- The service acquires its instance lock before loading state.
   Client startup and update replacement share an additional pre-spawn gate.
 - Shutdown enters draining before taking the exclusive operation gate, waits
   for existing mutations, restores managed agent configuration, stops listeners,
@@ -108,8 +108,8 @@ on an unattended machine; there is no plaintext fallback.
 The display name is Private AI Proxy, with by dstack TEE attribution.
 The application identifier is `org.dstack.private-ai-proxy`; storage and
 credential services use the new identity and local keys use `sk-pap-`.
-Old beta configuration is not migrated. Command registration installs only
-`private-ai-proxy` and refuses unrelated existing commands.
+Old beta configuration is not migrated. Command registration installs `private-ai-proxy` and its `pap` shortcut,
+and refuses unrelated existing commands.
 
 Windows uses the official Tauri NSIS template with branded artwork and
 no legacy-installation branches. Linux packages use the Private AI Proxy name.

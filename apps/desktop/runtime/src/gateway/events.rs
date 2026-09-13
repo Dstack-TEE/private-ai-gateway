@@ -74,7 +74,9 @@ impl GatewayManager {
                 load_catalog = true;
             }
             "request_complete" => {
-                persist = Some(apply_request_event(&mut runtime.state, object)?);
+                if optional_string(object, "path").as_deref() != Some("/v1/models") {
+                    persist = Some(apply_request_event(&mut runtime.state, object)?);
+                }
             }
             // Verification lost: one atomic barrier. The epoch moves so a
             // read still in flight can neither publish nor clear this error,
@@ -285,10 +287,7 @@ pub(super) fn apply_request_event(
         .and_then(|value| u16::try_from(value).ok())
         .ok_or_else(|| "ACI emitted an invalid request event".to_string())?;
     let receipt_id = optional_string(event, "receipt_id");
-    let (request_id, session_id, agent) = parse_request_tag(
-        optional_string(event, "tag").as_deref(),
-        receipt_id.as_deref(),
-    );
+    let (request_id, session_id, agent) = parse_request_tag(&required_string(event, "tag")?)?;
     let activity = RequestActivity {
         id: request_id,
         session_id,
@@ -304,7 +303,7 @@ pub(super) fn apply_request_event(
         verified: event.get("verified").and_then(Value::as_bool),
         detail: optional_string(event, "detail").unwrap_or_default(),
         at: now_secs(),
-        agent,
+        agent: Some(agent),
         locally_constrained: event.get("locally_constrained").and_then(Value::as_bool),
         rewritten: event.get("rewritten").and_then(Value::as_bool),
         left_device: true,
@@ -359,38 +358,18 @@ pub(super) fn merge_activity(state: &mut GatewayState, mut incoming: RequestActi
     state.activity.truncate(MAX_ACTIVITY);
 }
 
-pub(super) fn parse_request_tag(
-    tag: Option<&str>,
-    receipt_id: Option<&str>,
-) -> (String, String, Option<String>) {
-    if let Some(tag) = tag {
-        let mut parts = tag.splitn(4, ':');
-        if parts.next() == Some("pap") {
-            if let (Some(request), Some(session), Some(agent)) =
-                (parts.next(), parts.next(), parts.next())
-            {
-                if !request.is_empty() && !session.is_empty() && !agent.is_empty() {
-                    return (
-                        request.to_string(),
-                        session.to_string(),
-                        Some(agent.to_string()),
-                    );
-                }
+fn parse_request_tag(tag: &str) -> Result<(String, String, String), String> {
+    let mut parts = tag.splitn(4, ':');
+    if parts.next() == Some("pap") {
+        if let (Some(request), Some(session), Some(agent)) =
+            (parts.next(), parts.next(), parts.next())
+        {
+            if !request.is_empty() && !session.is_empty() && !agent.is_empty() {
+                return Ok((request.to_string(), session.to_string(), agent.to_string()));
             }
         }
-        return (
-            receipt_id.unwrap_or(tag).to_string(),
-            "legacy".to_string(),
-            Some(tag.to_string()),
-        );
     }
-    (
-        receipt_id
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("legacy-{:016x}", now_secs())),
-        "legacy".to_string(),
-        None,
-    )
+    Err("ACI emitted an invalid request attribution tag".to_string())
 }
 
 pub(super) fn required_string(object: &Map<String, Value>, key: &str) -> Result<String, String> {

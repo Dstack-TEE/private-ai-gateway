@@ -150,8 +150,8 @@ export interface ConfidentialProfile {
   provider: ServiceProvider;
   remoteUrl: string;
   auth: ProfileAuth;
-  /** Non-secret presence metadata; absent on profiles saved by early betas. */
-  credentialSaved?: boolean;
+  /** Non-secret presence metadata, independent of verification history. */
+  credentialSaved: boolean;
   verifiedAt?: number;
 }
 

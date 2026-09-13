@@ -30,39 +30,8 @@ impl DesktopRuntime {
         let entry = service_config::profile_credential_entry(&profile)?;
         let stored_key = self.secrets.get(&entry)?;
 
-        let mut pending = self
-            .legacy_credential_pending
-            .lock()
-            .map_err(|_| "The credential migration state is unavailable".to_string())?;
-        if !*pending {
-            self.persist_profile_credential_saved(profile_id, stored_key.is_some())?;
-            return Ok(stored_key);
-        }
-
-        let had_stored_key = stored_key.is_some();
-        let legacy_key = self.secrets.get(LEGACY_API_KEY_ENTRY)?;
-        let key = stored_key.or(legacy_key.clone());
-        let wrote_profile_key = !had_stored_key && legacy_key.is_some();
-        if let (true, Some(key)) = (wrote_profile_key, key.as_deref()) {
-            self.secrets.set(&entry, key)?;
-        }
-        if let Err(error) = self.persist_profile_credential_saved(profile_id, key.is_some()) {
-            if wrote_profile_key {
-                let _ = self.secrets.delete(&entry);
-            }
-            return Err(format!(
-                "The previous Confidential AI credential could not be migrated: {error}"
-            ));
-        }
-        if legacy_key.is_some() {
-            if let Err(error) = self.secrets.delete(LEGACY_API_KEY_ENTRY) {
-                return Err(format!(
-                    "The previous Confidential AI credential was migrated, but its old copy could not be removed: {error}"
-                ));
-            }
-        }
-        *pending = false;
-        Ok(key)
+        self.persist_profile_credential_saved(profile_id, stored_key.is_some())?;
+        Ok(stored_key)
     }
 
     pub(super) fn cleanup_manifest(&self) -> Result<Vec<String>, String> {

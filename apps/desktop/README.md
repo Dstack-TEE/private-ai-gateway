@@ -692,10 +692,12 @@ protocol is the service's own response, shown as such.
   restores agent configs, and starts a freshly verified connection. Saving while stopped does not start verification; protection verifies the service
   when started. Failed connection leaves the saved profile available for retry. Selecting an existing
   profile also closes the chooser. The window and native tray both route a
-  missing or unavailable current profile back into this same flow. Legacy
-  single-service settings are recognized at
-  launch, while their credential migrates to the profile entry on first use so
-  opening the app does not request credential-store access.
+  missing or unavailable current profile back into this same flow. Only the current
+  multi-profile settings and explicit credential-presence fields are accepted.
+  Older settings, credential entries, CLI names and request-event formats are
+  not migrated or inferred. Start from a clean installation when coming from
+  an unsupported version; saved agent configuration must be disconnected in
+  that version before removing its restoration records.
 - **Model catalog** is the verified service's `GET /v1/models`, read through
   the sidecar and published atomically with the identity. It is the single
   source of model truth: agents choose from it, the proxy serves it on

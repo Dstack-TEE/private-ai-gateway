@@ -84,22 +84,6 @@ mod tests {
     }
 
     #[test]
-    fn instance_lock_excludes_legacy_fd_lock_in_both_directions() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut legacy = RwLock::new(open(dir.path(), "instance.lock").unwrap());
-        let guard = legacy.try_write().unwrap();
-        assert!(instance(dir.path()).unwrap().is_none());
-        drop(guard);
-        let current = instance(dir.path()).unwrap().unwrap();
-        assert_eq!(
-            legacy.try_write().unwrap_err().kind(),
-            io::ErrorKind::WouldBlock
-        );
-        drop(current);
-        assert!(legacy.try_write().is_ok());
-    }
-
-    #[test]
     fn apply_lock_serializes_writers() {
         let dir = std::env::temp_dir().join(format!("pap-apply-lock-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);

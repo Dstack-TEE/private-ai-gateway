@@ -98,7 +98,6 @@ fn test_runtime(
         account_login: tokio::sync::Mutex::new(None),
         account_save: Mutex::new(None),
         balances: crate::balance_cache::BalanceCache::default(),
-        legacy_credential_pending: Mutex::new(false),
         endpoint: EndpointRuntime::new(executor.handle().clone()),
         codex_sync: CodexCatalogSync::default(),
         agent_policy: Mutex::new(()),
@@ -257,7 +256,7 @@ fn offline_removal_queues_cleanup_and_uncommitted_retirement_preserves_active_ke
     )
     .unwrap();
     profile.credential_ref = Some("credential-old".into());
-    profile.credential_saved = Some(true);
+    profile.credential_saved = true;
     profile.auth = crate::contracts::ProfileAuth::OAuth {
         account_id: "user_test".into(),
         account_name: None,

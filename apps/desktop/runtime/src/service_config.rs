@@ -18,7 +18,6 @@ use crate::contracts::{
 
 const CONFIG_FILE: &str = "confidential-ai.json";
 const CONFIG_VERSION: u8 = 1;
-const LEGACY_DEFAULT_PROFILE_ID: &str = "default";
 const MAX_PROFILES: usize = 50;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -28,11 +27,6 @@ pub struct ServiceSettings {
     pub active_profile_id: String,
     pub profiles: Vec<ConfidentialProfile>,
     pub require_production_os: bool,
-}
-
-pub struct LoadedSettings {
-    pub settings: ServiceSettings,
-    pub migrated_legacy: bool,
 }
 
 impl Default for ServiceSettings {
@@ -86,9 +80,7 @@ impl ServiceSettings {
 }
 
 pub fn profile_has_credential(profile: &ConfidentialProfile) -> bool {
-    profile
-        .credential_saved
-        .unwrap_or(profile.verified_at.is_some())
+    profile.credential_saved
 }
 
 pub fn set_profile_credential_saved(
@@ -101,54 +93,24 @@ pub fn set_profile_credential_saved(
         .iter_mut()
         .find(|profile| profile.id == profile_id)
         .ok_or_else(|| "Confidential AI profile not found".to_string())?;
-    if profile.credential_saved == Some(saved) {
+    if profile.credential_saved == saved {
         return Ok(false);
     }
-    profile.credential_saved = Some(saved);
+    profile.credential_saved = saved;
     Ok(true)
 }
 
-pub fn load() -> Result<LoadedSettings, String> {
-    let path = config_path()?;
-    let text = match fs::read_to_string(&path) {
+pub fn load() -> Result<ServiceSettings, String> {
+    let text = match fs::read_to_string(config_path()?) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(LoadedSettings {
-                settings: ServiceSettings::default(),
-                migrated_legacy: false,
-            });
+            return Ok(ServiceSettings::default());
         }
         Err(error) => return Err(format!("Cannot read Confidential AI settings: {error}")),
     };
-    if let Ok(settings) = serde_json::from_str::<ServiceSettings>(&text) {
-        return Ok(LoadedSettings {
-            settings: resolve_settings(settings)?,
-            migrated_legacy: false,
-        });
-    }
-    let legacy: StartGatewayConfig = serde_json::from_str(&text)
+    let settings = serde_json::from_str(&text)
         .map_err(|_| "The saved Confidential AI settings are invalid".to_string())?;
-    let legacy = resolve_runtime_config(legacy)?;
-    let provider = provider_for_url(&legacy.remote_url);
-    let settings = ServiceSettings {
-        version: CONFIG_VERSION,
-        active_profile_id: LEGACY_DEFAULT_PROFILE_ID.to_string(),
-        profiles: vec![ConfidentialProfile {
-            id: LEGACY_DEFAULT_PROFILE_ID.to_string(),
-            credential_ref: None,
-            name: provider_name(&provider).to_string(),
-            provider,
-            remote_url: legacy.remote_url,
-            auth: ProfileAuth::ApiKey,
-            credential_saved: None,
-            verified_at: None,
-        }],
-        require_production_os: legacy.require_production_os,
-    };
-    Ok(LoadedSettings {
-        settings: resolve_settings(settings)?,
-        migrated_legacy: true,
-    })
+    resolve_settings(settings)
 }
 
 pub fn save(settings: ServiceSettings) -> Result<ServiceSettings, String> {
@@ -192,7 +154,7 @@ pub fn resolve_profile(
         provider: input.provider,
         remote_url,
         auth: ProfileAuth::ApiKey,
-        credential_saved: None,
+        credential_saved: false,
         verified_at,
     })
 }
@@ -323,22 +285,6 @@ fn validate_profile_id(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn provider_for_url(url: &str) -> ServiceProvider {
-    match url {
-        "https://inference.phala.com" => ServiceProvider::Phala,
-        "https://tee.redpill.ai" => ServiceProvider::Redpill,
-        _ => ServiceProvider::Custom,
-    }
-}
-
-fn provider_name(provider: &ServiceProvider) -> &'static str {
-    match provider {
-        ServiceProvider::Phala => "Phala",
-        ServiceProvider::Redpill => "RedPill",
-        ServiceProvider::Custom => "Custom service",
-    }
-}
-
 fn config_path() -> Result<PathBuf, String> {
     Ok(app_data_dir()?.join(CONFIG_FILE))
 }
@@ -401,9 +347,14 @@ mod tests {
 
     #[test]
     fn credential_presence_is_explicit_and_profile_scoped() {
-        let mut profile = resolve_profile(input("https://private.example.com"), Some(42)).unwrap();
-        assert!(profile_has_credential(&profile));
-        profile.credential_saved = Some(false);
+        let profile = resolve_profile(input("https://private.example.com"), Some(42)).unwrap();
+        assert!(!profile_has_credential(&profile));
+        let mut incomplete = serde_json::to_value(&profile).unwrap();
+        incomplete
+            .as_object_mut()
+            .unwrap()
+            .remove("credentialSaved");
+        assert!(serde_json::from_value::<ConfidentialProfile>(incomplete).is_err());
         let mut settings = ServiceSettings {
             active_profile_id: profile.id.clone(),
             profiles: vec![profile],

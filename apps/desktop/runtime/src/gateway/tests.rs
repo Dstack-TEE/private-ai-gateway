@@ -268,6 +268,12 @@ fn identity_alone_does_not_verify_and_requests_are_attributed() {
         "receipt_id": "rcpt-1", "verified": null,
         "detail": "receipt rcpt-1 recorded", "tag": "pap:req-1:session-1:claude-code"
     });
+    for tag in [serde_json::Value::Null, json!("claude-code")] {
+        let mut invalid = request.clone();
+        invalid["tag"] = tag;
+        assert!(apply_request_event(&mut state, invalid.as_object().unwrap()).is_err());
+        assert!(state.activity.is_empty());
+    }
     apply_request_event(&mut state, request.as_object().unwrap()).unwrap();
     let verdict = json!({
         "method": "POST", "path": "/v1/messages", "status": 200, "streamed": true,

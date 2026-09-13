@@ -39,11 +39,11 @@ fn codex_model_changes_keep_credentials_but_endpoint_changes_revoke_them() {
     );
     assert_eq!(sandbox.projector.tokens.read(agent.id()).unwrap(), token);
     sandbox.projector.reconcile(None).unwrap();
-    let mut legacy = sandbox.projector.load_store().unwrap();
-    let record = legacy.get_mut(agent.id()).unwrap();
+    let mut interrupted = sandbox.projector.load_store().unwrap();
+    let record = interrupted.get_mut(agent.id()).unwrap();
     record.options = options.clone();
-    record.attention = Some("Configuration changed in an older app version".into());
-    sandbox.projector.save_store(&legacy).unwrap();
+    record.attention = Some("Configuration requires explicit repair".into());
+    sandbox.projector.save_store(&interrupted).unwrap();
     let repair = ConnectOptions::default();
     let preview = sandbox
         .projector
@@ -383,12 +383,12 @@ fn pi_and_hermes_use_verified_model_discovery() {
     {
         let pi_token = sandbox.projector.tokens.read("pi").unwrap().unwrap();
         let config_path = Agent::Pi.config_path(&sandbox.home, sandbox.projector.tool_env);
-        let mut legacy = provider.clone();
-        legacy["apiKey"] = json!(format!(
+        let mut changed = provider.clone();
+        changed["apiKey"] = json!(format!(
             "!{}",
             helper_command(&sandbox.projector.helper_exe, "pi").unwrap()
         ));
-        let value = ConfigValue::Json(legacy);
+        let value = ConfigValue::Json(changed);
         let mut config = doc(&sandbox, Agent::Pi);
         config
             .set_value(&["providers", "private-ai-proxy"], &value)

@@ -92,7 +92,7 @@ impl ProfileBackup {
                 continue;
             }
             resolved.id = format!("profile-{}", uuid::Uuid::new_v4());
-            resolved.credential_saved = Some(false);
+            resolved.credential_saved = false;
             if candidate.profiles.is_empty() {
                 candidate.active_profile_id = resolved.id.clone();
             }
@@ -194,7 +194,7 @@ mod tests {
         let mut settings = ServiceSettings::default();
         assert_eq!(backup().merge(&mut settings).unwrap().imported, 1);
         assert_eq!(settings.profiles[0].verified_at, None);
-        assert_eq!(settings.profiles[0].credential_saved, Some(false));
+        assert_eq!(settings.profiles[0].credential_saved, false);
         let id = settings.active_profile_id.clone();
         assert_eq!(backup().merge(&mut settings).unwrap().skipped, 1);
         assert_eq!(settings.active_profile_id, id);

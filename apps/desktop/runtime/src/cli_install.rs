@@ -41,7 +41,7 @@ mod windows_alias {
     const SCRIPT: &[u8] = b"@echo off\r\n\"%~dp0private-ai-proxy.exe\" %*\r\n";
 
     pub(super) fn install(executable: &Path) -> Result<(), String> {
-        reject_legacy_executable(executable)?;
+        reject_alias_collision(executable)?;
         let alias = executable.with_file_name("pap.cmd");
         match OpenOptions::new().write(true).create_new(true).open(&alias) {
             Ok(mut file) => {
@@ -77,11 +77,11 @@ mod windows_alias {
         }
     }
 
-    pub(super) fn reject_legacy_executable(executable: &Path) -> Result<(), String> {
+    pub(super) fn reject_alias_collision(executable: &Path) -> Result<(), String> {
         match fs::symlink_metadata(executable.with_file_name("pap.exe")) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Ok(_) => Err("A legacy pap.exe shadows the pap alias; remove the old installation or extract this release into a clean directory".to_string()),
-            Err(_) => Err("Cannot inspect the legacy pap.exe command".to_string()),
+            Ok(_) => Err("An existing pap.exe shadows the pap alias; remove the conflicting executable or choose a clean directory".to_string()),
+            Err(_) => Err("Cannot inspect the pap.exe command".to_string()),
         }
     }
 
@@ -111,11 +111,11 @@ mod windows_alias {
             assert!(install(&executable).is_err());
             assert!(uninstall(&executable).is_err());
             assert_eq!(fs::read(alias).unwrap(), b"other");
-            let legacy = executable.with_file_name("pap.exe");
-            fs::write(&legacy, b"old cli").unwrap();
-            assert!(reject_legacy_executable(&executable).is_err());
+            let conflicting = executable.with_file_name("pap.exe");
+            fs::write(&conflicting, b"other cli").unwrap();
+            assert!(reject_alias_collision(&executable).is_err());
             assert!(install(&executable).is_err());
-            assert_eq!(fs::read(legacy).unwrap(), b"old cli");
+            assert_eq!(fs::read(conflicting).unwrap(), b"other cli");
         }
     }
 }
@@ -134,7 +134,6 @@ mod platform {
     enum CommandState {
         Missing,
         ManagedLink,
-        LegacyLink(PathBuf),
         Executable,
     }
 
@@ -176,10 +175,7 @@ mod platform {
             }
         }
         for (path, state) in commands {
-            if matches!(
-                state,
-                CommandState::ManagedLink | CommandState::LegacyLink(_)
-            ) {
+            if matches!(state, CommandState::ManagedLink) {
                 fs::remove_file(&path).map_err(|_| format!("Cannot remove {}", path.display()))?;
             }
         }
@@ -223,24 +219,14 @@ mod platform {
     }
 
     fn register_commands(executable: &Path, directory: &Path) -> Result<(), String> {
-        // Check both names before changing either, including an existing legacy pap link.
+        // Validate both names before creating either command.
         let commands = command_states(executable, directory)?;
         let mut created: Vec<PathBuf> = Vec::new();
         for (path, state) in commands {
-            let previous = match state {
-                CommandState::Missing => None,
-                CommandState::LegacyLink(target) => {
-                    fs::remove_file(&path)
-                        .map_err(|_| format!("Cannot update {}", path.display()))?;
-                    Some(target)
-                }
-                CommandState::ManagedLink | CommandState::Executable => continue,
-            };
+            if !matches!(state, CommandState::Missing) {
+                continue;
+            }
             if symlink(executable, &path).is_err() {
-                if let Some(target) = previous {
-                    symlink(target, &path)
-                        .map_err(|_| format!("Cannot restore {}", path.display()))?;
-                }
                 for path in created {
                     fs::remove_file(&path).map_err(|_| {
                         format!("Cannot roll back registration of {}", path.display())
@@ -261,30 +247,6 @@ mod platform {
         };
 
         if metadata.file_type().is_symlink() {
-            // A renamed bundle leaves the old pap link dangling beside its replacement.
-            // Only that exact missing sibling is ours; arbitrary broken links stay untouched.
-            if command_path.file_name().is_some_and(|name| name == "pap") {
-                let target = fs::read_link(command_path)
-                    .map_err(|_| format!("Cannot read {}", command_path.display()))?;
-                let resolved = if target.is_absolute() {
-                    target.clone()
-                } else {
-                    command_path
-                        .parent()
-                        .unwrap_or(Path::new("."))
-                        .join(&target)
-                };
-                if resolved.file_name().is_some_and(|name| name == "pap")
-                    && resolved
-                        .parent()
-                        .and_then(|parent| parent.canonicalize().ok())
-                        == executable.parent().map(Path::to_path_buf)
-                    && fs::symlink_metadata(&resolved)
-                        .is_err_and(|error| error.kind() == ErrorKind::NotFound)
-                {
-                    return Ok(CommandState::LegacyLink(target));
-                }
-            }
             let target = command_path.canonicalize().map_err(|_| {
                 format!(
                     "Refusing to replace broken or inaccessible link {}",
@@ -425,7 +387,7 @@ mod platform {
         let directory = PathBuf::from("/usr/local/bin");
         match command_state(executable, &directory.join("private-ai-proxy")) {
             Ok(CommandState::ManagedLink | CommandState::Executable) => Some(directory),
-            Ok(CommandState::Missing | CommandState::LegacyLink(_)) | Err(_) => None,
+            Ok(CommandState::Missing) | Err(_) => None,
         }
     }
 
@@ -434,7 +396,7 @@ mod platform {
         let directory = PathBuf::from("/usr/bin");
         match command_state(executable, &directory.join("private-ai-proxy")) {
             Ok(CommandState::ManagedLink | CommandState::Executable) => Some(directory),
-            Ok(CommandState::Missing | CommandState::LegacyLink(_)) | Err(_) => None,
+            Ok(CommandState::Missing) | Err(_) => None,
         }
     }
 
@@ -486,8 +448,6 @@ mod platform {
             let executable = executable(root.path());
             let directory = root.path().join("bin");
             fs::create_dir(&directory).unwrap();
-            std::os::unix::fs::symlink(executable.with_file_name("pap"), directory.join("pap"))
-                .unwrap();
             register_commands(&executable, &directory).unwrap();
             register_commands(&executable, &directory).unwrap();
 
@@ -528,15 +488,17 @@ mod platform {
         fn broken_link_is_never_replaced() {
             let root = tempdir().unwrap();
             let executable = executable(root.path());
-            let command = root.path().join("private-ai-proxy");
-            std::os::unix::fs::symlink(root.path().join("missing"), &command).unwrap();
+            for (name, target) in [
+                ("private-ai-proxy", root.path().join("missing")),
+                ("pap", executable.with_file_name("pap")),
+            ] {
+                let command = root.path().join(name);
+                std::os::unix::fs::symlink(&target, &command).unwrap();
 
-            let error = command_state(&executable, &command).unwrap_err();
-            assert!(error.contains("broken or inaccessible link"));
-            assert!(fs::symlink_metadata(command)
-                .unwrap()
-                .file_type()
-                .is_symlink());
+                let error = command_state(&executable, &command).unwrap_err();
+                assert!(error.contains("broken or inaccessible link"));
+                assert_eq!(fs::read_link(command).unwrap(), target);
+            }
         }
     }
 }
@@ -658,7 +620,7 @@ mod platform {
     ) -> Result<Registration, String> {
         let directory = executable_directory(&executable, directory)?;
         let command_path = directory.join("private-ai-proxy.exe");
-        windows_alias::reject_legacy_executable(&executable)?;
+        windows_alias::reject_alias_collision(&executable)?;
         let (path_value, _) = read_user_path()?;
         let installed = path_entries(&path_value)
             .iter()

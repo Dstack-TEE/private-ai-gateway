@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-# Check both names: older releases shipped pap as the executable.
+# Check ownership of the canonical command and its alias.
 for cli in /usr/bin/private-ai-proxy /usr/bin/pap; do
   [ -e "$cli" ] || [ -L "$cli" ] || continue
   owner=$(dpkg-query -S "$cli" 2>/dev/null | sed -n '1s/: .*//p')
@@ -10,7 +10,7 @@ for cli in /usr/bin/private-ai-proxy /usr/bin/pap; do
     exit 1
   fi
   directory=$(dirname "$(readlink -f "$cli")")
-  for binary in private-ai-proxy-service private-ai-proxy private-ai-proxy-helper pap-service pap; do
+  for binary in private-ai-proxy-service private-ai-proxy private-ai-proxy-helper; do
     executable="$directory/$binary"
     [ -e "$executable" ] || continue
     for process in /proc/[0-9]*/exe; do

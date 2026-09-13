@@ -9,7 +9,7 @@ impl Projector {
         record.filter(|record| {
             !record.disconnected()
                 || std::path::absolute(agent.config_path(&self.home, self.tool_env))
-                    .is_ok_and(|path| record.config_path.as_ref() == Some(&path))
+                    .is_ok_and(|path| record.config_path == path)
         })
     }
 
@@ -369,7 +369,7 @@ impl Projector {
         }
         let current_path = self.action_path(agent, record, true);
         if let Err(attention) = &current_path {
-            if let Some(path) = record.and_then(|record| record.config_path.as_ref()) {
+            if let Some(path) = record.map(|record| &record.config_path) {
                 status.config_path = path.display().to_string();
             }
             status.attention = Some(attention.clone());

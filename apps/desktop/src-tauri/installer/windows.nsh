@@ -108,19 +108,18 @@ Var PapStartupLockPath
   ${EndIf}
 !macroend
 
-!macro PAP_EXISTING_CLI
-  StrCpy $R4 "$INSTDIR\private-ai-proxy.exe"
-  ${IfNot} ${FileExists} "$R4"
-    StrCpy $R4 "$INSTDIR\pap.exe"
-  ${EndIf}
-!macroend
-
 !macro NSIS_HOOK_PREINSTALL
   !insertmacro PAP_ACQUIRE_STARTUP_LOCK
   !insertmacro PAP_CHECK_CLI "private-ai-proxy.exe"
-  !insertmacro PAP_CHECK_CLI "pap.exe"
+  SearchPath $R0 "pap.exe"
+  ${If} $R0 != ""
+    !insertmacro PAP_FAIL "A pap.exe executable shadows the pap shortcut at $R0. Remove the conflicting executable before installing ${PRODUCTNAME}."
+  ${EndIf}
+  ${If} ${FileExists} "$INSTDIR\pap.exe"
+    !insertmacro PAP_FAIL "A pap.exe executable shadows the pap shortcut in the install directory. Remove the conflicting executable or choose another directory."
+  ${EndIf}
   !insertmacro PAP_CHECK_CLI "pap.cmd"
-  !insertmacro PAP_EXISTING_CLI
+  StrCpy $R4 "$INSTDIR\private-ai-proxy.exe"
   ${If} ${FileExists} "$R4"
     ExecWait '"$R4" --yes service stop' $R0
     ${If} $R0 != 0
@@ -143,7 +142,7 @@ Var PapStartupLockPath
 !macro NSIS_HOOK_PREUNINSTALL
   !insertmacro PAP_ACQUIRE_STARTUP_LOCK
 
-  !insertmacro PAP_EXISTING_CLI
+  StrCpy $R4 "$INSTDIR\private-ai-proxy.exe"
   ${If} ${FileExists} "$R4"
     ExecWait '"$R4" --yes service stop' $R0
     ${If} $R0 != 0

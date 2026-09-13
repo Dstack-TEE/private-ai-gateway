@@ -338,7 +338,7 @@ export function mockApi(name: string | null): DesktopApi {
     && (query.since === undefined || item.at >= query.since)
     && (query.until === undefined || item.at < query.until));
   let clientKey = "sk-pap-2f8a19c4d7e6b305a418b62f903c7de84fd119b7a02e65c83b34f09c719a5d2e";
-  const credentialProfiles = new Set(state.profiles.filter((profile) => profile.credentialSaved ?? Boolean(profile.verifiedAt)).map((profile) => profile.id));
+  const credentialProfiles = new Set(state.profiles.filter((profile) => profile.credentialSaved).map((profile) => profile.id));
   const publish = () => {
     const protectedNow = state.status === "verified" && !state.configurationVerification && state.apiKeySaved;
     agents = agents.map((agent) => ({ ...agent, authorized: agent.connected && protectedNow }));
@@ -646,7 +646,7 @@ export function mockApi(name: string | null): DesktopApi {
         ...state,
         config: { ...state.config, remoteUrl: profile.remoteUrl },
         activeProfileId: profile.id,
-        apiKeySaved: profile.credentialSaved ?? Boolean(profile.verifiedAt),
+        apiKeySaved: profile.credentialSaved,
         catalog: undefined,
         status: reconnect ? "verified" : "stopped",
         protectedSince: reconnect ? Math.floor(Date.now() / 1_000) : undefined,

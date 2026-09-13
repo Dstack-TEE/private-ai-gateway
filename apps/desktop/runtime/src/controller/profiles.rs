@@ -107,7 +107,7 @@ impl DesktopRuntime {
             remote_url: candidate.remote_url.clone(),
             require_production_os,
         };
-        candidate.credential_saved = Some(true);
+        candidate.credential_saved = true;
         settings.upsert(candidate.clone())?;
         settings.active_profile_id = candidate.id.clone();
         settings.require_production_os = require_production_os;
@@ -411,7 +411,7 @@ impl DesktopRuntime {
             .iter_mut()
             .find(|profile| profile.id == state.active_profile_id)
         {
-            profile.credential_saved = Some(false);
+            profile.credential_saved = false;
         }
         if let Err(error) = service_config::save(settings) {
             let restore = restore_secret_entry(&*self.secrets, &entry, previous_key.as_deref());

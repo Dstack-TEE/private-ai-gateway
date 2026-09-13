@@ -2,10 +2,9 @@
 set -eu
 
 pap=/usr/bin/private-ai-proxy
-[ -e "$pap" ] || pap=/usr/bin/pap
 [ -e "$pap" ] || [ -L "$pap" ] || exit 0
 directory=$(dirname "$(readlink -f "$pap")")
-for binary in private-ai-proxy-service private-ai-proxy private-ai-proxy-helper pap-service pap; do
+for binary in private-ai-proxy-service private-ai-proxy private-ai-proxy-helper; do
   executable="$directory/$binary"
   [ -e "$executable" ] || continue
   for process in /proc/[0-9]*/exe; do

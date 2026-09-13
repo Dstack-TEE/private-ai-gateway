@@ -50,7 +50,7 @@ fn interrupted_two_file_connection_restores_from_the_persisted_journal() {
         )
         .unwrap();
     let mut record = edit.record.unwrap();
-    record.config_path = Some(config.clone());
+    record.config_path = config.clone();
     record.disabled = true;
     record.cleanup_pending = true;
     record.suspended = true;
@@ -354,8 +354,8 @@ fn recorded_paths_restore_original_files_after_location_changes() {
         assert_eq!(
             sandbox.projector.load_store().unwrap()[agent.id()]
                 .config_path
-                .as_deref(),
-            Some(path.as_path())
+                .as_path(),
+            path.as_path()
         );
         let projected = fs::read_to_string(&path).unwrap();
         sandbox.projector.home = sandbox.home.join("different-profile");
@@ -474,8 +474,8 @@ fn disconnected_provider_ownership_does_not_follow_a_new_config_path() {
         assert_eq!(
             sandbox.projector.load_store().unwrap()[agent.id()]
                 .config_path
-                .as_deref(),
-            Some(target.as_path())
+                .as_path(),
+            target.as_path()
         );
         assert_eq!(fs::read_to_string(&original).unwrap(), retained);
     }
@@ -664,7 +664,7 @@ fn disconnect_all_restores_every_agent() {
     store.insert(
         "codex".into(),
         Connection {
-            config_path: Some(codex.clone()),
+            config_path: codex.clone(),
             fields: vec![OwnedField {
                 path: owned(&["model_provider"]),
                 value: Some(ConfigValue::Str("private_ai_proxy".into())),

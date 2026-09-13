@@ -7,8 +7,7 @@
 //!
 //! Codex, Claude Code, and OpenCode are projected through their documented
 //! custom-provider settings. Disconnecting never depends on the endpoint or
-//! the catalog, so a connection made by an older version can always be
-//! restored.
+//! the catalog, so current connections can be restored while offline.
 
 mod discovery;
 mod projection;
@@ -61,7 +60,7 @@ const CODEX_CATALOG_FILE: &str = "codex-model-catalog.json";
 const HELPER_MISSING: &str =
     "The credential helper is missing or invalid in this installation, so \
                               agents cannot be connected";
-const RESTORE_PATH_MISSING: &str = "This legacy connection has no recorded absolute config path. \
+const RESTORE_PATH_MISSING: &str = "The connection record has no valid absolute config path. \
     Access is disabled. Automatic restoration is unsafe; the recovery record is retained.";
 
 /// File name of the bundled console helper that prints an agent's token.
@@ -103,24 +102,19 @@ struct Connection {
     /// Last catalog reconciled, including failed attempts, to avoid repeated writes.
     #[serde(default)]
     catalog_revision: Option<String>,
-    #[serde(default)]
-    config_path: Option<PathBuf>,
+    config_path: PathBuf,
     fields: Vec<OwnedField>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     selection: Option<selection::Journal>,
     /// User intent survives protection sessions; suspended links retain only provider definitions.
-    #[serde(default)]
     suspended: bool,
-    #[serde(default)]
     options: ConnectOptions,
     #[serde(default)]
     attention: Option<String>,
     /// The agent is not authorized (disconnect in progress).
-    #[serde(default)]
     disabled: bool,
     /// A disconnect started; the record stays until token, parked secrets,
     /// and config are all cleaned up, so a retry is idempotent.
-    #[serde(default)]
     cleanup_pending: bool,
 }
 
@@ -147,16 +141,17 @@ impl Connection {
             .iter()
             .any(|field| matches!(field.previous, Some(Previous::Plain(ConfigValue::Json(_)))))
         {
-            return Err("This legacy connection contains a structured plaintext backup. Access is disabled; secure manual recovery is required and the existing record is retained".to_string());
+            return Err("The connection record contains an unsafe structured plaintext backup. Access is disabled; secure manual recovery is required and the existing record is retained".to_string());
         }
         Ok(())
     }
 
     fn restore_path(&self) -> Result<&Path, String> {
-        self.config_path
-            .as_deref()
-            .filter(|path| path.is_absolute())
-            .ok_or_else(|| RESTORE_PATH_MISSING.to_string())
+        if self.config_path.is_absolute() {
+            Ok(&self.config_path)
+        } else {
+            Err(RESTORE_PATH_MISSING.to_string())
+        }
     }
 }
 
@@ -274,11 +269,11 @@ impl Projector {
     }
 
     /// Startup permission maintenance under the apply lock.
-    pub fn migrate_legacy(&self) -> Result<bool, String> {
+    pub fn initialize_store(&self) -> Result<(), String> {
         lock::with_apply_lock(&self.data_dir, || {
             self.maintain_store_permissions()?;
             let _ = self.load_store()?;
-            Ok(false)
+            Ok(())
         })
     }
 
@@ -347,7 +342,7 @@ impl Projector {
     }
 
     /// Load the connection record. A pure read (symlinks refused, no
-    /// permission or migration side effects); maintenance happens only under
+    /// permission side effects); maintenance happens only under
     /// the apply lock.
     fn load_store(&self) -> Result<Store, String> {
         let text = tokens::read_private_text(&self.store_path())

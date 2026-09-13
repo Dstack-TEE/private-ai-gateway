@@ -57,7 +57,7 @@ impl Projector {
                     store.insert(
                         agent.id().to_string(),
                         Connection {
-                            config_path: Some(path),
+                            config_path: path,
                             fields,
                             suspended: true,
                             options: saved_options,
@@ -328,7 +328,7 @@ impl Projector {
         }
         let previous_record = store.get(agent.id()).cloned();
         let mut next_record = edit.record.clone().ok_or("Missing connection journal")?;
-        next_record.config_path = Some(path.to_path_buf());
+        next_record.config_path = path.to_path_buf();
         next_record.options = options.clone();
         next_record.catalog_revision = catalog.map(|catalog| catalog.revision.clone());
         let mut guard = Rollback::default();

@@ -608,7 +608,7 @@ mod tests {
             provider: ServiceProvider::Custom,
             remote_url: "https://private.example.com".to_string(),
             auth: ProfileAuth::ApiKey,
-            credential_saved: Some(true),
+            credential_saved: true,
             verified_at: None,
         });
         assert_eq!(menu_state(&ready), "Not protected");
@@ -629,7 +629,7 @@ mod tests {
         ready.status = "stopped".into();
         ready.configuration_verification = false;
 
-        ready.profiles[0].credential_saved = Some(false);
+        ready.profiles[0].credential_saved = false;
         assert_eq!(menu_state(&ready), "Not protected - profile required");
         assert_eq!(protection_action(&ready), "Set Up Profile…");
     }

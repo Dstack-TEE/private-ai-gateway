@@ -7,7 +7,6 @@
 use std::{collections::HashMap, sync::Mutex};
 
 const SERVICE: &str = crate::brand::APP_IDENTIFIER;
-pub const LEGACY_API_KEY_ENTRY: &str = "service-api-key";
 const MAX_KEY_LEN: usize = 512;
 
 /// A named-entry secret store. Entry names are app-chosen, never user input.

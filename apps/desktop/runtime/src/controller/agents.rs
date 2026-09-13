@@ -26,7 +26,7 @@ impl DesktopRuntime {
 
     pub(super) fn reload_agent_tokens(&self) -> Result<(), String> {
         let projector = self.current_projector()?;
-        projector.migrate_legacy()?;
+        projector.initialize_store()?;
         if !crate::recovery::connection_intended(&self.manager.snapshot()?) {
             let failures = projector.reconcile(None)?;
             if !failures.is_empty() {

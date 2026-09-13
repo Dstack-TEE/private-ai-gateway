@@ -18,7 +18,7 @@ use desktop_gateway::{
     catalog::Catalog,
     lock,
     proxy::{self, ProxyEvent, ProxyState},
-    secrets::{validate_api_key, KeyringStore, SecretStore, LEGACY_API_KEY_ENTRY},
+    secrets::{validate_api_key, KeyringStore, SecretStore},
     tokens::{TokenFiles, TokenSet, LOCAL_TOOLS_AGENT},
 };
 use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
@@ -54,7 +54,6 @@ pub struct DesktopRuntime {
     usage: Arc<UsageStore>,
     secrets: Arc<dyn SecretStore>,
     credentials: ClientCredentials,
-    legacy_credential_pending: Mutex<bool>,
     endpoint: EndpointRuntime,
     codex_sync: CodexCatalogSync,
     agent_policy: Mutex<()>,
@@ -234,7 +233,7 @@ impl DesktopRuntime {
         if !options.helper_path.is_absolute() {
             return Err("The credential helper path must be absolute".to_string());
         }
-        // Establish ownership before settings migration, storage, or listeners.
+        // Establish ownership before settings, storage, or listeners.
         let data_dir = app_data_dir()?;
         let instance = lock::instance(&data_dir)
             .map_err(|error| format!("Cannot take the instance lock: {error}"))?
@@ -245,13 +244,9 @@ impl DesktopRuntime {
             eprintln!("Cannot stage the credential helper: {error}");
         }
         let secrets: Arc<dyn SecretStore> = Arc::new(KeyringStore);
-        let (mut settings, mut settings_error, migrated_legacy) = match service_config::load() {
-            Ok(loaded) => (loaded.settings, None, loaded.migrated_legacy),
-            Err(error) => (
-                service_config::ServiceSettings::default(),
-                Some(error),
-                false,
-            ),
+        let (mut settings, mut settings_error) = match service_config::load() {
+            Ok(settings) => (settings, None),
+            Err(error) => (service_config::ServiceSettings::default(), Some(error)),
         };
         let runtime_config = match settings.runtime_config() {
             Ok(config) => config,
@@ -263,10 +258,9 @@ impl DesktopRuntime {
                 })?
             }
         };
-        let credential_saved = migrated_legacy
-            || settings
-                .active_profile()
-                .is_ok_and(service_config::profile_has_credential);
+        let credential_saved = settings
+            .active_profile()
+            .is_ok_and(service_config::profile_has_credential);
 
         let (local, local_error) = match local_api::load() {
             Ok(config) => (config, None),
@@ -328,7 +322,6 @@ impl DesktopRuntime {
             account_login: tokio::sync::Mutex::new(None),
             account_save: Mutex::new(None),
             balances: crate::balance_cache::BalanceCache::default(),
-            legacy_credential_pending: Mutex::new(migrated_legacy),
             endpoint: EndpointRuntime::new(task_runtime.clone()),
             codex_sync: CodexCatalogSync::default(),
             agent_policy: Mutex::new(()),

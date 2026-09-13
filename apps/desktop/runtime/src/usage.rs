@@ -384,8 +384,7 @@ fn initialize(connection: &Connection) -> Result<(), String> {
              CREATE INDEX IF NOT EXISTS usage_records_at ON usage_records(at DESC, id DESC);
              CREATE INDEX IF NOT EXISTS usage_records_agent ON usage_records(agent, at DESC);
              CREATE INDEX IF NOT EXISTS usage_records_model ON usage_records(model, at DESC);
-             CREATE INDEX IF NOT EXISTS usage_records_session ON usage_records(session_id, at DESC);
-             DELETE FROM usage_records WHERE path = '/v1/models';",
+             CREATE INDEX IF NOT EXISTS usage_records_session ON usage_records(session_id, at DESC);",
         )
         .map_err(|error| format!("Cannot initialize the usage database: {error}"))
 }
@@ -729,24 +728,6 @@ mod tests {
         let mut discovery = item("catalog", 30, "codex", "catalog-only");
         discovery.path = "/v1/models".to_string();
         store.upsert(&discovery).unwrap();
-        store
-            .lock()
-            .unwrap()
-            .execute(
-                "INSERT INTO usage_records (
-                   id, session_id, at, agent, model, method, path, status, streamed,
-                   receipt_id, verified, detail, locally_constrained, rewritten,
-                   left_device, input_tokens, output_tokens, cache_read_tokens,
-                   cache_write_tokens, cost_usd, updated_at
-                 ) SELECT
-                   'legacy-catalog', session_id, at, agent, 'legacy-catalog-only', method,
-                   '/v1/models', status, streamed, receipt_id, verified, detail,
-                   locally_constrained, rewritten, left_device, input_tokens, output_tokens,
-                   cache_read_tokens, cache_write_tokens, cost_usd, updated_at
-                 FROM usage_records WHERE id = 'a1'",
-                [],
-            )
-            .unwrap();
         let first = store
             .page(&UsageQuery {
                 limit: Some(1),
@@ -800,16 +781,6 @@ mod tests {
         assert_eq!(pi.items.len(), 1);
         drop(store);
         let reopened = UsageStore::open(path).unwrap();
-        let legacy_count: u64 = reopened
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT count(*) FROM usage_records WHERE path = '/v1/models'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(legacy_count, 0);
         assert_eq!(
             reopened
                 .page(&UsageQuery::default())
@@ -836,10 +807,10 @@ mod tests {
     }
 
     #[test]
-    fn legacy_ids_are_valid_cursor_tiebreakers() {
+    fn opaque_ids_are_valid_cursor_tiebreakers() {
         let store = UsageStore::memory().unwrap();
         store
-            .upsert(&item("tag:legacy/agent@example", 10, "hermes", "model-a"))
+            .upsert(&item("tag:request/agent@example", 10, "hermes", "model-a"))
             .unwrap();
         store
             .upsert(&item("older", 9, "hermes", "model-a"))
@@ -850,7 +821,7 @@ mod tests {
                 ..UsageQuery::default()
             })
             .unwrap();
-        assert_eq!(first.items[0].id, "tag:legacy/agent@example");
+        assert_eq!(first.items[0].id, "tag:request/agent@example");
         let second = store
             .page(&UsageQuery {
                 cursor: first.next_cursor,

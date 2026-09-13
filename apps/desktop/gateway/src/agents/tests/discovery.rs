@@ -315,19 +315,19 @@ fn hermes_windows_installed_command_round_trip() {
 }
 
 #[test]
-fn legacy_recovery_never_guesses_paths_or_displays_structured_secrets() {
+fn invalid_recovery_never_guesses_paths_or_displays_structured_secrets() {
     for structured in [false, true] {
         let sandbox = sandbox(if structured {
-            "legacy-structured"
+            "invalid-structured"
         } else {
-            "legacy-path"
+            "invalid-path"
         });
         connect(&sandbox);
         let path = Agent::ClaudeCode.config_path(&sandbox.home, false);
         let before = fs::read(&path).unwrap();
         let mut store = sandbox.projector.load_store().unwrap();
         let record = store.get_mut("claude-code").unwrap();
-        record.config_path = None;
+        record.config_path = PathBuf::new();
         if structured {
             record.fields[0].previous = Some(Previous::Plain(ConfigValue::Json(
                 json!({"apiKey":"sk-test-hidden"}),

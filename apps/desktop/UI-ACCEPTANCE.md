@@ -131,7 +131,7 @@ upgrade/restart still require platform acceptance.
 | Agent configuration | Five integrations, verified model discovery, drift detection, uninstall, restore/retry, persistent links | Actual CLI sessions with installed versions |
 | Admission/revocation | Local HTTP tests: credentials revoked during body/read/send boundaries; unchanged token reconciliation does not cancel delivery | Long sessions on each target OS |
 | Local API | Endpoint validation, occupied-port rollback, rebind serialization, network opt-in, client-key rotation and failure revocation | Real macOS/Windows network permissions |
-| Usage | SQLite reopen/persistence, filters, cursor pagination, legacy IDs, full session totals, empty days, CSV safety, explicit clearing | Sustained real traffic and disk exhaustion |
+| Usage | SQLite reopen/persistence, filters, cursor pagination, opaque IDs, full session totals, empty days, CSV safety, explicit clearing | Sustained real traffic and disk exhaustion |
 | Proof | Event merging preserves receipt results and usage; forwarded failures distinguished from local rejections | Real signed receipts from each supported provider |
 | Updates | Standard Tauri updater and SemVer libraries; channel isolation, persistence, automatic checks, offline retry, missing-feed state, confirmation | Installed-version upgrade/restart and rollback acceptance |
 | Settings | Grouped shadcn Item/Field composition, Advanced channel selector, independent local version display | WKWebView font/rendering acceptance |
