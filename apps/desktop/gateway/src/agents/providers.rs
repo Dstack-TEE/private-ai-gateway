@@ -113,6 +113,16 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, St
             let mut fields = vec![
                 set(&["env", "ANTHROPIC_BASE_URL"], base),
                 set(&["env", "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"], "1"),
+                generated_catalog(
+                    &["modelPicker"],
+                    serde_json::json!({
+                        "replaceBuiltInOptions": true,
+                        "options": catalog.models.iter().map(|model| {
+                            serde_json::json!({ "model": model.id() })
+                        }).collect::<Vec<_>>()
+                    }),
+                    catalog.models.len(),
+                ),
                 set(
                     &["apiKeyHelper"],
                     helper_command(inputs.helper_exe, "claude-code")?,
