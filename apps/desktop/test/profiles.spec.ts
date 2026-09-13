@@ -162,6 +162,14 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
   await expect(editor.getByLabel("Service endpoint")).toHaveCount(0);
   await editor.getByRole("tab", { name: "API key", exact: true }).click();
   await expect(editor.getByLabel("Phala AI API key")).toBeVisible();
+  for (const provider of ["Phala", "RedPill"]) {
+    await editor.getByRole("button", { name: provider, exact: true }).click();
+    await editor.getByRole("tab", { name: "API key", exact: true }).click();
+    await editor.getByRole("button", { name: "Get API key", exact: true }).click();
+    await expect(page.locator("html")).toHaveAttribute("data-api-key-page", provider.toLowerCase());
+  }
+  await editor.getByRole("button", { name: "Phala", exact: true }).click();
+  await editor.getByRole("tab", { name: "API key", exact: true }).click();
   await expect(editor.getByText("Stored securely on this device.")).toBeVisible();
   await expect(editor.getByRole("button", { name: "Save" })).toBeDisabled();
 
@@ -170,6 +178,7 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
   await expect(editor.getByLabel("Service endpoint")).toBeEnabled();
   await editor.getByLabel("Service endpoint").fill("https://private.example.com");
   await expect(editor.getByLabel("API key")).toBeVisible();
+  await expect(editor.getByRole("button", { name: "Get API key", exact: true })).toHaveCount(0);
   await editor.getByRole("button", { name: "Cancel" }).click();
 
   await profiles.getByRole("button", { name: "New Profile" }).click();

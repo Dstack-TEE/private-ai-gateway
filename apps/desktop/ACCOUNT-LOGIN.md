@@ -1,7 +1,10 @@
 # Account login
 
 Phala and RedPill profiles offer account login alongside manual API keys. Custom
-endpoints use manual keys. Provider buttons with their icons stay in the form
+endpoints use manual keys. The API key tab provides a Get API key button for
+Phala and RedPill, opening their official dashboard in the system browser;
+Phala keys are created under Confidential AI API. Account sign-in continues
+to use the existing official authorization flow. Provider buttons with their icons stay in the form
 content. Phala completes automatically after browser authorization, which already
 selects its workspace. RedPill displays a standard workspace selector and Save,
 including when only one workspace is available. Failed persistence

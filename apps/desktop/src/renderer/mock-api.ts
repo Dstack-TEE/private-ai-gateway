@@ -500,6 +500,7 @@ export function mockApi(name: string | null): DesktopApi {
     openAboutLink: async () => undefined,
     onAgentsChange: () => () => undefined,
     openAgentWebsite: async () => undefined,
+    openApiKeyPage: async (provider) => { document.documentElement.dataset.apiKeyPage = provider; },
     confirm: async (options) => window.confirm(`${options.title}\n\n${options.message}`),
     start: async (config) => {
       const run = ++verifyRun;
