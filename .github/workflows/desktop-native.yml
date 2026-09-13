@@ -176,7 +176,11 @@ jobs:
         working-directory: apps/desktop
         env:
           RELEASE_PLATFORMS: ${{ inputs.release_platforms || 'all' }}
-        run: echo "matrix=$(node scripts/select-release-platforms.mjs \"$RELEASE_PLATFORMS\")" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          matrix="$(node scripts/select-release-platforms.mjs "$RELEASE_PLATFORMS")"
+          node --input-type=module -e 'const value = JSON.parse(process.argv[1]); if (!Array.isArray(value.include) || value.include.length === 0) process.exit(1)' "$matrix"
+          printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
 
   package:
     name: Package (${{ matrix.platform }})
