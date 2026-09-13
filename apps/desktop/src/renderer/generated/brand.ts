@@ -18,8 +18,8 @@ export const brand = {
       "keyLabel": "RedPill API key"
     },
     "theme": {
-      "accentLight": "#83B83F",
-      "accentDark": "#B3E26B",
+      "accentLight": "#8BC34A",
+      "accentDark": "#A5D66D",
       "brandColor": "#83B83F",
       "iconBackground": "#579532"
     }
