@@ -1,0 +1,636 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use tauri::{
+    menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder, Submenu},
+    tray::TrayIconBuilder,
+    AppHandle, Emitter, Manager, Wry,
+};
+use tauri_plugin_clipboard_manager::ClipboardExt;
+
+use desktop_gateway::agents::{Agent, AgentStatus, ConnectOptions};
+use desktop_gateway::brand::PRODUCT_NAME as APP_NAME;
+use desktop_runtime::{client::Client, contracts::GatewayState};
+
+/// Native menu handles mirror backend state; actions use the same client as the window.
+pub struct TrayMenu {
+    toggle: MenuItem<Wry>,
+    status: MenuItem<Wry>,
+    autostart: CheckMenuItem<Wry>,
+    endpoint: MenuItem<Wry>,
+    agents: Vec<(Agent, CheckMenuItem<Wry>)>,
+    profiles: Submenu<Wry>,
+    profile_items: Mutex<Option<Vec<ProfileMenuItem>>>,
+    protected_icon: AtomicBool,
+    dark_icon: AtomicBool,
+}
+
+struct ProfileMenuItem {
+    id: String,
+    name: String,
+    item: CheckMenuItem<Wry>,
+}
+
+pub fn setup(app: &AppHandle) -> tauri::Result<()> {
+    let state = GatewayState::default();
+    let status_line = protection_title(&state);
+    let toggle = MenuItemBuilder::with_id("toggle", protection_action(&state)).build(app)?;
+    let status = MenuItemBuilder::with_id("status", &status_line)
+        .enabled(false)
+        .build(app)?;
+    let autostart = CheckMenuItemBuilder::with_id("autostart", "Open at Login")
+        .checked(crate::autostart::is_enabled(app).unwrap_or(false))
+        .build(app)?;
+    let endpoint = MenuItemBuilder::with_id("copy-endpoint", "Copy Local API Endpoint")
+        .enabled(false)
+        .build(app)?;
+    let profiles = Submenu::with_items(app, "Profiles", true, &[])?;
+    let agents_menu = Submenu::with_items(app, "Agents", true, &[])?;
+    let mut agents = Vec::new();
+    for agent in [
+        Agent::ClaudeCode,
+        Agent::Codex,
+        Agent::Hermes,
+        Agent::Pi,
+        Agent::OpenCode,
+    ] {
+        let item = CheckMenuItemBuilder::with_id(format!("agent:{}", agent.id()), agent.name())
+            .enabled(false)
+            .build(app)?;
+        agents_menu.append(&item)?;
+        agents.push((agent, item));
+    }
+    agents_menu.append(&tauri::menu::PredefinedMenuItem::separator(app)?)?;
+    agents_menu.append(&MenuItemBuilder::with_id("agents", "Manage Agents…").build(app)?)?;
+    let menu = MenuBuilder::new(app)
+        .item(&status)
+        .item(&toggle)
+        .separator()
+        .text("open", format!("Open {APP_NAME}"))
+        .text("settings", "Settings…")
+        .separator()
+        .item(&endpoint)
+        .text("copy-key", "Copy Local API Key")
+        .separator()
+        .item(&profiles)
+        .item(&agents_menu)
+        .separator()
+        .item(&autostart)
+        .separator()
+        .text("quit", format!("Quit {APP_NAME}"))
+        .text("stop-all-quit", "Stop All and Quit…")
+        .build()?;
+    app.manage(TrayMenu {
+        toggle,
+        status,
+        autostart,
+        endpoint,
+        agents,
+        profiles,
+        profile_items: Mutex::new(None),
+        protected_icon: AtomicBool::new(false),
+        dark_icon: AtomicBool::new(false),
+    });
+
+    let icon = tray_icon(false, false)?;
+    TrayIconBuilder::with_id("gateway")
+        .icon(icon)
+        .icon_as_template(cfg!(target_os = "macos"))
+        .tooltip(format!("{APP_NAME} - {status_line}"))
+        .menu(&menu)
+        .show_menu_on_left_click(true)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "toggle" => toggle_or_open_settings(app),
+            "open" => show_window(app),
+            "settings" | "agents" => {
+                show_window(app);
+                let _ = app.emit(crate::menu::NAVIGATE_EVENT, event.id().as_ref());
+            }
+            "autostart" => sync_autostart(app),
+            "quit" => {
+                app.exit(0);
+            }
+            "stop-all-quit" => {
+                show_window(app);
+                let _ = app.emit("gateway://confirm-stop-all", ());
+            }
+            id if matches!(id, "profiles" | "copy-key" | "copy-endpoint")
+                || id.starts_with("profile:")
+                || id.starts_with("agent:") =>
+            {
+                perform_action(app, id.to_string())
+            }
+            _ => {}
+        })
+        .build(app)?;
+    Ok(())
+}
+
+fn perform_action(app: &AppHandle, id: String) {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let client = app.state::<Arc<Client>>().inner().clone();
+        let result = (|| -> Result<(), String> {
+            match id.as_str() {
+                "copy-endpoint" => {
+                    let endpoint = client
+                        .state()?
+                        .proxy_url
+                        .ok_or("Local API is unavailable")?;
+                    app.clipboard()
+                        .write_text(endpoint)
+                        .map_err(|_| "Cannot copy the endpoint")?;
+                }
+                "copy-key" => {
+                    app.clipboard()
+                        .write_text(client.client_key()?)
+                        .map_err(|_| "Cannot copy the client key")?;
+                }
+                "profiles" => {
+                    show_window(&app);
+                    crate::native_dialog::open_profiles(&app, false)?;
+                }
+                _ if id.starts_with("profile:") => {
+                    client.activate_profile(id[8..].to_string())?;
+                }
+                _ if id.starts_with("agent:") => {
+                    let agent_id = &id[6..];
+                    let agent = client
+                        .list_agents()?
+                        .into_iter()
+                        .find(|agent| agent.id == agent_id)
+                        .ok_or("Agent is no longer available")?;
+                    if !agent.installed && !agent.recorded {
+                        return Err("Agent is not installed".into());
+                    }
+                    let connect = !agent.recorded;
+                    let options = ConnectOptions::default();
+                    let preview =
+                        client.preview_agent(agent.id.clone(), connect, options.clone())?;
+                    client.apply_agent(agent.id, connect, preview.revision, options)?;
+                }
+                _ => return Ok(()),
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            client.report_error(error);
+            show_window(&app);
+        }
+        let state = client.state().unwrap_or_else(|_| client.cached_state());
+        sync(&app, &state);
+        if id.starts_with("agent:") {
+            if let Ok(agents) = client.list_agents() {
+                sync_agents(&app, &agents);
+            }
+            let _ = app.emit("gateway://agents-changed", ());
+        }
+    });
+}
+
+pub fn sync_agents(app: &AppHandle, agents: &[AgentStatus]) {
+    let handle = app.clone();
+    let agents = agents.to_vec();
+    let _ = app.run_on_main_thread(move || sync_agents_inner(&handle, &agents));
+}
+
+fn sync_agents_inner(app: &AppHandle, agents: &[AgentStatus]) {
+    let Some(menu) = app.try_state::<TrayMenu>() else {
+        return;
+    };
+    for (kind, item) in &menu.agents {
+        let agent = agents.iter().find(|agent| agent.id == kind.id());
+        let _ = item.set_checked(agent.is_some_and(|agent| agent.recorded));
+        let _ = item.set_enabled(
+            agent.is_some_and(|agent| agent.recorded || (agent.installed && agent.error.is_none())),
+        );
+        let suffix = match agent {
+            Some(agent) if agent.attention.is_some() || agent.error.is_some() => {
+                " - Needs attention"
+            }
+            Some(agent) if agent.installed => "",
+            _ => " - Not installed",
+        };
+        let _ = item.set_text(format!("{}{suffix}", kind.name()));
+    }
+}
+
+fn sync_profiles(app: &AppHandle, state: &GatewayState, menu: &TrayMenu) -> tauri::Result<()> {
+    let Ok(mut cached) = menu.profile_items.lock() else {
+        return Ok(());
+    };
+    let changed = cached.as_ref().is_none_or(|items| {
+        items.len() != state.profiles.len()
+            || items
+                .iter()
+                .zip(&state.profiles)
+                .any(|(entry, profile)| entry.id != profile.id || entry.name != profile.name)
+    });
+    if changed {
+        while menu.profiles.remove_at(0)?.is_some() {}
+        let mut items = Vec::new();
+        for profile in &state.profiles {
+            let item =
+                CheckMenuItemBuilder::with_id(format!("profile:{}", profile.id), &profile.name)
+                    .build(app)?;
+            menu.profiles.append(&item)?;
+            items.push(ProfileMenuItem {
+                id: profile.id.clone(),
+                name: profile.name.clone(),
+                item,
+            });
+        }
+        if !items.is_empty() {
+            menu.profiles
+                .append(&tauri::menu::PredefinedMenuItem::separator(app)?)?;
+        }
+        menu.profiles.append(
+            &MenuItemBuilder::with_id(
+                "profiles",
+                if items.is_empty() {
+                    "New Profile…"
+                } else {
+                    "Manage Profiles…"
+                },
+            )
+            .build(app)?,
+        )?;
+        *cached = Some(items);
+    }
+    for (entry, profile) in cached.iter().flatten().zip(&state.profiles) {
+        let _ = entry
+            .item
+            .set_checked(profile.id == state.active_profile_id);
+        let _ = entry.item.set_enabled(
+            state.status != "verifying"
+                && desktop_runtime::service_config::profile_has_credential(profile),
+        );
+    }
+    Ok(())
+}
+
+fn toggle_or_open_settings(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let client = app.state::<std::sync::Arc<Client>>();
+        let Ok(state) = client.state() else {
+            sync(&app, &client.cached_state());
+            show_window(&app);
+            return;
+        };
+        if !protection_action_enabled(&state) {
+            sync(&app, &state);
+            return;
+        }
+        if !should_stop(&state) && !active_profile_ready(&state) {
+            sync(&app, &state);
+            show_window(&app);
+            let opened = if state.profiles.is_empty() {
+                crate::native_dialog::open(&app, "setup-profile", false, None, None)
+            } else {
+                crate::native_dialog::open_profiles(&app, true)
+            };
+            if let Err(error) = opened {
+                client.report_error(error);
+            }
+            return;
+        }
+        client.toggle();
+        let state = client.state().unwrap_or_else(|_| client.cached_state());
+        sync(&app, &state);
+    });
+}
+
+fn sync_autostart(app: &AppHandle) {
+    let menu = app.state::<TrayMenu>();
+    let checked = menu.autostart.is_checked().unwrap_or(false);
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let menu = app.state::<TrayMenu>();
+        let result = set_open_at_login(&app, checked);
+        if let Err(error) = result {
+            let _ = menu.autostart.set_checked(!checked);
+            app.state::<std::sync::Arc<Client>>()
+                .report_error(format!("Open at Login could not be changed: {error}"));
+        }
+        let client = app.state::<std::sync::Arc<Client>>();
+        if let Ok(preferences) = crate::load_launch_preferences(&app, &client) {
+            let _ = app.emit("gateway://launch-preferences", preferences);
+        }
+    });
+}
+
+pub fn set_open_at_login(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    crate::autostart::set_enabled(app, enabled)
+        .map_err(|error| format!("Open at Login could not be changed: {error}"))?;
+    if let Some(menu) = app.try_state::<TrayMenu>() {
+        let _ = menu.autostart.set_checked(enabled);
+    }
+    Ok(())
+}
+
+/// Keep the status separate from the action the user can take.
+pub fn sync(app: &AppHandle, state: &GatewayState) {
+    let handle = app.clone();
+    let state = state.clone();
+    let _ = app.run_on_main_thread(move || sync_inner(&handle, &state));
+}
+
+fn sync_inner(app: &AppHandle, state: &GatewayState) {
+    let status_line = protection_title(state);
+    if let Some(menu) = app.try_state::<TrayMenu>() {
+        let _ = menu.status.set_text(&status_line);
+        let _ = menu.toggle.set_text(protection_action(state));
+        let _ = menu.toggle.set_enabled(protection_action_enabled(state));
+        let _ = menu.endpoint.set_enabled(state.proxy_url.is_some());
+        if let Err(error) = sync_profiles(app, state, &menu) {
+            eprintln!("Cannot refresh tray profiles: {error}");
+        }
+        let protected = is_protected(state);
+        if menu.protected_icon.load(Ordering::Relaxed) != protected {
+            if let Err(error) = apply_icon(
+                app,
+                &menu,
+                protected,
+                menu.dark_icon.load(Ordering::Relaxed),
+            ) {
+                eprintln!("Cannot update tray protection state: {error}");
+            }
+        }
+    }
+    if let Some(tray) = app.tray_by_id("gateway") {
+        let _ = tray.set_tooltip(Some(format!("{APP_NAME} - {status_line}")));
+    }
+}
+
+/// System theme observers call this independently of the application's theme.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn set_dark(app: &AppHandle, dark: bool) -> tauri::Result<()> {
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        if let Some(menu) = handle.try_state::<TrayMenu>() {
+            if menu.dark_icon.load(Ordering::Relaxed) != dark {
+                if let Err(error) = apply_icon(
+                    &handle,
+                    &menu,
+                    menu.protected_icon.load(Ordering::Relaxed),
+                    dark,
+                ) {
+                    eprintln!("Cannot update tray system theme: {error}");
+                }
+            }
+        }
+    })
+}
+
+fn apply_icon(app: &AppHandle, menu: &TrayMenu, protected: bool, dark: bool) -> tauri::Result<()> {
+    if let Some(tray) = app.tray_by_id("gateway") {
+        tray.set_icon_with_as_template(
+            Some(tray_icon(protected, dark)?),
+            cfg!(target_os = "macos"),
+        )?;
+        menu.protected_icon.store(protected, Ordering::Relaxed);
+        menu.dark_icon.store(dark, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+fn tray_icon(protected: bool, dark: bool) -> tauri::Result<tauri::image::Image<'static>> {
+    let image =
+        tauri::image::Image::from_bytes(include_bytes!("../../assets/tray/trayTemplate@2x.png"))?;
+    let mut rgba = image.rgba().to_vec();
+    let foreground = if !cfg!(target_os = "macos") && dark {
+        255
+    } else {
+        0
+    };
+    for pixel in rgba.as_chunks_mut::<4>().0 {
+        pixel[..3].fill(foreground);
+        if !protected {
+            pixel[3] = (u16::from(pixel[3]) * 45 / 100) as u8;
+        }
+    }
+    Ok(tauri::image::Image::new_owned(
+        rgba,
+        image.width(),
+        image.height(),
+    ))
+}
+
+fn is_protected(state: &GatewayState) -> bool {
+    state.status == "verified"
+        && !state.configuration_verification
+        && state.api_key_saved
+        && state.endpoint_error.is_none()
+}
+
+fn protection_title(state: &GatewayState) -> String {
+    if !is_protected(state) {
+        return menu_state(state).into();
+    }
+    let mode = if state.config.require_production_os {
+        "Protected"
+    } else {
+        "Protected (Dev mode)"
+    };
+    let Some(since) = state.protected_since else {
+        return mode.into();
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let minutes = now.saturating_sub(since) / 60;
+    format!("{mode} - {}h {:02}m", minutes / 60, minutes % 60)
+}
+
+#[derive(Default)]
+pub struct MainWindowPresentation {
+    ready: AtomicBool,
+    requested: AtomicBool,
+}
+
+pub fn main_window_ready(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("Only the main window can announce its content is ready".into());
+    }
+    let app = window.app_handle();
+    let presentation = app.state::<MainWindowPresentation>();
+    if !presentation.ready.swap(true, Ordering::SeqCst)
+        && presentation.requested.load(Ordering::SeqCst)
+    {
+        show_window(app);
+    }
+    Ok(())
+}
+
+pub fn show_window(app: &AppHandle) {
+    let presentation = app.state::<MainWindowPresentation>();
+    presentation.requested.store(true, Ordering::SeqCst);
+    if !presentation.ready.load(Ordering::SeqCst) {
+        return;
+    }
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(window) = handle.get_webview_window("main") else {
+            return;
+        };
+        let _ = window.show();
+        activate_app();
+        let _ = window.set_focus();
+    });
+}
+
+fn should_stop(state: &GatewayState) -> bool {
+    state.should_stop_protection()
+}
+
+fn protection_action_enabled(state: &GatewayState) -> bool {
+    !(state.status == "verifying" && state.configuration_verification)
+        && (should_stop(state) || state.endpoint_error.is_none())
+}
+
+fn protection_action(state: &GatewayState) -> &'static str {
+    if state.reconnecting {
+        return "Cancel reconnection";
+    }
+    if state.status == "verifying" && !state.configuration_verification {
+        "Cancel verification"
+    } else if should_stop(state) {
+        "Stop protection"
+    } else if !active_profile_ready(state) {
+        "Set Up Profile…"
+    } else {
+        "Start protection"
+    }
+}
+
+fn menu_state(state: &GatewayState) -> &'static str {
+    if state.reconnecting {
+        return "Reconnecting - requests paused";
+    }
+    if state.endpoint_error.is_some() {
+        return "Local API unavailable";
+    }
+    if state.status == "stopped" && !active_profile_ready(state) {
+        return "Not protected - profile required";
+    }
+    match state.status.as_str() {
+        "verifying" if state.configuration_verification => "Verifying configuration",
+        "verifying" => "Verifying service",
+        "verified" if state.configuration_verification => "Not protected - configuration verified",
+        "verified" if !state.api_key_saved => "Not protected - API key required",
+        "verified" => "Protected",
+        "blocked" => "Protection blocked - service identity changed",
+        "error" => "Not protected - verification failed",
+        _ => "Not protected",
+    }
+}
+
+fn active_profile_ready(state: &GatewayState) -> bool {
+    state.api_key_saved
+        && state.profiles.iter().any(|profile| {
+            profile.id == state.active_profile_id
+                && desktop_runtime::service_config::profile_has_credential(profile)
+        })
+}
+
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+fn activate_app() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+
+    if let Some(marker) = MainThreadMarker::new() {
+        NSApplication::sharedApplication(marker).activateIgnoringOtherApps(true);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn activate_app() {}
+
+#[cfg(test)]
+mod tests {
+    use super::{menu_state, protection_action, protection_action_enabled, should_stop};
+    use desktop_runtime::contracts::{
+        ConfidentialProfile, GatewayState, ProfileAuth, ServiceProvider,
+    };
+
+    fn state(status: &str, api_key_saved: bool) -> GatewayState {
+        GatewayState {
+            status: status.to_string(),
+            api_key_saved,
+            ..GatewayState::default()
+        }
+    }
+
+    #[test]
+    fn protection_action_matches_the_runtime_operation() {
+        assert_eq!(
+            menu_state(&GatewayState::default()),
+            "Not protected - profile required"
+        );
+        assert_eq!(menu_state(&state("verified", true)), "Protected");
+        assert_eq!(
+            menu_state(&state("verified", false)),
+            "Not protected - API key required"
+        );
+        assert_eq!(
+            protection_action(&state("verified", true)),
+            "Stop protection"
+        );
+        assert_eq!(
+            protection_action(&state("verifying", false)),
+            "Cancel verification"
+        );
+        assert!(should_stop(&state("verifying", false)));
+        assert!(should_stop(&state("blocked", true)));
+        assert!(!should_stop(&state("error", true)));
+        for status in ["stopped", "error"] {
+            let mut reconnecting = state(status, true);
+            reconnecting.reconnecting = true;
+            assert!(should_stop(&reconnecting));
+            assert_eq!(protection_action(&reconnecting), "Cancel reconnection");
+            reconnecting.configuration_verification = true;
+            assert!(!should_stop(&reconnecting));
+        }
+    }
+
+    #[test]
+    fn stopped_state_requires_a_saved_active_credential() {
+        let mut ready = state("stopped", true);
+        ready.active_profile_id = "profile-1".to_string();
+        ready.profiles.push(ConfidentialProfile {
+            credential_ref: None,
+            id: "profile-1".to_string(),
+            name: "Private AI".to_string(),
+            provider: ServiceProvider::Custom,
+            remote_url: "https://private.example.com".to_string(),
+            auth: ProfileAuth::ApiKey,
+            credential_saved: Some(true),
+            verified_at: None,
+        });
+        assert_eq!(menu_state(&ready), "Not protected");
+        assert_eq!(protection_action(&ready), "Start protection");
+
+        ready.status = "verified".into();
+        ready.configuration_verification = true;
+        assert!(!should_stop(&ready));
+        assert_eq!(protection_action(&ready), "Start protection");
+        assert_eq!(menu_state(&ready), "Not protected - configuration verified");
+        assert!(protection_action_enabled(&ready));
+
+        ready.status = "verifying".into();
+        assert!(!should_stop(&ready));
+        assert!(!protection_action_enabled(&ready));
+        assert_eq!(protection_action(&ready), "Start protection");
+
+        ready.status = "stopped".into();
+        ready.configuration_verification = false;
+
+        ready.profiles[0].credential_saved = Some(false);
+        assert_eq!(menu_state(&ready), "Not protected - profile required");
+        assert_eq!(protection_action(&ready), "Set Up Profile…");
+    }
+}

@@ -1,0 +1,1124 @@
+# Private AI Proxy
+
+Cross-platform Tauri desktop app that turns the bundled `private-ai-proxy serve` verifier
+into a local gateway for Codex, Claude Code, OpenCode, Pi, Hermes, OpenClaw, and
+Oh My Pi. One Rust
+runtime owns policy, persistence, credentials, usage, agent projection, and
+process lifecycle. A shared React renderer owns the dense product UI, while
+Tauri delegates windows, menus, tray integration, file dialogs, confirmation
+dialogs, clipboard, autostart, and application lifecycle to each operating
+system.
+
+The app is now Private AI Proxy; the remote inference service remains Private AI
+Gateway. This is a fresh application identity (`org.dstack.private-ai-proxy`)
+with its own data and credential namespace; old beta configuration is not migrated.
+The only installed CLI is `private-ai-proxy`. It combines local management with ACI's `verify`,
+`audit`, `sessions`, `send` and `serve` commands using the same Rust source.
+The existing standalone `aci` binary is unchanged in the repository but is no
+longer bundled. The backend launches `private-ai-proxy serve` with strict receipt enforcement.
+Build the unified CLI with `cargo build --features desktop-client --bin private-ai-proxy`;
+ordinary server and standalone ACI builds do not acquire desktop dependencies.
+
+macOS releases provide separate Apple Silicon (`arm64`) and Intel (`x64`)
+packages. Local builds default to the host architecture; pass `--target` to
+build for another target after installing it with `rustup target add`.
+CI checks the architecture of the app and its three bundled executables, and runs Intel packages
+through Rosetta on macOS 26. Explicit `--target universal-apple-darwin` builds
+remain available when both Rust targets are installed.
+
+Public download names follow
+`private-ai-proxy[-cli]-<version>-<platform>-<architecture>.<format>`.
+For example, `private-ai-proxy-0.1.2-beta.22-macos-arm64.dmg` and
+`private-ai-proxy-cli-0.1.2-beta.22-macos-x64.tar.gz`.
+Tauri's `darwin-aarch64` and `darwin-x86_64` updater entries reference separate
+signed archives. CI shares one Cargo target directory across the
+manifests, uses the same distribution entry point as local builds, and avoids
+generating a redundant desktop ZIP.
+GitHub's official cache restore/save actions cache registry sources and Cargo
+dependency/build/fingerprint directories across all manifests. Cache keys cover
+the toolchain and all four manifests and lockfiles; final bundles are excluded.
+Failed builds save a separate partial key so they cannot replace a complete cache.
+
+Launching with no profiles stays on Overview. Starting protection without a
+profile opens New Profile and resumes protection after successful verification
+and saving; opening profile settings manually never opts into protection.
+Windows and Linux sidebars do not reserve a macOS traffic-light region.
+
+Windows uses Tauri's NSIS template with generated 150x57 header and 164x314
+sidebar artwork and the branded application icon for installation and removal.
+Installer branding is the approved app icon with "Private AI Proxy" and
+"by dstack TEE", matching the application header. The product wordmarks are
+outlined vectors; the standalone upstream Dstack wordmark is not used.
+The official NSIS hooks stop the backend and maintain current-user CLI registration.
+macOS uses a generated 660x440 DMG background with native app and Applications
+icons. Artwork uses the approved icon exports and vector wordmarks, without system fonts.
+CI sets Tauri's `TAURI_BUNDLER_DMG_IGNORE_CI=true` on macOS so the official
+Finder customization step actually applies the background and icon positions.
+The app and Applications centers are (180, 230) and (480, 230), with the arrow
+centered between them in a 660x440 window. CI mounts the built DMG read-only
+and verifies both Finder positions, window dimensions and selected background
+using `scripts/verify-dmg-layout.mjs`, then detaches it.
+Linux DEB/RPM packages use the branded application icons and metadata in the
+system package manager; they do not have a custom installer wizard.
+See [Tauri DMG configuration](https://v2.tauri.app/reference/config/#dmgconfig)
+and [NSIS customization](https://v2.tauri.app/distribute/windows-installer/#customizing-the-nsis-installer).
+Published releases keep installers, required updater archives, three portable CLI
+archives, `latest.json` and one `SHA256SUMS`. Detached updater signatures remain
+embedded in the manifest; duplicate archives and CLI DEB/RPM builds remain CI
+artifacts rather than additional release downloads.
+
+The CLI archives are independent distributions: no Tauri UI or desktop installation
+is required. Extract all three executables together, then use `private-ai-proxy --help` or
+`private-ai-proxy --json schema`. A working profile can be configured entirely through `private-ai-proxy`.
+
+Profiles, Local API settings, Privacy verification, and Usage proof open as
+document-modal AppKit sheets on macOS, without traffic lights or an independent
+title bar. Done, Cancel, and Escape dismiss the sheet, including loading/error
+states. Windows uses owned windows and Linux uses transient windows. Complex content stays in the shared renderer
+so behavior and accessibility do not drift across three platform-specific UI
+implementations. Destructive confirmations and file destinations use the
+operating system's native dialogs directly.
+
+### Renderer Components
+
+The renderer uses the official shadcn/ui **Base Luma** style with Base UI,
+Tailwind CSS 4, Lucide, and the official shadcn Emerald light/dark action palette
+over Neutral surfaces. Successful states reuse primary; status badges use
+neutral text and borders with only their leading dot colored. Model charts retain
+distinct categorical colors rather than the Emerald theme's monochrome scale.
+SidebarMenuButton uses Luma's unmodified rounded-xl geometry. Buttons and card/dialog
+surfaces use their respective Luma radius tokens, not a single shared radius.
+Continuous list rows keep square internal edges inside their rounded group.
+Source: https://github.com/shadcn-ui/ui/blob/main/apps/v4/registry/themes.ts
+
+Update the theme with `npx shadcn apply b1VnI5nk --only theme --yes` in this
+directory. `theme.css` is CLI-managed; application status colors and categorical
+chart colors live in `semantic.css`. Appearance uses shadcn's `.dark` convention;
+a local blocking bootstrap applies the native/system appearance before styles
+and React load. Do not duplicate generated theme or radius definitions.
+There is no separate success palette. Warnings use Tailwind amber and errors
+use the destructive token. Overview decoration remains neutral.
+Protection switches use primary when enabled, with warning taking precedence in
+development mode; preference and agent switches retain the default theme.
+`semantic.css` contains application aliases and warning/chart tokens.
+Product layout, responsive rules, and interaction states use Tailwind utilities
+at their component owners. `base.css` contains only global defaults and animation
+keyframes; `theme.css` remains managed by shadcn. `NativeDialogHost` owns the shared
+native-window layout. Semantic class names are retained as stable test selectors,
+not as a parallel CSS styling system.
+
+Class composition uses [shadcn-ui/cn](https://github.com/shadcn-ui/cn), migrated
+with `npx shadcn migrate cn --yes`. The shared `lib/utils.ts` re-exports the
+package directly; there is no local merging implementation. CVA and Recharts
+may still depend on `clsx` internally; those dependency contracts are unchanged.
+Tailwind Preflight and shadcn's standard CSS are enabled. System selects retain
+their browser/platform picker. Do not override component dimensions, radii,
+shadows or typography; choose from the official component variants instead.
+
+Component sources in `src/renderer/components/ui` were obtained from the official
+`https://ui.shadcn.com/r/styles/base-luma/{component}.json` registry on 2026-09-05.
+Local changes are import paths and Lucide icon substitution. The account summary follows
+[Item composition](https://ui.shadcn.com/docs/components/base/item#composition)
+and [Item vs Field](https://ui.shadcn.com/docs/components/base/item#item-vs-field).
+Its action menu uses the official Base Luma Dropdown Menu registry (2026-09-09),
+with portal ownership passed into native HTML dialogs.
+Protection controls use the standard 44x20 switch geometry and Base UI behavior.
+Overview aligns the switch with the status text at the top right;
+the profile and info actions sit below. The Agents card reserves three standard
+item rows even when fewer agents are installed; it does not create placeholder
+agents. Elapsed time is visible only while protected, independent of whether a
+session remains resumable. The initial window is 1052x752; saved user window geometry takes
+precedence on later launches.
+Sidebar buttons use Luma's default 36px size, not its 56px large variant.
+`components.json` configures subsequent
+shadcn additions. Use these components for new standard controls; retain semantic
+HTML for navigation/list rows and the operating-system APIs for native surfaces.
+Product statuses use semantic tokens: success for verified/available/connected, muted for
+unknown/inactive, warning for caution states, destructive for errors, and chart tokens for usage.
+Primary remains reserved for commands and selection. The default Luma
+appearance is not an AppKit emulation: WebView content is still web content.
+
+Typography uses the platform system font and Tailwind typography tokens:
+text-xs for captions, text-sm for body/list text,
+text-lg for page/dialog headings, text-xl for metrics, and text-2xl for the
+Overview protection status. Product CSS uses these tokens instead of intermediate
+13/17/19/21px sizes. Unmodified upstream component-specific typography, such as
+Calendar's weekday labels, retains the shadcn default.
+Sidebar selection uses standard weight
+and fixed control geometry; this prevents control movement, not changes in glyph
+advance widths. CSS cannot add a variation axis missing from a font. Apple's
+SF Pro download inspected on 2026-09-07 (Version 22.0d4e4) exposes only
+`wdth`, `opsz`, and `wght`, not `GRAD`. The inspected `SF-Pro.ttf` SHA-256 was
+`26e2ab7338d25b79276b9363f22bb7576850f7f326a8fb97ba2419cf0f923012`.
+The downloadable font is not a guarantee about every OS-internal font build.
+Strict grade-only emphasis would require a licensed, locally bundled font with
+that axis, such as Roboto Flex, while keeping `font-weight` unchanged.
+We do not simulate grade with outlines, duplicate text, or width compensation.
+Sources: [Apple Fonts](https://developer.apple.com/fonts/),
+[SF Pro download](https://devimages-cdn.apple.com/design/resources/download/SF-Pro.dmg),
+[Roboto Flex axes](https://github.com/google/fonts/blob/main/ofl/robotoflex/METADATA.pb).
+
+Shared product compositions live one layer above `components/ui`:
+
+- `controls.tsx`: named icon actions and protection/preference switches.
+- `sheet.tsx`: the single modal lifecycle, heading and action layout. It uses
+  HTML `showModal()` for focus containment inside native child-window webviews,
+  rather than adding a second library focus trap over the platform sheet.
+- `settings.tsx`: grouped settings, navigation rows, toggles and labeled fields.
+
+Forms use the official Field components. Local API fields use FieldGroup and
+FieldSeparator, with the Luma InputGroup for inline key actions; standalone
+option rows use Item outline. Client endpoint previews are omitted from Settings; the Overview help
+button opens a native examples sheet with cURL, Python and JavaScript tabs.
+Examples use the configured endpoint and discovered models. The local client key
+is read when the example sheet opens and embedded in its copyable snippets; copied
+snippets are sensitive. Key changes invalidate the displayed code. Provider keys
+are never used in examples.
+
+Longer choice lists use Luma Select, including date presets and calendar
+month/year navigation; listen addresses use Combobox. Theme uses an icon
+ToggleGroup and the update channel uses a two-option ToggleGroup. General
+settings rows are 52px with no inter-row gap; descriptive rows grow naturally.
+ChoiceSelect shares composition and portal ownership, not a replacement menu
+implementation. Menus inside HTML dialogs portal into their owning dialog.
+Form scroll regions own horizontal padding so the standard 3px focus ring is
+not clipped. Continuous bordered lists keep edge-to-edge hover backgrounds
+and use an inset focus ring on full-row actions. Image clipping and actual
+scroll viewports remain intact.
+
+Profiles offers native file-picker import/export of a versioned JSON configuration
+backup. It contains only profile names, provider IDs and service URLs, not keys,
+OAuth accounts, verification state, active selection or security policy. Imports
+are limited to 256 KiB and 50 profiles, validate every entry before writing, skip
+exact normalized duplicates, allocate new IDs and never overwrite an existing
+profile. Imported entries need credentials and fresh verification before use.
+Exported configurations may still reveal private service names and endpoints.
+
+About offers a redacted diagnostics export. It uses a strict field allowlist of
+build/platform metadata, boolean gateway state and numeric counts. It excludes
+raw stderr, error messages, URLs, profile names, paths, request bodies, model IDs
+and credentials. Both exports use the existing atomic writer and native file
+dialogs; neither starts a gateway or reads the OS credential store.
+
+Network address changes use [`netwatcher` 0.8](https://docs.rs/netwatcher/0.8.0/),
+which subscribes to native interface events rather than adding a polling loop.
+The backend owns native wake monitoring: IORegisterForSystemPower on macOS,
+PowerRegisterSuspendResumeNotification on Windows and login1 PrepareForSleep(false)
+on Linux. There is no elapsed-time inference or UI dependency. Registrations are
+removed when the backend exits.
+Linux reconnects and re-subscribes every five seconds after subscription failure
+or stream termination, with cancellation on backend exit. Monitor availability is
+visible in Settings and redacted diagnostics. Environments without login1 retain
+network recovery but cannot report wake until the service becomes available.
+Recovery revokes the old transport generation and holds agent routing at Local API
+until fresh verification succeeds. The user session is independent of that transport:
+network/wake recovery, interrupted-verification retries, profile changes and Local
+API restarts preserve its ID, start time and usage. SQLite stores the current
+session marker so an abnormal backend exit does not silently split usage. Restart
+loads its usage summary but never restores a verified identity or forwarding
+permission. An interrupted session resumes automatically after verification.
+Manual stop, explicit backend shutdown, Reset settings and security blocks end its
+persistent resume marker. A blocked candidate configuration does not end the
+original profile session.
+If all non-loopback addresses disappear it waits for an address to
+return. Address presence is not a claim of internet reachability; a failed fresh
+verification retries after 3, 6, 12 and 24 seconds, then at most once every 30 seconds
+while connection intent remains active. Protection startup times out after 120
+seconds instead of hanging indefinitely; configuration verification keeps its
+45-second budget. Successful verification resets the backoff.
+A failed local listener retries the same configured address and port; it never
+chooses a different endpoint automatically.
+A structured `keyset_changed` event requests fresh verification without ending
+connection intent. Actual verification failures and unknown security blocks
+require user intervention; the controller never retries them as normal rotation.
+An explicit Protect on launch preference can start a new, fully verified session
+when the backend is launched again. Events survive a busy
+lifecycle lock or in-progress verification and are revisited by the existing
+reconciliation loop without busy-waiting. Manual start/stop, backend exit/install and
+successful active-profile changes cancel recovery intent; failed and no-op imports
+do not. Address changes do not interrupt loopback services; failed local services
+can still retry without an external network address.
+Real sleep/wake, VPN changes and per-platform notification delivery still require
+installed-app acceptance tests.
+
+Notifications has its own native dialog with a master switch and gateway,
+Local API and response-verification categories. All default to enabled; saved
+choices are never reset on launch. Delivery uses the official Tauri notification
+plugin from Rust, independent of renderer lifecycle. Each category is limited
+to one notification per minute, and foreground faults are not replayed on hide.
+Notification text never includes credentials, prompts, endpoints or profile names.
+Authorization is checked on launch and focus, but permission warnings appear
+only in Notifications. macOS uses UNUserNotificationCenter settings and Windows
+uses ToastNotifier.Setting. Enabling the master switch automatically requests
+undetermined permission; denied permission offers system settings instead.
+macOS notification authorization and banner availability are separate fields;
+disabled banners are not reported as denied authorization.
+Linux has no portable per-app authorization query, so the dialog reports
+that limitation without claiming permission is granted. Focus modes may still
+suppress delivery. Installed packages must be tested on each OS; tray state,
+update badges and inline errors remain available without notification delivery.
+
+Native windows wait for required content, the initial appearance, fonts and local
+image decoding before requesting presentation. Failed image decoding does not
+block the window. Example dialogs also wait for their local key read.
+The main window uses the same readiness gate instead of showing during native
+setup. Its config uses `create: false`; `WebviewWindowBuilder::from_config` creates
+it after the backend client and native services are registered, so initial IPC
+requests cannot race managed-state initialization. Saved geometry still restores
+through the window-state plugin's window-ready hook. Open at Login stays hidden
+until explicitly requested. This follows
+[Tauri's frontend-ready pattern](https://v2.tauri.app/learn/splashscreen/), without
+adding a splash screen. It is a content-readiness gate, not a compositor fence.
+Dialog windows are created lazily and reused after closing. Closing unmounts the
+form, clearing drafts, credential inputs, and data subscriptions; reopening mounts
+fresh content from the backend subscription snapshot. Mutations still use fresh
+backend validation. Update dialogs are one-shot, and profile editors on Windows
+and Linux are recreated because their owner is fixed at creation.
+Each dialog kind retains at most one WebView, trading bounded memory for faster
+repeat opens. The first open still pays the platform's WebView creation cost.
+Dialog windows are not user-resizable; screen-boundary fitting remains enabled.
+Profile editors use 580x560 and Local API settings use 600x512 content areas to
+fit standard fields without scrolling. Long verification details and small-screen
+layouts scroll within the body while keeping the footer visible.
+Both emitters and JavaScript listeners target the owning WebviewWindow. Tauri's
+default Any listener also receives targeted events, so emit_to alone does not
+isolate nested sheets.
+Native dialogs receive the saved appearance with their initial state and apply
+it in a layout effect, avoiding a temporary System-theme render before the async
+preferences read. Recharts is loaded only on Usage; its fixed-height shell stays
+synchronous. Snapshot-based presentation gates are not used: a successful snapshot
+does not guarantee compositor readiness, and a failed snapshot must not block a
+usable dialog. WebKit has no general public first-composited-frame event.
+No transparent prewarming, animation-frame waits, or presentation sleeps are used.
+A 20-second failed-handshake deadline cleans up an
+unpresented window and reports the failure in the main window. Browser checks
+cover readiness ordering; compositor behavior still requires macOS acceptance.
+SheetActions provides one shared footer divider.
+
+Rendering follows [Tauri's system-WebView architecture](https://v2.tauri.app/concept/architecture/):
+Recharts, the usage table, and the date picker load on demand. Cipher motion uses
+CSS transforms without per-row layout observers. React `useMemo` keeps chart
+aggregation and number formatters stable, and `memo` isolates the plot from
+unrelated page updates. The session clock follows the Page Visibility API and
+resynchronizes from wall time when a hidden window becomes visible.
+These are frontend optimizations; they do not replace platform compositor testing.
+References: [React memo](https://react.dev/reference/react/memo),
+[Page Visibility API](https://developer.mozilla.org/en-US/docs/Web/API/Page_Visibility_API).
+
+Keep dependency updates within [Tauri's version compatibility rules](https://v2.tauri.app/develop/updating-dependencies/):
+the JavaScript API and Rust crate share a minor version, paired plugins share an
+exact version, and Wry is resolved through Tauri rather than overridden separately.
+
+The dstack macOS 26+ icon uses the owner's hand-edited Icon Composer project,
+including its gradient, foreground placement and native appearance materials.
+Every static application and installer icon uses the approved Light PNG.
+Only macOS dark appearance uses the Dark artwork, through the native .icon
+project and the macOS renderer.
+The build does not synthesize a replacement icon design.
+Disabled controls are reserved for in-flight mutations, missing/invalid inputs,
+unavailable data, pagination boundaries and dependent settings. Development OS
+changes and deleting a profile during protection use explicit stop-and-confirm
+flows. Deletion aborts if stopping fails; backend lifecycle checks remain in
+force if a concurrent client starts protection again. Preset service endpoints
+are read-only and copyable, not disabled merely because they are preset values.
+Scroll surfaces use the system's normal scrollbar behavior and symmetric content
+padding, without a permanently reserved gutter or an extra right-side lane.
+
+Oh My Pi's local SVG comes from can1357/oh-my-pi, commit
+08db86f87bda871e574eda56de39745523836116, assets/icon.svg (MIT; adjacent LICENSE).
+Sidebar navigation uses SidebarMenu, information rows use Item, status labels use
+Badge, and errors use Alert/FieldError. Agent detection runs on startup, window
+activation and Agents navigation, plus background reconciliation; no refresh button.
+Use the default switch size except for the Overview main switch; do not retain legacy CSS aliases for removed radii.
+
+The sidebar update badge is pinned at the bottom and invokes the same confirmed
+installation action as Settings. About displays the installed version and update
+status/action together on one row. After native confirmation, the existing native
+child-window mechanism presents update progress (an attached sheet on macOS, an
+owned window on Windows/Linux), with the shared shadcn Progress content. The web
+preview uses Dialog. A backend snapshot replays progress and failures to newly
+loaded windows; closing is disabled while installation cannot be cancelled.
+Failures are dismissible. Settings, Profile and usage actions
+share the same Item-based clickable row. Lists use explicit Separator components.
+
+Usage charts use shadcn Chart and Recharts, loaded only on the Usage page.
+SQLite supplies per-day/per-model aggregates using the full filter scope,
+independently of pagination. The ten largest models by tokens have individual
+stacks; additional models are combined as Other without dropping usage. Colors
+come from the complete model facet so filtering does not recolor a model.
+Input/output are not separate stacks. Empty dates are filled and ranges over 90 days are
+aggregated monthly without dropping totals. Chart configuration contains labels
+only; Bar colors reference static theme variables to avoid dynamic style tags
+under the production CSP. Chart metric views use Tabs. Date filtering uses the
+official Calendar/Popover with local-day boundaries, presets and an explicit
+Apply/Cancel flow. Query, summary, chart and CSV share the same date bounds.
+Usage details use shadcn Table with TanStack Table v9 manual cursor pagination
+(20/50/100 rows), the shared outcome/number presentation, and token-detail tooltips.
+Rows open the same proof dialog as Overview; no page-local sorting or unmeasured
+latency/throughput fields are exposed. Calendar, table and chart load lazily.
+The generated Calendar forwards its day-button ref to preserve keyboard focus.
+
+Short help uses the shared Hint composition of shadcn Tooltip, TooltipTrigger,
+and TooltipContent. The base-luma colors, spacing, radius, arrow, and animation
+are unchanged. Two integration adaptations remain: TooltipContent accepts a portal
+container for HTML dialogs, and composed triggers preserve the rendered control's
+data-slot rather than replacing a switch/badge slot with tooltip-trigger.
+Tooltips inside HTML dialogs portal into that dialog's top layer. Action menus
+and agent repair actions remain click-open Popovers; chart data uses ChartTooltip.
+Browser title attributes are not used for application help. Switches, labeled
+buttons, provider choices, ordinary fields and visible evidence do not repeat
+their labels in tooltips.
+
+| Surface | Hint content | Component / interaction |
+| --- | --- | --- |
+| Overview privacy info / Local API help | Dialog name | Tooltip; click opens the dialog |
+| Edit, copy, reveal, rotate, export and other icon actions | Action name | Tooltip; click executes the action |
+| Theme icon toggles | System / Light / Dark | Tooltip; click selects the theme |
+| Usage model | Full text that may be truncated | Tooltip |
+| Non-loopback warning | Network exposure explanation | Tooltip |
+| Usage table token count | Input, output, cache counts | Tooltip, hover/focus |
+| Missing usage in proof | Why unavailable or not applicable | Tooltip, hover/focus |
+| Usage chart | Model and metric at the hovered date | shadcn ChartTooltip (Recharts) |
+| Agent attention badge | Explanation and repair command | Popover, click; includes an action |
+| Date-range picker | Calendar and Apply/Cancel | Popover, click; includes controls |
+
+Profile saves continue to verify the endpoint/key before persisting or
+reconnecting. No separate verified-configuration badge or credential-delete
+action is shown. Agent switches show optimistic pending state instead of a
+disabled flash, serialize writes per agent, retain the latest requested state,
+and roll back on failure. Concurrent scans are coalesced. Detection feedback is
+automatic and does not add expanding status text to the Agents toolbar.
+
+Settings offers System (default), Light and Dark appearance, persisted in runtime
+preferences. Tauri applies native appearance; renderer windows synchronize through
+an appearance event. Cmd+, opens Settings on macOS through the native app menu;
+Ctrl+, is also handled by the renderer. Native editing shortcuts retain their
+platform roles. Active modal sheets keep their focus rather than being discarded.
+
+Main window position, size and maximized state are persisted by the official
+`tauri-plugin-window-state`; transient dialogs, visibility and decorations are
+excluded. The plugin checks saved positions against connected monitors and leaves
+placement to the OS when the saved monitor is unavailable.
+
+Native close requests and Cmd/Ctrl+W go through the topmost dialog's existing
+dismissal guard before destruction. Saving and update installation cannot be
+bypassed by an OS close button. Cmd+. uses the same cancel guard. Form dialogs
+focus their heading without a visible focus ring. Tab navigation retains standard
+focus indicators on interactive controls.
+Closing a nested editor restores focus to its trigger. The fixed desktop sidebar
+opts out of shadcn's collapse shortcut; Cmd/Ctrl+B is left untouched.
+
+All renderer windows suppress the WebView navigation context menu and reload
+shortcuts (Cmd/Ctrl+R and F5). Text fields and selected text open a Tauri native
+editing menu; read-only fields omit Cut/Paste. Undo/Redo menu roles are macOS-only,
+as documented by Tauri. Normal text-editing shortcuts remain unchanged. File drops
+cannot navigate the embedded browser away from the application.
+
+Blocking Tauri commands use the shared `run_blocking` boundary for filesystem,
+SQLite, credential, agent and startup-preference work. Native window presentation
+stays on the platform thread. Exit restoration runs in the background and prevents
+later configuration changes after successful restoration; failed restoration keeps
+the application open. Async verification and listener operations retain their
+existing lifecycle locks.
+
+### Publishing Updates
+
+The pipeline uses official Tauri CLI signing/updater artifacts for macOS,
+Windows, and Linux DEB/RPM packages, Apple notarytool, and GitHub Actions/CLI. Rust setup/cache actions are
+third-party, not GitHub official actions. All external actions are pinned to commit SHAs; checkout does
+not persist credentials, and signing/publishing secrets are scoped to their steps.
+Release-only npm installs skip lifecycle scripts. PRs and main pushes run CI;
+manual dispatch publishes releases. Feed updates serialize separately by channel.
+Manifest/channel orchestration and Icon Composer compilation are project scripts,
+not replacements for the official signature or updater engines.
+
+Signed packages, draft releases, and feed publication use the `desktop-release`
+GitHub Environment. Configure required reviewers, prevent self-review, and allow
+only the approved release branch and desktop version tags. Review the exact
+source commit before approving a job. Keep signing secrets exclusively in that
+environment; remove repository and organization copies that could bypass it.
+Unsigned packages use a secret-free `desktop-build` environment without release
+approval. Signed builds skip the shared Rust build cache.
+
+The Desktop Tauri workflow defaults `release_channel` to `beta`. Use
+`production_macos=true`, a matching `release_version`, and `publish_release=true`
+to publish signed updates. Leave publication disabled to create a draft.
+
+| Channel | Version | GitHub release | Feed tag |
+| --- | --- | --- | --- |
+| beta (default) | `0.1.2-beta.1` | Pre-release | `desktop-updates-beta` |
+| stable (explicit) | `0.1.2` | Release | `desktop-updates-stable` |
+
+Each feed hosts its own `latest.json` with macOS, Windows, and installer-specific
+Linux DEB/RPM targets. Canonical SemVer, channel, manifest and GitHub Pre-release
+metadata must agree. Feed advancement uses
+SemVer comparison,
+including numeric beta sequence numbers, and never falls back to another channel.
+Release tooling uses `node-semver`; clients use the official Tauri updater's
+default version comparator, signature verification and installer. No custom
+version comparator or prerelease sorting is used. The client only checks that
+the returned manifest's channel matches the user's selection.
+The shared update-feed workflow is called explicitly after publication, even before
+the release-event workflow exists on the default branch, and avoids relying on
+events generated by `GITHUB_TOKEN` to trigger another workflow.
+
+Required update configuration is `TAURI_SIGNING_PRIVATE_KEY` (`desktop-release` Environment Secret)
+and `TAURI_UPDATER_PUBLIC_KEY` (repository Variable), independently of Apple
+signing credentials. Never rotate these casually: installed clients trust the
+embedded public key. Packages without a release version remain non-updating
+test builds. Existing 0.1.0 test installations need one manual installation of
+an updater-enabled version. The withdrawn 0.1.1 used the retired
+`desktop-updates` URL and also needs a manual migration. That URL is not reused.
+Settings > Advanced > Update channel selects Stable or Beta and persists locally.
+The initial default follows the installed package's version. Switching clears
+any pending update and immediately checks the selected channel. Installation
+only accepts a newer version from that channel: choosing Stable while running
+a newer beta waits for a higher stable version instead of downgrading.
+Updates are checked at startup, every six hours, when connectivity returns,
+and on window activation if the last check was over fifteen minutes ago.
+About reads the installed version locally even when update checks fail; it has
+no manual check button, only an install action when a newer version is available.
+A confirmed HTTP 404 means that channel has no published feed yet, not that the
+app is current. Other failures remain errors and are retried automatically.
+Installation
+requires confirmation before stopping protection and restoring agent configs.
+
+Keep policy, persistence and verification in their existing runtime/page owners;
+shared presentation components receive values and callbacks only. `main.tsx`
+creates the React root once, independently of the hot-reloadable renderer.
+
+New/Edit Profile opens a separate child dialog over the Profiles chooser.
+Dialog webviews receive a non-secret state snapshot at initialization and are
+presented after their first content commit, not as empty windows while IPC loads.
+The initial state is consumed synchronously for the first render. Windows that
+still need a credential or historical record stay hidden without a transient
+Loading/Cancel page; errors remain actionable and dismissible.
+
+The tray uses the same transparent monochrome glyph on every platform.
+Protected uses full opacity; stopped or verifying uses 45% alpha. The inactive
+opacity is a product convention, not an Apple-mandated value. macOS uses a
+36px black-and-clear template for Tauri's 18pt image, with a 16pt mark; the system
+controls tint. Windows observes native system color changes and reads
+`SystemUsesLightTheme`, independently of the app's theme. Linux subscribes to
+XDG desktop-portal `color-scheme` changes (1 means dark, 2 means light).
+Dark mode uses white and light mode uses black, without a tile or outline.
+Observers are stopped on application exit. Linux panels with a theme independent
+of the portal preference may require desktop-specific acceptance; the app does
+not pretend the portal describes every custom panel. The native tray menu offers endpoint/key copying, profile selection,
+agent connection checkmarks, and elapsed protection time. Actions use the same
+runtime operations as the main window, including profile reconnection and config restoration.
+
+Agent connections are saved preferences, not permanent config rewrites. Only
+connected agents under active protection receive gateway settings. Stopping,
+verification failure, or stopping the backend restores the owned settings while retaining
+the connection choices. Startup recovers unfinished restoration before any
+automatic connection. Uninstalled agents stay linked but inactive; deleted
+configs are not recreated, and external edits are preserved. Failed restoration
+keeps its journal for retry and prevents backend shutdown from silently discarding it.
+Closing or quitting only the desktop UI leaves protection and the backend running;
+use Stop All and Quit or `private-ai-proxy --yes service stop` to shut down both.
+
+Ordinary CLI output uses short status summaries, lists, and operation results.
+See the [CLI guide](CLI.md) for command discovery, profile editing, reviewed
+agent changes and a core-capability coverage matrix.
+For automation, use `private-ai-proxy --json --non-interactive <command>`. JSON mode never
+prompts; successful results go to stdout, structured errors to stderr.
+`status --watch --json` emits one JSON object per line. Argument errors exit
+with code 2; command failures exit with code 1. Help and version retain Clap's
+standard text output. `--non-interactive` (alias `--no-interactive`) also works
+without JSON and does not grant approval: use `--yes` for changes requiring
+confirmation and `--key-stdin` to supply credentials without a prompt.
+Force-kill and power loss cannot run cleanup; recovery runs on the next launch.
+
+Settings exposes **Open at Login** (the operating system's login item, also
+available in the tray) and **Protect on launch** (off by default). Automatic
+connection verifies the selected profile before applying any agent config.
+
+Local API settings can be saved during protection. The runtime serializes this
+with start/stop and profile changes, restores connected agent configurations,
+rebinds and persists the listener, then re-verifies protection. Reconnection
+projects the new endpoint into connected, installed agents. A bind or save
+failure restores the old listener before attempting to resume protection.
+Requests in flight can be interrupted. Saving identical settings is a no-op.
+
+## Application Updates
+
+On macOS, Windows, and installed Linux DEB/RPM builds, the main window checks once at launch; Settings also
+supports manual checks. Installation requires confirmation. The official Tauri
+updater downloads and verifies the signed archive before the runtime restores
+agent configurations and allows installation. Failed download/signature
+verification leaves running protection untouched; failed installation leaves
+protection stopped. Linux updater manifests use separate
+`linux-x86_64-deb` and `linux-x86_64-rpm` entries, and the locked updater invokes
+the matching native installer with user authorization. AppImage is not shipped;
+existing AppImage users must manually migrate to DEB or RPM.
+
+Update signatures are separate from Apple Developer ID signing/notarization
+and Windows Authenticode. The current Windows release workflow does not provide
+Authenticode signing; installer artwork and publisher metadata do not remove
+SmartScreen warnings. See [Tauri Windows signing](https://v2.tauri.app/distribute/sign/windows/).
+Release administrators must provision these settings:
+
+- Environment Secret `TAURI_SIGNING_PRIVATE_KEY`, generated with the Tauri signer and retained securely.
+- Optional Environment Secret `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, if the key is encrypted.
+- Repository Variable `TAURI_UPDATER_PUBLIC_KEY`, containing the matching public key.
+
+Dispatch `desktop-native.yml` with `production_macos=true`, `release_channel`
+(`beta` by default), and a matching `release_version`. CI requires signing
+settings and creates macOS, Windows, Linux DEB, and Linux RPM signatures plus
+`latest.json`.
+Publishing requires `publish_release=true` or explicitly publishing the draft.
+The selected channel's feed advances only to a newer version. Its public URL is
+`releases/download/desktop-updates-beta/latest.json` or
+`releases/download/desktop-updates-stable/latest.json`; Actions artifacts are not a feed.
+Do not replace an existing version's assets or rotate the signing key casually.
+
+Ordinary test builds without `release_version` keep updates disabled explicitly.
+The first updater-enabled app must be installed manually. For local distribution
+builds, set `TAURI_UPDATER_PUBLIC_KEY`, `TAURI_UPDATER_ENDPOINT` (HTTPS), and the
+Tauri signing secret; the brand overlay enables updater artifacts only when
+both public settings are present. No signing secrets are embedded in the app.
+
+The macOS DMG app automatically attempts user-level `private-ai-proxy` registration after it
+is launched from a stable location. Mounted disk images and App Translocation are
+rejected so they cannot leave a broken command link. It does not request
+administrator privileges or edit shell profiles. Settings > Advanced retains
+startup errors for retry; removing the command there disables registration on
+subsequent launches. No PKG installer is produced.
+
+> Every request goes to a hardware-verified private AI service, and every
+> response is checked against its signed receipt.
+
+## Architecture
+
+```
+Codex / Claude Code / OpenCode / Pi / Hermes / OpenClaw / Oh My Pi
+        │  the agent's own API, a machine-local token
+        ▼
+configured Local API    in-process Rust proxy: agent tokens, catalog check,
+        │               limits, revocation gate, activity; relays unchanged
+        ▼
+127.0.0.1:<dynamic>     bundled `private-ai-proxy serve`: TEE identity, pinned channel,
+        │               policy, forwarding, receipt verification
+        ▼
+https://tee.redpill.ai
+```
+
+The desktop app converts nothing. Whatever an agent sends on
+`/v1/chat/completions`, `/v1/messages`, or `/v1/responses` (and the
+`count_tokens` / `responses/compact` helpers) reaches the verified service with
+the same method, path, query, body, and streaming; the service's status,
+headers, and bytes come back the same way. Whether the service answers a
+protocol is the service's own response, shown as such.
+
+- **Primary instance, then endpoint.** At launch the app takes a per-user OS
+  file lock (`fd-lock`) to become the primary instance and synchronously binds
+  the saved Local API address and port; a failure is shown in the window and
+  blocks protection for that launch. Saving connection choices and restoring
+  agents do not require a listener. A second instance hands off to the first (the Tauri
+  single-instance plugin only focuses the window; the lock decides).
+- **Local endpoint** defaults to loopback-only `http://127.0.0.1:4180`. The
+  app claims the configured address and port before agent settings are applied.
+  The address Combobox lists active interfaces using `if-addrs` and accepts
+  manual input; scope-dependent IPv6 link-local addresses are not suggested.
+  Non-loopback addresses display a warning and require native confirmation
+  on Save. The persisted permission remains enforced by the Rust resolver.
+  The local HTTP listener is unencrypted and must not be exposed to the
+  internet. Client host changes advertised URLs, not the bind address.
+- **AI service** names the remote endpoint in the UI. The protocol calls it an
+  [ACI service](../../spec/aci.md), which can serve inference directly or act
+  as an aggregator. This label is not a verification verdict; the current
+  verification state is displayed separately.
+- **Sessions.** The proxy forwards only while a *verified session* is
+  published: the sidecar's verified identity and the catalog read through it,
+  together, under one generation (per sidecar start) and epoch (per identity
+  report). Catalog reads have their own ordering counter; ordinary refreshes
+  update subsequent admissions without cancelling in-flight requests.
+  Starting, stopping, `blocked`, `fatal`, or a crash is
+  one atomic barrier: the epoch moves, the identity must be reported again,
+  the catalog is cleared, and a read still in flight can neither publish nor
+  clear the error. Each request holds a lease and re-checks it, plus the
+  credential epoch (token still owned by the same agent, key unchanged),
+  after the body is read; the send is then raced against a delivery token
+  that every revocation cancels, so a request admitted before a Delete key,
+  Disconnect, or Stop but not yet sent is refused (`503 revoked`) rather than
+  delivered. A failure before `send()` is recorded as `Blocked locally`; once
+  upstream delivery begins, a timeout or connection failure is recorded as an
+  upstream failure with delivery explicitly unconfirmed, never as "did not
+  leave this Mac." Deletes revoke the key in memory before touching the
+  credential store. The sidecar re-checks verification for every method and
+  refuses to forward when a re-verification changed the service identity
+  mid-request.
+- **Agent tokens** are random per-agent secrets in owner-only files under the
+  app data directory. A token is a capability for that agent's endpoints
+  (Claude Code: Messages and `count_tokens`; Codex: Responses and
+  `responses/compact`; OpenCode, Pi, Hermes, OpenClaw and Oh My Pi: Chat Completions; `/v1/models`
+  for all) plus
+  an attribution label the proxy sends as `x-aci-tag`, which the sidecar
+  copies into its receipt event and strips before forwarding. It does not
+  defend against other software running as the same OS user, which can read
+  the same files or run the helper. Codex and Claude Code obtain their token
+  through the bundled console helper
+  (`private-ai-proxy-helper --agent-token <agent>`). OpenCode reads the
+  token file through its `{file:...}` reference; Pi, Hermes and Oh My Pi use their
+  supported command-backed provider credential mechanisms. OpenClaw uses its
+  exec SecretRef provider.
+- **AI service profile credentials** and any credential a connection
+  takes over live only in the OS credential store (`keyring` 4). Each profile
+  has its own credential entry; the profile JSON stores only its name,
+  provider, endpoint, authentication kind, credential-presence metadata, and
+  verification time. Launching the app does not read the credential store;
+  the selected credential is loaded only when verification or protection uses
+  it, then cleared from proxy memory when protection stops. It is swapped for
+  the agent token on the way to the sidecar and never reaches the window.
+  Previews show `Existing secret` /
+  `Managed local credential` in place of values; the connection record stores
+  an opaque `secret_ref`. Record, tokens, and temp files are owner-only
+  (0600/0700; on Windows they inherit the per-user profile ACL) and tightened
+  when read; config writes hold a cross-process file lock from the revision
+  check to the final rename.
+- **AI service profiles** are saved locally and verified when protection starts. A profile
+  combines a user-visible name, provider, endpoint, and authentication method.
+  A fresh install starts without a profile and stays on Overview. The protection
+  switch opens New Profile when needed; every profile can be deleted, including the last one.
+  Settings offers local, self-hosted branding for the Phala and RedPill
+  presets plus a custom HTTPS endpoint. New providers or endpoints require a
+  new key, so a credential is never silently reused. Profile metadata is
+  written atomically. Phala and RedPill also offer browser account login; the
+  shared runtime exchanges authorization for an inference key and stores only
+  the key in the OS credential store. See [Account login](ACCOUNT-LOGIN.md). A successful
+  Phala login persists and selects the profile automatically. RedPill uses a
+  workspace selector and `Save`, as do subsequent workspace edits. Completion returns
+  to the chooser. If protection
+  was off it stays off; if it was on, saving or switching profiles stops protection,
+  restores agent configs, and starts a freshly verified connection. Saving while stopped does not start verification; protection verifies the service
+  when started. Failed connection leaves the saved profile available for retry. Selecting an existing
+  profile also closes the chooser. The window and native tray both route a
+  missing or unavailable current profile back into this same flow. Legacy
+  single-service settings are recognized at
+  launch, while their credential migrates to the profile entry on first use so
+  opening the app does not request credential-store access.
+- **Model catalog** is the verified service's `GET /v1/models`, read through
+  the sidecar and published atomically with the identity. It is the single
+  source of model truth: agents choose from it, the proxy serves it on
+  `/v1/models`, and a request whose `model` is not listed is refused before
+  it leaves the machine. Models that disappear on a refresh are reported,
+  never replaced.
+
+  The RedPill/Phala presets also intersect this list with the dated endpoint
+  observations in `gateway/src/endpoint-support.json`. RedPill was probed;
+  Phala inherits the inventory because the presets share the serving backend.
+  Only successful observations are offered: Codex uses Responses, Claude Code
+  uses Messages, and the other integrations use Chat Completions. Generated
+  configs, per-agent `/v1/models`, default selection, and local request admission
+  share this policy. Explicit or saved incompatible defaults are rejected, never
+  silently replaced. `supportedEndpoints` in the model summary exposes the
+  observed paths; it is absent for custom endpoints without an inventory.
+  Inconclusive results and newly listed models require a fresh probe and inventory
+  update before they are offered for these presets. This is a compatibility
+  snapshot, not continuous availability monitoring or a claim that an endpoint
+  returning a transient error is permanently unsupported.
+
+  Apps fetch this file from the repository's `main` branch when starting protection
+  or refreshing the model catalog (`private-ai-proxy models list --refresh`). The request runs
+  in the background after verified model discovery, uses a separate unauthenticated HTTPS client, and has
+  a four-second deadline and a 1 MiB limit. ETag conditional requests reuse the
+  last validated inventory. Invalid schemas, incomplete observations, download
+  errors, and offline operation keep the newest valid local snapshot. Cache and
+  bundled `checkedAt` values are parsed as RFC 3339 timestamps; only strictly newer
+  downloaded observations replace them. Equal/older dates cannot override local
+  data. Corrections and intentional rollbacks must carry a new observation date.
+  Protection starts with local data and never waits for GitHub. Concurrent refreshes
+  share one download, and results apply only to a still-verified matching session.
+  Cache replacement is atomic. Active agent projections
+  refresh through the existing configuration transaction and restoration journal.
+
+  To publish changes, review the full three-endpoint probe report and update
+  `gateway/src/endpoint-support.json` through a PR to `main`. A partial `--model`
+  or `--surface` diagnostic must be merged into the full inventory, not replace it.
+  Once clients have this loader, inventory-only changes need no app release.
+  The feed cannot add models absent from the verified service catalog, change
+  credentials or provider URLs, or bypass ACI verification. Updating compatibility
+  records may still require restarting an agent that only loads its config at startup.
+
+  Endpoint capability inventory can be checked explicitly from this directory:
+
+  ```sh
+  node scripts/probe-model-endpoints.mjs --endpoint https://tee.redpill.ai --key-env REDPILL_AI_API_KEY --json
+  node scripts/probe-model-endpoints.mjs --endpoint https://inference.phala.com --key-env PHALA_AI_API_KEY --json
+  ```
+
+  Supply the named key through the process environment, never a command-line
+  argument. The script reads the live catalog and sends one small, potentially
+  billable request per model to Chat Completions, Responses, and Messages.
+  `--model ID` and `--surface responses` limit the inventory; concurrency defaults to two (maximum four),
+  with a 20-second request timeout and no retries. Authentication and rate-limit
+  errors stop scheduling requests. Reports contain no credentials or response
+  text. Exit code 2 means some results remain inconclusive; those results must
+  not be treated as evidence of unsupported protocols. A successful response
+  establishes basic non-streaming protocol support only, not tool calling,
+  streaming, or receipt validity. This diagnostic calls the supplied endpoint
+  directly and does not run automatically during startup or modify agent configs.
+- **Usage history** is written to an owner-only SQLite database in the app
+  data directory and has no automatic retention cutoff. Overview shows ten
+  recent rows plus a complete current-session summary aggregated from SQLite,
+  rather than from the 50-row in-memory activity preview. Usage keeps history
+  across app restarts, supports agent/model/time filters and cursor pagination,
+  and deletes records only after explicit confirmation. CSV cells that could
+  be interpreted as spreadsheet formulas are escaped. Token and cost fields
+  remain absent when no compatible usage was captured; missing counts are never
+  replaced by estimates or zero. Capture is bounded to 16 MiB per JSON response
+  or SSE line, matching the server's SSE line limit. Large output fields are
+  skipped during deserialization rather than copied into a second response tree.
+  Captured counts are published when the response body is dropped, including
+  downstream cancellation before EOF. Event delivery remains best-effort when
+  the activity queue is saturated. Oversized lines are discarded, not parsed
+  as valid truncated JSON. Response bytes and proof handling remain unchanged.
+  Local rejections and count_tokens requests without inference usage are marked
+  not applicable. Providers may omit streaming usage (Chat Completions commonly
+  requires stream_options.include_usage); the proxy does not rewrite requests to
+  add it. Old missing counts cannot be backfilled because response bodies are not
+  retained.
+- **The Local API client key** uses `sk-pap-` followed by 64 lowercase hex
+  characters generated from 32 random bytes.
+- **What a receipt proves.** The verifier applies its ACI policy to inference
+  bodies (`provider.aci_verified`, pinned sessions) and re-serializes them;
+  the receipt binds those bytes, shown as `Policy applied`, not the agent's
+  original request. A service-side rewrite recorded in the receipt shows as
+  `Rewritten by service`.
+- **Proxy limits.** Request bodies are buffered (32 MiB, the same limit the
+  sidecar enforces, 60 s read timeout) only so the `model` can be checked
+  against the catalog. With `--verify-receipts` (always enabled by desktop),
+  the sidecar also buffers responses in memory up to 32 MiB and checks their
+  receipts before returning any bytes. Failed, missing or unavailable proofs
+  return HTTP 502 without the provider response body. SSE framing is preserved,
+  but tokens are delivered only after the entire response is verified. Neither
+  request nor response buffers are written to disk. Verification has a 600 s
+  upper bound; the desktop allows 660 s without response bytes for delivery
+  overhead. Agents can impose shorter timeouts, including Claude Code's stream
+  watchdog. Late receipts enrich metadata without replacing an already recorded
+  HTTP failure with success.
+  At most 64 requests are in flight (`429`); upstream connect 5 s,
+  idle read 660 s (`504`). Standard hop-by-hop headers plus any named by
+  `Connection`, `Proxy-Connection`, the agent credential, and the attribution
+  tag are removed in both directions by both proxies. The helper endpoints
+  are gated exactly like inference: token scope, verified session, and a
+  catalog model (both protocols require `model`).
+
+## Agents
+
+OpenClaw integration targets the native host's default configuration and its
+OpenAI Chat Completions provider contract. It adds a separate `openclaw` token
+and an executable SecretRef, not the upstream provider key. On Unix, the backend
+stages a private user-owned helper at startup; scans verify that it matches the bundled
+helper. Windows checks the helper's ACL without changing it. Configuration
+edits preserve JSON5 comments and unrelated fields. An explicit model selection
+changes only `agents.defaults.model.primary`; existing fallback lists stay intact.
+
+OpenClaw 2026.9.2 was checked offline with a real generated configuration and
+exec-secret audit. This is not real inference or a guarantee for older releases.
+Remote gateways, non-default profiles, ambiguous legacy paths, `$include`, and
+unsafe helper/configuration conflicts are refused rather than rewritten. WSL and
+remote hosts do not implicitly share this desktop's loopback endpoint or token.
+
+Connections now remember their absolute config path. Legacy records without
+that path, or containing potentially sensitive structured plaintext backups,
+require explicit manual recovery instead of guessing a restore target. New
+unmanaged same-name provider collisions are refused without exposing nested
+secrets in previews or ordinary connection records.
+
+Oh My Pi is a separate integration: it detects `omp` and manages
+`~/.omp/agent/models.yml` or `models.yaml` with its own `oh-my-pi` token and
+connection record. YAML comments and unrelated providers are preserved. It uses
+Chat Completions; Pi keeps its independent Chat Completions configuration. Connect selects the
+default model in the native settings file; restart after reconnecting, because command
+credentials can be cached by the CLI process. Named profiles and pending legacy
+JSON migration are refused rather than silently redirected or rewritten.
+Official Oh My Pi v18.1.12 was checked offline on Linux for generated configuration
+loading, helper success/failure and YAML file priority. Windows/macOS CLI shell
+execution and real inference are not claimed by those checks.
+
+| Agent | Config written | Credential reference |
+| --- | --- | --- |
+| Codex | `~/.codex/config.toml`: required verified `model`, `model_provider`, and a `model_providers.private_ai_proxy` Responses provider | helper command |
+| Claude Code | `~/.claude/settings.json`: `env.ANTHROPIC_BASE_URL`, `apiKeyHelper`, an explicit Messages-compatible `env.ANTHROPIC_MODEL`, and verified `modelPicker` options (Claude Code 2.1.242+); higher-priority exported credentials must be unset | helper command |
+| OpenCode | `opencode.json`: an app-owned `@ai-sdk/openai-compatible` provider whose model map is generated from the verified catalog; optional default | token file |
+| Pi | `~/.pi/agent/models.json`: an app-owned Chat Completions provider whose models, limits, modalities, reasoning flag, and prices come from the verified catalog | helper command |
+| Hermes | `~/.hermes/config.yaml`: a comment-preserving custom Chat Completions provider with `discover_models`, optional default, and command-backed auth | helper command |
+| OpenClaw | `~/.openclaw/openclaw.json`: an app-owned Chat Completions provider with a verified catalog and native primary model | exec SecretRef helper |
+| Oh My Pi | `~/.omp/agent/models.yml` (or existing `models.yaml`): an independent Chat Completions provider; native `modelRoles.default` selection | helper command |
+
+Codex's default model is a user preference, separate from connection authorization.
+Changing it does not revoke the helper credential; endpoint, provider, and auth
+fields remain strictly checked. Suspension preserves the selected model for the
+next verified connection. A removed model produces an actionable warning and is
+still rejected by the proxy catalog gate. Agent warning badges expose backend
+repair actions; reconnect and incomplete-disconnect recovery are distinct.
+An already-running CLI may retain old configuration: after repair or disconnect,
+restart it to reload the file. The helper never creates or restores credentials.
+
+The verified catalog is the only model source. Connect selects an explicit
+compatible default for every integration. Pi stores the selection in settings.json;
+Oh My Pi uses modelRoles.default in config.yml (or its existing config.yaml).
+These secondary files participate in the preview fingerprint and recovery journal. `Connect` previews
+the exact fields with a revision of the inputs; generated model maps are shown
+as a concise catalog summary instead of serialized JSON. `Apply` refuses if any
+moved. Token, parked secrets, config, and record are applied as one transaction
+and rolled back together.
+`Disconnect` and CLI `agents disconnect-all` work without endpoint or gateway.
+Settings > Advanced > Reset settings stops protection, restores all managed agent
+configurations, restores the default local listener and production-OS policy,
+and resets preferences. The desktop also disables Open at Login, resets the main
+window size and position, and refreshes
+all preference controls. Profiles, provider credentials, the local client key,
+usage history, system notification authorization, and installed CLI registration
+are retained. Partial failures are reported and leave the reset retryable; no
+unrelated agent edits are overwritten. The CLI counterpart `private-ai-proxy --yes settings reset`
+uses the same backend transaction but does not change the OS login item.
+During automatic network recovery and verification, agent routing stays pointed at
+Local API. The proxy clears agent authorization until protection is verified again;
+refreshing agent status cannot reauthorize those tokens. Explicit Stop, Disconnect,
+configuration changes and shutdown restore the original routing. An interrupted
+active session retains its routing across backend restart until reverified; a
+previously stopped session remains stopped. Temporary agent connection failures
+retry after 30 seconds, while ownership or native configuration conflicts wait
+for explicit repair.
+
+`Disconnect` tombstones the record (disabled, cleanup pending), deletes the
+token file before any record or config is touched, and syncs the removal to
+the parent directory (on Windows, a directory-handle flush) before anything
+else runs: revoking the capability itself is durable, so no later failure can
+leave an agent authorized, while the record stays visible for an idempotent
+retry. A failed sync fails the disconnect closed. Disconnect restores only defaults
+and global routing/authentication fields; app-created provider definitions remain
+with their ownership journal and an explicitly disconnected state. File/command
+credential references and automatic discovery are removed or disabled in inactive
+providers, so deleted token files do not break the agent configuration loader. Tokens and
+consumed parked secrets are removed. Reconciliation never reconnects an explicitly
+disconnected agent. Reconnecting updates only definitions still owned by the app,
+rotates its local token and records the currently selected native defaults. Existing
+provider values and user edits are restored or left untouched, never adopted as
+unmanaged structured backups. Unreadable configuration leaves recovery retryable.
+
+Before Connect changes either config file, its disabled recovery journal is persisted.
+A crash or partial write therefore cannot create an authorized half-applied connection.
+Claude Code has no separate provider registry: its base URL, helper and model must
+all be restored on Disconnect. Existing CLI sessions still need restart; this edits
+native defaults, not an already-running process or project-level overrides.
+Install detection requires a real executable on `PATH` or in common per-user
+and macOS package-manager binary directories; a config directory alone does
+not count as an installation. Detection is informational only and never gates
+Connect; connecting creates the official config file from scratch. The
+`apiKeyHelper` command line is parsed by a POSIX `sh` on every
+platform (Git's sh on Windows), so the path is quoted uniformly with `shlex`.
+Record and token files are read through `O_NOFOLLOW` descriptors and reads
+never change permissions; owner-only permissions are restored only by explicit
+maintenance under the apply lock.
+
+## Branding
+
+See the [final material previews](brand/dstack/previews/README.md) for installer artwork, tray states, and the original/generated color comparison.
+
+`brand/<id>/brand.json` is the single source of truth for everything that
+names or draws the product: product and organization names, tagline, support
+and homepage URLs, the default service URL and key label, the bundle
+identifier, category, and descriptions, the accent colours, and the official
+asset files next to it. `npm run prepare:brand` (run automatically by
+`check`, `build`, `dev`, and `dist`; `PRIVATE_AI_PROXY_BRAND=<id>` selects a
+brand, default `dstack`) projects it into `src/renderer/generated/` (the
+`brand.ts` module and appearance PNGs, imported as Vite assets so they ship
+self-hosted under the production CSP),
+`gateway/src/brand.rs`, the cross-platform fallback icons and macOS Icon
+Composer asset in `src-tauri/icons`, the template tray icon in `assets/tray`,
+and an ignored
+`src-tauri/tauri.brand.conf.json` overlay (product name, identifier, bundle
+metadata, plus the precompiled native icon list on macOS) that `dev`, `dist`,
+and CI pass to the Tauri CLI as
+`--config`; the tracked `tauri.conf.json` keeps the window list and stays
+neutral, and the window title is set at run time from `brand.rs`. The
+committed outputs are for the default brand; CI regenerates them and fails on
+drift. With Xcode 26, `prepare-macos-icon.mjs` compiles the `.icon` source into
+the native `Assets.car`. The complete hand-edited project is copied from
+`brand/dstack/icon/AppIcon.icon` without changing its layers or manifest.
+The Light export generates the shared static PNG, ICO and ICNS files, retaining
+the existing 100px transparent desktop margin on a 1024px canvas. This keeps
+full-bleed exports from appearing oversized. Original Icon Composer PNGs carry
+a Display P3 profile: Sharp transforms them to sRGB before resizing and before
+Tauri/resvg can strip color metadata. Original PNGs and the .icon remain intact.
+The renderer uses 256px images without that outer margin. It uses Light on
+Windows/Linux, and follows appearance on macOS. Installer artwork uses the
+same Light icon with the product name and byline on a neutral background.
+Required inputs, hashes and generated asset drift are checked before release.
+The tray uses the SVG-derived template with native/system-preference black/white
+selection and inactive alpha, rather than a colored app tile.
+
+The default brand uses the official Dstack logo kit from
+[Dstack-TEE/dstack](https://github.com/Dstack-TEE/dstack) at commit
+`982621521b435cc10b535cb8646efecb8c3fc255` (`docs/assets/dstack-logo-kit/`),
+with its upstream origin and license recorded in `brand/dstack/brand.json`. Its app icon is the owner's `Archive.zip` design;
+archive provenance and per-file hashes are recorded separately in `iconSource`.
+To update it, replace the complete source `.icon`, both appearance PNG exports,
+and the transparent tray SVG in `brand/dstack/icon`, update their hashes, then
+run `npm run prepare:brand`. Never edit the generated copies in `src-tauri/icons`.
+`product-wordmark-light.svg` contains the outlined product name and byline,
+authored with Liberation Sans (SIL OFL 1.1); builds do not need that font
+installed. Keep its artwork labels aligned with
+`productName` and `byline` in the brand configuration. Unused upstream logo-kit files and duplicate Windows/Linux dark icon outputs
+are removed; source provenance remains in the brand metadata.
+`brand/redpill` and `brand/phala` are templates: add the official assets and
+Icon Composer project they reference before selecting them.
+
+## Development
+
+Install dependencies and run the Tauri app:
+
+```bash
+cargo build --bin aci
+cd apps/desktop
+npm ci
+npm run dev
+```
+
+The persistent backend launches the target-triple-specific bundled `private-ai-proxy serve`
+process. No independent ACI executable is included.
+The development command builds debug sidecars; packaged builds compile release
+sidecars from this repository. `npm run dist` produces the native bundle for
+the current platform. CI builds the same Tauri application as a macOS DMG and
+app, a Windows NSIS installer, and Linux DEB and RPM packages. AppImage is
+excluded because its temporary mount cannot own a persistent backend after the
+UI exits.
+
+Tests sit at the boundaries. `cargo test --manifest-path gateway/Cargo.toml`
+covers the proxy (token scope, fail-closed session, revocation gate, and a
+relay check proving that each inference path carries method, path, query,
+body, status, and streamed bytes through unchanged), the projections
+(round-trip per agent, stale revision, restore all), and the catalog.
+`npm run test:renderer` first builds the production renderer, then runs
+Playwright against the stateful in-page mock. It covers protection start/stop,
+agent discovery and reversible config previews, current-session Overview
+usage, persistent-history filters and cursor pagination,
+proof and local-block semantics, profile management, system confirmation boundaries,
+account cancellation, cache isolation and updates. Tests are grouped by these
+behaviors; visual layout is reviewed separately. TypeScript checks include the
+core test code and reject unused locals. Renderer checks, release manifest tests,
+and Rust checks run on every desktop CI build. Windows package jobs also execute
+the shared libraries' tests. NSIS/DEB installation checks exercise the bundled
+CLI, backend and helper, then uninstall the package; temporary
+credential-store fixtures are separate from real provider credentials.
+
+## Packaging
+
+`npm run dist` builds the release sidecars and runs `tauri build`. Xcode 26 or
+newer is required to package the adaptive macOS app icon. The platform bundle
+contains the shared renderer, `private-ai-proxy`, the persistent `private-ai-proxy-service`, and
+the credential helper. The ACI verifier runs through `private-ai-proxy serve`. The UI and CLI are clients of the same per-user backend;
+there is no second GUI process.
+
+`scripts/bundle-sidecars.mjs` builds three executables with `--locked`: `private-ai-proxy`,
+`private-ai-proxy-service`, and `private-ai-proxy-helper`, a console
+binary from the gateway crate that prints an agent's local token (kept separate
+from the GUI app so stdout works on Windows). A release build passes
+`DESKTOP_RELEASE_VERSION` to the CLI/backend as `PAP_BUILD_VERSION`; ordinary
+builds use the runtime crate version. The desktop gateway and Tauri crates declare
+`rust-version = 1.89`, the highest MSRV in their locked dependency graphs
+(`aes` 0.9.3: 1.89; `keyring` 4.2: 1.88), and commit their `Cargo.lock` files.
+The root `aci` follows the root workspace toolchain. CI tests the gateway,
+runtime, renderer, and Tauri backend, then compiles and bundles the same app on
+macOS, Windows, and Linux. It also publishes UI-free CLI archives on all three
+platforms and CLI-only DEB/RPM packages on Linux. See
+[`CLI-DISTRIBUTION.md`](CLI-DISTRIBUTION.md) for installed paths, PATH ownership,
+upgrade behavior, and automatic macOS registration on app startup. macOS additionally
+launches the packaged app with an isolated home to verify the command link, then
+verifies the compiled asset catalog, legacy ICNS fallback, bundle icon name, DMG,
+and zipped app bundle.
+
+### macOS distribution signing
+
+Normal CI packages use an explicit ad-hoc identity and are beta artifacts. A
+production macOS package must be started manually from the `Desktop Tauri`
+workflow with `production_macos` enabled. That path fails closed unless all of
+these secrets are present in the `desktop-release` environment:
+
+- `APPLE_CERTIFICATE`: base64-encoded PKCS#12 containing a Developer ID
+  Application certificate and its private key
+- `APPLE_CERTIFICATE_PASSWORD`: password used when exporting the PKCS#12
+- `APPLE_API_ISSUER`: App Store Connect API issuer ID
+- `APPLE_API_KEY`: App Store Connect API key ID
+- `APPLE_API_PRIVATE_KEY`: complete contents of the matching `AuthKey_*.p8`
+
+From a trusted Mac, upload the replacement files directly without printing their
+contents (adjust the filenames to match the new credentials):
+
+```bash
+set -o pipefail
+base64 -i Certificates.p12 | gh secret set APPLE_CERTIFICATE --repo Dstack-TEE/private-ai-gateway --env desktop-release
+gh secret set APPLE_API_PRIVATE_KEY --repo Dstack-TEE/private-ai-gateway --env desktop-release < AuthKey_NEW_KEY_ID.p8
+gh secret set APPLE_CERTIFICATE_PASSWORD --repo Dstack-TEE/private-ai-gateway --env desktop-release
+gh secret set APPLE_API_KEY --repo Dstack-TEE/private-ai-gateway --env desktop-release
+gh secret set APPLE_API_ISSUER --repo Dstack-TEE/private-ai-gateway --env desktop-release
+```
+
+The last three commands prompt for values. The issuer ID is not the Developer
+Team ID. The current Tauri packaging workflow does not use `KEYCHAIN_PASSWORD`.
+Replacing Apple credentials does not rotate Tauri updater trust. After a signing
+key compromise, keep publication paused until a fresh updater key and a tested
+client/feed migration are ready; installed clients still trust their embedded key.
+
+The certificate must be created by the Apple Developer team Account Holder
+from a CSR whose private key remains with the person exporting the PKCS#12.
+The Tauri bundler imports the certificate, infers the signing identity, signs
+the nested sidecars and app with hardened runtime, notarizes and staples the
+app, then signs the DMG. CI submits and staples the final DMG separately because
+it is the downloaded distribution container. The release artifact is uploaded
+only after `codesign`, Gatekeeper assessment, and stapler validation all pass.
+
+Claude Code gateway discovery only lists IDs containing `claude` or `anthropic`.
+Connect therefore selects an explicit Messages-compatible `ANTHROPIC_MODEL` from
+the verified catalog, rather than relying on discovery to select non-Claude models.
+Restart an existing Claude Code process after changing its settings. `/model` and
+`--model`, shell credentials and higher-priority project/managed settings can still
+override a user configuration; check `/status` in the affected Claude Code session.
+OpenCode's official `~/.opencode/bin` installation is scanned even when the desktop
+app's PATH does not include the terminal's PATH. The visible Agents page rescans
+every 15 seconds and on window focus.
+
+Frontend asynchronous reads use TanStack Query, not a custom snapshot cache.
+Queries retain same-key data while revalidating on mount, focus, reconnect or
+runtime change notifications. Account balances include provider, login/profile
+and credential reference in their key; Usage keys include filters and pagination.
+A changed query does not display another query's data. Permission denial clears
+balance data, while transient errors retain the last successful result.
+
+Tauri commands remain the transport and Rust remains the state authority. Runtime
+events cancel older reads and update the gateway query cache. Local IPC queries and
+mutations use networkMode=always so offline desktop settings remain operable;
+mutations are not automatically retried. Appearance/registration mutations update
+or invalidate their query data. Install progress, form drafts and operation queues
+remain local UI state. Credentials are not stored in the general query cache.
+
+The implementation follows TanStack Query's query keys, invalidation and focusManager
+APIs and Tauri's commands/events/state-management boundaries. A QueryClient belongs
+to each WebView; cross-window correctness comes from runtime state and its events,
+not from pretending JavaScript caches are shared across windows.
+
+### Claude Code model selection and response timing
+
+Claude Code 2.1.242 or later supports the `modelPicker` settings generated from
+the verified Messages-compatible catalog. Reconnect Claude Code in the app after
+upgrading, then restart Claude Code to refresh its settings. Use `/model` to
+choose a listed model. Gateway discovery alone filters out IDs without `claude`
+or `anthropic`, so it cannot list all Messages-compatible gateway models.
+Managed `availableModels` or `modelPicker` settings can still restrict the list;
+the app does not override administrator policy. An existing unmanaged
+`modelPicker` is reported as a configuration conflict rather than overwritten. Anthropic does not officially
+support non-Claude models, and Messages support alone does not establish full
+tool-calling compatibility.
+
+Desktop protection buffers SSE until the complete response receipt verifies.
+The SSE events remain intact but do not arrive token by token. Long responses
+can hit Claude Code's own stream watchdog. True incremental delivery requires
+a different receipt/delivery policy; increasing the local transport timeout
+does not make buffered responses stream live.
+
+Official contracts: [modelPicker](https://code.claude.com/docs/en/settings-reference#modelpicker),
+[gateway model discovery](https://code.claude.com/docs/en/llm-gateway-protocol#model-discovery).

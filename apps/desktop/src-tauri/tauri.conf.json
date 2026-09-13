@@ -1,0 +1,88 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Private AI Proxy",
+  "version": "0.1.0",
+  "identifier": "dev.private-ai-proxy.desktop",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeDevCommand": "npm run dev:web",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "create": false,
+        "title": "Private AI Proxy",
+        "width": 1052,
+        "height": 752,
+        "minWidth": 720,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "trafficLightPosition": {
+          "x": 14,
+          "y": 16
+        },
+        "hiddenTitle": true,
+        "center": true,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' https://img.clerk.com https://images.clerk.dev https://clerk.redpill.ai; style-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'",
+      "devCsp": "default-src 'self'; connect-src ipc: http://ipc.localhost ws://127.0.0.1:1420; img-src 'self' https://img.clerk.com https://images.clerk.dev https://clerk.redpill.ai; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-src 'none'"
+    }
+  },
+  "plugins": {
+    "deep-link": { "desktop": { "schemes": ["org.dstack.private-ai-proxy"] } }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "category": "DeveloperTool",
+    "shortDescription": "Verified local AI proxy",
+    "externalBin": [
+      "binaries/private-ai-proxy",
+      "binaries/private-ai-proxy-service",
+      "binaries/private-ai-proxy-helper"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "hardenedRuntime": true
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "headerImage": "installer/brand-header.bmp",
+        "sidebarImage": "installer/brand-sidebar.bmp",
+        "installerIcon": "icons/icon.ico",
+        "installerHooks": "installer/windows.nsh"
+      }
+    },
+    "linux": {
+      "deb": {
+        "preInstallScript": "installer/deb-pre-install.sh",
+        "preRemoveScript": "installer/deb-pre-remove.sh",
+        "files": { "/usr/bin/pap": "installer/pap.sh" }
+      },
+      "rpm": {
+        "preInstallScript": "installer/rpm-pre-install.sh",
+        "preRemoveScript": "installer/rpm-pre-remove.sh",
+        "files": { "/usr/bin/pap": "installer/pap.sh" }
+      }
+    },
+    "android": {
+      "debugApplicationIdSuffix": ".debug"
+    }
+  }
+}

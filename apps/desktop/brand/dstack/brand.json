@@ -1,0 +1,59 @@
+{
+  "id": "dstack",
+  "productName": "Private AI Proxy",
+  "shortName": "Proxy",
+  "organizationName": "Dstack TEE",
+  "tagline": "The open framework for confidential AI",
+  "homepageUrl": "https://dstack.org",
+  "supportUrl": "https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/quickstart.md",
+  "service": {
+    "name": "RedPill",
+    "defaultUrl": "https://tee.redpill.ai",
+    "keyLabel": "RedPill API key"
+  },
+  "bundle": {
+    "identifier": "org.dstack.private-ai-proxy",
+    "category": "DeveloperTool",
+    "shortDescription": "Verified local AI proxy",
+    "longDescription": "Routes coding agents through a hardware-verified confidential AI service with a signed proof for every answer."
+  },
+  "theme": {
+    "accentLight": "#8BC34A",
+    "accentDark": "#A5D66D",
+    "brandColor": "#83B83F",
+    "iconBackground": "#579532"
+  },
+  "assets": {
+    "appIconDefault": "icon/default.png",
+    "appIconDark": "icon/dark.png",
+    "appIconComposer": "icon/AppIcon.icon/icon.json",
+    "trayTemplate": "icon/foreground.svg",
+    "productWordmark": "product-wordmark-light.svg"
+  },
+  "source": {
+    "repository": "https://github.com/Dstack-TEE/dstack",
+    "commit": "982621521b435cc10b535cb8646efecb8c3fc255",
+    "license": "Apache-2.0 (LICENSE alongside; logo kit is the project's own mark, used to identify the Dstack TEE brand)",
+    "note": "Upstream origin of the Dstack mark; obsolete logo-kit copies are not bundled. Current owner-authored assets and hashes are recorded in iconSource."
+  },
+  "iconSource": {
+    "archive": "Archive.zip",
+    "archiveSha256": "56f6b2bd8f63ad5ba9365aa8ef28e5a206e479ddcb3d822960c888af6b65e4b5",
+    "description": "Owner-edited Icon Composer project and appearance exports, supplied 2026-09-12. Preserve the authored layers, colors and material settings.",
+    "files": {
+      "icon/default.png": "Transmission-LiquidGlass-iOS-Default-1024@1x.png",
+      "icon/dark.png": "Transmission-LiquidGlass-iOS-Dark-1024@1x.png",
+      "icon/foreground.svg": "dstak.svg",
+      "icon/AppIcon.icon/icon.json": "Transmission-LiquidGlass.icon/icon.json",
+      "icon/AppIcon.icon/Assets/foreground 1.svg": "Transmission-LiquidGlass.icon/Assets/foreground 1.svg"
+    },
+    "sha256": {
+      "icon/default.png": "2d05747b5451df9565174bc8975c7f3d1662e9c2fcf22481c12d04c09bb6c74b",
+      "icon/dark.png": "921aa2aec83d988bdc0fcd05ca6c2e32f4e51d315cc4b754a88254aed90189d5",
+      "icon/foreground.svg": "3abe8c3bcbe5a0a46cebefcdbeb04802b8387494314416260bff4bb874359e38",
+      "icon/AppIcon.icon/icon.json": "8a5e8a40ddbb2ae637b4d356e1213a1eacbcedc117079bf3b77766914ef6087c",
+      "icon/AppIcon.icon/Assets/foreground 1.svg": "477358ff3a075c0ca0b8c63f22bdf881ab19e3bca59d25b352b313bd4b67b5f9"
+    }
+  },
+  "byline": "by dstack TEE"
+}

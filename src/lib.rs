@@ -9,6 +9,7 @@
 
 pub mod aci;
 pub mod aggregator;
+#[cfg(unix)]
 pub mod dstack;
 pub(crate) mod error_payload;
 pub mod http;

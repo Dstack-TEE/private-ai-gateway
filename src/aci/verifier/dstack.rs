@@ -1,6 +1,7 @@
 //! dstack-specific verification helpers: event-log/app-id checks, RTMR replay,
 //! KMS receipt-key custody, and secp256k1 key recovery.
 
+#[cfg(unix)]
 pub use dstack_sdk::dstack_client::EventLog as DstackEventLog;
 use k256::ecdsa::{RecoveryId, Signature as K256Signature, VerifyingKey as K256VerifyingKey};
 use k256::EncodedPoint;
@@ -13,6 +14,21 @@ use super::decode_hex;
 use crate::aci::types::WorkloadKeyset;
 
 const DSTACK_RUNTIME_EVENT_TYPE: u32 = 0x08000001;
+
+/// Wire-only event evidence for platforms without the Unix dstack SDK.
+///
+/// Verification only consumes the attested JSON evidence. Keeping this type
+/// local avoids coupling the cross-platform `aci` verifier to the Unix-socket
+/// client used by the gateway service process.
+#[cfg(not(unix))]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct DstackEventLog {
+    pub imr: u32,
+    pub event_type: u32,
+    pub digest: String,
+    pub event: String,
+    pub event_payload: String,
+}
 
 /// Replay the dstack event log to RTMR3 and require it to match the quote,
 /// returning the verified events. The `aci` CLI reuses this for its own

@@ -167,13 +167,18 @@ What the proxy does:
   `--allow-unverified` drops the demand.
 - Every upstream connection enforces the attested TLS SPKI pin for the
   hostname and fails closed on a mismatch.
-- Responses stream through byte-exact while the proxy digests the raw wire
-  bytes — bodies are never buffered or stored. Each POST response's receipt
+- Without `--verify-receipts`, responses stream through byte-exact while the proxy digests the wire
+  bytes for later audit. Each POST response's receipt
   id and body digests are recorded (the last 256 exchanges), and a 2xx
   inference response with no receipt header is flagged immediately
   ([aci.md](../spec/aci.md) §5.2).
-- Verification runs on demand from the control endpoint on
-  `127.0.0.1:4181`, not per request:
+- With `--verify-receipts`, responses are buffered in memory (maximum 32 MiB)
+  until their receipt verifies successfully. Missing, invalid or unavailable
+  proofs return HTTP 502 without exposing the response body. SSE is delivered
+  after full verification rather than token-by-token. Buffers are never written
+  to disk; the request bearer is used transiently for receipt verification.
+  The control endpoint on `127.0.0.1:4181` also supports inspection and
+  explicit re-verification:
 
   ```bash
   curl -sS http://127.0.0.1:4181/receipts        # recent exchanges

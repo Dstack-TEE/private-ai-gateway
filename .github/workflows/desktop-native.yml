@@ -1,0 +1,702 @@
+name: Desktop Tauri
+
+on:
+  workflow_dispatch:
+    inputs:
+      production_macos:
+        description: Sign and notarize the macOS package for distribution
+        required: true
+        default: false
+        type: boolean
+      release_version:
+        description: 'Optional update version matching the channel (for example 0.1.2-beta.1)'
+        required: false
+        type: string
+      release_channel:
+        description: Update channel (stable must be explicitly selected)
+        required: true
+        default: beta
+        type: choice
+        options:
+          - beta
+          - stable
+      publish_release:
+        description: Publish the signed version and advance the desktop update channel
+        required: true
+        default: false
+        type: boolean
+  pull_request:
+    paths:
+      - '.github/workflows/desktop-native.yml'
+      - 'apps/desktop/**'
+      - 'src/aci/**'
+      - 'src/bin/aci/**'
+      - 'src/bin/private-ai-proxy/**'
+      - 'src/bin/private-ai-proxy-service/**'
+      - 'tests/private_ai_proxy_cli.rs'
+      - 'src/http/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/desktop-native.yml'
+      - 'apps/desktop/**'
+      - 'src/aci/**'
+      - 'src/bin/aci/**'
+      - 'src/bin/private-ai-proxy/**'
+      - 'src/bin/private-ai-proxy-service/**'
+      - 'tests/private_ai_proxy_cli.rs'
+      - 'src/http/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_BUILD_JOBS: 2
+  CARGO_TARGET_DIR: ${{ github.workspace }}/apps/desktop/src-tauri/target
+
+concurrency:
+  group: desktop-${{ github.event_name }}-${{ github.ref }}-${{ inputs.release_version || 'ci' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
+        with:
+          toolchain: '1.89'
+          components: rustfmt, clippy
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        id: rust
+        with:
+          toolchain: stable
+      - &restore-rust-cache
+        name: Restore Rust dependencies
+        if: ${{ !inputs.production_macos && inputs.release_version == '' }}
+        id: rust-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: &rust-cache-paths |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ env.CARGO_TARGET_DIR }}/*/.fingerprint
+            ${{ env.CARGO_TARGET_DIR }}/*/deps
+            ${{ env.CARGO_TARGET_DIR }}/*/build
+            ${{ env.CARGO_TARGET_DIR }}/*/*/.fingerprint
+            ${{ env.CARGO_TARGET_DIR }}/*/*/deps
+            ${{ env.CARGO_TARGET_DIR }}/*/*/build
+          key: pap-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'apps/desktop/gateway/Cargo.lock', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.lock', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml') }}
+          restore-keys: |
+            pap-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'apps/desktop/gateway/Cargo.lock', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.lock', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml') }}-partial-
+            pap-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-
+      - name: Install Linux desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev gnome-keyring dbus-x11 libsecret-tools
+      - name: Install desktop dependencies
+        working-directory: apps/desktop
+        run: npm ci
+      - name: Verify generated brand assets
+        working-directory: apps/desktop
+        run: |
+          npm run prepare:brand
+          status="$(git status --porcelain=v1 --untracked-files=all -- src/renderer/generated gateway/src/brand.rs src-tauri/icons/32x32.png src-tauri/icons/128x128.png src-tauri/icons/128x128@2x.png src-tauri/icons/icon.png src-tauri/icons/icon.icns src-tauri/icons/icon.ico src-tauri/icons/AppIcon.icon src-tauri/installer/brand-*.bmp src-tauri/installer/brand-dmg-background.png assets/tray)"
+          if [[ -n "$status" ]]; then
+            printf '%s\n' "$status"
+            git diff -- src/renderer/generated gateway/src/brand.rs src-tauri/icons src-tauri/installer assets/tray
+            exit 1
+          fi
+      - name: Verify renderer
+        working-directory: apps/desktop
+        run: |
+          npm run check
+          npm run test:release
+      - name: Renderer UI checks
+        working-directory: apps/desktop
+        run: |
+          npx playwright install chromium
+          npm run test:renderer
+      - name: Stage Tauri sidecars
+        working-directory: apps/desktop
+        run: npm run build:sidecars:debug
+      - name: Verify Rust sources
+        run: |
+          cargo +1.89 fmt --manifest-path apps/desktop/gateway/Cargo.toml -- --check
+          cargo +1.89 fmt --manifest-path apps/desktop/runtime/Cargo.toml -- --check
+          cargo +1.89 fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
+          cargo +1.89 clippy --locked --all-targets --manifest-path apps/desktop/gateway/Cargo.toml -- -D warnings
+          cargo +1.89 clippy --locked --all-targets --manifest-path apps/desktop/runtime/Cargo.toml -- -D warnings
+          cargo +1.89 clippy --locked --all-targets --manifest-path apps/desktop/src-tauri/Cargo.toml -- -D warnings
+          cargo +1.89 test --locked --manifest-path apps/desktop/gateway/Cargo.toml
+          cargo +1.89 test --locked --manifest-path apps/desktop/runtime/Cargo.toml
+          cargo +1.89 test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+          cargo test --locked --bin aci
+          cargo test --locked --bin private-ai-proxy --features desktop-client
+          cargo test --locked --test private_ai_proxy_cli --features desktop-client
+          cargo test --locked --test aci_cli
+      - &save-rust-cache
+        name: Save Rust dependencies
+        if: always() && !cancelled() && steps.rust-cache.outputs.cache-primary-key != '' && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: *rust-cache-paths
+          key: ${{ job.status == 'success' && steps.rust-cache.outputs.cache-primary-key || format('{0}-partial-{1}-{2}', steps.rust-cache.outputs.cache-primary-key, github.run_id, github.run_attempt) }}
+
+  package:
+    name: Package (${{ matrix.platform }})
+    needs: verify
+    environment:
+      name: ${{ (inputs.production_macos || inputs.release_version != '') && 'desktop-release' || 'desktop-build' }}
+    env:
+      DESKTOP_RELEASE_VERSION: ${{ inputs.release_version }}
+      PAP_BUILD_TARGET: ${{ matrix.target }}
+      PAP_BUNDLE_DIR: ${{ github.workspace }}/apps/desktop/src-tauri/target/${{ matrix.bundle_dir }}
+      DESKTOP_RELEASE_CHANNEL: ${{ inputs.release_channel || 'beta' }}
+      TAURI_UPDATER_PUBLIC_KEY: ${{ inputs.release_version && vars.TAURI_UPDATER_PUBLIC_KEY || '' }}
+      TAURI_UPDATER_ENDPOINT: ${{ inputs.release_version && format('https://github.com/Dstack-TEE/private-ai-gateway/releases/download/desktop-updates-{0}/latest.json', inputs.release_channel || 'beta') || '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-26
+            platform: macos-arm64
+            cli_platform: macos
+            cli_arch: arm64
+            target: aarch64-apple-darwin
+            bundle_dir: aarch64-apple-darwin/release/bundle
+            bundles: app,dmg
+          - os: macos-26
+            platform: macos-x64
+            cli_platform: macos
+            cli_arch: x64
+            target: x86_64-apple-darwin
+            bundle_dir: x86_64-apple-darwin/release/bundle
+            bundles: app,dmg
+          - os: windows-2025
+            platform: windows-x64
+            target: ''
+            bundle_dir: release/bundle
+            cli_platform: windows
+            cli_arch: x64
+            bundles: nsis
+          - os: ubuntu-24.04
+            platform: linux-x64
+            target: ''
+            bundle_dir: release/bundle
+            cli_platform: linux
+            cli_arch: x64
+            bundles: deb,rpm
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.cli_platform == 'macos' && 90 || 60 }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Validate updater release configuration
+        if: inputs.release_version != ''
+        shell: bash
+        env:
+          PRODUCTION_MACOS: ${{ inputs.production_macos }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          case "$DESKTOP_RELEASE_CHANNEL" in
+            beta) [[ "$DESKTOP_RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-beta\.[1-9][0-9]*$ ]] ;;
+            stable) [[ "$DESKTOP_RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ;;
+            *) exit 1 ;;
+          esac
+          test "$PRODUCTION_MACOS" = true
+          test -n "$TAURI_UPDATER_PUBLIC_KEY"
+          test -n "$TAURI_SIGNING_PRIVATE_KEY"
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        id: rust
+        with:
+          toolchain: stable
+      - *restore-rust-cache
+      - name: Install macOS target
+        if: runner.os == 'macOS'
+        run: rustup target add "$PAP_BUILD_TARGET"
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev gnome-keyring dbus-x11 rpm cpio xvfb x11-utils
+      - name: Install desktop dependencies
+        working-directory: apps/desktop
+        run: npm ci
+      - name: Prepare Apple notarization key
+        if: runner.os == 'macOS' && inputs.production_macos
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_API_ISSUER APPLE_API_KEY APPLE_API_PRIVATE_KEY; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if (( ${#missing[@]} )); then
+            printf 'Missing required macOS release secret: %s\n' "${missing[@]}"
+            exit 1
+          fi
+
+          key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+          umask 077
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$key_path"
+          echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+
+      - name: Build production macOS package
+        if: runner.os == 'macOS' && inputs.production_macos
+        working-directory: apps/desktop
+        env:
+          TAURI_BUNDLER_DMG_IGNORE_CI: 'true'
+          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.release_version && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.release_version && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: npm run dist -- --bundles ${{ matrix.bundles }}
+
+      - name: Build ad-hoc macOS package
+        if: runner.os == 'macOS' && inputs.production_macos != true
+        working-directory: apps/desktop
+        env:
+          TAURI_BUNDLER_DMG_IGNORE_CI: 'true'
+          APPLE_SIGNING_IDENTITY: '-'
+        run: npm run dist -- --bundles ${{ matrix.bundles }}
+
+      - name: Build non-macOS package
+        if: runner.os != 'macOS'
+        working-directory: apps/desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.release_version && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.release_version && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+        run: npm run dist -- --bundles ${{ matrix.bundles }}
+
+      - name: Verify macOS executables
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_bundle="$(find "$PAP_BUNDLE_DIR/macos" -type d -name '*.app' -print -quit)"
+          test -n "$app_bundle"
+          architecture=arm64
+          if [[ "$PAP_BUILD_TARGET" == x86_64-apple-darwin ]]; then architecture=x86_64; fi
+          for binary in private-ai-proxy-desktop private-ai-proxy private-ai-proxy-service private-ai-proxy-helper; do
+            test "$(xcrun lipo -archs "$app_bundle/Contents/MacOS/$binary")" = "$architecture"
+          done
+          if [[ "$architecture" == x86_64 ]] && ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+            softwareupdate --install-rosetta --agree-to-license
+          fi
+          arch "-$architecture" "$app_bundle/Contents/MacOS/private-ai-proxy" --version
+          arch "-$architecture" "$app_bundle/Contents/MacOS/private-ai-proxy-service" --version
+          arch "-$architecture" "$app_bundle/Contents/MacOS/private-ai-proxy-helper" --help
+
+      - name: Package CLI-only distribution
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${DESKTOP_RELEASE_VERSION:-0.1.0}"
+          target_triple="$(rustc -vV | sed -n 's/^host: //p')"
+          test -n "$target_triple"
+          source_args=()
+          if [[ '${{ runner.os }}' == macOS ]]; then
+            target_triple="$PAP_BUILD_TARGET"
+            app_bundle="$(find "$PAP_BUNDLE_DIR/macos" -type d -name '*.app' -print -quit)"
+            test -n "$app_bundle"
+            source_args=(--source "$app_bundle/Contents/MacOS")
+          fi
+          node scripts/package-cli.mjs \
+            --platform '${{ matrix.cli_platform }}' \
+            --arch '${{ matrix.cli_arch }}' \
+            --version "$version" \
+            --target-triple "$target_triple" \
+            --output release "${source_args[@]}"
+
+      - name: Check CLI-only archive without UI
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${DESKTOP_RELEASE_VERSION:-0.1.0}"
+          base="private-ai-proxy-cli-${version}-${{ matrix.cli_platform }}-${{ matrix.cli_arch }}"
+          scratch="$(mktemp -d "$RUNNER_TEMP/cli-archive.XXXXXX")"
+          trap 'rm -rf "$scratch"' EXIT
+          if [[ '${{ matrix.cli_platform }}' == windows ]]; then
+            native_tar="$(cygpath -u "$WINDIR")/System32/tar.exe"
+            "$native_tar" -x -f "release/${base}.zip" -C "$scratch"
+          else
+            tar -x -z -f "release/${base}.tar.gz" -C "$scratch"
+          fi
+          node scripts/cli-package-smoke.mjs "$scratch/$base" "$version"
+
+      - name: Verify Windows installer startup gate
+        if: runner.os == 'Windows'
+        working-directory: apps/desktop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $makensis = Join-Path $env:LOCALAPPDATA 'tauri/NSIS/makensis.exe'
+          if (!(Test-Path -LiteralPath $makensis -PathType Leaf)) { throw 'Tauri-managed makensis.exe is missing' }
+          node scripts/windows-startup-gate-smoke.mjs $makensis
+          if ($LASTEXITCODE -ne 0) { throw 'Windows startup-gate smoke failed' }
+
+      - name: Check CLI-only Linux packages without installation
+        if: runner.os == 'Linux'
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${DESKTOP_RELEASE_VERSION:-0.1.0}"
+          deb=(release/private-ai-proxy-cli_*.deb)
+          rpm=(release/private-ai-proxy-cli-*.rpm)
+          test "${#deb[@]}" -eq 1
+          test "${#rpm[@]}" -eq 1
+          scratch="$(mktemp -d "$RUNNER_TEMP/cli-native.XXXXXX")"
+          trap 'rm -rf "$scratch"' EXIT
+          mkdir "$scratch/deb" "$scratch/rpm"
+          dpkg-deb -x "${deb[0]}" "$scratch/deb"
+          node scripts/cli-package-smoke.mjs "$scratch/deb/usr/libexec/private-ai-proxy" "$version" "$scratch/deb/usr/bin"
+          test "$(readlink "$scratch/deb/usr/bin/private-ai-proxy")" = ../libexec/private-ai-proxy/private-ai-proxy
+          (cd "$scratch/rpm" && rpm2cpio "$GITHUB_WORKSPACE/apps/desktop/${rpm[0]}" | cpio -idm --quiet)
+          node scripts/cli-package-smoke.mjs "$scratch/rpm/usr/libexec/private-ai-proxy" "$version" "$scratch/rpm/usr/bin"
+          test "$(readlink "$scratch/rpm/usr/bin/private-ai-proxy")" = ../libexec/private-ai-proxy/private-ai-proxy
+
+      - name: Notarize production macOS disk image
+        if: runner.os == 'macOS' && inputs.production_macos
+        working-directory: apps/desktop
+        shell: bash
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          set -euo pipefail
+          dmg="$(find "$PAP_BUNDLE_DIR/dmg" -type f -name '*.dmg' -print -quit)"
+          test -f "$dmg"
+          xcrun notarytool submit "$dmg" \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait
+          xcrun stapler staple "$dmg"
+          cli_scratch="$(mktemp -d "$RUNNER_TEMP/pap-cli-notary.XXXXXX")"
+          trap 'rm -rf "$cli_scratch"' EXIT
+          tar -xzf "release/private-ai-proxy-cli-${DESKTOP_RELEASE_VERSION:-0.1.0}-macos-${{ matrix.cli_arch }}.tar.gz" -C "$cli_scratch"
+          cli_directory="$cli_scratch/private-ai-proxy-cli-${DESKTOP_RELEASE_VERSION:-0.1.0}-macos-${{ matrix.cli_arch }}"
+          for executable in "$cli_directory"/*; do codesign --verify --strict "$executable"; done
+          ditto -c -k --keepParent "$cli_directory" "$cli_scratch/cli.zip"
+          xcrun notarytool submit "$cli_scratch/cli.zip" \
+            --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" --wait
+
+      - name: Test macOS backend library
+        if: runner.os == 'macOS'
+        working-directory: apps/desktop
+        run: |
+          cargo test --release --locked --manifest-path runtime/Cargo.toml --target "$(rustc -vV | sed -n 's/^host: //p')" --lib
+
+      - name: Test Windows desktop libraries
+        if: runner.os == 'Windows'
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --release --locked --manifest-path gateway/Cargo.toml --lib
+          cargo test --release --locked --manifest-path runtime/Cargo.toml --lib
+          cargo test --release --locked --manifest-path src-tauri/Cargo.toml --lib
+
+      - name: Check installed Windows sidecars without UI
+        if: runner.os == 'Windows'
+        working-directory: apps/desktop
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem "$env:PAP_BUNDLE_DIR/nsis/*.exe")
+          if ($installers.Count -ne 1) { throw 'Expected one NSIS installer' }
+          $installDir = Join-Path $env:RUNNER_TEMP 'Tauri Installed Check'
+          if (Test-Path $installDir) { throw 'Install check directory already exists' }
+          function Run-Installer($executable, $arguments) {
+            $process = Start-Process -FilePath $executable -ArgumentList $arguments -PassThru
+            if (!$process.WaitForExit(60000)) {
+              & taskkill.exe /PID $process.Id /T /F
+              throw 'Installer timed out'
+            }
+            if ($process.ExitCode -ne 0) { throw "Installer failed: $($process.ExitCode)" }
+          }
+          try {
+            Run-Installer $installers[0].FullName "/S /D=$installDir"
+            node scripts/packaged-sidecars-smoke.mjs $installDir
+            if ($LASTEXITCODE -ne 0) { throw 'Installed sidecar checks failed' }
+            $registration = (& "$installDir/private-ai-proxy.exe" --json cli status | ConvertFrom-Json)
+            if ($LASTEXITCODE -ne 0 -or !$registration.installed) { throw 'NSIS did not register private-ai-proxy in the user PATH' }
+            if ([IO.Path]::GetFullPath($registration.commandPath) -ne [IO.Path]::GetFullPath("$installDir/private-ai-proxy.exe")) {
+              throw 'private-ai-proxy reported an unexpected registered command path'
+            }
+            $env:PAP_TEST_HELPER_PATH = "$installDir/private-ai-proxy-helper.exe"
+            cargo test --release --locked --manifest-path gateway/Cargo.toml --lib -- --ignored hermes_windows_installed_command_round_trip
+            if ($LASTEXITCODE -ne 0) { throw 'Hermes credential command failed' }
+            cargo test --release --locked --manifest-path gateway/Cargo.toml --lib -- --ignored keyring_round_trip
+            if ($LASTEXITCODE -ne 0) { throw 'Credential Manager check failed' }
+          } finally {
+            if (Test-Path "$installDir/uninstall.exe") {
+              Run-Installer "$installDir/uninstall.exe" "/S _?=$installDir"
+            }
+            foreach ($binary in @('private-ai-proxy-desktop.exe', 'private-ai-proxy.exe', 'pap.cmd', 'private-ai-proxy-service.exe', 'private-ai-proxy-helper.exe')) {
+              if (Test-Path "$installDir/$binary") { throw "Uninstall left $binary" }
+            }
+            $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+            if (($userPath -split ';') -contains $installDir) { throw 'Uninstall left the NSIS-owned private-ai-proxy PATH entry' }
+          }
+
+      - name: Check installed Linux sidecars without UI
+        if: runner.os == 'Linux'
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          packages=("$PAP_BUNDLE_DIR"/deb/*.deb)
+          test "${#packages[@]}" -eq 1
+          package=$(dpkg-deb -f "${packages[0]}" Package)
+          if dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'install ok installed'; then
+            echo 'Refusing to replace an existing installation'
+            exit 1
+          fi
+          scratch=$(mktemp -d "$RUNNER_TEMP/tauri-installed.XXXXXX")
+          cleanup() {
+            local status=$?
+            if dpkg-query -W "$package" >/dev/null 2>&1; then
+              sudo apt-get remove -y "$package" || status=1
+            fi
+            for binary in private-ai-proxy-desktop private-ai-proxy private-ai-proxy-service private-ai-proxy-helper; do
+              if [[ -e "/usr/bin/$binary" ]]; then status=1; fi
+            done
+            rm -rf "$scratch"
+            return "$status"
+          }
+          trap cleanup EXIT
+          sudo apt-get install -y "${packages[0]}"
+          node scripts/packaged-sidecars-smoke.mjs /usr/bin
+          export TAURI_CHECK_KEYRING_HOME="$scratch"
+          export XDG_RUNTIME_DIR="$scratch/runtime"
+          mkdir -m 700 "$XDG_RUNTIME_DIR"
+          dbus-run-session -- bash -euc '
+            HOME="$TAURI_CHECK_KEYRING_HOME" gnome-keyring-daemon --foreground --unlock --components=secrets <<< ci-check-only &
+            keyring_pid=$!
+            trap "kill $keyring_pid 2>/dev/null || true; wait $keyring_pid || true" EXIT
+            gdbus wait --session --timeout 10 org.freedesktop.secrets
+            cargo test --release --locked --manifest-path gateway/Cargo.toml --lib -- --ignored keyring_round_trip
+          '
+          xvfb-run -a dbus-run-session -- node scripts/native-backend-smoke.mjs /usr/bin
+      - name: Stage and inspect macOS package
+        if: runner.os == 'macOS'
+        working-directory: apps/desktop
+        shell: bash
+        env:
+          PRODUCTION_MACOS: ${{ inputs.production_macos }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          app_bundle="$(find "$PAP_BUNDLE_DIR/macos" -type d -name '*.app' -print -quit)"
+          dmg="$(find "$PAP_BUNDLE_DIR/dmg" -type f -name '*.dmg' -print -quit)"
+          test -d "$app_bundle"
+          test -f "$dmg"
+          test -x "$app_bundle/Contents/MacOS/private-ai-proxy"
+          test -x "$app_bundle/Contents/MacOS/private-ai-proxy-service"
+          test ! -e "$app_bundle/Contents/MacOS/aci"
+          test -x "$app_bundle/Contents/MacOS/private-ai-proxy-helper"
+          test -f "$app_bundle/Contents/Resources/Assets.car"
+          test -f "$app_bundle/Contents/Resources/icon.icns"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$app_bundle/Contents/Info.plist")" = Icon
+          codesign --verify --deep --strict --verbose=2 "$app_bundle"
+          codesign_details="$(codesign --display --verbose=4 "$app_bundle" 2>&1)"
+          if [[ "$PRODUCTION_MACOS" == "true" ]]; then
+            grep -q '^Authority=Developer ID Application:' <<<"$codesign_details"
+            if grep -q '^Signature=adhoc$' <<<"$codesign_details"; then
+              echo 'Production package was signed ad-hoc instead of with Developer ID'
+              exit 1
+            fi
+            xcrun stapler validate "$app_bundle"
+            xcrun stapler validate "$dmg"
+            spctl --assess --type execute --verbose=4 "$app_bundle"
+            spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
+          else
+            grep -q '^Signature=adhoc$' <<<"$codesign_details"
+          fi
+          registration_home="$(mktemp -d "$RUNNER_TEMP/pap-registration.XXXXXX")"
+          registration_log="$RUNNER_TEMP/private-ai-proxy-registration.log"
+          registration_stop_log="$RUNNER_TEMP/private-ai-proxy-registration-stop.log"
+          registration_pid=
+          cleanup_registration() {
+            local status=$?
+            trap - EXIT
+            if [[ -n "$registration_pid" ]] && kill -0 "$registration_pid" 2>/dev/null; then
+              kill -TERM "$registration_pid" 2>/dev/null || true
+              for _ in {1..50}; do
+                kill -0 "$registration_pid" 2>/dev/null || break
+                sleep 0.1
+              done
+              if kill -0 "$registration_pid" 2>/dev/null; then
+                kill -KILL "$registration_pid" 2>/dev/null || true
+                for _ in {1..50}; do
+                  kill -0 "$registration_pid" 2>/dev/null || break
+                  sleep 0.1
+                done
+              fi
+            fi
+            if [[ -n "$registration_pid" ]]; then
+              if kill -0 "$registration_pid" 2>/dev/null; then
+                echo 'Packaged app did not exit during registration smoke cleanup.' >&2
+                status=1
+              else
+                wait "$registration_pid" 2>/dev/null || true
+              fi
+            fi
+            if HOME="$registration_home" PRIVATE_AI_PROXY_HOME="$registration_home" \
+              "$app_bundle/Contents/MacOS/private-ai-proxy" --yes service stop >"$registration_stop_log" 2>&1; then
+              rm -rf "$registration_home"
+            else
+              echo "Packaged backend cleanup failed; isolated state retained at $registration_home" >&2
+              cat "$registration_log" >&2 || true
+              cat "$registration_stop_log" >&2 || true
+              status=1
+            fi
+            rm -f "$registration_log" "$registration_stop_log"
+            return "$status"
+          }
+          trap cleanup_registration EXIT
+          registration_before="$(HOME="$registration_home" PRIVATE_AI_PROXY_HOME="$registration_home" \
+            "$app_bundle/Contents/MacOS/private-ai-proxy" --json cli status)"
+          node -e 'const value = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (value.installed !== false) process.exit(1)' \
+            <<<"$registration_before"
+          HOME="$registration_home" PRIVATE_AI_PROXY_HOME="$registration_home" \
+            "$app_bundle/Contents/MacOS/private-ai-proxy-desktop" >"$registration_log" 2>&1 &
+          registration_pid=$!
+          for _ in {1..100}; do
+            [[ -L "$registration_home/.local/bin/private-ai-proxy" ]] && break
+            if ! kill -0 "$registration_pid" 2>/dev/null; then
+              cat "$registration_log"
+              exit 1
+            fi
+            sleep 0.1
+          done
+          test -L "$registration_home/.local/bin/pap"
+          test "$(readlink "$registration_home/.local/bin/pap")" = "$(realpath "$app_bundle/Contents/MacOS/private-ai-proxy")"
+          test -L "$registration_home/.local/bin/private-ai-proxy"
+          test "$(readlink "$registration_home/.local/bin/private-ai-proxy")" = "$(realpath "$app_bundle/Contents/MacOS/private-ai-proxy")"
+          registration_after="$(HOME="$registration_home" PRIVATE_AI_PROXY_HOME="$registration_home" \
+            "$app_bundle/Contents/MacOS/private-ai-proxy" --json cli status)"
+          node -e 'const value = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (value.installed !== true) process.exit(1)' \
+            <<<"$registration_after"
+          kill -0 "$registration_pid"
+          cleanup_registration
+          hdiutil verify "$dmg"
+          node scripts/verify-dmg-layout.mjs "$dmg"
+          base="private-ai-proxy-${DESKTOP_RELEASE_VERSION:-0.1.0}-macos-${{ matrix.cli_arch }}"
+          cp "$dmg" "release/$base.dmg"
+          if [[ -n "$DESKTOP_RELEASE_VERSION" ]]; then
+            updater="$(find "$PAP_BUNDLE_DIR/macos" -maxdepth 1 -name '*.app.tar.gz' -print -quit)"
+            test -n "$updater"
+            mv "$updater" "release/$base.app.tar.gz"
+            mv "$updater.sig" "release/$base.app.tar.gz.sig"
+          fi
+      - name: Upload desktop package
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: private-ai-proxy-${{ inputs.release_version && (inputs.release_channel || 'beta') || 'test' }}-${{ inputs.release_version || '0.1.0' }}-${{ github.sha }}-${{ matrix.platform }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            apps/desktop/release/*.dmg
+            apps/desktop/release/*.app.tar.gz*
+            apps/desktop/release/private-ai-proxy-cli-*
+            ${{ env.PAP_BUNDLE_DIR }}/nsis/*.exe
+            ${{ env.PAP_BUNDLE_DIR }}/deb/*.deb
+            ${{ env.PAP_BUNDLE_DIR }}/deb/*.sig
+            ${{ env.PAP_BUNDLE_DIR }}/rpm/*.rpm
+            ${{ env.PAP_BUNDLE_DIR }}/rpm/*.sig
+            ${{ env.PAP_BUNDLE_DIR }}/macos/*.tar.gz
+            ${{ env.PAP_BUNDLE_DIR }}/macos/*.sig
+            ${{ env.PAP_BUNDLE_DIR }}/nsis/*.sig
+
+      - name: Remove Apple notarization key
+        if: always() && runner.os == 'macOS' && inputs.production_macos
+        shell: bash
+        run: rm -f "${APPLE_API_KEY_PATH:-}"
+      - *save-rust-cache
+
+  draft-release:
+    if: inputs.release_version != '' && inputs.production_macos
+    needs: package
+    environment: desktop-release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ inputs.release_version }}
+      CHANNEL: ${{ inputs.release_channel || 'beta' }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: private-ai-proxy-*
+          path: release-artifacts
+          merge-multiple: false
+      - name: Install release tooling
+        working-directory: apps/desktop
+        run: npm ci --ignore-scripts
+      - name: Create signed update manifest and draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node apps/desktop/scripts/create-update-manifest.mjs release-artifacts "$VERSION" "$GITHUB_REPOSITORY" "$CHANNEL"
+          node apps/desktop/scripts/release-assets.mjs release-artifacts > release-assets.list
+          mapfile -d '' assets < release-assets.list
+          release_args=()
+          if [[ "$CHANNEL" == beta ]]; then release_args+=(--prerelease); fi
+          gh release create "desktop-v$VERSION" "${assets[@]}" "${release_args[@]}" --draft --latest=false --target "$GITHUB_SHA" --title "Private AI Proxy $VERSION" --generate-notes
+      - name: Publish desktop version
+        if: inputs.publish_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "desktop-v$VERSION" --draft=false --latest=false
+
+  update-feed:
+    if: inputs.publish_release && inputs.release_version != '' && inputs.production_macos
+    needs: draft-release
+    permissions:
+      contents: write
+    uses: ./.github/workflows/desktop-update-feed.yml
+    with:
+      tag: desktop-v${{ inputs.release_version }}
