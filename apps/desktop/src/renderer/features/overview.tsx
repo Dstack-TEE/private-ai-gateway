@@ -233,7 +233,7 @@ function OverviewModule({
         {description && <CardDescription>{description}</CardDescription>}
         {action && <CardAction>{onAction ? <Button variant="outline" size="sm" onClick={onAction}>{action}</Button> : action}</CardAction>}
       </CardHeader>
-      <CardContent className="module min-h-0 min-w-0 flex-1 overflow-hidden @container">{children}</CardContent>
+      <CardContent className="module flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden @container">{children}</CardContent>
     </Card>
   );
 }
