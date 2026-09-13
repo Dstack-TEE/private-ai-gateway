@@ -194,7 +194,7 @@ mod tests {
         let mut settings = ServiceSettings::default();
         assert_eq!(backup().merge(&mut settings).unwrap().imported, 1);
         assert_eq!(settings.profiles[0].verified_at, None);
-        assert_eq!(settings.profiles[0].credential_saved, false);
+        assert!(!settings.profiles[0].credential_saved);
         let id = settings.active_profile_id.clone();
         assert_eq!(backup().merge(&mut settings).unwrap().skipped, 1);
         assert_eq!(settings.active_profile_id, id);
