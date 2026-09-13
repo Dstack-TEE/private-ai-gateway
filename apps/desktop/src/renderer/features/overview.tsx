@@ -1,5 +1,4 @@
 import React, { memo } from "react";
-import { AccountTools } from "../components/account-tools";
 import { ChevronDown, CircleHelp, Info, Plus, Settings } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { StateLabel } from "../components/state-label";
@@ -18,7 +17,6 @@ import { sortAgents } from "../lib/agents";
 import { UsageRow } from "./usage";
 import { ProtectedControl, ProtectionStatus } from "../components/protection";
 import { ServiceLogo } from "../components/brand";
-import { desktopApi } from "../lib/environment";
 
 const TLS_TRACKS = [
   "17 03 03 00 f4   9f3a c1e0 7b42 d5a8 0e6f 2c91 4d17 e8b3 5a0c f9d2 61b7 a3e4 b8c5 0f2e 93d1 7a46 e5b0 1c8d",
@@ -186,9 +184,6 @@ function StatusSurface({
           <span>{activeProfile?.name ?? "Set up"}</span>
           {activeProfile && <ChevronDown aria-hidden="true" />}
         </Button>
-        {activeProfile?.auth.kind === "oauth" && activeProfile.credentialSaved && <AccountTools
-          api={desktopApi} provider={activeProfile.provider} target={{ kind: "profile", profileId: activeProfile.id }}
-          credentialRef={activeProfile.credentialRef} scope={activeProfile.auth.scope} compact />}
         <IconButton size="icon-sm" label="Privacy verification" aria-haspopup="dialog" onClick={onPrivacy}><Info aria-hidden="true" /></IconButton>
         </div>
         <ProtectedControl state={state} busy={busy} running={running} endpointDown={endpointDown} developmentMode={developmentMode} onToggle={onToggle} iconOnly />
