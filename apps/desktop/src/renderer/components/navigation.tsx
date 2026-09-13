@@ -62,8 +62,8 @@ export function Sidebar({
         )}
       </div>
       <div className="sidebar-brand min-h-9.5 mt-0 mr-1.5 mb-5 ml-1.5 flex items-center gap-2.25 font-semibold whitespace-nowrap overflow-hidden [&_>_*]:pointer-events-none [&_span]:overflow-hidden [&_span]:text-ellipsis max-[780px]:[&_>_span:last-child]:text-xs max-[620px]:justify-center max-[620px]:p-0 max-[620px]:[&_>_span:last-child]:hidden" data-tauri-drag-region>
-        <BrandMark className="brand-mark w-7.5 h-7.5" />
-        <span className="sidebar-brand-copy min-w-0 flex flex-col gap-0.5 leading-4.5 [&_small]:text-xs [&_small]:font-normal [&_small]:text-muted-foreground"><span>{brand.productName}</span><small>{brand.byline}</small></span>
+        <BrandMark className="brand-mark size-9" />
+        <span className="sidebar-brand-copy min-w-0 flex flex-col gap-0.5 text-sm leading-4.5 [&_small]:text-xs [&_small]:leading-4 [&_small]:font-normal [&_small]:text-muted-foreground"><span>{brand.productName}</span><small>{brand.byline}</small></span>
       </div>
       <SidebarProvider keyboardShortcut={false} className="min-h-0 flex-col">
       <nav className="w-full" aria-label="Main navigation" onKeyDown={onKeyDown}>

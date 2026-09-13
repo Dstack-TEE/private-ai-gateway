@@ -747,6 +747,7 @@ export function mockApi(name: string | null): DesktopApi {
         modelPoint.costUsd += item.costUsd ?? 0;
         byModel.set(key, modelPoint);
       }
+      if (name === "usage-cache") document.documentElement.dataset.usageLoaded = "true";
       return {
         items,
         nextCursor: offset + limit < filtered.length ? `${offset + limit}:mock` : undefined,

@@ -1,6 +1,7 @@
 import { useAgents } from "./hooks/use-agents";
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { cliRegistrationQuery, usagePageQuery } from "./lib/page-queries";
 import { useGatewayState } from "./lib/use-gateway-state";
 import { useWindowReady } from "./lib/use-window-ready";
 import { errorMessage } from "./lib/error-message";
@@ -36,6 +37,13 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
   const stateLoaded = !gateway.isLoading;
   const [allowDevelopmentOs, setAllowDevelopmentOs] = useState(false);
   const client = useQueryClient();
+  const backendReady = Boolean(gateway.data) && state.backendConnected !== false;
+  useEffect(() => {
+    if (!backendReady) return;
+    // Prefetch shares page caches and retains errors for the page to display.
+    void client.prefetchQuery(usagePageQuery());
+    void client.prefetchQuery(cliRegistrationQuery());
+  }, [client, backendReady]);
   const { data: launchPreferences } = useQuery({ queryKey: ["launch-preferences"], queryFn: () => desktopApi.getLaunchPreferences() });
   const [savingPreference, setSavingPreference] = useState(false);
   const [connectingBackend, setConnectingBackend] = useState(false);

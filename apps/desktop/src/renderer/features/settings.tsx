@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { cliRegistrationQuery } from "../lib/page-queries";
 import { errorMessage } from "../lib/error-message";
 import { ChevronRight } from "lucide-react";
 import { brand } from "../generated/brand";
@@ -19,7 +20,7 @@ import { isProtected, profileIsAvailable } from "../lib/protection";
 
 function CliRegistrationControl(): React.JSX.Element {
   const client = useQueryClient();
-  const { data: registration, error: readError } = useQuery({ queryKey: ["cli-registration"], queryFn: () => desktopApi.getCliRegistration() });
+  const { data: registration, error: readError } = useQuery(cliRegistrationQuery());
   const mutation = useMutation({
     mutationFn: (installed: boolean) => desktopApi.setCliRegistration(installed),
     onMutate: () => client.cancelQueries({ queryKey: ["cli-registration"] }),
