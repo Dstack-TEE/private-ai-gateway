@@ -7,11 +7,11 @@ const all = [
   { os: "ubuntu-24.04-arm", platform: "linux-arm64", cli_platform: "linux", cli_arch: "arm64", target: "", bundle_dir: "release/bundle", bundles: "deb,rpm" },
 ];
 const value = process.argv[2]?.trim() || "all";
-const selected = value === "all" ? all : value.split(",").map((item) => item.trim()).filter(Boolean);
+const selected = value === "all" ? all.map((item) => item.platform) : value.split(",").map((item) => item.trim()).filter(Boolean);
 const valid = new Set(all.map((item) => item.platform));
-if (value !== "all" && (selected.some((item) => !valid.has(item)) || new Set(selected).size !== selected.length)) {
+if (selected.some((item) => !valid.has(item)) || new Set(selected).size !== selected.length) {
   throw new Error(`Platforms must be all or a unique comma-separated list of: ${[...valid].join(", ")}`);
 }
-const matrix = value === "all" ? all : all.filter((item) => selected.includes(item.platform));
+const matrix = all.filter((item) => selected.includes(item.platform));
 if (matrix.length === 0) throw new Error("At least one package platform is required");
 process.stdout.write(JSON.stringify({ include: matrix }));
