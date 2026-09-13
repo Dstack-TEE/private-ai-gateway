@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Private AI Proxy",
   "version": "0.1.0",
-  "identifier": "dev.private-ai-proxy.desktop",
+  "identifier": "org.dstack.private-ai-proxy",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://127.0.0.1:1420",
