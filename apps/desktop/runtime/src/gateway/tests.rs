@@ -1,6 +1,189 @@
 use super::*;
 
+#[tokio::test]
+async fn compatibility_refresh_is_background_work_and_cannot_resurrect_a_stopped_session() {
+    use axum::{routing::get, Json, Router};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let mut inventory = serde_json::to_value(EndpointInventory::bundled().unwrap()).unwrap();
+    inventory["checkedAt"] = "2027-01-01T00:00:00Z".into();
+    for observation in inventory["results"].as_array_mut().unwrap() {
+        if observation["model"] == "z-ai/glm-5.3" {
+            observation["status"] = "inconclusive".into();
+        }
+    }
+    let app = Router::new()
+        .route(
+            "/v1/models",
+            get(|| async { Json(serde_json::json!({"data":[{"id":"z-ai/glm-5.3"}]})) }),
+        )
+        .route(
+            "/inventory",
+            get({
+                let reached = reached.clone();
+                let release = release.clone();
+                move || {
+                    let reached = reached.clone();
+                    let release = release.clone();
+                    let inventory = inventory.clone();
+                    async move {
+                        reached.notify_one();
+                        release.notified().await;
+                        Json(inventory)
+                    }
+                }
+            }),
+        );
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let updater = InventoryUpdater::new(directory.path().join("inventory.json"))
+        .unwrap()
+        .with_source(format!("{base}/inventory"));
+    let (events, _) = tokio::sync::mpsc::channel(8);
+    let proxy = ProxyState::new(events).unwrap();
+    let manager = Arc::new(
+        GatewayManager::new(
+            proxy.clone(),
+            Arc::new(UsageStore::memory().unwrap()),
+            Arc::new(WaitingSidecar),
+            Handle::current(),
+            GatewayState::default(),
+        )
+        .with_endpoint_inventory(updater),
+    );
+    {
+        let mut runtime = manager.lock().unwrap();
+        runtime.generation = 1;
+        runtime.epoch = 1;
+        runtime.identity_ready = true;
+        runtime.sidecar_url = Some(base.clone());
+        runtime.state.remote_url = Some("https://tee.redpill.ai".into());
+    }
+    proxy.publish(Session {
+        generation: 1,
+        epoch: 1,
+        base_url: Some(base),
+        ..Session::default()
+    });
+    tokio::time::timeout(Duration::from_secs(2), manager.load_catalog(1, 1))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(proxy.session().verified);
+    tokio::time::timeout(Duration::from_secs(2), reached.notified())
+        .await
+        .unwrap();
+    assert!(proxy.session().catalog.unwrap().models[0]
+        .supports(desktop_gateway::catalog::Surface::Responses));
+    // A second catalog read also stays responsive while the shared download waits.
+    tokio::time::timeout(Duration::from_secs(2), manager.refresh_catalog())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut states = manager.subscribe();
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), states.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(proxy
+        .session()
+        .catalog
+        .unwrap()
+        .for_surface(desktop_gateway::catalog::Surface::Responses)
+        .models
+        .is_empty());
+    assert_eq!(proxy.session().epoch, 1);
+    manager.stop().unwrap();
+    manager.apply_inventory(1, 1).unwrap();
+    assert!(!proxy.session().verified);
+    server.abort();
+    let _ = server.await;
+}
+
 struct WaitingSidecar;
+
+#[tokio::test]
+async fn late_catalog_failure_cannot_override_a_newer_success_or_security_stop() {
+    use axum::{routing::get, Json, Router};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let app = Router::new().route(
+        "/v1/models",
+        get({
+            let calls = calls.clone();
+            let reached = reached.clone();
+            let release = release.clone();
+            move || {
+                let index = calls.fetch_add(1, Ordering::SeqCst);
+                let reached = reached.clone();
+                let release = release.clone();
+                async move {
+                    if index.is_multiple_of(2) {
+                        reached.notify_one();
+                        release.notified().await;
+                        return Json(serde_json::json!({"error":"old request failed"}));
+                    }
+                    Json(serde_json::json!({"data":[{"id":"current-model"}]}))
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let (events, _) = tokio::sync::mpsc::channel(8);
+    let proxy = ProxyState::new(events).unwrap();
+    let manager = Arc::new(GatewayManager::new(
+        proxy.clone(),
+        Arc::new(UsageStore::memory().unwrap()),
+        Arc::new(WaitingSidecar),
+        Handle::current(),
+        GatewayState::default(),
+    ));
+    {
+        let mut runtime = manager.lock().unwrap();
+        runtime.identity_ready = true;
+        runtime.sidecar_url = Some(base.clone());
+    }
+    proxy.publish(Session {
+        base_url: Some(base),
+        ..Session::default()
+    });
+    for stop in [false, true] {
+        let pending = {
+            let manager = manager.clone();
+            tokio::spawn(async move { manager.refresh_catalog().await })
+        };
+        tokio::time::timeout(Duration::from_secs(2), reached.notified())
+            .await
+            .unwrap();
+        if stop {
+            manager.stop().unwrap();
+        } else {
+            manager.refresh_catalog().await.unwrap();
+        }
+        release.notify_one();
+        pending.await.unwrap().unwrap();
+        let state = manager.snapshot().unwrap();
+        assert!(state.error.is_none());
+        assert_eq!(proxy.session().verified, !stop);
+        assert_eq!(state.status, if stop { "stopped" } else { "verified" });
+        if !stop {
+            assert_eq!(state.catalog.unwrap().models[0].id, "current-model");
+        }
+    }
+    server.abort();
+    let _ = server.await;
+}
 struct WaitingChild(Option<tokio::sync::mpsc::Sender<SidecarEvent>>);
 impl SidecarChild for WaitingChild {
     fn kill(&mut self) -> Result<(), String> {

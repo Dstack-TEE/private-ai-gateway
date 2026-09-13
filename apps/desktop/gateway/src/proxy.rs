@@ -173,11 +173,20 @@ impl ProxyState {
 
     // State is guarded by std locks: writers are the desktop shell's event
     // handlers (synchronous), readers never hold a guard across an await.
-    /// Publish a session atomically; replaces whatever was there and stops
-    /// deliveries admitted under the previous one.
+    /// Catalog-only updates affect subsequent admissions, not existing requests.
+    /// Identity, credentials and explicit stop retain their revocation barriers.
     pub fn publish(&self, session: Session) {
-        *write(&self.session) = session;
-        self.revoke_deliveries();
+        let mut current = write(&self.session);
+        let revoke = current.generation != session.generation
+            || current.epoch != session.epoch
+            || current.session_id != session.session_id
+            || current.base_url != session.base_url
+            || current.verified != session.verified
+            || current.catalog.is_some() != session.catalog.is_some();
+        *current = session;
+        if revoke {
+            self.revoke_deliveries();
+        }
     }
 
     pub fn session(&self) -> Session {

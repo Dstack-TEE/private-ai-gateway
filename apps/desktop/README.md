@@ -632,7 +632,9 @@ protocol is the service's own response, shown as such.
 - **Sessions.** The proxy forwards only while a *verified session* is
   published: the sidecar's verified identity and the catalog read through it,
   together, under one generation (per sidecar start) and epoch (per identity
-  report or refresh). Starting, stopping, `blocked`, `fatal`, or a crash is
+  report). Catalog reads have their own ordering counter; ordinary refreshes
+  update subsequent admissions without cancelling in-flight requests.
+  Starting, stopping, `blocked`, `fatal`, or a crash is
   one atomic barrier: the epoch moves, the identity must be reported again,
   the catalog is cleared, and a read still in flight can neither publish nor
   clear the error. Each request holds a lease and re-checks it, plus the
@@ -719,11 +721,16 @@ protocol is the service's own response, shown as such.
 
   Apps fetch this file from the repository's `main` branch when starting protection
   or refreshing the model catalog (`private-ai-proxy models list --refresh`). The request runs
-  alongside model discovery, uses a separate unauthenticated HTTPS client, and has
+  in the background after verified model discovery, uses a separate unauthenticated HTTPS client, and has
   a four-second deadline and a 1 MiB limit. ETag conditional requests reuse the
   last validated inventory. Invalid schemas, incomplete observations, download
-  errors, and offline operation retain the last good local cache, or the bundled
-  inventory on first use. Cache replacement is atomic. Active agent projections
+  errors, and offline operation keep the newest valid local snapshot. Cache and
+  bundled `checkedAt` values are parsed as RFC 3339 timestamps; only strictly newer
+  downloaded observations replace them. Equal/older dates cannot override local
+  data. Corrections and intentional rollbacks must carry a new observation date.
+  Protection starts with local data and never waits for GitHub. Concurrent refreshes
+  share one download, and results apply only to a still-verified matching session.
+  Cache replacement is atomic. Active agent projections
   refresh through the existing configuration transaction and restoration journal.
 
   To publish changes, review the full three-endpoint probe report and update

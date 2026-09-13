@@ -11,6 +11,11 @@ fn downloaded_inventory_rejects_unknown_schema_duplicate_and_partial_observation
         },
         {
             let mut value = valid.clone();
+            value["checkedAt"] = json!("2026-02-30T00:00:00Z");
+            value
+        },
+        {
+            let mut value = valid.clone();
             value["results"][0]["status"] = json!("maybe");
             value
         },

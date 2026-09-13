@@ -33,7 +33,7 @@ pub enum Surface {
 pub struct EndpointInventory {
     schema_version: u32,
     endpoint: String,
-    checked_at: String,
+    checked_at: chrono::DateTime<chrono::Utc>,
     results: Vec<EndpointObservation>,
 }
 
@@ -57,14 +57,16 @@ enum ObservationStatus {
 }
 
 impl EndpointInventory {
+    pub fn is_newer_than(&self, other: &Self) -> bool {
+        self.checked_at > other.checked_at
+    }
+
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
         let inventory: Self = serde_json::from_slice(bytes)
             .map_err(|_| "Invalid model endpoint inventory".to_string())?;
         let mut pairs = HashSet::new();
         if inventory.schema_version != 1
             || inventory.endpoint != "https://tee.redpill.ai"
-            || inventory.checked_at.is_empty()
-            || inventory.checked_at.len() > 64
             || inventory.results.is_empty()
             || inventory.results.len() > 10_000
             || inventory.results.iter().any(|entry| {
