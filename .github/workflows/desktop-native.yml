@@ -206,7 +206,7 @@ jobs:
             cli_arch: x64
             bundles: deb,rpm
     runs-on: ${{ matrix.os }}
-    if: ${{ inputs.release_platforms == '' || inputs.release_platforms == 'all' || contains(format(',{0},', inputs.release_platforms), format(',{0},', matrix.platform)) }}
+    if: ${{ !inputs.release_platforms || inputs.release_platforms == 'all' || contains(format(',{0},', inputs.release_platforms), format(',{0},', matrix.platform)) }}
     timeout-minutes: ${{ matrix.cli_platform == 'macos' && 90 || 60 }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
