@@ -522,6 +522,18 @@ fn claude_takes_over_credentials_via_the_keyring_and_restores_them() {
         .unwrap()
         .contains("--agent-token claude-code"));
     assert_eq!(doc.get_str(&["model"]).as_deref(), Some("opus"));
+    let settings: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(settings["modelPicker"]["replaceBuiltInOptions"], true);
+    let models = catalog().for_surface(Agent::ClaudeCode.surface());
+    assert_eq!(
+        settings["modelPicker"]["options"],
+        serde_json::json!(models
+            .models
+            .iter()
+            .map(|model| serde_json::json!({"model": model.id()}))
+            .collect::<Vec<_>>())
+    );
     assert!(
         sandbox.secrets.holds("sk-old-secret"),
         "old secret parked in the store"
@@ -543,6 +555,8 @@ fn claude_takes_over_credentials_via_the_keyring_and_restores_them() {
     let text = fs::read_to_string(&path).unwrap();
     assert!(text.contains("\"ANTHROPIC_AUTH_TOKEN\": \"sk-old-secret\""));
     assert!(!text.contains("apiKeyHelper"));
+    let restored: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert!(restored.get("modelPicker").is_none());
     assert!(sandbox.secrets.is_empty(), "restore entry released");
     assert!(sandbox
         .projector

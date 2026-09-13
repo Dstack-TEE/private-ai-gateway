@@ -1091,3 +1091,25 @@ The implementation follows TanStack Query's query keys, invalidation and focusMa
 APIs and Tauri's commands/events/state-management boundaries. A QueryClient belongs
 to each WebView; cross-window correctness comes from runtime state and its events,
 not from pretending JavaScript caches are shared across windows.
+
+### Claude Code model selection and response timing
+
+Claude Code 2.1.242 or later supports the `modelPicker` settings generated from
+the verified Messages-compatible catalog. Reconnect Claude Code in the app after
+upgrading, then restart Claude Code to refresh its settings. Use `/model` to
+choose a listed model. Gateway discovery alone filters out IDs without `claude`
+or `anthropic`, so it cannot list all Messages-compatible gateway models.
+Managed `availableModels` or `modelPicker` settings can still restrict the list;
+the app does not override administrator policy. An existing unmanaged
+`modelPicker` is reported as a configuration conflict rather than overwritten. Anthropic does not officially
+support non-Claude models, and Messages support alone does not establish full
+tool-calling compatibility.
+
+Desktop protection buffers SSE until the complete response receipt verifies.
+The SSE events remain intact but do not arrive token by token. Long responses
+can hit Claude Code's own stream watchdog. True incremental delivery requires
+a different receipt/delivery policy; increasing the local transport timeout
+does not make buffered responses stream live.
+
+Official contracts: [modelPicker](https://code.claude.com/docs/en/settings-reference#modelpicker),
+[gateway model discovery](https://code.claude.com/docs/en/llm-gateway-protocol#model-discovery).

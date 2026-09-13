@@ -207,10 +207,10 @@ impl Agent {
             }
             Agent::ClaudeCode => {
                 if cfg!(windows) {
-                    return "Claude Code uses apiKeyHelper with a local token. Windows shell compatibility has not been verified with the real Claude CLI. Shell credentials and managed settings may override this projection. Anthropic does not officially support non-Claude models.";
+                    return "Claude Code 2.1.242+ uses a verified model picker and apiKeyHelper with a local token. Responses arrive after receipt verification, not token by token. Windows shell compatibility has not been verified with the real Claude CLI. Shell credentials and managed settings may override this projection. Anthropic does not officially support non-Claude models.";
                 }
                 "Claude Code will authenticate through apiKeyHelper with a machine-local token \
-                 and use an explicit Messages-compatible model from the verified service. Restart Claude Code after applying. Credentials set in this settings file are taken over and restored on \
+                 and use a Messages-compatible model picker generated from the verified service (Claude Code 2.1.242+). Restart Claude Code after applying. Responses arrive after receipt verification, not token by token. Credentials set in this settings file are taken over and restored on \
                  disconnect; a token exported in your shell would still take priority, so unset \
                  ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY there. A claude.ai login is not \
                  used through the gateway. Anthropic does not officially support non-Claude models."

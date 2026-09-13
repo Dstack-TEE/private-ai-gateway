@@ -18,8 +18,8 @@
     "longDescription": "Routes coding agents through a hardware-verified confidential AI service with a signed proof for every answer."
   },
   "theme": {
-    "accentLight": "#83B83F",
-    "accentDark": "#83B83F",
+    "accentLight": "#59A64A",
+    "accentDark": "#59A64A",
     "brandColor": "#83B83F",
     "iconBackground": "#579532"
   },
