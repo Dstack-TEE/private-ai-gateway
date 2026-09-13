@@ -161,9 +161,26 @@ jobs:
           path: *rust-cache-paths
           key: ${{ job.status == 'success' && steps.rust-cache.outputs.cache-primary-key || format('{0}-partial-{1}-{2}', steps.rust-cache.outputs.cache-primary-key, github.run_id, github.run_attempt) }}
 
+  select-platforms:
+    name: Select release platforms
+    needs: verify
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.platforms.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - id: platforms
+        name: Build package matrix
+        working-directory: apps/desktop
+        env:
+          RELEASE_PLATFORMS: ${{ inputs.release_platforms || 'all' }}
+        run: echo "matrix=$(node scripts/select-release-platforms.mjs \"$RELEASE_PLATFORMS\")" >> "$GITHUB_OUTPUT"
+
   package:
     name: Package (${{ matrix.platform }})
-    needs: verify
+    needs: [verify, select-platforms]
     environment:
       name: ${{ (inputs.production_macos || inputs.release_version != '') && 'desktop-release' || 'desktop-build' }}
     env:
@@ -175,55 +192,13 @@ jobs:
       TAURI_UPDATER_ENDPOINT: ${{ inputs.release_version && format('https://github.com/Dstack-TEE/private-ai-gateway/releases/download/desktop-updates-{0}/latest.json', inputs.release_channel || 'beta') || '' }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: macos-26
-            platform: macos-arm64
-            cli_platform: macos
-            cli_arch: arm64
-            target: aarch64-apple-darwin
-            bundle_dir: aarch64-apple-darwin/release/bundle
-            bundles: app,dmg
-          - os: macos-26
-            platform: macos-x64
-            cli_platform: macos
-            cli_arch: x64
-            target: x86_64-apple-darwin
-            bundle_dir: x86_64-apple-darwin/release/bundle
-            bundles: app,dmg
-          - os: windows-2025
-            platform: windows-x64
-            target: ''
-            bundle_dir: release/bundle
-            cli_platform: windows
-            cli_arch: x64
-            bundles: nsis
-          - os: ubuntu-24.04
-            platform: linux-x64
-            target: ''
-            bundle_dir: release/bundle
-            cli_platform: linux
-            cli_arch: x64
-            bundles: deb,rpm
+      matrix: ${{ fromJSON(needs.select-platforms.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
-    if: ${{ !inputs.release_platforms || inputs.release_platforms == 'all' || contains(format(',{0},', inputs.release_platforms), format(',{0},', matrix.platform)) }}
     timeout-minutes: ${{ matrix.cli_platform == 'macos' && 90 || 60 }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - name: Validate selected package targets
-        if: inputs.release_version != ''
-        shell: bash
-        run: |
-          set -euo pipefail
-          IFS=',' read -ra targets <<< "${{ inputs.release_platforms || 'all' }}"
-          for target in "${targets[@]}"; do
-            case "${target//[[:space:]]/}" in
-              all|macos-arm64|macos-x64|windows-x64|linux-x64) ;;
-              *) echo "Unsupported package target: $target"; exit 1 ;;
-            esac
-          done
       - name: Validate updater release configuration
         if: inputs.release_version != ''
         shell: bash
