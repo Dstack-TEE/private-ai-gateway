@@ -1,5 +1,6 @@
 import React, { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { usagePageQuery } from "../lib/page-queries";
 import { errorMessage } from "../lib/error-message";
 import { Ban, ChevronLeft, ChevronRight, ShieldCheck, ShieldX } from "lucide-react";
 import { Button } from "../components/ui/button";
@@ -18,7 +19,6 @@ import { Sheet, DismissSheetAction } from "../components/sheet";
 import { ChoiceSelect } from "../components/choice-select";
 import type { AgentStatus, GatewayState, RequestActivity, UsagePage } from "../../shared/contracts";
 import { formatTimestamp } from "../lib/format";
-import { desktopApi } from "../lib/environment";
 
 const UsageDatePicker = lazy(() => import("../components/usage-date-picker").then((module) => ({ default: module.UsageDatePicker })));
 
@@ -64,9 +64,7 @@ export function UsageView({
   const bounds = usageDateBounds(range);
   const { since, until } = bounds;
   const usageQuery = { agent: agent || undefined, model: model || undefined, since, until, cursor: currentCursor, limit: pageSize };
-  const { data: page, error: queryError, isPending: loading } = useQuery({
-    queryKey: ["usage", usageQuery], queryFn: () => desktopApi.queryUsage(usageQuery),
-  });
+  const { data: page, error: queryError, isPending: loading } = useQuery(usagePageQuery(usageQuery));
   const error = queryError ? errorMessage(queryError) : undefined;
   useEffect(() => {
     if (!loading && focusAfterPage.current) {

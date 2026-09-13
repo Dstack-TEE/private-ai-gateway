@@ -70,13 +70,14 @@ test("usage query failures do not display stale totals or lose the selected filt
 
 });
 
-test("usage snapshots survive navigation without showing another query's rows", async ({ page }) => {
+test("usage preloads before navigation and keeps each query isolated", async ({ page }) => {
   await page.goto("/?mock=usage-cache");
+  await expect(page.locator("html")).toHaveAttribute("data-usage-loaded", "true");
+  await page.evaluate(() => { document.documentElement.dataset.holdUsage = "true"; });
   await nav(page, "Usage").click();
   const rows = page.locator(".usage-history tbody tr");
   await expect(rows).toHaveCount(20);
   const first = await rows.first().innerText();
-  await page.evaluate(() => { document.documentElement.dataset.holdUsage = "true"; });
   await nav(page, "Overview").click();
   await nav(page, "Usage").click();
   await expect(rows).toHaveCount(20);
