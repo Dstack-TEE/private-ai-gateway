@@ -30,6 +30,11 @@ on:
         required: true
         default: false
         type: boolean
+      package_only:
+        description: Skip full verification for a non-release package smoke build
+        required: true
+        default: false
+        type: boolean
   pull_request:
     paths:
       - '.github/workflows/desktop-native.yml'
@@ -70,6 +75,7 @@ concurrency:
 
 jobs:
   verify:
+    if: ${{ inputs.package_only != true }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -129,6 +135,11 @@ jobs:
         run: |
           npm run check
           npm run test:release
+      - name: Cache Playwright browsers
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: pap-playwright-v1-${{ runner.os }}-${{ hashFiles('apps/desktop/package-lock.json') }}
       - name: Renderer UI checks
         working-directory: apps/desktop
         run: |
@@ -163,6 +174,7 @@ jobs:
   select-platforms:
     name: Select release platforms
     needs: verify
+    if: ${{ always() && (inputs.package_only == true || github.event_name == 'workflow_dispatch' || inputs.release_version != '') }}
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.platforms.outputs.matrix }}
@@ -175,8 +187,13 @@ jobs:
         working-directory: apps/desktop
         env:
           RELEASE_PLATFORMS: ${{ inputs.release_platforms || 'all' }}
+          RELEASE_VERSION: ${{ inputs.release_version || '' }}
         run: |
           set -euo pipefail
+          if [[ "$RELEASE_VERSION" != "" && "${{ inputs.package_only }}" == "true" ]]; then
+            echo 'package_only cannot be used for a release'
+            exit 1
+          fi
           matrix="$(node scripts/select-release-platforms.mjs "$RELEASE_PLATFORMS")"
           node --input-type=module -e 'const value = JSON.parse(process.argv[1]); if (!Array.isArray(value.include) || value.include.length === 0) process.exit(1)' "$matrix"
           printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
@@ -184,6 +201,7 @@ jobs:
   package:
     name: Package (${{ matrix.platform }})
     needs: [verify, select-platforms]
+    if: ${{ always() && (needs.verify.result == 'success' || inputs.package_only == true) && (github.event_name == 'workflow_dispatch' || inputs.release_version != '') }}
     environment:
       name: ${{ (inputs.production_macos || inputs.release_version != '') && 'desktop-release' || 'desktop-build' }}
     env:

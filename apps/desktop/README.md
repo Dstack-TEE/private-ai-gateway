@@ -570,6 +570,9 @@ to `all` or a comma-separated subset of `macos-arm64`, `macos-x64`,
 GitHub's official `windows-11-arm` and `ubuntu-24.04-arm` hosted runners. The updater manifest contains only selected
 platform entries. CI requires signing settings and creates macOS, Windows,
 Linux DEB, and Linux RPM signatures plus `latest.json` for the selected targets.
+For a non-release platform smoke build, set `package_only=true`; this skips the
+full verification suite and never creates a release or updater feed. Production
+publishing always requires the full verification job.
 Publishing requires `publish_release=true` or explicitly publishing the draft.
 The selected channel's feed advances only to a newer version. Its public URL is
 `releases/download/desktop-updates-beta/latest.json` or
