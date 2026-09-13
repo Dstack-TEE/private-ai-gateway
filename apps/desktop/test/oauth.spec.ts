@@ -178,6 +178,7 @@ test("a delayed balance cannot appear after changing provider", async ({ page })
   const editor = page.getByRole("dialog", { name: "Edit profile" });
   await expect(editor.getByRole("button", { name: "Account actions" })).toBeVisible();
   await expect(editor.getByLabel("Account details")).toBeVisible();
+  await expect(editor.getByLabel("Workspace", { exact: true })).toHaveCount(0);
   await editor.getByRole("button", { name: "RedPill", exact: true }).click();
   await page.evaluate(() => window.dispatchEvent(new Event("mock:release-balance")));
   await expect(editor.getByRole("button", { name: "Sign in with RedPill" })).toBeVisible();
