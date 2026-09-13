@@ -133,7 +133,7 @@ export function Overview({
           action="View all"
           onAction={onUsage}
         >
-          <div className="preview-list max-h-80 min-h-0 overflow-y-auto overscroll-contain [&_>_:last-child]:border-b-0" role="region" tabIndex={0} aria-label="Recent requests">
+          <div className="preview-list h-full min-h-0 overflow-y-auto overscroll-contain [&_>_:last-child]:border-b-0" role="region" tabIndex={0} aria-label="Recent requests">
             {recent.length === 0 && (
               <EmptyState text={running || state.sessionActive || state.reconnecting ? "No requests in this session yet." : "Start protection to begin a new session."} />
             )}
@@ -227,13 +227,13 @@ function OverviewModule({
   onAction?(): void;
 }>): React.JSX.Element {
   return (
-    <Card size="sm" className="overview-module min-w-0 [&_.agent-config]:hidden">
-      <CardHeader className="items-center">
+    <Card size="sm" className="overview-module min-w-0 flex h-full flex-col [&_.agent-config]:hidden">
+      <CardHeader className="flex-none items-center">
         <CardTitle className="overview-module-title flex items-center flex-wrap gap-2"><h2 className="text-base font-medium">{title}</h2>{titleAdornment}{status}</CardTitle>
         {description && <CardDescription>{description}</CardDescription>}
         {action && <CardAction>{onAction ? <Button variant="outline" size="sm" onClick={onAction}>{action}</Button> : action}</CardAction>}
       </CardHeader>
-      <CardContent className="module min-w-0 @container min-h-0 flex-1">{children}</CardContent>
+      <CardContent className="module min-h-0 min-w-0 flex-1 overflow-hidden @container">{children}</CardContent>
     </Card>
   );
 }
