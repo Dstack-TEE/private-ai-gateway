@@ -4,7 +4,7 @@ import { useAccountLogin } from "../lib/use-account-login";
 import { AccountTools } from "../components/account-tools";
 import { ToggleGroup, ToggleGroupItem } from "../components/ui/toggle-group";
 import { errorMessage } from "../lib/error-message";
-import { Check, Copy, LoaderCircle, Pencil, Plus, TriangleAlert, Trash2 } from "lucide-react";
+import { Check, Copy, ExternalLink, LoaderCircle, Pencil, Plus, TriangleAlert, Trash2 } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { ActionItem } from "../components/action-item";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
@@ -427,6 +427,10 @@ export function ProfileEditorSheet({
             <TabsContent value="apiKey">
               <FormField id="profile-key" label={keyLabel} description={savedCredentialApplies ? "Leave blank to keep the saved key." : "Stored securely on this device."}>
                 <Input id="profile-key" type="password" value={apiKeyDraft} onChange={(event) => setApiKeyDraft(event.target.value)} placeholder={savedCredentialApplies ? "Replace the saved key" : `Paste your ${keyLabel}`} disabled={frozen || working} autoComplete="off" spellCheck={false} aria-describedby="profile-key-note" />
+                {draft.provider !== "custom" && <Button type="button" variant="link" size="sm" className="h-auto justify-start self-start p-0" disabled={working || frozen} onClick={() => {
+                  setError(undefined);
+                  void desktopApi.openApiKeyPage(draft.provider).catch((error: unknown) => setError(errorMessage(error)));
+                }}>Get API key<ExternalLink size={14} aria-hidden="true" /></Button>}
               </FormField>
             </TabsContent>
           </Tabs>

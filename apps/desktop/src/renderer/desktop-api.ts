@@ -131,6 +131,7 @@ export const desktopApi: DesktopApi = {
     return invoke("open_about_link", { target });
   },
   openAgentWebsite: (agentId) => invoke("open_agent_website", { agentId }),
+  openApiKeyPage: (provider) => invoke("open_api_key_page", { provider }),
   confirm(options): Promise<boolean> {
     return confirm(options.message, {
       title: options.title,

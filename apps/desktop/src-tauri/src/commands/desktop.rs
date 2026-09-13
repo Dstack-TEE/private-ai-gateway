@@ -131,3 +131,18 @@ pub(crate) async fn stop_all_and_quit(
     app.exit(0);
     Ok(())
 }
+
+#[tauri::command]
+pub(crate) async fn open_api_key_page(
+    app: AppHandle,
+    provider: desktop_runtime::contracts::ServiceProvider,
+) -> Result<(), String> {
+    let url = match provider {
+        desktop_runtime::contracts::ServiceProvider::Phala => "https://cloud.phala.com/dashboard",
+        desktop_runtime::contracts::ServiceProvider::Redpill => "https://www.redpill.ai/dashboard",
+        desktop_runtime::contracts::ServiceProvider::Custom => {
+            return Err("Custom providers do not have a built-in API key page".into())
+        }
+    };
+    open_account_url(app, url.to_string()).await
+}

@@ -381,6 +381,7 @@ export interface DesktopApi {
   /** Open a documented, allowlisted project resource in the system browser. */
   openAboutLink(target: "documentation" | "github"): Promise<void>;
   openAgentWebsite(agentId: string): Promise<void>;
+  openApiKeyPage(provider: ServiceProvider): Promise<void>;
   /** Use the platform confirmation dialog for destructive actions. */
   confirm(options: ConfirmationOptions): Promise<boolean>;
   start(config: StartGatewayConfig): Promise<GatewayState>;

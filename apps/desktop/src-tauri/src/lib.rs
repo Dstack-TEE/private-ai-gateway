@@ -303,6 +303,7 @@ pub fn run() {
             commands::desktop::native_dialog_ready,
             commands::desktop::main_window_ready,
             commands::desktop::open_agent_website,
+            commands::desktop::open_api_key_page,
             commands::desktop::close_native_dialog,
             commands::usage::query_usage,
             commands::usage::get_usage_record,
