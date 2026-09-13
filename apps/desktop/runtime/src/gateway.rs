@@ -38,7 +38,7 @@ const MAX_DIAGNOSTIC_BYTES: usize = 4_096;
 const MAX_EVENT_BYTES: usize = 1_048_576;
 
 pub struct GatewayManager {
-    inventory: Option<InventoryUpdater>,
+    inventory: Option<Arc<InventoryUpdater>>,
     inner: Mutex<RuntimeState>,
     proxy: Arc<ProxyState>,
     usage: Arc<UsageStore>,
@@ -69,9 +69,10 @@ struct RuntimeState {
     child: Option<Box<dyn SidecarChild>>,
     /// Bumped on every start and stop; doubles as the proxy session generation.
     generation: u64,
-    /// Bumped on every identity report and catalog refresh; only the newest
-    /// epoch may publish a session, so a slow older read never wins.
+    /// Bumped on identity changes, independently of catalog refreshes.
     epoch: u64,
+    catalog_read: u64,
+    catalog: Option<Catalog>,
     stdout: Vec<u8>,
     diagnostic: VecDeque<u8>,
     /// Where the sidecar listens once ready; private to this process.
@@ -91,7 +92,7 @@ struct RuntimeState {
 
 impl GatewayManager {
     pub(crate) fn with_endpoint_inventory(mut self, inventory: InventoryUpdater) -> Self {
-        self.inventory = Some(inventory);
+        self.inventory = Some(Arc::new(inventory));
         self
     }
     pub fn new(
@@ -128,6 +129,8 @@ impl GatewayManager {
                 child: None,
                 generation: 0,
                 epoch: 0,
+                catalog_read: 0,
+                catalog: None,
                 stdout: Vec::new(),
                 diagnostic: VecDeque::with_capacity(MAX_DIAGNOSTIC_BYTES),
                 sidecar_url: None,
@@ -567,73 +570,58 @@ impl GatewayManager {
         });
     }
 
-    /// Re-read the catalog under a new epoch and republish the session. A
-    /// result from an older epoch or generation is dropped.
+    /// Refresh discovery without revoking the current verified session.
     pub async fn refresh_catalog(self: &Arc<Self>) -> Result<GatewayState, String> {
         let (generation, epoch) = {
-            let mut runtime = self.lock()?;
+            let runtime = self.lock()?;
             if !runtime.identity_ready {
                 return Err("Start the gateway and wait for verification first".to_string());
             }
-            runtime.epoch += 1;
-            let epoch = runtime.epoch;
-            // Publishing the new epoch invalidates any read still in flight;
-            // the session stays verified with its current catalog meanwhile.
-            let current = self.proxy.session();
-            self.proxy.publish(Session { epoch, ..current });
-            (runtime.generation, epoch)
+            (runtime.generation, runtime.epoch)
         };
         self.load_catalog(generation, epoch).await?;
         self.snapshot()
     }
 
     async fn load_catalog(self: &Arc<Self>, generation: u64, epoch: u64) -> Result<(), String> {
-        let endpoint = self.lock()?.state.remote_url.clone();
-        let (result, inventory) =
-            tokio::join!(self.proxy.fetch_catalog(generation, epoch), async {
-                if endpoint
-                    .as_deref()
-                    .is_some_and(Catalog::has_endpoint_inventory)
-                {
-                    if let Some(updater) = &self.inventory {
-                        return Ok(updater.refresh().await);
-                    }
-                }
-                EndpointInventory::bundled()
-            });
+        let read = {
+            let mut runtime = self.lock()?;
+            if runtime.generation != generation || runtime.epoch != epoch || !runtime.identity_ready
+            {
+                return Ok(());
+            }
+            runtime.catalog_read += 1;
+            runtime.catalog_read
+        };
+        let result = self.proxy.fetch_catalog(generation, epoch).await;
         let mut runtime = self.lock()?;
-        if runtime.generation != generation || runtime.epoch != epoch || !runtime.identity_ready {
+        if runtime.generation != generation
+            || runtime.epoch != epoch
+            || !runtime.identity_ready
+            || runtime.catalog_read != read
+        {
             return Ok(());
         }
-        let Some(sidecar_url) = runtime.sidecar_url.clone() else {
+        if runtime.sidecar_url.is_none() {
             return Ok(());
-        };
+        }
         let result = result.and_then(|mut catalog| {
             if let Some(endpoint) = runtime.state.remote_url.as_deref() {
-                catalog.apply_endpoint_inventory(endpoint, &inventory?)?;
+                let inventory = match &self.inventory {
+                    Some(updater) => updater.current(),
+                    None => EndpointInventory::bundled()?,
+                };
+                catalog.apply_endpoint_inventory(endpoint, &inventory)?;
             }
             Ok(catalog)
         });
         let outcome = match result {
             Ok(catalog) => {
-                let summary = CatalogSummary::from_catalog(&catalog, runtime.last_catalog.as_ref());
-                runtime.last_catalog = Some(summary.clone());
-                runtime.state.catalog = Some(summary);
                 runtime.state.status = "verified".to_string();
                 runtime.state.reconnecting = false;
                 runtime.state.progress = None;
                 runtime.state.error = None;
-                if !runtime.verification_only {
-                    runtime.state.protected_since.get_or_insert_with(now_secs);
-                    self.proxy.publish(Session {
-                        generation,
-                        epoch,
-                        session_id: Some(runtime.session_id.clone()),
-                        base_url: Some(sidecar_url),
-                        verified: true,
-                        catalog: Some(catalog),
-                    });
-                }
+                self.publish_catalog(&mut runtime, catalog);
                 Ok(())
             }
             Err(error) => {
@@ -654,7 +642,82 @@ impl GatewayManager {
         };
         drop(runtime);
         self.publish();
+        if outcome.is_ok() {
+            self.refresh_inventory(generation, epoch);
+        }
         outcome
+    }
+
+    fn publish_catalog(&self, runtime: &mut RuntimeState, catalog: Catalog) {
+        let summary = CatalogSummary::from_catalog(&catalog, runtime.last_catalog.as_ref());
+        runtime.last_catalog = Some(summary.clone());
+        runtime.state.catalog = Some(summary);
+        runtime.catalog = Some(catalog.clone());
+        if !runtime.verification_only {
+            runtime.state.protected_since.get_or_insert_with(now_secs);
+            self.proxy.publish(Session {
+                generation: runtime.generation,
+                epoch: runtime.epoch,
+                session_id: Some(runtime.session_id.clone()),
+                base_url: runtime.sidecar_url.clone(),
+                verified: true,
+                catalog: Some(catalog),
+            });
+        }
+    }
+
+    fn refresh_inventory(self: &Arc<Self>, generation: u64, epoch: u64) {
+        let Some(updater) = self.inventory.clone() else {
+            return;
+        };
+        let eligible = self.lock().is_ok_and(|runtime| {
+            runtime
+                .state
+                .remote_url
+                .as_deref()
+                .is_some_and(Catalog::has_endpoint_inventory)
+        });
+        if !eligible {
+            return;
+        }
+        let manager = Arc::downgrade(self);
+        self.task_runtime.spawn(async move {
+            updater.refresh().await;
+            let Some(manager) = manager.upgrade() else {
+                return;
+            };
+            if let Err(error) = manager.apply_inventory(generation, epoch) {
+                eprintln!("Cannot apply model endpoint inventory: {error}");
+            }
+        });
+    }
+
+    fn apply_inventory(&self, generation: u64, epoch: u64) -> Result<(), String> {
+        let mut runtime = self.lock()?;
+        if runtime.generation != generation
+            || runtime.epoch != epoch
+            || !runtime.identity_ready
+            || runtime.state.status != "verified"
+        {
+            return Ok(());
+        }
+        let (Some(mut catalog), Some(endpoint)) =
+            (runtime.catalog.clone(), runtime.state.remote_url.as_deref())
+        else {
+            return Ok(());
+        };
+        let Some(updater) = &self.inventory else {
+            return Ok(());
+        };
+        let previous = catalog.revision.clone();
+        catalog.apply_endpoint_inventory(endpoint, &updater.current())?;
+        if catalog.revision == previous {
+            return Ok(());
+        }
+        self.publish_catalog(&mut runtime, catalog);
+        drop(runtime);
+        self.publish();
+        Ok(())
     }
 
     fn update(&self, change: impl FnOnce(&mut GatewayState)) {

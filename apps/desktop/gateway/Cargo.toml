@@ -19,6 +19,7 @@ path = "src/bin/private-ai-proxy-helper.rs"
 axum = "0.7"
 async-stream = "0.3"
 bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
 fd-lock = "4"
 futures-util = "0.3"
 jsonc-parser = { version = "0.33.1", features = ["serde", "cst"] }

@@ -728,7 +728,7 @@ async fn helper_endpoints_require_a_verified_catalog_model() {
 }
 
 #[tokio::test]
-async fn unchanged_agent_scan_does_not_cancel_an_admitted_request() {
+async fn agent_scan_and_catalog_refresh_preserve_admitted_requests() {
     let (state, _events) = state();
     state.set_tokens(tokens());
     let sidecar = mock_sidecar().await;
@@ -751,6 +751,11 @@ async fn unchanged_agent_scan_does_not_cancel_an_admitted_request() {
         .await
         .unwrap();
     state.set_tokens(tokens());
+    let mut session = state.session();
+    session.catalog =
+        Some(Catalog::from_remote(&json!({"data": [{"id": "replacement"}]}), 2).unwrap());
+    state.publish(session);
+    assert!(check_catalog(&state, Some("openai/gpt-oss-20b"), Surface::ChatCompletions).is_err());
     resume.notify_one();
     let response = tokio::time::timeout(Duration::from_secs(5), request)
         .await
@@ -763,9 +768,14 @@ async fn unchanged_agent_scan_does_not_cancel_an_admitted_request() {
 /// must deliver nothing to the sidecar.
 #[tokio::test]
 async fn revocation_after_the_final_check_delivers_nothing() {
-    let revocations: [fn(&ProxyState); 3] = [
+    let revocations: [fn(&ProxyState); 4] = [
         |state| state.set_api_key(None),
         |state| state.set_tokens(state.tokens().without("opencode")),
+        |state| {
+            let mut session = state.session();
+            session.epoch += 1;
+            state.publish(session);
+        },
         |state| {
             let mut session = state.session();
             session.verified = false;

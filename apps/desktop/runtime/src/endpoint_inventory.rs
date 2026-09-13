@@ -2,6 +2,7 @@ use std::{
     fs::File,
     io::{Read, Write},
     path::PathBuf,
+    sync::{Mutex, PoisonError},
     time::Duration,
 };
 
@@ -11,7 +12,6 @@ use reqwest::{
     Client, StatusCode,
 };
 use serde::Serialize;
-use tokio::sync::Mutex;
 
 const SOURCE: &str = "https://raw.githubusercontent.com/Dstack-TEE/private-ai-gateway/main/apps/desktop/gateway/src/endpoint-support.json";
 const MAX_BYTES: usize = 1024 * 1024;
@@ -28,15 +28,20 @@ pub(crate) struct InventoryUpdater {
     client: Option<Client>,
     cache_path: PathBuf,
     cache: Mutex<CachedInventory>,
+    refreshing: tokio::sync::Mutex<()>,
+    #[cfg(test)]
+    source: Option<String>,
 }
 
 impl InventoryUpdater {
     pub fn new(cache_path: PathBuf) -> Result<Self, String> {
         let bundled = EndpointInventory::bundled()?;
-        let cached = read_cache(&cache_path).unwrap_or(CachedInventory {
-            inventory: bundled,
-            etag: None,
-        });
+        let cached = read_cache(&cache_path)
+            .filter(|cache| cache.inventory.is_newer_than(&bundled))
+            .unwrap_or(CachedInventory {
+                inventory: bundled,
+                etag: None,
+            });
         Ok(Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(4))
@@ -45,26 +50,63 @@ impl InventoryUpdater {
                 .ok(),
             cache_path,
             cache: Mutex::new(cached),
+            refreshing: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            source: None,
         })
     }
 
     pub async fn refresh(&self) -> EndpointInventory {
+        #[cfg(test)]
+        if let Some(source) = &self.source {
+            return self.refresh_from(source).await;
+        }
         self.refresh_from(SOURCE).await
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_source(mut self, source: String) -> Self {
+        self.source = Some(source);
+        self
+    }
+
+    pub fn current(&self) -> EndpointInventory {
+        self.cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .inventory
+            .clone()
+    }
+
     async fn refresh_from(&self, source: &str) -> EndpointInventory {
-        let mut cache = self.cache.lock().await;
+        let _refresh = match self.refreshing.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                // Background subscribers share completion across profile/session changes.
+                let _completed = self.refreshing.lock().await;
+                return self.current();
+            }
+        };
+        let etag = self
+            .cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .etag
+            .clone();
         if let Some(client) = &self.client {
-            if let Ok(Some(updated)) = download(client, source, cache.etag.as_deref()).await {
+            if let Ok(Some(updated)) = download(client, source, etag.as_deref()).await {
+                if !updated.inventory.is_newer_than(&self.current()) {
+                    return self.current();
+                }
                 // Persist before replacing the in-memory copy. A full disk must
                 // not discard validated data already available to this session.
                 if let Err(error) = persist(&self.cache_path, &updated) {
                     eprintln!("Cannot cache model endpoint inventory: {error}");
                 }
-                *cache = updated;
+                *self.cache.lock().unwrap_or_else(PoisonError::into_inner) = updated;
             }
         }
-        cache.inventory.clone()
+        self.current()
     }
 }
 
@@ -143,12 +185,72 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
+    async fn freshness_uses_parsed_dates_and_never_downgrades_local_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("inventory.json");
+        let bundled = EndpointInventory::bundled().unwrap();
+        let dated = |date: &str| {
+            let mut value = serde_json::to_value(&bundled).unwrap();
+            value["checkedAt"] = date.into();
+            EndpointInventory::parse(&serde_json::to_vec(&value).unwrap()).unwrap()
+        };
+        let cached = |inventory| CachedInventory {
+            inventory,
+            etag: Some("\"cached\"".into()),
+        };
+        persist(&path, &cached(dated("2026-01-01T00:00:00Z"))).unwrap();
+        let updater = InventoryUpdater::new(path.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(updater.current()).unwrap(),
+            serde_json::to_value(&bundled).unwrap()
+        );
+        assert!(updater.cache.lock().unwrap().etag.is_none());
+        let newer = dated("2027-01-01T00:00:00Z");
+        assert!(!dated("2027-01-01T01:00:00+01:00").is_newer_than(&newer));
+        persist(&path, &cached(newer.clone())).unwrap();
+        let updater = InventoryUpdater::new(path.clone()).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source = format!("http://{}", listener.local_addr().unwrap());
+        let body = serde_json::to_string(&bundled).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut bytes = [0; 1024];
+            while !request.ends_with(b"\r\n\r\n") {
+                let length = socket.read(&mut bytes).await.unwrap();
+                assert!(length > 0 && request.len() < 4096);
+                request.extend_from_slice(&bytes[..length]);
+            }
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let result = updater.refresh_from(&source).await;
+        server.await.unwrap();
+        assert_eq!(
+            serde_json::to_value(result).unwrap(),
+            serde_json::to_value(&newer).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(read_cache(&path).unwrap().inventory).unwrap(),
+            serde_json::to_value(newer).unwrap()
+        );
+    }
+
+    #[tokio::test]
     async fn conditional_updates_preserve_valid_cache_on_bad_download_and_restart() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("inventory.json");
         let updater = InventoryUpdater::new(path.clone()).unwrap();
         let mut updated = serde_json::to_value(EndpointInventory::bundled().unwrap()).unwrap();
-        updated["checkedAt"] = "2026-09-12T00:00:00.000Z".into();
+        updated["checkedAt"] = "2026-09-12T00:00:00Z".into();
         let body = updated.to_string();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let source = format!("http://{}", listener.local_addr().unwrap());
