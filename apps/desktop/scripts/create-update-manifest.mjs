@@ -3,16 +3,22 @@ import path from "node:path";
 import { releaseChannel } from "./release-channel.mjs";
 import { artifactName, desktopPackages } from "./release-artifacts.mjs";
 
-const [directory, version, repository, channel = "beta"] = process.argv.slice(2);
+const [directory, version, repository, channel = "beta", selectedPlatforms = "all"] = process.argv.slice(2);
 const release = releaseChannel(version, channel);
 if (!directory || !/^[\w.-]+\/[\w.-]+$/.test(repository ?? "")) {
-  throw new Error("Usage: create-update-manifest.mjs <artifact directory> <version> <owner/repo> [beta|stable]");
+  throw new Error("Usage: create-update-manifest.mjs <artifact directory> <version> <owner/repo> [beta|stable] [all|platform,...]");
 }
 const entries = await readdir(directory, { recursive: true, withFileTypes: true });
 const files = entries.filter((entry) => entry.isFile()).map((entry) => path.join(entry.parentPath, entry.name));
 const tag = release.tag;
 const platforms = {};
+const requested = selectedPlatforms === "all" ? null : new Set(selectedPlatforms.split(",").map((value) => value.trim()).filter(Boolean));
+if (requested && [...requested].some((platform) => !["macos-arm64", "macos-x64", "windows-x64", "linux-x64"].includes(platform))) {
+  throw new Error("Platforms must be all, macos-arm64, macos-x64, windows-x64, or linux-x64");
+}
 for (const specification of desktopPackages) {
+  const packageId = `${specification.platform}-${specification.arch}`;
+  if (requested && !requested.has(packageId)) continue;
   const { suffix, targets } = specification;
   const filename = artifactName({ version, ...specification });
   const candidates = files.filter((file) => specification.platform === "macos"

@@ -20,6 +20,11 @@ on:
         options:
           - beta
           - stable
+      release_platforms:
+        description: Comma-separated package targets, or all (macos-arm64, macos-x64, windows-x64, linux-x64)
+        required: true
+        default: all
+        type: string
       publish_release:
         description: Publish the signed version and advance the desktop update channel
         required: true
@@ -201,11 +206,24 @@ jobs:
             cli_arch: x64
             bundles: deb,rpm
     runs-on: ${{ matrix.os }}
+    if: ${{ inputs.release_platforms == '' || inputs.release_platforms == 'all' || contains(format(',{0},', inputs.release_platforms), format(',{0},', matrix.platform)) }}
     timeout-minutes: ${{ matrix.cli_platform == 'macos' && 90 || 60 }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+      - name: Validate selected package targets
+        if: inputs.release_version != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          IFS=',' read -ra targets <<< "${{ inputs.release_platforms || 'all' }}"
+          for target in "${targets[@]}"; do
+            case "${target//[[:space:]]/}" in
+              all|macos-arm64|macos-x64|windows-x64|linux-x64) ;;
+              *) echo "Unsupported package target: $target"; exit 1 ;;
+            esac
+          done
       - name: Validate updater release configuration
         if: inputs.release_version != ''
         shell: bash
@@ -680,7 +698,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          node apps/desktop/scripts/create-update-manifest.mjs release-artifacts "$VERSION" "$GITHUB_REPOSITORY" "$CHANNEL"
+          node apps/desktop/scripts/create-update-manifest.mjs release-artifacts "$VERSION" "$GITHUB_REPOSITORY" "$CHANNEL" "${{ inputs.release_platforms || 'all' }}"
           node apps/desktop/scripts/release-assets.mjs release-artifacts > release-assets.list
           mapfile -d '' assets < release-assets.list
           release_args=()

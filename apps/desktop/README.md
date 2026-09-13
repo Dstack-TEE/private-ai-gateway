@@ -564,9 +564,11 @@ Release administrators must provision these settings:
 - Repository Variable `TAURI_UPDATER_PUBLIC_KEY`, containing the matching public key.
 
 Dispatch `desktop-native.yml` with `production_macos=true`, `release_channel`
-(`beta` by default), and a matching `release_version`. CI requires signing
-settings and creates macOS, Windows, Linux DEB, and Linux RPM signatures plus
-`latest.json`.
+(`beta` by default), and a matching `release_version`. Set `release_platforms`
+to `all` or a comma-separated subset of `macos-arm64`, `macos-x64`,
+`windows-x64`, and `linux-x64`. The updater manifest contains only selected
+platform entries. CI requires signing settings and creates macOS, Windows,
+Linux DEB, and Linux RPM signatures plus `latest.json` for the selected targets.
 Publishing requires `publish_release=true` or explicitly publishing the draft.
 The selected channel's feed advances only to a newer version. Its public URL is
 `releases/download/desktop-updates-beta/latest.json` or
