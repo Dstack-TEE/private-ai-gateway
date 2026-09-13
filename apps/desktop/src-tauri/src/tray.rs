@@ -475,11 +475,41 @@ pub fn show_window(app: &AppHandle) {
         let Some(window) = handle.get_webview_window("main") else {
             return;
         };
+        set_dock_visibility(true);
         let _ = window.show();
         activate_app();
         let _ = window.set_focus();
     });
 }
+
+pub fn hide_window(app: &AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(window) = handle.get_webview_window("main") {
+            let _ = window.hide();
+        }
+        set_dock_visibility(false);
+    });
+}
+
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+fn set_dock_visibility(visible: bool) {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+
+    if let Some(marker) = MainThreadMarker::new() {
+        let policy = if visible {
+            NSApplicationActivationPolicy::Regular
+        } else {
+            NSApplicationActivationPolicy::Accessory
+        };
+        NSApplication::sharedApplication(marker).setActivationPolicy(policy);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_dock_visibility(_visible: bool) {}
 
 fn should_stop(state: &GatewayState) -> bool {
     state.should_stop_protection()

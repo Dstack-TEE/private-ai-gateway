@@ -367,7 +367,7 @@ pub fn run() {
                 }
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
-                    let _ = window_for_events.hide();
+                    tray::hide_window(&app_for_events);
                 }
             });
             if let Err(error) = tray::setup(app.handle()) {
