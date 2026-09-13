@@ -379,7 +379,7 @@ export interface DesktopApi {
   onNativeCloseRequest(listener: () => void): () => void;
   closeNativeDialog(): Promise<void>;
   /** Open a documented, allowlisted project resource in the system browser. */
-  openAboutLink(target: "documentation" | "github"): Promise<void>;
+  openAboutLink(target: "documentation" | "github" | "aci"): Promise<void>;
   openAgentWebsite(agentId: string): Promise<void>;
   openApiKeyPage(provider: ServiceProvider): Promise<void>;
   /** Use the platform confirmation dialog for destructive actions. */

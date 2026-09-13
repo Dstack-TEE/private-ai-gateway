@@ -27,6 +27,7 @@ pub(crate) async fn open_about_link(app: AppHandle, target: String) -> Result<()
     let url = match target.as_str() {
         "documentation" => desktop_gateway::brand::SUPPORT_URL,
         "github" => "https://github.com/Dstack-TEE/private-ai-gateway",
+        "aci" => "https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/attested-confidential-inference.md",
         _ => return Err("Unknown resource".to_string()),
     };
     run_blocking(move || {
