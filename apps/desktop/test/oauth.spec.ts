@@ -22,8 +22,6 @@ test("Phala completes automatically while RedPill confirms its workspace with Sa
       await page.evaluate(() => window.addEventListener("mock:top-up", (event) => {
         if (event instanceof CustomEvent) document.documentElement.dataset.billingScope = event.detail.organizationId;
       }));
-      await page.getByRole("button", { name: "Current balance: $12.50", exact: true }).click();
-      await expect(page.locator("html")).toHaveAttribute("data-billing-scope", "phala-research");
     }
     await page.getByRole("switch", { name: "Stop protection" }).click();
     await expect(page.getByRole("switch", { name: "Start protection" })).toBeVisible();
@@ -82,13 +80,7 @@ test("RedPill workspace and organization menu preserve billing scope", async ({ 
   await expect(editor.getByRole("button", { name: "Top up", exact: true })).toHaveCount(0);
   await save.click();
   const mainCard = page.getByRole("region", { name: "Protection status" });
-  const balanceButton = mainCard.getByRole("button", { name: "Current balance: $12.50", exact: true });
-  await expect(balanceButton).toBeVisible();
-  await page.evaluate(() => { delete document.documentElement.dataset.topUpProvider; });
-  await balanceButton.click();
-  await expect(page.locator("html")).toHaveAttribute("data-top-up-provider", "redpill");
-  await expect(page.locator("html")).toHaveAttribute("data-top-up-organization", "research-team");
-  await expect(mainCard.getByRole("button", { name: "Top up", exact: true })).toHaveCount(0);
+  await expect(mainCard.getByRole("button", { name: "Current balance: $12.50", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Profiles: RedPill" }).click();
   await page.getByRole("button", { name: "Edit RedPill" }).click();
   const saved = page.getByRole("dialog", { name: "Edit profile" });
@@ -157,7 +149,6 @@ test("billing permissions hide billing actions but allow scoped organization man
         window.dispatchEvent(new Event("mock:billing-read-granted"));
         window.dispatchEvent(new Event("focus"));
       });
-      await expect(page.getByRole("button", { name: "Current balance: $12.50", exact: true })).toBeVisible();
       await page.getByRole("button", { name: "Profiles: RedPill" }).click();
       await page.getByRole("button", { name: "Edit RedPill" }).click();
       await expect(editor.getByLabel("Balance in USD")).toHaveText("$12.50");

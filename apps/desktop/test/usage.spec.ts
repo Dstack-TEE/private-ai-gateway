@@ -2,14 +2,11 @@ import { expect, test } from "@playwright/test";
 import { modelChartData } from "../src/renderer/components/usage-chart";
 import { nav, choose } from "./helpers";
 
-test("recent usage keeps ten rows in an internally scrollable card", async ({ page }) => {
+test("recent usage keeps ten rows visible in the overview card", async ({ page }) => {
   await page.setViewportSize({ width: 1100, height: 1040 });
   await page.goto("/?mock=recent-usage");
   const list = page.getByRole("region", { name: "Recent requests", exact: true });
   await expect(list.locator(".usage-row")).toHaveCount(10);
-  expect(await list.evaluate((node) => node.scrollHeight > node.clientHeight)).toBe(true);
-  await list.evaluate((node) => { node.scrollTop = node.scrollHeight; });
-  await expect(list.locator(".usage-row").last()).toBeInViewport();
   await expect(page.getByRole("heading", { name: "Recent usage", exact: true })).toBeInViewport();
 });
 
@@ -91,19 +88,15 @@ test("usage preloads before navigation and keeps each query isolated", async ({ 
   await expect(page.getByText("Loading usage history…", { exact: true })).toHaveCount(0);
 });
 
-test("saved balance remains visible while reopening Overview refreshes it", async ({ page }) => {
+test("Overview does not read account credentials on launch", async ({ page }) => {
   await page.goto("/?mock=oauth-balance-cache");
   await page.getByRole("switch", { name: "Start protection" }).click();
   const editor = page.getByRole("dialog", { name: "New profile" });
   await editor.getByRole("button", { name: "Sign in with Phala" }).click();
   await expect(editor).toHaveCount(0);
-  const balance = page.getByRole("button", { name: "Current balance: $12.50", exact: true });
-  await expect(balance).toBeVisible();
-  await page.evaluate(() => { document.documentElement.dataset.holdBalance = "true"; });
+  await expect(page.getByRole("button", { name: "Current balance: $12.50", exact: true })).toHaveCount(0);
   await nav(page, "Agents").click();
   await nav(page, "Overview").click();
-  await expect(balance).toBeVisible();
-  await page.evaluate(() => window.dispatchEvent(new Event("mock:release-balance")));
 });
 
 test("usage history filters, paginates and inspects proof boundaries", async ({ page }) => {
