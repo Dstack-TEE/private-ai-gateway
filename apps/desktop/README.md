@@ -579,9 +579,12 @@ For a non-release platform smoke build, set `package_only=true`; this skips the
 full verification suite and never creates a release or updater feed. Production
 publishing always requires the full verification job.
 Publishing requires `publish_release=true` or explicitly publishing the draft.
-The selected channel's feed advances only to a newer version. Its public URL is
-`releases/download/desktop-updates-beta/latest.json` or
-`releases/download/desktop-updates-stable/latest.json`; Actions artifacts are not a feed.
+Each platform's feed advances independently using Tauri's target identifiers:
+`releases/download/desktop-updates-{beta|stable}/latest-{target}-{arch}.json`
+(for example, `latest-darwin-aarch64.json`). Linux feeds include both DEB and RPM.
+Partial releases leave other platform feeds untouched, including their version.
+The legacy `latest.json` feed advances only on full releases, so older clients
+never receive an old binary advertised as a newer version. Actions artifacts are not a feed.
 Do not replace an existing version's assets or rotate the signing key casually.
 
 Ordinary test builds without `release_version` keep updates disabled explicitly.

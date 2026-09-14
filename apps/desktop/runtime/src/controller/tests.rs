@@ -240,7 +240,7 @@ fn offline_removal_queues_cleanup_and_uncommitted_retirement_preserves_active_ke
     let executor = tokio::runtime::Runtime::new().unwrap();
     let directory = app_data_dir().unwrap();
     std::fs::create_dir_all(&directory).unwrap();
-    let runtime = test_runtime(&executor, &directory);
+    let mut runtime = test_runtime(&executor, &directory);
     std::fs::write(directory.join("account-cleanup.pending"), "invalid JSON").unwrap();
     assert!(runtime.cleanup_manifest().unwrap().is_empty());
     assert!(!directory.join("account-cleanup.pending").exists());
@@ -276,6 +276,22 @@ fn offline_removal_queues_cleanup_and_uncommitted_retirement_preserves_active_ke
         true,
         false,
     );
+    struct NoCredentialAccess;
+    impl desktop_gateway::secrets::SecretStore for NoCredentialAccess {
+        fn get(&self, _: &str) -> Result<Option<String>, String> {
+            panic!("Empty cleanup must not read saved profile credentials");
+        }
+        fn set(&self, _: &str, _: &str) -> Result<(), String> {
+            panic!("Empty cleanup must not write credentials");
+        }
+        fn delete(&self, _: &str) -> Result<(), String> {
+            panic!("Empty cleanup must not delete credentials");
+        }
+    }
+    let secrets = runtime.secrets.clone();
+    Arc::get_mut(&mut runtime).unwrap().secrets = Arc::new(NoCredentialAccess);
+    executor.block_on(runtime.cleanup_retired()).unwrap();
+    Arc::get_mut(&mut runtime).unwrap().secrets = secrets;
     runtime
         .queue_retired(RetiredCredential {
             profile_id: profile.id.clone(),

@@ -3,6 +3,7 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { publishedRelease, shouldAdvance } from "./release-channel.mjs";
 import { desktopPackages } from "./release-artifacts.mjs";
+import { updateFeeds } from "./update-feeds.mjs";
 
 const repo = process.env.GH_REPO;
 const tag = process.env.TAG;
@@ -18,7 +19,7 @@ const request = async (url, options = {}) => {
   if (!response.ok) throw new Error(`Update asset unavailable (${response.status}): ${url}`);
   return response;
 };
-let manifest = await (await request(`${prefix}latest.json`)).json();
+const manifest = await (await request(`${prefix}latest.json`)).json();
 if (manifest.version !== release.version || manifest.channel !== release.channel) throw new Error("Manifest and release channel do not match");
 const selected = selectedPlatforms === "all" ? null : new Set(selectedPlatforms.split(",").map((value) => value.trim()).filter(Boolean));
 if (selected && [...selected].some((platform) => !desktopPackages.some((entry) => `${entry.platform}-${entry.arch}` === platform))) {
@@ -40,35 +41,32 @@ try {
 } catch (error) {
   if (!/release not found|HTTP 404/i.test(String(error.stderr ?? ""))) throw error;
 }
-let current;
-if (feed?.assets.some((asset) => asset.name === "latest.json")) {
-  current = await (await request(`https://github.com/${repo}/releases/download/${release.feedTag}/latest.json`)).json();
-  if (current.channel !== release.channel) throw new Error("Existing feed belongs to another channel");
-}
-if (current && selected) {
-  manifest = { ...manifest, platforms: { ...current.platforms, ...manifest.platforms } };
-}
-if (selected && !current && selectedTargets.length !== desktopPackages.flatMap((entry) => entry.targets).length) {
-  throw new Error("A partial platform feed requires an existing complete feed");
-}
-for (const platform of desktopPackages.flatMap((entry) => entry.targets)) {
-  const entry = manifest.platforms?.[platform];
-  if (typeof entry?.signature !== "string" || !entry.signature.trim() || typeof entry.url !== "string") {
-    throw new Error(`Invalid combined update entry: ${platform}`);
+const pending = [];
+for (const [name, candidate] of updateFeeds(manifest, selectedTargets)) {
+  let current;
+  if (feed?.assets.some((asset) => asset.name === name)) {
+    current = await (await request(`https://github.com/${repo}/releases/download/${release.feedTag}/${name}`)).json();
+    if (current.channel !== release.channel) throw new Error("Existing feed belongs to another channel");
   }
-  await request(entry.url, { method: "HEAD" });
+  if (shouldAdvance(release.version, current?.version, release.channel)) {
+    pending.push([name, candidate]);
+  }
 }
-if (!shouldAdvance(release.version, current?.version, release.channel)) {
-  console.log(`Keeping newer or equal ${release.channel} feed`);
-} else {
+if (pending.length) {
   if (!feed) gh("release", "create", release.feedTag, "--target", process.env.GITHUB_SHA, "--title", `Desktop ${release.channel} update feed`, "--notes", "Signed desktop update manifest.", "--prerelease", "--latest=false");
   const directory = await mkdtemp(path.resolve(".update-feed-"));
   try {
-    const file = path.join(directory, "latest.json");
-    await writeFile(file, `${JSON.stringify(manifest, null, 2)}\n`);
-    gh("release", "upload", release.feedTag, file, "--clobber");
+    const files = [];
+    for (const [name, candidate] of pending) {
+      const file = path.join(directory, name);
+      await writeFile(file, `${JSON.stringify(candidate, null, 2)}\n`);
+      files.push(file);
+    }
+    gh("release", "upload", release.feedTag, ...files, "--clobber");
     console.log(`Advanced ${release.channel} to ${release.version}`);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+} else {
+  console.log(`Keeping newer or equal ${release.channel} feeds`);
 }

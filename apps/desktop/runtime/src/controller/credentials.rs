@@ -111,6 +111,9 @@ impl DesktopRuntime {
                 records.push((entry, record));
             }
         }
+        if records.is_empty() {
+            return self.save_cleanup_manifest(&[]);
+        }
         records.sort_by_key(|(_, record)| record.action != "activate");
         let profiles = self.manager.snapshot()?.profiles;
         let mut selected = Vec::new();

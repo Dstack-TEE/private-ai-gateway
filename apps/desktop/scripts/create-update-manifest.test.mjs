@@ -5,6 +5,22 @@ import path from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
 import { artifactName, desktopPackages } from "./release-artifacts.mjs";
+import { updateFeeds } from "./update-feeds.mjs";
+
+test("partial releases preserve independent platform versions and the complete legacy feed", () => {
+  const targets = desktopPackages.flatMap((entry) => entry.targets);
+  const manifest = { version: "0.1.2-beta.38", channel: "beta", platforms: Object.fromEntries(targets.map((target) => [target, { url: target, signature: target }])) };
+  const complete = updateFeeds(manifest, targets);
+  assert.equal(complete.size, 7);
+  assert.deepEqual(complete.get("latest.json"), manifest);
+  assert.deepEqual(Object.keys(complete.get("latest-linux-aarch64.json").platforms), ["linux-aarch64-deb", "linux-aarch64-rpm"]);
+  const partial = updateFeeds({ ...manifest, version: "0.1.2-beta.39" }, ["darwin-aarch64"]);
+  assert.deepEqual([...partial.keys()], ["latest-darwin-aarch64.json"]);
+  const published = new Map([...complete, ...partial]);
+  assert.equal(published.get("latest-darwin-aarch64.json").version, "0.1.2-beta.39");
+  assert.equal(published.get("latest-linux-aarch64.json").version, "0.1.2-beta.38");
+  assert.equal(published.get("latest.json").version, "0.1.2-beta.38");
+});
 
 for (const [channel, version] of [["stable", "0.1.2"], ["beta", "0.1.2-beta.10"]]) {
 test(`${channel} manifests use signed platform artifacts and reject incomplete releases`, async () => {

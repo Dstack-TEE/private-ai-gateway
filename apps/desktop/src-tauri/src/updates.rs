@@ -136,7 +136,9 @@ pub async fn check_update(
         UpdateChannel::Beta => "beta",
         UpdateChannel::Stable => "stable",
     };
-    let endpoint = format!("https://github.com/Dstack-TEE/private-ai-gateway/releases/download/desktop-updates-{channel_name}/latest.json");
+    let target =
+        tauri_plugin_updater::target().ok_or("Updates are unavailable on this platform")?;
+    let endpoint = format!("https://github.com/Dstack-TEE/private-ai-gateway/releases/download/desktop-updates-{channel_name}/latest-{target}.json");
     let updater = app
         .updater_builder()
         .endpoints(vec![endpoint
