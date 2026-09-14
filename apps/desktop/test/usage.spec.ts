@@ -160,8 +160,8 @@ test("usage history filters, paginates and inspects proof boundaries", async ({ 
   await blocked.click();
   const blockedProof = page.getByRole("dialog", { name: "Usage proof" });
   await expect(blockedProof.getByText("Blocked locally", { exact: true })).toBeVisible();
-  await expect(blockedProof.getByText(/did not leave this Mac/)).toBeVisible();
-  await expect(blockedProof.getByText("Request kept on this Mac", { exact: true })).toBeVisible();
+  await expect(blockedProof.getByText(/did not leave this device/)).toBeVisible();
+  await expect(blockedProof.getByText("Request kept on this device", { exact: true })).toBeVisible();
   await expect(blockedProof.locator(".proof-flow, .privacy-verdict.state-success")).toHaveCount(0);
   await blockedProof.getByRole("button", { name: "Done" }).click();
   await expect(history).not.toContainText("/v1/models");

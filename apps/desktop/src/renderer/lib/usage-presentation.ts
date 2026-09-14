@@ -1,4 +1,4 @@
-import { Ban, LoaderCircle, ShieldCheck, ShieldX, TriangleAlert } from "lucide-react";
+import { Ban, Shield, ShieldCheck, ShieldX, TriangleAlert } from "lucide-react";
 import type { RequestActivity } from "../../shared/contracts";
 export type Tone = "success" | "warning" | "danger" | "neutral";
 
@@ -7,7 +7,7 @@ export function outcomeOf(activity: RequestActivity): { label: string; tone: Ton
   if (activity.verified === false) return { label: "Proof failed", tone: "danger", icon: TriangleAlert };
   if (activity.status < 200 || activity.status >= 300) return { label: "Upstream failed", tone: "danger", icon: TriangleAlert };
   if (activity.verified === true) return { label: "Protected", tone: "success", icon: ShieldCheck };
-  if (activity.receiptId) return { label: "Proof pending", tone: "warning", icon: LoaderCircle };
+  if (activity.receiptId) return { label: "Proof not verified", tone: "warning", icon: Shield };
   return { label: "Proof unavailable", tone: "warning", icon: ShieldX };
 }
 

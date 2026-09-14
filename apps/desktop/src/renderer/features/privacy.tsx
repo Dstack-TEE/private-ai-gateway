@@ -41,7 +41,7 @@ function PrivacyVerification({ state }: { state: GatewayState }): React.JSX.Elem
       ok: verified && passed("id-6"),
       title: "Attested encrypted channel",
       detail: verified
-        ? "Requests leave this Mac only over an SPKI-pinned TLS channel whose key is bound to the verified service identity."
+        ? "Requests leave this device only over an SPKI-pinned TLS channel whose key is bound to the verified service identity."
         : "No verified connection is active.",
     },
     {
