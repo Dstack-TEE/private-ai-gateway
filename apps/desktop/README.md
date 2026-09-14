@@ -1137,11 +1137,10 @@ the app does not override administrator policy. An existing unmanaged
 support non-Claude models, and Messages support alone does not establish full
 tool-calling compatibility.
 
-Desktop protection buffers SSE until the complete response receipt verifies.
-The SSE events remain intact but do not arrive token by token. Long responses
-can hit Claude Code's own stream watchdog. True incremental delivery requires
-a different receipt/delivery policy; increasing the local transport timeout
-does not make buffered responses stream live.
+Desktop protection forwards SSE incrementally while recording response digests.
+Receipt audits run after delivery and update Usage proof; they cannot retract
+content already delivered. The verified identity and session policy still gate
+request admission, and stopping protection interrupts active streams.
 
 Official contracts: [modelPicker](https://code.claude.com/docs/en/settings-reference#modelpicker),
 [gateway model discovery](https://code.claude.com/docs/en/llm-gateway-protocol#model-discovery).
