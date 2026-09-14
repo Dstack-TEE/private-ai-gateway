@@ -461,7 +461,7 @@ fn identity_alone_does_not_verify_and_requests_are_attributed() {
     let verdict = json!({
         "method": "POST", "path": "/v1/messages", "status": 200, "streamed": true,
         "receipt_id": "rcpt-1", "verified": true, "rewritten": true,
-        "locally_constrained": true,
+        "local_policy_applied": true,
         "detail": "receipt verified", "tag": "pap:req-1:session-1:claude-code"
     });
     apply_request_event(&mut state, verdict.as_object().unwrap()).unwrap();
@@ -473,7 +473,7 @@ fn identity_alone_does_not_verify_and_requests_are_attributed() {
     assert_eq!(item.agent.as_deref(), Some("claude-code"));
     assert_eq!(item.verified, Some(true));
     assert_eq!(item.rewritten, Some(true));
-    assert_eq!(item.locally_constrained, Some(true));
+    assert_eq!(item.local_policy_applied, Some(true));
 }
 
 #[test]
@@ -494,7 +494,7 @@ fn proxy_receipt_and_usage_events_merge_into_one_complete_activity() {
             detail: "Awaiting receipt verification".to_string(),
             at: 100,
             agent: Some("claude-code".to_string()),
-            locally_constrained: None,
+            local_policy_applied: None,
             rewritten: None,
             left_device: true,
             input_tokens: None,
@@ -508,7 +508,7 @@ fn proxy_receipt_and_usage_events_merge_into_one_complete_activity() {
     let verdict = json!({
         "method": "POST", "path": "/v1/messages", "status": 200,
         "streamed": true, "receipt_id": "rcpt-merge", "verified": true,
-        "locally_constrained": true, "rewritten": true,
+        "local_policy_applied": true, "rewritten": true,
         "detail": "receipt verified",
         "tag": "pap:req-merge:session-merge:claude-code"
     });
@@ -529,7 +529,7 @@ fn proxy_receipt_and_usage_events_merge_into_one_complete_activity() {
             detail: String::new(),
             at: 102,
             agent: Some("claude-code".to_string()),
-            locally_constrained: None,
+            local_policy_applied: None,
             rewritten: None,
             left_device: true,
             input_tokens: Some(1_024),
@@ -546,7 +546,7 @@ fn proxy_receipt_and_usage_events_merge_into_one_complete_activity() {
     assert_eq!(item.at, 100);
     assert_eq!(item.receipt_id.as_deref(), Some("rcpt-merge"));
     assert_eq!(item.verified, Some(true));
-    assert_eq!(item.locally_constrained, Some(true));
+    assert_eq!(item.local_policy_applied, Some(true));
     assert_eq!(item.rewritten, Some(true));
     assert_eq!(item.input_tokens, Some(1_024));
     assert_eq!(item.output_tokens, Some(256));

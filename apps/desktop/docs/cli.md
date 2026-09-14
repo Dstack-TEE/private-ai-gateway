@@ -2,7 +2,7 @@
 
 `private-ai-proxy` manages the same per-user backend as the desktop app. It does not require
 an open window. Installations must keep `private-ai-proxy` (including the verifier), `private-ai-proxy-service`, and the
-credential helper together; see [distribution](CLI-DISTRIBUTION.md).
+credential helper together; see [distribution](cli-distribution.md).
 `pap` is an installed shortcut to the same executable; either name accepts the
 same commands.
 
@@ -14,6 +14,22 @@ discovery document, not an RPC or response JSON Schema.
 
 `private-ai-proxy completions bash` prints shell completion code without installing it or
 changing shell configuration. Other supported shells are listed in its help.
+
+## ACI Commands
+
+The same binary includes the original ACI protocol commands:
+
+| Command | Purpose |
+| --- | --- |
+| `private-ai-proxy verify <url>` | Verify the service identity and attestation. |
+| `private-ai-proxy audit` | Audit saved ACI evidence offline; see `audit --help` for inputs. |
+| `private-ai-proxy sessions <url>` | Inspect and verify attested inference sessions. |
+| `private-ai-proxy send <url>` | Send an inference request using the ACI client. |
+| `private-ai-proxy serve <url>` | Run the local streaming proxy with post-delivery receipt audits. |
+
+`pap` accepts these same commands. They are compiled from shared ACI sources,
+not forwarded to an external `aci` executable. `serve` is standalone;
+`start` below manages the persistent background service and saved profiles.
 
 ## Lifecycle
 

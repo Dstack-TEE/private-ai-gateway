@@ -4,9 +4,7 @@
 //! Startup verifies `<base-url>` (spec 9.1) and refuses to listen unless
 //! the verdict is VERIFIED. The proxy exposes a plaintext local API, rejects
 //! E2EE request headers, and forwards accepted traffic over the SPKI-pinned
-//! channel. With --verify-receipts, POST response bytes are held in bounded
-//! memory until verification succeeds; failed or unavailable proofs withhold
-//! the response. Without it, responses stream through for on-demand auditing.
+//! channel. Receipt auditing never delays response delivery.
 //! Only digests and verdicts are retained after the request; bodies never go to disk.
 //! No bodies are logged.
 
@@ -98,8 +96,8 @@ pub struct RequestOutcome {
     pub rewritten: Option<bool>,
     /// Whether this proxy changed the request body before forwarding (ACI
     /// policy: `provider.aci_verified` / pinned sessions, re-serialized).
-    /// The receipt then binds the constrained bytes, not the caller's.
-    pub locally_constrained: bool,
+    /// True when local verification policy was applied to the outgoing request.
+    pub local_policy_applied: bool,
 }
 
 type Reporter = Arc<dyn Fn(RequestOutcome) + Send + Sync>;
@@ -142,7 +140,7 @@ pub struct RecordedExchange {
     /// Caller-supplied `x-aci-tag`, carried into every outcome for this exchange.
     pub tag: Option<String>,
     /// Whether the forwarded body differs from what the caller sent.
-    pub locally_constrained: bool,
+    pub local_policy_applied: bool,
 }
 
 /// Recorded exchanges kept for on-demand verification (a bounded ring;
@@ -162,8 +160,6 @@ pub struct ProxyState {
     accepted_composes: Vec<String>,
     /// Apply the production dstack OS-image policy on startup and re-verification.
     require_production_os: bool,
-    /// Verify completed response receipts before releasing any response bytes.
-    verify_receipts: bool,
     audit_receipts: bool,
     audits: Arc<tokio::sync::Semaphore>,
     trusted: Mutex<TrustedIdentity>,
@@ -202,7 +198,6 @@ impl ProxyState {
         enforce_verified: bool,
         accepted_composes: Vec<String>,
         require_production_os: bool,
-        verify_receipts: bool,
         fixed_pins: Vec<String>,
         required_claims: Vec<RequiredClaim>,
         report: AttestationReport,
@@ -218,7 +213,6 @@ impl ProxyState {
             enforce_verified,
             accepted_composes,
             require_production_os,
-            verify_receipts,
             audit_receipts: false,
             audits: Arc::new(tokio::sync::Semaphore::new(16)),
             trusted: Mutex::new(TrustedIdentity {
@@ -411,7 +405,6 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
         !args.allow_unverified,
         args.accepted_composes.clone(),
         require_production_os,
-        args.verify_receipts,
         args.sessions.clone(),
         args.require_claims.clone(),
         report,
@@ -470,10 +463,7 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
         });
         write_json_event(&event)?;
     } else {
-        let receipt_mode = if args.verify_receipts {
-            "each POST receipt is verified before response delivery using the request's \
-             transient bearer credential."
-        } else if args.audit_receipts {
+        let receipt_mode = if args.audit_receipts {
             "responses stream immediately; receipts are audited after delivery."
         } else {
             "POST receipt verification is available on demand."
@@ -609,7 +599,7 @@ async fn proxy_passthrough(
         detail: String::new(),
         tag: None,
         rewritten: None,
-        locally_constrained: false,
+        local_policy_applied: false,
     });
     let mut builder = Response::builder().status(status);
     let named = connection_named(&resp_headers);
@@ -731,112 +721,11 @@ async fn proxy_inference(
         }
     }
 
-    if state.verify_receipts && ((200..300).contains(&status) || receipt_id.is_some()) {
-        // A receipt binds the completed response. Do not release any response
-        // bytes until verification succeeds, including for SSE responses.
-        let locally_constrained = request_body.as_slice() != body.as_ref();
-        let checked = async {
-            let id = receipt_id
-                .clone()
-                .ok_or_else(|| "Missing response receipt".to_string())?;
-            let mut bytes = Vec::new();
-            while let Some(chunk) = resp
-                .chunk()
-                .await
-                .map_err(|_| "Incomplete response".to_string())?
-            {
-                if bytes.len().saturating_add(chunk.len()) > 32 * 1024 * 1024 {
-                    return Err("Response exceeds the 32 MiB verification limit".to_string());
-                }
-                bytes.extend_from_slice(&chunk);
-            }
-            let mut exchange = RecordedExchange {
-                receipt_id: id,
-                path: path.clone(),
-                status,
-                streamed,
-                request: BodyDigest::of(&request_body),
-                response: BodyDigest::of(&bytes),
-                truncation: None,
-                pinned_sessions: pinned_session_ids(&request_body),
-                at: crate::checks::now_secs(),
-                verified: None,
-                tag: tag.clone(),
-                locally_constrained,
-            };
-            let result = verify_exchange(
-                &state,
-                &trusted,
-                &exchange,
-                bearer_token(&headers).as_deref(),
-            )
-            .await;
-            exchange.verified = Some(
-                result
-                    .as_ref()
-                    .is_ok_and(|(transcript, _)| transcript.verified()),
-            );
-            state.record(exchange);
-            let (transcript, detail) = result?;
-            if !transcript.verified() {
-                return Err(detail);
-            }
-            Ok((bytes, rewrite_noted(&transcript), detail))
-        };
-        let result = race_delivery(
-            &delivery,
-            tokio::time::timeout(std::time::Duration::from_secs(600), checked),
-        )
-        .await;
-        let result = match result {
-            None => Err("Protection was revoked before verified response delivery".to_string()),
-            Some(Err(_)) => Err("Response verification timed out".to_string()),
-            Some(Ok(result)) => result,
-        };
-        match result {
-            Ok((bytes, rewritten, detail)) => {
-                (state.reporter)(RequestOutcome {
-                    method: Method::POST,
-                    path,
-                    status,
-                    streamed,
-                    receipt_id,
-                    verified: Some(true),
-                    detail,
-                    tag,
-                    rewritten: Some(rewritten),
-                    locally_constrained,
-                });
-                return builder
-                    .body(Body::from(bytes))
-                    .unwrap_or_else(|_| internal_error());
-            }
-            Err(detail) => {
-                (state.reporter)(RequestOutcome {
-                    method: Method::POST,
-                    path,
-                    status: 502,
-                    streamed,
-                    receipt_id,
-                    verified: Some(false),
-                    detail: format!("Response withheld: {detail}"),
-                    tag,
-                    rewritten: None,
-                    locally_constrained,
-                });
-                return json_response(
-                    StatusCode::BAD_GATEWAY,
-                    json!({"error": {"type": "verification_error", "message": "Response withheld because receipt verification did not succeed"}}),
-                );
-            }
-        }
-    }
-
     // Streaming modes record digests for background or on-demand audits.
     // Non-success responses without receipts also use this passthrough path.
     let hook_state = state.clone();
     let hook_path = path.clone();
-    let locally_constrained = request_body.as_slice() != body.as_ref();
+    let local_policy_applied = request_body.as_slice() != body.as_ref();
     let request_digest = BodyDigest::of(&request_body);
     // §9.3(6): the pinned ids ride along so the on-demand check enforces the
     // same membership rule as `aci send --session`.
@@ -860,7 +749,7 @@ async fn proxy_inference(
                 detail,
                 tag: tag.clone(),
                 rewritten: None,
-                locally_constrained,
+                local_policy_applied,
             };
         let outcome = match &receipt_id {
             Some(id) => outcome(
@@ -899,7 +788,7 @@ async fn proxy_inference(
                 at: crate::checks::now_secs(),
                 verified: None,
                 tag: tag.clone(),
-                locally_constrained,
+                local_policy_applied,
             };
             hook_state.record(exchange.clone());
             if hook_state.audit_receipts {
@@ -963,7 +852,7 @@ fn audit_exchange(
             detail,
             tag: exchange.tag.clone(),
             rewritten,
-            locally_constrained: exchange.locally_constrained,
+            local_policy_applied: exchange.local_policy_applied,
         });
     };
     if exchange.truncation.is_some() {
@@ -1071,7 +960,7 @@ async fn control_verify(
             detail,
             tag: exchange.tag.clone(),
             rewritten,
-            locally_constrained: exchange.locally_constrained,
+            local_policy_applied: exchange.local_policy_applied,
         });
     };
     match verify_exchange(&state, &trusted, &exchange, bearer.as_deref()).await {
@@ -1321,7 +1210,7 @@ fn request_outcome_event(outcome: RequestOutcome) -> Value {
         "detail": outcome.detail,
         "tag": outcome.tag,
         "rewritten": outcome.rewritten,
-        "locally_constrained": outcome.locally_constrained,
+        "local_policy_applied": outcome.local_policy_applied,
     })
 }
 
@@ -1537,7 +1426,7 @@ fn send_error(state: &ProxyState, method: Method, path: String, err: reqwest::Er
         detail: format!("upstream connection failed (possible TLS pin mismatch): {err}"),
         tag: None,
         rewritten: None,
-        locally_constrained: false,
+        local_policy_applied: false,
     });
     text_response(StatusCode::BAD_GATEWAY, "upstream connection failed\n")
 }
@@ -1686,10 +1575,10 @@ mod tests {
             detail: "receipt verified".to_string(),
             tag: Some("claude-code declared".to_string()),
             rewritten: Some(false),
-            locally_constrained: true,
+            local_policy_applied: true,
         };
         let event = request_outcome_event(outcome);
-        assert_eq!(event["locally_constrained"], true);
+        assert_eq!(event["local_policy_applied"], true);
 
         assert_eq!(event["type"], "request_complete");
         assert_eq!(event["schema_version"], 1);
@@ -1757,7 +1646,6 @@ mod tests {
             false,
             Vec::new(),
             false,
-            true,
             Vec::new(),
             Vec::new(),
             vector_report(),
@@ -1942,7 +1830,6 @@ mod tests {
             true,
             Vec::new(),
             false,
-            false,
             Vec::new(),
             vec![crate::checks::RequiredClaim::parse("tee_attested").unwrap()],
             vector_report(),
@@ -2067,12 +1954,7 @@ mod tests {
         assert_eq!(outcome.method, "POST");
         assert_eq!(outcome.path, "/v1/chat/completions");
         assert_eq!(outcome.receipt_id.as_deref(), Some("rcpt-0001"));
-        assert_eq!(outcome.verified, Some(true));
-        assert!(
-            outcome.detail.contains("signature ok"),
-            "{}",
-            outcome.detail
-        );
+        assert_eq!(outcome.verified, None);
 
         // Any POST path is inference-capable: an Anthropic-style /v1/messages
         // forward is recorded the same way without being enumerated.
@@ -2088,7 +1970,7 @@ mod tests {
         assert_eq!(resp.bytes().await.unwrap().as_ref(), RESPONSE_BODY);
         let outcome = rx.recv().await.expect("messages outcome reported");
         assert_eq!(outcome.path, "/v1/messages");
-        assert_eq!(outcome.verified, Some(true));
+        assert_eq!(outcome.verified, None);
 
         // The control endpoint lists both recorded exchanges, newest first.
         let listed: Value = http
@@ -2101,7 +1983,7 @@ mod tests {
             .unwrap();
         assert_eq!(listed.as_array().unwrap().len(), 2);
         assert_eq!(listed[0]["path"], "/v1/messages");
-        assert_eq!(listed[0]["verified"], Value::Bool(true));
+        assert_eq!(listed[0]["verified"], Value::Null);
 
         // On-demand verification runs the full receipt + session audit
         // against the recorded digests.
@@ -2161,12 +2043,12 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(resp.status().as_u16(), 502);
-        assert!(!resp.text().await.unwrap().contains("\"ok\":true"));
+        assert_eq!(resp.status().as_u16(), 200);
+        assert!(resp.text().await.unwrap().contains("\"ok\":true"));
         let outcome = rx.recv().await.expect("responses outcome reported");
         assert_eq!(outcome.verified, Some(false));
         assert!(
-            outcome.detail.contains("Response withheld"),
+            outcome.detail.contains("no X-Receipt-Id"),
             "{}",
             outcome.detail
         );
@@ -2227,7 +2109,6 @@ mod tests {
             let (tx, mut outcomes) = mpsc::unbounded_channel();
             let mut state = state_over(spawn_server(upstream).await, tx);
             let config = Arc::get_mut(&mut state).unwrap();
-            config.verify_receipts = false;
             config.audit_receipts = true;
             let proxy = spawn_server(build_proxy_router(state)).await;
             let response = reqwest::Client::new()
@@ -2274,73 +2155,6 @@ mod tests {
                     _ => None,
                 }
             );
-        }
-    }
-
-    #[tokio::test]
-    async fn strict_receipts_withhold_tampered_and_unavailable_responses() {
-        for receipt_available in [true, false] {
-            for streamed in [true, false] {
-                let upstream = Router::new()
-                    .route(
-                        "/v1/chat/completions",
-                        post(move || async move {
-                            (
-                                [
-                                    ("x-receipt-id", "rcpt-0001"),
-                                    (
-                                        "content-type",
-                                        if streamed {
-                                            "text/event-stream"
-                                        } else {
-                                            "application/json"
-                                        },
-                                    ),
-                                ],
-                                "UNVERIFIED_SECRET_RESPONSE",
-                            )
-                        }),
-                    )
-                    .route(
-                        "/v1/aci/receipts/:id",
-                        get(move || async move {
-                            if receipt_available {
-                                json_response(StatusCode::OK, vector_receipt_envelope())
-                            } else {
-                                text_response(
-                                    StatusCode::SERVICE_UNAVAILABLE,
-                                    "receipt unavailable",
-                                )
-                            }
-                        }),
-                    )
-                    .route(
-                        "/v1/aci/sessions/:id",
-                        get(|| async {
-                            (
-                                [("content-type", "application/json")],
-                                vector_session_bytes(),
-                            )
-                        }),
-                    );
-                let (tx, mut rx) = mpsc::unbounded_channel();
-                let state = state_over(spawn_server(upstream).await, tx);
-                let proxy = spawn_server(build_proxy_router(state)).await;
-                let response = reqwest::Client::new()
-                    .post(format!("{proxy}/v1/chat/completions"))
-                    .bearer_auth("test-key")
-                    .body(REQUEST_BODY.to_vec())
-                    .send()
-                    .await
-                    .unwrap();
-                assert_eq!(response.status().as_u16(), 502);
-                let body = response.text().await.unwrap();
-                assert!(!body.contains("UNVERIFIED_SECRET_RESPONSE"));
-                assert!(body.contains("Response withheld"));
-                let outcome = rx.recv().await.unwrap();
-                assert_eq!(outcome.verified, Some(false));
-                assert_eq!(outcome.status, 502);
-            }
         }
     }
 }

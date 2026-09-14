@@ -47,15 +47,13 @@ binary. Do not infer OS distribution signing from an updater `.sig` file.
 Linux package/repository signing requires a separate distribution decision;
 current Tauri update signatures authenticate updates, not apt/rpm repositories.
 
-Naming and CLI integration proposal: [Client architecture](CLIENT-ARCHITECTURE.md).
+Naming and CLI integration proposal: [Client architecture](client-architecture.md).
 
 ## Confirmed Corrections
 
-- Optional receipt enforcement: `aci serve --verify-receipts` verifies before
-  response delivery. Actual HTTP tests cover valid receipts, missing receipts,
-  tampered JSON/SSE and receipt unavailability, checking withheld response bytes.
-  Desktop now uses `--audit-receipts` to stream immediately and audit afterward;
-  failed audits cannot retrospectively withdraw responses. Strict mode remains opt-in.
+- Receipt auditing: responses stream immediately. HTTP tests cover first-byte
+  delivery before completion, successful and failed audits, and unavailable receipts.
+  `--audit-receipts` runs retrospective checks; no receipt check withholds content.
 - Theme follows System before React mounts, and native dialog backing surfaces
   use the parent window's effective appearance. Profiles select the entire row;
   proof content shares the heading/footer inset and separates verbose reports.

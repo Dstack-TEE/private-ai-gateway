@@ -280,14 +280,7 @@ pub struct ServeArgs {
     )]
     pub json_events: bool,
     #[arg(
-        long = "verify-receipts",
-        help = "Buffer POST responses (up to 32 MiB) and verify receipts before delivery. \
-                Failed or unavailable proofs withhold the response. SSE is delivered only after verification."
-    )]
-    pub verify_receipts: bool,
-    #[arg(
         long,
-        conflicts_with = "verify_receipts",
         help = "Stream responses immediately and audit receipts after delivery; audit failures cannot retract delivered content."
     )]
     pub audit_receipts: bool,
@@ -358,13 +351,13 @@ mod tests {
             "serve",
             "https://example.test",
             "--json-events",
-            "--verify-receipts",
+            "--audit-receipts",
         ])
         .unwrap();
         let Command::Serve(args) = cli.command else {
             panic!("expected serve command");
         };
         assert!(args.json_events);
-        assert!(args.verify_receipts);
+        assert!(args.audit_receipts);
     }
 }

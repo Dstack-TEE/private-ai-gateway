@@ -25,8 +25,8 @@ ordinary service and standalone ACI builds.
 
 `private-ai-proxy verify/audit/sessions/send` do not initialize the managed backend or
 credential store. `private-ai-proxy serve` streams responses immediately and
-audits receipts afterward by default. `--verify-receipts` explicitly opts into
-withholding instead. `private-ai-proxy --json serve`
+audits receipts afterward by default. Receipt checks never gate streaming.
+`private-ai-proxy --json serve`
 emits lifecycle JSON events. The original `aci` interface stays unchanged.
 
 `private-ai-proxy start/stop` retain managed profiles, user-session continuity and reversible

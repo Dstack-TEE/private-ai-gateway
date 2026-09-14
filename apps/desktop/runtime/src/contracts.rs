@@ -65,7 +65,7 @@ pub struct RequestActivity {
     /// Whether the verifier applied its ACI policy to the body before
     /// forwarding; the receipt binds those bytes, not the agent's original.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub locally_constrained: Option<bool>,
+    pub local_policy_applied: Option<bool>,
     /// Whether the receipt records a service-side rewrite of the request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rewritten: Option<bool>,

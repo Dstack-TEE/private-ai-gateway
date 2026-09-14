@@ -171,7 +171,7 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
     && (activity.status === 502 || activity.status === 504);
   const notes = [
     activity.streamed ? "Streamed response." : undefined,
-    activity.locallyConstrained
+    activity.localPolicyApplied
       ? "The verifier applied its routing policy before sending; the receipt binds those bytes."
       : undefined,
     activity.rewritten ? "The service rewrote the request before inference; the receipt records it." : undefined,

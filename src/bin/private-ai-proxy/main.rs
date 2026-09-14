@@ -55,9 +55,7 @@ async fn main() {
                 Ok(args::Command::Sessions(a)) => sessions::run(a, production).await,
                 Ok(args::Command::Send(a)) => send::run(a, production).await,
                 Ok(args::Command::Serve(mut a)) => {
-                    if !a.verify_receipts {
-                        a.audit_receipts = true;
-                    }
+                    a.audit_receipts = true;
                     a.json_events |= json;
                     serve::run(a, production).await
                 }

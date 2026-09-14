@@ -62,7 +62,7 @@ export interface RequestActivity {
   at: number;
   agent?: string;
   /** The verifier applied its ACI policy to the body; the receipt binds those bytes. */
-  locallyConstrained?: boolean;
+  localPolicyApplied?: boolean;
   rewritten?: boolean;
   leftDevice: boolean;
   inputTokens?: number;

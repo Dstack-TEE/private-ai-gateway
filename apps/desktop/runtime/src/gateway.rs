@@ -542,7 +542,7 @@ impl GatewayManager {
             detail: event.detail,
             at: event.at,
             agent: event.agent,
-            locally_constrained: event.locally_constrained,
+            local_policy_applied: event.local_policy_applied,
             rewritten: event.rewritten,
             left_device: event.left_device,
             input_tokens: event.input_tokens,

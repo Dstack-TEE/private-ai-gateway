@@ -1,5 +1,10 @@
 # Private AI Proxy
 
+Guides: [architecture](docs/client-architecture.md), [CLI](docs/cli.md),
+[distribution](docs/cli-distribution.md), [account login](docs/account-login.md),
+[Apple design](docs/apple-design-review.md), [UI acceptance](docs/ui-acceptance.md),
+and [release readiness](docs/product-readiness-checklist.md).
+
 Cross-platform Tauri desktop app that turns the bundled `private-ai-proxy serve` verifier
 into a local gateway for Codex, Claude Code, OpenCode, Pi, Hermes, OpenClaw, and
 Oh My Pi. One Rust
@@ -519,7 +524,7 @@ Closing or quitting only the desktop UI leaves protection and the backend runnin
 use Stop All and Quit or `private-ai-proxy --yes service stop` to shut down both.
 
 Ordinary CLI output uses short status summaries, lists, and operation results.
-See the [CLI guide](CLI.md) for command discovery, profile editing, reviewed
+See the [CLI guide](docs/cli.md) for command discovery, profile editing, reviewed
 agent changes and a core-capability coverage matrix.
 For automation, use `private-ai-proxy --json --non-interactive <command>`. JSON mode never
 prompts; successful results go to stdout, structured errors to stderr.
@@ -692,7 +697,7 @@ protocol is the service's own response, shown as such.
   new key, so a credential is never silently reused. Profile metadata is
   written atomically. Phala and RedPill also offer browser account login; the
   shared runtime exchanges authorization for an inference key and stores only
-  the key in the OS credential store. See [Account login](ACCOUNT-LOGIN.md). A successful
+  the key in the OS credential store. See [Account login](docs/account-login.md). A successful
   Phala login persists and selects the profile automatically. RedPill uses a
   workspace selector and `Save`, as do subsequent workspace edits. Completion returns
   to the chooser. If protection
@@ -727,12 +732,14 @@ protocol is the service's own response, shown as such.
   snapshot, not continuous availability monitoring or a claim that an endpoint
   returning a transient error is permanently unsupported.
 
-  September 14 inventory update: added `nvidia/nemotron-3.5-lightning` after all
-  three endpoints returned valid responses. Other entries retain their previous
-  observations: the serial follow-up was interrupted by HTTP 429 on GPT-OSS-20B.
-  GLM-5.2 and GLM-5.3 passed all three endpoints; DeepSeek Flash 0731 Responses
-  returned HTTP 502, and Qwen3 VL 30B timed out on all three endpoints (60 seconds).
-  Those transient errors do not overwrite prior confirmed compatibility.
+  September 14 inventory update (22:19 UTC): 25 models were checked across all
+  three endpoints. GPT-OSS-20B returned HTTP 429 and retains its previous results.
+  NVIDIA Nemotron 3.5 Lightning, GLM-5.2 and GLM-5.3 passed all three endpoints.
+  DeepSeek Flash 0731 and GLM-5.1 Responses returned HTTP 502 and are temporarily
+  excluded from Responses-compatible agent catalogs as inconclusive observations,
+  not permanent unsupported claims. Qwen3 VL 30B still timed out on all three
+  endpoints (60 seconds). The resulting inventory offers 25 Chat Completions,
+  25 Messages and 12 Responses models, including the retained GPT-OSS-20B entries.
 
   Apps fetch this file from the repository's `main` branch when starting protection
   or refreshing the model catalog (`private-ai-proxy models list --refresh`). The request runs
@@ -811,9 +818,8 @@ protocol is the service's own response, shown as such.
   and interrupted streams are reported explicitly; unavailable audits remain
   unverified and can be retried through the verifier's control endpoint. Excess
   audits are deferred, not placed in an unbounded queue. Identity checks, provider
-  policy, credential revocation and stop still gate delivery. The standalone
-  `--verify-receipts` opt-in mode remains available for callers that require
-  withholding (32 MiB response limit, 600-second deadline). Late receipts never
+  policy, credential revocation and stop still gate delivery. Receipt verification
+  is retrospective only, including standalone CLI usage. Late receipts never
   replace a recorded HTTP failure with success.
   At most 64 requests are in flight (`429`); upstream connect 5 s,
   idle read 660 s (`504`). Standard hop-by-hop headers plus any named by
@@ -988,7 +994,6 @@ presets inside the app, not separate branded application builds.
 Install dependencies and run the Tauri app:
 
 ```bash
-cargo build --bin aci
 cd apps/desktop
 npm ci
 npm run dev
@@ -1041,7 +1046,7 @@ The root `aci` follows the root workspace toolchain. CI tests the gateway,
 runtime, renderer, and Tauri backend, then compiles and bundles the same app on
 macOS, Windows, and Linux. It also publishes UI-free CLI archives on all three
 platforms and CLI-only DEB/RPM packages on Linux. See
-[`CLI-DISTRIBUTION.md`](CLI-DISTRIBUTION.md) for installed paths, PATH ownership,
+[CLI distribution](docs/cli-distribution.md) for installed paths, PATH ownership,
 upgrade behavior, and automatic macOS registration on app startup. macOS additionally
 launches the packaged app with an isolated home to verify the command link, then
 verifies the compiled asset catalog, legacy ICNS fallback, bundle icon name, DMG,

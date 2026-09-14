@@ -304,7 +304,7 @@ pub(super) fn apply_request_event(
         detail: optional_string(event, "detail").unwrap_or_default(),
         at: now_secs(),
         agent: Some(agent),
-        locally_constrained: event.get("locally_constrained").and_then(Value::as_bool),
+        local_policy_applied: event.get("local_policy_applied").and_then(Value::as_bool),
         rewritten: event.get("rewritten").and_then(Value::as_bool),
         left_device: true,
         input_tokens: None,
@@ -338,9 +338,9 @@ pub(super) fn merge_activity(state: &mut GatewayState, mut incoming: RequestActi
         if incoming.detail.is_empty() || (failed && !existing.detail.is_empty()) {
             incoming.detail = existing.detail.clone();
         }
-        incoming.locally_constrained = incoming
-            .locally_constrained
-            .or(existing.locally_constrained);
+        incoming.local_policy_applied = incoming
+            .local_policy_applied
+            .or(existing.local_policy_applied);
         incoming.rewritten = incoming.rewritten.or(existing.rewritten);
         incoming.left_device |= existing.left_device;
         incoming.input_tokens = incoming.input_tokens.or(existing.input_tokens);

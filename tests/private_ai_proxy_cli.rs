@@ -66,6 +66,23 @@ fn command_discovery_is_detailed_and_machine_readable() {
     assert_success(&schema);
     let schema: Value = serde_json::from_slice(&schema.stdout).unwrap();
     assert_eq!(schema["name"], "private-ai-proxy");
+    for name in ["verify", "audit", "sessions", "send", "serve"] {
+        assert!(schema["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|command| command["name"] == name));
+        let output = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
+            .args([name, "--help"])
+            .output()
+            .unwrap();
+        assert_success(&output);
+        if name == "serve" {
+            let help = String::from_utf8(output.stdout).unwrap();
+            assert!(help.contains("--audit-receipts"));
+            assert!(!help.contains("--verify-receipts"));
+        }
+    }
     let json_flag = schema["arguments"]
         .as_array()
         .unwrap()
