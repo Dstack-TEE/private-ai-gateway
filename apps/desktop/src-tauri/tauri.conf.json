@@ -80,9 +80,6 @@
         "preRemoveScript": "installer/rpm-pre-remove.sh",
         "files": { "/usr/bin/pap": "installer/pap.sh" }
       }
-    },
-    "android": {
-      "debugApplicationIdSuffix": ".debug"
     }
   }
 }
