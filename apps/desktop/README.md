@@ -925,7 +925,6 @@ maintenance under the apply lock.
 
 ## Branding
 
-
 `brand/<id>/brand.json` is the single source of truth for everything that
 names or draws the product: product and organization names, tagline, support
 and homepage URLs, the default service URL and key label, the bundle
@@ -972,8 +971,8 @@ authored with Liberation Sans (SIL OFL 1.1); builds do not need that font
 installed. Keep its artwork labels aligned with
 `productName` and `byline` in the brand configuration. Unused upstream logo-kit files and duplicate Windows/Linux dark icon outputs
 are removed; source provenance remains in the brand metadata.
-`brand/redpill` and `brand/phala` are templates: add the official assets and
-Icon Composer project they reference before selecting them.
+The shipped application brand is `dstack`; Phala and RedPill are provider
+presets inside the app, not separate branded application builds.
 
 ## Development
 

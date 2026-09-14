@@ -18,11 +18,6 @@ test("Phala completes automatically while RedPill confirms its workspace with Sa
     await expect(editor).toHaveCount(0);
     await expect(page.getByRole("switch", { name: "Stop protection" })).toBeVisible();
     await expect(page.getByRole("button", { name: `Profiles: ${provider}` })).toBeVisible();
-    if (provider === "Phala") {
-      await page.evaluate(() => window.addEventListener("mock:top-up", (event) => {
-        if (event instanceof CustomEvent) document.documentElement.dataset.billingScope = event.detail.organizationId;
-      }));
-    }
     await page.getByRole("switch", { name: "Stop protection" }).click();
     await expect(page.getByRole("switch", { name: "Start protection" })).toBeVisible();
     await page.getByRole("button", { name: `Profiles: ${provider}` }).click();
@@ -39,12 +34,6 @@ test("Phala completes automatically while RedPill confirms its workspace with Sa
 test("RedPill workspace and organization menu preserve billing scope", async ({ page }) => {
   await page.route("https://img.clerk.com/**", (route) => route.fulfill({ contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><circle cx="12" cy="12" r="12" fill="green"/></svg>' }));
   await page.goto("/?mock=oauth-workspaces");
-  await page.evaluate(() => window.addEventListener("mock:top-up", (event) => {
-    if (event instanceof CustomEvent) {
-      document.documentElement.dataset.topUpProvider = event.detail.provider;
-      document.documentElement.dataset.topUpOrganization = event.detail.organizationId ?? "";
-    }
-  }));
   await page.getByRole("button", { name: "Set up profile" }).click();
   const editor = page.getByRole("dialog", { name: "New profile" });
   await editor.getByRole("button", { name: "RedPill", exact: true }).click();

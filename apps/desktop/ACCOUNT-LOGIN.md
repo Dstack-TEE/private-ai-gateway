@@ -107,19 +107,16 @@ or failure preserves the saved profile. Deploy the API's managed-key account
 read support before releasing this editor change. Phala
 has no separate organization tier: its workspace (team) is selected in the browser.
 
-Balances load automatically after authorization, when opening a saved account,
-and on the active profile's main card. The main card adds only a current-balance
-button beside the profile selector; clicking it opens the provider billing page.
-Refresh remains in the account actions menu. Organization,
-workspace, promotional credits and Top up remain in the editor. The same component handles both surfaces,
-refreshing a visible main card every five minutes, an editor every minute, and
-on focus with a 30-second minimum interval. The runtime coalesces concurrent windows by login ID or profile ID plus
+Balances load in the profile editor after authorization or when opening a saved
+account. Overview does not query balances or read credentials for this purpose.
+The editor refreshes every minute and revalidates on focus after 30 seconds.
+The runtime coalesces concurrent windows by login ID or profile ID plus
 credential reference; successful results live for 30 seconds and failures for 10.
 A replaced credential cannot reuse an old cache entry. Balance reads do not update
 profile settings or hold the authorization lock during network requests. The renderer discards results when the target changes.
 
-Loading and unavailable states never masquerade as a zero balance. Refresh and
-Top up remain separate actions; balance failures stay local to this display and
+Loading and unavailable states never masquerade as a zero balance. Balance
+failures stay local to this display and
 cannot interrupt protection. RedPill shows the shared organization USD balance;
 workspace and key limits still apply. Saved app keys require current live Clerk
 billing-read and workspace permissions, so a later permission grant no longer
@@ -195,7 +192,7 @@ hosts are accepted, allowed explicitly by CSP, and images send no referrer.
 OAuth scopes remain `openid profile user:org:read`. Key management, billing read
 and billing management are separate live organization permissions. A denied
 balance response becomes a typed null result: no balance or Top up is rendered.
-A billing reader sees the balance but no Top up unless management is permitted.
+A billing reader sees the balance; the editor exposes no Top up action.
 Permission changes are rechecked by the API on refresh, subject to the existing
 30-second runtime cache. Network failures remain errors, not zero balances or
 permission denials. Balance request failures hide the balance entry and retry on

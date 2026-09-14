@@ -104,9 +104,8 @@ and by dstack TEE. Product wordmarks are outlined SVGs, without system-font
 dependencies or the standalone original Dstack wordmark.
 Outside branded artwork, green indicates protection and verification state; the action accent is
 applied only to the primary action, selection, and links; the rest of the
-palette is system-neutral. `redpill` and `phala` are configuration
-templates; the script refuses to build them until their official assets are
-added.
+palette is system-neutral. Phala and RedPill are provider presets inside the
+shared Dstack-branded application.
 
 The tray uses Tauri's standard native menu items, not a WebView popup or a custom
 switch view. Status and elapsed time are separate from the Start/Stop/Cancel

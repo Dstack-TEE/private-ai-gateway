@@ -11,7 +11,7 @@ import { Item, ItemActions, ItemContent, ItemTitle } from "./ui/item";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 
 type Props = {
-  api: Pick<DesktopApi, "getAccountBalance" | "openTopUp" | "openOrganization">;
+  api: Pick<DesktopApi, "getAccountBalance" | "openOrganization">;
   provider: ServiceProvider;
   target: AccountBalanceTarget;
   scope?: AccountScope;
@@ -19,7 +19,6 @@ type Props = {
   images?: AccountImages;
   onSignIn?(): void;
   disabled?: boolean;
-  compact?: boolean;
 };
 
 /** Changing account or credential must never display the previous account's balance. */
@@ -29,14 +28,14 @@ export function AccountTools(props: Props) {
   return <AccountDetailsView key={cacheKey} cacheKey={cacheKey} {...props} />;
 }
 
-function AccountDetailsView({ cacheKey, api, provider, target, scope, images, onSignIn, disabled = false, compact = false }: Props & { cacheKey: string }) {
+function AccountDetailsView({ cacheKey, api, provider, target, scope, images, onSignIn, disabled = false }: Props & { cacheKey: string }) {
   const [linkError, setLinkError] = useState<string>();
   const [opening, setOpening] = useState(false);
   const openingRef = useRef(false);
   const returningFromAccountPage = useRef(false);
   const { data: balance, isFetching: busy, refetch } = useQuery({
     queryKey: ["account-balance", cacheKey], queryFn: () => api.getAccountBalance(target),
-    refetchInterval: compact ? 300_000 : 60_000, staleTime: 30_000, retry: false,
+    refetchInterval: 60_000, staleTime: 30_000, retry: false,
   });
   useEffect(() => {
     const refreshAfterBilling = () => {
@@ -63,17 +62,9 @@ function AccountDetailsView({ cacheKey, api, provider, target, scope, images, on
     finally { openingRef.current = false; setOpening(false); }
   }, [disabled]);
   const organizationSlug = balance?.scope.organizationSlug ?? scope?.organizationSlug;
-  const billingSlug = provider === "phala" ? balance?.scope.workspaceSlug ?? scope?.workspaceSlug : organizationSlug;
-  const canOpenBilling = Boolean(billingSlug);
-  const openBilling = () => balance && canOpenBilling && openPage(() => api.openTopUp(provider, billingSlug ?? undefined));
   const manage = provider === "redpill" && organizationSlug ? () => void openPage(() => api.openOrganization(organizationSlug)) : undefined;
-  const displayScope = provider === "redpill" && !compact ? scope ?? balance?.scope : balance?.scope ?? scope;
+  const displayScope = provider === "redpill" ? scope ?? balance?.scope : balance?.scope ?? scope;
   const owner = displayScope?.organization ?? displayScope?.workspace;
-  if (compact && !balance) return null;
-  const amount = balance ? currency(Number(balance.balanceUsd)) : "";
-  if (compact) return <Button type="button" variant="outline" size="sm" className="tabular-nums"
-    aria-label={`Current balance: ${amount}`} title={linkError ?? `${owner ?? "Account"}${canOpenBilling ? " · Open billing" : ""}`}
-    disabled={opening || !balance || !canOpenBilling} onClick={() => void openBilling()}>{amount}</Button>;
   const name = owner ?? "Account";
   return <div aria-label="Account details">
     <Item variant="outline" size="sm" className="grid grid-cols-[2rem_minmax(0,_1fr)_auto] gap-x-3">
