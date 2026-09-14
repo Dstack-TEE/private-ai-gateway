@@ -51,11 +51,11 @@ Naming and CLI integration proposal: [Client architecture](CLIENT-ARCHITECTURE.m
 
 ## Confirmed Corrections
 
-- Receipt enforcement: `aci serve --verify-receipts` now verifies before
+- Optional receipt enforcement: `aci serve --verify-receipts` verifies before
   response delivery. Actual HTTP tests cover valid receipts, missing receipts,
   tampered JSON/SSE and receipt unavailability, checking withheld response bytes.
-  Earlier desktop betas audited receipts after streaming and cannot retrospectively
-  withdraw responses already delivered. Strict mode buffers in memory, not on disk.
+  Desktop now uses `--audit-receipts` to stream immediately and audit afterward;
+  failed audits cannot retrospectively withdraw responses. Strict mode remains opt-in.
 - Theme follows System before React mounts, and native dialog backing surfaces
   use the parent window's effective appearance. Profiles select the entire row;
   proof content shares the heading/footer inset and separates verbose reports.

@@ -728,6 +728,64 @@ async fn helper_endpoints_require_a_verified_catalog_model() {
 }
 
 #[tokio::test]
+async fn token_revocation_interrupts_a_stream_after_its_first_chunk() {
+    let finish = Arc::new(tokio::sync::Notify::new());
+    let upstream = spawn(
+        Router::new()
+            .route(
+                "/v1/models",
+                get(|| async { Json(json!({"data":[{"id":"model"}]})) }),
+            )
+            .route(
+                "/v1/chat/completions",
+                post(move || {
+                    let finish = finish.clone();
+                    async move {
+                        Body::from_stream(async_stream::stream! {
+                            yield Ok::<_, std::io::Error>(Bytes::from_static(b"first"));
+                            finish.notified().await;
+                            yield Ok::<_, std::io::Error>(Bytes::from_static(b"last"));
+                        })
+                    }
+                }),
+            ),
+    )
+    .await;
+    let (state, mut events) = state();
+    state.set_tokens(tokens());
+    state.set_api_key(Some("test-key".into()));
+    verified(&state, &upstream, 1, 1).await;
+    let proxy = spawn(router(state.clone())).await;
+    let response = reqwest::Client::new()
+        .post(format!("{proxy}/v1/chat/completions"))
+        .bearer_auth("opencode-token")
+        .json(&json!({"model":"model"}))
+        .send()
+        .await
+        .unwrap();
+    let mut stream = response.bytes_stream();
+    assert_eq!(stream.next().await.unwrap().unwrap().as_ref(), b"first");
+    state.set_tokens(state.tokens().without("opencode"));
+    let next = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await
+        .unwrap();
+    assert!(next.is_none_or(|item| item.is_err()));
+    drop(stream);
+    let failure = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if event.status == 502 {
+                break event;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(failure.left_device);
+    assert!(failure.detail.contains("revoked"));
+}
+
+#[tokio::test]
 async fn agent_scan_and_catalog_refresh_preserve_admitted_requests() {
     let (state, _events) = state();
     state.set_tokens(tokens());

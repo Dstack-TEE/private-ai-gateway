@@ -198,7 +198,7 @@ impl GatewayManager {
             "--control".to_string(),
             "127.0.0.1:0".to_string(),
             "--json-events".to_string(),
-            "--verify-receipts".to_string(),
+            "--audit-receipts".to_string(),
         ]);
 
         let (receiver, mut child) = self.launcher.spawn(args)?;

@@ -78,7 +78,7 @@ function PrivacyVerification({ state }: { state: GatewayState }): React.JSX.Elem
           </div>
         ))}
       </div>
-      <p className="proof-boundary mt-3 mr-0 mb-4.5 ml-0 text-muted-foreground text-xs">{passed("id-5") ? "Key custody evidence passed." : "Key custody is not independently established by these checks."} This summary does not verify upstream inference or answer accuracy. {!state.config.requireProductionOs && "Development OS images are allowed."}</p>
+      <p className="proof-boundary mt-3 mr-0 mb-4.5 ml-0 text-muted-foreground text-xs">{passed("id-5") ? "Key custody evidence passed." : "Key custody is not independently established by these checks."} Responses are forwarded immediately; receipts are audited afterward and cannot retract delivered content. This summary does not verify upstream inference or answer accuracy. {!state.config.requireProductionOs && "Development OS images are allowed."}</p>
       {identity && (
         <section className="privacy-section mt-6" aria-labelledby="verified-identity-title">
           <div className="privacy-section-heading min-h-9 pt-0 pr-0.5 pb-2 pl-0.5 flex items-center flex-wrap justify-between gap-y-1 gap-x-4 [&_h3]:m-0 [&_h3]:text-foreground [&_h3]:text-sm [&_h3]:font-semibold [&_>_span]:text-muted-foreground [&_>_span]:text-xs"><h3 id="verified-identity-title">{verified ? "Current service identity" : "Last reported identity"}</h3><span>{checkCount(checks)} checks passed</span></div>

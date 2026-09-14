@@ -18,14 +18,15 @@ Status: implemented; modular layout updated 2026-09-12.
 commands. Management command execution and output live in
 `apps/desktop/runtime/src/cli`. ACI modules are compiled from
 their existing source paths, so both executables use one verifier implementation.
-Desktop integration adds opt-in lifecycle events and receipt withholding; the
+Desktop integration adds opt-in lifecycle events and post-delivery receipt auditing; the
 original `aci` entry point and default streaming behavior remain available.
 The explicit `desktop-client` Cargo feature keeps desktop dependencies out of
 ordinary service and standalone ACI builds.
 
 `private-ai-proxy verify/audit/sessions/send` do not initialize the managed backend or
-credential store. `private-ai-proxy serve` runs the standalone local verifier and always
-enforces receipt verification before response delivery. `private-ai-proxy --json serve`
+credential store. `private-ai-proxy serve` streams responses immediately and
+audits receipts afterward by default. `--verify-receipts` explicitly opts into
+withholding instead. `private-ai-proxy --json serve`
 emits lifecycle JSON events. The original `aci` interface stays unchanged.
 
 `private-ai-proxy start/stop` retain managed profiles, user-session continuity and reversible

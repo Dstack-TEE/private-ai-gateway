@@ -250,7 +250,7 @@ mod tests {
         let path = directory.path().join("inventory.json");
         let updater = InventoryUpdater::new(path.clone()).unwrap();
         let mut updated = serde_json::to_value(EndpointInventory::bundled().unwrap()).unwrap();
-        updated["checkedAt"] = "2026-09-12T00:00:00Z".into();
+        updated["checkedAt"] = "2027-01-01T00:00:00Z".into();
         let body = updated.to_string();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let source = format!("http://{}", listener.local_addr().unwrap());

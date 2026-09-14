@@ -164,6 +164,8 @@ pub struct ProxyState {
     require_production_os: bool,
     /// Verify completed response receipts before releasing any response bytes.
     verify_receipts: bool,
+    audit_receipts: bool,
+    audits: Arc<tokio::sync::Semaphore>,
     trusted: Mutex<TrustedIdentity>,
     /// Set when an upstream response advertised a keyset digest other than the
     /// trusted one; blocks inference forwards until a fresh verify passes.
@@ -217,6 +219,8 @@ impl ProxyState {
             accepted_composes,
             require_production_os,
             verify_receipts,
+            audit_receipts: false,
+            audits: Arc::new(tokio::sync::Semaphore::new(16)),
             trusted: Mutex::new(TrustedIdentity {
                 report: Arc::new(report),
                 keyset_digest,
@@ -400,7 +404,7 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
     } else {
         Arc::new(|_| {})
     };
-    let state = Arc::new(ProxyState::new(
+    let mut state = ProxyState::new(
         client,
         base_url.clone(),
         host,
@@ -414,7 +418,9 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
         identity,
         reporter,
         event_sink,
-    ));
+    );
+    state.audit_receipts = args.audit_receipts;
+    let state = Arc::new(state);
     // §5.3 prevention: a claims policy derives the pin set from the current
     // attested sessions before any traffic — and nothing acceptable to pin
     // means refusing to start, not serving unpinned.
@@ -467,6 +473,8 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
         let receipt_mode = if args.verify_receipts {
             "each POST receipt is verified before response delivery using the request's \
              transient bearer credential."
+        } else if args.audit_receipts {
+            "responses stream immediately; receipts are audited after delivery."
         } else {
             "POST receipt verification is available on demand."
         };
@@ -824,7 +832,7 @@ async fn proxy_inference(
         }
     }
 
-    // Audit-only mode records digests for the control endpoint to verify later.
+    // Streaming modes record digests for background or on-demand audits.
     // Non-success responses without receipts also use this passthrough path.
     let hook_state = state.clone();
     let hook_path = path.clone();
@@ -833,6 +841,7 @@ async fn proxy_inference(
     // §9.3(6): the pinned ids ride along so the on-demand check enforces the
     // same membership rule as `aci send --session`.
     let pinned_sessions = pinned_session_ids(&request_body);
+    let audit_bearer = bearer_token(&headers);
     let hook: CompletionHook = Box::new(move |end| {
         let (response, truncation) = match end {
             StreamEnd::Complete(digest) => (digest, None),
@@ -857,7 +866,11 @@ async fn proxy_inference(
             Some(id) => outcome(
                 Some(id.clone()),
                 None,
-                format!("receipt {id} recorded; verification available on demand"),
+                if hook_state.audit_receipts {
+                    "Response delivered; receipt audit pending".to_string()
+                } else {
+                    format!("receipt {id} recorded; verification available on demand")
+                },
             ),
             // A 2xx POST completion with no receipt header can never be
             // audited: fail loudly (spec 5.2 puts a receipt on every
@@ -889,14 +902,113 @@ async fn proxy_inference(
                 locally_constrained,
             };
             hook_state.record(exchange.clone());
+            if hook_state.audit_receipts {
+                (hook_state.reporter)(outcome);
+                audit_exchange(hook_state, trusted, exchange, audit_bearer);
+                return;
+            }
         }
         (hook_state.reporter)(outcome);
     });
 
-    let stream = tee(resp.bytes_stream(), hook);
+    let upstream = async_stream::stream! {
+        loop {
+            match race_delivery(&delivery, resp.chunk()).await {
+                Some(Ok(Some(chunk))) => yield Ok(chunk),
+                Some(Ok(None)) => break,
+                Some(Err(_)) => {
+                    yield Err(std::io::Error::other("Upstream response interrupted"));
+                    break;
+                }
+                None => {
+                    yield Err(std::io::Error::other("Protection revoked during response delivery"));
+                    break;
+                }
+            }
+        }
+    };
+    let stream = tee(upstream, hook);
     builder
         .body(Body::from_stream(stream))
         .unwrap_or_else(|_| internal_error())
+}
+
+fn audit_exchange(
+    state: Arc<ProxyState>,
+    trusted: TrustedIdentity,
+    exchange: RecordedExchange,
+    bearer: Option<String>,
+) {
+    let report_state = state.clone();
+    let report_exchange = exchange.clone();
+    let report = move |verified, detail, rewritten| {
+        let state = &report_state;
+        let exchange = &report_exchange;
+        if let Some(entry) = state
+            .recorded
+            .lock()
+            .expect("recorded ring poisoned")
+            .iter_mut()
+            .find(|entry| entry.receipt_id == exchange.receipt_id && entry.at == exchange.at)
+        {
+            entry.verified = verified;
+        }
+        (state.reporter)(RequestOutcome {
+            method: Method::POST,
+            path: exchange.path.clone(),
+            status: exchange.status,
+            streamed: exchange.streamed,
+            receipt_id: Some(exchange.receipt_id.clone()),
+            verified,
+            detail,
+            tag: exchange.tag.clone(),
+            rewritten,
+            locally_constrained: exchange.locally_constrained,
+        });
+    };
+    if exchange.truncation.is_some() {
+        report(
+            Some(false),
+            "Response delivery was incomplete; the receipt cannot verify the partial response."
+                .into(),
+            None,
+        );
+        return;
+    }
+    let Ok(permit) = state.audits.clone().try_acquire_owned() else {
+        report(
+            None,
+            "Response delivered; receipt audit deferred because the audit limit was reached".into(),
+            None,
+        );
+        return;
+    };
+    tokio::spawn(async move {
+        let _permit = permit;
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            verify_exchange(&state, &trusted, &exchange, bearer.as_deref()),
+        )
+        .await
+        {
+            Ok(Ok((transcript, detail))) => report(
+                Some(transcript.verified()),
+                format!("Post-delivery receipt audit: {detail}"),
+                Some(rewrite_noted(&transcript)),
+            ),
+            Ok(Err(_)) => report(
+                None,
+                "Response delivered; receipt audit could not complete. Retry the audit later."
+                    .into(),
+                None,
+            ),
+            Err(_) => report(
+                None,
+                "Response delivered; receipt audit timed out. Retry the audit later.".into(),
+                None,
+            ),
+        }
+    });
 }
 
 /// GET /receipts on the control endpoint: recorded exchanges, newest first.
@@ -2065,6 +2177,104 @@ mod tests {
         let models_outcome = rx.recv().await.expect("models outcome reported");
         assert_eq!(models_outcome.method, Method::GET);
         assert_eq!(models_outcome.verified, None);
+    }
+
+    #[tokio::test]
+    async fn streaming_audit_does_not_gate_delivery_on_receipt_success() {
+        use futures_util::StreamExt;
+        for mode in ["valid", "tampered", "unavailable"] {
+            let response_bytes: &'static [u8] = if mode == "valid" {
+                RESPONSE_BODY
+            } else {
+                b"data: first\n\ndata: [DONE]\n\n"
+            };
+            let split = response_bytes.len() / 2;
+            let finish_stream = Arc::new(tokio::sync::Notify::new());
+            let audit_started = Arc::new(tokio::sync::Notify::new());
+            let finish_audit = Arc::new(tokio::sync::Notify::new());
+            let upstream = Router::new()
+                .route("/v1/chat/completions", post({
+                    let finish = finish_stream.clone();
+                    move || {
+                        let finish = finish.clone();
+                        async move {
+                            let body = Body::from_stream(async_stream::stream! {
+                                yield Ok::<_, std::io::Error>(Bytes::from_static(&response_bytes[..split]));
+                                finish.notified().await;
+                                yield Ok::<_, std::io::Error>(Bytes::from_static(&response_bytes[split..]));
+                            });
+                            Response::builder().header("content-type", "text/event-stream")
+                                .header("x-receipt-id", "rcpt-0001").body(body).unwrap()
+                        }
+                    }
+                }))
+                .route("/v1/aci/receipts/:id", get({
+                    let started = audit_started.clone();
+                    let finish = finish_audit.clone();
+                    move || {
+                        let started = started.clone();
+                        let finish = finish.clone();
+                        async move {
+                            started.notify_one(); finish.notified().await;
+                            if mode != "unavailable" { json_response(StatusCode::OK, vector_receipt_envelope()) }
+                            else { text_response(StatusCode::SERVICE_UNAVAILABLE, "unavailable") }
+                        }
+                    }
+                }))
+                .route("/v1/aci/sessions/:id", get(|| async {
+                    ([("content-type", "application/json")], vector_session_bytes())
+                }));
+            let (tx, mut outcomes) = mpsc::unbounded_channel();
+            let mut state = state_over(spawn_server(upstream).await, tx);
+            let config = Arc::get_mut(&mut state).unwrap();
+            config.verify_receipts = false;
+            config.audit_receipts = true;
+            let proxy = spawn_server(build_proxy_router(state)).await;
+            let response = reqwest::Client::new()
+                .post(format!("{proxy}/v1/chat/completions"))
+                .body(REQUEST_BODY.to_vec())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let mut stream = response.bytes_stream();
+            let first = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(first.as_ref(), &response_bytes[..split]);
+            assert!(outcomes.try_recv().is_err());
+            finish_stream.notify_one();
+            let remaining = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                let mut bytes = Vec::new();
+                while let Some(chunk) = stream.next().await {
+                    bytes.extend_from_slice(&chunk.unwrap());
+                }
+                bytes
+            })
+            .await
+            .unwrap();
+            assert_eq!(remaining, &response_bytes[split..]);
+            tokio::time::timeout(std::time::Duration::from_secs(2), audit_started.notified())
+                .await
+                .unwrap();
+            assert_eq!(outcomes.recv().await.unwrap().verified, None);
+            finish_audit.notify_one();
+            let audited = tokio::time::timeout(std::time::Duration::from_secs(5), outcomes.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(audited.status, 200);
+            assert_eq!(
+                audited.verified,
+                match mode {
+                    "valid" => Some(true),
+                    "tampered" => Some(false),
+                    _ => None,
+                }
+            );
+        }
     }
 
     #[tokio::test]

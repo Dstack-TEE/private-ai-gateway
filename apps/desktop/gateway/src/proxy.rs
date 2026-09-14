@@ -56,7 +56,7 @@ pub const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_IN_FLIGHT: usize = 64;
 const BODY_READ_TIMEOUT: Duration = Duration::from_secs(60);
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// Receipt-verified responses may be held for 600 seconds; allow delivery overhead.
+/// Idle stream timeout. Receipt auditing does not hold response delivery.
 const UPSTREAM_READ_TIMEOUT: Duration = Duration::from_secs(660);
 // Match the gateway's SSE limit: Responses terminal events repeat the full output.
 const MAX_USAGE_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
@@ -727,14 +727,27 @@ async fn forward(
                 cost_usd: None,
             },
         };
-        while let Some(chunk) = stream.next().await {
+        loop {
+            let chunk = tokio::select! {
+                biased;
+                _ = delivery.cancelled() => {
+                    report.event.status = 502;
+                    report.event.detail = "Response stream interrupted because protection or credentials were revoked".into();
+                    yield Err(std::io::Error::other("Response delivery revoked"));
+                    break;
+                }
+                chunk = stream.next() => chunk,
+            };
+            let Some(chunk) = chunk else { break; };
             match chunk {
                 Ok(bytes) => {
                     if let Some(capture) = &mut report.capture { capture.push(&bytes); }
-                    yield Ok::<Bytes, reqwest::Error>(bytes);
+                    yield Ok::<Bytes, std::io::Error>(bytes);
                 }
                 Err(error) => {
-                    yield Err(error);
+                    report.event.status = 502;
+                    report.event.detail = "Upstream response stream interrupted".into();
+                    yield Err(std::io::Error::other(error));
                     break;
                 }
             }

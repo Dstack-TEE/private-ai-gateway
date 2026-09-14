@@ -11,6 +11,7 @@ platform verification result.
 - [x] Local rejection is distinguishable from an upstream failure and records `left_device = false`.
 - [x] Failures after upstream delivery begins record `left_device = true` and state that receipt by the service is unconfirmed.
 - [x] Tray, window header, Overview, and dialogs use the same protection state and reason.
+- [x] Responses stream before receipt auditing; valid, failed and unavailable audits do not gate completed delivery. Stop and credential revocation still interrupt active streams.
 
 ## Usage
 

@@ -33,7 +33,7 @@ async fn main() {
         .about("Private AI Proxy: manage local protection and verify confidential AI services")
         .long_about("Manage profiles, coding agents and local protection, or verify and audit ACI services without starting the managed backend.")
         .mut_subcommand("cli", |command| command.about("Manage installation of the private-ai-proxy command"))
-        .mut_subcommand("serve", |command| command.about("Run a local verifying proxy; withhold responses until their receipts verify"))
+        .mut_subcommand("serve", |command| command.about("Run a local verifying proxy; stream responses and audit receipts after delivery"))
         .arg(clap::Arg::new("require_production_os").long("require-production-os").help("Require an attested production OS image").global(true).action(clap::ArgAction::SetTrue));
     let json = std::env::args_os()
         .skip(1)
@@ -55,7 +55,9 @@ async fn main() {
                 Ok(args::Command::Sessions(a)) => sessions::run(a, production).await,
                 Ok(args::Command::Send(a)) => send::run(a, production).await,
                 Ok(args::Command::Serve(mut a)) => {
-                    a.verify_receipts = true;
+                    if !a.verify_receipts {
+                        a.audit_receipts = true;
+                    }
                     a.json_events |= json;
                     serve::run(a, production).await
                 }

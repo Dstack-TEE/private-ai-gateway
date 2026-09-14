@@ -1,8 +1,11 @@
 {
   "schemaVersion": 1,
   "endpoint": "https://tee.redpill.ai",
-  "checkedAt": "2026-09-11T06:50:56.833Z",
+  "checkedAt": "2026-09-14T21:48:11.327Z",
   "results": [
+    {"model":"nvidia/nemotron-3.5-lightning","endpoint":"/v1/chat/completions","status":"supported","reason":"valid_response","httpStatus":200},
+    {"model":"nvidia/nemotron-3.5-lightning","endpoint":"/v1/responses","status":"supported","reason":"valid_response","httpStatus":200},
+    {"model":"nvidia/nemotron-3.5-lightning","endpoint":"/v1/messages","status":"supported","reason":"valid_response","httpStatus":200},
     {"model":"deepseek/deepseek-v4-flash-0731","endpoint":"/v1/chat/completions","status":"supported","reason":"valid_response","httpStatus":200},
     {"model":"deepseek/deepseek-v4-flash-0731","endpoint":"/v1/responses","status":"supported","reason":"valid_response","httpStatus":200},
     {"model":"deepseek/deepseek-v4-flash-0731","endpoint":"/v1/messages","status":"supported","reason":"valid_response","httpStatus":200},

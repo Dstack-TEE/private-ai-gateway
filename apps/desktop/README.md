@@ -15,7 +15,7 @@ with its own data and credential namespace; old beta configuration is not migrat
 The only installed CLI is `private-ai-proxy`. It combines local management with ACI's `verify`,
 `audit`, `sessions`, `send` and `serve` commands using the same Rust source.
 The existing standalone `aci` binary is unchanged in the repository but is no
-longer bundled. The backend launches `private-ai-proxy serve` with strict receipt enforcement.
+longer bundled. The backend launches `private-ai-proxy serve` with post-delivery receipt auditing.
 Build the unified CLI with `cargo build --features desktop-client --bin private-ai-proxy`;
 ordinary server and standalone ACI builds do not acquire desktop dependencies.
 
@@ -593,7 +593,7 @@ startup errors for retry; removing the command there disables registration on
 subsequent launches. No PKG installer is produced.
 
 > Every request goes to a hardware-verified private AI service, and every
-> response is checked against its signed receipt.
+> response streams immediately, with signed receipts audited afterward.
 
 ## Architecture
 
@@ -727,6 +727,13 @@ protocol is the service's own response, shown as such.
   snapshot, not continuous availability monitoring or a claim that an endpoint
   returning a transient error is permanently unsupported.
 
+  September 14 inventory update: added `nvidia/nemotron-3.5-lightning` after all
+  three endpoints returned valid responses. Other entries retain their previous
+  observations: the serial follow-up was interrupted by HTTP 429 on GPT-OSS-20B.
+  GLM-5.2 and GLM-5.3 passed all three endpoints; DeepSeek Flash 0731 Responses
+  returned HTTP 502, and Qwen3 VL 30B timed out on all three endpoints (60 seconds).
+  Those transient errors do not overwrite prior confirmed compatibility.
+
   Apps fetch this file from the repository's `main` branch when starting protection
   or refreshing the model catalog (`private-ai-proxy models list --refresh`). The request runs
   in the background after verified model discovery, uses a separate unauthenticated HTTPS client, and has
@@ -796,16 +803,18 @@ protocol is the service's own response, shown as such.
   `Rewritten by service`.
 - **Proxy limits.** Request bodies are buffered (32 MiB, the same limit the
   sidecar enforces, 60 s read timeout) only so the `model` can be checked
-  against the catalog. With `--verify-receipts` (always enabled by desktop),
-  the sidecar also buffers responses in memory up to 32 MiB and checks their
-  receipts before returning any bytes. Failed, missing or unavailable proofs
-  return HTTP 502 without the provider response body. SSE framing is preserved,
-  but tokens are delivered only after the entire response is verified. Neither
-  request nor response buffers are written to disk. Verification has a 600 s
-  upper bound; the desktop allows 660 s without response bytes for delivery
-  overhead. Agents can impose shorter timeouts, including Claude Code's stream
-  watchdog. Late receipts enrich metadata without replacing an already recorded
-  HTTP failure with success.
+  against the catalog. Desktop uses `--audit-receipts`: response chunks are
+  forwarded immediately and hashed incrementally without buffering the full body.
+  After completion, at most 16 concurrent audits fetch receipts using the request's
+  transient credential, with a 30-second deadline. Failed audits update Usage;
+  they do not change the delivered HTTP status or retract content. Missing receipts
+  and interrupted streams are reported explicitly; unavailable audits remain
+  unverified and can be retried through the verifier's control endpoint. Excess
+  audits are deferred, not placed in an unbounded queue. Identity checks, provider
+  policy, credential revocation and stop still gate delivery. The standalone
+  `--verify-receipts` opt-in mode remains available for callers that require
+  withholding (32 MiB response limit, 600-second deadline). Late receipts never
+  replace a recorded HTTP failure with success.
   At most 64 requests are in flight (`429`); upstream connect 5 s,
   idle read 660 s (`504`). Standard hop-by-hop headers plus any named by
   `Connection`, `Proxy-Connection`, the agent credential, and the attribution

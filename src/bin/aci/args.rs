@@ -286,6 +286,12 @@ pub struct ServeArgs {
     )]
     pub verify_receipts: bool,
     #[arg(
+        long,
+        conflicts_with = "verify_receipts",
+        help = "Stream responses immediately and audit receipts after delivery; audit failures cannot retract delivered content."
+    )]
+    pub audit_receipts: bool,
+    #[arg(
         long = "allow-unverified",
         help = "Drop the default provider.aci_verified demand (spec 5.3)."
     )]
