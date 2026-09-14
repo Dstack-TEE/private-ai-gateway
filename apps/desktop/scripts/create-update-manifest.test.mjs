@@ -66,3 +66,32 @@ test(`${channel} manifests use signed platform artifacts and reject incomplete r
   }
 });
 }
+
+test("native ARM64 artifacts are selected by matrix provenance and normalized without changing bytes", async () => {
+  const directory = await mkdtemp(path.resolve("playwright-artifacts/native-manifest-"));
+  const version = "0.1.2-beta.36";
+  const paths = [];
+  try {
+    for (const specification of desktopPackages.filter(entry => entry.platform !== "macos")) {
+      const folder = path.join(directory, `private-ai-proxy-beta-${version}-${"a".repeat(40)}-${specification.platform}-${specification.arch}`);
+      await mkdir(folder, { recursive: true });
+      const file = path.join(folder, `Private AI Proxy_native${specification.suffix}`);
+      await writeFile(file, `${specification.platform}-${specification.arch}`);
+      await writeFile(`${file}.sig`, `${specification.platform}-${specification.arch}-signature`);
+      paths.push(path.join(folder, artifactName({ version, ...specification })));
+    }
+    const run = () => promisify(execFile)(process.execPath, ["scripts/create-update-manifest.mjs", directory, version, "Dstack-TEE/private-ai-gateway", "beta", "windows-arm64,windows-x64,linux-arm64,linux-x64"]);
+    await run();
+    const manifest = JSON.parse(await readFile(path.join(directory, "latest.json"), "utf8"));
+    assert.equal(Object.keys(manifest.platforms).length, 6);
+    for (const file of paths) {
+      const bytes = await readFile(file, "utf8");
+      assert.equal(await readFile(`${file}.sig`, "utf8"), `${bytes}-signature`);
+    }
+    await run();
+    await rm(`${paths[0]}.sig`);
+    await assert.rejects(run);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
