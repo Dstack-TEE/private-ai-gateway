@@ -85,7 +85,7 @@ export function Overview({
   const localAvailable = isProtected(state) && Boolean(state.proxyUrl) && !state.endpointError;
   const recent = protectedNow || state.sessionActive || state.reconnecting ? state.activity.slice(0, 10) : [];
   return (
-    <div className="overview-page max-w-240 h-full min-h-0 mt-0 mr-auto mb-0 ml-auto flex flex-col overflow-hidden @container/overview @max-[600px]/overview:[&_.overview-grid_>_.overview-module:nth-child(n)]:col-auto @max-[600px]/overview:[&_.overview-grid_>_.overview-module:nth-child(n)]:row-auto">
+    <div className="overview-page max-w-240 min-h-full mx-auto flex flex-col @container/overview @max-[600px]/overview:[&_.overview-grid_>_.overview-module:nth-child(n)]:col-auto @max-[600px]/overview:[&_.overview-grid_>_.overview-module:nth-child(n)]:row-auto">
       <div className="overview-top grid *:min-h-36 grid-cols-2 gap-4 items-stretch [&_.status-surface.status-compact]:min-w-0 @max-[600px]/overview:grid-cols-1">
       <StatusSurface
         state={state}
@@ -100,7 +100,7 @@ export function Overview({
       />
       <SessionSummary summary={state.sessionUsage} active={protectedNow || Boolean(state.sessionActive || state.reconnecting)} />
       </div>
-      <div className="overview-grid h-0 min-h-0 flex-1 mt-4 grid grid-cols-2 grid-rows-[minmax(212px,_1fr)_auto] gap-4 @max-[540px]/overview:grid-cols-1 [&_>_.overview-module:first-child]:col-start-1 [&_>_.overview-module:first-child]:row-start-1 [&_>_.overview-module:nth-child(2)]:col-start-1 [&_>_.overview-module:nth-child(2)]:row-start-2 [&_>_.overview-module:nth-child(3)]:col-start-2 [&_>_.overview-module:nth-child(3)]:row-[1_/_span_2] max-[780px]:grid-cols-1 max-[440px]:gap-3">
+      <div className="overview-grid mt-4 grid grid-cols-2 grid-rows-[auto_auto] gap-4 @max-[600px]/overview:grid-cols-1 [&_>_.overview-module:first-child]:col-start-1 [&_>_.overview-module:first-child]:row-start-1 [&_>_.overview-module:nth-child(2)]:col-start-1 [&_>_.overview-module:nth-child(2)]:row-start-2 [&_>_.overview-module:nth-child(3)]:col-start-2 [&_>_.overview-module:nth-child(3)]:row-[1_/_span_2]">
         <OverviewModule title="Local API" description="Use private AI in your tools." titleAdornment={<Hint content="Local API examples"><Badge variant="ghost" className="size-6 p-0 [&>svg]:size-4!" render={<button type="button" />} aria-label="Local API examples" aria-haspopup="dialog" onClick={onLocalExamples}><CircleHelp aria-hidden="true" /></Badge></Hint>} status={<StateLabel tone={localAvailable ? "success" : "neutral"} text={localAvailable ? "Available" : "Unavailable"} />} action={<IconButton label="Local API settings" aria-haspopup="dialog" onClick={onLocalSettings}><Settings size={16} /></IconButton>}>
           <LocalApiPanel
             proxyUrl={state.proxyUrl}
@@ -132,8 +132,9 @@ export function Overview({
           description="Latest requests in this session."
           action="View all"
           onAction={onUsage}
+          scrollable
         >
-          <div className="preview-list h-full min-h-0 overflow-y-auto overscroll-contain [&_>_:last-child]:border-b-0" role="region" tabIndex={0} aria-label="Recent requests">
+          <div className="preview-list flex-1 min-h-0 overflow-y-auto overscroll-contain [&_>_:last-child]:border-b-0" role="region" tabIndex={0} aria-label="Recent requests">
             {recent.length === 0 && (
               <EmptyState text={running || state.sessionActive || state.reconnecting ? "No requests in this session yet." : "Start protection to begin a new session."} />
             )}
@@ -217,6 +218,7 @@ function OverviewModule({
   status,
   action,
   onAction,
+  scrollable = false,
   children,
 }: React.PropsWithChildren<{
   title: string;
@@ -225,6 +227,7 @@ function OverviewModule({
   status?: React.ReactNode;
   action?: React.ReactNode;
   onAction?(): void;
+  scrollable?: boolean;
 }>): React.JSX.Element {
   return (
     <Card size="sm" className="overview-module min-h-0 min-w-0 flex h-full flex-col [&_.agent-config]:hidden">
@@ -233,7 +236,7 @@ function OverviewModule({
         {description && <CardDescription>{description}</CardDescription>}
         {action && <CardAction>{onAction ? <Button variant="outline" size="sm" onClick={onAction}>{action}</Button> : action}</CardAction>}
       </CardHeader>
-      <CardContent className="module flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden @container">{children}</CardContent>
+      <CardContent className={`module flex min-w-0 flex-1 flex-col @container ${scrollable ? "min-h-0 [contain:size] @max-[600px]/overview:h-80 @max-[600px]/overview:flex-none" : "shrink-0"}`}>{children}</CardContent>
     </Card>
   );
 }

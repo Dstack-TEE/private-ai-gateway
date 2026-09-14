@@ -697,9 +697,10 @@ jobs:
           node apps/desktop/scripts/create-update-manifest.mjs release-artifacts "$VERSION" "$GITHUB_REPOSITORY" "$CHANNEL" "${{ inputs.release_platforms || 'all' }}"
           node apps/desktop/scripts/release-assets.mjs release-artifacts > release-assets.list
           mapfile -d '' assets < release-assets.list
+          node apps/desktop/scripts/release-notes.mjs release-artifacts "$GITHUB_REPOSITORY" > release-notes.md
           release_args=()
           if [[ "$CHANNEL" == beta ]]; then release_args+=(--prerelease); fi
-          gh release create "desktop-v$VERSION" "${assets[@]}" "${release_args[@]}" --draft --latest=false --target "$GITHUB_SHA" --title "Private AI Proxy $VERSION" --generate-notes
+          gh release create "desktop-v$VERSION" "${assets[@]}" "${release_args[@]}" --draft --latest=false --target "$GITHUB_SHA" --title "Private AI Proxy $VERSION" --notes-file release-notes.md
       - name: Publish desktop version
         if: inputs.publish_release
         env:
