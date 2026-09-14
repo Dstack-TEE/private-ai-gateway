@@ -1,27 +1,16 @@
-//! Unified local proxy CLI. ACI's existing binary and protocol implementation stay intact.
-#[path = "../aci/args.rs"]
+//! Unified local proxy CLI. Owns shared ACI command implementations; the standalone aci entry reuses them.
 mod args;
-#[path = "../aci/audit.rs"]
 mod audit;
-#[path = "../aci/capture.rs"]
 mod capture;
-#[path = "../aci/checks.rs"]
 mod checks;
-#[path = "../aci/client.rs"]
 mod client;
 use desktop_runtime::cli as managed;
-#[path = "../aci/send.rs"]
 mod send;
-#[path = "../aci/serve.rs"]
 mod serve;
-#[path = "../aci/sessions.rs"]
 mod sessions;
 #[cfg(test)]
-#[path = "../aci/spec_fixtures.rs"]
 mod spec_fixtures;
-#[path = "../aci/transcript.rs"]
 mod transcript;
-#[path = "../aci/verify.rs"]
 mod verify;
 
 use clap::{FromArgMatches, Subcommand};

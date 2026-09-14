@@ -1,11 +1,12 @@
-# `aci` CLI
+# ACI Commands in Private AI Proxy
 
-The reference command-line client for the ACI protocol
+Shared command-line implementation of the ACI protocol
 ([spec/aci.md](../../../spec/aci.md)). It reuses the gateway's own
-verification code and fails closed: exit code 0 means VERIFIED.
+verification code. The standalone `aci` entry imports these modules; the
+packaged `private-ai-proxy` CLI (also available as `pap`) owns this source.
 
 ```bash
-cargo run --bin aci -- <command> --help
+cargo run --features desktop-client --bin private-ai-proxy -- <command> --help
 ```
 
 | Command | What it does |

@@ -41,7 +41,7 @@ fn test_only_modules(main_rs: &str) -> Vec<String> {
 
 #[test]
 fn the_cli_calls_no_verification_primitive_directly() {
-    let dir = Path::new("src/bin/aci");
+    let dir = Path::new("src/bin/private-ai-proxy");
     let main_rs = fs::read_to_string(dir.join("main.rs")).expect("CLI entry point");
     let test_only = test_only_modules(&main_rs);
     assert!(

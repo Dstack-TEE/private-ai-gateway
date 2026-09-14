@@ -17,7 +17,8 @@ Status: implemented; modular layout updated 2026-09-12.
 `private-ai-proxy` composes the managed CLI's Clap command tree with the existing ACI
 commands. Management command execution and output live in
 `apps/desktop/runtime/src/cli`. ACI modules are compiled from
-their existing source paths, so both executables use one verifier implementation.
+`src/bin/private-ai-proxy`, so both executables use one verifier implementation.
+`src/bin/aci/main.rs` is only the standalone entry point and imports those modules.
 Desktop integration adds opt-in lifecycle events and post-delivery receipt auditing; the
 original `aci` entry point and default streaming behavior remain available.
 The explicit `desktop-client` Cargo feature keeps desktop dependencies out of
@@ -121,7 +122,7 @@ console executables and do not require the desktop UI.
 
 Repository: https://github.com/Dstack-TEE/private-ai-gateway
 Main integrated before this change: `c2d31a8`.
-Primary contracts: `src/bin/aci/args.rs`, `apps/desktop/runtime/src/cli/args.rs`,
+Primary contracts: `src/bin/private-ai-proxy/args.rs`, `apps/desktop/runtime/src/cli/args.rs`,
 `apps/desktop/runtime/src/process.rs`, `apps/desktop/scripts/package-cli.mjs`.
 
 Official contracts: [Rust file locks](https://doc.rust-lang.org/1.89.0/std/fs/struct.File.html#method.try_lock),
