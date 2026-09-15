@@ -5,14 +5,11 @@ import { cliRegistrationQuery, usagePageQuery } from "./lib/page-queries";
 import { useGatewayState } from "./lib/use-gateway-state";
 import { useWindowReady } from "./lib/use-window-ready";
 import { errorMessage } from "./lib/error-message";
-import { RefreshCw } from "lucide-react";
 import { brand } from "./generated/brand";
 import { UpdateProgressDialog, useUpdates } from "./updates";
-import { Button } from "./components/ui/button";
 import { LocalApiExamples } from "./components/local-api-examples";
 import { NotificationsSheet } from "./components/notifications";
-import { Alert, AlertDescription } from "./components/ui/alert";
-import type { ConfidentialProfile, ConfidentialProfileInput, GatewayState, LocalApiConfig, LaunchPreferences, RequestActivity } from "../shared/contracts";
+import type { AgentStatus, ConfidentialProfile, ConfidentialProfileInput, GatewayState, LocalApiConfig, LaunchPreferences, RequestActivity, SurfaceErrorScope } from "../shared/contracts";
 import { MacMenuBar, PageHeader, PreviewTrayMenu, Sidebar } from "./components/navigation";
 import type { SettingsTarget, View } from "./components/navigation";
 import { desktopApi, previewMode } from "./lib/environment";
@@ -47,8 +44,18 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
   const { data: launchPreferences } = useQuery({ queryKey: ["launch-preferences"], queryFn: () => desktopApi.getLaunchPreferences() });
   const [savingPreference, setSavingPreference] = useState(false);
   const [connectingBackend, setConnectingBackend] = useState(false);
-  const [actionError, setActionError] = useState<string>();
-  useWindowReady(stateLoaded, desktopApi.mainWindowReady, setActionError);
+  const [surfaceErrors, setSurfaceErrors] = useState<Partial<Record<SurfaceErrorScope, string>>>({});
+  const setSurfaceError = useCallback((scope: SurfaceErrorScope, message?: string) => {
+    setSurfaceErrors((current) => {
+      if (current[scope] === message) return current;
+      const next = { ...current };
+      if (message) next[scope] = message;
+      else delete next[scope];
+      return next;
+    });
+  }, []);
+  const reportWindowError = useCallback((message: string) => setSurfaceError("settings", message), [setSurfaceError]);
+  useWindowReady(stateLoaded, desktopApi.mainWindowReady, reportWindowError);
   const [clientKeyError, setClientKeyError] = useState<string>();
   const [copied, setCopied] = useState<string>();
   const [clientKey, setClientKey] = useState("");
@@ -81,17 +88,18 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
   useEffect(() => desktopApi.onLaunchPreferencesChange((next) => {
     void client.cancelQueries({ queryKey: ["launch-preferences"] }).then(() => client.setQueryData(["launch-preferences"], next));
   }), [client]);
+  useEffect(() => desktopApi.onSurfaceError(({ scope, message }) => setSurfaceError(scope, message)), [setSurfaceError]);
 
   const saveLaunchPreference = async (name: keyof LaunchPreferences, enabled: boolean) => {
     setSavingPreference(true);
-    setActionError(undefined);
+    setSurfaceError("settings");
     try { await client.cancelQueries({ queryKey: ["launch-preferences"] }); client.setQueryData(["launch-preferences"], await desktopApi.setLaunchPreference(name, enabled)); }
-    catch (error) { setActionError(errorMessage(error)); }
+    catch (error) { setSurfaceError("settings", errorMessage(error)); }
     finally { setSavingPreference(false); }
   };
 
   const requestStopAllAndQuit = useCallback(async () => {
-    setActionError(undefined);
+    setSurfaceError("settings");
     try {
       const confirmed = await desktopApi.confirm({
         title: "Stop all services and quit?",
@@ -100,9 +108,9 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
       });
       if (confirmed) await desktopApi.stopAllAndQuit();
     } catch (error) {
-      setActionError(errorMessage(error));
+      setSurfaceError("settings", errorMessage(error));
     }
-  }, []);
+  }, [setSurfaceError]);
 
   useEffect(() => desktopApi.onStopAllRequest(() => { void requestStopAllAndQuit(); }), [requestStopAllAndQuit]);
 
@@ -140,7 +148,6 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
     let active = true;
     const unsubscribeNavigate = desktopApi.onNavigate((section) => {
       if (active) {
-        setActionError(undefined);
         setSettingsTarget(undefined);
         setView(section);
         window.requestAnimationFrame(() => document.getElementById(`page-title-${section}`)?.focus());
@@ -204,8 +211,7 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
   }, []);
 
 
-  const run = async (action: () => Promise<GatewayState | void>, notice?: string): Promise<string | undefined> => {
-    setActionError(undefined);
+  const applyStateAction = async (action: () => Promise<GatewayState | void>, notice?: string): Promise<string | undefined> => {
     try {
       const next = await action();
       if (next) {
@@ -213,10 +219,15 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
       }
       if (notice) notify(notice);
     } catch (error) {
-      const message = errorMessage(error);
-      setActionError(message);
-      return message;
+      return errorMessage(error);
     }
+  };
+
+  const runOnSurface = async (scope: SurfaceErrorScope, action: () => Promise<GatewayState | void>, notice?: string) => {
+    setSurfaceError(scope);
+    const message = await applyStateAction(action, notice);
+    setSurfaceError(scope, message);
+    return message;
   };
 
   const showProfiles = (repair: boolean) => {
@@ -226,21 +237,24 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
       setSettingsTarget("confidential");
       return;
     }
-    void desktopApi.openNativeDialog("profiles", { repair }).catch((error: unknown) => setActionError(errorMessage(error)));
+    const scope = view === "settings" ? "settings" : "profiles";
+    setSurfaceError(scope);
+    void desktopApi.openNativeDialog("profiles", { repair }).catch((error: unknown) => setSurfaceError(scope, errorMessage(error)));
   };
 
   const toggleGateway = () => {
     const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
     if (!running && !busy && !state.reconnecting && !profileIsAvailable(activeProfile, state)) {
       if (state.profiles.length === 0 && !previewMode) {
-        void desktopApi.openNativeDialog("setup-profile").catch((error: unknown) => setActionError(errorMessage(error)));
+        setSurfaceError("profiles");
+        void desktopApi.openNativeDialog("setup-profile").catch((error: unknown) => setSurfaceError("profiles", errorMessage(error)));
       } else {
         setStartAfterSetup(state.profiles.length === 0);
         showProfiles(Boolean(activeProfile));
       }
       return;
     }
-    void run(() =>
+    void runOnSurface("protection", () =>
       running || busy || state.reconnecting ? desktopApi.stop() : desktopApi.start({ remoteUrl: state.config.remoteUrl, requireProductionOs: !allowDevelopmentOs }),
     );
   };
@@ -248,35 +262,29 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
   const changeDevelopmentOs = async (enabled: boolean) => {
     if (applying) return;
     setApplying(true);
+    setSurfaceError("settings");
     try {
       if (!await desktopApi.confirm({ title: enabled ? "Allow development OS?" : "Require production OS?", message: "Protection will stop before changing this policy.", confirmLabel: "Stop and Change" })) return;
       setState(await desktopApi.stop());
       setAllowDevelopmentOs(enabled);
-    } catch (error) { setActionError(errorMessage(error)); }
+    } catch (error) { setSurfaceError("settings", errorMessage(error)); }
     finally { setApplying(false); }
   };
 
   const saveConfiguration = async (profile: ConfidentialProfileInput, key?: string): Promise<string | undefined> => {
-    setActionError(undefined);
-    try {
+    const message = await applyStateAction(async () => {
       const saved = await desktopApi.saveConfiguration(profile, !allowDevelopmentOs, key);
-      setState(startAfterSetup ? await desktopApi.start(saved.config) : saved);
       setStartAfterSetup(false);
-      notify(`${profile.name.trim()} saved`);
-      return undefined;
-    } catch (error) {
-      const message = errorMessage(error);
-      setActionError(message);
-      return message;
-    }
+      return startAfterSetup ? desktopApi.start(saved.config) : saved;
+    }, `${profile.name.trim()} saved`);
+    return message;
   };
 
-  const activateProfile = (profileId: string) => run(() => desktopApi.activateProfile(profileId));
+  const activateProfile = (profileId: string) => applyStateAction(() => desktopApi.activateProfile(profileId));
 
-  const deleteProfile = (profileId: string) => run(() => desktopApi.deleteProfile(profileId), "AI service profile deleted");
+  const deleteProfile = (profileId: string) => applyStateAction(() => desktopApi.deleteProfile(profileId), "AI service profile deleted");
 
   const rotateClientKey = async (): Promise<string | undefined> => {
-    setActionError(undefined);
     rotatingClientKey.current = true;
     try {
       setClientKey(await desktopApi.rotateClientKey());
@@ -292,10 +300,10 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
     }
   };
 
-  const saveLocalApi = (config: LocalApiConfig) => run(() => desktopApi.saveLocalApiConfig(config), "Local API settings saved");
+  const saveLocalApi = (config: LocalApiConfig) => applyStateAction(() => desktopApi.saveLocalApiConfig(config), "Local API settings saved");
 
   const copy = async (label: string, value: string) => {
-    await run(async () => {
+    await runOnSurface("local-api", async () => {
       await desktopApi.copyText(value);
       setCopied(label);
       notify(`${label} copied`);
@@ -308,7 +316,7 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
   };
 
   const resetSettings = async () => {
-    setActionError(undefined);
+    setSurfaceError("settings");
     let confirmed: boolean;
     try {
       confirmed = await desktopApi.confirm({
@@ -317,7 +325,7 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
         confirmLabel: "Reset settings",
       });
     } catch (error) {
-      setActionError(errorMessage(error));
+      setSurfaceError("settings", errorMessage(error));
       return;
     }
     if (!confirmed) return;
@@ -328,7 +336,7 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
       notify("Settings reset");
       window.setTimeout(() => document.getElementById("page-title-settings")?.focus(), 0);
     } catch (error) {
-      setActionError(errorMessage(error));
+      setSurfaceError("settings", errorMessage(error));
     } finally {
       setApplying(false);
     }
@@ -339,7 +347,6 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
     window.requestAnimationFrame(() => document.getElementById(`page-title-${next}`)?.focus());
   };
   const changeView = (next: View, focusHeading = true) => {
-    setActionError(undefined);
     if (next === "settings") setSettingsTarget(undefined);
     setView(next);
     if (focusHeading) focusPageHeading(next);
@@ -350,7 +357,9 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
       return;
     }
     if (!previewMode) {
-      void desktopApi.openNativeDialog(target).catch((error: unknown) => setActionError(errorMessage(error)));
+      const scope: SurfaceErrorScope = view === "settings" ? "settings" : target === "privacy" ? "protection" : target === "local-api" || target === "local-api-example" ? "local-api" : "settings";
+      setSurfaceError(scope);
+      void desktopApi.openNativeDialog(target).catch((error: unknown) => setSurfaceError(scope, errorMessage(error)));
       return;
     }
     setSettingsTarget(target);
@@ -360,8 +369,23 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
       setSelectedUsage(activity);
       return;
     }
-    void desktopApi.openNativeDialog("usage-proof", { recordId: activity.id }).catch((error: unknown) => setActionError(errorMessage(error)));
-  }, []);
+    setSurfaceError("usage");
+    void desktopApi.openNativeDialog("usage-proof", { recordId: activity.id }).catch((error: unknown) => setSurfaceError("usage", errorMessage(error)));
+  }, [setSurfaceError]);
+
+  const selectAgent = (agent: AgentStatus, connect: boolean) => {
+    setSurfaceError("agents");
+    void applyAgent(agent, connect);
+  };
+
+  const startBackend = async () => {
+    if (connectingBackend) return;
+    setConnectingBackend(true);
+    setSurfaceError("protection");
+    try { setState(await desktopApi.startBackendService()); }
+    catch (error) { setSurfaceError("protection", errorMessage(error)); }
+    finally { setConnectingBackend(false); }
+  };
 
   const windowContent = (
     <main className="app-shell w-full h-full grid grid-cols-[var(--sidebar-width)_minmax(0,_1fr)] overflow-hidden bg-background max-[780px]:grid-cols-[154px_minmax(0,_1fr)] max-[620px]:grid-cols-[68px_minmax(0,_1fr)] max-[440px]:grid-cols-[56px_minmax(0,_1fr)]">
@@ -377,19 +401,6 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
           onToggle={toggleGateway}
         />
         <div className="content flex-auto min-w-0 min-h-0 overflow-auto pt-4 pr-6 pb-6 pl-6 [&_>_[role=alert]]:mb-4 max-[780px]:p-4 max-[440px]:p-3" id={`page-${view}`} key={view}>
-        {state.backendConnected === false && <Alert>
-          <AlertDescription className="flex items-center justify-between gap-4">
-            <span>Backend disconnected</span>
-            <Button disabled={connectingBackend} onClick={() => {
-              setConnectingBackend(true);
-              void desktopApi.startBackendService().then((next) => {
-                setState(next);
-                setActionError(undefined);
-              }).catch((error: unknown) => setActionError(errorMessage(error)))
-                .finally(() => setConnectingBackend(false));
-            }}><RefreshCw aria-hidden="true" />{connectingBackend ? "Connecting" : "Start backend"}</Button>
-          </AlertDescription>
-        </Alert>}
         {view === "overview" && (
           <Overview
             pendingAgentChanges={pendingAgentChanges}
@@ -399,14 +410,19 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
             running={running}
             endpointDown={endpointDown}
             developmentMode={allowDevelopmentOs}
-            agentProblem={agentProblem}
-            clientKeyError={clientKeyError}
+            backendDisconnected={state.backendConnected === false}
+            connectingBackend={connectingBackend}
+            protectionProblem={surfaceErrors.protection}
+            profileProblem={surfaceErrors.profiles}
+            agentProblem={surfaceErrors.agents ?? agentProblem}
+            clientKeyError={clientKeyError ?? surfaceErrors["local-api"]}
             accountApi={desktopApi}
             locked={locked}
             clientKey={clientKey}
             clientKeyVisible={clientKeyVisible}
             copied={copied}
             onToggle={toggleGateway}
+            onStartBackend={() => void startBackend()}
             onSettings={() => openSettings("confidential")}
             onPrivacy={() => openSettings("privacy")}
             onLocalSettings={() => openSettings("local-api")}
@@ -415,7 +431,7 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
             onUsage={() => changeView("usage")}
             onCopy={copy}
             onToggleClientKey={() => setClientKeyVisible((visible) => !visible)}
-            onSelect={(agent, connect) => void applyAgent(agent, connect)}
+            onSelect={selectAgent}
             onInspect={inspectUsage}
           />
         )}
@@ -424,14 +440,15 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
             pendingAgentChanges={pendingAgentChanges}
             agents={agents}
             locked={locked}
-            problem={agentProblem}
-            onSelect={(agent, connect) => void applyAgent(agent, connect)}
+            problem={surfaceErrors.agents ?? agentProblem}
+            onSelect={selectAgent}
           />
         )}
         {view === "usage" && (
           <UsageView
             state={state}
             agents={agents}
+            problem={surfaceErrors.usage}
             onInspect={inspectUsage}
           />
         )}
@@ -443,10 +460,10 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
             running={running}
             allowDevelopmentOs={allowDevelopmentOs}
             locked={locked || Object.keys(pendingAgentChanges).length > 0}
-            problem={actionError}
+            problem={surfaceErrors.settings}
             onPolicy={(value) => void changeDevelopmentOs(value)}
             onResetSettings={() => void resetSettings()}
-            onAboutLink={(target) => void run(() => desktopApi.openAboutLink(target))}
+            onAboutLink={(target) => void runOnSurface("settings", () => desktopApi.openAboutLink(target))}
             onOpen={openSettings}
             launchPreferences={launchPreferences}
             savingPreference={savingPreference}
@@ -489,7 +506,7 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
           clientKey={clientKey}
           clientKeyVisible={clientKeyVisible}
           copied={copied}
-          externalError={clientKeyError}
+          externalError={clientKeyError ?? surfaceErrors["local-api"]}
           onCopy={copy}
           onToggleKey={() => setClientKeyVisible((visible) => !visible)}
           onRotate={rotateClientKey}
@@ -503,7 +520,7 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
       <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
         {notice?.text}
       </div>
-      <UpdateProgressDialog updates={updates} />
+      {previewMode && <UpdateProgressDialog updates={updates} />}
     </main>
   );
 

@@ -305,11 +305,18 @@ fn watch_presentation(window: &tauri::WebviewWindow) {
         if !presented.load(std::sync::atomic::Ordering::Acquire) && pending.is_visible().is_ok() {
             let app = pending.app_handle().clone();
             if pending.destroy().is_ok() {
-                app.state::<std::sync::Arc<desktop_runtime::client::Client>>()
-                    .report_error(
-                        "The dialog could not finish loading. Please try opening it again."
-                            .to_string(),
-                    );
+                let scope = match pending.label() {
+                    PROFILES_LABEL | PROFILE_EDITOR_LABEL => crate::SurfaceErrorScope::Profiles,
+                    LOCAL_API_LABEL | "local-api-example" => crate::SurfaceErrorScope::LocalApi,
+                    USAGE_PROOF_LABEL => crate::SurfaceErrorScope::Usage,
+                    PRIVACY_LABEL => crate::SurfaceErrorScope::Protection,
+                    _ => crate::SurfaceErrorScope::Settings,
+                };
+                crate::report_surface_error(
+                    &app,
+                    scope,
+                    "The dialog could not finish loading. Please try opening it again.",
+                );
                 crate::tray::show_window(&app);
             }
         }

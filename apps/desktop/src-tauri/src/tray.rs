@@ -175,7 +175,14 @@ fn perform_action(app: &AppHandle, id: String) {
             Ok(())
         })();
         if let Err(error) = result {
-            client.report_error(error);
+            let scope = if id.starts_with("agent:") {
+                crate::SurfaceErrorScope::Agents
+            } else if id.starts_with("profile:") || id == "profiles" {
+                crate::SurfaceErrorScope::Profiles
+            } else {
+                crate::SurfaceErrorScope::LocalApi
+            };
+            crate::report_surface_error(&app, scope, error);
             show_window(&app);
         }
         let state = client.state().unwrap_or_else(|_| client.cached_state());
@@ -291,11 +298,14 @@ fn toggle_or_open_settings(app: &AppHandle) {
                 crate::native_dialog::open_profiles(&app, true)
             };
             if let Err(error) = opened {
-                client.report_error(error);
+                crate::report_surface_error(&app, crate::SurfaceErrorScope::Profiles, error);
             }
             return;
         }
-        client.toggle();
+        if let Err(error) = client.toggle() {
+            crate::report_surface_error(&app, crate::SurfaceErrorScope::Protection, error);
+            show_window(&app);
+        }
         let state = client.state().unwrap_or_else(|_| client.cached_state());
         sync(&app, &state);
     });
@@ -310,8 +320,11 @@ fn sync_autostart(app: &AppHandle) {
         let result = set_open_at_login(&app, checked);
         if let Err(error) = result {
             let _ = menu.autostart.set_checked(!checked);
-            app.state::<std::sync::Arc<Client>>()
-                .report_error(format!("Open at Login could not be changed: {error}"));
+            crate::report_surface_error(
+                &app,
+                crate::SurfaceErrorScope::Settings,
+                format!("Open at Login could not be changed: {error}"),
+            );
         }
         let client = app.state::<std::sync::Arc<Client>>();
         if let Ok(preferences) = crate::load_launch_preferences(&app, &client) {

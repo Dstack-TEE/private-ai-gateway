@@ -15,9 +15,8 @@ function WindowContent({ reset }: { reset: boolean }): React.JSX.Element {
 }
 
 export function Renderer(): React.JSX.Element {
-  const [interactionError, setInteractionError] = useState("");
   const [settingsRevision, setSettingsRevision] = useState(0);
   useEffect(() => desktopApi.onSettingsReset(() => { queryClient.clear(); setSettingsRevision((value) => value + 1); }), []);
-  useEffect(() => installNativeInteractions(desktopApi, setInteractionError), []);
-  return <QueryClientProvider client={queryClient}><TooltipProvider><AppearanceProvider key={settingsRevision} api={desktopApi}><DialogCloseProvider api={desktopApi}><WindowContent reset={settingsRevision > 0} /></DialogCloseProvider>{interactionError && <span className="sr-only" role="alert">{interactionError}</span>}</AppearanceProvider></TooltipProvider></QueryClientProvider>;
+  useEffect(() => installNativeInteractions(desktopApi), []);
+  return <QueryClientProvider client={queryClient}><TooltipProvider><AppearanceProvider key={settingsRevision} api={desktopApi}><DialogCloseProvider api={desktopApi}><WindowContent reset={settingsRevision > 0} /></DialogCloseProvider></AppearanceProvider></TooltipProvider></QueryClientProvider>;
 }

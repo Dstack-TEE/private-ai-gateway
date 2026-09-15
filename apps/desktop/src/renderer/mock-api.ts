@@ -495,6 +495,13 @@ export function mockApi(name: string | null): DesktopApi {
         window.removeEventListener("mock:refresh-usage", refreshUsage);
       };
     },
+    onSurfaceError: (listener) => {
+      const receive = (event: Event) => {
+        if (event instanceof CustomEvent) listener(event.detail);
+      };
+      window.addEventListener("mock:surface-error", receive);
+      return () => window.removeEventListener("mock:surface-error", receive);
+    },
     onNavigate: () => () => undefined,
     onProfileRepairRequest: () => () => undefined,
     onUsageProofRequest: () => () => undefined,

@@ -26,8 +26,7 @@ export function useAgents(api: DesktopApi, { active, revision, verified, notify 
   const loadAgents = useCallback(async () => {
     try {
       return await client.fetchQuery({ queryKey: ["agents"], queryFn: () => api.listAgents(), staleTime: 0 });
-    } catch (error) {
-      setOperationError(errorMessage(error));
+    } catch {
       return undefined;
     }
   }, [api, client]);

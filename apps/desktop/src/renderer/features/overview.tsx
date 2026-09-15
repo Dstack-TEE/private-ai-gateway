@@ -1,5 +1,5 @@
 import React, { memo } from "react";
-import { ChevronDown, CircleHelp, Info, Plus, Settings } from "lucide-react";
+import { ChevronDown, CircleHelp, Info, Plus, RefreshCw, Settings } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { StateLabel } from "../components/state-label";
 import { Hint } from "../components/hint";
@@ -42,6 +42,10 @@ export function Overview({
   running,
   endpointDown,
   developmentMode,
+  backendDisconnected,
+  connectingBackend,
+  protectionProblem,
+  profileProblem,
   agentProblem,
   clientKeyError,
   accountApi,
@@ -50,6 +54,7 @@ export function Overview({
   clientKeyVisible,
   copied,
   onToggle,
+  onStartBackend,
   onSettings,
   onPrivacy,
   onLocalSettings,
@@ -68,6 +73,10 @@ export function Overview({
   running: boolean;
   endpointDown: boolean;
   developmentMode: boolean;
+  backendDisconnected: boolean;
+  connectingBackend: boolean;
+  protectionProblem?: string;
+  profileProblem?: string;
   agentProblem?: string;
   clientKeyError?: string;
   accountApi: Pick<DesktopApi, "getAccountBalance">;
@@ -76,6 +85,7 @@ export function Overview({
   clientKeyVisible: boolean;
   copied?: string;
   onToggle(): void;
+  onStartBackend(): void;
   onSettings(): void;
   onPrivacy(): void;
   onLocalSettings(): void;
@@ -99,8 +109,12 @@ export function Overview({
         running={running}
         endpointDown={endpointDown}
         developmentMode={developmentMode}
+        backendDisconnected={backendDisconnected}
+        connectingBackend={connectingBackend}
+        problem={protectionProblem ?? profileProblem}
         accountApi={accountApi}
         onToggle={onToggle}
+        onStartBackend={onStartBackend}
         onSettings={onSettings}
         onPrivacy={onPrivacy}
       />
@@ -162,8 +176,12 @@ function StatusSurface({
   running,
   endpointDown,
   developmentMode,
+  backendDisconnected,
+  connectingBackend,
+  problem,
   accountApi,
   onToggle,
+  onStartBackend,
   onSettings,
   onPrivacy,
 }: {
@@ -172,8 +190,12 @@ function StatusSurface({
   running: boolean;
   endpointDown: boolean;
   developmentMode: boolean;
+  backendDisconnected: boolean;
+  connectingBackend: boolean;
+  problem?: string;
   accountApi: Pick<DesktopApi, "getAccountBalance">;
   onToggle(): void;
+  onStartBackend(): void;
   onSettings(): void;
   onPrivacy(): void;
 }): React.JSX.Element {
@@ -181,8 +203,8 @@ function StatusSurface({
   const protectedNow = isProtected(state);
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   const protectionDetail = state.reconnecting || state.endpointError || state.status === "blocked" || state.status === "error"
-    ? verdict.detail
-    : undefined;
+    ? problem ?? verdict.detail
+    : problem;
   return (
     <Card size="sm" role="region" className={`status-surface relative isolate transition-colors duration-200 ease-out motion-reduce:transition-none status-compact [&_.protected-control]:col-start-2 [&_.protected-control]:row-start-1 [&_.protected-control]:self-start [&_.protected-control]:justify-self-end [&_.protected-control]:min-h-[calc(var(--text-2xl)_*_var(--text-2xl--line-height))] [&_.status-profile]:w-[min(140px,_100%)] [&_.status-profile]:bg-card [&_.is-icon-only]:m-0 [&_.protection-status]:justify-start [&_.status-heading]:transition-colors [&_.status-heading]:duration-200 [&_.status-heading]:ease-out [&_[data-slot=switch]]:transition-colors [&_[data-slot=switch]]:duration-200 [&_[data-slot=switch]]:ease-out motion-reduce:[&_.status-heading]:transition-none motion-reduce:[&_[data-slot=switch]]:transition-none status-${state.status} ${protectedNow ? developmentMode ? "status-ready ring-warning dark:ring-warning shadow-warning/10" : "status-ready ring-primary dark:ring-primary shadow-primary/10" : ""} ${developmentMode ? "is-development" : ""}`} aria-label="Protection status">
       <TrackLayer active={protectedNow} />
@@ -191,6 +213,7 @@ function StatusSurface({
           <ProtectionStatus state={state} label={verdict.title} detail={protectionDetail} />
         </div>
         <div className="status-profile-actions col-span-full row-start-2 self-end flex items-center gap-2 min-w-0">
+        {backendDisconnected ? <Button variant="outline" size="sm" disabled={connectingBackend} onClick={onStartBackend}><RefreshCw className={connectingBackend ? "animate-control-spin" : undefined} aria-hidden="true" />{connectingBackend ? "Starting" : "Start backend"}</Button> : <>
         <Button id="overview-profile" variant="outline" size="sm" className="status-profile w-[min(128px,_100%)] min-w-0 [&_>_span:not(.service-logo):not(.service-custom-icon)]:min-w-0 [&_>_span:not(.service-logo):not(.service-custom-icon)]:flex-1 [&_>_span:not(.service-logo):not(.service-custom-icon)]:overflow-hidden [&_>_span:not(.service-logo):not(.service-custom-icon)]:text-left [&_>_span:not(.service-logo):not(.service-custom-icon)]:text-ellipsis [&_>_span:not(.service-logo):not(.service-custom-icon)]:whitespace-nowrap [&_>_svg]:flex-none [&_.service-logo]:w-5 [&_.service-logo]:h-5 [&_.service-custom-icon]:w-5 [&_.service-custom-icon]:h-5" aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Set up profile"} aria-haspopup="dialog" onClick={onSettings}>
           {activeProfile ? <ServiceLogo url={activeProfile.remoteUrl} /> : <Plus aria-hidden="true" />}
           <span>{activeProfile?.name ?? "Set up"}</span>
@@ -198,6 +221,7 @@ function StatusSurface({
         </Button>
         {activeProfile?.auth.kind === "oauth" && <AccountBalanceValue api={accountApi} provider={activeProfile.provider} target={{ kind: "profile", profileId: activeProfile.id }} credentialRef={activeProfile.credentialRef} enabled={protectedNow} />}
         <IconButton size="icon-sm" label="Privacy verification" aria-haspopup="dialog" onClick={onPrivacy}><Info aria-hidden="true" /></IconButton>
+        </>}
         </div>
         <ProtectedControl state={state} busy={busy} running={running} endpointDown={endpointDown} developmentMode={developmentMode} onToggle={onToggle} iconOnly />
       </CardContent>

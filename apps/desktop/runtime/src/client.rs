@@ -432,22 +432,14 @@ impl Client {
             .await
             .map_err(|_| "Management request task failed")?
     }
-    pub fn report_error(&self, error: String) {
-        let mut state = self.states.borrow().clone();
-        state.error = Some(error);
-        self.states.send_replace(state);
-    }
-    pub fn toggle(&self) {
-        let result = self.state().and_then(|state| {
+    pub fn toggle(&self) -> Result<GatewayState, String> {
+        self.state().and_then(|state| {
             if state.should_stop_protection() {
                 self.stop()
             } else {
                 self.start(state.config)
             }
-        });
-        if let Err(error) = result {
-            self.report_error(error);
-        }
+        })
     }
     pub fn shutdown(&self) -> Result<(), String> {
         self.shutdown_owned(None)

@@ -53,3 +53,16 @@ test("agent operation failures stay out of the active protection status", async 
   await expect(status.getByRole("alert")).toHaveCount(0);
   await expect(status.locator(".protection-duration")).toBeVisible();
 });
+
+test("native shell errors stay on their owning surface", async ({ page }) => {
+  await page.goto("/?mock=ready");
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent("mock:surface-error", {
+    detail: { scope: "agents", message: "Agent menu action failed" },
+  })));
+  const status = page.getByLabel("Protection status");
+  const agents = page.locator(".overview-module", { has: page.getByRole("heading", { name: "Agents", exact: true }) });
+  await expect(agents.getByRole("alert")).toHaveText("Agent menu action failed");
+  await expect(status.getByRole("alert")).toHaveCount(0);
+  await nav(page, "Usage").click();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+});

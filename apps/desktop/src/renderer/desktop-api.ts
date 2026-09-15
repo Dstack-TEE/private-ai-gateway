@@ -98,6 +98,7 @@ export const desktopApi: DesktopApi = {
   onStateChange(listener: (state: GatewayState) => void): () => void {
     return subscribe("gateway://state", listener);
   },
+  onSurfaceError: (listener) => subscribe("gateway://surface-error", listener),
   onNavigate(listener: (section: "settings" | "agents") => void): () => void {
     return subscribe("gateway://navigate", listener);
   },

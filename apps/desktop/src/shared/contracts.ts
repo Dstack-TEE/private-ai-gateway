@@ -365,6 +365,7 @@ export interface DesktopApi {
   resetSettings(): Promise<GatewayState>;
   onSettingsReset(listener: () => void): () => void;
   onStateChange(listener: (state: GatewayState) => void): () => void;
+  onSurfaceError(listener: (error: SurfaceError) => void): () => void;
   /** A native menu asked the main window to show a section. */
   onNavigate(listener: (section: "settings" | "agents") => void): () => void;
   onAgentsChange(listener: () => void): () => void;
@@ -414,4 +415,11 @@ export interface DesktopApi {
     revision: string,
     options: ConnectOptions,
   ): Promise<AgentStatus>;
+}
+
+export type SurfaceErrorScope = "protection" | "profiles" | "local-api" | "agents" | "usage" | "settings";
+
+export interface SurfaceError {
+  scope: SurfaceErrorScope;
+  message: string;
 }

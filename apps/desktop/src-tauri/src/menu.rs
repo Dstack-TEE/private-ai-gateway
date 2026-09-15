@@ -107,8 +107,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
                 .find(|window| window.is_focused().unwrap_or(false))
             {
                 if let Err(error) = crate::native_dialog::request_close(&window) {
-                    app.state::<std::sync::Arc<desktop_runtime::client::Client>>()
-                        .report_error(error);
+                    eprintln!("Cannot close the active window: {error}");
                 }
             }
         }
@@ -123,9 +122,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
                 if let Err(error) =
                     crate::commands::desktop::open_about_link(app.clone(), target).await
                 {
-                    use tauri::Manager;
-                    app.state::<std::sync::Arc<desktop_runtime::client::Client>>()
-                        .report_error(error);
+                    crate::report_surface_error(&app, crate::SurfaceErrorScope::Settings, error);
                 }
             });
         }

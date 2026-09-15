@@ -27,6 +27,33 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_shell::ShellExt;
 
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum SurfaceErrorScope {
+    Protection,
+    Profiles,
+    LocalApi,
+    Agents,
+    Usage,
+    Settings,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct SurfaceError {
+    scope: SurfaceErrorScope,
+    message: String,
+}
+
+pub(crate) fn report_surface_error(
+    app: &AppHandle,
+    scope: SurfaceErrorScope,
+    error: impl std::fmt::Display,
+) {
+    let message = error.to_string();
+    eprintln!("{scope:?}: {message}");
+    let _ = app.emit("gateway://surface-error", SurfaceError { scope, message });
+}
+
 pub(crate) async fn run_blocking<T: Send + 'static>(
     operation: impl FnOnce() -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
@@ -80,7 +107,7 @@ fn refresh_preferences(app: &AppHandle, client: &Arc<Client>) {
                     let _ = app_for_main_thread.emit("gateway://launch-preferences", launch);
                 });
             }
-            Err(error) => client.report_error(error),
+            Err(error) => report_surface_error(&app, SurfaceErrorScope::Settings, error),
         }
     });
 }
@@ -371,7 +398,11 @@ pub fn run() {
                 }
             });
             if let Err(error) = tray::setup(app.handle()) {
-                client.report_error(format!("The system tray is unavailable: {error}"));
+                report_surface_error(
+                    app.handle(),
+                    SurfaceErrorScope::Settings,
+                    format!("The system tray is unavailable: {error}"),
+                );
             } else {
                 #[cfg(any(target_os = "windows", target_os = "linux"))]
                 if let Err(error) = tray_theme::setup(app.handle()) {
@@ -379,7 +410,11 @@ pub fn run() {
                 }
             }
             if let Err(error) = menu::setup(app.handle()) {
-                client.report_error(format!("The application menu is unavailable: {error}"));
+                report_surface_error(
+                    app.handle(),
+                    SurfaceErrorScope::Settings,
+                    format!("The application menu is unavailable: {error}"),
+                );
             }
 
             let handle = app.handle().clone();

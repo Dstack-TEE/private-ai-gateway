@@ -89,18 +89,14 @@ function NativeDialogStatus({ label, error, onClose }: { label: string; error?: 
 
 function NativeProfilesWindow({ repair, editor = false, profileId, startAfterSave = false }: { repair: boolean; editor?: boolean; profileId?: string | null; startAfterSave?: boolean }): React.JSX.Element {
   const native = useNativeGatewayWindow(editor ? profileId ? "Edit Profile" : "New Profile" : "Profiles");
-  const [actionError, setActionError] = useState<string>();
   const [repairRequest, setRepairRequest] = useState(repair ? 1 : 0);
   useEffect(() => desktopApi.onProfileRepairRequest(() => setRepairRequest((current) => current + 1)), []);
   const run = async (action: () => Promise<GatewayState>): Promise<string | undefined> => {
-    setActionError(undefined);
     try {
       native.setState(await action());
       return undefined;
     } catch (error) {
-      const message = errorMessage(error);
-      setActionError(message);
-      return message;
+      return errorMessage(error);
     }
   };
 
@@ -123,7 +119,6 @@ function NativeProfilesWindow({ repair, editor = false, profileId, startAfterSav
   /></NativeDialogHost>;
   return (
     <NativeDialogHost >
-      {actionError && <div className="sr-only" role="alert">{actionError}</div>}
       <ProfilesSheet
         key={repairRequest}
         state={native.state}
