@@ -167,13 +167,17 @@ What the proxy does:
   `--allow-unverified` drops the demand.
 - Every upstream connection enforces the attested TLS SPKI pin for the
   hostname and fails closed on a mismatch.
-- Responses stream through byte-exact while the proxy digests the raw wire
-  bytes — bodies are never buffered or stored. Each POST response's receipt
+- Responses always stream through byte-exact while the proxy digests the wire
+  bytes for later audit. Each POST response's receipt
   id and body digests are recorded (the last 256 exchanges), and a 2xx
   inference response with no receipt header is flagged immediately
   ([aci.md](../spec/aci.md) §5.2).
-- Verification runs on demand from the control endpoint on
-  `127.0.0.1:4181`, not per request:
+- `--audit-receipts` audits receipts after delivery using the request bearer
+  transiently. It never delays streaming or retracts delivered responses.
+  Selecting verified AttestedSessions and enforcing the attested connection
+  remain the pre-delivery checks; receipt checks are retrospective only.
+  The control endpoint on `127.0.0.1:4181` also supports inspection and
+  explicit re-verification:
 
   ```bash
   curl -sS http://127.0.0.1:4181/receipts        # recent exchanges

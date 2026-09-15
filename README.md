@@ -575,7 +575,8 @@ src/aci/                       ACI wire types, keys, receipts, upstreams
 src/aggregator/service.rs      report, forwarding, E2EE, receipt finalization
 src/aggregator/upstream_config.rs runtime upstream config and provider adapters
 src/http/app.rs                Axum HTTP routers and middleware/backend wiring
-src/bin/aci/                   `aci` verifier CLI: verify, audit, sessions, send, serve
+src/bin/private-ai-proxy/      Proxy CLI and shared ACI commands: verify, audit, sessions, send, serve
+src/bin/aci/                   standalone `aci` entry reusing the Proxy command implementation
 clients/                       verifier-ts verifier library (browser + node); pi-provider pi provider extension
 docs/                          design notes, configuration reference, provider reviews
 deploy/                        git-launcher and dstack compose examples

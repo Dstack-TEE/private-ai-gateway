@@ -9,3 +9,16 @@ __pycache__/
 *.py[cod]
 .DS_Store
 clients/pi-provider/packages/*/dist/
+/apps/desktop/dist/
+/apps/desktop/node_modules/
+/apps/desktop/brand/.generated/
+/apps/desktop/src-tauri/tauri.brand.conf.json
+/apps/desktop/src-tauri/icons/Assets.car
+/apps/desktop/release/
+/apps/desktop/test-results/
+/apps/desktop/playwright-artifacts/
+/apps/desktop/src-tauri/binaries/*
+/ci-artifacts/
+/apps/desktop/gateway/target/
+/apps/desktop/runtime/target/
+/apps/desktop/src-tauri/target/

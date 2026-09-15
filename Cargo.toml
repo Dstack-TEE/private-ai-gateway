@@ -13,11 +13,25 @@ path = "src/lib.rs"
 name = "private-ai-gateway"
 path = "src/main.rs"
 
+[[bin]]
+name = "private-ai-proxy"
+path = "src/bin/private-ai-proxy/main.rs"
+required-features = ["desktop-client"]
+
+[[bin]]
+name = "private-ai-proxy-service"
+path = "src/bin/private-ai-proxy-service/main.rs"
+required-features = ["desktop-client"]
+
+[features]
+desktop-client = ["dep:desktop_runtime", "dep:desktop_gateway"]
+
 [dependencies]
+desktop_runtime = { package = "private-ai-proxy-runtime", path = "apps/desktop/runtime", optional = true }
+desktop_gateway = { package = "private-ai-proxy-gateway", path = "apps/desktop/gateway", optional = true }
 # Canonical-JSON, types, and serialization.
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-dstack-sdk = "0.1.2"
 bytes = "1"
 rust_decimal = "1"
 
@@ -74,13 +88,20 @@ prometheus = "0.13"
 # Async traits used by upstream and verifier abstractions.
 async-trait = "0.1"
 
+# Cancellation token for the serve delivery gate.
+tokio-util = "0.7"
+
 # Upstream ACI/DCAP verification.
 dcap-qvl = { version = "0.3.12", default-features = false, features = ["std", "report", "rustcrypto"] }
 
 # `aci` CLI argument parsing.
 clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
 
+[target.'cfg(unix)'.dependencies]
+dstack-sdk = "0.1.2"
+
 [dev-dependencies]
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
 serde_json = "1"
 

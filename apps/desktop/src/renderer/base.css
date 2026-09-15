@@ -1,0 +1,32 @@
+@theme {
+  --animate-brand-icon-pulse: brand-icon-pulse 1.5s ease-in-out infinite;
+  --animate-track-left: track-left 60s linear infinite;
+  --animate-track-right: track-right 60s linear infinite;
+  --animate-control-spin: control-spin 900ms linear infinite;
+
+  @keyframes brand-icon-pulse {
+    50% { opacity: 0.68; }
+  }
+  @keyframes track-left {
+    to { transform: translateX(-50%); }
+  }
+  @keyframes track-right {
+    from { transform: translateX(-50%); }
+    to { transform: translateX(0); }
+  }
+  @keyframes control-spin {
+    to { transform: rotate(360deg); }
+  }
+}
+
+@layer base {
+  body { @apply select-none; }
+  input, textarea, [contenteditable="true"] { @apply select-text; }
+  html, body, #root { @apply size-full; }
+  body { @apply m-0 min-w-50 overflow-hidden bg-background text-sm text-foreground; }
+  button, input, select { @apply [font:inherit] text-inherit; }
+  button { @apply cursor-default; }
+  button:disabled:not([data-slot]) { @apply opacity-40; }
+  :focus-visible:not([data-slot]) { @apply outline-none ring-3 ring-ring/50; }
+  code { @apply font-mono text-xs; }
+}

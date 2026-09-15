@@ -1,0 +1,2 @@
+apps/desktop/brand/**/*.svg text eol=lf
+apps/desktop/brand/**/*.json text eol=lf
