@@ -1,6 +1,6 @@
 # Apple design review
 
-Scope: the desktop window (Tauri WebView) of Private AI Gateway, the tray,
+Scope: the desktop window (Tauri WebView) of Private AI Proxy, the tray,
 and the macOS menu bar. References: Apple Human Interface Guidelines
 (developer.apple.com, pages Typography, Buttons, Layout, Settings, Segmented
 controls, Toolbars, Windows, read on 2026-09-02) and the structure of

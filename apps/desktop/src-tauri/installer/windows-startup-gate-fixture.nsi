@@ -1,5 +1,5 @@
 Unicode true
-Name "Private AI Gateway startup gate fixture"
+Name "Private AI Proxy startup gate fixture"
 OutFile "${OUTPUT}"
 SilentInstall silent
 RequestExecutionLevel user

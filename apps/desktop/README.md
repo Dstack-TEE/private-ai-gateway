@@ -2,8 +2,8 @@
 
 Guides: [architecture](docs/client-architecture.md), [CLI](docs/cli.md),
 [distribution](docs/cli-distribution.md), [account login](docs/account-login.md),
-[Apple design](docs/apple-design-review.md), [UI acceptance](docs/ui-acceptance.md),
-and [release readiness](docs/product-readiness-checklist.md).
+[Apple design](docs/apple-design-review.md), and
+[release readiness](docs/product-readiness-checklist.md).
 
 Cross-platform Tauri desktop app that turns the bundled `private-ai-proxy serve` verifier
 into a local gateway for Codex, Claude Code, OpenCode, Pi, Hermes, OpenClaw, and
