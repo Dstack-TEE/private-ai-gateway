@@ -87,7 +87,7 @@ export function LocalApiSheet({
   externalError?: string;
   onCopy(label: string, value: string): Promise<void>;
   onToggleKey(): void;
-  onRotate(): Promise<void>;
+  onRotate(): Promise<string | undefined>;
   onSave(config: LocalApiConfig): Promise<string | undefined>;
   onClose(): void;
 }): React.JSX.Element {
@@ -109,7 +109,7 @@ export function LocalApiSheet({
         message: "The old client key will stop working immediately. Update your tools with the new key. Agent credentials do not change. In-flight requests may be interrupted.",
         confirmLabel: "Rotate key",
       });
-      if (confirmed) await onRotate();
+      if (confirmed) setError(await onRotate());
     } catch (error) {
       setError(errorMessage(error));
     } finally {

@@ -44,6 +44,23 @@ const REDPILL_PROFILE: ConfidentialProfile = {
   verifiedAt: now - 300,
 };
 
+const REDPILL_ACCOUNT_PROFILE: ConfidentialProfile = {
+  ...REDPILL_PROFILE,
+  credentialRef: "credential-redpill-account",
+  auth: {
+    kind: "oauth",
+    accountId: "preview-account",
+    accountName: "Alice Example",
+    scope: {
+      organizationId: "org_test",
+      organizationSlug: "research-team",
+      organization: "Personal organization",
+      workspace: "Default",
+      workspaceId: 123,
+    },
+  },
+};
+
 const BASE: GatewayState = {
   status: "stopped",
   configurationVerification: false,
@@ -312,6 +329,7 @@ export function mockApi(name: string | null): DesktopApi {
   const known: MockScenario[] = ["backend-disconnected", "ready", "no-profiles", "no-key", "verifying", "configuration-verifying", "error", "empty-catalog", "blocked", "needs-attention", "endpoint-busy", "interactive"];
   const picked = name?.startsWith("oauth-") ? "no-profiles" : known.find((candidate) => candidate === name) ?? "ready";
   let { state, agents } = scenario(picked);
+  if (name === "oauth-saved-stopped") state = { ...BASE, profiles: [REDPILL_ACCOUNT_PROFILE], activeProfileId: REDPILL_ACCOUNT_PROFILE.id };
   if (name === "recent-usage") state = { ...state, activity: USAGE_HISTORY.slice(0, 12) };
   if (name === "agent-installed") agents = agents.map((agent) => agent.id === "opencode" ? { ...agent, installed: false } : agent);
   if (name === "reconnecting") state = { ...state, status: "stopped", reconnecting: true, protectedSince: now - 600, error: "Network unavailable. Connect to a network; protection resumes after verification." };
@@ -361,6 +379,7 @@ export function mockApi(name: string | null): DesktopApi {
   let failedAccountSave = false;
   let billingRead = name !== "oauth-balance-denied";
   let billingError = name === "oauth-balance-error";
+  let balanceReads = 0;
   const billingManage = billingRead && name !== "oauth-balance-readonly";
   window.addEventListener("mock:billing-read-granted", () => { billingRead = true; billingError = false; });
   let login: { id: string; profile: ConfidentialProfileInput; polls: number } | undefined;
@@ -577,6 +596,7 @@ export function mockApi(name: string | null): DesktopApi {
       return { auth, workspaces: [{ id: 123, name: "Default", isDefault: true }, { id: 124, name: "Research", isDefault: false }] };
     },
     getAccountBalance: async (target) => {
+      document.documentElement.dataset.balanceReads = String(++balanceReads);
       if (name === "oauth-balance-cache" && document.documentElement.dataset.holdBalance === "true") {
         await new Promise<void>((resolve) => window.addEventListener("mock:release-balance", () => resolve(), { once: true }));
       }
@@ -822,6 +842,7 @@ export function mockApi(name: string | null): DesktopApi {
       };
     },
     applyAgent: async (agentId, connect) => {
+      if (name === "agent-write-error") throw new Error("operation_failed: The operation could not complete.");
       if (name === "agent-pending") {
         window.dispatchEvent(new Event("mock:agent-write"));
         if (connect) await new Promise<void>((resolve) => window.addEventListener("mock:finish-agent", () => resolve(), { once: true }));

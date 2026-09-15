@@ -21,22 +21,49 @@ type Props = {
   disabled?: boolean;
 };
 
-/** Changing account or credential must never display the previous account's balance. */
-export function AccountTools(props: Props) {
-  const id = props.target.kind === "login" ? props.target.id : props.target.profileId;
-  const cacheKey = `${props.provider}:${props.target.kind}:${id}:${props.credentialRef ?? ""}`;
-  return <AccountDetailsView key={cacheKey} cacheKey={cacheKey} {...props} />;
+type BalanceProps = Pick<Props, "provider" | "target" | "credentialRef"> & {
+  api: Pick<DesktopApi, "getAccountBalance">;
+  enabled: boolean;
+};
+
+function balanceCacheKey({ provider, target, credentialRef }: Pick<Props, "provider" | "target" | "credentialRef">) {
+  const id = target.kind === "login" ? target.id : target.profileId;
+  return `${provider}:${target.kind}:${id}:${credentialRef ?? ""}`;
 }
 
-function AccountDetailsView({ cacheKey, api, provider, target, scope, images, onSignIn, disabled = false }: Props & { cacheKey: string }) {
+function useAccountBalance({ api, provider, target, credentialRef, enabled = true }: Omit<BalanceProps, "enabled"> & { enabled?: boolean }) {
+  const cacheKey = balanceCacheKey({ provider, target, credentialRef });
+  return useQuery({
+    queryKey: ["account-balance", cacheKey],
+    queryFn: () => api.getAccountBalance(target),
+    enabled,
+    refetchInterval: enabled ? 60_000 : false,
+    staleTime: 30_000,
+    retry: false,
+  });
+}
+
+/** Compact account balance for a profile whose credential is already in active use. */
+export function AccountBalanceValue(props: BalanceProps) {
+  const { data: balance, isFetching } = useAccountBalance(props);
+  if (!balance) return null;
+  return <span className="shrink-0 text-sm font-medium tabular-nums text-muted-foreground" aria-label={`Current balance: ${currency(Number(balance.balanceUsd))}`} role="status" aria-live="polite" aria-busy={isFetching}>
+    {currency(Number(balance.balanceUsd))}
+  </span>;
+}
+
+/** Changing account or credential must never display the previous account's balance. */
+export function AccountTools(props: Props) {
+  const cacheKey = balanceCacheKey(props);
+  return <AccountDetailsView key={cacheKey} {...props} />;
+}
+
+function AccountDetailsView({ api, provider, target, scope, credentialRef, images, onSignIn, disabled = false }: Props) {
   const [linkError, setLinkError] = useState<string>();
   const [opening, setOpening] = useState(false);
   const openingRef = useRef(false);
   const returningFromAccountPage = useRef(false);
-  const { data: balance, isFetching: busy, refetch } = useQuery({
-    queryKey: ["account-balance", cacheKey], queryFn: () => api.getAccountBalance(target),
-    refetchInterval: 60_000, staleTime: 30_000, retry: false,
-  });
+  const { data: balance, isFetching: busy, refetch } = useAccountBalance({ api, provider, target, credentialRef });
   useEffect(() => {
     const refreshAfterBilling = () => {
       if (!returningFromAccountPage.current || document.visibilityState === "hidden") return;

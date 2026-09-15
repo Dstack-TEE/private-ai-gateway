@@ -88,15 +88,17 @@ test("usage preloads before navigation and keeps each query isolated", async ({ 
   await expect(page.getByText("Loading usage history…", { exact: true })).toHaveCount(0);
 });
 
-test("Overview does not read account credentials on launch", async ({ page }) => {
-  await page.goto("/?mock=oauth-balance-cache");
+test("Overview waits for active credential use before loading balance", async ({ page }) => {
+  await page.goto("/?mock=oauth-saved-stopped");
+  await expect(page.locator("html")).not.toHaveAttribute("data-balance-reads");
+  await expect(page.getByLabel("Current balance: $12.50", { exact: true })).toHaveCount(0);
   await page.getByRole("switch", { name: "Start protection" }).click();
-  const editor = page.getByRole("dialog", { name: "New profile" });
-  await editor.getByRole("button", { name: "Sign in with Phala" }).click();
-  await expect(editor).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Current balance: $12.50", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("switch", { name: "Stop protection" })).toBeVisible();
+  await expect(page.getByLabel("Current balance: $12.50", { exact: true })).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("data-balance-reads", "1");
   await nav(page, "Agents").click();
   await nav(page, "Overview").click();
+  await expect(page.getByLabel("Current balance: $12.50", { exact: true })).toBeVisible();
 });
 
 test("usage history filters, paginates and inspects proof boundaries", async ({ page }) => {

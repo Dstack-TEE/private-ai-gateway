@@ -554,7 +554,7 @@ fn decode<T: DeserializeOwned>(reader: &mut BufReader<Stream>, id: u64) -> Resul
         Outcome::Result(value) => {
             serde_json::from_value(value).map_err(|_| "Unexpected management response shape".into())
         }
-        Outcome::Error(error) => Err(format!("{}: {}", error.code, error.message)),
+        Outcome::Error(error) => Err(error.message),
     }
 }
 fn absent(error: &io::Error) -> bool {

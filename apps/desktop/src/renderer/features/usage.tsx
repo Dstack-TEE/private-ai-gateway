@@ -45,12 +45,10 @@ export function UsageRow({ activity, onOpen }: { activity: RequestActivity; onOp
 export function UsageView({
   state,
   agents,
-  problem,
   onInspect,
 }: {
   state: GatewayState;
   agents: AgentStatus[];
-  problem?: string;
   onInspect(activity: RequestActivity): void;
 }): React.JSX.Element {
   const [agent, setAgent] = useState("");
@@ -85,7 +83,7 @@ export function UsageView({
 
   return (
     <div className="usage-page max-w-230 min-h-full mt-0 mr-auto mb-0 ml-auto">
-      {(problem || error) && <Alert variant="destructive"><AlertDescription>{problem ?? error}</AlertDescription></Alert>}
+      {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
       <div className="usage-toolbar grid grid-cols-[minmax(150px,_0.8fr)_minmax(210px,_1.25fr)_auto] items-end gap-2.5 [&_select]:w-full [&_select]:min-w-0 max-[780px]:grid-cols-2 max-[440px]:grid-cols-1" role="group" aria-label="Usage filters">
         <Field><FieldLabel htmlFor="usage-agent">Agent</FieldLabel><ChoiceSelect id="usage-agent" label="Agent" className="w-full" value={agent} onChange={(value) => { setAgent(value); resetPagination(); }} options={[{ value: "", label: "All agents" }, ...agentOptions.map((entry) => ({ value: entry, label: agentName(entry) }))]} /></Field>
         <Field><FieldLabel htmlFor="usage-model">Model</FieldLabel><ChoiceSelect id="usage-model" label="Model" className="w-full" value={model} onChange={(value) => { setModel(value); resetPagination(); }} options={[{ value: "", label: "All models" }, ...modelOptions.map((entry) => ({ value: entry, label: entry }))]} /></Field>

@@ -53,6 +53,7 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
   const [copied, setCopied] = useState<string>();
   const [clientKey, setClientKey] = useState("");
   const [clientKeyVisible, setClientKeyVisible] = useState(false);
+  const rotatingClientKey = useRef(false);
   const [applying, setApplying] = useState(false);
   const [selectedUsage, setSelectedUsage] = useState<RequestActivity>();
   const [notice, setNotice] = useState<{ id: number; text: string } | undefined>(() => initialView === "settings" ? { id: Date.now(), text: "Settings reset" } : undefined);
@@ -72,8 +73,8 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
   const copyTimer = useRef<number | undefined>(undefined);
   const [startAfterSetup, setStartAfterSetup] = useState(false);
   const { busy, running, verified, endpointDown } = protectionFlags(state);
-  const { agents, pendingAgentChanges, loadAgents, applyAgent } = useAgents(desktopApi, {
-    active: view === "agents", revision: state.catalog?.revision, verified, onError: setActionError, notify,
+  const { agents, pendingAgentChanges, loadAgents, applyAgent, problem: agentProblem } = useAgents(desktopApi, {
+    active: view === "agents", revision: state.catalog?.revision, verified, notify,
   });
   const models = state.catalog?.models ?? [];
 
@@ -139,6 +140,7 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
     let active = true;
     const unsubscribeNavigate = desktopApi.onNavigate((section) => {
       if (active) {
+        setActionError(undefined);
         setSettingsTarget(undefined);
         setView(section);
         window.requestAnimationFrame(() => document.getElementById(`page-title-${section}`)?.focus());
@@ -167,7 +169,7 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
         keyRead += 1;
         setClientKey("");
         setClientKeyVisible(false);
-        setClientKeyError("Client key unavailable. Rotate the key again to restore access.");
+        if (!rotatingClientKey.current) setClientKeyError("Client key unavailable. Rotate the key again to restore access.");
         return;
       }
       loadClientKey();
@@ -273,16 +275,20 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
 
   const deleteProfile = (profileId: string) => run(() => desktopApi.deleteProfile(profileId), "AI service profile deleted");
 
-  const rotateClientKey = async () => {
+  const rotateClientKey = async (): Promise<string | undefined> => {
     setActionError(undefined);
+    rotatingClientKey.current = true;
     try {
       setClientKey(await desktopApi.rotateClientKey());
       setClientKeyVisible(true);
       notify("Client key replaced");
+      return undefined;
     } catch (error) {
       setClientKey("");
       setClientKeyVisible(false);
-      setActionError(errorMessage(error));
+      return errorMessage(error);
+    } finally {
+      rotatingClientKey.current = false;
     }
   };
 
@@ -328,12 +334,12 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
     }
   };
 
-  const problem = actionError ?? clientKeyError ?? state.error;
   const locked = applying;
   const focusPageHeading = (next: View) => {
     window.requestAnimationFrame(() => document.getElementById(`page-title-${next}`)?.focus());
   };
   const changeView = (next: View, focusHeading = true) => {
+    setActionError(undefined);
     if (next === "settings") setSettingsTarget(undefined);
     setView(next);
     if (focusHeading) focusPageHeading(next);
@@ -393,7 +399,9 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
             running={running}
             endpointDown={endpointDown}
             developmentMode={allowDevelopmentOs}
-            problem={problem}
+            agentProblem={agentProblem}
+            clientKeyError={clientKeyError}
+            accountApi={desktopApi}
             locked={locked}
             clientKey={clientKey}
             clientKeyVisible={clientKeyVisible}
@@ -416,7 +424,7 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
             pendingAgentChanges={pendingAgentChanges}
             agents={agents}
             locked={locked}
-            problem={problem}
+            problem={agentProblem}
             onSelect={(agent, connect) => void applyAgent(agent, connect)}
           />
         )}
@@ -424,7 +432,6 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
           <UsageView
             state={state}
             agents={agents}
-            problem={problem}
             onInspect={inspectUsage}
           />
         )}
@@ -436,7 +443,7 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
             running={running}
             allowDevelopmentOs={allowDevelopmentOs}
             locked={locked || Object.keys(pendingAgentChanges).length > 0}
-            problem={problem}
+            problem={actionError}
             onPolicy={(value) => void changeDevelopmentOs(value)}
             onResetSettings={() => void resetSettings()}
             onAboutLink={(target) => void run(() => desktopApi.openAboutLink(target))}
@@ -482,6 +489,7 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
           clientKey={clientKey}
           clientKeyVisible={clientKeyVisible}
           copied={copied}
+          externalError={clientKeyError}
           onCopy={copy}
           onToggleKey={() => setClientKeyVisible((visible) => !visible)}
           onRotate={rotateClientKey}

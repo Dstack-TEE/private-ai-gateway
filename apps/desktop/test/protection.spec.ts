@@ -39,3 +39,17 @@ test("fail-closed states stay explicit and never show the success effects", asyn
   await nav(page, "Settings").click();
   await expect(page.getByRole("alert")).toContainText("Address already in use");
 });
+
+test("agent operation failures stay out of the active protection status", async ({ page }) => {
+  await page.goto("/?mock=agent-write-error");
+  const status = page.getByLabel("Protection status");
+  await expect(status.getByText("Protected", { exact: true })).toBeVisible();
+  await expect(status.locator(".protection-duration")).toBeVisible();
+
+  await page.getByRole("switch", { name: "Disconnect Claude Code", exact: true }).click();
+  const agents = page.locator(".overview-module", { has: page.getByRole("heading", { name: "Agents", exact: true }) });
+  await expect(agents.getByRole("alert")).toContainText("The operation could not complete.");
+  await expect(agents.getByRole("alert")).not.toContainText("operation_failed");
+  await expect(status.getByRole("alert")).toHaveCount(0);
+  await expect(status.locator(".protection-duration")).toBeVisible();
+});

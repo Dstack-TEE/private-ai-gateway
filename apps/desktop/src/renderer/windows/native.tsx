@@ -178,6 +178,7 @@ function NativeLocalApiWindow(): React.JSX.Element {
   const [copied, setCopied] = useState<string>();
   const [keyError, setKeyError] = useState<string>();
   const [actionError, setActionError] = useState<string>();
+  const rotatingClientKey = useRef(false);
   const native = useNativeGatewayWindow("Local API Settings", keyLoaded);
   const copyTimer = useRef<number | undefined>(undefined);
 
@@ -201,7 +202,7 @@ function NativeLocalApiWindow(): React.JSX.Element {
       else {
         setClientKey("");
         setClientKeyVisible(false);
-        setActionError("Client key unavailable. Rotate the key again to restore access.");
+        if (!rotatingClientKey.current) setActionError("Client key unavailable. Rotate the key again to restore access.");
       }
     });
     return () => {
@@ -226,15 +227,19 @@ function NativeLocalApiWindow(): React.JSX.Element {
       setActionError(errorMessage(error));
     }
   };
-  const rotate = async () => {
+  const rotate = async (): Promise<string | undefined> => {
     setActionError(undefined);
+    rotatingClientKey.current = true;
     try {
       setClientKey(await desktopApi.rotateClientKey());
       setClientKeyVisible(true);
+      return undefined;
     } catch (error) {
       setClientKey("");
       setClientKeyVisible(false);
-      setActionError(errorMessage(error));
+      return errorMessage(error);
+    } finally {
+      rotatingClientKey.current = false;
     }
   };
   const saveLocalApi = async (config: LocalApiConfig): Promise<string | undefined> => {
