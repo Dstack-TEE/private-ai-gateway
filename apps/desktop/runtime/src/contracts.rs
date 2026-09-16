@@ -265,15 +265,12 @@ impl CatalogSummary {
             .map(|model| ModelSummary {
                 id: model.id().to_string(),
                 name: model.display_name().to_string(),
-                supported_endpoints: model
-                    .supported_surfaces
-                    .as_ref()
-                    .map(|surfaces| {
-                        surfaces
-                            .iter()
-                            .map(|surface| surface.path().to_string())
-                            .collect()
-                    }),
+                supported_endpoints: model.supported_surfaces.as_ref().map(|surfaces| {
+                    surfaces
+                        .iter()
+                        .map(|surface| surface.path().to_string())
+                        .collect()
+                }),
                 context_length: model.remote.context_length,
                 max_output_length: model.remote.max_output_length,
                 is_tee: model.bool_field("is_tee"),

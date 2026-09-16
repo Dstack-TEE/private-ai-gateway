@@ -111,20 +111,17 @@ impl EndpointInventory {
                     || entry.reason.len() > 256
                     || (inventory.schema_version == 2) != entry.checks.is_some()
                     || entry.checks.as_ref().is_some_and(|checks| {
-                        checks
-                            .entries()
-                            .iter()
-                            .any(|check| {
-                                check.reason.is_empty()
-                                    || check.reason.len() > 256
-                                    || check
+                        checks.entries().iter().any(|check| {
+                            check.reason.is_empty()
+                                || check.reason.len() > 256
+                                || check
+                                    .http_status
+                                    .is_some_and(|status| !(100..600).contains(&status))
+                                || (check.status == ObservationStatus::Supported
+                                    && !check
                                         .http_status
-                                        .is_some_and(|status| !(100..600).contains(&status))
-                                    || (check.status == ObservationStatus::Supported
-                                        && !check
-                                            .http_status
-                                            .is_some_and(|status| (200..300).contains(&status)))
-                            })
+                                        .is_some_and(|status| (200..300).contains(&status)))
+                        })
                     })
                     || !matches!(
                         entry.endpoint.as_str(),
