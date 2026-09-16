@@ -48,13 +48,20 @@ function sse(data) {
 
 test("tool requests and result turns use each API's native contract", () => {
   for (const surface of surfaces) {
-    const request = payload("model-a", surface, { tools: true });
+    const request = payload("model-a", surface, { stream: true, tools: true });
     assert.equal(request.stream, true);
+    assert.deepEqual(request.tool_choice, surface === "messages" ? { type: "auto" } : "auto");
+    if (surface !== "messages") {
+      assert.equal(request.parallel_tool_calls, true);
+      const tool = surface === "responses" ? request.tools[0] : request.tools[0].function;
+      assert.equal(tool.strict, false);
+    }
     const summary = summarizeStream(surface, events(surface));
     assert.equal(summary.streaming.status, "supported");
     assert.equal(summary.tools.status, "supported");
     const resumed = toolResultPayload("model-a", surface, summary.body);
     assert.equal(resumed.stream, true);
+    assert.deepEqual(resumed.tool_choice, surface === "messages" ? { type: "auto" } : "auto");
     const input = JSON.stringify(resumed.input ?? resumed.messages);
     assert.match(input, /call-1/);
     assert.match(input, /OK/);
@@ -65,10 +72,10 @@ test("tool requests and result turns use each API's native contract", () => {
   assert.doesNotThrow(() => toolResultPayload("model-a", "messages", sparse.body));
 });
 
-test("truncated streams, invalid event order, and ignored tool choice never confirm tool support", () => {
+test("truncated streams, invalid event order, and ignored automatic tool choice stay inconclusive", () => {
   for (const surface of surfaces) {
     assert.equal(summarizeStream(surface, events(surface).slice(0, -1)).streaming.status, "inconclusive");
-    assert.equal(summarizeStream(surface, events(surface, false)).tools.status, "unavailable");
+    assert.equal(summarizeStream(surface, events(surface, false)).tools.status, "inconclusive");
   }
   assert.equal(summarizeStream("responses", events("responses").slice(1)).streaming.status, "inconclusive");
   const invalid = events("messages");
@@ -88,7 +95,7 @@ test("full probes consume chunked SSE and publish only observations, not respons
       if (!body.stream) return Response.json(surface === "responses" ? { object: "response", status: "completed", output: [] }
         : surface === "messages" ? { type: "message", role: "assistant", content: [] } : { choices: [{ message: { role: "assistant", content: "OK" } }] });
       const resumed = (body.input ?? body.messages).length > 1;
-      return sse(events(surface, !resumed));
+      return sse(events(surface, Boolean(body.tools) && !resumed));
     },
   });
   assert.equal(calls.length, 9);
@@ -98,6 +105,23 @@ test("full probes consume chunked SSE and publish only observations, not respons
     assert.deepEqual(Object.values(result.checks).map(check => check.status), ["supported", "supported", "supported"]);
   }
   assert.doesNotMatch(JSON.stringify(report), /test-private-key|call-1|probe_echo/);
+});
+
+test("plain streaming is checked separately when a tool request is rejected", async () => {
+  const report = await probe({
+    endpoint: "https://tee.redpill.ai", key: "test-key", concurrency: 1,
+    modelIds: ["model-a"], surfaceNames: ["responses"],
+    fetchImpl: async (url, options) => {
+      if (url.endsWith("/models")) return Response.json({ data: [{ id: "model-a" }] });
+      const body = JSON.parse(options.body);
+      if (!body.stream) return Response.json({ object: "response", status: "completed", output: [] });
+      if (body.tools) return Response.json({ error: { code: "invalid_request" } }, { status: 400 });
+      return sse(events("responses", false));
+    },
+  });
+  assert.equal(report.results[0].checks.streaming.status, "supported");
+  assert.equal(report.results[0].checks.tools.status, "inconclusive");
+  assert.equal(report.results[0].checks.tools.reason, "request_rejected");
 });
 
 test("an auth failure during streaming stops further requests and leaves checks inconclusive", async () => {
@@ -113,6 +137,77 @@ test("an auth failure during streaming stops further requests and leaves checks 
   });
   assert.equal(requests, 2);
   assert.equal(report.results[0].checks.streaming.reason, "authentication_or_permission");
-  assert.equal(report.results[1].reason, "not_probed_after_auth_or_limit_error");
+  assert.equal(report.results[1].reason, "not_probed_after_authentication_error");
   assert.doesNotMatch(JSON.stringify(report), /private provider detail/);
+});
+
+test("rate limits stay local to an observation and later models are still probed", async () => {
+  let requests = 0;
+  const report = await probe({
+    endpoint: "https://tee.redpill.ai", key: "test-key", concurrency: 1, basic: true,
+    fetchImpl: async (url) => {
+      if (url.endsWith("/models")) return Response.json({ data: [{ id: "model-a" }, { id: "model-b" }] });
+      requests++;
+      if (requests === 1) return Response.json({ error: { code: "rate_limit" } }, { status: 429 });
+      const surface = url.split("/v1/")[1];
+      return Response.json(surface === "responses" ? { object: "response", status: "completed", output: [] }
+        : surface === "messages" ? { type: "message", role: "assistant", content: [] }
+          : { choices: [{ message: { role: "assistant", content: "OK" } }] });
+    },
+  });
+  assert.equal(requests, 6);
+  assert.equal(report.results[0].reason, "rate_or_quota_limit");
+  assert.equal(report.results.at(-1).status, "supported");
+});
+
+test("inconclusive refreshes retain prior conclusive capability evidence", async () => {
+  const prior = {
+    schemaVersion: 2, endpoint: "https://tee.redpill.ai", checkedAt: "2026-09-15T00:00:00Z",
+    results: surfaces.map(surface => ({
+      model: "model-a", endpoint: `/v1/${surface}`, status: "supported", reason: "valid_response", httpStatus: 200,
+      checks: {
+        streaming: { status: "supported", reason: "valid_event_stream", httpStatus: 200 },
+        tools: { status: "supported", reason: "valid_streamed_tool_call", httpStatus: 200 },
+        toolResult: { status: "supported", reason: "valid_tool_result_response", httpStatus: 200 },
+      },
+    })),
+  };
+  const report = await probe({
+    endpoint: prior.endpoint, key: "test-key", concurrency: 1, previousInventory: prior,
+    fetchImpl: async (url) => url.endsWith("/models")
+      ? Response.json({ data: [{ id: "model-a" }] })
+      : Response.json({ error: { code: "temporary" } }, { status: 503 }),
+  });
+  assert.equal(report.results.length, 3);
+  for (const result of report.results) {
+    assert.equal(result.status, "supported");
+    assert.match(result.reason, /^retained_previous_supported_after_transient_server_error$/);
+    assert.equal(result.checks.streaming.status, "supported");
+  }
+});
+
+test("explicit endpoint incompatibility clears stale capability evidence", async () => {
+  const prior = {
+    schemaVersion: 2, endpoint: "https://tee.redpill.ai", checkedAt: "2026-09-15T00:00:00Z",
+    results: surfaces.map(surface => ({
+      model: "model-a", endpoint: `/v1/${surface}`, status: "supported", reason: "valid_response", httpStatus: 200,
+      checks: {
+        streaming: { status: "supported", reason: "valid_event_stream", httpStatus: 200 },
+        tools: { status: "supported", reason: "valid_streamed_tool_call", httpStatus: 200 },
+        toolResult: { status: "supported", reason: "valid_tool_result_response", httpStatus: 200 },
+      },
+    })),
+  };
+  const report = await probe({
+    endpoint: prior.endpoint, key: "test-key", previousInventory: prior,
+    modelIds: ["model-a"], surfaceNames: ["responses"],
+    fetchImpl: async (url) => url.endsWith("/models")
+      ? Response.json({ data: [{ id: "model-a" }] })
+      : Response.json({ error: { code: "unsupported_endpoint" } }, { status: 404 }),
+  });
+  const result = report.results.find(entry => entry.endpoint === "/v1/responses");
+  assert.equal(result.status, "unavailable");
+  assert.deepEqual(Object.values(result.checks).map(check => check.status), [
+    "inconclusive", "inconclusive", "inconclusive",
+  ]);
 });

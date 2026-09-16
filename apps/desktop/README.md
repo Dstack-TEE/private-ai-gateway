@@ -738,14 +738,22 @@ protocol is the service's own response, shown as such.
   snapshot, not continuous availability monitoring or a claim that an endpoint
   returning a transient error is permanently unsupported.
 
-  September 14 inventory update (22:19 UTC): 25 models were checked across all
-  three endpoints. GPT-OSS-20B returned HTTP 429 and retains its previous results.
-  NVIDIA Nemotron 3.5 Lightning, GLM-5.2 and GLM-5.3 passed all three endpoints.
-  DeepSeek Flash 0731 and GLM-5.1 Responses returned HTTP 502 and are temporarily
-  excluded from Responses-compatible agent catalogs as inconclusive observations,
-  not permanent unsupported claims. Qwen3 VL 30B still timed out on all three
-  endpoints (60 seconds). The resulting inventory offers 25 Chat Completions,
-  25 Messages and 12 Responses models, including the retained GPT-OSS-20B entries.
+  September 16 inventory update (19:12 UTC): the live catalog contained 26 models.
+  Basic text requests succeeded for 26 Chat Completions, 26 Messages and 15
+  Responses surfaces. Incremental SSE was observed for 25, 23 and 12 surfaces
+  respectively. The stricter Agent projection, which also requires a valid streamed
+  tool call and a streamed tool-result turn, offers 24 Chat Completions, 22 Messages
+  and 8 Responses models. GLM-5.3 passed the full sequence on all three surfaces,
+  including the Responses contract used by Codex. The catalog added
+  `phala/qwen3.8-27b-uncensored` and no longer lists
+  `phala/qwen3.6-35b-a3b-uncensored`.
+
+  Eleven Responses text observations remain inconclusive: ten returned transient
+  server errors and one returned a generic request rejection. GPT-OSS-20B Messages
+  and the three Nemotron 3.5 Lightning surfaces were rate-limited during the refresh;
+  their prior successful basic observations were retained, but no Agent capability
+  was inferred from the temporary failures. A transient result is not evidence of
+  incompatibility, but it is also not new evidence of support.
 
   Apps fetch this file from the repository's `main` branch when starting protection
   or refreshing the model catalog (`private-ai-proxy models list --refresh`). The request runs
@@ -772,26 +780,29 @@ protocol is the service's own response, shown as such.
   Endpoint capability inventory can be checked explicitly from this directory:
 
   ```sh
-  node scripts/probe-model-endpoints.mjs --endpoint https://tee.redpill.ai --key-env REDPILL_AI_API_KEY --json
-  node scripts/probe-model-endpoints.mjs --endpoint https://inference.phala.com --key-env PHALA_AI_API_KEY --json
+  node scripts/probe-model-endpoints.mjs --endpoint https://tee.redpill.ai --key-env REDPILL_AI_API_KEY --previous gateway/src/endpoint-support.json --json
+  node scripts/probe-model-endpoints.mjs --endpoint https://inference.phala.com --key-env PHALA_AI_API_KEY --previous gateway/src/endpoint-support.json --json
   ```
 
   Supply the named key through the process environment, never a command-line
   argument. The script reads the live catalog and sends one small, potentially
   billable text request per model to Chat Completions, Responses, and Messages,
-  followed by a streamed tool call and a streamed tool-result turn when supported
-  (up to three requests per model and endpoint). SSE framing uses `eventsource-parser`.
-  `--model ID` and `--surface responses` limit the inventory; concurrency defaults to two (maximum four),
-  with a 20-second request timeout and no retries. Authentication and rate-limit
-  errors stop scheduling requests. Reports contain no credentials or response
-  text. Exit code 2 means some results remain inconclusive; those results must
-  not be treated as evidence of unsupported protocols. A successful response
-  in a version 1 report (`--basic`) establishes non-streaming API availability
-  only. The bundled September 14 snapshot is version 1; it does not claim full
-  agent compatibility. Version 2 reports record streaming, tool arguments, and
-  tool-result checks separately. Agent projections require all three checks to
-  succeed when version 2 evidence is available; ordinary Local API text requests
-  continue to use the basic endpoint observation. `--reasoning-effort low|medium|high`
+  followed by a streamed tool call and a streamed tool-result turn when supported.
+  If the tool request cannot independently prove streaming, the probe sends a plain
+  streamed text request instead (up to four requests per model and endpoint). SSE
+  framing uses `eventsource-parser`. `--model ID` and `--surface responses` limit
+  the inventory; concurrency defaults to one (maximum four), with a 30-second request
+  timeout and no retries. Authentication errors stop scheduling requests. Rate limits,
+  timeouts and server errors remain local to one observation so later jobs still run.
+  Reports contain no credentials or response text. Exit code 2 means some results
+  remain inconclusive; those results must not be treated as evidence of unsupported
+  protocols. `--previous` retains earlier conclusive evidence when a refresh is
+  inconclusive and drops models no longer present in the live catalog. A successful
+  response in a version 1 report (`--basic`) establishes non-streaming API availability
+  only. The bundled September 16 snapshot is version 2. Version 2 reports record
+  streaming, tool arguments, and tool-result checks separately. Agent projections
+  require all three checks to succeed; ordinary Local API text requests continue to
+  use the basic endpoint observation. `--reasoning-effort low|medium|high`
   also checks Responses requests with that specific effort; it does not establish
   support for other effort levels or all Codex features. Neither mode checks
   receipt validity. This diagnostic calls the supplied endpoint

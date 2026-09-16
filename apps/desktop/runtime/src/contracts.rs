@@ -266,9 +266,8 @@ impl CatalogSummary {
                 id: model.id().to_string(),
                 name: model.display_name().to_string(),
                 supported_endpoints: model
-                    .agent_surfaces
+                    .supported_surfaces
                     .as_ref()
-                    .or(model.supported_surfaces.as_ref())
                     .map(|surfaces| {
                         surfaces
                             .iter()

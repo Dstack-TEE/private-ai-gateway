@@ -1,5 +1,6 @@
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
+import { readFile } from "node:fs/promises";
 import { EventSourceParserStream } from "eventsource-parser/stream";
 
 const surfaces = ["chat/completions", "responses", "messages"];
@@ -15,6 +16,74 @@ const toolParameters = {
 };
 const unknown = reason => ({ status: "inconclusive", reason });
 const supported = reason => ({ status: "supported", reason });
+const withHttpStatus = (result, httpStatus) => ({ ...result, ...(httpStatus ? { httpStatus } : {}) });
+
+function checks(reason) {
+  return {
+    streaming: unknown(reason),
+    tools: unknown(reason),
+    toolResult: unknown(reason),
+  };
+}
+
+function retainConclusive(previous, current) {
+  if (!previous || current.status !== "inconclusive" || previous.status === "inconclusive") return current;
+  return {
+    ...previous,
+    reason: `retained_previous_${previous.status}_after_${current.reason}`,
+  };
+}
+
+function mergeObservation(previous, current, schemaVersion) {
+  const base = retainConclusive(previous, current);
+  const merged = {
+    model: current.model,
+    endpoint: current.endpoint,
+    status: base.status,
+    reason: base.reason,
+    ...(base.httpStatus ? { httpStatus: base.httpStatus } : {}),
+  };
+  if (schemaVersion === 2) {
+    const currentChecks = current.checks ?? checks("not_probed_in_version_two");
+    const previousChecks = previous?.checks;
+    merged.checks = Object.fromEntries(["streaming", "tools", "toolResult"].map(name => [
+      name,
+      current.status === "unavailable"
+        ? currentChecks[name]
+        : retainConclusive(previousChecks?.[name], currentChecks[name]),
+    ]));
+  }
+  return merged;
+}
+
+export function mergeInventory(previous, current, catalogIds) {
+  if (!previous || previous.endpoint !== current.endpoint || ![1, 2].includes(previous.schemaVersion) ||
+      previous.schemaVersion > current.schemaVersion || !Array.isArray(previous.results) ||
+      previous.reasoningEffort !== current.reasoningEffort) {
+    throw new Error("The previous inventory is incompatible with this probe.");
+  }
+  const key = entry => `${entry.model}\n${entry.endpoint}`;
+  const previousByKey = new Map(previous.results.map(entry => [key(entry), entry]));
+  const currentByKey = new Map(current.results.map(entry => [key(entry), entry]));
+  const results = [];
+  for (const model of catalogIds) {
+    const entries = surfaces.map(surface => {
+      const endpoint = `/v1/${surface}`;
+      const fresh = currentByKey.get(`${model}\n${endpoint}`);
+      const prior = previousByKey.get(`${model}\n${endpoint}`);
+      if (fresh) return mergeObservation(prior, fresh, current.schemaVersion);
+      if (!prior) return undefined;
+      return mergeObservation(prior, {
+        ...prior,
+        ...(current.schemaVersion === 2 && !prior.checks
+          ? { checks: checks("not_probed_in_version_two") }
+          : {}),
+      }, current.schemaVersion);
+    });
+    if (entries.every(Boolean)) results.push(...entries);
+  }
+  return { ...current, results };
+}
 
 function boundedBody(response) {
   if (!response.body) throw new Error("empty_response");
@@ -44,20 +113,24 @@ async function readJson(response) {
   }
 }
 
-export function payload(model, surface, { tools = false, reasoningEffort } = {}) {
-  const message = { role: "user", content: tools ? "Call probe_echo with value OK, then reply with its result." : "Reply OK." };
+export function payload(model, surface, { stream = false, tools = false, reasoningEffort } = {}) {
+  const content = tools ? "Call probe_echo with value OK, then reply with its result."
+    : stream ? "Reply with the numbers 1 through 20 separated by spaces, and nothing else."
+      : "Reply OK.";
+  const message = { role: "user", content };
+  const maxTokens = tools ? 256 : stream ? 64 : 16;
   const body = surface === "responses"
-    ? { model, input: [message], max_output_tokens: tools ? 256 : 16, stream: tools, store: false }
-    : { model, messages: [message], max_tokens: tools ? 256 : 16, stream: tools };
+    ? { model, input: [message], max_output_tokens: maxTokens, stream, store: false }
+    : { model, messages: [message], max_tokens: maxTokens, stream };
   if (!tools) return body;
-  const definition = { name: toolName, description: "Echo the supplied value.", parameters: toolParameters, strict: true };
+  const definition = { name: toolName, description: "Echo the supplied value.", parameters: toolParameters, strict: false };
   if (surface === "messages") {
     body.tools = [{ name: toolName, description: definition.description, input_schema: toolParameters }];
-    body.tool_choice = { type: "tool", name: toolName };
+    body.tool_choice = { type: "auto" };
   } else {
     body.tools = [surface === "responses" ? { type: "function", ...definition } : { type: "function", function: definition }];
-    body.tool_choice = surface === "responses" ? { type: "function", name: toolName } : { type: "function", function: { name: toolName } };
-    body.parallel_tool_calls = false;
+    body.tool_choice = "auto";
+    body.parallel_tool_calls = true;
     if (surface === "responses") {
       body.include = ["reasoning.encrypted_content"];
       if (reasoningEffort) body.reasoning = { effort: reasoningEffort };
@@ -67,13 +140,13 @@ export function payload(model, surface, { tools = false, reasoningEffort } = {})
 }
 
 export function toolResultPayload(model, surface, body, reasoningEffort) {
-  const request = payload(model, surface, { tools: true, reasoningEffort });
+  const request = payload(model, surface, { stream: true, tools: true, reasoningEffort });
   const message = { role: "user", content: "Call probe_echo with value OK, then reply with its result." };
   if (surface === "responses") {
     const call = body.output.find(item => item?.type === "function_call");
     if (!call) throw new Error("missing_tool_call");
     request.input = [message, ...body.output, { type: "function_call_output", call_id: call.call_id, output: "OK" }];
-    request.tool_choice = "none";
+    request.tool_choice = "auto";
   } else if (surface === "messages") {
     const call = body.content.find(item => item?.type === "tool_use");
     if (!call) throw new Error("missing_tool_call");
@@ -84,7 +157,7 @@ export function toolResultPayload(model, surface, body, reasoningEffort) {
   } else {
     const assistant = body.choices[0].message;
     request.messages = [message, assistant, { role: "tool", tool_call_id: assistant.tool_calls[0].id, content: "OK" }];
-    request.tool_choice = "none";
+    request.tool_choice = "auto";
   }
   return request;
 }
@@ -204,7 +277,7 @@ export function summarizeStream(surface, events) {
     responseCalls.get(index)?.done && responseCalls.get(index).arguments === item.arguments
   ));
   const tools = calls.length === 1 && validCall(calls[0], surface) && validResponseDeltas
-    ? supported("valid_streamed_tool_call") : { status: "unavailable", reason: "required_tool_call_missing_or_invalid" };
+    ? supported("valid_streamed_tool_call") : unknown("required_tool_call_missing_or_invalid");
   return { body, streaming: supported("valid_event_stream"), tools };
 }
 
@@ -220,11 +293,14 @@ export function classify(surface, status, body) {
     return { status: "inconclusive", reason: "authentication_or_permission", stop: true };
   }
   if (status === 429) {
-    return { status: "inconclusive", reason: "rate_or_quota_limit", stop: true };
+    return { status: "inconclusive", reason: "rate_or_quota_limit" };
   }
   if (status === 405 || status === 501 ||
       ([400, 404, 422].includes(status) && unsupportedCodes.has(body?.error?.code))) {
     return { status: "unavailable", reason: "unsupported_endpoint_or_model" };
+  }
+  if ([408, 425].includes(status) || status >= 500) {
+    return { status: "inconclusive", reason: "transient_server_error" };
   }
   if (status < 200 || status >= 300) {
     return { status: "inconclusive", reason: "request_rejected" };
@@ -242,7 +318,7 @@ export function classify(surface, status, body) {
     : { status: "inconclusive", reason: "unexpected_response" };
 }
 
-export async function probe({ endpoint, key, modelIds = [], surfaceNames = surfaces, concurrency = 2, timeout = 20000, basic = false, reasoningEffort, fetchImpl = fetch }) {
+export async function probe({ endpoint, key, modelIds = [], surfaceNames = surfaces, concurrency = 1, timeout = 30000, basic = false, reasoningEffort, previousInventory, fetchImpl = fetch }) {
   const base = new URL(endpoint);
   if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash) {
     throw new Error("Use an HTTPS endpoint without credentials, query, or fragment.");
@@ -283,8 +359,8 @@ export async function probe({ endpoint, key, modelIds = [], surfaceNames = surfa
   const results = new Array(jobs.length);
   let cursor = 0;
   let stopped = false;
-  async function request(model, surface, body, stream = false) {
-    if (stopped) return { result: unknown("not_probed_after_auth_or_limit_error") };
+  async function request(model, surface, body) {
+    if (stopped) return { result: unknown("not_probed_after_authentication_error") };
     try {
       const response = await fetchImpl(`${root}/v1/${surface}`, {
         method: "POST", redirect: "error", signal: AbortSignal.timeout(timeout),
@@ -292,7 +368,7 @@ export async function probe({ endpoint, key, modelIds = [], surfaceNames = surfa
         body: JSON.stringify(body),
       });
       const httpStatus = response.status;
-      if (stream && response.ok) {
+      if (body.stream && response.ok) {
         const summary = summarizeStream(surface, await readStream(response));
         return { ...summary, result: summary.streaming, httpStatus };
       }
@@ -310,29 +386,40 @@ export async function probe({ endpoint, key, modelIds = [], surfaceNames = surfa
       const index = cursor++;
       const { model, surface } = jobs[index];
       const { result, httpStatus } = await request(model, surface, payload(model, surface));
-      let checks;
+      let capabilityChecks;
       if (!basic) {
-        checks = { streaming: unknown("not_probed"), tools: unknown("not_probed"), toolResult: unknown("not_probed") };
+        capabilityChecks = checks("not_probed");
         if (result.status === "supported") {
-          const stream = await request(model, surface, payload(model, surface, { tools: true, reasoningEffort }), true);
-          checks.streaming = stream.result;
-          checks.tools = stream.tools ?? unknown("no_valid_tool_stream");
-          if (checks.streaming.status === "supported" && checks.tools.status === "supported") {
+          const toolStream = await request(model, surface, payload(model, surface, {
+            stream: true, tools: true, reasoningEffort,
+          }));
+          capabilityChecks.streaming = withHttpStatus(toolStream.result, toolStream.httpStatus);
+          capabilityChecks.tools = withHttpStatus(toolStream.tools ?? toolStream.result, toolStream.httpStatus);
+          if (!stopped && capabilityChecks.streaming.status !== "supported") {
+            const textStream = await request(model, surface, payload(model, surface, { stream: true }));
+            capabilityChecks.streaming = withHttpStatus(textStream.result, textStream.httpStatus);
+          }
+          if (capabilityChecks.streaming.status === "supported" && capabilityChecks.tools.status === "supported") {
             try {
-              const resumed = await request(model, surface, toolResultPayload(model, surface, stream.body, reasoningEffort), true);
-              checks.toolResult = resumed.result.status === "supported" && hasText(surface, resumed.body)
-                ? supported("valid_tool_result_response") : resumed.result.status === "supported" ? unknown("no_tool_result_text") : resumed.result;
+              const resumed = await request(model, surface, toolResultPayload(model, surface, toolStream.body, reasoningEffort));
+              capabilityChecks.toolResult = withHttpStatus(
+                resumed.result.status === "supported" && hasText(surface, resumed.body)
+                  ? supported("valid_tool_result_response")
+                  : resumed.result.status === "supported" ? unknown("no_tool_result_text") : resumed.result,
+                resumed.httpStatus,
+              );
             } catch {
-              checks.toolResult = unknown("invalid_tool_call_shape");
+              capabilityChecks.toolResult = unknown("invalid_tool_call_shape");
             }
           }
         }
       }
-      results[index] = { model, endpoint: `/v1/${surface}`, ...result, ...(checks ? { checks } : {}), ...(httpStatus ? { httpStatus } : {}) };
+      results[index] = { model, endpoint: `/v1/${surface}`, ...result, ...(capabilityChecks ? { checks: capabilityChecks } : {}), ...(httpStatus ? { httpStatus } : {}) };
     }
   }
   await Promise.all(Array.from({ length: concurrency }, worker));
-  return { schemaVersion: basic ? 1 : 2, endpoint: root, checkedAt: new Date().toISOString(), ...(reasoningEffort ? { reasoningEffort } : {}), results };
+  const report = { schemaVersion: basic ? 1 : 2, endpoint: root, checkedAt: new Date().toISOString(), ...(reasoningEffort ? { reasoningEffort } : {}), results };
+  return previousInventory ? mergeInventory(previousInventory, report, ids) : report;
 }
 
 async function main() {
@@ -340,19 +427,26 @@ async function main() {
     endpoint: { type: "string" }, "key-env": { type: "string", default: "PAP_PROBE_API_KEY" },
     model: { type: "string", multiple: true }, json: { type: "boolean" },
     surface: { type: "string", multiple: true },
+    previous: { type: "string" },
     basic: { type: "boolean" }, "reasoning-effort": { type: "string" },
-    concurrency: { type: "string", default: "2" }, timeout: { type: "string", default: "20000" },
+    concurrency: { type: "string", default: "1" }, timeout: { type: "string", default: "30000" },
     help: { type: "boolean" },
   } });
   if (values.help) {
-    console.log("Usage: node scripts/probe-model-endpoints.mjs --endpoint https://tee.redpill.ai [--key-env PAP_PROBE_API_KEY] [--model ID] [--surface responses] [--basic] [--reasoning-effort low|medium|high] [--json]\nChecks text, streamed tool calls, and tool results (up to 3 inferences per model and endpoint). --basic checks text only. Requests may be billed. No retries.");
+    console.log("Usage: node scripts/probe-model-endpoints.mjs --endpoint https://tee.redpill.ai [--key-env PAP_PROBE_API_KEY] [--model ID] [--surface responses] [--previous PATH] [--basic] [--reasoning-effort low|medium|high] [--json]\nChecks text, streaming, streamed tool calls, and tool results (up to 4 inferences per model and endpoint). --previous retains earlier conclusive evidence when a refresh is inconclusive. --basic checks text only. Requests may be billed. No retries.");
     return;
   }
   if (!values.endpoint) throw new Error("Provide --endpoint. Use --help for usage.");
+  let previousInventory;
+  if (values.previous) {
+    try { previousInventory = JSON.parse(await readFile(values.previous, "utf8")); }
+    catch { throw new Error("Cannot read the previous endpoint inventory."); }
+  }
   const report = await probe({
     endpoint: values.endpoint, key: process.env[values["key-env"]], modelIds: values.model,
     surfaceNames: values.surface,
     basic: values.basic, reasoningEffort: values["reasoning-effort"],
+    previousInventory,
     concurrency: Number(values.concurrency), timeout: Number(values.timeout),
   });
   if (values.json) console.log(JSON.stringify(report, null, 2));

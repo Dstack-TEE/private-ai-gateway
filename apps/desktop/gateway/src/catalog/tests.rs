@@ -1,5 +1,15 @@
 use super::*;
 
+fn version_one_inventory() -> EndpointInventory {
+    let mut value = serde_json::to_value(EndpointInventory::bundled().unwrap()).unwrap();
+    value["schemaVersion"] = json!(1);
+    value.as_object_mut().unwrap().remove("reasoningEffort");
+    for entry in value["results"].as_array_mut().unwrap() {
+        entry.as_object_mut().unwrap().remove("checks");
+    }
+    EndpointInventory::parse(&serde_json::to_vec(&value).unwrap()).unwrap()
+}
+
 #[test]
 fn downloaded_inventory_rejects_unknown_schema_duplicate_and_partial_observations() {
     let valid = serde_json::to_value(EndpointInventory::bundled().unwrap()).unwrap();
@@ -50,17 +60,22 @@ fn observations_are_scoped_and_never_add_unlisted_models() {
         1,
     )
     .unwrap();
+    let inventory = version_one_inventory();
     for endpoint in ["https://tee.redpill.ai", "https://inference.phala.com/v1"] {
         let mut catalog = original.clone();
         catalog
-            .apply_endpoint_inventory(endpoint, &EndpointInventory::bundled().unwrap())
+            .apply_endpoint_inventory(endpoint, &inventory)
             .unwrap();
         assert_ne!(catalog.revision, original.revision);
         assert_eq!(catalog.openai_list(), original.openai_list());
         assert!(catalog
             .models
             .iter()
-            .all(|model| model.agent_surfaces.is_none()));
+            .all(|model| model.agent_surfaces.as_ref().is_some_and(Vec::is_empty)));
+        assert!(catalog
+            .for_agent_surface(Surface::ChatCompletions)
+            .models
+            .is_empty());
         assert_eq!(catalog.for_surface(Surface::Responses).models.len(), 1);
         assert_eq!(catalog.for_surface(Surface::Messages).models.len(), 2);
         assert_eq!(
@@ -75,7 +90,7 @@ fn observations_are_scoped_and_never_add_unlisted_models() {
     ] {
         let mut catalog = original.clone();
         catalog
-            .apply_endpoint_inventory(endpoint, &EndpointInventory::bundled().unwrap())
+            .apply_endpoint_inventory(endpoint, &inventory)
             .unwrap();
         assert_eq!(catalog.revision, original.revision);
         assert!(catalog
@@ -91,16 +106,16 @@ fn agent_projections_require_all_version_two_checks_without_blocking_basic_api_a
     value["schemaVersion"] = json!(2);
     for entry in value["results"].as_array_mut().unwrap() {
         entry["checks"] = json!({
-            "streaming": {"status": "supported", "reason": "valid_event_stream"},
-            "tools": {"status": "supported", "reason": "valid_streamed_tool_call"},
-            "toolResult": {"status": "supported", "reason": "valid_tool_result_response"}
+            "streaming": {"status": "supported", "reason": "valid_event_stream", "httpStatus": 200},
+            "tools": {"status": "supported", "reason": "valid_streamed_tool_call", "httpStatus": 200},
+            "toolResult": {"status": "supported", "reason": "valid_tool_result_response", "httpStatus": 200}
         });
         if entry["model"] == "z-ai/glm-5.3" && entry["endpoint"] == "/v1/responses" {
             entry["checks"]["tools"]["status"] = json!("inconclusive");
         }
     }
     let inventory = EndpointInventory::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
-    let mut basic = serde_json::to_value(EndpointInventory::bundled().unwrap()).unwrap();
+    let mut basic = serde_json::to_value(version_one_inventory()).unwrap();
     basic["checkedAt"] = json!("2026-09-16T23:59:59Z");
     let basic = EndpointInventory::parse(&serde_json::to_vec(&basic).unwrap()).unwrap();
     assert!(!basic.is_newer_than(&inventory));

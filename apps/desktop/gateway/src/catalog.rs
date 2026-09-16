@@ -61,10 +61,12 @@ struct EndpointChecks {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct EndpointCheck {
     status: ObservationStatus,
     reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    http_status: Option<u16>,
 }
 
 impl EndpointChecks {
@@ -112,7 +114,17 @@ impl EndpointInventory {
                         checks
                             .entries()
                             .iter()
-                            .any(|check| check.reason.is_empty() || check.reason.len() > 256)
+                            .any(|check| {
+                                check.reason.is_empty()
+                                    || check.reason.len() > 256
+                                    || check
+                                        .http_status
+                                        .is_some_and(|status| !(100..600).contains(&status))
+                                    || (check.status == ObservationStatus::Supported
+                                        && !check
+                                            .http_status
+                                            .is_some_and(|status| (200..300).contains(&status)))
+                            })
                     })
                     || !matches!(
                         entry.endpoint.as_str(),
@@ -341,7 +353,7 @@ impl Catalog {
                 })
                 .collect(),
             );
-            model.agent_surfaces = (inventory.schema_version == 2).then(|| {
+            model.agent_surfaces = Some(if inventory.schema_version == 2 {
                 [
                     Surface::ChatCompletions,
                     Surface::Messages,
@@ -357,6 +369,8 @@ impl Catalog {
                     })
                 })
                 .collect()
+            } else {
+                Vec::new()
             });
         }
         let bytes = serde_json::to_vec(&self.models).map_err(|error| error.to_string())?;
