@@ -22,7 +22,7 @@ test("fail-closed states stay explicit and never show the success effects", asyn
   await page.goto("/?mock=blocked");
   const status = page.getByLabel("Protection status");
   await expect(status.getByText("Protection blocked", { exact: true })).toBeVisible();
-  await expect(status.getByRole("alert")).toContainText(/identity changed after verification/i);
+  await expect(status.getByRole("alert")).toHaveCount(0);
   await expect(status.locator(".protection-duration")).toHaveCount(0);
   await expect(page.locator(".overview-banner")).toHaveCount(0);
   await expect(page.getByRole("switch", { name: "Stop protection" })).toHaveAttribute("aria-checked", "true");
@@ -34,10 +34,10 @@ test("fail-closed states stay explicit and never show the success effects", asyn
 
   await page.goto("/?mock=endpoint-busy");
   await expect(page.getByLabel("Protection status").getByText("Not protected", { exact: true })).toBeVisible();
-  await expect(page.getByText(/Address already in use/i)).toBeVisible();
+  await expect(page.getByText(/Address already in use/i)).toHaveCount(0);
   await expect(page.getByRole("switch", { name: "Start protection" })).toBeDisabled();
   await nav(page, "Settings").click();
-  await expect(page.getByRole("alert")).toContainText("Address already in use");
+  await expect(page.getByRole("alert")).toHaveCount(0);
 });
 
 test("agent operation failures stay out of the active protection status", async ({ page }) => {
@@ -46,22 +46,38 @@ test("agent operation failures stay out of the active protection status", async 
   await expect(status.getByText("Protected", { exact: true })).toBeVisible();
   await expect(status.locator(".protection-duration")).toBeVisible();
 
-  await page.getByRole("switch", { name: "Disconnect Claude Code", exact: true }).click();
+  const failure = page.waitForEvent("dialog");
+  const toggle = page.getByRole("switch", { name: "Connect Codex", exact: true }).click();
+  const dialog = await failure;
+  expect(dialog.message()).toContain("Codex could not connect");
+  expect(dialog.message()).toContain("Update Codex before connecting");
+  expect(dialog.message()).not.toContain("invalid_state");
+  await dialog.dismiss();
+  await toggle;
   const agents = page.locator(".overview-module", { has: page.getByRole("heading", { name: "Agents", exact: true }) });
-  await expect(agents.getByRole("alert")).toContainText("The operation could not complete.");
-  await expect(agents.getByRole("alert")).not.toContainText("operation_failed");
+  await expect(agents.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByRole("switch", { name: "Connect Codex", exact: true })).not.toBeChecked();
   await expect(status.getByRole("alert")).toHaveCount(0);
   await expect(status.locator(".protection-duration")).toBeVisible();
+  await page.getByRole("switch", { name: "Disconnect Claude Code", exact: true }).click();
+  await expect(page.getByRole("switch", { name: "Connect Claude Code", exact: true })).not.toBeChecked();
+  await nav(page, "Agents").click();
+  await expect(page.getByRole("alert")).toHaveCount(0);
 });
 
 test("native shell errors stay on their owning surface", async ({ page }) => {
   await page.goto("/?mock=ready");
-  await page.evaluate(() => window.dispatchEvent(new CustomEvent("mock:surface-error", {
+  const failure = page.waitForEvent("dialog");
+  const action = page.evaluate(() => window.dispatchEvent(new CustomEvent("mock:surface-error", {
     detail: { scope: "agents", message: "Agent menu action failed" },
   })));
+  const dialog = await failure;
+  expect(dialog.message()).toContain("Agent menu action failed");
+  await dialog.dismiss();
+  await action;
   const status = page.getByLabel("Protection status");
   const agents = page.locator(".overview-module", { has: page.getByRole("heading", { name: "Agents", exact: true }) });
-  await expect(agents.getByRole("alert")).toHaveText("Agent menu action failed");
+  await expect(agents.getByRole("alert")).toHaveCount(0);
   await expect(status.getByRole("alert")).toHaveCount(0);
   await nav(page, "Usage").click();
   await expect(page.getByRole("alert")).toHaveCount(0);

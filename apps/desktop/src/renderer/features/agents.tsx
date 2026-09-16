@@ -1,6 +1,6 @@
 import { displayAgentName, sortAgents } from "../lib/agents";
-import React, { useState } from "react";
-import { errorMessage } from "../lib/error-message";
+import React from "react";
+import { useErrorAlert } from "../lib/error-alert";
 import { ExternalLink, TriangleAlert } from "lucide-react";
 import claudeCodeIcon from "@lobehub/icons-static-svg/icons/claudecode-color.svg";
 import codexIcon from "@lobehub/icons-static-svg/icons/codex-color.svg";
@@ -13,7 +13,6 @@ import { StateLabel } from "../components/state-label";
 import { AgentAttention } from "../components/agent-attention";
 import ohMyPiIcon from "../assets/oh-my-pi.svg";
 import { type Tone } from "../lib/usage-presentation";
-import { Alert, AlertDescription } from "../components/ui/alert";
 import { Item, ItemActions, ItemContent, ItemTitle } from "../components/ui/item";
 import { Separator } from "../components/ui/separator";
 import { SwitchControl } from "../components/controls";
@@ -56,12 +55,10 @@ export function AgentsView({
   const connected = agents.filter((agent) => agent.installed && agent.connected).length;
   return (
     <div className="page-body max-w-230 min-h-full mt-0 mr-auto mb-0 ml-auto">
-      {problem && <Alert variant="destructive"><AlertDescription>{problem}</AlertDescription></Alert>}
-
       <section className="group mt-5 [&:first-child]:mt-0" aria-labelledby="agents-title">
         <h2 className="group-title mx-0.5 mb-2 flex min-h-5 items-center gap-2 text-sm font-semibold" id="agents-title">Installed <span className="ml-auto truncate text-xs font-normal text-muted-foreground">{connected} connected</span></h2>
         <div className="inset min-w-0 bg-card border border-border rounded-2xl overflow-hidden">
-          {!agents.some((agent) => agent.installed) && <EmptyState text="No installed agents found" />}
+          {!agents.some((agent) => agent.installed) && <EmptyState text={problem ? "Agent detection unavailable" : "No installed agents found"} />}
           {sortAgents(agents.filter((agent) => agent.installed)).map((agent) => (
             <AgentRow
               pendingConnection={pendingAgentChanges[agent.id]}
@@ -136,9 +133,8 @@ export function AgentRow({
 }
 
 function AgentWebsite({ agent }: { agent: AgentStatus }): React.JSX.Element {
-  const [error, setError] = useState<string>();
-  return <span><Button variant="outline" onClick={() => {
-    setError(undefined);
-    void desktopApi.openAgentWebsite(agent.id).catch((error: unknown) => setError(errorMessage(error)));
-  }}>Website<ExternalLink size={14} aria-hidden="true" /></Button>{error && <span className="row-note flex-[1_0_100%] block text-muted-foreground text-xs wrap-anywhere [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [code&]:overflow-hidden [code&]:text-ellipsis [code&]:whitespace-nowrap" role="alert">{error}</span>}</span>;
+  const reportError = useErrorAlert("Could not open agent website");
+  return <Button variant="outline" onClick={() => {
+    void desktopApi.openAgentWebsite(agent.id).catch(reportError);
+  }}>Website<ExternalLink size={14} aria-hidden="true" /></Button>;
 }

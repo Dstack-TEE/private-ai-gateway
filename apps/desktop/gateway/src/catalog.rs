@@ -34,6 +34,8 @@ pub struct EndpointInventory {
     schema_version: u32,
     endpoint: String,
     checked_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
     results: Vec<EndpointObservation>,
 }
 
@@ -46,6 +48,35 @@ struct EndpointObservation {
     reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     http_status: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checks: Option<EndpointChecks>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EndpointChecks {
+    streaming: EndpointCheck,
+    tools: EndpointCheck,
+    tool_result: EndpointCheck,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct EndpointCheck {
+    status: ObservationStatus,
+    reason: String,
+}
+
+impl EndpointChecks {
+    fn entries(&self) -> [&EndpointCheck; 3] {
+        [&self.streaming, &self.tools, &self.tool_result]
+    }
+
+    fn supported(&self) -> bool {
+        self.entries()
+            .iter()
+            .all(|check| check.status == ObservationStatus::Supported)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -58,21 +89,31 @@ enum ObservationStatus {
 
 impl EndpointInventory {
     pub fn is_newer_than(&self, other: &Self) -> bool {
-        self.checked_at > other.checked_at
+        self.schema_version >= other.schema_version && self.checked_at > other.checked_at
     }
 
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
         let inventory: Self = serde_json::from_slice(bytes)
             .map_err(|_| "Invalid model endpoint inventory".to_string())?;
         let mut pairs = HashSet::new();
-        if inventory.schema_version != 1
+        if !matches!(inventory.schema_version, 1 | 2)
             || inventory.endpoint != "https://tee.redpill.ai"
+            || inventory.reasoning_effort.as_deref().is_some_and(|effort| {
+                inventory.schema_version != 2 || !matches!(effort, "low" | "medium" | "high")
+            })
             || inventory.results.is_empty()
             || inventory.results.len() > 10_000
             || inventory.results.iter().any(|entry| {
                 entry.model.trim().is_empty()
                     || entry.model.len() > 256
                     || entry.reason.len() > 256
+                    || (inventory.schema_version == 2) != entry.checks.is_some()
+                    || entry.checks.as_ref().is_some_and(|checks| {
+                        checks
+                            .entries()
+                            .iter()
+                            .any(|check| check.reason.is_empty() || check.reason.len() > 256)
+                    })
                     || !matches!(
                         entry.endpoint.as_str(),
                         "/v1/chat/completions" | "/v1/messages" | "/v1/responses"
@@ -118,6 +159,10 @@ pub struct CatalogModel {
     /// None means this endpoint has no compatibility inventory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supported_surfaces: Option<Vec<Surface>>,
+    /// Version 2 observations also check streamed tool calls and tool-result turns.
+    /// None means these agent capabilities have not been probed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_surfaces: Option<Vec<Surface>>,
 }
 
 impl CatalogModel {
@@ -125,6 +170,14 @@ impl CatalogModel {
         self.supported_surfaces
             .as_ref()
             .is_none_or(|surfaces| surfaces.contains(&surface))
+    }
+
+    pub fn supports_agent(&self, surface: Surface) -> bool {
+        self.supports(surface)
+            && self
+                .agent_surfaces
+                .as_ref()
+                .is_none_or(|surfaces| surfaces.contains(&surface))
     }
 
     pub fn id(&self) -> &str {
@@ -209,6 +262,7 @@ impl Catalog {
             models.push(CatalogModel {
                 remote: entry,
                 supported_surfaces: None,
+                agent_surfaces: None,
             });
         }
         let revision = hasher
@@ -230,6 +284,12 @@ impl Catalog {
     pub fn for_surface(&self, surface: Surface) -> Self {
         let mut catalog = self.clone();
         catalog.models.retain(|model| model.supports(surface));
+        catalog
+    }
+
+    pub fn for_agent_surface(&self, surface: Surface) -> Self {
+        let mut catalog = self.for_surface(surface);
+        catalog.models.retain(|model| model.supports_agent(surface));
         catalog
     }
 
@@ -281,6 +341,23 @@ impl Catalog {
                 })
                 .collect(),
             );
+            model.agent_surfaces = (inventory.schema_version == 2).then(|| {
+                [
+                    Surface::ChatCompletions,
+                    Surface::Messages,
+                    Surface::Responses,
+                ]
+                .into_iter()
+                .filter(|surface| {
+                    inventory.results.iter().any(|entry| {
+                        entry.model == model.id()
+                            && entry.endpoint == surface.path()
+                            && entry.status == ObservationStatus::Supported
+                            && entry.checks.as_ref().is_some_and(EndpointChecks::supported)
+                    })
+                })
+                .collect()
+            });
         }
         let bytes = serde_json::to_vec(&self.models).map_err(|error| error.to_string())?;
         self.revision = format!("{:x}", Sha256::digest(bytes));

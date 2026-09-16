@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { nav } from "./helpers";
+import { nav, expectErrorAlert } from "./helpers";
 
 test("desktop suppresses browser reload menus and preserves native editing actions", async ({ page }) => {
   await page.addInitScript(() => window.addEventListener("mock:edit-menu", (event) => {
@@ -283,11 +283,11 @@ test("rotating the client key requires an explicit native confirmation", async (
     if (!surface) await page.getByRole("button", { name: "Local API settings", exact: true }).click();
     await expect(key).not.toHaveValue("");
     page.once("dialog", (dialog) => dialog.accept());
-    await page.getByRole("button", { name: "Rotate key" }).click();
+    await expectErrorAlert(page, () => page.getByRole("button", { name: "Rotate key" }).click(), "Could not store the replacement client key");
     await expect(key).toHaveValue("");
     await expect(page.getByRole("button", { name: "Copy client key" })).toBeDisabled();
     await expect(page.getByRole("button", { name: "Rotate key" })).toBeEnabled();
-    await expect(page.getByRole("alert")).toContainText("Could not store the replacement client key");
+    await expect(page.getByRole("alert")).toHaveCount(0);
     page.once("dialog", (dialog) => dialog.accept());
     await page.getByRole("button", { name: "Rotate key" }).click();
     await expect(key).toHaveValue(/^sk-pap-/);
@@ -337,10 +337,8 @@ test("protection flow, page headers, and focus follow the native desktop contrac
   await expect(page.getByLabel("Protection status").getByText("Not protected", { exact: true })).toBeVisible();
 });
 
-test("a native proof error remains dismissible without a window close button", async ({ page }) => {
-  await page.goto("/?mock=ready&native-dialog=usage-proof&record=missing");
-  await expect(page.getByRole("alert")).toHaveText("Usage record not found");
-  await expect(page.getByRole("button", { name: "Done", exact: true })).toBeVisible();
-  await page.keyboard.press("Escape");
+test("a native proof error closes the failed window after the system alert", async ({ page }) => {
+  await expectErrorAlert(page, () => page.goto("/?mock=ready&native-dialog=usage-proof&record=missing"), "Usage record not found");
+  await expect(page.getByRole("alert")).toHaveCount(0);
   await expect(page.getByLabel("Usage proof closed")).toBeVisible();
 });

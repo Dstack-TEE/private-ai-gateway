@@ -8,7 +8,7 @@ import { UpdateControl, UpdateChannelControl, useUpdates } from "../updates";
 import { Button } from "../components/ui/button";
 import { AppearanceControl } from "../components/appearance";
 import { ExportDiagnostics } from "../components/maintenance";
-import { Alert, AlertDescription } from "../components/ui/alert";
+import { ErrorAlert } from "../components/error-alert";
 import { Item, ItemActions, ItemContent, ItemTitle, ItemDescription } from "../components/ui/item";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
 import { SettingsSection, SettingsList, SettingsLink, SettingsToggle } from "../components/settings";
@@ -31,17 +31,15 @@ function CliRegistrationControl(): React.JSX.Element {
   const change = async () => {
     if (!registration || busy) return;
     try { await mutation.mutateAsync(!registration.installed); }
-    catch { /* The mutation error is rendered below. */ }
+    catch { /* ErrorAlert observes the mutation failure. */ }
   };
   const directory = registration ? parentDirectory(registration.commandPath) : undefined;
-  const description = error
-    ?? registration?.startupError
-    ?? (registration?.installed
+  const description = registration?.installed
       ? registration.onPath
         ? `Installed at ${directory}. This app can resolve private-ai-proxy; terminal PATH may differ.`
         : `Installed at ${directory}. Ensure this directory is in your terminal PATH.`
-      : directory ? `Default location: ${directory}` : "Command registration is unavailable.");
-  return <Item>
+      : directory ? `Default location: ${directory}` : "Command registration is unavailable.";
+  return <Item><ErrorAlert title="Command registration failed" error={error ?? registration?.startupError} />
     <ItemContent>
       <ItemTitle>private-ai-proxy command</ItemTitle>
       <ItemDescription>{description}</ItemDescription>
@@ -61,7 +59,6 @@ export function SettingsView({
   running,
   allowDevelopmentOs,
   locked,
-  problem,
   onPolicy,
   onResetSettings,
   onAboutLink,
@@ -76,7 +73,6 @@ export function SettingsView({
   running: boolean;
   allowDevelopmentOs: boolean;
   locked: boolean;
-  problem?: string;
   onPolicy(value: boolean): void;
   onResetSettings(): void;
   onAboutLink(target: "documentation" | "github"): void;
@@ -89,10 +85,6 @@ export function SettingsView({
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   return (
     <div className="page-body max-w-230 min-h-full mt-0 mr-auto mb-0 ml-auto settings-page">
-      {state.wakeMonitorAvailable === false && <Alert className="border-warning/30 bg-warning/10"><AlertDescription className="text-warning">System wake monitoring is unavailable. Reconnect protection manually after sleep until monitoring recovers.</AlertDescription></Alert>}
-      {problem && <Alert variant="destructive"><AlertDescription>{problem}</AlertDescription></Alert>}
-
-      {state.endpointError && <Alert className="border-warning/30 bg-warning/10"><AlertDescription className="text-warning">{state.endpointError}</AlertDescription></Alert>}
 
       <SettingsSection title="General">
           <SettingsToggle label="Open at Login" checked={launchPreferences?.openAtLogin ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("openAtLogin", !launchPreferences?.openAtLogin)} />

@@ -1,5 +1,6 @@
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
+import { EventSourceParserStream } from "eventsource-parser/stream";
 
 const surfaces = ["chat/completions", "responses", "messages"];
 const unsupportedCodes = new Set([
@@ -7,18 +8,33 @@ const unsupportedCodes = new Set([
   "unsupported_endpoint", "endpoint_not_supported",
 ]);
 const maxBodyBytes = 1024 * 1024;
+const toolName = "probe_echo";
+const toolParameters = {
+  type: "object", properties: { value: { type: "string", enum: ["OK"] } },
+  required: ["value"], additionalProperties: false,
+};
+const unknown = reason => ({ status: "inconclusive", reason });
+const supported = reason => ({ status: "supported", reason });
+
+function boundedBody(response) {
+  if (!response.body) throw new Error("empty_response");
+  let bytes = 0;
+  return response.body.pipeThrough(new TransformStream({
+    transform(chunk, controller) {
+      bytes += chunk.byteLength;
+      if (bytes > maxBodyBytes) throw new Error("response_too_large");
+      controller.enqueue(chunk);
+    },
+  }));
+}
 
 async function readJson(response) {
-  if (!response.body) throw new Error("empty_response");
-  const reader = response.body.getReader();
+  const reader = boundedBody(response).getReader();
   const chunks = [];
-  let length = 0;
   try {
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
-      length += value.byteLength;
-      if (length > maxBodyBytes) throw new Error("response_too_large");
       chunks.push(value);
     }
     return JSON.parse(Buffer.concat(chunks).toString("utf8"));
@@ -28,11 +44,175 @@ async function readJson(response) {
   }
 }
 
-function payload(model, surface) {
-  const message = { role: "user", content: "Reply OK." };
+export function payload(model, surface, { tools = false, reasoningEffort } = {}) {
+  const message = { role: "user", content: tools ? "Call probe_echo with value OK, then reply with its result." : "Reply OK." };
+  const body = surface === "responses"
+    ? { model, input: [message], max_output_tokens: tools ? 256 : 16, stream: tools, store: false }
+    : { model, messages: [message], max_tokens: tools ? 256 : 16, stream: tools };
+  if (!tools) return body;
+  const definition = { name: toolName, description: "Echo the supplied value.", parameters: toolParameters, strict: true };
+  if (surface === "messages") {
+    body.tools = [{ name: toolName, description: definition.description, input_schema: toolParameters }];
+    body.tool_choice = { type: "tool", name: toolName };
+  } else {
+    body.tools = [surface === "responses" ? { type: "function", ...definition } : { type: "function", function: definition }];
+    body.tool_choice = surface === "responses" ? { type: "function", name: toolName } : { type: "function", function: { name: toolName } };
+    body.parallel_tool_calls = false;
+    if (surface === "responses") {
+      body.include = ["reasoning.encrypted_content"];
+      if (reasoningEffort) body.reasoning = { effort: reasoningEffort };
+    }
+  }
+  return body;
+}
+
+export function toolResultPayload(model, surface, body, reasoningEffort) {
+  const request = payload(model, surface, { tools: true, reasoningEffort });
+  const message = { role: "user", content: "Call probe_echo with value OK, then reply with its result." };
+  if (surface === "responses") {
+    const call = body.output.find(item => item?.type === "function_call");
+    if (!call) throw new Error("missing_tool_call");
+    request.input = [message, ...body.output, { type: "function_call_output", call_id: call.call_id, output: "OK" }];
+    request.tool_choice = "none";
+  } else if (surface === "messages") {
+    const call = body.content.find(item => item?.type === "tool_use");
+    if (!call) throw new Error("missing_tool_call");
+    request.messages = [message, { role: "assistant", content: body.content }, {
+      role: "user", content: [{ type: "tool_result", tool_use_id: call.id, content: "OK" }],
+    }];
+    request.tool_choice = { type: "auto" };
+  } else {
+    const assistant = body.choices[0].message;
+    request.messages = [message, assistant, { role: "tool", tool_call_id: assistant.tool_calls[0].id, content: "OK" }];
+    request.tool_choice = "none";
+  }
+  return request;
+}
+
+function validCall(call, surface) {
+  try {
+    const name = surface === "chat/completions" ? call.function.name : call.name;
+    const args = surface === "messages" ? call.input : JSON.parse(surface === "responses" ? call.arguments : call.function.arguments);
+    const id = surface === "responses" ? call.call_id : call.id;
+    return name === toolName && typeof id === "string" && id.length > 0 &&
+      args?.value === "OK" && Object.keys(args).length === 1;
+  } catch {
+    return false;
+  }
+}
+
+async function readStream(response) {
+  if (response.headers.get("content-type")?.split(";")[0].trim() !== "text/event-stream") {
+    throw new Error("expected_event_stream");
+  }
+  const reader = boundedBody(response).pipeThrough(new TextDecoderStream())
+    .pipeThrough(new EventSourceParserStream({ onError: "terminate", maxBufferSize: maxBodyBytes })).getReader();
+  const events = [];
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      const data = value.data === "[DONE]" ? { type: "done" } : JSON.parse(value.data);
+      if (!data || typeof data !== "object") throw new Error("invalid_stream_event");
+      events.push(data);
+      if (["done", "message_stop", "response.completed", "response.failed", "response.incomplete", "error"].includes(data.type)) break;
+    }
+    return events;
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
+/** Accumulate documented API events; SSE framing is handled by eventsource-parser. */
+export function summarizeStream(surface, events) {
+  let body;
+  let terminal = false;
+  let delta = false;
+  const responseCalls = new Map();
+  const validIndex = index => Number.isInteger(index) && index >= 0 && index < 128;
+  if (events.some(event => event.error || ["error", "response.failed", "response.incomplete"].includes(event.type))) {
+    return { streaming: unknown("stream_error_or_incomplete") };
+  }
+  if (surface === "responses") {
+    body = events.find(event => event.type === "response.completed")?.response;
+    terminal = body?.status === "completed" && body?.object === "response" && Array.isArray(body.output);
+    delta = events.some(event => ["response.output_text.delta", "response.function_call_arguments.delta"].includes(event.type) && typeof event.delta === "string" && event.delta.length > 0);
+    for (const event of events) {
+      if (event.type === "response.output_item.added" && event.item?.type === "function_call") {
+        responseCalls.set(event.output_index, { arguments: event.item.arguments ?? "", done: false });
+      }
+      if (event.type === "response.function_call_arguments.delta") {
+        const call = responseCalls.get(event.output_index);
+        if (!call || typeof event.delta !== "string") return { streaming: unknown("invalid_event_sequence") };
+        call.arguments += event.delta;
+      }
+      if (event.type === "response.output_item.done" && event.item?.type === "function_call") {
+        const call = responseCalls.get(event.output_index);
+        if (call) call.done = call.arguments === event.item.arguments;
+      }
+    }
+  } else if (surface === "messages") {
+    body = events.find(event => event.type === "message_start")?.message;
+    if (body) {
+      body = { ...body, content: [] };
+      const partial = new Map();
+      for (const event of events) {
+        if (["content_block_start", "content_block_delta"].includes(event.type) && !validIndex(event.index)) {
+          return { streaming: unknown("invalid_event_sequence") };
+        }
+        if (event.type === "content_block_start") body.content[event.index] = { ...event.content_block };
+        if (event.type === "content_block_delta") {
+          const block = body.content[event.index];
+          if (!block) return { streaming: unknown("invalid_event_sequence") };
+          if (event.delta?.type === "text_delta") { block.text += event.delta.text; delta = true; }
+          if (event.delta?.type === "input_json_delta") { partial.set(event.index, (partial.get(event.index) ?? "") + event.delta.partial_json); delta = true; }
+          if (event.delta?.type === "thinking_delta") block.thinking += event.delta.thinking;
+          if (event.delta?.type === "signature_delta") block.signature = (block.signature ?? "") + event.delta.signature;
+        }
+        if (event.type === "message_delta") body.stop_reason = event.delta?.stop_reason;
+      }
+      try { for (const [index, text] of partial) body.content[index].input = JSON.parse(text); }
+      catch { return { streaming: unknown("invalid_tool_arguments") }; }
+    }
+    terminal = events.some(event => event.type === "message_stop") && body?.role === "assistant" && ["end_turn", "tool_use"].includes(body.stop_reason);
+  } else {
+    const message = { role: "assistant", content: "", tool_calls: [] };
+    let finish;
+    for (const event of events) {
+      const choice = event.choices?.find(choice => choice.index === 0);
+      if (!choice) continue;
+      if (choice.delta?.content) { message.content += choice.delta.content; delta = true; }
+      for (const call of choice.delta?.tool_calls ?? []) {
+        if (!validIndex(call.index)) return { streaming: unknown("invalid_event_sequence") };
+        const current = message.tool_calls[call.index] ?? { id: "", type: "function", function: { name: "", arguments: "" } };
+        current.id += call.id ?? "";
+        current.function.name += call.function?.name ?? "";
+        current.function.arguments += call.function?.arguments ?? "";
+        message.tool_calls[call.index] = current;
+        if (call.function?.arguments) delta = true;
+      }
+      if (choice.finish_reason) finish = choice.finish_reason;
+    }
+    body = { choices: [{ message }] };
+    terminal = events.some(event => event.type === "done") && ["stop", "tool_calls"].includes(finish);
+  }
+  if (!terminal || !delta) return { streaming: unknown("missing_stream_delta_or_completion") };
+  const calls = surface === "responses" ? body.output.filter(item => item.type === "function_call")
+    : surface === "messages" ? body.content.filter(item => item.type === "tool_use") : body.choices[0].message.tool_calls;
+  const validResponseDeltas = surface !== "responses" || body.output.every((item, index) => item.type !== "function_call" || (
+    responseCalls.get(index)?.done && responseCalls.get(index).arguments === item.arguments
+  ));
+  const tools = calls.length === 1 && validCall(calls[0], surface) && validResponseDeltas
+    ? supported("valid_streamed_tool_call") : { status: "unavailable", reason: "required_tool_call_missing_or_invalid" };
+  return { body, streaming: supported("valid_event_stream"), tools };
+}
+
+function hasText(surface, body) {
   return surface === "responses"
-    ? { model, input: [message], max_output_tokens: 16, stream: false }
-    : { model, messages: [message], max_tokens: 16, stream: false };
+    ? body?.output?.some(item => item?.type === "message" && item.content?.some(part => part?.type === "output_text" && part.text?.trim()))
+    : surface === "messages" ? body?.content?.some(part => part?.type === "text" && part.text?.trim())
+      : !!body?.choices?.[0]?.message?.content?.trim();
 }
 
 export function classify(surface, status, body) {
@@ -62,7 +242,7 @@ export function classify(surface, status, body) {
     : { status: "inconclusive", reason: "unexpected_response" };
 }
 
-export async function probe({ endpoint, key, modelIds = [], surfaceNames = surfaces, concurrency = 2, timeout = 20000 }) {
+export async function probe({ endpoint, key, modelIds = [], surfaceNames = surfaces, concurrency = 2, timeout = 20000, basic = false, reasoningEffort, fetchImpl = fetch }) {
   const base = new URL(endpoint);
   if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash) {
     throw new Error("Use an HTTPS endpoint without credentials, query, or fragment.");
@@ -75,11 +255,14 @@ export async function probe({ endpoint, key, modelIds = [], surfaceNames = surfa
       !Number.isInteger(timeout) || timeout < 1000 || timeout > 60000) {
     throw new Error("Concurrency must be 1-4 and timeout must be 1000-60000 milliseconds.");
   }
+  if (reasoningEffort && (!["low", "medium", "high"].includes(reasoningEffort) || basic)) {
+    throw new Error("Reasoning effort must be low, medium, or high, and requires full probes.");
+  }
   const root = base.href.replace(/\/$/, "").replace(/\/v1$/, "");
   const headers = { authorization: `Bearer ${key}`, "content-type": "application/json" };
   let catalog;
   try {
-    const response = await fetch(`${root}/v1/models`, {
+    const response = await fetchImpl(`${root}/v1/models`, {
       headers, redirect: "error", signal: AbortSignal.timeout(timeout),
     });
     if (!response.ok) throw new Error(`Model catalog returned HTTP ${response.status}.`);
@@ -100,34 +283,56 @@ export async function probe({ endpoint, key, modelIds = [], surfaceNames = surfa
   const results = new Array(jobs.length);
   let cursor = 0;
   let stopped = false;
+  async function request(model, surface, body, stream = false) {
+    if (stopped) return { result: unknown("not_probed_after_auth_or_limit_error") };
+    try {
+      const response = await fetchImpl(`${root}/v1/${surface}`, {
+        method: "POST", redirect: "error", signal: AbortSignal.timeout(timeout),
+        headers: surface === "messages" ? { ...headers, "anthropic-version": "2023-06-01" } : headers,
+        body: JSON.stringify(body),
+      });
+      const httpStatus = response.status;
+      if (stream && response.ok) {
+        const summary = summarizeStream(surface, await readStream(response));
+        return { ...summary, result: summary.streaming, httpStatus };
+      }
+      let data;
+      try { data = await readJson(response); } catch { /* Preserve the HTTP failure classification. */ }
+      const { stop, ...result } = classify(surface, httpStatus, data);
+      if (stop) stopped = true;
+      return { result, httpStatus };
+    } catch {
+      return { result: unknown("network_timeout_or_invalid_response") };
+    }
+  }
   async function worker() {
     while (cursor < jobs.length) {
       const index = cursor++;
       const { model, surface } = jobs[index];
-      let result = { status: "inconclusive", reason: "not_probed_after_auth_or_limit_error" };
-      let httpStatus;
-      if (!stopped) {
-        try {
-          const response = await fetch(`${root}/v1/${surface}`, {
-            method: "POST", redirect: "error", signal: AbortSignal.timeout(timeout),
-            headers: surface === "messages" ? { ...headers, "anthropic-version": "2023-06-01" } : headers,
-            body: JSON.stringify(payload(model, surface)),
-          });
-          httpStatus = response.status;
-          let body;
-          try { body = await readJson(response); } catch { /* Classification preserves HTTP failures. */ }
-          result = classify(surface, httpStatus, body);
-          if (result.stop) stopped = true;
-        } catch {
-          result = { status: "inconclusive", reason: "network_or_timeout" };
+      const { result, httpStatus } = await request(model, surface, payload(model, surface));
+      let checks;
+      if (!basic) {
+        checks = { streaming: unknown("not_probed"), tools: unknown("not_probed"), toolResult: unknown("not_probed") };
+        if (result.status === "supported") {
+          const stream = await request(model, surface, payload(model, surface, { tools: true, reasoningEffort }), true);
+          checks.streaming = stream.result;
+          checks.tools = stream.tools ?? unknown("no_valid_tool_stream");
+          if (checks.streaming.status === "supported" && checks.tools.status === "supported") {
+            try {
+              const resumed = await request(model, surface, toolResultPayload(model, surface, stream.body, reasoningEffort), true);
+              checks.toolResult = resumed.result.status === "supported" && hasText(surface, resumed.body)
+                ? supported("valid_tool_result_response") : resumed.result.status === "supported" ? unknown("no_tool_result_text") : resumed.result;
+            } catch {
+              checks.toolResult = unknown("invalid_tool_call_shape");
+            }
+          }
         }
       }
-      const { stop: _stop, ...publicResult } = result;
-      results[index] = { model, endpoint: `/v1/${surface}`, ...publicResult, ...(httpStatus ? { httpStatus } : {}) };
+      results[index] = { model, endpoint: `/v1/${surface}`, ...result, ...(checks ? { checks } : {}), ...(httpStatus ? { httpStatus } : {}) };
     }
   }
   await Promise.all(Array.from({ length: concurrency }, worker));
-  return { schemaVersion: 1, endpoint: root, checkedAt: new Date().toISOString(), results };
+  return { schemaVersion: basic ? 1 : 2, endpoint: root, checkedAt: new Date().toISOString(), ...(reasoningEffort ? { reasoningEffort } : {}), results };
 }
 
 async function main() {
@@ -135,17 +340,19 @@ async function main() {
     endpoint: { type: "string" }, "key-env": { type: "string", default: "PAP_PROBE_API_KEY" },
     model: { type: "string", multiple: true }, json: { type: "boolean" },
     surface: { type: "string", multiple: true },
+    basic: { type: "boolean" }, "reasoning-effort": { type: "string" },
     concurrency: { type: "string", default: "2" }, timeout: { type: "string", default: "20000" },
     help: { type: "boolean" },
   } });
   if (values.help) {
-    console.log("Usage: node scripts/probe-model-endpoints.mjs --endpoint https://tee.redpill.ai [--key-env PAP_PROBE_API_KEY] [--model ID] [--surface responses] [--json]\nSends one small inference per model and endpoint. Requests may be billed. No retries.");
+    console.log("Usage: node scripts/probe-model-endpoints.mjs --endpoint https://tee.redpill.ai [--key-env PAP_PROBE_API_KEY] [--model ID] [--surface responses] [--basic] [--reasoning-effort low|medium|high] [--json]\nChecks text, streamed tool calls, and tool results (up to 3 inferences per model and endpoint). --basic checks text only. Requests may be billed. No retries.");
     return;
   }
   if (!values.endpoint) throw new Error("Provide --endpoint. Use --help for usage.");
   const report = await probe({
     endpoint: values.endpoint, key: process.env[values["key-env"]], modelIds: values.model,
     surfaceNames: values.surface,
+    basic: values.basic, reasoningEffort: values["reasoning-effort"],
     concurrency: Number(values.concurrency), timeout: Number(values.timeout),
   });
   if (values.json) console.log(JSON.stringify(report, null, 2));
@@ -153,7 +360,7 @@ async function main() {
     console.log(`Endpoint capabilities: ${report.endpoint}`);
     console.table(report.results);
   }
-  if (report.results.some(result => result.status === "inconclusive")) process.exitCode = 2;
+  if (report.results.some(result => result.status === "inconclusive" || Object.values(result.checks ?? {}).some(check => check.status === "inconclusive"))) process.exitCode = 2;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

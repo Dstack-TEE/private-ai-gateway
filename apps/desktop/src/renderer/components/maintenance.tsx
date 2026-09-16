@@ -4,6 +4,7 @@ import { Download, Upload } from "lucide-react";
 import type { DesktopApi } from "../../shared/contracts";
 import { IconButton } from "./controls";
 import { SettingsLink } from "./settings";
+import { showErrorAlert } from "../lib/error-alert";
 
 const mock = new URLSearchParams(window.location.search).has("mock");
 const filters = [{ name: "JSON", extensions: ["json"] }];
@@ -49,7 +50,7 @@ export function ExportDiagnostics({ api, onMessage }: { api: DesktopApi; onMessa
       if (!path) return;
       await api.exportDiagnostics(path);
       onMessage("Diagnostics exported without keys, URLs, local paths or request content.");
-    } catch { onMessage("Could not export diagnostics. Choose a new file name and check write permissions."); }
+    } catch { await showErrorAlert("Could not export diagnostics", "Choose a new file name and check write permissions.", api); }
     finally { setBusy(false); }
   };
   return <SettingsLink title={busy ? "Exporting diagnostics" : "Export diagnostics"} aria-label="Export diagnostics" disabled={busy} onClick={() => void run()} />;

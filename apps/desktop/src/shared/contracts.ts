@@ -385,6 +385,8 @@ export interface DesktopApi {
   openApiKeyPage(provider: ServiceProvider): Promise<void>;
   /** Use the platform confirmation dialog for destructive actions. */
   confirm(options: ConfirmationOptions): Promise<boolean>;
+  /** Show a platform-native error alert for an explicit user action that failed. */
+  showErrorAlert(title: string, message: string): Promise<void>;
   start(config: StartGatewayConfig): Promise<GatewayState>;
   saveConfiguration(profile: ConfidentialProfileInput, requireProductionOs: boolean, key?: string): Promise<GatewayState>;
   completeAccountLogin(id: string, callbackUrl: string): Promise<void>;

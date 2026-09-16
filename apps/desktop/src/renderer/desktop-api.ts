@@ -141,6 +141,7 @@ export const desktopApi: DesktopApi = {
       cancelLabel: options.cancelLabel ?? "Cancel",
     });
   },
+  showErrorAlert: (title, message) => invoke("show_error_alert", { title, message }),
 
   saveConfiguration: (profile, requireProductionOs, key) => invoke("save_configuration", { profile, requireProductionOs, key }),
   completeAccountLogin: (id, callbackUrl) => invoke("complete_account_login", { id, callbackUrl }),

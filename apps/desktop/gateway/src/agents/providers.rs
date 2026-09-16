@@ -11,17 +11,11 @@ pub(super) struct Inputs<'a> {
 }
 
 /// The fields this app owns for the agent and the values a connection writes.
-pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
-    let catalog = inputs
-        .catalog
-        .ok_or_else(|| "The verified model list is not available".to_string())?;
-    let catalog = catalog.for_surface(agent.surface());
+pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, AgentError> {
+    let catalog = inputs.catalog.ok_or(AgentError::InvalidState)?;
+    let catalog = catalog.for_agent_surface(agent.surface());
     if catalog.models.is_empty() {
-        return Err(format!(
-            "No models with confirmed {} support are available for {}",
-            agent.surface().path(),
-            agent.name()
-        ));
+        return Err(AgentError::NoCompatibleModels);
     }
     let inputs = &Inputs {
         catalog: Some(&catalog),
@@ -35,23 +29,18 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, St
         .map(str::trim)
         .filter(|model| !model.is_empty());
     if inputs.options.default_model.is_some() && default_model.is_none() {
-        return Err("Choose a non-empty model ID".into());
+        return Err(AgentError::IncompatibleModel);
     }
     if default_model.is_some_and(|model| catalog.get(model).is_none()) {
-        return Err(format!(
-            "`{}` is not in the verified model list compatible with {} ({})",
-            default_model.unwrap_or_default(),
-            agent.name(),
-            agent.surface().path()
-        ));
+        return Err(AgentError::IncompatibleModel);
     }
     if agent == Agent::Codex && default_model.is_none() {
-        return Err("Choose a verified default model for Codex".to_string());
+        return Err(AgentError::IncompatibleModel);
     }
     let base = inputs.endpoint.trim_end_matches('/');
     Ok(match agent {
-        Agent::OpenClaw => openclaw::fields(inputs)?,
-        Agent::OhMyPi => oh_my_pi::fields(inputs)?,
+        Agent::OpenClaw => openclaw::fields(inputs).map_err(AgentError::ConfigurationConflict)?,
+        Agent::OhMyPi => oh_my_pi::fields(inputs).map_err(AgentError::ConfigurationConflict)?,
         Agent::Codex => {
             let mut fields = vec![
                 set(&["model_provider"], "private_ai_proxy"),
@@ -125,7 +114,8 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, St
                 ),
                 set(
                     &["apiKeyHelper"],
-                    helper_command(inputs.helper_exe, "claude-code")?,
+                    helper_command(inputs.helper_exe, "claude-code")
+                        .map_err(AgentError::ConfigurationConflict)?,
                 ),
                 absent(&["env", "ANTHROPIC_AUTH_TOKEN"]),
                 absent(&["env", "ANTHROPIC_API_KEY"]),
@@ -149,7 +139,8 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, St
         }
         Agent::Pi => vec![generated_catalog(
             &["providers", "private-ai-proxy"],
-            pi_provider(catalog, base, inputs.helper_exe)?,
+            pi_provider(catalog, base, inputs.helper_exe)
+                .map_err(AgentError::ConfigurationConflict)?,
             catalog.models.len(),
         )],
         Agent::Hermes => {
@@ -161,7 +152,8 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, St
                 boolean(&["providers", provider, "discover_models"], true),
                 set(
                     &["providers", provider, "key_cmd"],
-                    credential_helper_command(inputs.helper_exe, Agent::Hermes)?,
+                    credential_helper_command(inputs.helper_exe, Agent::Hermes)
+                        .map_err(AgentError::ConfigurationConflict)?,
                 ),
                 set(&["model", "provider"], format!("custom:{provider}")),
             ];
@@ -308,7 +300,7 @@ pub(super) fn codex_catalog(
     let models = catalog
         .models
         .iter()
-        .filter(|model| model.supports(Surface::Responses))
+        .filter(|model| model.supports_agent(Surface::Responses))
         .enumerate()
         .map(|(index, model)| {
             let leaf = model.id().rsplit('/').next().unwrap_or(model.id());

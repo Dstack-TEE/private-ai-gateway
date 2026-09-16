@@ -5,7 +5,7 @@ fn codex_model_changes_keep_credentials_but_endpoint_changes_revoke_them() {
     let sandbox = sandbox("codex-model-preference");
     let agent = Agent::Codex;
     let path = agent.config_path(&sandbox.home, false);
-    write(
+    write_executable(
         &sandbox
             .home
             .join(".local/bin")
@@ -237,7 +237,7 @@ fn inventory_refresh_updates_active_catalog_without_rotating_credentials() {
     let agent = Agent::Pi;
     let path = agent.config_path(&sandbox.home, false);
     write(&path, r#"{"custom":true}"#);
-    write(
+    write_executable(
         &sandbox
             .home
             .join(".local/bin")
@@ -538,18 +538,40 @@ fn agents_require_a_verified_catalog_model() {
             &ConnectOptions::default()
         )
         .is_ok());
-    assert!(sandbox
-        .projector
-        .preview(
-            Agent::ClaudeCode,
-            true,
-            Some(&catalog()),
-            &ConnectOptions {
-                default_model: Some("claude-sonnet-4-6".to_string()),
-            },
+    assert!(
+        sandbox
+            .projector
+            .preview(
+                Agent::ClaudeCode,
+                true,
+                Some(&catalog()),
+                &ConnectOptions {
+                    default_model: Some("claude-sonnet-4-6".to_string()),
+                },
+            )
+            .unwrap_err()
+            .code()
+            == "incompatible_model"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(
+            &sandbox.projector.helper_exe,
+            fs::Permissions::from_mode(0o600),
         )
-        .unwrap_err()
-        .contains("not in the verified model list"));
+        .unwrap();
+        assert!(sandbox.projector.require_helper().is_err());
+        assert!(
+            sandbox
+                .projector
+                .preview(Agent::Codex, true, Some(&catalog()), &claude_options())
+                .unwrap_err()
+                .code()
+                == "helper_unavailable"
+        );
+    }
     // Without the bundled helper, agents cannot authenticate.
     fs::remove_file(&sandbox.projector.helper_exe).unwrap();
     let status = &sandbox.projector.scan(Some(&catalog())).unwrap().0[1];
@@ -557,9 +579,12 @@ fn agents_require_a_verified_catalog_model() {
         .error
         .as_deref()
         .is_some_and(|error| error.contains("helper")));
-    assert!(sandbox
-        .projector
-        .preview(Agent::ClaudeCode, true, Some(&catalog()), &claude_options())
-        .unwrap_err()
-        .contains("helper"));
+    assert!(
+        sandbox
+            .projector
+            .preview(Agent::ClaudeCode, true, Some(&catalog()), &claude_options())
+            .unwrap_err()
+            .code()
+            == "helper_unavailable"
+    );
 }

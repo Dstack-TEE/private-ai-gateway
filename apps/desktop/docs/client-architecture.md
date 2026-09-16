@@ -1,6 +1,6 @@
 # Private AI Proxy architecture
 
-Status: implemented; modular layout updated 2026-09-12.
+Status: implemented; modular layout updated 2026-09-16.
 
 ## Responsibilities
 
@@ -9,7 +9,8 @@ Status: implemented; modular layout updated 2026-09-12.
 | Private AI Gateway | Remote attested inference service and signed receipts | `src/aggregator`, `src/middleware` |
 | Private AI Proxy | Desktop profiles, agent connections, verification and usage | `apps/desktop/src/renderer` |
 | Local backend | Sessions, configuration transactions, local API and process ownership | `apps/desktop/runtime`, `apps/desktop/gateway` |
-| `private-ai-proxy` | Unified managed-client and ACI protocol commands | `src/bin/private-ai-proxy` |
+| `private-ai-proxy` | Unified managed-client and ACI protocol commands | `apps/desktop/cli` |
+| `private-ai-proxy-service` | Per-user backend entry point | `apps/desktop/service` |
 | `aci` | Existing standalone protocol reference CLI, unchanged and not bundled | `src/bin/aci` |
 
 ## Shared implementation
@@ -17,12 +18,15 @@ Status: implemented; modular layout updated 2026-09-12.
 `private-ai-proxy` composes the managed CLI's Clap command tree with the existing ACI
 commands. Management command execution and output live in
 `apps/desktop/runtime/src/cli`. ACI modules are compiled from
-`src/bin/private-ai-proxy`, so both executables use one verifier implementation.
+`apps/desktop/cli`, so both executables use one verifier implementation.
 `src/bin/aci/main.rs` is only the standalone entry point and imports those modules.
 Desktop integration adds opt-in lifecycle events and post-delivery receipt auditing; the
 original `aci` entry point and default streaming behavior remain available.
 The explicit `desktop-client` Cargo feature keeps desktop dependencies out of
 ordinary service and standalone ACI builds.
+The root Cargo manifest declares both client binaries at their desktop-owned paths;
+their protocol commands reuse the root `private_ai_gateway` library rather than
+copying the verification kernel into the desktop app.
 
 `private-ai-proxy verify/audit/sessions/send` do not initialize the managed backend or
 credential store. `private-ai-proxy serve` streams responses immediately and
@@ -122,7 +126,7 @@ console executables and do not require the desktop UI.
 
 Repository: https://github.com/Dstack-TEE/private-ai-gateway
 Main integrated before this change: `c2d31a8`.
-Primary contracts: `src/bin/private-ai-proxy/args.rs`, `apps/desktop/runtime/src/cli/args.rs`,
+Primary contracts: `apps/desktop/cli/args.rs`, `apps/desktop/runtime/src/cli/args.rs`,
 `apps/desktop/runtime/src/process.rs`, `apps/desktop/scripts/package-cli.mjs`.
 
 Official contracts: [Rust file locks](https://doc.rust-lang.org/1.89.0/std/fs/struct.File.html#method.try_lock),

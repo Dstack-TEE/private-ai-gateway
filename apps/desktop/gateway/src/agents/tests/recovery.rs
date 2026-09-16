@@ -107,11 +107,14 @@ fn native_model_settings_edits_invalidate_preview_and_survive_disconnect() {
         &defaults,
         r#"{"defaultProvider":"edited","defaultModel":"edited-model"}"#,
     );
-    assert!(sandbox
-        .projector
-        .apply(agent, true, &preview.revision, Some(&catalog), &options)
-        .unwrap_err()
-        .contains("changed since the preview"));
+    assert!(
+        sandbox
+            .projector
+            .apply(agent, true, &preview.revision, Some(&catalog), &options)
+            .unwrap_err()
+            .code()
+            == "revision_conflict"
+    );
     let preview = sandbox
         .projector
         .preview(agent, true, Some(&catalog), &options)
@@ -442,6 +445,7 @@ fn disconnected_provider_ownership_does_not_follow_a_new_config_path() {
                 .projector
                 .preview(agent, true, Some(&catalog), &options)
                 .unwrap_err()
+                .to_string()
                 .contains("already exists"));
             let deferred = sandbox
                 .projector
@@ -458,6 +462,7 @@ fn disconnected_provider_ownership_does_not_follow_a_new_config_path() {
                 .projector
                 .preview(agent, true, Some(&catalog), &options)
                 .unwrap_err()
+                .to_string()
                 .contains("already exists"));
             disconnect(&sandbox, agent);
         }
@@ -755,6 +760,7 @@ fn revocation_is_durable_even_when_the_first_manifest_save_fails() {
                 .projector
                 .apply(Agent::ClaudeCode, false, &preview.revision, None, &options)
                 .map(|_| ())
+                .map_err(|error| error.to_string())
         };
         fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700)).unwrap();
         assert!(result.is_err());
@@ -820,7 +826,7 @@ fn disconnect_fails_closed_when_revocation_cannot_be_persisted() {
         .projector
         .apply(Agent::ClaudeCode, false, &preview.revision, None, &options)
         .unwrap_err();
-    assert!(error.contains("could not be persisted"), "{error}");
+    assert_eq!(error.code(), "configuration_restore_failed");
     // The removal happened before the failed sync stopped everything…
     assert!(sandbox
         .projector

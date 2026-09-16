@@ -9,10 +9,13 @@ impl Projector {
         revision_seen: &str,
         catalog: Option<&Catalog>,
         options: &ConnectOptions,
-    ) -> Result<AgentStatus, String> {
+    ) -> Result<AgentStatus, AgentError> {
         lock::with_apply_lock(&self.data_dir, || {
-            self.maintain_store_permissions()?;
-            let mut store = self.load_store()?;
+            self.maintain_store_permissions()
+                .map_err(|_| AgentError::RecordUnavailable)?;
+            let mut store = self
+                .load_store()
+                .map_err(|_| AgentError::RecordUnavailable)?;
             let path = self.action_path(agent, store.get(agent.id()), connect);
             let (text, read_error) = self.config_text_at(agent, &path);
             if revision(
@@ -25,20 +28,17 @@ impl Projector {
                 options,
             ) != revision_seen
             {
-                return Err(format!(
-                    "The {} config changed since the preview; review the changes again",
-                    agent.name()
-                ));
+                return Err(AgentError::RevisionConflict);
             }
             if connect {
-                let path = path?;
-                if let Some(error) = read_error {
-                    return Err(error);
+                let path = path.map_err(AgentError::ConfigurationConflict)?;
+                if read_error.is_some() {
+                    return Err(AgentError::ConfigurationRead);
                 }
                 if catalog.is_some() {
                     self.require_helper()?;
                     self.connect(agent, &mut store, text, &path, catalog, options)
-                        .map_err(ConnectFailure::message)?;
+                        .map_err(ConnectFailure::error)?;
                 } else {
                     if self.current_record(agent, store.get(agent.id())).is_some() {
                         self.suspend(agent, &mut store)?;
@@ -64,7 +64,8 @@ impl Projector {
                             ..Connection::default()
                         },
                     );
-                    self.save_store(&store)?;
+                    self.save_store(&store)
+                        .map_err(|_| AgentError::ConfigurationWrite)?;
                 }
             } else {
                 self.disconnect(agent, &mut store)?;
@@ -106,7 +107,7 @@ impl Projector {
             let mut failures = Vec::new();
             for agent in targets {
                 if let Err(error) = self.cleanup(agent, &mut store) {
-                    failures.push((agent.id().to_string(), error));
+                    failures.push((agent.id().to_string(), error.to_string()));
                 }
             }
             Ok(failures)
@@ -155,7 +156,11 @@ impl Projector {
                             let text = self.read_config(agent)?;
                             let path = self
                                 .action_path(agent, store.get(agent.id()), true)
-                                .map_err(ConnectFailure::Conflict)?;
+                                .map_err(|error| {
+                                    ConnectFailure::Conflict(AgentError::ConfigurationConflict(
+                                        error,
+                                    ))
+                                })?;
                             self.connect(agent, &mut store, text, &path, catalog, &record.options)
                         })
                 } else if !record.suspended
@@ -179,7 +184,9 @@ impl Projector {
                         };
                         let path = self
                             .action_path(agent, store.get(agent.id()), true)
-                            .map_err(ConnectFailure::Conflict)?;
+                            .map_err(|error| {
+                                ConnectFailure::Conflict(AgentError::ConfigurationConflict(error))
+                            })?;
                         self.connect(agent, &mut store, text, &path, catalog, &options)
                     })()
                 } else {
@@ -188,7 +195,7 @@ impl Projector {
                 if let Err(error) = result {
                     if let ConnectFailure::Conflict(message) = &error {
                         if let Some(record) = store.get_mut(agent.id()) {
-                            record.attention = Some(message.clone());
+                            record.attention = Some(message.to_string());
                             record.catalog_revision =
                                 catalog.map(|catalog| catalog.revision.clone());
                         }
@@ -201,28 +208,36 @@ impl Projector {
         })
     }
 
-    pub(super) fn suspend(&self, agent: Agent, store: &mut Store) -> Result<(), String> {
+    pub(super) fn suspend(&self, agent: Agent, store: &mut Store) -> Result<(), AgentError> {
         let Some(record) = store.get_mut(agent.id()) else {
             return Ok(());
         };
         if record.restored() {
             return Ok(());
         }
-        self.tokens.revoke(agent.id())?;
+        self.tokens
+            .revoke(agent.id())
+            .map_err(|_| AgentError::RestorationFailed)?;
         record.suspended = true;
-        self.save_store(store)?;
+        self.save_store(store)
+            .map_err(|_| AgentError::RecordUnavailable)?;
         let record = store
             .get(agent.id())
             .cloned()
-            .ok_or("Missing agent restore record")?;
-        record.validate_recovery()?;
+            .ok_or(AgentError::RecordUnavailable)?;
+        record
+            .validate_recovery()
+            .map_err(AgentError::ConfigurationConflict)?;
         if record.fields.is_empty() {
             return Ok(());
         }
-        let path = record.restore_path()?;
+        let path = record
+            .restore_path()
+            .map_err(AgentError::ConfigurationConflict)?;
         if let Some(journal) = &record.selection {
             if let Some(selection) =
-                selection::restoration(agent, path, journal, self.secrets.as_ref())?
+                selection::restoration(agent, path, journal, self.secrets.as_ref())
+                    .map_err(|_| AgentError::RestorationFailed)?
             {
                 if !selection.changes.is_empty() {
                     write_atomic(
@@ -230,18 +245,18 @@ impl Projector {
                         &selection.after,
                         Some(selection.before.as_deref()),
                     )
-                    .map_err(|error| format!("Cannot restore native model settings: {error}"))?;
+                    .map_err(|_| AgentError::RestorationFailed)?;
                 }
             }
         }
         let text = self.read_config_at(agent, path)?;
         let mut doc = ConfigDoc::parse(agent.format(), text.as_deref().unwrap_or_default())
             .map_err(|reason| {
-                format!(
+                AgentError::InvalidConfiguration(format!(
                     "Cannot restore {} at {}: {reason}",
                     agent.name(),
                     path.display()
-                )
+                ))
             })?;
         let default_model =
             selected_model(agent, Some(&doc)).or_else(|| record.options.default_model.clone());
@@ -266,11 +281,17 @@ impl Projector {
             }
         };
         if !edit.changes.is_empty() {
-            write_atomic(path, &doc.render()?, Some(text.as_deref()))
-                .map_err(|error| format!("Cannot restore {}: {error}", agent.name()))?;
+            write_atomic(
+                path,
+                &doc.render().map_err(|_| AgentError::RestorationFailed)?,
+                Some(text.as_deref()),
+            )
+            .map_err(|_| AgentError::RestorationFailed)?;
         }
         for entry in &edit.consumed_secrets {
-            self.secrets.delete(entry)?;
+            self.secrets
+                .delete(entry)
+                .map_err(|_| AgentError::CredentialStore)?;
         }
         if let Some(record) = store.get_mut(agent.id()) {
             let fields = record.fields.clone();
@@ -287,6 +308,7 @@ impl Projector {
             record.selection = None;
         }
         self.save_store(store)
+            .map_err(|_| AgentError::RecordUnavailable)
     }
 
     /// Token, parked secrets, config, and record land together or are rolled
@@ -313,40 +335,49 @@ impl Projector {
         if store.get(agent.id()).is_some_and(|record| {
             record.cleanup_pending || (record.disabled && !record.disconnected())
         }) {
-            return Err(ConnectFailure::Conflict(format!(
-                "{} has a disconnect in progress; finish it before connecting again",
-                agent.name()
+            return Err(ConnectFailure::Conflict(AgentError::ConfigurationConflict(
+                format!(
+                    "{} has a disconnect in progress; finish it before connecting again",
+                    agent.name()
+                ),
             )));
         }
         let edit = self
             .edit(agent, true, &mut doc, store, catalog, &options)
             .map_err(ConnectFailure::Conflict)?;
         if agent == Agent::Codex {
-            self.sync_codex_catalog(
-                catalog.ok_or_else(|| "The verified model list is not available".to_string())?,
-            )?;
+            self.sync_codex_catalog(catalog.ok_or(AgentError::InvalidState)?)?;
         }
         let previous_record = store.get(agent.id()).cloned();
-        let mut next_record = edit.record.clone().ok_or("Missing connection journal")?;
+        let mut next_record = edit.record.clone().ok_or(AgentError::Internal)?;
         next_record.config_path = path.to_path_buf();
         next_record.options = options.clone();
         next_record.catalog_revision = catalog.map(|catalog| catalog.revision.clone());
         let mut guard = Rollback::default();
-        let result = (|| -> Result<(), String> {
+        let result = (|| -> Result<(), AgentError> {
             // A fresh token on every new connection; a leftover file from an
             // incomplete disconnect is never reused.
             if store
                 .get(agent.id())
                 .is_some_and(|record| !record.suspended)
             {
-                self.tokens.ensure(agent.id())?;
+                self.tokens
+                    .ensure(agent.id())
+                    .map_err(|_| AgentError::ConfigurationWrite)?;
             } else {
-                self.tokens.rotate(agent.id())?;
+                self.tokens
+                    .rotate(agent.id())
+                    .map_err(|_| AgentError::ConfigurationWrite)?;
                 guard.revoke_token = true;
             }
             for secret in &edit.pending_secrets {
-                let previous = self.secrets.get(&secret.entry)?;
-                self.secrets.set(&secret.entry, &secret.value)?;
+                let previous = self
+                    .secrets
+                    .get(&secret.entry)
+                    .map_err(|_| AgentError::CredentialStore)?;
+                self.secrets
+                    .set(&secret.entry, &secret.value)
+                    .map_err(|_| AgentError::CredentialStore)?;
                 guard.secrets.push((secret.entry.clone(), previous));
             }
             // Persist recovery before either file changes. An interrupted apply
@@ -356,11 +387,15 @@ impl Projector {
             pending.cleanup_pending = true;
             pending.disabled = true;
             store.insert(agent.id().to_string(), pending);
-            self.save_store(store)?;
+            self.save_store(store)
+                .map_err(|_| AgentError::ConfigurationWrite)?;
             if !edit.changes.is_empty() {
-                write_atomic(path, &doc.render()?, Some(text.as_deref())).map_err(|error| {
-                    format!("Cannot write the {} config: {error}", agent.name())
-                })?;
+                write_atomic(
+                    path,
+                    &doc.render().map_err(|_| AgentError::ConfigurationWrite)?,
+                    Some(text.as_deref()),
+                )
+                .map_err(|_| AgentError::ConfigurationWrite)?;
                 guard.configs.push((path.to_path_buf(), text.clone()));
             }
             if let Some(selection) = &edit.selection {
@@ -370,7 +405,7 @@ impl Projector {
                         &selection.after,
                         Some(selection.before.as_deref()),
                     )
-                    .map_err(|error| format!("Cannot write native model settings: {error}"))?;
+                    .map_err(|_| AgentError::ConfigurationWrite)?;
                     guard
                         .configs
                         .push((selection.path.clone(), selection.before.clone()));
@@ -378,6 +413,7 @@ impl Projector {
             }
             store.insert(agent.id().to_string(), next_record);
             self.save_store(store)
+                .map_err(|_| AgentError::ConfigurationWrite)
         })();
         if let Err(error) = result {
             let rollback = self.rollback(agent, guard);
@@ -390,11 +426,12 @@ impl Projector {
                         store.remove(agent.id());
                     }
                 }
-                self.save_store(store)?;
+                self.save_store(store)
+                    .map_err(|_| AgentError::ConfigurationWrite)?;
             }
             return Err(ConnectFailure::Unavailable(match rollback {
-                Ok(()) => format!("{error}; nothing was changed"),
-                Err(rollback) => format!("{error}; rolling back also failed: {rollback}"),
+                Ok(()) => error,
+                Err(_) => AgentError::RestorationFailed,
             }));
         }
         Ok(())
@@ -405,22 +442,27 @@ impl Projector {
     /// afterwards — even the tombstone save — the agent can never be
     /// authorized again, not even across a restart. Cleanup never needs the
     /// old token; a new connection always issues a fresh one.
-    pub(super) fn disconnect(&self, agent: Agent, store: &mut Store) -> Result<(), String> {
+    pub(super) fn disconnect(&self, agent: Agent, store: &mut Store) -> Result<(), AgentError> {
         let Some(record) = store.get_mut(agent.id()) else {
-            return Err(format!("{} is not connected", agent.name()));
+            return Err(AgentError::InvalidState);
         };
-        self.tokens.revoke(agent.id())?;
+        self.tokens
+            .revoke(agent.id())
+            .map_err(|_| AgentError::RestorationFailed)?;
         record.disabled = true;
         record.cleanup_pending = true;
-        self.save_store(store)?;
+        self.save_store(store)
+            .map_err(|_| AgentError::RecordUnavailable)?;
         self.cleanup(agent, store)
     }
 
     /// Keep the journal on failure so cleanup can be retried without losing
     /// the original settings or parked credentials.
-    pub(super) fn cleanup(&self, agent: Agent, store: &mut Store) -> Result<(), String> {
+    pub(super) fn cleanup(&self, agent: Agent, store: &mut Store) -> Result<(), AgentError> {
         self.suspend(agent, store)?;
-        self.tokens.revoke(agent.id())?;
+        self.tokens
+            .revoke(agent.id())
+            .map_err(|_| AgentError::RestorationFailed)?;
         if let Some(record) = store.get_mut(agent.id()) {
             if record.fields.is_empty() {
                 store.remove(agent.id());
@@ -431,6 +473,7 @@ impl Projector {
             }
         }
         self.save_store(store)
+            .map_err(|_| AgentError::RecordUnavailable)
     }
 
     pub(super) fn rollback(&self, agent: Agent, guard: Rollback) -> Result<(), String> {

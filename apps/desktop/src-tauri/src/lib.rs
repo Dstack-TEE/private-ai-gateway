@@ -107,7 +107,7 @@ fn refresh_preferences(app: &AppHandle, client: &Arc<Client>) {
                     let _ = app_for_main_thread.emit("gateway://launch-preferences", launch);
                 });
             }
-            Err(error) => report_surface_error(&app, SurfaceErrorScope::Settings, error),
+            Err(error) => eprintln!("Cannot refresh desktop preferences: {error}"),
         }
     });
 }
@@ -326,6 +326,7 @@ pub fn run() {
             commands::gateway::stop_gateway,
             commands::desktop::copy_text,
             commands::desktop::show_edit_menu,
+            commands::desktop::show_error_alert,
             commands::desktop::open_native_dialog,
             commands::desktop::native_dialog_ready,
             commands::desktop::main_window_ready,
@@ -398,11 +399,7 @@ pub fn run() {
                 }
             });
             if let Err(error) = tray::setup(app.handle()) {
-                report_surface_error(
-                    app.handle(),
-                    SurfaceErrorScope::Settings,
-                    format!("The system tray is unavailable: {error}"),
-                );
+                eprintln!("The system tray is unavailable: {error}");
             } else {
                 #[cfg(any(target_os = "windows", target_os = "linux"))]
                 if let Err(error) = tray_theme::setup(app.handle()) {
@@ -410,11 +407,7 @@ pub fn run() {
                 }
             }
             if let Err(error) = menu::setup(app.handle()) {
-                report_surface_error(
-                    app.handle(),
-                    SurfaceErrorScope::Settings,
-                    format!("The application menu is unavailable: {error}"),
-                );
+                eprintln!("The application menu is unavailable: {error}");
             }
 
             let handle = app.handle().clone();

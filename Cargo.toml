@@ -15,12 +15,12 @@ path = "src/main.rs"
 
 [[bin]]
 name = "private-ai-proxy"
-path = "src/bin/private-ai-proxy/main.rs"
+path = "apps/desktop/cli/main.rs"
 required-features = ["desktop-client"]
 
 [[bin]]
 name = "private-ai-proxy-service"
-path = "src/bin/private-ai-proxy-service/main.rs"
+path = "apps/desktop/service/main.rs"
 required-features = ["desktop-client"]
 
 [features]

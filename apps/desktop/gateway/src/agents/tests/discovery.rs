@@ -51,7 +51,7 @@ fn helper_relocation_requires_explicit_reconnect_without_scan_writes() {
             .join("stable helpers")
             .join(helper_binary_name());
         sandbox.projector.helper_exe = stable.clone();
-        write(&sandbox.projector.helper_exe, "helper");
+        write_executable(&sandbox.projector.helper_exe, "helper");
         if agent == Agent::OpenCode {
             assert_scan(&sandbox, true, None);
         } else if agent == Agent::OpenClaw {
@@ -111,33 +111,60 @@ async fn metadata_timeout_releases_the_config_transaction() {
     let started = std::time::Instant::now();
     let error = lock::with_apply_lock(root.path(), || {
         let error = bounded_command_output(command, std::time::Duration::from_secs(1)).unwrap_err();
-        Ok(error.kind())
+        Ok::<_, String>(error.kind())
     })
     .unwrap();
     assert_eq!(error, io::ErrorKind::TimedOut);
     assert!(started.elapsed() < std::time::Duration::from_secs(10));
-    lock::with_apply_lock(root.path(), || Ok(())).unwrap();
+    lock::with_apply_lock(root.path(), || Ok::<_, String>(())).unwrap();
 }
 
 #[cfg(unix)]
 #[test]
 fn command_output_resolves_the_discovered_shebang_runtime() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let root = env::temp_dir().join(format!("pap-command-path-{}", std::process::id()));
-    let runtime = root.join("bin");
+    let root = tempfile::tempdir().unwrap();
+    let runtime = root.path().join("bin");
+    let incompatible_runtime = root.path().join("other-bin");
     let executable = runtime.join("codex");
     let node = runtime.join("node");
-    let _ = fs::remove_dir_all(&root);
-    write(&executable, "#!/usr/bin/env node\n");
-    write(&node, "#!/bin/sh\nprintf bundled-catalog\n");
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
-    fs::set_permissions(&node, fs::Permissions::from_mode(0o700)).unwrap();
+    write_executable(&executable, "#!/usr/bin/env node\n");
+    write_executable(&node, "#!/bin/sh\nprintf bundled-catalog\n");
+    write_executable(&incompatible_runtime.join("node"), "#!/bin/sh\nexit 1\n");
 
-    let output = command_output(&executable, &[], std::slice::from_ref(&runtime)).unwrap();
-    let _ = fs::remove_dir_all(root);
+    let output = command_output(&executable, &[], &[incompatible_runtime, runtime]).unwrap();
     assert!(output.status.success());
     assert_eq!(output.stdout, b"bundled-catalog");
+}
+
+#[test]
+fn codex_metadata_errors_explain_export_failures_without_leaking_stderr() {
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt;
+    #[cfg(windows)]
+    use std::os::windows::process::ExitStatusExt;
+    use std::process::{ExitStatus, Output};
+
+    #[cfg(unix)]
+    let status = ExitStatus::from_raw(2 << 8);
+    #[cfg(windows)]
+    let status = ExitStatus::from_raw(2);
+    let error = codex_metadata(Ok(Output {
+        status,
+        stdout: Vec::new(),
+        stderr: b"error: unrecognized subcommand 'models'; PRIVATE_DETAIL".to_vec(),
+    }))
+    .unwrap_err();
+    assert_eq!(error.code(), "codex_metadata_unavailable");
+    assert!(error.to_string().contains("Update Codex"));
+    assert!(!error.to_string().contains("PRIVATE_DETAIL"));
+    let error = codex_metadata(Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "PRIVATE_DETAIL",
+    )))
+    .unwrap_err();
+    assert_eq!(error.code(), "codex_metadata_unavailable");
+    assert!(error.to_string().contains("timed out"));
+    assert!(!error.to_string().contains("PRIVATE_DETAIL"));
 }
 
 #[test]
@@ -376,11 +403,28 @@ fn finds_opencode_installed_by_the_official_script_without_shell_path() {
     } else {
         "opencode"
     });
-    write(&executable, "test executable");
+    write_executable(&executable, "test executable");
     assert_eq!(
         find_cli(Agent::OpenCode, &sandbox.home, false),
         Some(executable)
     );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let stale = sandbox.home.join("stale/codex");
+        let installed = sandbox.home.join("installed/codex");
+        write(&stale, "not executable");
+        fs::set_permissions(&stale, fs::Permissions::from_mode(0o600)).unwrap();
+        write_executable(&installed, "#!/bin/sh\n");
+        let paths = [
+            stale.parent().unwrap().to_path_buf(),
+            installed.parent().unwrap().to_path_buf(),
+        ];
+        assert_eq!(find_cli_in_paths(Agent::Codex, &paths), Some(installed));
+        assert!(find_cli_in_paths(Agent::Codex, &paths[..1]).is_none());
+    }
 }
 
 /// POSIX quoting round-trips through shlex and, where available, sh.

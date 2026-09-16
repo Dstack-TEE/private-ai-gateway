@@ -2,11 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeftRight, Ellipsis, ExternalLink } from "lucide-react";
 import type { AccountBalanceTarget, AccountImages, AccountScope, DesktopApi, ServiceProvider } from "../../shared/contracts";
 import { useQuery } from "@tanstack/react-query";
-import { errorMessage } from "../lib/error-message";
 import { currency } from "../lib/usage-presentation";
 import { Avatar, AvatarFallback, AvatarImage } from "./ui/avatar";
 import { Button } from "./ui/button";
-import { FieldError } from "./ui/field";
+import { useErrorAlert } from "../lib/error-alert";
 import { Item, ItemActions, ItemContent, ItemTitle } from "./ui/item";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 
@@ -59,7 +58,7 @@ export function AccountTools(props: Props) {
 }
 
 function AccountDetailsView({ api, provider, target, scope, credentialRef, images, onSignIn, disabled = false }: Props) {
-  const [linkError, setLinkError] = useState<string>();
+  const reportError = useErrorAlert("Could not open account");
   const [opening, setOpening] = useState(false);
   const openingRef = useRef(false);
   const returningFromAccountPage = useRef(false);
@@ -82,12 +81,11 @@ function AccountDetailsView({ api, provider, target, scope, credentialRef, image
     if (openingRef.current || disabled) return;
     openingRef.current = true;
     setOpening(true);
-    setLinkError(undefined);
     returningFromAccountPage.current = true;
     try { await action(); }
-    catch (error) { setLinkError(errorMessage(error)); returningFromAccountPage.current = false; }
+    catch (error) { reportError(error); returningFromAccountPage.current = false; }
     finally { openingRef.current = false; setOpening(false); }
-  }, [disabled]);
+  }, [disabled, reportError]);
   const organizationSlug = balance?.scope.organizationSlug ?? scope?.organizationSlug;
   const manage = provider === "redpill" && organizationSlug ? () => void openPage(() => api.openOrganization(organizationSlug)) : undefined;
   const displayScope = provider === "redpill" ? scope ?? balance?.scope : balance?.scope ?? scope;
@@ -107,7 +105,6 @@ function AccountDetailsView({ api, provider, target, scope, credentialRef, image
         <AccountActions disabled={disabled || opening} onManage={manage} onSignIn={onSignIn} />
       </ItemActions>
     </Item>
-    <FieldError>{linkError}</FieldError>
   </div>;
 }
 

@@ -1,5 +1,29 @@
 use super::*;
 
+#[derive(Debug)]
+pub enum AgentOperationError {
+    Agent(desktop_gateway::agents::AgentError),
+    Runtime(String),
+}
+
+impl From<desktop_gateway::agents::AgentError> for AgentOperationError {
+    fn from(error: desktop_gateway::agents::AgentError) -> Self {
+        Self::Agent(error)
+    }
+}
+
+impl From<String> for AgentOperationError {
+    fn from(error: String) -> Self {
+        Self::Runtime(error)
+    }
+}
+
+impl From<&str> for AgentOperationError {
+    fn from(error: &str) -> Self {
+        Self::Runtime(error.to_string())
+    }
+}
+
 impl DesktopRuntime {
     pub(super) fn projector(&self, endpoint: &str) -> Result<Projector, String> {
         Projector::new(self.helper_path.clone(), endpoint, self.secrets.clone())
@@ -122,11 +146,12 @@ impl DesktopRuntime {
         agent_id: String,
         connect: bool,
         options: ConnectOptions,
-    ) -> Result<AgentPreview, String> {
+    ) -> Result<AgentPreview, AgentOperationError> {
         let agent = Agent::from_id(&agent_id)?;
         let catalog = self.connection_catalog(agent, connect)?;
-        self.current_projector()?
-            .preview(agent, connect, catalog.as_ref(), &options)
+        Ok(self
+            .current_projector()?
+            .preview(agent, connect, catalog.as_ref(), &options)?)
     }
 
     pub fn apply_agent(
@@ -135,17 +160,17 @@ impl DesktopRuntime {
         connect: bool,
         revision: String,
         options: ConnectOptions,
-    ) -> Result<AgentStatus, String> {
+    ) -> Result<AgentStatus, AgentOperationError> {
         let _operation = self.configuration_change()?;
         let _guard = self
             .agent_policy
             .lock()
             .map_err(|_| "Agent state unavailable")?;
         if self.exiting.load(Ordering::Acquire) {
-            return Err("The app is closing".to_string());
+            return Err("The app is closing".into());
         }
         if self.instance.is_none() {
-            return Err("Another app instance owns the agent configurations".to_string());
+            return Err("Another app instance owns the agent configurations".into());
         }
         let agent = Agent::from_id(&agent_id)?;
         let catalog = self.connection_catalog(agent, connect)?;

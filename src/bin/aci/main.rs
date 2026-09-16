@@ -3,28 +3,28 @@
 //! Verify a live service, audit saved artifacts offline, or run one
 //! verified chat completion end to end.
 
-#[path = "../private-ai-proxy/args.rs"]
+#[path = "../../../apps/desktop/cli/args.rs"]
 mod args;
-#[path = "../private-ai-proxy/audit.rs"]
+#[path = "../../../apps/desktop/cli/audit.rs"]
 mod audit;
-#[path = "../private-ai-proxy/capture.rs"]
+#[path = "../../../apps/desktop/cli/capture.rs"]
 mod capture;
-#[path = "../private-ai-proxy/checks.rs"]
+#[path = "../../../apps/desktop/cli/checks.rs"]
 mod checks;
-#[path = "../private-ai-proxy/client.rs"]
+#[path = "../../../apps/desktop/cli/client.rs"]
 mod client;
-#[path = "../private-ai-proxy/send.rs"]
+#[path = "../../../apps/desktop/cli/send.rs"]
 mod send;
-#[path = "../private-ai-proxy/serve.rs"]
+#[path = "../../../apps/desktop/cli/serve.rs"]
 mod serve;
-#[path = "../private-ai-proxy/sessions.rs"]
+#[path = "../../../apps/desktop/cli/sessions.rs"]
 mod sessions;
 #[cfg(test)]
-#[path = "../private-ai-proxy/spec_fixtures.rs"]
+#[path = "../../../apps/desktop/cli/spec_fixtures.rs"]
 mod spec_fixtures;
-#[path = "../private-ai-proxy/transcript.rs"]
+#[path = "../../../apps/desktop/cli/transcript.rs"]
 mod transcript;
-#[path = "../private-ai-proxy/verify.rs"]
+#[path = "../../../apps/desktop/cli/verify.rs"]
 mod verify;
 
 use clap::Parser;

@@ -320,8 +320,10 @@ pub(super) fn restore(
     doc: &mut ConfigDoc,
     record: &Connection,
     secrets: &dyn SecretStore,
-) -> Result<Edit, String> {
-    record.validate_recovery()?;
+) -> Result<Edit, AgentError> {
+    record
+        .validate_recovery()
+        .map_err(AgentError::ConfigurationConflict)?;
     let routing_unchanged = record
         .fields
         .iter()
@@ -348,7 +350,7 @@ pub(super) fn restore(
                 && doc.get_value(&refs(&field.path)).is_none()
         })
     {
-        return Err("Credential restoration is ambiguous after routing or helper edits. Access is disabled; the recovery record and parked credentials are retained".to_string());
+        return Err(AgentError::ConfigurationConflict("Credential restoration is ambiguous after routing or helper edits. Access is disabled; restore the agent's original routing/helper settings, then retry disconnecting. The recovery record and parked credentials are retained".to_string()));
     }
     let mut changes = Vec::new();
     let mut consumed_secrets = Vec::new();
@@ -358,9 +360,10 @@ pub(super) fn restore(
             let inactive = inactive_provider_value(field);
             if doc.get_value(&path) == field.value && inactive != field.value {
                 match &inactive {
-                    Some(value) => doc.set_value(&path, value)?,
-                    None => doc.remove(&path)?,
+                    Some(value) => doc.set_value(&path, value),
+                    None => doc.remove(&path),
                 }
+                .map_err(|_| AgentError::RestorationFailed)?;
                 changes.push(ConfigChange {
                     key: path.join("."),
                     before: Some("Connected provider".into()),
@@ -381,7 +384,10 @@ pub(super) fn restore(
         let sensitive = is_sensitive(&field.path);
         let (restored, after_label) = match &field.previous {
             Some(Previous::Plain(value)) => (Some(value.clone()), None),
-            Some(Previous::Secret { secret_ref }) => match secrets.get(secret_ref)? {
+            Some(Previous::Secret { secret_ref }) => match secrets
+                .get(secret_ref)
+                .map_err(|_| AgentError::CredentialStore)?
+            {
                 Some(value) => (
                     Some(ConfigValue::Str(value)),
                     Some("Previous secret restored".to_string()),
@@ -394,9 +400,10 @@ pub(super) fn restore(
             None => (None, None),
         };
         match &restored {
-            Some(value) => doc.set_value(&path, value)?,
-            None => doc.remove(&path)?,
+            Some(value) => doc.set_value(&path, value),
+            None => doc.remove(&path),
         }
+        .map_err(|_| AgentError::RestorationFailed)?;
         changes.push(if sensitive {
             ConfigChange {
                 key: path.join("."),
@@ -474,7 +481,7 @@ pub(super) fn connection_options(
         catalog.is_some_and(|catalog| {
             catalog
                 .get(model)
-                .is_some_and(|entry| entry.supports(agent.surface()))
+                .is_some_and(|entry| entry.supports_agent(agent.surface()))
         })
     });
     let saved = prior.and_then(|record| record.options.default_model.clone());
@@ -490,7 +497,7 @@ pub(super) fn connection_options(
                     catalog
                         .models
                         .iter()
-                        .find(|model| model.supports(agent.surface()))
+                        .find(|model| model.supports_agent(agent.surface()))
                 })
                 .map(|model| model.id().to_string())
         }),

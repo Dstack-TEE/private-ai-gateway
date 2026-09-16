@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { AgentStatus, DesktopApi } from "../../shared/contracts";
 import { errorMessage } from "../lib/error-message";
 import { displayAgentName } from "../lib/agents";
+import { showErrorAlert } from "../lib/error-alert";
 
 type Options = {
   active: boolean;
@@ -18,7 +19,6 @@ export function useAgents(api: DesktopApi, { active, revision, verified, notify 
     queryKey: ["agents"], queryFn: () => api.listAgents(), staleTime: 0,
     refetchInterval: active ? 15_000 : false,
   });
-  const [operationError, setOperationError] = useState<string>();
   const [pendingAgentChanges, setPendingAgentChanges] = useState<Record<string, boolean>>({});
   const agentOperations = useRef(new Set<string>());
   const agentIntents = useRef(new Map<string, boolean>());
@@ -39,13 +39,15 @@ export function useAgents(api: DesktopApi, { active, revision, verified, notify 
     setPendingAgentChanges((current) => ({ ...current, [agent.id]: connect }));
     if (agentOperations.current.has(agent.id)) return;
     agentOperations.current.add(agent.id);
-    setOperationError(undefined);
+    let failure: string | undefined;
+    let attemptedConnection = connect;
     try {
       let changed = agent;
       // Serialize writes per agent and retain the user's latest intent.
       while (agentIntents.current.has(agent.id)) {
         const target = agentIntents.current.get(agent.id);
         if (target === undefined) break;
+        attemptedConnection = target;
         if (changed.recorded !== target || (target && !changed.authorized && changed.attention)) {
           const options = {};
           const preview = await api.previewAgent(agent.id, target, options);
@@ -60,16 +62,17 @@ export function useAgents(api: DesktopApi, { active, revision, verified, notify 
       }
       notify(`${displayAgentName(agent)} ${changed.recorded ? "connected" : "disconnected"}`);
     } catch (error) {
-      setOperationError(errorMessage(error));
+      failure = errorMessage(error);
     } finally {
       agentIntents.current.delete(agent.id);
       agentOperations.current.delete(agent.id);
       setPendingAgentChanges((current) => { const next = { ...current }; delete next[agent.id]; return next; });
       void loadAgents();
     }
+    if (failure) {
+      await showErrorAlert(`${displayAgentName(agent)} could not ${attemptedConnection ? "connect" : "disconnect"}`, failure, api);
+    }
   };
-
-
-  const problem = operationError ?? (agentsError ? errorMessage(agentsError) : undefined);
+  const problem = agentsError ? errorMessage(agentsError) : undefined;
   return { agents, pendingAgentChanges, loadAgents, applyAgent, problem };
 }

@@ -190,7 +190,7 @@ fn links_survive_stop_restart_and_uninstall_without_owning_inactive_configs() {
     } else {
         "claude"
     });
-    write(&cli, "test cli");
+    write_executable(&cli, "test cli");
     write(
         &config,
         r#"{"model":"original","env":{"ANTHROPIC_AUTH_TOKEN":"original-secret"}}"#,
@@ -263,7 +263,7 @@ fn links_survive_stop_restart_and_uninstall_without_owning_inactive_configs() {
         .find(|s| s.id == agent.id())
         .unwrap();
     assert!(status.connected && !status.authorized && status.attention.is_some());
-    write(&cli, "test cli");
+    write_executable(&cli, "test cli");
     assert!(sandbox
         .projector
         .reconcile(Some(&catalog()))
@@ -288,7 +288,7 @@ fn links_survive_stop_restart_and_uninstall_without_owning_inactive_configs() {
 fn temporary_connection_failure_retries_without_clearing_user_conflicts() {
     let sandbox = sandbox("transient-connect");
     let agent = Agent::OpenCode;
-    write(
+    write_executable(
         &sandbox.home.join(".opencode/bin").join(if cfg!(windows) {
             "opencode.exe"
         } else {
@@ -449,7 +449,8 @@ fn unmanaged_provider_objects_are_not_captured_as_plain_backups() {
                 .projector
                 .preview(agent, true, Some(&catalog()), &claude_options())
                 .unwrap_err();
-            assert!(!error.contains("sk-test-hidden"));
+            assert_eq!(error.code(), "configuration_conflict");
+            assert!(!error.to_string().contains("sk-test-hidden"));
             assert_eq!(fs::read_to_string(&path).unwrap(), text);
             assert!(!sandbox.projector.store_path().exists());
             assert!(sandbox.projector.tokens.read(agent.id()).unwrap().is_none());
@@ -555,10 +556,19 @@ fn native_auth_and_routing_conflicts_are_read_only_and_deauthorize() {
             .as_deref()
             .unwrap()
             .contains("sk-test-hidden"));
-        assert!(sandbox
+        let error = sandbox
             .projector
             .preview(agent, true, Some(&catalog), &options)
-            .is_err());
+            .unwrap_err();
+        assert_eq!(
+            error.code(),
+            if matches!(case, "aws" | "stored-key" | "explicit-key" | "pool") {
+                "authentication_conflict"
+            } else {
+                "configuration_conflict"
+            }
+        );
+        assert!(!error.to_string().contains("sk-test-hidden"));
         assert!(sandbox
             .projector
             .apply(agent, true, &preview.revision, Some(&catalog), &options)
@@ -649,11 +659,14 @@ fn projections_and_codex_defaults_use_the_same_endpoint_filter() {
     };
     assert_eq!(provider["models"].as_array().unwrap().len(), 1);
     assert_eq!(provider["models"][0]["id"], "openai/gpt-oss-20b");
-    assert!(sandbox
-        .projector
-        .preview(Agent::ClaudeCode, true, Some(&catalog), &options)
-        .unwrap_err()
-        .contains("No models with confirmed"));
+    assert_eq!(
+        sandbox
+            .projector
+            .preview(Agent::ClaudeCode, true, Some(&catalog), &options)
+            .unwrap_err()
+            .code(),
+        "no_compatible_models"
+    );
     assert!(sandbox
         .projector
         .preview(Agent::Codex, true, Some(&catalog), &claude_options())
@@ -686,7 +699,7 @@ fn installation_detection_uses_executables_not_config_directories() {
             .home
             .join(".local/bin")
             .join(if cfg!(windows) { "pi.exe" } else { "pi" });
-    write(&executable, "#!/bin/sh\n");
+    write_executable(&executable, "#!/bin/sh\n");
     let statuses = sandbox.projector.scan(None).unwrap().0;
     assert!(
         statuses
@@ -700,7 +713,7 @@ fn installation_detection_uses_executables_not_config_directories() {
         .home
         .join(".nvm/versions/node/v22.19.0/bin")
         .join(if cfg!(windows) { "codex.cmd" } else { "codex" });
-    write(&codex, "#!/bin/sh\n");
+    write_executable(&codex, "#!/bin/sh\n");
     let statuses = sandbox.projector.scan(None).unwrap().0;
     assert!(
         statuses
@@ -731,7 +744,7 @@ fn apply_refuses_a_stale_revision() {
             &claude_options(),
         )
         .unwrap_err();
-    assert!(error.contains("changed since the preview"));
+    assert_eq!(error.code(), "revision_conflict");
     assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"model": "opus"}"#);
     write(&path, r#"{"model": "sonnet"}"#);
     let error = sandbox
@@ -744,7 +757,7 @@ fn apply_refuses_a_stale_revision() {
             &claude_options(),
         )
         .unwrap_err();
-    assert!(error.contains("changed since the preview"));
+    assert_eq!(error.code(), "revision_conflict");
     assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"model": "sonnet"}"#);
     assert!(sandbox
         .projector
@@ -780,10 +793,8 @@ fn connect_rolls_everything_back_when_the_record_cannot_be_saved() {
             &claude_options(),
         )
         .unwrap_err();
-    assert!(
-        error.contains("nothing was changed") || error.contains("lock"),
-        "{error}"
-    );
+    assert_eq!(error.code(), "configuration_lock_failed");
+    assert!(!error.to_string().contains("sk-user"));
     assert_eq!(
         fs::read_to_string(&path).unwrap(),
         r#"{"env": {"ANTHROPIC_API_KEY": "sk-user"}}"#
@@ -861,6 +872,12 @@ fn drifted_or_broken_configs_deauthorize_tokens_but_stay_recoverable() {
     // Corrupt the file entirely: still recorded, error reported, token
     // still unauthorized, and Disconnect retains its recovery journal.
     write(&path, "{ not json");
+    let error = sandbox
+        .projector
+        .preview(Agent::ClaudeCode, true, Some(&catalog()), &claude_options())
+        .unwrap_err();
+    assert_eq!(error.code(), "invalid_configuration");
+    assert!(!error.to_string().contains("sk-old-secret"));
     assert!(sandbox.projector.scan(None).unwrap().1.is_empty());
     let status = &sandbox.projector.scan(None).unwrap().0[1];
     assert!(status.recorded && !status.authorized);

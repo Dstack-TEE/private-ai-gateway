@@ -320,9 +320,9 @@ fn encode(value: impl Serialize) -> Result<Value, RpcError> {
 }
 
 async fn dispatch(runtime: &Arc<DesktopRuntime>, command: Command) -> Result<Value, RpcError> {
-    async fn execute(runtime: &Arc<DesktopRuntime>, command: Command) -> Result<Value, String> {
-        fn value(input: impl Serialize) -> Result<Value, String> {
-            serde_json::to_value(input).map_err(|_| "Cannot encode operation result".into())
+    async fn execute(runtime: &Arc<DesktopRuntime>, command: Command) -> Result<Value, RpcError> {
+        fn value(input: impl Serialize) -> Result<Value, RpcError> {
+            encode(input)
         }
         match command {
             Command::State => value(runtime.state()?),
@@ -441,7 +441,5 @@ async fn dispatch(runtime: &Arc<DesktopRuntime>, command: Command) -> Result<Val
             Command::Watch => Err("Subscription requires its own connection".into()),
         }
     }
-    execute(runtime, command)
-        .await
-        .map_err(|message| RpcError::operation(&message))
+    execute(runtime, command).await
 }

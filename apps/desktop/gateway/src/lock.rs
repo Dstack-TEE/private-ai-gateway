@@ -6,7 +6,7 @@
 //! processes: the lock is held from the revision check through the final
 //! rename and manifest update.
 
-use std::{fs, io, path::Path};
+use std::{fmt, fs, io, path::Path};
 
 use fd_lock::RwLock;
 
@@ -53,18 +53,31 @@ pub fn instance(data_dir: &Path) -> io::Result<Option<InstanceLock>> {
     }
 }
 
+/// Failure to open or acquire the transaction lock, separate from operation errors.
+#[derive(Debug)]
+pub struct ApplyLockError(io::Error);
+
+impl fmt::Display for ApplyLockError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Cannot lock the agent configurations: {}", self.0)
+    }
+}
+
+impl std::error::Error for ApplyLockError {}
+
+impl From<ApplyLockError> for String {
+    fn from(error: ApplyLockError) -> Self {
+        error.to_string()
+    }
+}
+
 /// Run `f` while holding the exclusive apply lock; blocks until it is free.
-pub fn with_apply_lock<T>(
+pub fn with_apply_lock<T, E: From<ApplyLockError>>(
     data_dir: &Path,
-    f: impl FnOnce() -> Result<T, String>,
-) -> Result<T, String> {
-    let mut lock = RwLock::new(
-        open(data_dir, "apply.lock")
-            .map_err(|error| format!("Cannot open the agent config lock: {error}"))?,
-    );
-    let _guard = lock
-        .write()
-        .map_err(|error| format!("Cannot take the agent config lock: {error}"))?;
+    f: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    let mut lock = RwLock::new(open(data_dir, "apply.lock").map_err(ApplyLockError)?);
+    let _guard = lock.write().map_err(ApplyLockError)?;
     f()
 }
 
@@ -92,14 +105,14 @@ mod tests {
         let holder = std::thread::spawn(move || {
             with_apply_lock(&holder_dir, || {
                 release_rx.recv().unwrap();
-                Ok(())
+                Ok::<_, String>(())
             })
         });
         std::thread::sleep(std::time::Duration::from_millis(100));
         let waiter_dir = dir.clone();
         let waiter = std::thread::spawn(move || {
             let started = std::time::Instant::now();
-            with_apply_lock(&waiter_dir, || Ok(started.elapsed()))
+            with_apply_lock(&waiter_dir, || Ok::<_, String>(started.elapsed()))
         });
         std::thread::sleep(std::time::Duration::from_millis(150));
         release_tx.send(()).unwrap();

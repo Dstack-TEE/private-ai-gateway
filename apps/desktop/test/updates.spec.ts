@@ -62,7 +62,7 @@ for (const offline of [false, true]) {
     await expect(failure).toHaveCount(0);
     if (offline) {
       await expect(about.getByRole("button", { name: "Install and Restart" })).toHaveCount(0);
-      await expect(about).toContainText("Could not check for updates. Retrying automatically.");
+      await expect(about).toContainText("Update status unavailable");
     } else {
       await expect(about.getByRole("button", { name: "Install and Restart" })).toBeEnabled();
     }
@@ -72,7 +72,7 @@ for (const offline of [false, true]) {
 test("settings keep the installed version visible without manual update controls", async ({ page }) => {
   for (const [scenario, message] of [
     ["update-unpublished", "No releases published in this channel yet"],
-    ["update-offline", "Could not check for updates. Retrying automatically."],
+    ["update-offline", "Update status unavailable"],
   ] as const) {
     await page.goto(`/?mock=${scenario}`);
     await nav(page, "Settings").click();
@@ -90,7 +90,7 @@ test("settings keep the installed version visible without manual update controls
   await page.goto("/?mock=update-recover");
   await nav(page, "Settings").click();
   const status = page.getByRole("region", { name: "About", exact: true }).getByRole("status");
-  await expect(status).toContainText("Retrying automatically");
+  await expect(status).toContainText("Update status unavailable");
   await page.evaluate(() => { window.dispatchEvent(new Event("offline")); window.dispatchEvent(new Event("online")); });
   await expect(status).toHaveText("You're up to date");
 });

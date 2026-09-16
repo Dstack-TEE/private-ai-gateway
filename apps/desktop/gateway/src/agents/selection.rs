@@ -169,7 +169,7 @@ pub(super) fn restoration(
         fields: journal.fields.clone(),
         ..Connection::default()
     };
-    let edit = restore(&mut doc, &record, secrets)?;
+    let edit = restore(&mut doc, &record, secrets).map_err(|error| error.to_string())?;
     Ok(Some(Edit {
         path,
         before: Some(text),

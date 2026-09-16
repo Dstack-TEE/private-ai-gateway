@@ -193,12 +193,6 @@ impl RpcError {
                 "Another operation is in progress. Retry after it completes.",
             );
         }
-        if message.contains("changed since the preview") {
-            return Self::new(
-                "revision_conflict",
-                "The agent configuration changed. Obtain a new preview before applying.",
-            );
-        }
         for prefix in [
             "Stop protection before",
             "Gateway is already running",
@@ -221,6 +215,33 @@ impl RpcError {
             return Self::new("credential_store_unavailable", "The OS credential store is unavailable or locked. Unlock it in your user session and retry.");
         }
         Self::new("operation_failed", "The operation could not complete. Check the gateway state and supplied configuration before retrying.")
+    }
+}
+
+impl From<desktop_gateway::agents::AgentError> for RpcError {
+    fn from(error: desktop_gateway::agents::AgentError) -> Self {
+        Self::new(error.code(), &error.to_string())
+    }
+}
+
+impl From<crate::controller::AgentOperationError> for RpcError {
+    fn from(error: crate::controller::AgentOperationError) -> Self {
+        match error {
+            crate::controller::AgentOperationError::Agent(error) => error.into(),
+            crate::controller::AgentOperationError::Runtime(message) => Self::operation(&message),
+        }
+    }
+}
+
+impl From<String> for RpcError {
+    fn from(message: String) -> Self {
+        Self::operation(&message)
+    }
+}
+
+impl From<&str> for RpcError {
+    fn from(message: &str) -> Self {
+        Self::operation(message)
     }
 }
 
@@ -300,5 +321,31 @@ mod tests {
         write(&mut bytes, &response).unwrap();
         let decoded: Response = read(&mut io::Cursor::new(bytes)).unwrap();
         assert!(matches!(decoded.outcome, Outcome::Error(_)));
+    }
+
+    #[test]
+    fn agent_failures_keep_actionable_causes_without_internal_details() {
+        use desktop_gateway::agents::AgentError;
+        for (error, code) in [
+            (AgentError::NoCompatibleModels, "no_compatible_models"),
+            (AgentError::IncompatibleModel, "incompatible_model"),
+            (AgentError::ConfigurationRead, "configuration_read_failed"),
+            (AgentError::ConfigurationWrite, "configuration_write_failed"),
+            (AgentError::Internal, "operation_failed"),
+        ] {
+            let public = RpcError::from(error);
+            assert_eq!(public.code, code);
+            assert!(!public.message.contains("PRIVATE_OS_DETAIL"));
+            assert!(!public.message.contains("sk-hidden"));
+        }
+        let diagnostic = "Codex CLI does not support `codex debug models --bundled`. Update Codex before connecting.";
+        assert_eq!(
+            RpcError::from(AgentError::MetadataUnavailable(diagnostic.to_string())).message,
+            diagnostic
+        );
+        let unclassified = RpcError::operation("PRIVATE_OS_DETAIL secret=sk-hidden");
+        assert_eq!(unclassified.code, "operation_failed");
+        assert!(!unclassified.message.contains("PRIVATE_OS_DETAIL"));
+        assert!(!unclassified.message.contains("sk-hidden"));
     }
 }

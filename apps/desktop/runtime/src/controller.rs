@@ -1,5 +1,6 @@
 mod accounts;
 mod agents;
+pub use agents::AgentOperationError;
 mod credentials;
 mod endpoint;
 mod lifecycle;
@@ -219,7 +220,10 @@ impl CodexCatalogSync {
                 return attempt.error.clone();
             }
         }
-        let error = projector.sync_codex_catalog(catalog).err();
+        let error = projector
+            .sync_codex_catalog(catalog)
+            .err()
+            .map(|error| error.to_string());
         *previous = Some(CodexCatalogSyncAttempt {
             revision: catalog.revision.clone(),
             error: error.clone(),

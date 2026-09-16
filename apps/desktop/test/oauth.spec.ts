@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { choose } from "./helpers";
+import { choose, expectErrorAlert } from "./helpers";
 
 test("Phala completes automatically while RedPill confirms its workspace with Save", async ({ page }) => {
   for (const provider of ["Phala", "RedPill"]) {
@@ -175,8 +175,8 @@ test("cancelled and declined authorizations leave the form reusable", async ({ p
   await editor.getByRole("button", { name: "Cancel Sign-in" }).click();
   await expect(signIn).toBeEnabled();
   await expect(editor.getByRole("button", { name: "Save", exact: true })).toHaveCount(0);
-  await signIn.click();
-  await expect(editor.getByText("Authorization was declined", { exact: true })).toBeVisible();
+  await expectErrorAlert(page, () => signIn.click(), "Authorization was declined");
+  await expect(editor.getByText("Authorization was declined", { exact: true })).toHaveCount(0);
   await expect(signIn).toBeEnabled();
   await editor.getByRole("tab", { name: "API key", exact: true }).click();
   await expect(editor.getByLabel("Phala AI API key")).toBeEnabled();
@@ -195,8 +195,8 @@ test("account save failure retries the staged grant and saved accounts can be de
   await editor.getByRole("button", { name: "Sign in with RedPill" }).click();
   const save = editor.getByRole("button", { name: "Save", exact: true });
   await expect(save).toBeEnabled();
-  await save.click();
-  await expect(editor.getByText("Could not store account credential", { exact: true })).toBeVisible();
+  await expectErrorAlert(page, () => save.click(), "Could not store account credential");
+  await expect(editor.getByText("Could not store account credential", { exact: true })).toHaveCount(0);
   await expect(editor.getByLabel("Account details").getByText("Personal organization", { exact: true })).toBeVisible();
   await save.click();
   await expect(editor).toHaveCount(0);
@@ -220,8 +220,8 @@ test("manual callback fallback keeps RedPill workspace confirmation", async ({ p
   await editor.getByRole("button", { name: "Sign in with RedPill" }).click();
   await editor.getByText("Paste callback link", { exact: true }).click();
   await editor.getByLabel("Callback URL").fill("https://wrong.example/callback?code=secret");
-  await editor.getByRole("button", { name: "Continue", exact: true }).click();
-  await expect(editor.getByText("Invalid callback link", { exact: true })).toBeVisible();
+  await expectErrorAlert(page, () => editor.getByRole("button", { name: "Continue", exact: true }).click(), "Invalid callback link");
+  await expect(editor.getByText("Invalid callback link", { exact: true })).toHaveCount(0);
   await expect(editor.getByLabel("Callback URL")).toHaveValue("");
   await editor.getByLabel("Callback URL").fill("http://127.0.0.1:4181/oauth/callback?state=mock&code=secret");
   await editor.getByRole("button", { name: "Continue", exact: true }).click();

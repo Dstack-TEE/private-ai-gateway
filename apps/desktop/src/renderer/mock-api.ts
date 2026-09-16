@@ -528,6 +528,7 @@ export function mockApi(name: string | null): DesktopApi {
     openAgentWebsite: async () => undefined,
     openApiKeyPage: async (provider) => { document.documentElement.dataset.apiKeyPage = provider; },
     confirm: async (options) => window.confirm(`${options.title}\n\n${options.message}`),
+    showErrorAlert: async (title, message) => window.alert(`${title}\n\n${message}`),
     start: async (config) => {
       const run = ++verifyRun;
       state = { ...state, status: "verifying", protectedSince: undefined, configurationVerification: false, progress: "Starting the verifier", config, remoteUrl: config.remoteUrl, error: undefined, activity: [], sessionId: `session-mock-${run}`, sessionUsage: usageSummary([]) };
@@ -849,7 +850,7 @@ export function mockApi(name: string | null): DesktopApi {
       };
     },
     applyAgent: async (agentId, connect) => {
-      if (name === "agent-write-error") throw new Error("operation_failed: The operation could not complete.");
+      if (name === "agent-write-error" && agentId === "codex") throw new Error("invalid_state: Codex CLI does not support `codex debug models --bundled`. Update Codex before connecting.");
       if (name === "agent-pending") {
         window.dispatchEvent(new Event("mock:agent-write"));
         if (connect) await new Promise<void>((resolve) => window.addEventListener("mock:finish-agent", () => resolve(), { once: true }));

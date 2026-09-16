@@ -96,6 +96,15 @@ pub(super) fn write(path: &Path, text: &str) {
     fs::write(path, text).unwrap();
 }
 
+pub(super) fn write_executable(path: &Path, text: &str) {
+    write(path, text);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+}
+
 fn claude_options() -> ConnectOptions {
     ConnectOptions {
         default_model: Some("openai/gpt-oss-20b".to_string()),

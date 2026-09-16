@@ -8,10 +8,10 @@ import { FieldLabel } from "./components/ui/field";
 import { Item, ItemContent, ItemTitle, ItemDescription, ItemActions } from "./components/ui/item";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "./components/ui/dialog";
 import { Progress } from "./components/ui/progress";
+import { useErrorAlert } from "./lib/error-alert";
 
 export function useUpdates(api: DesktopApi, native = false) {
   const [operation, setBusy] = useState<"installing" | "changing">();
-  const [mutationError, setError] = useState<string>();
   const [progress, setProgress] = useState<UpdateProgress>();
   const [installDialogOpen, setInstallDialogOpen] = useState(false);
   const [installError, setInstallError] = useState<string>();
@@ -32,9 +32,9 @@ export function useUpdates(api: DesktopApi, native = false) {
   const channel = snapshot?.channel;
   const currentVersion = installedVersion ?? info?.currentVersion;
   const busy = operation ?? (checking ? "checking" : undefined);
-  const error = mutationError ?? (checkError ? "Could not check for updates. Retrying automatically." : undefined);
+  const error = checkError ? "Could not check for updates. Retrying automatically." : undefined;
+  const reportError = useErrorAlert("Software update unavailable", undefined, api);
   const refresh = useCallback(async () => {
-    setError(undefined);
     await client.cancelQueries({ queryKey: ["app-update"] });
     await refetch();
   }, [client, refetch]);
@@ -48,14 +48,13 @@ export function useUpdates(api: DesktopApi, native = false) {
     if (inFlight.current || checking || next === channel) return;
     inFlight.current = true;
     setBusy("changing");
-    setError(undefined);
     try {
       const saved = await api.setUpdateChannel(next);
       if (!mounted.current) return;
       client.setQueryData(["app-update"], { channel: saved });
       await refresh();
     } catch {
-      if (mounted.current) setError("Could not save update channel.");
+      if (mounted.current) reportError("Could not save update channel.");
     } finally {
       inFlight.current = false;
       if (mounted.current) setBusy(undefined);
@@ -65,7 +64,6 @@ export function useUpdates(api: DesktopApi, native = false) {
   const install = async () => {
     if (inFlight.current || checking || !info?.version) return;
     inFlight.current = true;
-    setError(undefined);
     setBusy("installing");
     let dialogOpened = false;
     try {
@@ -79,7 +77,7 @@ export function useUpdates(api: DesktopApi, native = false) {
     } catch {
       if (mounted.current) {
         if (!dialogOpened) {
-          setError("Could not open the update dialog. Please try again.");
+          reportError("Could not open the update dialog. Please try again.");
         } else {
           if (!native) setInstallError("The update could not be installed. Close this dialog and try again later.");
           // Installing consumes the native update handle. Refresh it for a retry
@@ -130,7 +128,7 @@ export function UpdateChannelControl({ updates }: { updates: ReturnType<typeof u
 export function UpdateControl({ updates, productName }: { updates: ReturnType<typeof useUpdates>; productName: string }): React.JSX.Element {
   const { info, currentVersion, busy, error } = updates;
   const label = busy === "changing" ? "Saving update channel…" : busy === "checking" ? "Checking for updates…"
-    : error ?? (info?.enabled === false ? "Automatic updates unavailable in this build"
+    : error ? "Update status unavailable" : (info?.enabled === false ? "Automatic updates unavailable in this build"
       : info?.channelPublished === false ? "No releases published in this channel yet"
       : info?.version ? `Version ${info.version} is available`
       : info ? "You're up to date" : "Update status unavailable");
@@ -141,7 +139,7 @@ export function UpdateControl({ updates, productName }: { updates: ReturnType<ty
     <ItemActions className="ml-auto max-w-full flex-wrap justify-end text-right">
       <span className="text-sm font-medium tabular-nums" data-slot="app-version">{currentVersion ? `v${currentVersion}` : "Version unavailable"}</span>
       {info?.version ? <Button disabled={Boolean(busy)} onClick={() => void updates.install()}><Download aria-hidden="true" />Install and Restart</Button> : <ItemDescription className="max-w-sm text-right" role="status">{label}</ItemDescription>}
-      {info?.version && <span role={error ? "alert" : "status"} className={error ? "text-sm text-destructive" : "sr-only"}>{label}</span>}
+      {info?.version && <span role="status" className="sr-only">{label}</span>}
     </ItemActions>
   </Item>;
 }

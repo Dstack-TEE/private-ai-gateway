@@ -18,28 +18,23 @@ pub(super) fn hermes_native_dir(home: &Path, tool_env: bool) -> PathBuf {
     }
 }
 
-pub(super) fn read_auth_document(path: &Path) -> Result<serde_json::Value, String> {
+pub(super) fn read_auth_document(path: &Path) -> Result<serde_json::Value, AgentError> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(serde_json::json!({})),
-        Err(_) => {
-            return Err(format!(
-                "Cannot inspect native credential conflicts at {}; the file is unreadable",
-                path.display()
-            ))
-        }
+        Err(_) => return Err(AgentError::ConfigurationRead),
     };
     let value: serde_json::Value = serde_json::from_str(&text).map_err(|_| {
-        format!(
+        AgentError::InvalidConfiguration(format!(
             "Cannot inspect native credential conflicts at {}; invalid JSON",
             path.display()
-        )
+        ))
     })?;
     if !value.is_object() {
-        return Err(format!(
+        return Err(AgentError::InvalidConfiguration(format!(
             "Cannot inspect native credential conflicts at {}; expected an object",
             path.display()
-        ));
+        )));
     }
     Ok(value)
 }
@@ -145,7 +140,22 @@ pub(super) fn cli_in_paths(name: &str, paths: &[PathBuf]) -> Option<PathBuf> {
     paths
         .iter()
         .flat_map(|dir| candidates.iter().map(move |candidate| dir.join(candidate)))
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| executable_metadata(candidate).is_some())
+}
+
+pub(super) fn executable_metadata(path: &Path) -> Option<fs::Metadata> {
+    let metadata = fs::metadata(path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return None;
+        }
+    }
+    Some(metadata)
 }
 
 pub(super) fn command_output(
@@ -173,7 +183,7 @@ pub(super) fn command_output(
         command = Command::new(executable);
         command.args(args);
     }
-    command.env("PATH", command_path(search_paths)?);
+    command.env("PATH", command_path(executable, search_paths)?);
     bounded_command_output(command, std::time::Duration::from_secs(15))
 }
 
@@ -187,7 +197,16 @@ pub(super) fn bounded_command_output(
         .name("agent-metadata".to_string())
         .spawn(move || {
             use std::process::Stdio;
-            use tokio::io::AsyncReadExt;
+            use tokio::io::{AsyncRead, AsyncReadExt};
+
+            async fn read_pipe(pipe: impl AsyncRead + Unpin, limit: usize) -> io::Result<Vec<u8>> {
+                let mut bytes = Vec::new();
+                pipe.take(limit as u64 + 1).read_to_end(&mut bytes).await?;
+                if bytes.len() > limit {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "Model metadata output exceeds limit"));
+                }
+                Ok(bytes)
+            }
 
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -199,18 +218,18 @@ pub(super) fn bounded_command_output(
                         .stderr(Stdio::piped())
                         .kill_on_drop(true)
                         .spawn()?;
-                    let mut stdout = child.stdout.take().ok_or_else(|| io::Error::other("Missing stdout pipe"))?;
-                    let mut stderr = child.stderr.take().ok_or_else(|| io::Error::other("Missing stderr pipe"))?;
-                    let mut out = Vec::new();
-                    let mut err = Vec::new();
+                    let stdout = child.stdout.take().ok_or_else(|| io::Error::other("Missing stdout pipe"))?;
+                    let stderr = child.stderr.take().ok_or_else(|| io::Error::other("Missing stderr pipe"))?;
                     let result = tokio::time::timeout(timeout, async {
-                        tokio::try_join!(child.wait(), stdout.read_to_end(&mut out), stderr.read_to_end(&mut err))
+                        tokio::try_join!(child.wait(), read_pipe(stdout, 8 * 1024 * 1024), read_pipe(stderr, 64 * 1024))
                     }).await;
                     match result {
-                        Ok(Ok((status, _, _))) => Ok(std::process::Output { status, stdout: out, stderr: err }),
+                        Ok(Ok((status, stdout, stderr))) => Ok(std::process::Output { status, stdout, stderr }),
                         result => {
-                            // kill() also waits for exit, releasing the process before the config lock.
-                            child.kill().await?;
+                            // Preserve the primary I/O failure even if the child exited while
+                            // its bounded pipes were being drained.
+                            let _ = child.start_kill();
+                            let _ = child.wait().await;
                             match result {
                                 Ok(Err(error)) => Err(error),
                                 _ => Err(io::Error::new(io::ErrorKind::TimedOut, "Codex model metadata export timed out; check the Codex installation and retry")),
@@ -223,16 +242,48 @@ pub(super) fn bounded_command_output(
         .map_err(|_| io::Error::other("Model metadata worker failed"))?
 }
 
-pub(super) fn command_path(search_paths: &[PathBuf]) -> io::Result<OsString> {
-    let mut paths = search_paths.to_vec();
-    if let Some(current) = env::var_os("PATH") {
-        for path in env::split_paths(&current) {
-            if !paths.contains(&path) {
-                paths.push(path);
-            }
+pub(super) fn command_path(executable: &Path, search_paths: &[PathBuf]) -> io::Result<OsString> {
+    // npm launchers should resolve the runtime from their own installation first.
+    let mut paths: Vec<PathBuf> = executable
+        .parent()
+        .map(Path::to_path_buf)
+        .into_iter()
+        .collect();
+    let inherited: Vec<PathBuf> = env::var_os("PATH")
+        .map(|paths| env::split_paths(&paths).collect())
+        .unwrap_or_default();
+    for path in search_paths.iter().chain(&inherited) {
+        if !paths.contains(path) {
+            paths.push(path.clone());
         }
     }
     env::join_paths(paths).map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
+}
+
+pub(super) fn codex_metadata(
+    output: io::Result<std::process::Output>,
+) -> Result<serde_json::Value, AgentError> {
+    let output = output.map_err(|error| AgentError::MetadataUnavailable(match error.kind() {
+        io::ErrorKind::TimedOut => "Codex model metadata export timed out. Run `codex debug models --bundled` in Terminal to check the installation, then retry.".to_string(),
+        io::ErrorKind::InvalidData => "Codex returned invalid or oversized model metadata output. Check or reinstall the Codex installation, then retry.".to_string(),
+        io::ErrorKind::PermissionDenied => "Codex could not start because execution permission was denied. Check the Codex installation, then retry.".to_string(),
+        _ => "Codex could not start to export model metadata. Check that Codex and its runtime are installed, then retry.".to_string(),
+    }))?;
+    if !output.status.success() {
+        // Inspect known CLI diagnostics without returning arbitrary stderr to clients.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("unrecognized subcommand")
+            || stderr.contains("unexpected argument '--bundled'")
+        {
+            return Err(AgentError::MetadataUnavailable("Codex CLI does not support `codex debug models --bundled`. Update Codex before connecting.".to_string()));
+        }
+        return Err(AgentError::MetadataUnavailable(format!(
+            "Codex exited with {} while exporting model metadata. Run `codex debug models --bundled` in Terminal to see the cause, then retry.",
+            output.status
+        )));
+    }
+    serde_json::from_slice(&output.stdout)
+        .map_err(|_| AgentError::MetadataUnavailable("Codex returned malformed bundled model metadata. Update or reinstall Codex, then retry.".to_string()))
 }
 
 pub(super) fn env_path(name: &str) -> Option<PathBuf> {
@@ -276,43 +327,35 @@ impl Projector {
     /// catalog. The installed Codex binary supplies its exact catalog schema
     /// and complete built-in instructions; only public model metadata from
     /// the verified service is overlaid. No credentials are written here.
-    pub fn sync_codex_catalog(&self, catalog: &Catalog) -> Result<(), String> {
+    pub fn sync_codex_catalog(&self, catalog: &Catalog) -> Result<(), AgentError> {
         let bundled = self.codex_bundled_catalog()?;
-        let text = serde_json::to_string_pretty(&codex_catalog(catalog, &bundled)?)
-            .map_err(|error| format!("Cannot encode the Codex model catalog: {error}"))?;
-        tokens::create_private_dir(&self.data_dir)
-            .map_err(|error| format!("Cannot create the app data directory: {error}"))?;
+        let metadata = codex_catalog(catalog, &bundled).map_err(AgentError::MetadataUnavailable)?;
+        let text = serde_json::to_string_pretty(&metadata).map_err(|_| AgentError::Internal)?;
+        tokens::create_private_dir(&self.data_dir).map_err(|_| AgentError::ConfigurationWrite)?;
         if fs::read_to_string(self.codex_catalog_path()).is_ok_and(|current| current == text) {
             return Ok(());
         }
         write_atomic(&self.codex_catalog_path(), &text, None)
-            .map_err(|error| format!("Cannot write the Codex model catalog: {error}"))
+            .map_err(|_| AgentError::ConfigurationWrite)
     }
 
     #[cfg(not(test))]
-    pub(super) fn codex_bundled_catalog(&self) -> Result<serde_json::Value, String> {
+    pub(super) fn codex_bundled_catalog(&self) -> Result<serde_json::Value, AgentError> {
         let search_paths = cli_paths(&self.home, self.tool_env);
         let executable = find_cli_in_paths(Agent::Codex, &search_paths).ok_or_else(|| {
-            "Codex CLI was not found; install or update Codex before connecting".to_string()
+            AgentError::MetadataUnavailable(
+                "Codex CLI was not found; install or update Codex before connecting".to_string(),
+            )
         })?;
-        let output = command_output(
+        codex_metadata(command_output(
             &executable,
             &["debug", "models", "--bundled"],
             &search_paths,
-        )
-        .map_err(|error| format!("Cannot read model metadata from Codex: {error}"))?;
-        if !output.status.success() {
-            return Err(
-                "Codex could not export its bundled model metadata; update Codex and try again"
-                    .to_string(),
-            );
-        }
-        serde_json::from_slice(&output.stdout)
-            .map_err(|_| "Codex returned malformed bundled model metadata".to_string())
+        ))
     }
 
     #[cfg(test)]
-    pub(super) fn codex_bundled_catalog(&self) -> Result<serde_json::Value, String> {
+    pub(super) fn codex_bundled_catalog(&self) -> Result<serde_json::Value, AgentError> {
         Ok(serde_json::json!({
             "models": [{
                 "slug": "gpt-test",

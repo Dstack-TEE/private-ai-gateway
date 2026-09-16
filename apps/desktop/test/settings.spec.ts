@@ -1,10 +1,10 @@
 import { expect, test } from "@playwright/test";
 import { localApiExample } from "../src/renderer/lib/local-api-example";
-import { localAddressKind } from "../src/renderer/components/listen-address";
+import { localAddressKind } from "../src/renderer/lib/local-api-config";
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { nav, choose } from "./helpers";
+import { nav, choose, expectErrorAlert } from "./helpers";
 
 test("CLI registration and explicit backend recovery are reachable", async ({ page }) => {
   await page.goto("/?mock=ready");
@@ -19,12 +19,12 @@ test("CLI registration and explicit backend recovery are reachable", async ({ pa
   await expect(page.getByRole("button", { name: "Start backend", exact: true })).toHaveCount(0);
 });
 
-test("CLI startup errors remain visible until a successful retry", async ({ page }) => {
+test("CLI startup errors use native alerts and allow a successful retry", async ({ page }) => {
   await page.goto("/?mock=cli-startup-error");
   await nav(page, "Settings").click();
-  await page.getByRole("button", { name: "Advanced", exact: true }).click();
+  await expectErrorAlert(page, () => page.getByRole("button", { name: "Advanced", exact: true }).click(), "Move Private AI Proxy to a stable location");
   const cli = page.locator(".settings-advanced");
-  await expect(cli).toContainText("Move Private AI Proxy to a stable location");
+  await expect(cli).not.toContainText("Move Private AI Proxy to a stable location");
   await cli.getByRole("button", { name: "Install", exact: true }).click();
   await expect(cli).not.toContainText("Move Private AI Proxy to a stable location");
   await expect(cli.getByRole("button", { name: "Remove", exact: true })).toBeVisible();
@@ -110,10 +110,10 @@ test("Notifications defaults on, preserves category choices and reports permissi
   await expect(category).toBeEnabled();
   await expect(category).toHaveAttribute("aria-checked", "false");
   await page.goto("/?mock=notification-save-error&native-dialog=notifications");
-  await toggle.click();
+  await expectErrorAlert(page, () => toggle.click(), "Could not save notification settings.");
   await expect(toggle).toHaveAttribute("aria-checked", "true");
   await expect(toggle).toBeEnabled();
-  await expect(sheet.getByRole("alert")).toContainText("Could not save notification settings.");
+  await expect(sheet.getByRole("alert")).toHaveCount(0);
   await page.goto("/?mock=notifications-denied");
   await expect(page.getByRole("alert")).toHaveCount(0);
   await nav(page, "Settings").click();
@@ -139,7 +139,7 @@ test("notification authorization and banner settings remain distinct", async ({ 
   await expect(page.locator("html")).toHaveAttribute("data-notification-settings-opened", "true");
   await page.goto("/?mock=wake-monitor-unavailable");
   await nav(page, "Settings").click();
-  await expect(page.getByRole("alert")).toContainText("System wake monitoring is unavailable");
+  await expect(page.getByRole("alert")).toHaveCount(0);
 });
 
 test("appearance defaults to system, persists and settings shortcut navigates", async ({ page }) => {
@@ -173,8 +173,8 @@ test("diagnostics export has success and error feedback", async ({ page }) => {
   await page.goto("/?mock=export-error");
   await nav(page, "Settings").click();
   await page.getByRole("button", { name: "Advanced", exact: true }).click();
-  await page.getByRole("button", { name: "Export diagnostics" }).click();
-  await expect(page.getByRole("status").filter({ hasText: "Could not export diagnostics." })).toBeVisible();
+  await expectErrorAlert(page, () => page.getByRole("button", { name: "Export diagnostics" }).click(), "Could not export diagnostics");
+  await expect(page.getByText("Could not export diagnostics.")).toHaveCount(0);
 });
 
 test("network listeners show discovered addresses and require explicit save consent", async ({ page }) => {
@@ -194,6 +194,11 @@ test("network listeners show discovered addresses and require explicit save cons
     return Math.min(field.left - scroll.left, scroll.right - field.right, field.top - scroll.top);
   });
   expect(gutter).toBeGreaterThanOrEqual(3);
+  await input.fill("invalid-address");
+  await input.press("Escape");
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await expectErrorAlert(page, () => sheet.getByRole("button", { name: "Save", exact: true }).click(), "Enter a valid IPv4 or IPv6 listen address.");
+  }
   await sheet.getByRole("button", { name: "Choose listen address" }).click();
   await page.getByRole("option", { name: "192.168.1.20 en0" }).click();
   await expect(input).toHaveValue("192.168.1.20");
@@ -207,8 +212,8 @@ test("network listeners show discovered addresses and require explicit save cons
   await sheet.getByRole("button", { name: "Save", exact: true }).click();
   await expect(sheet).toHaveCount(0);
 
-  await page.goto("/?mock=network-scan-error&native-dialog=local-api");
-  await expect(page.getByRole("status")).toContainText("Network interfaces unavailable");
+  await expectErrorAlert(page, () => page.goto("/?mock=network-scan-error&native-dialog=local-api"), "Network interfaces unavailable");
+  await expect(page.getByText("Network interfaces unavailable")).toHaveCount(0);
   await page.getByRole("combobox", { name: "Listen address" }).fill("0:0:0:0:0:0:0:0");
   await expect(page.getByLabel("Client host", { exact: true })).toHaveAttribute("required", "");
 });

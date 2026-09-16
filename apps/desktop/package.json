@@ -20,6 +20,7 @@
     "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
     "tauri": "tauri",
     "test:renderer": "playwright test",
+    "test:probe": "node --test scripts/probe-model-endpoints.test.mjs",
     "test:release": "node --test scripts/create-update-manifest.test.mjs scripts/package-cli.test.mjs scripts/release-channel.test.mjs"
   },
   "engines": {
@@ -53,6 +54,7 @@
     "@types/react-dom": "19.2.7",
     "@vitejs/plugin-react": "6.1.1",
     "bmp-js": "^0.1.0",
+    "eventsource-parser": "^3.1.1",
     "semver": "^7.8.5",
     "shadcn": "^4.21.0",
     "sharp": "0.35.4",

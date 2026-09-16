@@ -1,11 +1,12 @@
 import React, { useState } from "react";
-import { errorMessage } from "../lib/error-message";
 import { Check, Copy, Eye, EyeOff, RefreshCw } from "lucide-react";
 import { Button } from "../components/ui/button";
-import { ListenAddress, localAddressKind } from "../components/listen-address";
+import { ListenAddress } from "../components/listen-address";
+import { localAddressKind } from "../lib/local-api-config";
 import { NetworkWarning } from "../components/network-warning";
 import { Hint } from "../components/hint";
-import { Field, FieldGroup, FieldLabel, FieldDescription, FieldError, FieldSeparator } from "../components/ui/field";
+import { Field, FieldGroup, FieldLabel, FieldDescription, FieldSeparator } from "../components/ui/field";
+import { useErrorAlert } from "../lib/error-alert";
 import { Item } from "../components/ui/item";
 import { Input } from "../components/ui/input";
 import { InputGroup, InputGroupInput, InputGroupAddon, InputGroupButton } from "../components/ui/input-group";
@@ -18,7 +19,6 @@ import { desktopApi } from "../lib/environment";
 
 export function LocalApiPanel({
   proxyUrl,
-  endpointError,
   clientKey,
   clientKeyVisible,
   copied,
@@ -26,7 +26,6 @@ export function LocalApiPanel({
   onToggleKey,
 }: {
   proxyUrl?: string;
-  endpointError?: string;
   clientKey: string;
   clientKeyVisible: boolean;
   copied?: string;
@@ -59,9 +58,8 @@ export function LocalApiPanel({
           <code className="row-note flex-[1_0_100%] block text-muted-foreground text-xs wrap-anywhere [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [code&]:overflow-hidden [code&]:text-ellipsis [code&]:whitespace-nowrap">{clientKey ? clientKeyVisible ? clientKey : maskClientKey(clientKey) : "Unavailable"}</code>
           <span className={`copy-feedback absolute right-13.5 top-[50%] opacity-0 -translate-y-1/2 text-muted-foreground text-xs font-semibold [transition:opacity_120ms_ease] [&.is-copied]:opacity-100 [&.is-copied]:text-primary ${copied === keyLabel ? "is-copied" : ""}`}>{copied === keyLabel ? "Copied" : "Copy"}</span>
         </Button>
-        <IconButton className="row-action relative z-2 ml-auto" label={clientKeyVisible ? "Hide client key" : "Reveal client key"} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}</IconButton>
+        <IconButton className="row-action relative z-2 ml-auto" label={clientKeyVisible ? "Hide client key" : "Reveal client key"} disabled={!clientKey} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}</IconButton>
       </Item>
-      {endpointError && <p className="inline-error pt-2 pr-3.25 pb-2 pl-3.25 text-destructive bg-[var(--danger-bg)] text-xs">{endpointError}</p>}
     </div>
   );
 }
@@ -95,23 +93,24 @@ export function LocalApiSheet({
   const addressKind = localAddressKind(draft.listenAddress);
   const networkAccess = Boolean(addressKind && addressKind !== "loopback");
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string>();
+  const reportError = useErrorAlert("Local API action failed", externalError);
   const update = <Key extends keyof LocalApiConfig>(key: Key, value: LocalApiConfig[Key]) => {
     setDraft((current) => ({ ...current, [key]: value }));
-    setError(undefined);
   };
   const rotateKey = async () => {
     setSaving(true);
-    setError(undefined);
     try {
       const confirmed = await desktopApi.confirm({
         title: "Rotate local API key?",
         message: "The old client key will stop working immediately. Update your tools with the new key. Agent credentials do not change. In-flight requests may be interrupted.",
         confirmLabel: "Rotate key",
       });
-      if (confirmed) setError(await onRotate());
+      if (confirmed) {
+        const message = await onRotate();
+        if (message) reportError(message);
+      }
     } catch (error) {
-      setError(errorMessage(error));
+      reportError(error);
     } finally {
       setSaving(false);
     }
@@ -119,10 +118,9 @@ export function LocalApiSheet({
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     setSaving(true);
-    setError(undefined);
     try {
       if (!addressKind) {
-        setError("Enter a valid IPv4 or IPv6 listen address.");
+        reportError("Enter a valid IPv4 or IPv6 listen address.");
         return;
       }
       if (networkAccess && !await desktopApi.confirm({
@@ -131,10 +129,10 @@ export function LocalApiSheet({
         confirmLabel: "Allow and Save",
       })) return;
       const message = await onSave({ ...draft, allowNetworkAccess: networkAccess });
-      setError(message);
-      if (!message) onClose();
+      if (message) reportError(message);
+      else onClose();
     } catch (saveError) {
-      setError(errorMessage(saveError));
+      reportError(saveError);
     } finally {
       setSaving(false);
     }
@@ -172,7 +170,6 @@ export function LocalApiSheet({
           </Field>
           </FieldGroup>
         </div>
-        <FieldError className="mt-3">{error ?? externalError}</FieldError>
         <SheetActions leading={
           <Button type="button" variant="outline" disabled={frozen || saving} onClick={() => setDraft({ listenAddress: "127.0.0.1", allowNetworkAccess: false, port: 4180 })}>Use default</Button>
         }>

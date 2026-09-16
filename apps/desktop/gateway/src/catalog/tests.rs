@@ -6,7 +6,7 @@ fn downloaded_inventory_rejects_unknown_schema_duplicate_and_partial_observation
     for malformed in [
         {
             let mut value = valid.clone();
-            value["schemaVersion"] = json!(2);
+            value["schemaVersion"] = json!(3);
             value
         },
         {
@@ -57,6 +57,10 @@ fn observations_are_scoped_and_never_add_unlisted_models() {
             .unwrap();
         assert_ne!(catalog.revision, original.revision);
         assert_eq!(catalog.openai_list(), original.openai_list());
+        assert!(catalog
+            .models
+            .iter()
+            .all(|model| model.agent_surfaces.is_none()));
         assert_eq!(catalog.for_surface(Surface::Responses).models.len(), 1);
         assert_eq!(catalog.for_surface(Surface::Messages).models.len(), 2);
         assert_eq!(
@@ -79,6 +83,45 @@ fn observations_are_scoped_and_never_add_unlisted_models() {
             .iter()
             .all(|model| model.supported_surfaces.is_none()));
     }
+}
+
+#[test]
+fn agent_projections_require_all_version_two_checks_without_blocking_basic_api_access() {
+    let mut value = serde_json::to_value(EndpointInventory::bundled().unwrap()).unwrap();
+    value["schemaVersion"] = json!(2);
+    for entry in value["results"].as_array_mut().unwrap() {
+        entry["checks"] = json!({
+            "streaming": {"status": "supported", "reason": "valid_event_stream"},
+            "tools": {"status": "supported", "reason": "valid_streamed_tool_call"},
+            "toolResult": {"status": "supported", "reason": "valid_tool_result_response"}
+        });
+        if entry["model"] == "z-ai/glm-5.3" && entry["endpoint"] == "/v1/responses" {
+            entry["checks"]["tools"]["status"] = json!("inconclusive");
+        }
+    }
+    let inventory = EndpointInventory::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+    let mut basic = serde_json::to_value(EndpointInventory::bundled().unwrap()).unwrap();
+    basic["checkedAt"] = json!("2026-09-16T23:59:59Z");
+    let basic = EndpointInventory::parse(&serde_json::to_vec(&basic).unwrap()).unwrap();
+    assert!(!basic.is_newer_than(&inventory));
+    let mut catalog = Catalog::from_remote(&json!({"data": [{"id": "z-ai/glm-5.3"}]}), 1).unwrap();
+    catalog
+        .apply_endpoint_inventory("https://tee.redpill.ai", &inventory)
+        .unwrap();
+    let model = &catalog.models[0];
+    assert!(model.supports(Surface::Responses));
+    assert!(!model.supports_agent(Surface::Responses));
+    assert!(catalog
+        .for_agent_surface(Surface::Responses)
+        .models
+        .is_empty());
+    assert!(model.supports_agent(Surface::Messages));
+
+    value["results"][0]["checks"]
+        .as_object_mut()
+        .unwrap()
+        .remove("toolResult");
+    assert!(EndpointInventory::parse(&serde_json::to_vec(&value).unwrap()).is_err());
 }
 fn remote() -> Value {
     json!({ "data": [

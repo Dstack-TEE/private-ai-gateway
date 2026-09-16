@@ -5,6 +5,8 @@ import { SettingsList, SettingsToggle } from "./settings";
 import { Sheet, SheetActions } from "./sheet";
 import { Alert, AlertDescription } from "./ui/alert";
 import { Button } from "./ui/button";
+import { ErrorAlert } from "./error-alert";
+import { useErrorAlert } from "../lib/error-alert";
 
 function useNotificationSettings(api: DesktopApi) {
   const { data, error: readError, refetch } = useQuery({
@@ -12,6 +14,7 @@ function useNotificationSettings(api: DesktopApi) {
   });
   const [mutationError, setError] = useState<string>();
   const error = mutationError ?? (readError ? "Could not read notification settings." : undefined);
+  const reportError = useErrorAlert("Notification action failed", undefined, api);
   const [busy, setBusy] = useState(false);
   const startupRequested = useRef(false);
   useEffect(() => {
@@ -38,9 +41,9 @@ function useNotificationSettings(api: DesktopApi) {
         catch { permissionFailed = true; }
       }
       await refresh();
-      if (permissionFailed) setError("Notifications are enabled in this app, but system permission could not be requested.");
+      if (permissionFailed) reportError("Notifications are enabled in this app, but system permission could not be requested.");
     }
-    catch { setError("Could not save notification settings."); }
+    catch { reportError("Could not save notification settings."); }
     finally { setBusy(false); }
   };
   const permissionAction = async () => {
@@ -50,7 +53,7 @@ function useNotificationSettings(api: DesktopApi) {
       if (data?.permission === "notDetermined") await api.requestNotificationPermission();
       else await api.openNotificationSettings();
       await refresh();
-    } catch { setError("Could not open notification permissions. Check your system settings."); }
+    } catch { reportError("Could not open notification permissions. Check your system settings."); }
     finally { setBusy(false); }
   };
   return { data, error, busy, change, permissionAction, refresh };
@@ -79,11 +82,11 @@ function NotificationPermissionNotice() {
 }
 
 export function NotificationsSheet({ onClose }: { onClose(): void }) {
-  const { data, error, busy, change, refresh } = useNotifications();
+  const { data, error, busy, change } = useNotifications();
   return <Sheet title="Notifications" className="notifications-sheet w-[min(580px,_calc(var(--window-dialog-width,_100vw)_-_32px))] [&[open]]:flex [&[open]]:flex-col" dismissible={!busy} onClose={onClose}>
     <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto py-4">
       <NotificationPermissionNotice />
-      {error && <Alert variant="destructive"><AlertDescription>{error}<Button variant="outline" size="sm" onClick={() => void refresh()}>Retry</Button></AlertDescription></Alert>}
+      <ErrorAlert title="Notification settings unavailable" error={error} />
       {data && <>
         <SettingsList><SettingsToggle label="Allow notifications" checked={data.preferences.enabled} disabled={busy} onToggle={() => void change("enabled", !data.preferences.enabled)} /></SettingsList>
         <SettingsList>{([

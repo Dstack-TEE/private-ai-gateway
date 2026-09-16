@@ -18,7 +18,6 @@ import { UsageRow } from "./usage";
 import { ProtectedControl, ProtectionStatus } from "../components/protection";
 import { ServiceLogo } from "../components/brand";
 import { AccountBalanceValue } from "../components/account-tools";
-import { Alert, AlertDescription } from "../components/ui/alert";
 
 const TLS_TRACKS = [
   "17 03 03 00 f4   9f3a c1e0 7b42 d5a8 0e6f 2c91 4d17 e8b3 5a0c f9d2 61b7 a3e4 b8c5 0f2e 93d1 7a46 e5b0 1c8d",
@@ -44,10 +43,7 @@ export function Overview({
   developmentMode,
   backendDisconnected,
   connectingBackend,
-  protectionProblem,
-  profileProblem,
   agentProblem,
-  clientKeyError,
   accountApi,
   locked,
   clientKey,
@@ -75,10 +71,7 @@ export function Overview({
   developmentMode: boolean;
   backendDisconnected: boolean;
   connectingBackend: boolean;
-  protectionProblem?: string;
-  profileProblem?: string;
   agentProblem?: string;
-  clientKeyError?: string;
   accountApi: Pick<DesktopApi, "getAccountBalance">;
   locked: boolean;
   clientKey: string;
@@ -111,7 +104,6 @@ export function Overview({
         developmentMode={developmentMode}
         backendDisconnected={backendDisconnected}
         connectingBackend={connectingBackend}
-        problem={protectionProblem ?? profileProblem}
         accountApi={accountApi}
         onToggle={onToggle}
         onStartBackend={onStartBackend}
@@ -124,19 +116,16 @@ export function Overview({
         <OverviewModule title="Local API" description="Use private AI in your tools." titleAdornment={<Hint content="Local API examples"><Badge variant="ghost" className="size-6 p-0 [&>svg]:size-4!" render={<button type="button" />} aria-label="Local API examples" aria-haspopup="dialog" onClick={onLocalExamples}><CircleHelp aria-hidden="true" /></Badge></Hint>} status={<StateLabel tone={localAvailable ? "success" : "neutral"} text={localAvailable ? "Available" : "Unavailable"} />} action={<IconButton label="Local API settings" aria-haspopup="dialog" onClick={onLocalSettings}><Settings size={16} /></IconButton>}>
           <LocalApiPanel
             proxyUrl={state.proxyUrl}
-            endpointError={state.endpointError}
             clientKey={clientKey}
             clientKeyVisible={clientKeyVisible}
             copied={copied}
             onCopy={onCopy}
             onToggleKey={onToggleClientKey}
           />
-          {clientKeyError && <Alert variant="destructive"><AlertDescription>{clientKeyError}</AlertDescription></Alert>}
         </OverviewModule>
         <OverviewModule title="Agents" description="Use private AI in your agents." action="View all" onAction={onAgents}>
-          {agentProblem && <Alert variant="destructive"><AlertDescription>{agentProblem}</AlertDescription></Alert>}
           <div className="preview-list [&_>_:last-child]:border-b-0 overview-agent-list [--agent-row-height:calc(2rem_+_1.25rem_+_2px)] grid grid-rows-[repeat(3,_minmax(var(--agent-row-height),_auto))] gap-3 [&_>_.empty-state]:row-span-full">
-            {!agents.some((agent) => agent.installed) && <EmptyState text="No installed agents found" />}
+            {!agents.some((agent) => agent.installed) && <EmptyState text={agentProblem ? "Agent detection unavailable" : "No installed agents found"} />}
             {sortAgents(agents.filter((agent) => agent.installed)).slice(0, 3).map((agent) => (
               <AgentRow
                 pendingConnection={pendingAgentChanges[agent.id]}
@@ -178,7 +167,6 @@ function StatusSurface({
   developmentMode,
   backendDisconnected,
   connectingBackend,
-  problem,
   accountApi,
   onToggle,
   onStartBackend,
@@ -192,7 +180,6 @@ function StatusSurface({
   developmentMode: boolean;
   backendDisconnected: boolean;
   connectingBackend: boolean;
-  problem?: string;
   accountApi: Pick<DesktopApi, "getAccountBalance">;
   onToggle(): void;
   onStartBackend(): void;
@@ -202,15 +189,12 @@ function StatusSurface({
   const verdict = presentation(state);
   const protectedNow = isProtected(state);
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
-  const protectionDetail = state.reconnecting || state.endpointError || state.status === "blocked" || state.status === "error"
-    ? problem ?? verdict.detail
-    : problem;
   return (
     <Card size="sm" role="region" className={`status-surface relative isolate transition-colors duration-200 ease-out motion-reduce:transition-none status-compact [&_.protected-control]:col-start-2 [&_.protected-control]:row-start-1 [&_.protected-control]:self-start [&_.protected-control]:justify-self-end [&_.protected-control]:min-h-[calc(var(--text-2xl)_*_var(--text-2xl--line-height))] [&_.status-profile]:w-[min(140px,_100%)] [&_.status-profile]:bg-card [&_.is-icon-only]:m-0 [&_.protection-status]:justify-start [&_.status-heading]:transition-colors [&_.status-heading]:duration-200 [&_.status-heading]:ease-out [&_[data-slot=switch]]:transition-colors [&_[data-slot=switch]]:duration-200 [&_[data-slot=switch]]:ease-out motion-reduce:[&_.status-heading]:transition-none motion-reduce:[&_[data-slot=switch]]:transition-none status-${state.status} ${protectedNow ? developmentMode ? "status-ready ring-warning dark:ring-warning shadow-warning/10" : "status-ready ring-primary dark:ring-primary shadow-primary/10" : ""} ${developmentMode ? "is-development" : ""}`} aria-label="Protection status">
       <TrackLayer active={protectedNow} />
       <CardContent className="status-compact-content relative z-2 grid grid-cols-[minmax(0,_1fr)_44px] grid-rows-[auto_1fr] gap-y-2 gap-x-3 flex-1 w-full">
         <div className={`[&.state-success]:text-primary [&.state-neutral]:text-muted-foreground [&.state-warning]:text-warning [&.state-danger]:text-destructive status-heading col-start-1 row-start-1 min-w-0 [&_.protection-status]:grid [&_.protection-status]:grid-cols-[24px_minmax(0,_1fr)] [&_.protection-status]:gap-y-1 [&_.protection-status]:gap-x-1.5 [&_.protection-status]:items-center [&_.protection-status]:text-2xl [&_.protection-status]:font-semibold [&_.protection-status_>_svg]:w-6 [&_.protection-status_>_svg]:h-6 [&_.protection-duration]:col-start-2 [&_.protection-duration]:text-xs [&_.protection-duration]:font-normal state-${verdict.tone}`}>
-          <ProtectionStatus state={state} label={verdict.title} detail={protectionDetail} />
+          <ProtectionStatus state={state} label={verdict.title} />
         </div>
         <div className="status-profile-actions col-span-full row-start-2 self-end flex items-center gap-2 min-w-0">
         {backendDisconnected ? <Button variant="outline" size="sm" disabled={connectingBackend} onClick={onStartBackend}><RefreshCw className={connectingBackend ? "animate-control-spin" : undefined} aria-hidden="true" />{connectingBackend ? "Starting" : "Start backend"}</Button> : <>

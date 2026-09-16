@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { modelChartData } from "../src/renderer/components/usage-chart";
-import { nav, choose } from "./helpers";
+import { nav, choose, expectErrorAlert } from "./helpers";
 
 test("recent usage keeps ten rows visible in the overview card", async ({ page }) => {
   await page.setViewportSize({ width: 1100, height: 1040 });
@@ -58,8 +58,8 @@ test("usage query failures do not display stale totals or lose the selected filt
   const model = page.getByRole("combobox", { name: "Model", exact: true });
   await model.click();
   const selected = await page.getByRole("option").nth(1).innerText();
-  await page.getByRole("option").nth(1).click();
-  await expect(page.getByRole("alert")).toHaveText("Usage database temporarily unavailable");
+  await expectErrorAlert(page, () => page.getByRole("option").nth(1).click(), "Usage database temporarily unavailable");
+  await expect(page.getByRole("alert")).toHaveCount(0);
   await expect(history.getByRole("button")).toHaveCount(0);
   await expect(page.locator(".usage-stats strong")).toHaveText(["—", "—", "—", "—"]);
   await expect(model.locator('[data-slot="select-value"]')).toHaveText(selected);

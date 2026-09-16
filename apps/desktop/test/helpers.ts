@@ -7,3 +7,13 @@ export async function choose(page: Page, control: import("@playwright/test").Loc
 }
 
 export type Page = import("@playwright/test").Page;
+import { expect } from "@playwright/test";
+
+export async function expectErrorAlert(page: Page, action: () => Promise<unknown>, message: string | RegExp) {
+  const pending = page.waitForEvent("dialog", (dialog) => dialog.type() === "alert");
+  const operation = action();
+  const dialog = await pending;
+  expect(dialog.message()).toMatch(message);
+  await dialog.accept();
+  await operation;
+}

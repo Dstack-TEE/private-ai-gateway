@@ -1,14 +1,8 @@
 import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import ipaddr from "ipaddr.js";
 import type { DesktopApi } from "../../shared/contracts";
 import { Combobox, ComboboxContent, ComboboxEmpty, ComboboxInput, ComboboxItem, ComboboxList } from "./ui/combobox";
-import { FieldDescription } from "./ui/field";
-
-export function localAddressKind(value: string) {
-  const address = value.trim();
-  return ipaddr.isValid(address) ? ipaddr.parse(address).range() : undefined;
-}
+import { ErrorAlert } from "./error-alert";
 
 export function ListenAddress({ api, value, disabled, onChange }: {
   api: Pick<DesktopApi, "listListenAddresses">;
@@ -27,7 +21,7 @@ export function ListenAddress({ api, value, disabled, onChange }: {
     <Combobox items={options} inputValue={value} onInputValueChange={onChange} value={value}
       onValueChange={(next) => { if (next) onChange(next); }}
       onOpenChange={(open) => { if (open) setContainer(input.current?.closest("dialog") ?? null); }}>
-      <ComboboxInput ref={input} id="local-listen-address" aria-label="Listen address" triggerLabel="Choose listen address" required disabled={disabled} autoComplete="off" spellCheck={false} aria-describedby={error ? "listen-address-error" : undefined} />
+      <ComboboxInput ref={input} id="local-listen-address" aria-label="Listen address" triggerLabel="Choose listen address" required disabled={disabled} autoComplete="off" spellCheck={false} />
       <ComboboxContent container={container}>
         <ComboboxEmpty>No matching address. You can enter an IP address.</ComboboxEmpty>
         <ComboboxList>{(address: string) => <ComboboxItem key={address} value={address}>
@@ -35,6 +29,6 @@ export function ListenAddress({ api, value, disabled, onChange }: {
         </ComboboxItem>}</ComboboxList>
       </ComboboxContent>
     </Combobox>
-    {error && <FieldDescription id="listen-address-error" role="status">{error}</FieldDescription>}
+    <ErrorAlert title="Could not detect network interfaces" error={error} />
   </>;
 }

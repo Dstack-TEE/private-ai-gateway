@@ -51,13 +51,11 @@ impl Projector {
 
     /// Connecting references the bundled helper; an installation without it
     /// cannot issue agent credentials.
-    pub(super) fn require_helper(&self) -> Result<(), String> {
-        if fs::metadata(&self.helper_exe)
-            .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
-        {
+    pub(super) fn require_helper(&self) -> Result<(), AgentError> {
+        if executable_metadata(&self.helper_exe).is_some_and(|metadata| metadata.len() > 0) {
             Ok(())
         } else {
-            Err(HELPER_MISSING.to_string())
+            Err(AgentError::HelperUnavailable)
         }
     }
 
@@ -69,19 +67,20 @@ impl Projector {
         store: &Store,
         catalog: Option<&Catalog>,
         options: &ConnectOptions,
-    ) -> Result<Edit, String> {
+    ) -> Result<Edit, AgentError> {
         if !connect {
-            let record = store
-                .get(agent.id())
-                .ok_or_else(|| format!("{} is not connected", agent.name()))?;
+            let record = store.get(agent.id()).ok_or(AgentError::InvalidState)?;
             let mut edit = restore(doc, record, self.secrets.as_ref())?;
             if let Some(journal) = &record.selection {
                 edit.selection = selection::restoration(
                     agent,
-                    record.restore_path()?,
+                    record
+                        .restore_path()
+                        .map_err(AgentError::ConfigurationConflict)?,
                     journal,
                     self.secrets.as_ref(),
-                )?;
+                )
+                .map_err(|_| AgentError::RestorationFailed)?;
                 if let Some(selection) = &edit.selection {
                     edit.changes.extend(selection.changes.clone());
                 }
@@ -89,18 +88,17 @@ impl Projector {
             return Ok(edit);
         }
         if catalog.is_none() {
-            return Err(format!(
-                "Start the gateway and wait until it is verified; the model list for {} comes \
-                 from it",
-                agent.name()
-            ));
+            return Err(AgentError::InvalidState);
         }
         let prior = self.current_record(agent, store.get(agent.id()));
         if agent == Agent::OpenClaw {
-            openclaw::validate_host(&self.home, self.tool_env)?;
-            openclaw::validate_helper(&self.helper_exe, &self.tokens.path(agent.id()))?;
-            openclaw::validate_config(doc, prior)?;
-            openclaw::validate_selection(doc, options)?;
+            openclaw::validate_host(&self.home, self.tool_env)
+                .map_err(AgentError::ConfigurationConflict)?;
+            openclaw::validate_helper(&self.helper_exe, &self.tokens.path(agent.id()))
+                .map_err(|_| AgentError::HelperUnavailable)?;
+            openclaw::validate_config(doc, prior).map_err(AgentError::ConfigurationConflict)?;
+            openclaw::validate_selection(doc, options)
+                .map_err(AgentError::ConfigurationConflict)?;
         }
         let options = connection_options(agent, doc, prior, catalog, options);
         self.validate_native_config(agent, doc, prior, &options, catalog)?;
@@ -114,15 +112,19 @@ impl Projector {
             options: &options,
         };
         let fields = fields(agent, &inputs)?;
-        let mut edit = project(doc, &fields, prior, agent)?;
+        let mut edit =
+            project(doc, &fields, prior, agent).map_err(AgentError::ConfigurationConflict)?;
         if let Some(model) = options.default_model.as_deref() {
-            let config_path = self.action_path(agent, prior, true)?;
+            let config_path = self
+                .action_path(agent, prior, true)
+                .map_err(AgentError::ConfigurationConflict)?;
             edit.selection = selection::prepare(
                 agent,
                 &config_path,
                 prior.and_then(|record| record.selection.as_ref()),
                 model.trim(),
-            )?;
+            )
+            .map_err(|_| AgentError::ConfigurationRead)?;
             if let Some(selection) = &edit.selection {
                 edit.changes.extend(selection.changes.clone());
                 if let Some(record) = &mut edit.record {
@@ -131,7 +133,8 @@ impl Projector {
             }
         }
         if agent == Agent::OpenCode {
-            self.check_opencode_merge(doc, fields.iter().any(|field| field.path == ["model"]))?;
+            self.check_opencode_merge(doc, fields.iter().any(|field| field.path == ["model"]))
+                .map_err(AgentError::ConfigurationConflict)?;
         }
         Ok(edit)
     }
@@ -143,17 +146,18 @@ impl Projector {
         prior: Option<&Connection>,
         options: &ConnectOptions,
         catalog: Option<&Catalog>,
-    ) -> Result<(), String> {
+    ) -> Result<(), AgentError> {
         match agent {
-            Agent::OhMyPi => oh_my_pi::validate_config(doc, prior),
+            Agent::OhMyPi => oh_my_pi::validate_config(doc, prior)
+                .map_err(AgentError::ConfigurationConflict),
             Agent::Codex if doc.contains(&["model_providers", "private_ai_proxy", "aws"]) => {
-                Err("Codex's gateway provider has AWS authentication, which conflicts with command authentication. Remove that conflict in Codex; it will not be overwritten".to_string())
+                Err(AgentError::AuthenticationConflict("Codex's gateway provider has AWS authentication, which conflicts with command authentication. Remove that conflict in Codex; it will not be overwritten".to_string()))
             }
             Agent::Pi => {
                 let path = Agent::Pi.config_path(&self.home, self.tool_env).with_file_name("auth.json");
                 let auth = read_auth_document(&path)?;
                 if auth.get("private-ai-proxy").is_some() {
-                    return Err("Pi has a stored credential for private-ai-proxy that takes priority over the helper. Resolve it in Pi before connecting; auth.json is left unchanged".to_string());
+                    return Err(AgentError::AuthenticationConflict("Pi has a stored credential for private-ai-proxy that takes priority over the helper. Resolve it in Pi before connecting; auth.json is left unchanged".to_string()));
                 }
                 Ok(())
             }
@@ -165,39 +169,39 @@ impl Projector {
                         !fields.is_empty() && fields.iter().all(|field| doc.get_value(&refs(&field.path)) == field.value)
                     });
                     if !owned {
-                        return Err("The Hermes private-ai-proxy provider already exists outside this connection; it will not be overwritten".to_string());
+                        return Err(AgentError::ConfigurationConflict("The Hermes private-ai-proxy provider already exists outside this connection; it will not be overwritten".to_string()));
                     }
                 }
                 if doc.contains(&["providers", "private-ai-proxy", "enabled"])
                     && doc.get_value(&["providers", "private-ai-proxy", "enabled"]) != Some(ConfigValue::Bool(true)) {
-                    return Err("The Hermes gateway provider must have enabled: true or omit that field; resolve it in Hermes before connecting".to_string());
+                    return Err(AgentError::ConfigurationConflict("The Hermes gateway provider must have enabled: true or omit that field; resolve it in Hermes before connecting".to_string()));
                 }
                 if doc.contains(&["providers", "private-ai-proxy", "api_mode"])
                     && doc.get_str(&["providers", "private-ai-proxy", "api_mode"]).as_deref() != Some("chat_completions") {
-                    return Err("Hermes api_mode overrides the gateway's chat_completions transport; resolve that conflict in Hermes".to_string());
+                    return Err(AgentError::ConfigurationConflict("Hermes api_mode overrides the gateway's chat_completions transport; resolve that conflict in Hermes".to_string()));
                 }
                 for key in ["api_key", "key_env", "api_key_env"] {
                     if doc.contains(&["providers", "private-ai-proxy", key]) || doc.contains(&["model", key]) {
-                        return Err("Hermes has an explicit credential source that may override or seed a pool ahead of the helper; remove that conflict in Hermes".to_string());
+                        return Err(AgentError::AuthenticationConflict("Hermes has an explicit credential source that may override or seed a pool ahead of the helper; remove that conflict in Hermes".to_string()));
                     }
                 }
                 if doc.contains(&["fallback_model"]) {
-                    return Err("Hermes fallback_model is outside this verified connection; disable it in Hermes before connecting. It will not be erased".to_string());
+                    return Err(AgentError::ConfigurationConflict("Hermes fallback_model is outside this verified connection; disable it in Hermes before connecting. It will not be erased".to_string()));
                 }
                 let existing = doc.get_str(&["model", "default"]);
                 let selected = options.default_model.as_deref().map(str::trim).filter(|s| !s.is_empty())
                     .or(existing.as_deref());
-                if selected.is_none_or(|id| id.is_empty() || catalog.is_some_and(|catalog| catalog.get(id).is_none_or(|model| !model.supports(agent.surface())))) {
-                    return Err("Choose a verified default model for Hermes; the existing default cannot be used for this connection".to_string());
+                if selected.is_none_or(|id| id.is_empty() || catalog.is_some_and(|catalog| catalog.get(id).is_none_or(|model| !model.supports_agent(agent.surface())))) {
+                    return Err(AgentError::IncompatibleModel);
                 }
                 let path = Agent::Hermes.config_path(&self.home, self.tool_env);
-                let directory = path.parent().ok_or("Invalid Hermes config directory")?;
+                let directory = path.parent().ok_or(AgentError::InvalidState)?;
                 let native = hermes_native_dir(&self.home, self.tool_env);
                 let resolved = directory.canonicalize().unwrap_or_else(|_| directory.to_path_buf());
                 let resolved_native = native.canonicalize().unwrap_or_else(|_| native.clone());
                 let root = if resolved.starts_with(&resolved_native) { native }
                     else if directory.parent().and_then(Path::file_name).is_some_and(|name| name == "profiles") {
-                        directory.parent().and_then(Path::parent).ok_or("Invalid Hermes profile directory")?.to_path_buf()
+                        directory.parent().and_then(Path::parent).ok_or(AgentError::InvalidState)?.to_path_buf()
                     } else { directory.to_path_buf() };
                 // Hermes falls back to the root auth store for named profiles.
                 let name = doc.get_str(&["providers", "private-ai-proxy", "name"])
@@ -205,10 +209,10 @@ impl Projector {
                 for path in [directory.join("auth.json"), root.join("auth.json")] {
                     let auth = read_auth_document(&path)?;
                     if let Some(pool) = auth.get("credential_pool") {
-                        let pool = pool.as_object().ok_or("Cannot verify Hermes credential_pool; resolve its shape in Hermes")?;
+                        let pool = pool.as_object().ok_or_else(|| AgentError::InvalidConfiguration("Cannot verify Hermes credential_pool; resolve its shape in Hermes".to_string()))?;
                         for key in ["private-ai-proxy".to_string(), format!("custom:{}", name.trim().to_lowercase().replace(' ', "-"))] {
                             if pool.get(&key).is_some_and(|entries| entries.as_array().is_none_or(|entries| !entries.is_empty())) {
-                                return Err("Hermes has a gateway credential pool that takes priority over key_cmd; resolve it in Hermes. Native auth files are left unchanged".to_string());
+                                return Err(AgentError::AuthenticationConflict("Hermes has a gateway credential pool that takes priority over key_cmd; resolve it in Hermes. Native auth files are left unchanged".to_string()));
                             }
                         }
                     }
@@ -352,9 +356,9 @@ impl Projector {
             return status;
         }
         if let Err(error) = self.require_helper() {
-            status.error = Some(error.clone());
+            status.error = Some(error.to_string());
             if agent == Agent::OpenClaw {
-                status.attention = Some(error);
+                status.attention = Some(error.to_string());
                 return status;
             }
         }
@@ -386,7 +390,7 @@ impl Projector {
             None => match self.parse_config(agent, text.as_deref()) {
                 Ok(doc) => Some(doc),
                 Err(error) => {
-                    status.error = Some(error);
+                    status.error = Some(error.to_string());
                     None
                 }
             },
@@ -466,7 +470,7 @@ impl Projector {
             if let (Some(catalog), Some(model)) = (catalog, selected_model(agent, doc.as_ref())) {
                 if catalog
                     .get(&model)
-                    .is_none_or(|model| !model.supports(agent.surface()))
+                    .is_none_or(|model| !model.supports_agent(agent.surface()))
                 {
                     status.attention = Some(format!(
                         "`{model}` is not available from the current profile. Choose an available model in the agent; the connection does not need to be recreated."
@@ -491,7 +495,7 @@ impl Projector {
                 {
                     status.connected = false;
                     status.authorized = false;
-                    status.attention = Some(attention);
+                    status.attention = Some(attention.to_string());
                 }
             }
         }
@@ -520,30 +524,32 @@ impl Projector {
         agent: Agent,
         path: &Result<PathBuf, String>,
     ) -> (Option<String>, Option<String>) {
-        match path
-            .as_ref()
-            .map_err(Clone::clone)
-            .and_then(|path| self.read_config_at(agent, path))
-        {
-            Ok(text) => (text, None),
-            Err(error) => (None, Some(error)),
+        match path {
+            Ok(path) => match self.read_config_at(agent, path) {
+                Ok(text) => (text, None),
+                Err(error) => (None, Some(error.to_string())),
+            },
+            Err(error) => (None, Some(error.clone())),
         }
     }
 
     /// The config text, or `None` when the file does not exist yet.
-    pub(super) fn read_config(&self, agent: Agent) -> Result<Option<String>, String> {
-        self.read_config_at(agent, &self.action_path(agent, None, true)?)
+    pub(super) fn read_config(&self, agent: Agent) -> Result<Option<String>, AgentError> {
+        let path = self
+            .action_path(agent, None, true)
+            .map_err(AgentError::ConfigurationConflict)?;
+        self.read_config_at(agent, &path)
     }
 
     pub(super) fn read_config_at(
         &self,
-        agent: Agent,
+        _agent: Agent,
         path: &Path,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<Option<String>, AgentError> {
         match fs::read_to_string(path) {
             Ok(text) => Ok(Some(text)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(format!("Cannot read the {} config: {error}", agent.name())),
+            Err(_) => Err(AgentError::ConfigurationRead),
         }
     }
 
@@ -551,9 +557,9 @@ impl Projector {
         &self,
         agent: Agent,
         text: Option<&str>,
-    ) -> Result<ConfigDoc, String> {
+    ) -> Result<ConfigDoc, AgentError> {
         ConfigDoc::parse(agent.format(), text.unwrap_or_default())
-            .map_err(|reason| self.parse_error(agent, &reason))
+            .map_err(|reason| AgentError::InvalidConfiguration(self.parse_error(agent, &reason)))
     }
 
     pub(super) fn parse_error(&self, agent: Agent, reason: &str) -> String {

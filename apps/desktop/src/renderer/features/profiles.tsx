@@ -9,8 +9,9 @@ import { Button } from "../components/ui/button";
 import { ActionItem } from "../components/action-item";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
 import { ProfileTransfer } from "../components/maintenance";
-import { Field, FieldGroup, FieldLabel, FieldError } from "../components/ui/field";
-import { Alert, AlertDescription } from "../components/ui/alert";
+import { Field, FieldGroup, FieldLabel } from "../components/ui/field";
+import { ErrorAlert } from "../components/error-alert";
+import { useErrorAlert } from "../lib/error-alert";
 import { Input } from "../components/ui/input";
 import { IconButton } from "../components/controls";
 import { Sheet, SheetActions } from "../components/sheet";
@@ -114,21 +115,26 @@ function ProfileListSheet({
   const [transferMessage, setTransferMessage] = useState<string>();
   const frozen = busy || transferBusy;
   const [workingProfileId, setWorkingProfileId] = useState<string>();
-  const [error, setError] = useState<string>();
+  const reportError = useErrorAlert("Profile action failed", openError);
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   const activeProfileAvailable = profileIsAvailable(activeProfile, state);
 
   const activate = async (profileId: string): Promise<boolean> => {
     if (profileId === state.activeProfileId) return true;
     setWorkingProfileId(profileId);
-    setError(undefined);
-    const message = await onActivate(profileId);
-    setWorkingProfileId(undefined);
-    if (message) {
-      setError(message);
+    try {
+      const message = await onActivate(profileId);
+      if (message) {
+        reportError(message);
+        return false;
+      }
+      return true;
+    } catch (error) {
+      reportError(error);
       return false;
+    } finally {
+      setWorkingProfileId(undefined);
     }
-    return true;
   };
   const select = async (profileId: string) => {
     if (!await activate(profileId)) return;
@@ -166,12 +172,11 @@ function ProfileListSheet({
           );
         })}
       </div>
-      {(error || openError) && <Alert variant="destructive"><AlertDescription>{error || openError}</AlertDescription></Alert>}
       {transferMessage && <p role="status" className="text-sm text-muted-foreground">{transferMessage}</p>}
       <SheetActions leading={
         <div className="flex items-center gap-2">
         <Button type="button" variant="outline" aria-haspopup="dialog" disabled={frozen || Boolean(workingProfileId)} onClick={onNew}><Plus size={15} />New Profile</Button>
-        <ProfileTransfer api={desktopApi} disabled={busy || Boolean(workingProfileId)} onBusy={setTransferBusy} onMessage={(message, failed) => { setError(failed ? message : undefined); setTransferMessage(failed ? undefined : message); }} />
+        <ProfileTransfer api={desktopApi} disabled={busy || Boolean(workingProfileId)} onBusy={setTransferBusy} onMessage={(message, failed) => { if (failed) reportError(message); setTransferMessage(failed ? undefined : message); }} />
         </div>
       }>
         <Button type="button" variant="outline" disabled={Boolean(workingProfileId) || transferBusy} onClick={onClose}>Done</Button>
@@ -216,9 +221,8 @@ export function ProfileEditorSheet({
   const saveInFlight = useRef(false);
   const autoSaveAttempt = useRef<string | undefined>(undefined);
   const [authMethod, setAuthMethod] = useState<"account" | "apiKey">(profile?.auth.kind === "apiKey" ? "apiKey" : "account");
-  const [error, setError] = useState<string>();
-  const reportLoginError = useCallback((error: unknown) => setError(errorMessage(error)), []);
-  const account = useAccountLogin(desktopApi, reportLoginError);
+  const reportError = useErrorAlert(isNew ? "Could not create profile" : "Profile action failed");
+  const account = useAccountLogin(desktopApi, reportError);
   const { session: login, auth: authorized } = account;
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<number>();
   const pendingWorkspaceSave = useRef<number | undefined>(undefined);
@@ -232,11 +236,10 @@ export function ProfileEditorSheet({
   const signIn = async () => {
     pendingWorkspaceSave.current = undefined;
     setSelectedWorkspaceId(undefined);
-    setError(undefined);
     try {
       if (running && !await desktopApi.confirm({ title: "Connect and restart protection?", message: "Connecting this account restarts protection. In-flight requests may be interrupted.", confirmLabel: "Continue" })) return;
       await account.start(draft);
-    } catch (error) { setError(errorMessage(error)); }
+    } catch (error) { reportError(error); }
   };
   const selectedPreset = SERVICE_PRESETS.find((service) => service.id === draft.provider);
   const keyLabel = selectedPreset?.keyLabel ?? "API key";
@@ -288,18 +291,15 @@ export function ProfileEditorSheet({
     }));
     setAuthMethod(next === "custom" ? "apiKey" : "account");
     setApiKeyDraft("");
-    setError(undefined);
   };
   const chooseAuthMethod = async (next: "account" | "apiKey") => {
     if (!await account.cancel()) return;
     pendingWorkspaceSave.current = undefined;
     setAuthMethod(next);
-    setError(undefined);
   };
   const removeProfile = async () => {
     if (working || frozen) return;
     setSaving(true);
-    setError(undefined);
     try {
       const current = await desktopApi.getState();
       const needsStop = !current.configurationVerification && ["verified", "blocked", "verifying"].includes(current.status);
@@ -311,16 +311,15 @@ export function ProfileEditorSheet({
       if (!confirmed) return;
       if (needsStop) await desktopApi.stop();
       const message = await onDelete(draft.id);
-      if (message) setError(message);
+      if (message) reportError(message);
       else { await account.cancel(); onDeleted(); }
-    } catch (error) { setError(errorMessage(error)); }
+    } catch (error) { reportError(error); }
     finally { setSaving(false); }
   };
   const save = useCallback(async () => {
     if (saveInFlight.current || working || frozen || needsAccountLogin || needsWorkspace) return;
     saveInFlight.current = true;
     setSaving(true);
-    setError(undefined);
     try {
       if (!authorized && running && profile?.id === state.activeProfileId && !await desktopApi.confirm({ title: "Save and reconnect?", message: "Saving this active profile restarts protection. In-flight requests may be interrupted.", confirmLabel: "Save and Reconnect" })) return;
       if (!authorized && authMethod === "account" && draft.provider === "redpill"
@@ -337,11 +336,11 @@ export function ProfileEditorSheet({
         return;
       }
       const message = await onSave(draft, authMethod === "apiKey" || draft.provider === "custom" ? apiKeyDraft.trim() || undefined : undefined);
-      if (message) setError(message);
+      if (message) reportError(message);
       else onComplete();
-    } catch (error) { setError(errorMessage(error)); }
+    } catch (error) { reportError(error); }
     finally { saveInFlight.current = false; setSaving(false); }
-  }, [working, frozen, needsAccountLogin, needsWorkspace, authorized, running, profile?.id, state.activeProfileId, login, authMethod, draft, state.config.requireProductionOs, workspaceId, account.consume, startAfterSave, onComplete, onSave, apiKeyDraft, savedScope?.workspaceId, account.start]);
+  }, [working, frozen, needsAccountLogin, needsWorkspace, authorized, running, profile?.id, state.activeProfileId, login, authMethod, draft, state.config.requireProductionOs, workspaceId, account.consume, startAfterSave, onComplete, onSave, apiKeyDraft, savedScope?.workspaceId, account.start, reportError]);
 
   useEffect(() => {
     if (!authorized || !login || working || frozen || autoSaveAttempt.current === login.id) return;
@@ -351,11 +350,11 @@ export function ProfileEditorSheet({
     autoSaveAttempt.current = login.id;
     if (pendingWorkspace !== undefined && !workspaces?.some((item) => item.id === pendingWorkspace)) {
       setSelectedWorkspaceId(undefined);
-      setError("The selected workspace is no longer available. Choose a workspace and save again.");
+      reportError("The selected workspace is no longer available. Choose a workspace and save again.");
       return;
     }
     void save();
-  }, [authorized, login, draft.provider, workspaces, working, frozen, save]);
+  }, [authorized, login, draft.provider, workspaces, working, frozen, save, reportError]);
 
   return (
     <Sheet title={isNew ? "New profile" : "Edit profile"} className="profile-editor-sheet w-[min(480px,_calc(var(--window-dialog-width,_100vw)_-_32px))] [&_.sheet-scroll]:min-h-0 [&_.sheet-scroll]:overflow-y-auto [&_.sheet-footer]:flex-none [&[open]]:flex [&[open]]:flex-col [&_form]:min-h-0 [&_form]:flex [&_form]:flex-col form-sheet [&_>_.sheet-heading]:px-5 [&_>_.field-note]:mx-5 [&_.sheet-footer]:mx-5 [&_form_>_[data-slot=field-error]]:mx-5 [&_.sheet-scroll]:px-5" dismissible={!saving && !account.working} onClose={() => void closeEditor()}>
@@ -380,7 +379,7 @@ export function ProfileEditorSheet({
         </ToggleGroup>
         </Field>
           <FormField id="profile-name" label="Profile name"><Input id="profile-name" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} disabled={frozen || working} autoComplete="off" /></FormField>
-          {draft.provider === "custom" && <FormField id="profile-endpoint" label="Service endpoint" description={<>Requires ACI support. <Button type="button" variant="link" className="h-auto p-0 text-xs align-baseline" onClick={() => { void desktopApi.openAboutLink("aci").catch((error: unknown) => setError(errorMessage(error))); }}>About ACI<ExternalLink size={12} aria-hidden="true" /></Button></>}><Input id="profile-endpoint" aria-describedby="profile-endpoint-note" value={draft.remoteUrl} onChange={(event) => setDraft((current) => ({ ...current, remoteUrl: event.target.value }))} disabled={frozen || working} spellCheck={false} /></FormField>}
+          {draft.provider === "custom" && <FormField id="profile-endpoint" label="Service endpoint" description={<>Requires ACI support. <Button type="button" variant="link" className="h-auto p-0 text-xs align-baseline" onClick={() => { void desktopApi.openAboutLink("aci").catch(reportError); }}>About ACI<ExternalLink size={12} aria-hidden="true" /></Button></>}><Input id="profile-endpoint" aria-describedby="profile-endpoint-note" value={draft.remoteUrl} onChange={(event) => setDraft((current) => ({ ...current, remoteUrl: event.target.value }))} disabled={frozen || working} spellCheck={false} /></FormField>}
           <Tabs value={draft.provider === "custom" ? "apiKey" : authMethod} className="gap-4"
             onValueChange={(next) => { if (next === "account" || next === "apiKey") void chooseAuthMethod(next); }}>
             {draft.provider !== "custom" && <TabsList aria-label="Sign-in method" className="w-full">
@@ -393,7 +392,7 @@ export function ProfileEditorSheet({
                   <div className="flex items-center justify-between gap-3" role="status" aria-live="polite">
                   <div className="space-y-1 text-sm"><p>Continue in your browser</p>{login.userCode && <p className="font-mono text-muted-foreground">{login.userCode}</p>}</div>
                   <div className="flex items-center gap-1">
-                    <IconButton size="icon-sm" label="Copy sign-in link" onClick={() => void desktopApi.copyText(login.url).catch((error: unknown) => setError(errorMessage(error)))}><Copy aria-hidden /></IconButton>
+                    <IconButton size="icon-sm" label="Copy sign-in link" onClick={() => void desktopApi.copyText(login.url).catch(reportError)}><Copy aria-hidden /></IconButton>
                     <Button type="button" variant="ghost" size="sm" disabled={account.working} onClick={() => void account.cancel()}>Cancel Sign-in</Button>
                   </div>
                   </div>
@@ -404,7 +403,7 @@ export function ProfileEditorSheet({
                         <Input id="account-callback" type="password" value={callbackDraft} autoComplete="off" spellCheck={false} disabled={account.working}
                           placeholder="http://127.0.0.1:4181/oauth/callback?…" onChange={(event) => setCallbackDraft(event.target.value)} />
                       </FormField>
-                      <Button type="button" variant="outline" disabled={account.working || !callbackDraft.trim()} onClick={() => { const value = callbackDraft; setCallbackDraft(""); setError(undefined); void account.complete(value); }}>Continue</Button>
+                      <Button type="button" variant="outline" disabled={account.working || !callbackDraft.trim()} onClick={() => { const value = callbackDraft; setCallbackDraft(""); void account.complete(value); }}>Continue</Button>
                     </div>
                   </details>}
                 </div> : selectedAccount ? <>
@@ -419,7 +418,7 @@ export function ProfileEditorSheet({
                       ...(!authorized && savedScope?.workspaceId != null && !workspaces?.some((item) => item.id === savedScope.workspaceId)
                         ? [{ value: String(savedScope.workspaceId), label: savedScope.workspace ?? "Current workspace", disabled: true }] : []),
                     ]} disabled={working || frozen || !workspaces?.length} onChange={(value) => setSelectedWorkspaceId(Number(value))} />
-                    {!authorized && workspaceError && <FieldError>{workspaceError}</FieldError>}
+                    {!authorized && <ErrorAlert title="Could not load account workspaces" error={workspaceError} />}
                   </FormField>}
                 </> : <Button type="button" variant="default" size="lg" className="w-full [&_.service-logo]:size-4" disabled={working || frozen || !draft.name.trim()} onClick={() => void signIn()}><ServiceLogo url={draft.remoteUrl} />Sign in with {selectedPreset?.name}</Button>}
               </FieldGroup>
@@ -428,15 +427,13 @@ export function ProfileEditorSheet({
               <FormField id="profile-key" label={keyLabel} description={savedCredentialApplies ? "Leave blank to keep the saved key." : "Stored securely on this device."}>
                 <Input id="profile-key" type="password" value={apiKeyDraft} onChange={(event) => setApiKeyDraft(event.target.value)} placeholder={savedCredentialApplies ? "Replace the saved key" : `Paste your ${keyLabel}`} disabled={frozen || working} autoComplete="off" spellCheck={false} aria-describedby="profile-key-note" />
                 {draft.provider !== "custom" && <Button type="button" variant="link" size="sm" className="h-auto justify-start self-start p-0" disabled={working || frozen} onClick={() => {
-                  setError(undefined);
-                  void desktopApi.openApiKeyPage(draft.provider).catch((error: unknown) => setError(errorMessage(error)));
+                  void desktopApi.openApiKeyPage(draft.provider).catch(reportError);
                 }}>Get API key<ExternalLink size={14} aria-hidden="true" /></Button>}
               </FormField>
             </TabsContent>
           </Tabs>
         </FieldGroup>
         </div>
-        <FieldError className="mt-3">{error}</FieldError>
         <SheetActions leading={!isNew && <Button type="button" variant="destructive" disabled={working || frozen} onClick={() => void removeProfile()}><Trash2 size={14} />Delete Profile</Button>}>
           <Button type="button" variant="outline" onClick={() => void closeEditor()} disabled={saving || account.working}>Cancel</Button>
           {!needsAccountLogin && <Button type="submit" variant="default" disabled={working || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || needsWorkspace || (!authorized && !savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Saving…" : authorized && draft.provider === "phala" ? "Retry" : "Save"}</Button>}

@@ -10,6 +10,7 @@
 //! the catalog, so current connections can be restored while offline.
 
 mod discovery;
+mod error;
 mod projection;
 mod providers;
 mod registry;
@@ -18,6 +19,7 @@ mod validation;
 
 pub use discovery::app_data_dir;
 use discovery::*;
+pub use error::AgentError;
 use projection::*;
 use providers::*;
 pub use registry::{
@@ -74,25 +76,24 @@ pub fn helper_binary_name() -> &'static str {
 
 #[derive(Debug)]
 enum ConnectFailure {
-    Conflict(String),
-    Unavailable(String),
+    Conflict(AgentError),
+    Unavailable(AgentError),
 }
 
-impl From<String> for ConnectFailure {
-    fn from(message: String) -> Self {
-        Self::Unavailable(message)
-    }
-}
-impl From<&str> for ConnectFailure {
-    fn from(message: &str) -> Self {
-        Self::Unavailable(message.to_string())
+impl From<AgentError> for ConnectFailure {
+    fn from(error: AgentError) -> Self {
+        Self::Unavailable(error)
     }
 }
 impl ConnectFailure {
-    fn message(self) -> String {
+    fn error(self) -> AgentError {
         match self {
             Self::Conflict(message) | Self::Unavailable(message) => message,
         }
+    }
+
+    fn message(self) -> String {
+        self.error().to_string()
     }
 }
 
@@ -285,16 +286,22 @@ impl Projector {
         connect: bool,
         catalog: Option<&Catalog>,
         options: &ConnectOptions,
-    ) -> Result<AgentPreview, String> {
-        let store = self.load_store()?;
+    ) -> Result<AgentPreview, AgentError> {
+        let store = self
+            .load_store()
+            .map_err(|_| AgentError::RecordUnavailable)?;
         if connect {
             self.require_helper()?;
         }
         let path = self.action_path(agent, store.get(agent.id()), connect);
+        if connect {
+            path.as_ref()
+                .map_err(|error| AgentError::ConfigurationConflict(error.clone()))?;
+        }
         let (text, read_error) = self.config_text_at(agent, &path);
         if connect {
-            if let Some(error) = read_error.clone() {
-                return Err(error);
+            if read_error.is_some() {
+                return Err(AgentError::ConfigurationRead);
             }
         }
         let mut restore_problem = path.as_ref().err().cloned();
@@ -304,7 +311,7 @@ impl Projector {
             Ok(mut doc) => match self.edit(agent, connect, &mut doc, &store, catalog, options) {
                 Ok(edit) => edit,
                 Err(error) if !connect && store.contains_key(agent.id()) => {
-                    restore_problem = Some(error);
+                    restore_problem = Some(error.to_string());
                     Edit::default()
                 }
                 Err(error) => return Err(error),
@@ -312,12 +319,14 @@ impl Projector {
             // A broken config does not prevent revocation. Applying the
             // disconnect keeps its restoration journal until repair succeeds.
             Err(_) if !connect => {
-                store
-                    .get(agent.id())
-                    .ok_or_else(|| format!("{} is not connected", agent.name()))?;
+                store.get(agent.id()).ok_or(AgentError::InvalidState)?;
                 Edit::default()
             }
-            Err(reason) => return Err(self.parse_error(agent, &reason)),
+            Err(reason) => {
+                return Err(AgentError::InvalidConfiguration(
+                    self.parse_error(agent, &reason),
+                ))
+            }
         };
         Ok(AgentPreview {
             agent: self.status(agent, &store, catalog),

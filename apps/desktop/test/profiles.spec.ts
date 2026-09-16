@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { nav } from "./helpers";
+import { nav, expectErrorAlert } from "./helpers";
 
 test("deleting a live profile confirms stop and aborts if stopping fails", async ({ page }) => {
   await page.goto("/?mock=ready&native-dialog=profiles");
@@ -20,8 +20,8 @@ test("deleting a live profile confirms stop and aborts if stopping fails", async
   await page.goto("/?mock=stop-protection-error&native-dialog=profiles");
   await profiles.getByRole("button", { name: "Edit RedPill" }).click();
   page.once("dialog", (dialog) => dialog.accept());
-  await remove.click();
-  await expect(editor.getByRole("alert")).toHaveText("Could not stop protection");
+  await expectErrorAlert(page, () => remove.click(), "Could not stop protection");
+  await expect(editor.getByRole("alert")).toHaveCount(0);
   await expect(remove).toBeEnabled();
   await editor.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(profiles.getByRole("button", { name: "Edit RedPill" })).toBeVisible();
@@ -45,8 +45,8 @@ test("profile imports require confirmation, need credentials and preserve the ac
   await profiles.getByRole("button", { name: "Export profile configurations" }).click();
   await expect(profiles.getByRole("status")).toContainText("without credentials");
   await page.goto("/?mock=export-error&native-dialog=profiles");
-  await profiles.getByRole("button", { name: "Export profile configurations" }).click();
-  await expect(profiles.getByRole("alert")).toContainText("Could not export profile configurations.");
+  await expectErrorAlert(page, () => profiles.getByRole("button", { name: "Export profile configurations" }).click(), "Could not export profile configurations.");
+  await expect(profiles.getByRole("alert")).toHaveCount(0);
   await expect(profiles.getByRole("button", { name: "Done", exact: true })).toBeEnabled();
 });
 
@@ -72,10 +72,9 @@ test("reset is in Advanced, requires consent and preserves profiles", async ({ p
 });
 
 test("stale profile editors are dismissible and configuration verification cannot be cancelled", async ({ page }) => {
-  await page.goto("/?mock=ready&native-dialog=profile-editor&profile=deleted-profile");
-  await expect(page.getByRole("alert")).toHaveText("This profile is no longer available.");
+  await expectErrorAlert(page, () => page.goto("/?mock=ready&native-dialog=profile-editor&profile=deleted-profile"), "This profile is no longer available.");
+  await expect(page.getByRole("alert")).toHaveCount(0);
   await expect(page.getByRole("dialog", { name: "New profile" })).toHaveCount(0);
-  await page.getByRole("button", { name: "Done" }).click();
   await expect(page.getByRole("main", { name: "Profiles closed" })).toBeVisible();
 
   await page.goto("/?mock=configuration-verifying");

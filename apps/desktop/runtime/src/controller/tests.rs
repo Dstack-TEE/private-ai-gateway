@@ -420,7 +420,7 @@ fn shutdown_blocks_later_configuration_changes() {
         runtime.start(state.config).unwrap_err(),
         "The app is closing"
     );
-    assert_eq!(
+    assert!(matches!(
         runtime
             .apply_agent(
                 "codex".into(),
@@ -429,8 +429,8 @@ fn shutdown_blocks_later_configuration_changes() {
                 ConnectOptions::default()
             )
             .unwrap_err(),
-        "The app is closing"
-    );
+        AgentOperationError::Runtime(message) if message == "The app is closing"
+    ));
 }
 
 #[test]

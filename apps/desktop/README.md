@@ -78,11 +78,14 @@ is required. Extract all three executables together, then use `private-ai-proxy 
 
 Profiles, Local API settings, Privacy verification, and Usage proof open as
 document-modal AppKit sheets on macOS, without traffic lights or an independent
-title bar. Done, Cancel, and Escape dismiss the sheet, including loading/error
-states. Windows uses owned windows and Linux uses transient windows. Complex content stays in the shared renderer
+title bar. Done, Cancel, and Escape dismiss the sheet. A child window is not
+presented until its required content is ready; a load failure closes it and uses
+a system error alert owned by the visible application window. Windows uses owned
+windows and Linux uses transient windows. Complex content stays in the shared renderer
 so behavior and accessibility do not drift across three platform-specific UI
-implementations. Destructive confirmations and file destinations use the
-operating system's native dialogs directly.
+implementations. Destructive confirmations, file destinations, and explicit
+action failures use the operating system's native dialogs directly. Background
+refresh failures remain noninterruptive.
 
 ### Renderer Components
 
@@ -775,15 +778,26 @@ protocol is the service's own response, shown as such.
 
   Supply the named key through the process environment, never a command-line
   argument. The script reads the live catalog and sends one small, potentially
-  billable request per model to Chat Completions, Responses, and Messages.
+  billable text request per model to Chat Completions, Responses, and Messages,
+  followed by a streamed tool call and a streamed tool-result turn when supported
+  (up to three requests per model and endpoint). SSE framing uses `eventsource-parser`.
   `--model ID` and `--surface responses` limit the inventory; concurrency defaults to two (maximum four),
   with a 20-second request timeout and no retries. Authentication and rate-limit
   errors stop scheduling requests. Reports contain no credentials or response
   text. Exit code 2 means some results remain inconclusive; those results must
   not be treated as evidence of unsupported protocols. A successful response
-  establishes basic non-streaming protocol support only, not tool calling,
-  streaming, or receipt validity. This diagnostic calls the supplied endpoint
+  in a version 1 report (`--basic`) establishes non-streaming API availability
+  only. The bundled September 14 snapshot is version 1; it does not claim full
+  agent compatibility. Version 2 reports record streaming, tool arguments, and
+  tool-result checks separately. Agent projections require all three checks to
+  succeed when version 2 evidence is available; ordinary Local API text requests
+  continue to use the basic endpoint observation. `--reasoning-effort low|medium|high`
+  also checks Responses requests with that specific effort; it does not establish
+  support for other effort levels or all Codex features. Neither mode checks
+  receipt validity. This diagnostic calls the supplied endpoint
   directly and does not run automatically during startup or modify agent configs.
+  Once a version 2 inventory is adopted, a newer version 1 report cannot replace
+  it and erase its agent-capability checks.
 - **Usage history** is written to an owner-only SQLite database in the app
   data directory and has no automatic retention cutoff. Overview shows ten
   recent rows plus a complete current-session summary aggregated from SQLite,
