@@ -149,11 +149,7 @@ impl EndpointInventory {
                         .http_status
                         .is_some_and(|status| !(100..600).contains(&status))
                     || (entry.status == ObservationStatus::Supported
-                        && !supports_compatibility(
-                            entry.status,
-                            &entry.reason,
-                            entry.http_status,
-                        ))
+                        && !supports_compatibility(entry.status, &entry.reason, entry.http_status))
             })
         {
             return Err("Invalid model endpoint inventory".to_string());
