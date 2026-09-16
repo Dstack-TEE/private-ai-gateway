@@ -299,10 +299,8 @@ impl Projector {
                 .map_err(|error| AgentError::ConfigurationConflict(error.clone()))?;
         }
         let (text, read_error) = self.config_text_at(agent, &path);
-        if connect {
-            if read_error.is_some() {
-                return Err(AgentError::ConfigurationRead);
-            }
+        if connect && read_error.is_some() {
+            return Err(AgentError::ConfigurationRead);
         }
         let mut restore_problem = path.as_ref().err().cloned();
         let edit = match ConfigDoc::parse(agent.format(), text.as_deref().unwrap_or_default()) {
