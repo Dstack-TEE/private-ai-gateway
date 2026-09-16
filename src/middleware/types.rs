@@ -111,6 +111,9 @@ pub struct ReasoningPolicy {
     pub default_policy: Option<ReasoningConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threshold: Option<u64>,
+    /// Omit both OpenAI output-limit aliases for structured chat output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omit_max_tokens: Option<bool>,
 }
 
 /// One ordered failover candidate: a backend route id plus the upstream format.
