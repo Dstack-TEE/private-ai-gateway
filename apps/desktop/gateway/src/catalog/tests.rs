@@ -47,6 +47,18 @@ fn downloaded_inventory_rejects_unknown_schema_duplicate_and_partial_observation
     ] {
         assert!(EndpointInventory::parse(&serde_json::to_vec(&malformed).unwrap()).is_err());
     }
+
+    let mut temporary = valid.clone();
+    temporary["results"][0]["status"] = json!("supported");
+    temporary["results"][0]["reason"] = json!("temporary_server_error");
+    temporary["results"][0]["httpStatus"] = json!(503);
+    assert!(EndpointInventory::parse(&serde_json::to_vec(&temporary).unwrap()).is_ok());
+
+    temporary["results"][0]["httpStatus"] = json!(400);
+    assert!(EndpointInventory::parse(&serde_json::to_vec(&temporary).unwrap()).is_err());
+
+    temporary["results"][0]["httpStatus"] = json!(501);
+    assert!(EndpointInventory::parse(&serde_json::to_vec(&temporary).unwrap()).is_err());
 }
 
 #[test]

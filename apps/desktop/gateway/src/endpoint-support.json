@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "endpoint": "https://tee.redpill.ai",
-  "checkedAt": "2026-09-16T19:12:44.488Z",
+  "checkedAt": "2026-09-16T21:07:55.860Z",
   "results": [
     {
       "model": "deepseek/deepseek-v4-flash-0731",
@@ -30,21 +30,24 @@
     {
       "model": "deepseek/deepseek-v4-flash-0731",
       "endpoint": "/v1/responses",
-      "status": "inconclusive",
-      "reason": "transient_server_error",
+      "status": "supported",
+      "reason": "temporary_server_error",
       "httpStatus": 502,
       "checks": {
         "streaming": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         },
         "tools": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         },
         "toolResult": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         }
       }
     },
@@ -382,21 +385,24 @@
     {
       "model": "qwen/qwen3.5-397b-a17b",
       "endpoint": "/v1/responses",
-      "status": "inconclusive",
-      "reason": "transient_server_error",
+      "status": "supported",
+      "reason": "temporary_server_error",
       "httpStatus": 502,
       "checks": {
         "streaming": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         },
         "tools": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         },
         "toolResult": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         }
       }
     },
@@ -451,21 +457,24 @@
     {
       "model": "qwen/qwen3.5-27b",
       "endpoint": "/v1/responses",
-      "status": "inconclusive",
-      "reason": "transient_server_error",
+      "status": "supported",
+      "reason": "temporary_server_error",
       "httpStatus": 502,
       "checks": {
         "streaming": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         },
         "tools": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         },
         "toolResult": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         }
       }
     },
@@ -615,20 +624,23 @@
       "model": "openai/gpt-oss-20b",
       "endpoint": "/v1/messages",
       "status": "supported",
-      "reason": "retained_previous_supported_after_rate_or_quota_limit",
-      "httpStatus": 200,
+      "reason": "temporary_rate_or_quota_limit",
+      "httpStatus": 429,
       "checks": {
         "streaming": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_rate_or_quota_limit",
+          "httpStatus": 429
         },
         "tools": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_rate_or_quota_limit",
+          "httpStatus": 429
         },
         "toolResult": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_rate_or_quota_limit",
+          "httpStatus": 429
         }
       }
     },
@@ -636,20 +648,23 @@
       "model": "nvidia/nemotron-3.5-lightning",
       "endpoint": "/v1/chat/completions",
       "status": "supported",
-      "reason": "retained_previous_supported_after_rate_or_quota_limit",
+      "reason": "valid_response",
       "httpStatus": 200,
       "checks": {
         "streaming": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_rate_or_quota_limit",
+          "httpStatus": 429
         },
         "tools": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_rate_or_quota_limit",
+          "httpStatus": 429
         },
         "toolResult": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_rate_or_quota_limit",
+          "httpStatus": 429
         }
       }
     },
@@ -657,20 +672,23 @@
       "model": "nvidia/nemotron-3.5-lightning",
       "endpoint": "/v1/responses",
       "status": "supported",
-      "reason": "retained_previous_supported_after_rate_or_quota_limit",
-      "httpStatus": 200,
+      "reason": "temporary_rate_or_quota_limit",
+      "httpStatus": 429,
       "checks": {
         "streaming": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_rate_or_quota_limit",
+          "httpStatus": 429
         },
         "tools": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_rate_or_quota_limit",
+          "httpStatus": 429
         },
         "toolResult": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_rate_or_quota_limit",
+          "httpStatus": 429
         }
       }
     },
@@ -678,20 +696,23 @@
       "model": "nvidia/nemotron-3.5-lightning",
       "endpoint": "/v1/messages",
       "status": "supported",
-      "reason": "retained_previous_supported_after_rate_or_quota_limit",
-      "httpStatus": 200,
+      "reason": "temporary_rate_or_quota_limit",
+      "httpStatus": 429,
       "checks": {
         "streaming": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_rate_or_quota_limit",
+          "httpStatus": 429
         },
         "tools": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_rate_or_quota_limit",
+          "httpStatus": 429
         },
         "toolResult": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_rate_or_quota_limit",
+          "httpStatus": 429
         }
       }
     },
@@ -699,22 +720,22 @@
       "model": "z-ai/glm-5.3",
       "endpoint": "/v1/chat/completions",
       "status": "supported",
-      "reason": "retained_previous_supported_after_rate_or_quota_limit",
+      "reason": "valid_response",
       "httpStatus": 200,
       "checks": {
         "streaming": {
           "status": "supported",
-          "reason": "retained_previous_supported_after_not_probed",
+          "reason": "valid_event_stream",
           "httpStatus": 200
         },
         "tools": {
           "status": "supported",
-          "reason": "retained_previous_supported_after_not_probed",
+          "reason": "valid_streamed_tool_call",
           "httpStatus": 200
         },
         "toolResult": {
           "status": "supported",
-          "reason": "retained_previous_supported_after_not_probed",
+          "reason": "valid_event_stream",
           "httpStatus": 200
         }
       }
@@ -723,22 +744,22 @@
       "model": "z-ai/glm-5.3",
       "endpoint": "/v1/responses",
       "status": "supported",
-      "reason": "retained_previous_supported_after_rate_or_quota_limit",
+      "reason": "valid_response",
       "httpStatus": 200,
       "checks": {
         "streaming": {
           "status": "supported",
-          "reason": "retained_previous_supported_after_not_probed",
+          "reason": "valid_event_stream",
           "httpStatus": 200
         },
         "tools": {
           "status": "supported",
-          "reason": "retained_previous_supported_after_not_probed",
+          "reason": "valid_streamed_tool_call",
           "httpStatus": 200
         },
         "toolResult": {
           "status": "supported",
-          "reason": "retained_previous_supported_after_not_probed",
+          "reason": "valid_event_stream",
           "httpStatus": 200
         }
       }
@@ -794,21 +815,24 @@
     {
       "model": "qwen/qwen3.6-27b",
       "endpoint": "/v1/responses",
-      "status": "inconclusive",
-      "reason": "transient_server_error",
+      "status": "supported",
+      "reason": "temporary_server_error",
       "httpStatus": 502,
       "checks": {
         "streaming": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         },
         "tools": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         },
         "toolResult": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         }
       }
     },
@@ -1150,21 +1174,24 @@
     {
       "model": "moonshotai/kimi-k2.6",
       "endpoint": "/v1/responses",
-      "status": "inconclusive",
-      "reason": "transient_server_error",
+      "status": "supported",
+      "reason": "temporary_server_error",
       "httpStatus": 502,
       "checks": {
         "streaming": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         },
         "tools": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         },
         "toolResult": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         }
       }
     },
@@ -1291,21 +1318,24 @@
     {
       "model": "qwen/qwen3-32b",
       "endpoint": "/v1/responses",
-      "status": "inconclusive",
-      "reason": "transient_server_error",
+      "status": "supported",
+      "reason": "temporary_server_error",
       "httpStatus": 502,
       "checks": {
         "streaming": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         },
         "tools": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         },
         "toolResult": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         }
       }
     },
@@ -1430,21 +1460,24 @@
     {
       "model": "z-ai/glm-5.1",
       "endpoint": "/v1/responses",
-      "status": "inconclusive",
-      "reason": "transient_server_error",
+      "status": "supported",
+      "reason": "temporary_server_error",
       "httpStatus": 502,
       "checks": {
         "streaming": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         },
         "tools": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         },
         "toolResult": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         }
       }
     },
@@ -1499,21 +1532,24 @@
     {
       "model": "deepseek/deepseek-v3.2",
       "endpoint": "/v1/responses",
-      "status": "inconclusive",
-      "reason": "transient_server_error",
+      "status": "supported",
+      "reason": "temporary_server_error",
       "httpStatus": 502,
       "checks": {
         "streaming": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         },
         "tools": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         },
         "toolResult": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         }
       }
     },
@@ -1637,21 +1673,24 @@
     {
       "model": "moonshotai/kimi-k2.5",
       "endpoint": "/v1/responses",
-      "status": "inconclusive",
-      "reason": "transient_server_error",
+      "status": "supported",
+      "reason": "temporary_server_error",
       "httpStatus": 502,
       "checks": {
         "streaming": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         },
         "tools": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         },
         "toolResult": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         }
       }
     },
@@ -1778,21 +1817,24 @@
     {
       "model": "moonshotai/kimi-k3",
       "endpoint": "/v1/responses",
-      "status": "inconclusive",
-      "reason": "transient_server_error",
+      "status": "supported",
+      "reason": "temporary_server_error",
       "httpStatus": 502,
       "checks": {
         "streaming": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         },
         "tools": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         },
         "toolResult": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "temporary_server_error",
+          "httpStatus": 502
         }
       }
     },

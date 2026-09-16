@@ -727,33 +727,29 @@ protocol is the service's own response, shown as such.
   The RedPill/Phala presets also intersect this list with the dated endpoint
   observations in `gateway/src/endpoint-support.json`. RedPill was probed;
   Phala inherits the inventory because the presets share the serving backend.
-  Only successful observations are offered: Codex uses Responses, Claude Code
+  Only compatible observations are offered: Codex uses Responses, Claude Code
   uses Messages, and the other integrations use Chat Completions. Generated
   configs, per-agent `/v1/models`, default selection, and local request admission
   share this policy. Explicit or saved incompatible defaults are rejected, never
   silently replaced. `supportedEndpoints` in the model summary exposes the
   observed paths; it is absent for custom endpoints without an inventory.
   Inconclusive results and newly listed models require a fresh probe and inventory
-  update before they are offered for these presets. This is a compatibility
-  snapshot, not continuous availability monitoring or a claim that an endpoint
-  returning a transient error is permanently unsupported.
+  update before they are offered for these presets. HTTP 408, 425, 429 and 5xx
+  responses other than 501 are temporary availability failures, not compatibility
+  failures, so they remain eligible. Network failures and malformed responses stay
+  inconclusive. This is a compatibility snapshot, not continuous availability
+  monitoring.
 
-  September 16 inventory update (19:12 UTC): the live catalog contained 26 models.
-  Basic text requests succeeded for 26 Chat Completions, 26 Messages and 15
-  Responses surfaces. Incremental SSE was observed for 25, 23 and 12 surfaces
-  respectively. The stricter Agent projection, which also requires a valid streamed
-  tool call and a streamed tool-result turn, offers 24 Chat Completions, 22 Messages
-  and 8 Responses models. GLM-5.3 passed the full sequence on all three surfaces,
-  including the Responses contract used by Codex. The catalog added
+  September 16 inventory update (21:07 UTC): the live catalog contained 26 models.
+  Compatible basic, incremental SSE and full Agent projections are respectively
+  26/26/25 for Chat Completions, 26/25/24 for Messages and 25/23/19 for Responses.
+  The Agent projection also requires streamed tool-call and tool-result compatibility.
+  Thirteen observations returned temporary 429 or 502 responses and remain eligible;
+  one generic Responses 404 without an explicit unsupported code remains
+  inconclusive. GLM-5.3 passed the full sequence on all three surfaces, including
+  the Responses contract used by Codex. The catalog added
   `phala/qwen3.8-27b-uncensored` and no longer lists
   `phala/qwen3.6-35b-a3b-uncensored`.
-
-  Eleven Responses text observations remain inconclusive: ten returned transient
-  server errors and one returned a generic request rejection. GPT-OSS-20B Messages
-  and the three Nemotron 3.5 Lightning surfaces were rate-limited during the refresh;
-  their prior successful basic observations were retained, but no Agent capability
-  was inferred from the temporary failures. A transient result is not evidence of
-  incompatibility, but it is also not new evidence of support.
 
   Apps fetch this file from the repository's `main` branch when starting protection
   or refreshing the model catalog (`private-ai-proxy models list --refresh`). The request runs
@@ -792,8 +788,9 @@ protocol is the service's own response, shown as such.
   streamed text request instead (up to four requests per model and endpoint). SSE
   framing uses `eventsource-parser`. `--model ID` and `--surface responses` limit
   the inventory; concurrency defaults to one (maximum four), with a 30-second request
-  timeout and no retries. Authentication errors stop scheduling requests. Rate limits,
-  timeouts and server errors remain local to one observation so later jobs still run.
+  timeout and no retries. Authentication errors stop scheduling requests. Temporary
+  HTTP responses remain local to one observation and count as compatibility so later
+  jobs still run; network timeouts remain inconclusive.
   Reports contain no credentials or response text. Exit code 2 means some results
   remain inconclusive; those results must not be treated as evidence of unsupported
   protocols. `--previous` retains earlier conclusive evidence when a refresh is

@@ -17,6 +17,7 @@ const toolParameters = {
 const unknown = reason => ({ status: "inconclusive", reason });
 const supported = reason => ({ status: "supported", reason });
 const withHttpStatus = (result, httpStatus) => ({ ...result, ...(httpStatus ? { httpStatus } : {}) });
+const isTemporaryHttpStatus = status => [408, 425, 429].includes(status) || status >= 500;
 
 function checks(reason) {
   return {
@@ -292,15 +293,16 @@ export function classify(surface, status, body) {
   if (status === 401 || status === 403) {
     return { status: "inconclusive", reason: "authentication_or_permission", stop: true };
   }
-  if (status === 429) {
-    return { status: "inconclusive", reason: "rate_or_quota_limit" };
-  }
   if (status === 405 || status === 501 ||
       ([400, 404, 422].includes(status) && unsupportedCodes.has(body?.error?.code))) {
     return { status: "unavailable", reason: "unsupported_endpoint_or_model" };
   }
-  if ([408, 425].includes(status) || status >= 500) {
-    return { status: "inconclusive", reason: "transient_server_error" };
+  if (isTemporaryHttpStatus(status)) {
+    return {
+      status: "supported",
+      reason: status === 429 ? "temporary_rate_or_quota_limit" : "temporary_server_error",
+      temporary: true,
+    };
   }
   if (status < 200 || status >= 300) {
     return { status: "inconclusive", reason: "request_rejected" };
@@ -374,9 +376,9 @@ export async function probe({ endpoint, key, modelIds = [], surfaceNames = surfa
       }
       let data;
       try { data = await readJson(response); } catch { /* Preserve the HTTP failure classification. */ }
-      const { stop, ...result } = classify(surface, httpStatus, data);
+      const { stop, temporary, ...result } = classify(surface, httpStatus, data);
       if (stop) stopped = true;
-      return { result, httpStatus };
+      return { result, httpStatus, temporary };
     } catch {
       return { result: unknown("network_timeout_or_invalid_response") };
     }
@@ -395,21 +397,25 @@ export async function probe({ endpoint, key, modelIds = [], surfaceNames = surfa
           }));
           capabilityChecks.streaming = withHttpStatus(toolStream.result, toolStream.httpStatus);
           capabilityChecks.tools = withHttpStatus(toolStream.tools ?? toolStream.result, toolStream.httpStatus);
-          if (!stopped && capabilityChecks.streaming.status !== "supported") {
-            const textStream = await request(model, surface, payload(model, surface, { stream: true }));
-            capabilityChecks.streaming = withHttpStatus(textStream.result, textStream.httpStatus);
-          }
-          if (capabilityChecks.streaming.status === "supported" && capabilityChecks.tools.status === "supported") {
-            try {
-              const resumed = await request(model, surface, toolResultPayload(model, surface, toolStream.body, reasoningEffort));
-              capabilityChecks.toolResult = withHttpStatus(
-                resumed.result.status === "supported" && hasText(surface, resumed.body)
-                  ? supported("valid_tool_result_response")
-                  : resumed.result.status === "supported" ? unknown("no_tool_result_text") : resumed.result,
-                resumed.httpStatus,
-              );
-            } catch {
-              capabilityChecks.toolResult = unknown("invalid_tool_call_shape");
+          if (toolStream.temporary) {
+            capabilityChecks.toolResult = withHttpStatus(toolStream.result, toolStream.httpStatus);
+          } else {
+            if (!stopped && capabilityChecks.streaming.status !== "supported") {
+              const textStream = await request(model, surface, payload(model, surface, { stream: true }));
+              capabilityChecks.streaming = withHttpStatus(textStream.result, textStream.httpStatus);
+            }
+            if (capabilityChecks.streaming.status === "supported" && capabilityChecks.tools.status === "supported") {
+              try {
+                const resumed = await request(model, surface, toolResultPayload(model, surface, toolStream.body, reasoningEffort));
+                capabilityChecks.toolResult = withHttpStatus(
+                  resumed.result.status === "supported" && (resumed.temporary || hasText(surface, resumed.body))
+                    ? supported(resumed.result.reason === "valid_response" ? "valid_tool_result_response" : resumed.result.reason)
+                    : resumed.result.status === "supported" ? unknown("no_tool_result_text") : resumed.result,
+                  resumed.httpStatus,
+                );
+              } catch {
+                capabilityChecks.toolResult = unknown("invalid_tool_call_shape");
+              }
             }
           }
         }

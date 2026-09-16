@@ -81,6 +81,21 @@ impl EndpointChecks {
     }
 }
 
+fn supports_compatibility(
+    status: ObservationStatus,
+    reason: &str,
+    http_status: Option<u16>,
+) -> bool {
+    status == ObservationStatus::Supported
+        && http_status.is_some_and(|status| {
+            (200..300).contains(&status)
+                || (status == 429 && reason == "temporary_rate_or_quota_limit")
+                || ((matches!(status, 408 | 425) || (500..600).contains(&status))
+                    && status != 501
+                    && reason == "temporary_server_error")
+        })
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum ObservationStatus {
@@ -118,9 +133,11 @@ impl EndpointInventory {
                                     .http_status
                                     .is_some_and(|status| !(100..600).contains(&status))
                                 || (check.status == ObservationStatus::Supported
-                                    && !check
-                                        .http_status
-                                        .is_some_and(|status| (200..300).contains(&status)))
+                                    && !supports_compatibility(
+                                        check.status,
+                                        &check.reason,
+                                        check.http_status,
+                                    ))
                         })
                     })
                     || !matches!(
@@ -132,9 +149,11 @@ impl EndpointInventory {
                         .http_status
                         .is_some_and(|status| !(100..600).contains(&status))
                     || (entry.status == ObservationStatus::Supported
-                        && !entry
-                            .http_status
-                            .is_some_and(|status| (200..300).contains(&status)))
+                        && !supports_compatibility(
+                            entry.status,
+                            &entry.reason,
+                            entry.http_status,
+                        ))
             })
         {
             return Err("Invalid model endpoint inventory".to_string());

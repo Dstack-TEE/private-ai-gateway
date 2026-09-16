@@ -141,7 +141,7 @@ test("an auth failure during streaming stops further requests and leaves checks 
   assert.doesNotMatch(JSON.stringify(report), /private provider detail/);
 });
 
-test("rate limits stay local to an observation and later models are still probed", async () => {
+test("rate limits count as compatibility and later models are still probed", async () => {
   let requests = 0;
   const report = await probe({
     endpoint: "https://tee.redpill.ai", key: "test-key", concurrency: 1, basic: true,
@@ -156,8 +156,24 @@ test("rate limits stay local to an observation and later models are still probed
     },
   });
   assert.equal(requests, 6);
-  assert.equal(report.results[0].reason, "rate_or_quota_limit");
+  assert.equal(report.results[0].status, "supported");
+  assert.equal(report.results[0].reason, "temporary_rate_or_quota_limit");
   assert.equal(report.results.at(-1).status, "supported");
+});
+
+test("temporary server responses keep agent surfaces available", async () => {
+  const report = await probe({
+    endpoint: "https://tee.redpill.ai", key: "test-key", concurrency: 1,
+    modelIds: ["model-a"], surfaceNames: ["responses"],
+    fetchImpl: async url => url.endsWith("/models")
+      ? Response.json({ data: [{ id: "model-a" }] })
+      : Response.json({ error: { code: "upstream_unavailable" } }, { status: 503 }),
+  });
+  assert.equal(report.results[0].status, "supported");
+  assert.equal(report.results[0].reason, "temporary_server_error");
+  assert.deepEqual(Object.values(report.results[0].checks).map(check => check.status), [
+    "supported", "supported", "supported",
+  ]);
 });
 
 test("inconclusive refreshes retain prior conclusive capability evidence", async () => {
@@ -176,12 +192,12 @@ test("inconclusive refreshes retain prior conclusive capability evidence", async
     endpoint: prior.endpoint, key: "test-key", concurrency: 1, previousInventory: prior,
     fetchImpl: async (url) => url.endsWith("/models")
       ? Response.json({ data: [{ id: "model-a" }] })
-      : Response.json({ error: { code: "temporary" } }, { status: 503 }),
+      : Promise.reject(new Error("temporary network failure")),
   });
   assert.equal(report.results.length, 3);
   for (const result of report.results) {
     assert.equal(result.status, "supported");
-    assert.match(result.reason, /^retained_previous_supported_after_transient_server_error$/);
+    assert.match(result.reason, /^retained_previous_supported_after_network_timeout_or_invalid_response$/);
     assert.equal(result.checks.streaming.status, "supported");
   }
 });
