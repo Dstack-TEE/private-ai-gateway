@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "enables the default permissions",
+  "description": "Core permissions shared by application windows",
   "windows": [
     "main",
     "profiles",
@@ -18,9 +18,6 @@
     "core:event:default",
     "core:window:allow-start-dragging",
     "core:window:allow-internal-toggle-maximize",
-    "dialog:allow-confirm",
-    "dialog:allow-message",
-    "dialog:allow-save",
-    "dialog:allow-open"
+    "dialog:allow-message"
   ]
 }
