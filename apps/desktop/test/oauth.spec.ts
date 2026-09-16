@@ -33,6 +33,9 @@ test("Phala completes automatically while RedPill confirms its workspace with Sa
 
 test("RedPill workspace and organization menu preserve billing scope", async ({ page }) => {
   await page.route("https://img.clerk.com/**", (route) => route.fulfill({ contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><circle cx="12" cy="12" r="12" fill="green"/></svg>' }));
+  await page.addInitScript(() => window.addEventListener("mock:top-up", (event) => {
+    if (event instanceof CustomEvent) document.documentElement.dataset.billingScope = event.detail.organizationId;
+  }));
   await page.goto("/?mock=oauth-workspaces");
   await page.getByRole("button", { name: "Set up profile" }).click();
   const editor = page.getByRole("dialog", { name: "New profile" });
@@ -68,8 +71,13 @@ test("RedPill workspace and organization menu preserve billing scope", async ({ 
   await expect(editor.getByText("$12.50", { exact: true })).toBeInViewport();
   await expect(editor.getByRole("button", { name: "Top up", exact: true })).toHaveCount(0);
   await save.click();
+  await page.getByRole("switch", { name: "Start protection" }).click();
   const mainCard = page.getByRole("region", { name: "Protection status" });
-  await expect(mainCard.getByRole("button", { name: "Current balance: $12.50", exact: true })).toHaveCount(0);
+  const balance = mainCard.getByRole("button", { name: "Current balance: $12.50", exact: true });
+  await expect(balance).toBeVisible();
+  await balance.click();
+  await expect(page.locator("html")).toHaveAttribute("data-billing-scope", "research-team");
+  await page.getByRole("switch", { name: "Stop protection" }).click();
   await page.getByRole("button", { name: "Profiles: RedPill" }).click();
   await page.getByRole("button", { name: "Edit RedPill" }).click();
   const saved = page.getByRole("dialog", { name: "Edit profile" });

@@ -635,6 +635,13 @@ fn opencode_limits_and_hermes_defaults_do_not_invent_metadata() {
 #[test]
 fn projections_and_codex_defaults_use_the_same_endpoint_filter() {
     let sandbox = sandbox("endpoint-filter");
+    write_executable(
+        &sandbox
+            .home
+            .join(".local/bin")
+            .join(if cfg!(windows) { "codex.exe" } else { "codex" }),
+        "test cli",
+    );
     let mut catalog = catalog();
     catalog.models[0].supported_surfaces = Some(vec![Surface::ChatCompletions]);
     catalog.models[1].supported_surfaces = Some(vec![Surface::Responses]);
@@ -672,13 +679,20 @@ fn projections_and_codex_defaults_use_the_same_endpoint_filter() {
         .preview(Agent::Codex, true, Some(&catalog), &claude_options())
         .is_err());
 
-    // Losing support must not silently replace the saved Codex selection.
+    // An inferred selection from an older catalog must not block reconnecting.
+    // Explicitly requested incompatible models above still fail closed.
     catalog.models[0].supported_surfaces = Some(vec![Surface::Responses]);
     catalog.models[1].supported_surfaces = Some(vec![]);
+    catalog.revision = "responses-model-changed".into();
     assert!(sandbox
         .projector
-        .preview(Agent::Codex, true, Some(&catalog), &options)
-        .is_err());
+        .reconcile(Some(&catalog))
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        doc(&sandbox, Agent::Codex).get_str(&["model"]).as_deref(),
+        Some("openai/gpt-oss-20b")
+    );
 }
 
 #[test]

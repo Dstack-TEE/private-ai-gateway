@@ -72,7 +72,7 @@ export function Overview({
   backendDisconnected: boolean;
   connectingBackend: boolean;
   agentProblem?: string;
-  accountApi: Pick<DesktopApi, "getAccountBalance">;
+  accountApi: Pick<DesktopApi, "getAccountBalance" | "openTopUp">;
   locked: boolean;
   clientKey: string;
   clientKeyVisible: boolean;
@@ -180,7 +180,7 @@ function StatusSurface({
   developmentMode: boolean;
   backendDisconnected: boolean;
   connectingBackend: boolean;
-  accountApi: Pick<DesktopApi, "getAccountBalance">;
+  accountApi: Pick<DesktopApi, "getAccountBalance" | "openTopUp">;
   onToggle(): void;
   onStartBackend(): void;
   onSettings(): void;

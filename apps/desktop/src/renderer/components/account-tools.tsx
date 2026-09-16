@@ -20,8 +20,12 @@ type Props = {
   disabled?: boolean;
 };
 
-type BalanceProps = Pick<Props, "provider" | "target" | "credentialRef"> & {
+type BalanceIdentity = Pick<Props, "provider" | "target" | "credentialRef">;
+type BalanceQueryProps = BalanceIdentity & {
   api: Pick<DesktopApi, "getAccountBalance">;
+};
+type BalanceProps = BalanceIdentity & {
+  api: Pick<DesktopApi, "getAccountBalance" | "openTopUp">;
   enabled: boolean;
 };
 
@@ -30,7 +34,7 @@ function balanceCacheKey({ provider, target, credentialRef }: Pick<Props, "provi
   return `${provider}:${target.kind}:${id}:${credentialRef ?? ""}`;
 }
 
-function useAccountBalance({ api, provider, target, credentialRef, enabled = true }: Omit<BalanceProps, "enabled"> & { enabled?: boolean }) {
+function useAccountBalance({ api, provider, target, credentialRef, enabled = true }: BalanceQueryProps & { enabled?: boolean }) {
   const cacheKey = balanceCacheKey({ provider, target, credentialRef });
   return useQuery({
     queryKey: ["account-balance", cacheKey],
@@ -44,11 +48,13 @@ function useAccountBalance({ api, provider, target, credentialRef, enabled = tru
 
 /** Compact account balance for a profile whose credential is already in active use. */
 export function AccountBalanceValue(props: BalanceProps) {
-  const { data: balance, isFetching } = useAccountBalance(props);
+  const { data: balance, isFetching, refetch } = useAccountBalance(props);
+  const { opening, openPage } = useAccountPage("Could not open billing", refetch);
   if (!balance) return null;
-  return <span className="shrink-0 text-sm font-medium tabular-nums text-muted-foreground" aria-label={`Current balance: ${currency(Number(balance.balanceUsd))}`} role="status" aria-live="polite" aria-busy={isFetching}>
-    {currency(Number(balance.balanceUsd))}
-  </span>;
+  const scopeSlug = props.provider === "phala" ? balance.scope.workspaceSlug : balance.scope.organizationSlug;
+  const amount = currency(Number(balance.balanceUsd));
+  return <Button type="button" variant="outline" size="sm" className="tabular-nums" aria-label={`Current balance: ${amount}`} aria-busy={isFetching || opening}
+    disabled={opening || !scopeSlug} onClick={() => openPage(() => props.api.openTopUp(props.provider, scopeSlug ?? undefined))}>{amount}</Button>;
 }
 
 /** Changing account or credential must never display the previous account's balance. */
@@ -58,11 +64,35 @@ export function AccountTools(props: Props) {
 }
 
 function AccountDetailsView({ api, provider, target, scope, credentialRef, images, onSignIn, disabled = false }: Props) {
-  const reportError = useErrorAlert("Could not open account");
+  const { data: balance, isFetching: busy, refetch } = useAccountBalance({ api, provider, target, credentialRef });
+  const { opening, openPage } = useAccountPage("Could not open account", refetch, disabled);
+  const organizationSlug = balance?.scope.organizationSlug ?? scope?.organizationSlug;
+  const manage = provider === "redpill" && organizationSlug ? () => void openPage(() => api.openOrganization(organizationSlug)) : undefined;
+  const displayScope = provider === "redpill" ? scope ?? balance?.scope : balance?.scope ?? scope;
+  const owner = displayScope?.organization ?? displayScope?.workspace;
+  const name = owner ?? "Account";
+  return <div aria-label="Account details">
+    <Item variant="outline" size="sm" className="grid grid-cols-[2rem_minmax(0,_1fr)_auto] gap-x-3">
+      <AccountAvatar name={name} src={images?.organization} />
+      <ItemContent className="min-h-8 min-w-0 justify-center">
+        <ItemTitle className="line-clamp-none wrap-anywhere">{name}</ItemTitle>
+      </ItemContent>
+      <ItemActions>
+        {balance && <span className="text-sm font-medium tabular-nums" aria-label="Balance in USD" role="status" aria-live="polite" aria-busy={busy}
+          title={balance.grantedUsd != null && Number(balance.grantedUsd) > 0 ? `${currency(Number(balance.grantedUsd))} promo credits` : undefined}>
+          {currency(Number(balance.balanceUsd))}
+        </span>}
+        <AccountActions disabled={disabled || opening} onManage={manage} onSignIn={onSignIn} />
+      </ItemActions>
+    </Item>
+  </div>;
+}
+
+function useAccountPage(title: string, refetch: () => Promise<unknown>, disabled = false) {
+  const reportError = useErrorAlert(title);
   const [opening, setOpening] = useState(false);
   const openingRef = useRef(false);
   const returningFromAccountPage = useRef(false);
-  const { data: balance, isFetching: busy, refetch } = useAccountBalance({ api, provider, target, credentialRef });
   useEffect(() => {
     const refreshAfterBilling = () => {
       if (!returningFromAccountPage.current || document.visibilityState === "hidden") return;
@@ -86,26 +116,7 @@ function AccountDetailsView({ api, provider, target, scope, credentialRef, image
     catch (error) { reportError(error); returningFromAccountPage.current = false; }
     finally { openingRef.current = false; setOpening(false); }
   }, [disabled, reportError]);
-  const organizationSlug = balance?.scope.organizationSlug ?? scope?.organizationSlug;
-  const manage = provider === "redpill" && organizationSlug ? () => void openPage(() => api.openOrganization(organizationSlug)) : undefined;
-  const displayScope = provider === "redpill" ? scope ?? balance?.scope : balance?.scope ?? scope;
-  const owner = displayScope?.organization ?? displayScope?.workspace;
-  const name = owner ?? "Account";
-  return <div aria-label="Account details">
-    <Item variant="outline" size="sm" className="grid grid-cols-[2rem_minmax(0,_1fr)_auto] gap-x-3">
-      <AccountAvatar name={name} src={images?.organization} />
-      <ItemContent className="min-h-8 min-w-0 justify-center">
-        <ItemTitle className="line-clamp-none wrap-anywhere">{name}</ItemTitle>
-      </ItemContent>
-      <ItemActions>
-        {balance && <span className="text-sm font-medium tabular-nums" aria-label="Balance in USD" role="status" aria-live="polite" aria-busy={busy}
-          title={balance.grantedUsd != null && Number(balance.grantedUsd) > 0 ? `${currency(Number(balance.grantedUsd))} promo credits` : undefined}>
-          {currency(Number(balance.balanceUsd))}
-        </span>}
-        <AccountActions disabled={disabled || opening} onManage={manage} onSignIn={onSignIn} />
-      </ItemActions>
-    </Item>
-  </div>;
+  return { opening, openPage };
 }
 
 function AccountAvatar({ name, src }: { name: string; src?: string | null }) {

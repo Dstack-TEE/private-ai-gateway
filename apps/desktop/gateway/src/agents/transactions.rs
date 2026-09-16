@@ -154,6 +154,7 @@ impl Projector {
                         .and_then(|()| {
                             self.require_helper()?;
                             let text = self.read_config(agent)?;
+                            let options = ConnectOptions::default();
                             let path = self
                                 .action_path(agent, store.get(agent.id()), true)
                                 .map_err(|error| {
@@ -161,7 +162,7 @@ impl Projector {
                                         error,
                                     ))
                                 })?;
-                            self.connect(agent, &mut store, text, &path, catalog, &record.options)
+                            self.connect(agent, &mut store, text, &path, catalog, &options)
                         })
                 } else if !record.suspended
                     && catalog.is_some_and(|catalog| {
@@ -175,13 +176,7 @@ impl Projector {
                     (|| {
                         self.require_helper()?;
                         let text = self.read_config(agent)?;
-                        let doc = self
-                            .parse_config(agent, text.as_deref())
-                            .map_err(ConnectFailure::Conflict)?;
-                        let options = ConnectOptions {
-                            default_model: selected_model(agent, Some(&doc))
-                                .or_else(|| record.options.default_model.clone()),
-                        };
+                        let options = ConnectOptions::default();
                         let path = self
                             .action_path(agent, store.get(agent.id()), true)
                             .map_err(|error| {

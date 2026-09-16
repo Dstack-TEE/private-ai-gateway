@@ -477,14 +477,17 @@ pub(super) fn connection_options(
     if options.default_model.is_some() {
         return options.clone();
     }
-    let current = selected_model(agent, Some(doc)).filter(|model| {
+    let compatible = |model: &String| {
         catalog.is_some_and(|catalog| {
             catalog
                 .get(model)
                 .is_some_and(|entry| entry.supports_agent(agent.surface()))
         })
-    });
-    let saved = prior.and_then(|record| record.options.default_model.clone());
+    };
+    let current = selected_model(agent, Some(doc)).filter(compatible);
+    let saved = prior
+        .and_then(|record| record.options.default_model.clone())
+        .filter(compatible);
     let preferred = if prior.is_some_and(|record| record.suspended && record.attention.is_none()) {
         saved.or(current)
     } else {
