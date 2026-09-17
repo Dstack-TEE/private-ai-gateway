@@ -21,13 +21,13 @@ Section
 
   ReadEnvStr $R4 "PAP_GATE_RELEASE"
   StrCpy $R5 450
-pag_gate_wait:
-  IfFileExists "$R4" pag_gate_release
+pap_gate_wait:
+  IfFileExists "$R4" pap_gate_release
   Sleep 100
   IntOp $R5 $R5 - 1
-  IntCmp $R5 0 pag_gate_timeout pag_gate_wait pag_gate_wait
-pag_gate_timeout:
+  IntCmp $R5 0 pap_gate_timeout pap_gate_wait pap_gate_wait
+pap_gate_timeout:
   !insertmacro PAP_FAIL "Startup gate fixture release timed out."
-pag_gate_release:
+pap_gate_release:
   !insertmacro PAP_RELEASE_STARTUP_LOCK
 SectionEnd

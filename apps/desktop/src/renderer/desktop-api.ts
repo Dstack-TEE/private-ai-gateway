@@ -128,7 +128,7 @@ export const desktopApi: DesktopApi = {
   onNativeDialogOpen: (listener) => subscribe("gateway://dialog-open", listener),
   onNativeDialogDismissed: (listener) => subscribe("gateway://dialog-dismissed", listener),
   onNativeCloseRequest: (listener) => subscribe("gateway://dialog-close-requested", listener),
-  openAboutLink(target: "documentation" | "github"): Promise<void> {
+  openAboutLink(target: "documentation" | "github" | "aci"): Promise<void> {
     return invoke("open_about_link", { target });
   },
   openAgentWebsite: (agentId) => invoke("open_agent_website", { agentId }),

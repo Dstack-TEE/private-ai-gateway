@@ -1,9 +1,9 @@
 //! Private AI Proxy's ACI commands must not grow a second verifier.
 //!
-//! Verification steps belong in `src/aci`, where the gateway's own verifier
-//! consumes them; the CLI maps their outcomes to transcript lines. When both
-//! sides implement a step, they drift — and both sides keep passing their own
-//! tests while disagreeing about the same service.
+//! Verification steps belong in `apps/desktop/aci`, where the gateway's own
+//! verifier consumes them; the CLI maps their outcomes to transcript lines.
+//! When both sides implement a step, they drift — and both sides keep passing
+//! their own tests while disagreeing about the same service.
 
 use std::fs;
 use std::path::Path;
@@ -67,8 +67,8 @@ fn the_cli_calls_no_verification_primitive_directly() {
             for primitive in VERIFICATION_PRIMITIVES {
                 if line.contains(primitive) {
                     offenders.push(format!(
-                        "{}:{}: {primitive} — put this step in src/aci and call it from both \
-                         verifiers\n    {}",
+                        "{}:{}: {primitive} — put this step in apps/desktop/aci and call it from \
+                         both verifiers\n    {}",
                         path.display(),
                         n + 1,
                         line.trim()

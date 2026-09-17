@@ -22,8 +22,8 @@ Desktop integration adds opt-in lifecycle events and post-delivery receipt audit
 The explicit `desktop-client` Cargo feature keeps desktop dependencies out of
 ordinary gateway builds.
 The root Cargo manifest declares the client binaries at their desktop-owned paths;
-the protocol commands reuse the root `private_ai_gateway` library rather than
-copying the verification kernel into the desktop app.
+the gateway and protocol commands share `apps/desktop/aci`, re-exported through
+the existing `private_ai_gateway::aci` API.
 
 `private-ai-proxy verify/audit/sessions/send` do not initialize the managed backend or
 credential store. `private-ai-proxy serve` streams responses immediately and
