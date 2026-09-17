@@ -22,8 +22,8 @@ use crate::aggregator::service::{ServiceError, ServiceResponseStream};
 
 use super::request_transform::{Endpoint, ResponsesToolMap};
 use super::response_transform::{
-    self, custom_tool_call_item, custom_tool_input, function_call_item, i64_field,
-    invalid_finish_reason_error, invalid_tool_call_arguments_error,
+    self, anthropic_usage, chat_cache_tokens, custom_tool_call_item, custom_tool_input,
+    function_call_item, i64_field, invalid_finish_reason_error, invalid_tool_call_arguments_error,
     invalid_tool_call_identity_error, item_id, map_finish_reason, message_item,
     normalize_function_call_arguments, normalize_reasoning_usage_value, now_millis, now_secs,
     output_text_part, reasoning_item, reasoning_text, refusal_part, responses_object,
@@ -150,6 +150,8 @@ struct StreamState {
     id: Option<String>,
     input_tokens: i64,
     output_tokens: i64,
+    cache_read_tokens: Option<i64>,
+    cache_creation_tokens: Option<i64>,
     has_started: bool,
     content_block_started: bool,
     current_content_index: i64,
@@ -605,7 +607,12 @@ fn anthropic_stream_tail(state: &mut StreamState) -> String {
         &json!({
             "type": "message_delta",
             "delta": { "stop_reason": map_finish_reason(fr), "stop_sequence": Value::Null },
-            "usage": { "input_tokens": state.input_tokens, "output_tokens": state.output_tokens },
+            "usage": anthropic_usage(
+                state.input_tokens,
+                state.output_tokens,
+                state.cache_read_tokens,
+                state.cache_creation_tokens,
+            ),
         }),
     ));
     output.push_str("event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n");
@@ -645,6 +652,9 @@ fn openai_to_anthropic_messages_stream(
         if completion != 0 {
             state.output_tokens = completion;
         }
+        let (cache_read, cache_creation) = chat_cache_tokens(usage);
+        state.cache_read_tokens = cache_read.or(state.cache_read_tokens);
+        state.cache_creation_tokens = cache_creation.or(state.cache_creation_tokens);
     }
 
     if !state.has_started {
@@ -680,7 +690,12 @@ fn openai_to_anthropic_messages_stream(
                 "message": {
                     "id": id, "type": "message", "role": "assistant", "content": [],
                     "model": model, "stop_reason": Value::Null, "stop_sequence": Value::Null,
-                    "usage": { "input_tokens": input_tokens, "output_tokens": 0 },
+                    "usage": anthropic_usage(
+                        input_tokens,
+                        0,
+                        state.cache_read_tokens,
+                        state.cache_creation_tokens,
+                    ),
                 },
             }),
         ));

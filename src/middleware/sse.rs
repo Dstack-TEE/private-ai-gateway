@@ -209,6 +209,11 @@ pub struct MeterStream {
     buf: Vec<u8>,
     inner_done: bool,
     last_usage: Option<Value>,
+    /// An Anthropic stream reports its input and cache counters on
+    /// `message_start`; `message_delta` is only required to carry
+    /// `output_tokens`. The start counters are held here so the delta's usage is
+    /// completed with them.
+    start_usage: Option<Value>,
     ttft_ms: Option<u64>,
     saw_error: bool,
     /// The client-facing outcome (Completed / Failed) is read from this shared
@@ -238,6 +243,7 @@ impl MeterStream {
             buf: Vec::new(),
             inner_done: false,
             last_usage: None,
+            start_usage: None,
             ttft_ms: None,
             saw_error: false,
             framing: crate::sse_framing::SseFramingObserver::for_protocol(protocol),
@@ -437,6 +443,20 @@ impl MeterStream {
                     };
                     self.detect_outcome(&parsed);
 
+                    let event_type = parsed.get("type").and_then(Value::as_str);
+                    if event_type == Some("message_start") {
+                        if let Some(usage) = parsed
+                            .get("message")
+                            .and_then(|m| m.get("usage"))
+                            .filter(|u| u.is_object())
+                        {
+                            self.start_usage = Some(usage.clone());
+                        }
+                    }
+                    let start_usage = (event_type == Some("message_delta"))
+                        .then(|| self.start_usage.clone())
+                        .flatten();
+
                     let top_usage = parsed.get("usage").is_some_and(|u| !u.is_null());
                     let nested_usage = parsed
                         .get("response")
@@ -455,7 +475,11 @@ impl MeterStream {
                     .expect("usage presence checked above");
                     let normalized = response_transform::normalize_reasoning_usage_value(usage_obj)
                         .unwrap_or(false);
-                    self.last_usage = Some(usage_obj.clone());
+                    let billed = match start_usage {
+                        Some(start) => complete_usage(start, usage_obj),
+                        None => usage_obj.clone(),
+                    };
+                    self.last_usage = Some(billed.clone());
                     if !self.inject && !normalized {
                         return line.to_string();
                     }
@@ -472,7 +496,7 @@ impl MeterStream {
                             slot.lock().unwrap_or_else(PoisonError::into_inner).clone()
                         });
                         let cost = pricing::compute_cost(
-                            upstream_usage.as_ref().unwrap_or(&*usage_obj),
+                            upstream_usage.as_ref().unwrap_or(&billed),
                             pricing,
                         );
                         if let Some(usage_map) = usage_obj.as_object_mut() {
@@ -493,6 +517,24 @@ impl MeterStream {
             None => Bytes::from(raw),
         }
     }
+}
+
+/// `start` completed by `delta`. Anthropic's counters are cumulative, so where
+/// both events state one the larger is the later figure: a delta that repeats
+/// the input counters as zeros cannot erase what the start reported.
+fn complete_usage(mut start: Value, delta: &Value) -> Value {
+    if let (Some(merged), Some(delta)) = (start.as_object_mut(), delta.as_object()) {
+        for (key, value) in delta {
+            let keeps_start = match (merged.get(key).and_then(Value::as_f64), value.as_f64()) {
+                (Some(started), Some(latest)) => started > latest,
+                _ => value.is_null(),
+            };
+            if !keeps_start {
+                merged.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    start
 }
 
 impl Stream for MeterStream {

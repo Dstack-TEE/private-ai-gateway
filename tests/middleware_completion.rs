@@ -1589,6 +1589,187 @@ async fn bridged_responses_report_and_price_the_upstream_usage_in_both_serving_m
     }
 }
 
+fn messages_input(stream: bool) -> CompletionInput {
+    let params = json!({
+        "model": "gpt-test",
+        "stream": stream,
+        "max_tokens": 16,
+        "messages": [{ "role": "user", "content": "hi" }]
+    });
+    CompletionInput {
+        endpoint: Endpoint::Messages,
+        endpoint_path: "/v1/messages",
+        surface: Surface::Anthropic,
+        received_body: serde_json::to_vec(&params).unwrap(),
+        params,
+        request_id: "req-messages".to_string(),
+        stream,
+        ..chat_input()
+    }
+}
+
+// `/v1/messages` must report the same billable buckets as `/v1/chat/completions`
+// does for the same upstream usage, whichever format the upstream speaks.
+#[tokio::test]
+async fn messages_report_and_price_every_usage_bucket_in_both_serving_modes() {
+    let chat = |usage: Value| {
+        json!({
+            "id": "u", "model": "m",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "hi" },
+                "delta": { "content": "hi" },
+                "finish_reason": "stop"
+            }],
+            "usage": usage
+        })
+    };
+    let anthropic_usage = json!({
+        "input_tokens": 500, "output_tokens": 200,
+        "cache_read_input_tokens": 400, "cache_creation_input_tokens": 100
+    });
+    // The counters arrive on message_start; message_delta states output only.
+    let anthropic_stream = [
+        json!({ "type": "message_start", "message": {
+            "id": "m", "model": "claude", "role": "assistant", "content": [],
+            "usage": {
+                "input_tokens": 500, "output_tokens": 1,
+                "cache_read_input_tokens": 400, "cache_creation_input_tokens": 100
+            }
+        }}),
+        json!({ "type": "content_block_start", "index": 0,
+                "content_block": { "type": "text", "text": "" } }),
+        json!({ "type": "content_block_delta", "index": 0,
+                "delta": { "type": "text_delta", "text": "hi" } }),
+        json!({ "type": "content_block_stop", "index": 0 }),
+        json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" },
+                "usage": { "output_tokens": 200 } }),
+        json!({ "type": "message_stop" }),
+    ]
+    .iter()
+    .map(|event| {
+        format!(
+            "event: {}\ndata: {event}\n\n",
+            event["type"].as_str().unwrap()
+        )
+    })
+    .collect::<String>();
+
+    let pricing = json!({
+        "inputCostPerToken": "1", "outputCostPerToken": "2",
+        "cacheReadCostPerToken": "0.1", "cacheCreationCostPerToken": "1.25"
+    });
+    let both_buckets = chat(json!({
+        "prompt_tokens": 1000, "completion_tokens": 200, "total_tokens": 1200,
+        "prompt_tokens_details": { "cached_tokens": 400 },
+        "cache_creation_input_tokens": 100
+    }));
+    let cached_only = chat(json!({
+        "prompt_tokens": 1000, "completion_tokens": 200, "total_tokens": 1200,
+        "prompt_tokens_details": { "cached_tokens": 400 }
+    }));
+    let uncached = chat(json!({
+        "prompt_tokens": 1000, "completion_tokens": 200, "total_tokens": 1200
+    }));
+    let sse = |body: &Value| format!("data: {body}\n\ndata: [DONE]\n\n");
+    // A delta that repeats the input counters as zeros must not erase them.
+    let zero_filled_delta = anthropic_stream.replace(
+        r#""usage":{"output_tokens":200}"#,
+        r#""usage":{"input_tokens":0,"output_tokens":200,"cache_read_input_tokens":0,"cache_creation_input_tokens":null}"#,
+    );
+    assert_ne!(zero_filled_delta, anthropic_stream);
+    for (format, streaming, wire, expected, cost) in [
+        // 500 input + 400 cache read * 0.1 + 100 cache creation * 1.25 + 200 output * 2
+        (
+            "anthropic",
+            true,
+            anthropic_stream,
+            anthropic_usage.clone(),
+            1065,
+        ),
+        (
+            "anthropic",
+            true,
+            zero_filled_delta,
+            anthropic_usage.clone(),
+            1065,
+        ),
+        (
+            "openai",
+            false,
+            both_buckets.to_string(),
+            anthropic_usage.clone(),
+            1065,
+        ),
+        ("openai", true, sse(&both_buckets), anthropic_usage, 1065),
+        // 600 input + 400 cache read * 0.1 + 200 output * 2
+        (
+            "openai",
+            false,
+            cached_only.to_string(),
+            json!({ "input_tokens": 600, "output_tokens": 200, "cache_read_input_tokens": 400 }),
+            1040,
+        ),
+        (
+            "openai",
+            true,
+            sse(&cached_only),
+            json!({ "input_tokens": 600, "output_tokens": 200, "cache_read_input_tokens": 400 }),
+            1040,
+        ),
+        (
+            "openai",
+            false,
+            uncached.to_string(),
+            json!({ "input_tokens": 1000, "output_tokens": 200 }),
+            1400,
+        ),
+        (
+            "openai",
+            true,
+            sse(&uncached),
+            json!({ "input_tokens": 1000, "output_tokens": 200 }),
+            1400,
+        ),
+    ] {
+        let route = format!("{format}:gpt-test");
+        let (control_url, posts) = spawn_control_capturing(
+            200,
+            json!({
+                "allow": true,
+                "candidates": [{ "routeId": route, "format": format }],
+                "pricing": pricing,
+                "userId": 7, "organizationId": 11, "workspaceId": 13
+            }),
+        )
+        .await;
+        let content_type = if streaming {
+            "text/event-stream"
+        } else {
+            "application/json"
+        };
+        let (service, _) = build_recording_service(200, wire.into_bytes(), content_type);
+        let response = middleware(control_url)
+            .handle_completion(&service, messages_input(streaming))
+            .await;
+        let (_, body) = raw_body(response).await;
+        let shown = if streaming {
+            sse_events(&body)
+                .into_iter()
+                .find(|event| event["type"] == "message_delta")
+                .map(|event| event["usage"]["cost"].clone())
+                .expect("message_delta")
+        } else {
+            serde_json::from_str::<Value>(&body).unwrap()["usage"]["cost"].clone()
+        };
+        let context = format!("{format} upstream, streaming={streaming}, usage={expected}");
+        assert_eq!(shown, cost, "{context}");
+
+        let report = wait_for_post(&posts, |r| r["selectedRouteId"] == json!(route)).await;
+        assert_eq!(report["usage"], expected, "{context}");
+    }
+}
+
 #[tokio::test]
 async fn meter_stream_injects_cost_classifies_completed_and_reports() {
     let (control_url, posts) = spawn_control_capturing(200, json!({})).await;
