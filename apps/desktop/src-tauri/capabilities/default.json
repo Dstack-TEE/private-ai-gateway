@@ -18,6 +18,9 @@
     "core:event:default",
     "core:window:allow-start-dragging",
     "core:window:allow-internal-toggle-maximize",
-    "dialog:allow-message"
+    "allow-show-edit-menu",
+    "allow-get-appearance",
+    "allow-show-error-alert",
+    "allow-get-gateway-state"
   ]
 }

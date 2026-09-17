@@ -398,18 +398,12 @@ export interface DesktopApi {
   openOrganization(organizationSlug: string): Promise<void>;
   openTopUp(provider: ServiceProvider, scopeSlug?: string): Promise<void>;
   cancelAccountLogin(id: string): Promise<void>;
-  verifyConfiguration(profile: ConfidentialProfileInput, requireProductionOs: boolean, key?: string): Promise<GatewayState>;
   activateProfile(profileId: string): Promise<GatewayState>;
   deleteProfile(profileId: string): Promise<GatewayState>;
   stop(): Promise<GatewayState>;
-  clearApiKey(): Promise<GatewayState>;
   queryUsage(query: UsageQuery): Promise<UsagePage>;
   getUsageRecord(recordId: string): Promise<RequestActivity>;
-  exportUsageCsv(query: UsageQuery, path: string): Promise<number>;
-  clearUsage(): Promise<number>;
-  refreshCatalog(): Promise<GatewayState>;
   listAgents(): Promise<AgentStatus[]>;
-  disconnectAllAgents(): Promise<AgentStatus[]>;
   previewAgent(agentId: string, connect: boolean, options: ConnectOptions): Promise<AgentPreview>;
   applyAgent(
     agentId: string,

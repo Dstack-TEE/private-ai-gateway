@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "update-progress-window",
+  "description": "Read-only software update progress",
+  "windows": ["update-progress"],
+  "permissions": [
+    "allow-get-update-progress"
+  ]
+}

@@ -32,6 +32,7 @@ if (universal && process.platform !== "darwin") throw new Error("Universal macOS
 const targets = universal ? MACOS_TARGETS : [targetTriple];
 
 const destinationDir = path.join(appRoot, "src-tauri/binaries");
+await rm(destinationDir, { recursive: true, force: true });
 await mkdir(destinationDir, { recursive: true });
 
 // Executables embedded by the Tauri shell. The helper remains a console

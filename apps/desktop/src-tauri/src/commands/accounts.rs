@@ -114,26 +114,6 @@ pub(crate) async fn delete_profile(
 }
 
 #[tauri::command]
-pub(crate) async fn clear_api_key(client: State<'_, Arc<Client>>) -> Result<GatewayState, String> {
-    let client = client.inner().clone();
-    run_blocking(move || client.clear_api_key()).await
-}
-
-#[tauri::command]
-pub(crate) async fn verify_configuration(
-    client: State<'_, Arc<Client>>,
-    profile: ConfidentialProfileInput,
-    require_production_os: bool,
-    key: Option<String>,
-) -> Result<GatewayState, String> {
-    client
-        .inner()
-        .clone()
-        .verify_configuration(profile, require_production_os, key)
-        .await
-}
-
-#[tauri::command]
 pub(crate) async fn save_configuration(
     client: State<'_, Arc<Client>>,
     profile: ConfidentialProfileInput,

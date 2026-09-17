@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "local-api-window",
+  "description": "Local API listener and client key management",
+  "windows": ["local-api"],
+  "permissions": [
+    "allow-get-client-key",
+    "allow-rotate-client-key",
+    "allow-save-local-api-config",
+    "allow-list-listen-addresses",
+    "allow-copy-text"
+  ]
+}

@@ -1,3 +1,70 @@
 fn main() {
-    tauri_build::build()
+    if std::env::var("PROFILE").as_deref() == Ok("release")
+        && std::env::var_os("TAURI_CONFIG").is_none()
+    {
+        panic!(
+            "release packages must be built with `npm run dist` so the brand overlay is applied"
+        );
+    }
+
+    let manifest = tauri_build::AppManifest::new().commands(&[
+        "start_backend_service",
+        "get_gateway_state",
+        "reset_settings",
+        "read_profile_backup",
+        "import_profiles",
+        "export_profiles",
+        "export_diagnostics",
+        "get_notification_settings",
+        "save_notification_settings",
+        "request_notification_permission",
+        "open_notification_settings",
+        "get_appearance",
+        "set_appearance",
+        "check_update",
+        "get_update_channel",
+        "set_update_channel",
+        "install_update",
+        "get_update_progress",
+        "get_launch_preferences",
+        "set_launch_preference",
+        "start_gateway",
+        "complete_account_login",
+        "begin_account_login",
+        "poll_account_login",
+        "save_account_login",
+        "account_details",
+        "account_balance",
+        "open_top_up",
+        "open_organization",
+        "cancel_account_login",
+        "activate_profile",
+        "delete_profile",
+        "save_configuration",
+        "stop_gateway",
+        "copy_text",
+        "show_edit_menu",
+        "show_error_alert",
+        "open_native_dialog",
+        "native_dialog_ready",
+        "main_window_ready",
+        "open_agent_website",
+        "open_api_key_page",
+        "close_native_dialog",
+        "query_usage",
+        "get_usage_record",
+        "open_about_link",
+        "get_client_key",
+        "rotate_client_key",
+        "save_local_api_config",
+        "list_listen_addresses",
+        "list_agents",
+        "preview_agent_connection",
+        "apply_agent_connection",
+        "get_cli_registration",
+        "set_cli_registration",
+        "stop_all_and_quit",
+    ]);
+    tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
+        .expect("failed to build the Tauri application");
 }

@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "local-api-example-window",
+  "description": "Local API examples with the current local credential",
+  "windows": ["local-api-example"],
+  "permissions": [
+    "allow-get-client-key",
+    "allow-copy-text"
+  ]
+}

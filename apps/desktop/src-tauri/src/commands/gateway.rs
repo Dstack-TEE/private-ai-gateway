@@ -56,13 +56,6 @@ pub(crate) async fn save_local_api_config(
 }
 
 #[tauri::command]
-pub(crate) async fn refresh_catalog(
-    client: State<'_, Arc<Client>>,
-) -> Result<GatewayState, String> {
-    client.inner().clone().refresh_catalog().await
-}
-
-#[tauri::command]
 pub(crate) async fn list_listen_addresses() -> Result<Vec<ListenAddress>, String> {
     run_blocking(|| {
         let interfaces = if_addrs::get_if_addrs()
@@ -116,12 +109,4 @@ pub(crate) async fn apply_agent_connection(
 ) -> Result<AgentStatus, String> {
     let client = client.inner().clone();
     run_blocking(move || client.apply_agent(agent_id, connect, revision, options)).await
-}
-
-#[tauri::command]
-pub(crate) async fn disconnect_all_agents(
-    client: State<'_, Arc<Client>>,
-) -> Result<Vec<AgentStatus>, String> {
-    let client = client.inner().clone();
-    run_blocking(move || client.disconnect_all_agents()).await
 }

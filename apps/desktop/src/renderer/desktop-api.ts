@@ -7,7 +7,6 @@ import { confirm } from "@tauri-apps/plugin-dialog";
 import type {
   AgentPreview,
   AgentStatus,
-  ConfidentialProfileInput,
   ConnectOptions,
   DesktopApi,
   GatewayState,
@@ -156,9 +155,6 @@ export const desktopApi: DesktopApi = {
   start(config: StartGatewayConfig): Promise<GatewayState> {
     return invoke("start_gateway", { config });
   },
-  verifyConfiguration(profile: ConfidentialProfileInput, requireProductionOs: boolean, key?: string): Promise<GatewayState> {
-    return invoke("verify_configuration", { profile, requireProductionOs, key });
-  },
   activateProfile(profileId: string): Promise<GatewayState> {
     return invoke("activate_profile", { profileId });
   },
@@ -168,29 +164,14 @@ export const desktopApi: DesktopApi = {
   stop(): Promise<GatewayState> {
     return invoke("stop_gateway");
   },
-  clearApiKey(): Promise<GatewayState> {
-    return invoke("clear_api_key");
-  },
   queryUsage(query: UsageQuery): Promise<UsagePage> {
     return invoke("query_usage", { query });
   },
   getUsageRecord(recordId: string): Promise<RequestActivity> {
     return invoke("get_usage_record", { recordId });
   },
-  exportUsageCsv(query: UsageQuery, path: string): Promise<number> {
-    return invoke("export_usage_csv", { query, path });
-  },
-  clearUsage(): Promise<number> {
-    return invoke("clear_usage");
-  },
-  refreshCatalog(): Promise<GatewayState> {
-    return invoke("refresh_catalog");
-  },
   listAgents(): Promise<AgentStatus[]> {
     return invoke("list_agents");
-  },
-  disconnectAllAgents(): Promise<AgentStatus[]> {
-    return invoke("disconnect_all_agents");
   },
   previewAgent(agentId: string, connect: boolean, options: ConnectOptions): Promise<AgentPreview> {
     return invoke("preview_agent_connection", { agentId, connect, options });
