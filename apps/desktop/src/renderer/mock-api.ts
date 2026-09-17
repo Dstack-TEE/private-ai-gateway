@@ -229,7 +229,7 @@ const PI: AgentStatus = {
 };
 const HERMES: AgentStatus = {
   id: "hermes",
-  name: "Hermes",
+  name: "Hermes Agent",
   configPath: "/Users/dev/.hermes/config.yaml",
   installed: true,
   connected: false,
@@ -237,8 +237,8 @@ const HERMES: AgentStatus = {
   authorized: false,
 };
 const CLAUDE_OFF: AgentStatus = { ...CLAUDE, connected: false, recorded: false, authorized: false };
-const DEFAULT_AGENTS = [CODEX, CLAUDE, OPENCODE, PI, HERMES];
-const STOPPED_AGENTS = [CODEX, CLAUDE_OFF, OPENCODE, PI, HERMES];
+const DEFAULT_AGENTS = [CLAUDE, CODEX, HERMES, PI, OPENCODE];
+const STOPPED_AGENTS = [CLAUDE_OFF, CODEX, HERMES, PI, OPENCODE];
 
 function scenario(name: MockScenario): { state: GatewayState; agents: AgentStatus[] } {
   switch (name) {
@@ -333,8 +333,13 @@ export function mockApi(name: string | null): DesktopApi {
   if (name === "recent-usage") state = { ...state, activity: USAGE_HISTORY.slice(0, 12) };
   if (name === "agent-installed") agents = agents.map((agent) => agent.id === "opencode" ? { ...agent, installed: false } : agent);
   if (name === "reconnecting") state = { ...state, status: "stopped", reconnecting: true, protectedSince: now - 600, error: "Network unavailable. Connect to a network; protection resumes after verification." };
-  if (name === "all-agent-icons") agents = [...agents,
+  if (name === "all-agent-icons") agents = [
+    CLAUDE,
+    CODEX,
+    HERMES,
+    PI,
     { ...PI, id: "oh-my-pi", name: "Oh My Pi", configPath: "/Users/dev/.omp/agent/models.json" },
+    OPENCODE,
     { ...OPENCODE, id: "openclaw", name: "OpenClaw", configPath: "/Users/dev/.openclaw/openclaw.json" },
   ];
   if (name === "wake-monitor-unavailable") state.wakeMonitorAvailable = false;

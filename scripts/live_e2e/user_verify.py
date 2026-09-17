@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch ACI artifacts for a received response and run `aci audit` on them."""
+"""Fetch ACI artifacts and audit them with Private AI Proxy."""
 from __future__ import annotations
 
 import argparse
@@ -98,7 +98,8 @@ def run_audit(
     nonce: str | None,
 ) -> int:
     cmd = [
-        "cargo", "run", "--quiet", "--bin", "aci", "--",
+        "cargo", "run", "--quiet", "--features", "desktop-client",
+        "--bin", "private-ai-proxy", "--",
         "audit", "--report", str(report_path), "--receipt", str(receipt_path), "--json",
     ]
     if nonce:
@@ -111,7 +112,7 @@ def run_audit(
         cmd.extend(["--response-body", str(args.response_body)])
     if args.skip_expiry:
         cmd.append("--skip-expiry")
-    # `aci audit --json` prints the transcript on stdout and exits non-zero
+    # `private-ai-proxy audit --json` prints the transcript on stdout and exits non-zero
     # when the verdict is NOT VERIFIED; pass both through.
     result = subprocess.run(cmd, cwd=ROOT, check=False)
     return result.returncode

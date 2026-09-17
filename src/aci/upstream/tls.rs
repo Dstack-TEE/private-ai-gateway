@@ -115,7 +115,7 @@ impl ServerCertVerifier for SpkiPinVerifier {
     }
 }
 
-/// Client for the `aci` CLI: it has no pin before the first handshake — that
+/// Client for Private AI Proxy's ACI commands: it has no pin before the first handshake — that
 /// is how it learns the SPKI to check at §9.1(6) — so it records what it sees
 /// and enforces any pin registered afterwards.
 pub fn observing_spki_client(

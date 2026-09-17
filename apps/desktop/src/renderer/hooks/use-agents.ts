@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { AgentStatus, DesktopApi } from "../../shared/contracts";
 import { errorMessage } from "../lib/error-message";
-import { displayAgentName } from "../lib/agents";
 import { showErrorAlert } from "../lib/error-alert";
 
 type Options = {
@@ -60,7 +59,7 @@ export function useAgents(api: DesktopApi, { active, revision, verified, notify 
           agentIntents.current.delete(agent.id);
         }
       }
-      notify(`${displayAgentName(agent)} ${changed.recorded ? "connected" : "disconnected"}`);
+      notify(`${agent.name} ${changed.recorded ? "connected" : "disconnected"}`);
     } catch (error) {
       failure = errorMessage(error);
     } finally {
@@ -70,7 +69,7 @@ export function useAgents(api: DesktopApi, { active, revision, verified, notify 
       void loadAgents();
     }
     if (failure) {
-      await showErrorAlert(`${displayAgentName(agent)} could not ${attemptedConnection ? "connect" : "disconnect"}`, failure, api);
+      await showErrorAlert(`${agent.name} could not ${attemptedConnection ? "connect" : "disconnect"}`, failure, api);
     }
   };
   const problem = agentsError ? errorMessage(agentsError) : undefined;

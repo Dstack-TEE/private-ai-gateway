@@ -48,13 +48,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let profiles = Submenu::with_items(app, "Profiles", true, &[])?;
     let agents_menu = Submenu::with_items(app, "Agents", true, &[])?;
     let mut agents = Vec::new();
-    for agent in [
-        Agent::ClaudeCode,
-        Agent::Codex,
-        Agent::Hermes,
-        Agent::Pi,
-        Agent::OpenCode,
-    ] {
+    for agent in Agent::ALL {
         let item = CheckMenuItemBuilder::with_id(format!("agent:{}", agent.id()), agent.name())
             .enabled(false)
             .build(app)?;

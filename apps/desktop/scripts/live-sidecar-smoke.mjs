@@ -4,12 +4,12 @@ import { once } from "node:events";
 import { writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 
-const [aciPath, remoteUrl, reportPath] = process.argv.slice(2);
-if (!aciPath || !remoteUrl || !reportPath) {
-  throw new Error("Usage: live-sidecar-smoke.mjs <aci-path> <remote-url> <report-path>");
+const [proxyPath, remoteUrl, reportPath] = process.argv.slice(2);
+if (!proxyPath || !remoteUrl || !reportPath) {
+  throw new Error("Usage: live-sidecar-smoke.mjs <proxy-path> <remote-url> <report-path>");
 }
 
-const child = spawn(aciPath, [
+const child = spawn(proxyPath, [
   "serve",
   remoteUrl,
   "--listen",
@@ -35,19 +35,19 @@ const ready = new Promise((resolve, reject) => {
       if (event.type === "ready") {
         resolve(event);
       } else if (event.type === "fatal") {
-        reject(new Error(event.message ?? "ACI emitted a fatal event"));
+        reject(new Error(event.message ?? "Private AI Proxy emitted a fatal event"));
       }
     } catch {
-      reject(new Error("ACI emitted invalid JSON event data"));
+      reject(new Error("Private AI Proxy emitted invalid JSON event data"));
     }
   });
   child.once("error", reject);
   child.once("exit", (code) => {
-    reject(new Error(`ACI exited before ready with status ${code ?? "unknown"}: ${stderr.trim()}`));
+    reject(new Error(`Private AI Proxy exited before ready with status ${code ?? "unknown"}: ${stderr.trim()}`));
   });
 });
 const timeout = new Promise((_, reject) => {
-  setTimeout(() => reject(new Error("Timed out waiting for live ACI verification")), 180_000).unref();
+  setTimeout(() => reject(new Error("Timed out waiting for Private AI Proxy verification")), 180_000).unref();
 });
 
 try {

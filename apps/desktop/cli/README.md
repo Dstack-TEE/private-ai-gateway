@@ -2,8 +2,8 @@
 
 Shared command-line implementation of the ACI protocol
 ([spec/aci.md](../../../spec/aci.md)). It reuses the gateway's own
-verification code. The standalone `aci` entry imports these modules; the
-packaged `private-ai-proxy` CLI (also available as `pap`) owns this source.
+verification code. The packaged `private-ai-proxy` CLI (also available as
+`pap`) is the sole executable that owns these commands.
 
 ```bash
 cargo run --features desktop-client --bin private-ai-proxy -- <command> --help
@@ -33,7 +33,7 @@ the client reads the RTMR3-bound `os-image-hash` and requires it to be in the
 verifier's reviewed production-image allowlist. Development and unknown hashes
 fail closed. Updating the allowlist requires a verifier release.
 
-This option is an appraisal step, not a dstack boot verifier. The `aci` client
+This option is an appraisal step, not a dstack boot verifier. The Proxy's ACI client
 verifies the DCAP quote and replays RTMR3, but it does not reconstruct MRTD or
 RTMR0-2 from the dstack OS image. Before relying on `policy-os: pass`, run a
 dstack verifier over the same quote, event log, and VM configuration, and

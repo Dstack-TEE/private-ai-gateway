@@ -13,7 +13,7 @@ impl GatewayManager {
             }
             if runtime.stdout.len().saturating_add(bytes.len()) > MAX_EVENT_BYTES {
                 drop(runtime);
-                self.fail(generation, "ACI emitted an oversized event".to_string())?;
+                self.fail(generation, "Verifier emitted an oversized event".to_string())?;
                 return Ok(());
             }
             runtime.stdout.extend_from_slice(bytes);
@@ -28,7 +28,7 @@ impl GatewayManager {
 
         for line in lines {
             let line = String::from_utf8(line)
-                .map_err(|_| "ACI emitted non-UTF-8 event data".to_string())?;
+                .map_err(|_| "Verifier emitted non-UTF-8 event data".to_string())?;
             let line = line.trim();
             if !line.is_empty() {
                 self.handle_line(generation, line)?;
@@ -39,12 +39,12 @@ impl GatewayManager {
 
     pub(super) fn handle_line(self: &Arc<Self>, generation: u64, line: &str) -> Result<(), String> {
         let event: Value = serde_json::from_str(line)
-            .map_err(|_| "ACI emitted invalid JSON event data".to_string())?;
+            .map_err(|_| "Verifier emitted invalid JSON event data".to_string())?;
         let object = event
             .as_object()
-            .ok_or_else(|| "ACI emitted an invalid event".to_string())?;
+            .ok_or_else(|| "Verifier emitted an invalid event".to_string())?;
         if object.get("schema_version").and_then(Value::as_u64) != Some(EVENT_SCHEMA_VERSION) {
-            return Err("ACI emitted an unknown event schema".to_string());
+            return Err("Verifier emitted an unknown event schema".to_string());
         }
 
         let event_type = required_string(object, "type")?;
@@ -96,7 +96,7 @@ impl GatewayManager {
                 runtime.state.catalog = None;
                 runtime.state.error = Some(
                     optional_string(object, "reason")
-                        .unwrap_or_else(|| "ACI blocked forwarding".to_string()),
+                        .unwrap_or_else(|| "Verifier blocked forwarding".to_string()),
                 );
             }
             "fatal" => {
@@ -109,7 +109,8 @@ impl GatewayManager {
                 runtime.state.progress = None;
                 runtime.state.catalog = None;
                 runtime.state.error = Some(
-                    optional_string(object, "message").unwrap_or_else(|| "ACI failed".to_string()),
+                    optional_string(object, "message")
+                        .unwrap_or_else(|| "Verifier failed".to_string()),
                 );
             }
             _ => return Ok(()),
@@ -195,7 +196,7 @@ pub(super) fn spawn_event_reader(
                 SidecarEvent::Stdout(bytes) => manager.handle_stdout(generation, &bytes),
                 SidecarEvent::Stderr(bytes) => manager.append_diagnostic(generation, &bytes),
                 SidecarEvent::Error(error) => {
-                    manager.fail(generation, format!("ACI process error: {error}"))
+                    manager.fail(generation, format!("Verifier process error: {error}"))
                 }
                 SidecarEvent::Terminated => manager.terminated(generation),
             };
@@ -229,7 +230,7 @@ pub(super) fn parse_identity(event: &Map<String, Value>) -> Result<GatewayIdenti
         keyset_not_after: event
             .get("keyset_not_after")
             .and_then(Value::as_u64)
-            .ok_or_else(|| "ACI emitted an invalid identity event".to_string())?,
+            .ok_or_else(|| "Verifier emitted an invalid identity event".to_string())?,
         tls_spki: optional_string(event, "tls_spki"),
         source: SourceProvenance {
             repo_url: source.and_then(|value| optional_string(value, "repo_url")),
@@ -285,7 +286,7 @@ pub(super) fn apply_request_event(
         .get("status")
         .and_then(Value::as_u64)
         .and_then(|value| u16::try_from(value).ok())
-        .ok_or_else(|| "ACI emitted an invalid request event".to_string())?;
+        .ok_or_else(|| "Verifier emitted an invalid request event".to_string())?;
     let receipt_id = optional_string(event, "receipt_id");
     let (request_id, session_id, agent) = parse_request_tag(&required_string(event, "tag")?)?;
     let activity = RequestActivity {
@@ -369,11 +370,11 @@ fn parse_request_tag(tag: &str) -> Result<(String, String, String), String> {
             }
         }
     }
-    Err("ACI emitted an invalid request attribution tag".to_string())
+    Err("Verifier emitted an invalid request attribution tag".to_string())
 }
 
 pub(super) fn required_string(object: &Map<String, Value>, key: &str) -> Result<String, String> {
-    optional_string(object, key).ok_or_else(|| format!("ACI event is missing {key}"))
+    optional_string(object, key).ok_or_else(|| format!("Verifier event is missing {key}"))
 }
 
 pub(super) fn optional_string(object: &Map<String, Value>, key: &str) -> Option<String> {

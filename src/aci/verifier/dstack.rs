@@ -31,7 +31,7 @@ pub struct DstackEventLog {
 }
 
 /// Replay the dstack event log to RTMR3 and require it to match the quote,
-/// returning the verified events. The `aci` CLI reuses this for its own
+/// returning the verified events. Private AI Proxy reuses this for its own
 /// §9.1(4) compose check, so failures are plain strings rather than this
 /// module's provider-verifier error type.
 pub fn verify_dstack_event_log(

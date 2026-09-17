@@ -524,7 +524,7 @@ pub async fn run(
     // client is held with heartbeats.
     // An ACI-constrained request is never committed early: its contract
     // includes refusal receipts and the 412 pinned-session refresh, which only
-    // exist as HTTP responses. `provider.aci_verified` is the aci CLI's
+    // exist as HTTP responses. `provider.aci_verified` is the Proxy ACI client's
     // default, so the clients that read `x-receipt-id` off every 2xx keep
     // their header.
     let aci_constrained = aci_required || !aci_session_ids.is_empty();

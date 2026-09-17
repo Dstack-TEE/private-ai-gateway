@@ -80,7 +80,7 @@ evidence) exactly as observed.
   (conformance gaps item 1).
 - **No TLS observation in a browser.** A browser cannot see the server
   certificate, so id-6 needs the SPKI your own TLS stack observed (the
-  `channel` option) — or the `aci` CLI / `aci serve` proxy, which can; with
+  `channel` option) — or `private-ai-proxy serve`, which can; with
   neither, a live run fails id-6 (§1.1).
 - **No deep audit of upstream evidence (§9.2(4)).** `checkSessionEvidence`
   proves the cited session's `evidence.data` hashes to `evidence.digest` and
@@ -264,7 +264,7 @@ and [LangChain JS](https://github.com/langchain-ai/langchainjs/blob/main/libs/pr
 
 Browsers cannot observe TLS SPKI, and this transport does not cover WebSocket
 model calls. For browser clients, WebSocket-only frameworks, or software that
-cannot inject a custom `fetch`, run `aci serve` and point the framework at its
+cannot inject a custom `fetch`, run `private-ai-proxy serve` and point the framework at its
 local OpenAI-compatible endpoint instead.
 
 Or drive the individual checks:
@@ -301,7 +301,7 @@ supported through at least February 10, 2027 and is planned to be replaced by
 E2EE v3. This verifier establishes the attested E2EE keys but does not construct
 encrypted requests or decrypt responses. Use a v2-capable client for those
 operations. Without one, a bound channel needs the caller-observed TLS SPKI
-(`channel`) or the `aci` CLI / `aci serve` proxy.
+(`channel`) or `private-ai-proxy serve`.
 
 ## Development
 

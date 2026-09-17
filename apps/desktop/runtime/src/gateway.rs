@@ -1,6 +1,6 @@
 //! Sidecar lifecycle and the platform-neutral desktop view of the gateway.
 //!
-//! The ACI verifier sidecar listens on a private loopback port; the stable
+//! The verifier process listens on a private loopback port; the stable
 //! local endpoint belongs to the in-process proxy. A session is only opened
 //! for requests once the sidecar's verified identity and the catalog read
 //! through it are both in, and they are published to the proxy together under
@@ -370,7 +370,7 @@ impl GatewayManager {
         if let Some(mut child) = child {
             child
                 .kill()
-                .map_err(|error| format!("Cannot stop ACI executable: {error}"))?;
+                .map_err(|error| format!("Cannot stop verifier process: {error}"))?;
         }
         self.publish();
         session_result?;
@@ -753,9 +753,9 @@ impl GatewayManager {
                     .to_string();
             runtime.state.status = "error".to_string();
             runtime.state.error = Some(if diagnostic.is_empty() {
-                "ACI stopped unexpectedly".to_string()
+                "Verifier stopped unexpectedly".to_string()
             } else {
-                format!("ACI stopped unexpectedly: {diagnostic}")
+                format!("Verifier stopped unexpectedly: {diagnostic}")
             });
         }
         runtime.state.reconnecting = crate::recovery::connection_intended(&runtime.state);

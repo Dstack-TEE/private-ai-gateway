@@ -85,13 +85,13 @@ impl Agent {
     }
 
     pub const ALL: [Agent; 7] = [
-        Agent::Codex,
         Agent::ClaudeCode,
-        Agent::OpenCode,
-        Agent::Pi,
+        Agent::Codex,
         Agent::Hermes,
-        Agent::OpenClaw,
+        Agent::Pi,
         Agent::OhMyPi,
+        Agent::OpenCode,
+        Agent::OpenClaw,
     ];
 
     pub fn from_id(id: &str) -> Result<Self, String> {
@@ -119,7 +119,7 @@ impl Agent {
             Agent::ClaudeCode => "Claude Code",
             Agent::OpenCode => "OpenCode",
             Agent::Pi => "Pi",
-            Agent::Hermes => "Hermes",
+            Agent::Hermes => "Hermes Agent",
             Agent::OpenClaw => "OpenClaw",
             Agent::OhMyPi => "Oh My Pi",
         }

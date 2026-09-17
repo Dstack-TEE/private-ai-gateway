@@ -1,4 +1,4 @@
-//! `aci serve`: a local verifying proxy that fails closed on the attested
+//! `private-ai-proxy serve`: a local verifying proxy that fails closed on the attested
 //! service.
 //!
 //! Startup verifies `<base-url>` (spec 9.1) and refuses to listen unless
@@ -53,7 +53,7 @@ const HOP_BY_HOP_HEADERS: &[&str] = &[
 ];
 
 /// Headers that select either E2EE v2 or the legacy encrypted transport.
-/// `aci serve` exposes a plaintext local API, so even a partial encrypted
+/// `private-ai-proxy serve` exposes a plaintext local API, so even a partial encrypted
 /// request is rejected instead of being forwarded or silently downgraded.
 const E2EE_REQUEST_HEADERS: &[&str] = &[
     "x-signing-algo",
@@ -326,7 +326,7 @@ impl ProxyState {
         };
         self.blocked.store(false, Ordering::SeqCst);
         (self.event_sink)(identity_event);
-        eprintln!("aci serve: re-verified after keyset change; resuming forwards");
+        eprintln!("private-ai-proxy serve: re-verified after keyset change; resuming forwards");
         Ok(())
     }
 }
@@ -469,7 +469,7 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
             "POST receipt verification is available on demand."
         };
         println!();
-        println!("aci serve: proxying {base_url} on http://{local} (plain HTTP, localhost)");
+        println!("private-ai-proxy serve: proxying {base_url} on http://{local} (plain HTTP, localhost)");
         println!(
             "forwarding every method and path; Authorization passed through unchanged; every \
              upstream hop pinned to the attested TLS key; each POST response's receipt id and \
@@ -628,7 +628,7 @@ async fn proxy_inference(
         eprintln!("!! POST {path} -> 400 E2EE request rejected by plaintext local API");
         return text_response(
             StatusCode::BAD_REQUEST,
-            "aci serve accepts plaintext requests only; remove E2EE request headers\n",
+            "private-ai-proxy serve accepts plaintext requests only; remove E2EE request headers\n",
         );
     }
 
@@ -679,7 +679,7 @@ async fn proxy_inference(
         match derive_policy_pins(&state).await {
             Ok(pins) if !pins.is_empty() && pins != active_pins => {
                 eprintln!(
-                    "aci serve: pinned sessions refused (412); policy re-accepted {} current \
+                    "private-ai-proxy serve: pinned sessions refused (412); policy re-accepted {} current \
                      session(s), retrying",
                     pins.len()
                 );
@@ -688,7 +688,7 @@ async fn proxy_inference(
                 {
                     Ok(body) => body,
                     Err(reason) => {
-                        eprintln!("aci serve: refreshed session policy rejected request: {reason}");
+                        eprintln!("private-ai-proxy serve: refreshed session policy rejected request: {reason}");
                         return text_response(
                             StatusCode::BAD_REQUEST,
                             "request session ids are not accepted by the refreshed ACI policy\n",
@@ -702,7 +702,7 @@ async fn proxy_inference(
                 }
             }
             Ok(_) => {}
-            Err(e) => eprintln!("aci serve: policy pin refresh after 412 failed: {e}"),
+            Err(e) => eprintln!("private-ai-proxy serve: policy pin refresh after 412 failed: {e}"),
         }
     }
     let status = resp.status().as_u16();
@@ -728,7 +728,7 @@ async fn proxy_inference(
     let local_policy_applied = request_body.as_slice() != body.as_ref();
     let request_digest = BodyDigest::of(&request_body);
     // §9.3(6): the pinned ids ride along so the on-demand check enforces the
-    // same membership rule as `aci send --session`.
+    // same membership rule as `private-ai-proxy send --session`.
     let pinned_sessions = pinned_session_ids(&request_body);
     let audit_bearer = bearer_token(&headers);
     let hook: CompletionHook = Box::new(move |end| {
@@ -1162,13 +1162,13 @@ fn default_reporter(outcome: RequestOutcome) {
 fn json_reporter(outcome: RequestOutcome) {
     let event = request_outcome_event(outcome);
     if let Err(error) = write_json_event(&event) {
-        eprintln!("aci serve: cannot write JSON event: {error}");
+        eprintln!("private-ai-proxy serve: cannot write JSON event: {error}");
     }
 }
 
 fn json_event_sink(event: Value) {
     if let Err(error) = write_json_event(&event) {
-        eprintln!("aci serve: cannot write JSON event: {error}");
+        eprintln!("private-ai-proxy serve: cannot write JSON event: {error}");
     }
 }
 
@@ -1353,7 +1353,7 @@ async fn derive_policy_pins(state: &ProxyState) -> Result<Vec<String>, String> {
             .await?;
     for rejected in audited.iter().filter(|session| !session.accepted()) {
         eprintln!(
-            "aci serve: session {} rejected ({})",
+            "private-ai-proxy serve: session {} rejected ({})",
             rejected.session_id,
             match &rejected.audit {
                 Err(e) => e.clone(),

@@ -11,32 +11,29 @@ Status: implemented; modular layout updated 2026-09-16.
 | Local backend | Sessions, configuration transactions, local API and process ownership | `apps/desktop/runtime`, `apps/desktop/gateway` |
 | `private-ai-proxy` | Unified managed-client and ACI protocol commands | `apps/desktop/cli` |
 | `private-ai-proxy-service` | Per-user backend entry point | `apps/desktop/service` |
-| `aci` | Existing standalone protocol reference CLI, unchanged and not bundled | `src/bin/aci` |
 
 ## Shared implementation
 
-`private-ai-proxy` composes the managed CLI's Clap command tree with the existing ACI
+`private-ai-proxy` composes the managed CLI's Clap command tree with its ACI
 commands. Management command execution and output live in
-`apps/desktop/runtime/src/cli`. ACI modules are compiled from
-`apps/desktop/cli`, so both executables use one verifier implementation.
-`src/bin/aci/main.rs` is only the standalone entry point and imports those modules.
-Desktop integration adds opt-in lifecycle events and post-delivery receipt auditing; the
-original `aci` entry point and default streaming behavior remain available.
+`apps/desktop/runtime/src/cli`; ACI command modules live in `apps/desktop/cli`.
+There is one user-facing executable and one verifier implementation.
+Desktop integration adds opt-in lifecycle events and post-delivery receipt auditing.
 The explicit `desktop-client` Cargo feature keeps desktop dependencies out of
-ordinary service and standalone ACI builds.
-The root Cargo manifest declares both client binaries at their desktop-owned paths;
-their protocol commands reuse the root `private_ai_gateway` library rather than
+ordinary gateway builds.
+The root Cargo manifest declares the client binaries at their desktop-owned paths;
+the protocol commands reuse the root `private_ai_gateway` library rather than
 copying the verification kernel into the desktop app.
 
 `private-ai-proxy verify/audit/sessions/send` do not initialize the managed backend or
 credential store. `private-ai-proxy serve` streams responses immediately and
 audits receipts afterward by default. Receipt checks never gate streaming.
 `private-ai-proxy --json serve`
-emits lifecycle JSON events. The original `aci` interface stays unchanged.
+emits lifecycle JSON events.
 
 `private-ai-proxy start/stop` retain managed profiles, user-session continuity and reversible
 agent configuration. The backend's supervised verifier process now runs
-`private-ai-proxy serve`, replacing the old ACI executable. Ownership-pipe and child-reaping
+`private-ai-proxy serve`. Ownership-pipe and child-reaping
 behavior is preserved; a backend crash must not leave a verifier listening.
 Packages contain `private-ai-proxy`, `private-ai-proxy-service` and the credential
 helper. They do not contain an independent `aci` executable.
@@ -77,7 +74,7 @@ helper. They do not contain an independent `aci` executable.
   and awaits process exit. Failure to restore leaves management available for
   recovery instead of closing the inference listener halfway through shutdown.
 - A parent-pipe supervisor owns ACI. Backend death closes the pipe in the kernel;
-  the supervisor terminates and reaps its ACI child. Normal stop waits for the
+  the supervisor terminates and reaps its verifier child. Normal stop waits for the
   supervisor; reap timeout preserves the completion handle for a later retry.
 
 ## Security and Protocol

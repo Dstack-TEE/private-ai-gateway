@@ -1,4 +1,4 @@
-//! HTTPS client for the `aci` CLI.
+//! HTTPS client for Private AI Proxy's ACI commands.
 //!
 //! Normal WebPKI validation plus per-hostname recording of the observed
 //! leaf SPKI sha256 (the spec 9.1(6) channel check) and optional
@@ -112,7 +112,7 @@ impl AciClient {
     }
 
     /// A request builder on the pinned/recording transport. The local proxy
-    /// (`aci serve`) uses it to forward arbitrary methods and paths upstream so
+    /// (`private-ai-proxy serve`) uses it to forward arbitrary methods and paths upstream so
     /// every hop still enforces the attested SPKI pin.
     pub fn request(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
         self.http.request(method, url)
@@ -264,7 +264,7 @@ mod tests {
 
     /// Live-network check that a registered pin is enforced fail-closed:
     /// a handshake presenting any other key must abort the connection.
-    /// Run with: cargo test --bin aci -- --ignored pin_mismatch
+    /// Run with: cargo test --features desktop-client --bin private-ai-proxy -- --ignored pin_mismatch
     #[tokio::test]
     #[ignore]
     async fn pin_mismatch_fails_closed_live() {

@@ -82,7 +82,7 @@ were hardened in place:
 | Component or behavior | Origin |
 | --- | --- |
 | ACI protocol, gateway surfaces, attestation, receipts and sessions | Existing upstream |
-| Rust `aci` verifier, `aci serve`, TLS channel binding and `--accept-compose` | Existing upstream |
+| Rust ACI verifier, `private-ai-proxy serve`, TLS channel binding and `--accept-compose` | Existing upstream |
 | TypeScript quote, nonce/keyset, compose and expiry checks | Existing upstream |
 | Pi provider, branded packages, model discovery and initial Pi TLS pinning | Original PR |
 | Framework-neutral model, lifecycle, policy, account-to-key contract, and structured inspection core | Current OpenCode work |

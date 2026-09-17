@@ -1,4 +1,4 @@
-//! `aci send`: one verified chat completion, end to end.
+//! `private-ai-proxy send`: one verified chat completion, end to end.
 //!
 //! Verifies the service (fail closed), sends the prompt over an
 //! SPKI-pinned connection capturing the exact wire bytes, then fetches

@@ -1,4 +1,4 @@
-//! Unified local proxy CLI. Owns shared ACI command implementations; the standalone aci entry reuses them.
+//! Unified Private AI Proxy CLI, including the ACI protocol commands.
 mod args;
 mod audit;
 mod capture;

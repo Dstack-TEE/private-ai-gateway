@@ -2,7 +2,7 @@
  * The verification transcript engine plus the one-call {@link verifyService}
  * entry point. DOM-free, so any web or node project imports it directly. Check
  * ids, titles, and section cites are the shared ACI transcript vocabulary (the
- * `aci` CLI prints the same lines); a check that cannot run is reported as
+ * Private AI Proxy prints the same lines); a check that cannot run is reported as
  * `skip` with the reason, never as a pass.
  */
 
@@ -64,8 +64,8 @@ export interface TranscriptOptions {
   /**
    * How this client's channel is bound to the attested keyset (§9.1(6)):
    * the TLS leaf SPKI the caller's own stack observed. A browser cannot
-   * observe TLS, so its channel is unbound — use the `aci` CLI or the
-   * `aci serve` proxy for a pinned channel.
+   * observe TLS, so its channel is unbound — use `private-ai-proxy serve`
+   * for a pinned channel.
    */
   channel?: { observedSpkiSha256: string; host?: string };
   /**
@@ -518,7 +518,7 @@ function channelLine(
       ID_TITLES,
       'id-6',
       'fail',
-      'the channel used is not bound to the attested keyset: browsers cannot observe the TLS certificate — supply the SPKI your own stack observed, or use the `aci` CLI / `aci serve` proxy (§1.1, §9.1(6))',
+      'the channel used is not bound to the attested keyset: browsers cannot observe the TLS certificate — supply the SPKI your own stack observed, or use `private-ai-proxy serve` (§1.1, §9.1(6))',
     );
   }
   return line(

@@ -1,4 +1,4 @@
-//! `aci verify`: run the spec 9.1 identity checks against a live service.
+//! `private-ai-proxy verify`: run the spec 9.1 identity checks against a live service.
 //!
 //! Fetches the attestation report with a fresh nonce over a TLS channel
 //! whose leaf SPKI is recorded, then checks online: DCAP collateral
@@ -14,7 +14,7 @@ use crate::checks::{
 use crate::client::{host_of, normalize_base_url, random_nonce_hex, AciClient};
 use crate::transcript::Transcript;
 
-/// Everything `aci send` and `aci serve` need after a full online
+/// Everything `private-ai-proxy send` and `private-ai-proxy serve` need after a full online
 /// verify: the transcript, the report, and the client that observed the
 /// channel (ready to have the attested SPKI pinned).
 pub struct ServiceVerification {

@@ -32,7 +32,7 @@ const report = JSON.parse(
   readFileSync(new URL('../../test/fixtures/aci_report.json', import.meta.url), 'utf8'),
 ) as unknown as AttestationReport;
 
-/** The nonce baked into the fixture's report_data (tests/aci_cli.rs NONCE). */
+/** The nonce baked into the fixture's report_data (tests/private_ai_proxy_aci.rs NONCE). */
 const FIXTURE_NONCE = 'cd20088d763605cf78564e5b35524ad52715419624b76e029582a3652758708d';
 /** Before the fixture keyset's not_after. */
 const FIXED_NOW = 1783805115;

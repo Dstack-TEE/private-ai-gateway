@@ -24,7 +24,7 @@ path = "apps/desktop/service/main.rs"
 required-features = ["desktop-client"]
 
 [features]
-desktop-client = ["dep:desktop_runtime", "dep:desktop_gateway"]
+desktop-client = ["dep:clap", "dep:desktop_runtime", "dep:desktop_gateway"]
 
 [dependencies]
 desktop_runtime = { package = "private-ai-proxy-runtime", path = "apps/desktop/runtime", optional = true }
@@ -94,8 +94,8 @@ tokio-util = "0.7"
 # Upstream ACI/DCAP verification.
 dcap-qvl = { version = "0.3.12", default-features = false, features = ["std", "report", "rustcrypto"] }
 
-# `aci` CLI argument parsing.
-clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
+# Private AI Proxy CLI argument parsing.
+clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 dstack-sdk = "0.1.2"

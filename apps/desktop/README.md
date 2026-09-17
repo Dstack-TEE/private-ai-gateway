@@ -19,10 +19,10 @@ Gateway. This is a fresh application identity (`org.dstack.private-ai-proxy`)
 with its own data and credential namespace; old beta configuration is not migrated.
 The only installed CLI is `private-ai-proxy`. It combines local management with ACI's `verify`,
 `audit`, `sessions`, `send` and `serve` commands using the same Rust source.
-The existing standalone `aci` binary is unchanged in the repository but is no
-longer bundled. The backend launches `private-ai-proxy serve` with post-delivery receipt auditing.
+There is no separate `aci` executable. The backend launches
+`private-ai-proxy serve` with post-delivery receipt auditing.
 Build the unified CLI with `cargo build --features desktop-client --bin private-ai-proxy`;
-ordinary server and standalone ACI builds do not acquire desktop dependencies.
+ordinary gateway builds do not acquire desktop dependencies.
 
 macOS releases provide separate Apple Silicon (`arm64`) and Intel (`x64`)
 packages. Local builds default to the host architecture; pass `--target` to
@@ -1025,7 +1025,7 @@ npm run dev
 ```
 
 The persistent backend launches the target-triple-specific bundled `private-ai-proxy serve`
-process. No independent ACI executable is included.
+process. No second verifier executable is included.
 The development command builds debug sidecars; packaged builds compile release
 sidecars from this repository. `npm run dist` produces the native bundle for
 the current platform. CI builds the same Tauri application as a macOS DMG and
@@ -1067,7 +1067,7 @@ from the GUI app so stdout works on Windows). A release build passes
 builds use the runtime crate version. The desktop gateway and Tauri crates declare
 `rust-version = 1.89`, the highest MSRV in their locked dependency graphs
 (`aes` 0.9.3: 1.89; `keyring` 4.2: 1.88), and commit their `Cargo.lock` files.
-The root `aci` follows the root workspace toolchain. CI tests the gateway,
+The root gateway and integrated Proxy CLI follow the root workspace toolchain. CI tests the gateway,
 runtime, renderer, and Tauri backend, then compiles and bundles the same app on
 macOS, Windows, and Linux. It also publishes UI-free CLI archives on all three
 platforms and CLI-only DEB/RPM packages on Linux. See

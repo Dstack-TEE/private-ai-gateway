@@ -1,8 +1,10 @@
-//! End-to-end test of the `aci` CLI's offline audit: serve a real in-process
+//! End-to-end test of Private AI Proxy's offline ACI audit: serve a real in-process
 //! ACI service over HTTP, capture the artifacts a client would save (report,
-//! request/response bytes, receipt, attested session), then run `aci audit`
+//! request/response bytes, receipt, attested session), then run
+//! `private-ai-proxy audit`
 //! on them and check every transcript status — including the honest failures
 //! for the stub quote, which is not a real DCAP quote.
+#![cfg(feature = "desktop-client")]
 
 mod common;
 
@@ -33,7 +35,7 @@ const RESPONSE_BODY: &[u8] = br#"{"id":"chat-xyz","object":"chat.completion","ch
 
 /// The checked-in §4.1 report shape, captured byte-exact from this in-process
 /// service (deterministic: fixed keys, stub quote, fixed clock, [`NONCE`]).
-/// Regenerate with `ACI_UPDATE_FIXTURES=1 cargo test --test aci_cli`.
+/// Regenerate with `ACI_UPDATE_FIXTURES=1 cargo test --features desktop-client --test private_ai_proxy_aci`.
 const REPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/aci_report_fixture.json"
@@ -139,7 +141,7 @@ async fn audit_verifies_artifacts_captured_from_a_live_service() {
         report_bytes.as_ref(),
         std::fs::read(REPORT_FIXTURE).expect("read report fixture"),
         "the served report drifted from tests/fixtures/aci_report_fixture.json; \
-         regenerate with ACI_UPDATE_FIXTURES=1 cargo test --test aci_cli"
+         regenerate with ACI_UPDATE_FIXTURES=1 cargo test --features desktop-client --test private_ai_proxy_aci"
     );
     let chat = http
         .post(format!("{base}/v1/chat/completions"))
@@ -194,7 +196,7 @@ async fn audit_verifies_artifacts_captured_from_a_live_service() {
     std::fs::write(path("response.json"), &response_bytes).unwrap();
     std::fs::write(path("session.json"), &session_bytes).unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_aci"))
+    let output = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
         .args([
             "audit",
             "--report",
@@ -212,7 +214,7 @@ async fn audit_verifies_artifacts_captured_from_a_live_service() {
             "--json",
         ])
         .output()
-        .expect("run aci audit");
+        .expect("run private-ai-proxy audit");
     let transcript: Value = serde_json::from_slice(&output.stdout)
         .unwrap_or_else(|e| panic!("bad JSON output ({e}): {:?}", output));
 
@@ -246,7 +248,7 @@ async fn audit_verifies_artifacts_captured_from_a_live_service() {
 /// live-capture test above covers id-3 against real time.
 #[test]
 fn audit_verifies_the_checked_in_report_fixture() {
-    let output = Command::new(env!("CARGO_BIN_EXE_aci"))
+    let output = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
         .args([
             "audit",
             "--report",
@@ -257,7 +259,7 @@ fn audit_verifies_the_checked_in_report_fixture() {
             "--json",
         ])
         .output()
-        .expect("run aci audit");
+        .expect("run private-ai-proxy audit");
     let transcript: Value = serde_json::from_slice(&output.stdout)
         .unwrap_or_else(|e| panic!("bad JSON output ({e}): {output:?}"));
 
@@ -304,10 +306,10 @@ fn old_protocol_report_fails_closed_with_a_clear_message() {
     let report_path = dir.join("old_report.json");
     std::fs::write(&report_path, serde_json::to_vec(&old_shape).unwrap()).unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_aci"))
+    let output = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
         .args(["audit", "--report", report_path.to_str().unwrap(), "--json"])
         .output()
-        .expect("run aci audit");
+        .expect("run private-ai-proxy audit");
     assert!(!output.status.success());
     let transcript: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(check_status(&transcript, "id-2"), "fail");

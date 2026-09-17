@@ -13,7 +13,6 @@ import { isProtected, presentation } from "../lib/protection";
 import { LocalApiPanel } from "./local-api";
 import { EmptyState } from "../components/detail";
 import { AgentRow } from "./agents";
-import { sortAgents } from "../lib/agents";
 import { UsageRow } from "./usage";
 import { ProtectedControl, ProtectionStatus } from "../components/protection";
 import { ServiceLogo } from "../components/brand";
@@ -126,7 +125,7 @@ export function Overview({
         <OverviewModule title="Agents" description="Use private AI in your agents." action="View all" onAction={onAgents}>
           <div className="preview-list [&_>_:last-child]:border-b-0 overview-agent-list [--agent-row-height:calc(2rem_+_1.25rem_+_2px)] grid grid-rows-[repeat(3,_minmax(var(--agent-row-height),_auto))] gap-3 [&_>_.empty-state]:row-span-full">
             {!agents.some((agent) => agent.installed) && <EmptyState text={agentProblem ? "Agent detection unavailable" : "No installed agents found"} />}
-            {sortAgents(agents.filter((agent) => agent.installed)).slice(0, 3).map((agent) => (
+            {agents.filter((agent) => agent.installed).slice(0, 3).map((agent) => (
               <AgentRow
                 pendingConnection={pendingAgentChanges[agent.id]}
                 key={agent.id}

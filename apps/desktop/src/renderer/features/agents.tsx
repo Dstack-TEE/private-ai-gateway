@@ -1,4 +1,3 @@
-import { displayAgentName, sortAgents } from "../lib/agents";
 import React from "react";
 import { useErrorAlert } from "../lib/error-alert";
 import { ExternalLink, TriangleAlert } from "lucide-react";
@@ -59,7 +58,7 @@ export function AgentsView({
         <h2 className="group-title mx-0.5 mb-2 flex min-h-5 items-center gap-2 text-sm font-semibold" id="agents-title">Installed <span className="ml-auto truncate text-xs font-normal text-muted-foreground">{connected} connected</span></h2>
         <div className="inset min-w-0 bg-card border border-border rounded-2xl overflow-hidden">
           {!agents.some((agent) => agent.installed) && <EmptyState text={problem ? "Agent detection unavailable" : "No installed agents found"} />}
-          {sortAgents(agents.filter((agent) => agent.installed)).map((agent) => (
+          {agents.filter((agent) => agent.installed).map((agent) => (
             <AgentRow
               pendingConnection={pendingAgentChanges[agent.id]}
               key={agent.id}
@@ -72,7 +71,7 @@ export function AgentsView({
       </section>
       {agents.some((agent) => !agent.installed) && <section className="group mt-5 [&:first-child]:mt-0" aria-labelledby="not-installed-title">
         <h2 className="group-title mx-0.5 mb-2 flex min-h-5 items-center gap-2 text-sm font-semibold" id="not-installed-title">Not installed</h2>
-        <div className="inset min-w-0 bg-card border border-border rounded-2xl overflow-hidden">{sortAgents(agents.filter((agent) => !agent.installed)).map((agent) => (
+        <div className="inset min-w-0 bg-card border border-border rounded-2xl overflow-hidden">{agents.filter((agent) => !agent.installed).map((agent) => (
           <AgentRow key={agent.id} agent={agent} disabled={locked} onSelect={() => undefined} />
         ))}</div>
       </section>}
@@ -93,7 +92,7 @@ export function AgentRow({
   compact?: boolean;
   onSelect(connect: boolean): void;
 }): React.JSX.Element {
-  const name = displayAgentName(agent);
+  const name = agent.name;
   const presence = pendingConnection !== undefined
     ? { label: pendingConnection ? "Connecting…" : "Disconnecting…", tone: "neutral" as Tone, icon: undefined }
     : !agent.installed

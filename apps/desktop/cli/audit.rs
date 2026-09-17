@@ -1,4 +1,4 @@
-//! `aci audit`: the check engine over artifacts saved to files.
+//! `private-ai-proxy audit`: the check engine over artifacts saved to files.
 //!
 //! Offline, quote collateral and the live TLS channel are honestly
 //! unavailable — those checks skip (never pass) rather than assume.

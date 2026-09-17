@@ -1,25 +1,8 @@
-//! Argument parsing for the `aci` CLI, built on clap's derive API.
+//! ACI command arguments for Private AI Proxy, built on clap's derive API.
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Subcommand};
 
 use crate::checks::RequiredClaim;
-
-/// Reference client for the ACI protocol (spec/aci.md).
-///
-/// Verify a live service, audit saved artifacts offline, or run one
-/// verified chat completion end to end.
-#[derive(Debug, Parser)]
-#[command(name = "aci")]
-pub struct Cli {
-    #[arg(
-        long,
-        global = true,
-        help = "Require the RTMR3 os-image-hash to be in the production allowlist. Use with a dstack verifier that checks the boot measurements."
-    )]
-    pub require_production_os: bool,
-    #[command(subcommand)]
-    pub command: Command,
-}
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -344,20 +327,4 @@ mod tests {
         assert!(err.contains("spec 5.3"), "{err}");
     }
 
-    #[test]
-    fn serve_accepts_json_events_mode() {
-        let cli = Cli::try_parse_from([
-            "aci",
-            "serve",
-            "https://example.test",
-            "--json-events",
-            "--audit-receipts",
-        ])
-        .unwrap();
-        let Command::Serve(args) = cli.command else {
-            panic!("expected serve command");
-        };
-        assert!(args.json_events);
-        assert!(args.audit_receipts);
-    }
 }

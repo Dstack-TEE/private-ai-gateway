@@ -1,4 +1,4 @@
-//! `aci sessions`: audit the attested sessions a service currently serves from.
+//! `private-ai-proxy sessions`: audit the attested sessions a service currently serves from.
 //!
 //! Verifies the service identity (spec 9.1, fail closed), lists the current
 //! sessions, fetches each full record by id, and runs the spec 9.2 audit
@@ -197,7 +197,7 @@ impl AuditedSession {
 }
 
 /// List the service's current sessions and audit each full record (spec 9.2)
-/// against `now` plus the claims policy. Shared with `aci serve
+/// against `now` plus the claims policy. Shared with `private-ai-proxy serve
 /// --require-claim`, which pins the accepted ids.
 pub async fn audit_current_sessions(
     client: &AciClient,

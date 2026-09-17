@@ -1,9 +1,10 @@
-//! Platform-neutral process ownership for the ACI sidecar.
+//! Platform-neutral process ownership for the verifier process.
 //!
 //! The desktop process starts a small instance of itself as a supervisor. The
-//! supervisor owns ACI and watches a pipe held by the desktop process. Normal
-//! shutdown closes the pipe explicitly; an abrupt desktop-process exit closes
-//! it in the kernel. In both cases the supervisor terminates and reaps ACI.
+//! supervisor owns `private-ai-proxy serve` and watches a pipe held by the
+//! desktop process. Normal shutdown closes the pipe explicitly; an abrupt
+//! desktop-process exit closes it in the kernel. In both cases the supervisor
+//! terminates and reaps the verifier.
 
 use std::{
     env,
@@ -23,8 +24,8 @@ use tokio::{
     sync::mpsc::{self, Receiver, Sender},
 };
 
-const ACI_BINARY: &str = "private-ai-proxy";
-const SUPERVISOR_ARGUMENT: &str = "--pap-internal-aci-supervisor-v1";
+const PROXY_BINARY: &str = "private-ai-proxy";
+const SUPERVISOR_ARGUMENT: &str = "--pap-internal-verifier-supervisor-v1";
 const EVENT_BUFFER: usize = 256;
 const PIPE_BUFFER: usize = 8 * 1024;
 const SUPERVISOR_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -36,18 +37,18 @@ pub struct TokioSidecarLauncher {
 }
 
 impl TokioSidecarLauncher {
-    pub fn new(aci_executable: PathBuf) -> Result<Self, String> {
-        let expected = sibling_executable(ACI_BINARY)?;
-        let supplied = canonicalize_executable(&aci_executable)?;
+    pub fn new(proxy_executable: PathBuf) -> Result<Self, String> {
+        let expected = sibling_executable(PROXY_BINARY)?;
+        let supplied = canonicalize_executable(&proxy_executable)?;
         if supplied != expected {
             return Err(format!(
-                "ACI executable must be the bundled sibling {}",
+                "Verifier executable must be the bundled sibling {}",
                 expected.display()
             ));
         }
 
         let runtime = Handle::try_current()
-            .map_err(|_| "The ACI launcher requires an active Tokio runtime".to_string())?;
+            .map_err(|_| "The verifier launcher requires an active Tokio runtime".to_string())?;
         let supervisor_executable = canonical_current_executable()?;
         Ok(Self {
             runtime,
@@ -72,19 +73,19 @@ impl SidecarLauncher for TokioSidecarLauncher {
 
         let mut child = command
             .spawn()
-            .map_err(|error| format!("Cannot start the ACI supervisor: {error}"))?;
+            .map_err(|error| format!("Cannot start the verifier supervisor: {error}"))?;
         let guard = child
             .stdin
             .take()
-            .ok_or_else(|| "Cannot open the ACI supervisor ownership pipe".to_string())?;
+            .ok_or_else(|| "Cannot open the verifier supervisor ownership pipe".to_string())?;
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| "Cannot capture ACI stdout".to_string())?;
+            .ok_or_else(|| "Cannot capture verifier stdout".to_string())?;
         let stderr = child
             .stderr
             .take()
-            .ok_or_else(|| "Cannot capture ACI stderr".to_string())?;
+            .ok_or_else(|| "Cannot capture verifier stderr".to_string())?;
 
         let (events, receiver) = mpsc::channel(EVENT_BUFFER);
         forward_pipe(
@@ -107,7 +108,7 @@ impl SidecarLauncher for TokioSidecarLauncher {
             let result = child
                 .wait()
                 .map(|_| ())
-                .map_err(|error| format!("Cannot reap the ACI supervisor: {error}"));
+                .map_err(|error| format!("Cannot reap the verifier supervisor: {error}"));
             let event = match &result {
                 Ok(()) => SidecarEvent::Terminated,
                 Err(error) => SidecarEvent::Error(error.clone()),
@@ -146,12 +147,12 @@ impl TokioSidecarChild {
             Err(RecvTimeoutError::Timeout) => {
                 self.reaped = Some(reaped);
                 Err(format!(
-                    "Timed out after {} ms waiting for the ACI supervisor to exit",
+                    "Timed out after {} ms waiting for the verifier supervisor to exit",
                     timeout.as_millis()
                 ))
             }
             Err(RecvTimeoutError::Disconnected) => {
-                Err("The ACI supervisor exited without a reap result".to_string())
+                Err("The verifier supervisor exited without a reap result".to_string())
             }
         }
     }
@@ -169,8 +170,8 @@ impl Drop for TokioSidecarChild {
     }
 }
 
-/// Run the internal ACI supervisor when the current process was launched in
-/// supervisor mode. Call this before initializing any desktop framework.
+/// Run the internal verifier supervisor when the current process was launched
+/// in supervisor mode. Call this before initializing any desktop framework.
 pub fn run_sidecar_supervisor_if_requested() -> Result<Option<ExitStatus>, String> {
     let mut arguments = env::args_os();
     let _ = arguments.next();
@@ -178,7 +179,7 @@ pub fn run_sidecar_supervisor_if_requested() -> Result<Option<ExitStatus>, Strin
         return Ok(None);
     }
 
-    let executable = sibling_executable(ACI_BINARY)?;
+    let executable = sibling_executable(PROXY_BINARY)?;
     supervise(executable, arguments).map(Some)
 }
 
@@ -281,7 +282,7 @@ fn forward_pipe<R, F>(
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) => {
                     let _ = events.try_send(SidecarEvent::Error(format!(
-                        "Cannot read ACI {stream_name}: {error}"
+                        "Cannot read verifier {stream_name}: {error}"
                     )));
                     return;
                 }
@@ -303,7 +304,7 @@ where
 fn supervise_command(mut command: Command) -> Result<ExitStatus, String> {
     let (owner_gone_tx, owner_gone_rx) = std_mpsc::sync_channel(1);
     thread::Builder::new()
-        .name("aci-owner-watch".to_string())
+        .name("verifier-owner-watch".to_string())
         .spawn(move || {
             let mut input = io::stdin().lock();
             let mut byte = [0_u8; 1];
@@ -317,21 +318,21 @@ fn supervise_command(mut command: Command) -> Result<ExitStatus, String> {
             }
             let _ = owner_gone_tx.send(());
         })
-        .map_err(|error| format!("Cannot start the ACI ownership monitor: {error}"))?;
+        .map_err(|error| format!("Cannot start the verifier ownership monitor: {error}"))?;
 
     command
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    configure_aci_command(&mut command);
+    configure_verifier_command(&mut command);
     let mut child = command
         .spawn()
-        .map_err(|error| format!("Cannot start bundled ACI executable: {error}"))?;
+        .map_err(|error| format!("Cannot start bundled verifier executable: {error}"))?;
 
     loop {
         if let Some(status) = child
             .try_wait()
-            .map_err(|error| format!("Cannot inspect ACI process state: {error}"))?
+            .map_err(|error| format!("Cannot inspect verifier process state: {error}"))?
         {
             return Ok(status);
         }
@@ -341,15 +342,17 @@ fn supervise_command(mut command: Command) -> Result<ExitStatus, String> {
                 if let Err(kill_error) = child.kill() {
                     if let Some(status) = child
                         .try_wait()
-                        .map_err(|error| format!("Cannot inspect ACI after owner exit: {error}"))?
+                        .map_err(|error| {
+                            format!("Cannot inspect verifier after owner exit: {error}")
+                        })?
                     {
                         return Ok(status);
                     }
-                    return Err(format!("Cannot stop ACI after owner exit: {kill_error}"));
+                    return Err(format!("Cannot stop verifier after owner exit: {kill_error}"));
                 }
                 return child
                     .wait()
-                    .map_err(|error| format!("Cannot reap ACI after owner exit: {error}"));
+                    .map_err(|error| format!("Cannot reap verifier after owner exit: {error}"));
             }
             Err(RecvTimeoutError::Timeout) => {}
         }
@@ -368,7 +371,7 @@ fn configure_supervisor_command(command: &mut Command) {
 fn configure_supervisor_command(_: &mut Command) {}
 
 #[cfg(windows)]
-fn configure_aci_command(command: &mut Command) {
+fn configure_verifier_command(command: &mut Command) {
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
@@ -376,7 +379,7 @@ fn configure_aci_command(command: &mut Command) {
 }
 
 #[cfg(not(windows))]
-fn configure_aci_command(_: &mut Command) {}
+fn configure_verifier_command(_: &mut Command) {}
 
 #[cfg(test)]
 mod tests {
@@ -393,26 +396,26 @@ mod tests {
     const FIXTURE_TIMEOUT: Duration = Duration::from_secs(5);
 
     #[test]
-    fn supervisor_reaps_aci_when_owner_pipe_closes() {
+    fn supervisor_reaps_verifier_when_owner_pipe_closes() {
         let directory = tempfile::tempdir().expect("temporary fixture directory");
-        let pid_file = directory.path().join("aci.pid");
+        let pid_file = directory.path().join("verifier.pid");
         let (mut supervisor, owner) = spawn_supervisor_fixture(&pid_file);
-        let aci_pid = wait_for_fixture_pid(&mut supervisor, &pid_file);
+        let verifier_pid = wait_for_fixture_pid(&mut supervisor, &pid_file);
 
         drop(owner);
         let status = wait_for_child(&mut supervisor, FIXTURE_TIMEOUT)
             .expect("supervisor should exit after ownership pipe closure");
         assert!(status.success(), "supervisor fixture failed: {status}");
-        crate::launch::wait_for_exit(aci_pid, FIXTURE_TIMEOUT)
-            .expect("fake ACI should be terminated and reaped");
+        crate::launch::wait_for_exit(verifier_pid, FIXTURE_TIMEOUT)
+            .expect("fake verifier should be terminated and reaped");
     }
 
     #[test]
     fn normal_stop_reaps_supervisor_and_finishes_waiter_thread() {
         let directory = tempfile::tempdir().expect("temporary fixture directory");
-        let pid_file = directory.path().join("aci.pid");
+        let pid_file = directory.path().join("verifier.pid");
         let (mut supervisor, owner) = spawn_supervisor_fixture(&pid_file);
-        let aci_pid = wait_for_fixture_pid(&mut supervisor, &pid_file);
+        let verifier_pid = wait_for_fixture_pid(&mut supervisor, &pid_file);
         let (reaped_tx, reaped_rx) = std_mpsc::sync_channel(1);
         let waiter = thread::Builder::new()
             .name("supervisor-test-reaper".to_string())
@@ -434,8 +437,8 @@ mod tests {
             .expect("normal stop should reap the supervisor");
         child.kill().expect("normal stop should be idempotent");
         waiter.join().expect("supervisor waiter should finish");
-        crate::launch::wait_for_exit(aci_pid, FIXTURE_TIMEOUT)
-            .expect("normal stop should terminate and reap fake ACI");
+        crate::launch::wait_for_exit(verifier_pid, FIXTURE_TIMEOUT)
+            .expect("normal stop should terminate and reap fake verifier");
     }
 
     #[test]
@@ -466,10 +469,10 @@ mod tests {
                 let mut command = Command::new(env::current_exe().expect("test executable"));
                 command
                     .args(["--ignored", "--exact", FIXTURE_TEST])
-                    .env(FIXTURE_ROLE, "aci");
+                    .env(FIXTURE_ROLE, "verifier");
                 supervise_command(command).expect("fixture supervisor");
             }
-            Ok("aci") => {
+            Ok("verifier") => {
                 let path = env::var_os(FIXTURE_PID_FILE).expect("fixture PID file");
                 let mut file = fs::File::create(path).expect("create fixture PID file");
                 writeln!(file, "{}", std::process::id()).expect("write fixture PID");
@@ -504,11 +507,11 @@ mod tests {
                 }
             }
             if let Some(status) = supervisor.try_wait().expect("inspect supervisor fixture") {
-                panic!("supervisor fixture exited before starting ACI: {status}");
+                panic!("supervisor fixture exited before starting verifier: {status}");
             }
             assert!(
                 started.elapsed() < FIXTURE_TIMEOUT,
-                "timed out waiting for fake ACI to start"
+                "timed out waiting for fake verifier to start"
             );
             thread::sleep(Duration::from_millis(10));
         }

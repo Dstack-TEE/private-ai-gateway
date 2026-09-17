@@ -22,7 +22,7 @@ async fn run() -> Result<(), String> {
         if status.success() {
             return Ok(());
         }
-        return Err("ACI supervisor exited unsuccessfully".into());
+        return Err("Verifier supervisor exited unsuccessfully".into());
     }
     Arguments::parse();
     let executable = std::env::current_exe().map_err(|_| "Cannot locate backend")?;

@@ -1,4 +1,4 @@
-//! The `aci` CLI must not grow a second verifier.
+//! Private AI Proxy's ACI commands must not grow a second verifier.
 //!
 //! Verification steps belong in `src/aci`, where the gateway's own verifier
 //! consumes them; the CLI maps their outcomes to transcript lines. When both

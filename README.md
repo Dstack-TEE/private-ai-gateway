@@ -18,8 +18,8 @@ can fetch, build, and run inside a dstack v2 application VM.
 
 Start here:
 
-- [ACI quickstart](docs/quickstart.md) — verify a live deployment with the
-  `aci` CLI, then use it as a local OpenAI-compatible endpoint.
+- [ACI quickstart](docs/quickstart.md) — verify a live deployment with
+  `private-ai-proxy`, then use it as a local OpenAI-compatible endpoint.
 - [ACI spec](spec/aci.md) — the protocol: trust model, artifacts, checks.
 - [ACI client architecture](clients/architecture.md) — the framework-neutral
   client product, existing versus new components, release policy, and coding
@@ -288,10 +288,10 @@ uv run python scripts/live_e2e/user_verify.py \
 ```
 
 The script's `--chat-id` argument accepts either a chat id or a receipt id. To
-verify already captured artifacts, run the `aci` CLI offline:
+verify already captured artifacts, run Private AI Proxy offline:
 
 ```bash
-cargo run --bin aci -- audit \
+cargo run --features desktop-client --bin private-ai-proxy -- audit \
   --report report.json \
   --receipt receipt.json \
   --nonce "$NONCE"
@@ -577,7 +577,6 @@ src/aggregator/upstream_config.rs runtime upstream config and provider adapters
 src/http/app.rs                Axum HTTP routers and middleware/backend wiring
 apps/desktop/cli/              Proxy CLI and shared ACI commands: verify, audit, sessions, send, serve
 apps/desktop/service/          Per-user Proxy backend entry point
-src/bin/aci/                   standalone `aci` entry reusing the Proxy command implementation
 clients/                       verifier-ts verifier library (browser + node); pi-provider pi provider extension
 docs/                          design notes, configuration reference, provider reviews
 deploy/                        git-launcher and dstack compose examples
