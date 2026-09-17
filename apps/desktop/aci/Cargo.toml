@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "ACI protocol, transport, and verification primitives for Private AI Proxy"
 license = "Apache-2.0"
 edition = "2021"
-rust-version = "1.89"
+rust-version = "1.91"
 
 [lib]
 name = "private_ai_proxy_aci"

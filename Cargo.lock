@@ -4076,6 +4076,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "shlex",
+ "tempfile",
  "tokio",
  "tokio-util",
  "toml_edit",
