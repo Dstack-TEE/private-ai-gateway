@@ -16,8 +16,8 @@ use super::quote::{
 };
 use super::report::{verify_report_binding, AciReportValidationError, ReportBinding};
 use super::{verify_dstack_event_log, AciServiceVerifierPolicy};
-use crate::receipt::ChannelBinding;
-use crate::types::{AttestationReport, SourceProvenance, WorkloadKeyset};
+use crate::aci::receipt::ChannelBinding;
+use crate::aci::types::{AttestationReport, SourceProvenance, WorkloadKeyset};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CheckId {

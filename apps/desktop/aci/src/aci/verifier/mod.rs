@@ -7,7 +7,7 @@
 //! implementations that are useful right now:
 //!
 //! * [`StaticUpstreamVerifier`] — returns a fixed
-//!   [`crate::receipt::UpstreamVerifiedEvent`]. Useful in tests
+//!   [`crate::aci::receipt::UpstreamVerifiedEvent`]. Useful in tests
 //!   and during bring-up when the deployment trusts a single hard-coded
 //!   upstream and the verifier_id field is the only thing a relying
 //!   party needs.
@@ -29,7 +29,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 
-use crate::receipt::UpstreamVerifiedEvent;
+use crate::aci::receipt::UpstreamVerifiedEvent;
 
 /// One upstream channel verification request.
 #[derive(Debug, Clone)]

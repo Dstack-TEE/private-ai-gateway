@@ -20,8 +20,8 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use private_ai_proxy_aci::digest;
-use private_ai_proxy_aci::receipt::ChannelBinding;
+use crate::aci::digest;
+use crate::aci::receipt::ChannelBinding;
 
 /// `api_version` stamped on session documents — `aci/1`, uniform with the
 /// rest of the ACI surface.

@@ -14,16 +14,16 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use private_ai_gateway::aci::digest::sha256_hex;
+use private_ai_gateway::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent};
+use private_ai_gateway::aci::upstream::{
+    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
+};
+use private_ai_gateway::aci::verifier::StaticUpstreamVerifier;
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore,
 };
 use private_ai_gateway::http::build_router;
-use private_ai_proxy_aci::digest::sha256_hex;
-use private_ai_proxy_aci::receipt::{ChannelBinding, UpstreamVerifiedEvent};
-use private_ai_proxy_aci::upstream::{
-    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
-};
-use private_ai_proxy_aci::verifier::StaticUpstreamVerifier;
 use serde_json::Value;
 
 use common::{verified_event, StaticKeyProvider, StubQuoter};

@@ -154,7 +154,7 @@ impl SealedWorkloadKeyset {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{KeyedPublicKey, WorkloadKeyset};
+    use crate::aci::types::{KeyedPublicKey, WorkloadKeyset};
 
     fn keyset() -> WorkloadKeyset {
         WorkloadKeyset {

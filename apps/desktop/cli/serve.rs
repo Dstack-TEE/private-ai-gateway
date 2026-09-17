@@ -19,7 +19,7 @@ use axum::extract::Path;
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
 use axum::{Json, Router};
-use private_ai_proxy_aci::types::{
+use private_ai_gateway::aci::types::{
     AttestationReport, PROVIDER_ACI_SESSION_IDS, PROVIDER_ACI_VERIFIED,
 };
 use serde_json::{json, Value};
@@ -1831,8 +1831,8 @@ mod tests {
         let now = crate::checks::now_secs();
         record["established_at"] = json!(now - 10);
         record["expires_at"] = json!(now + 3600);
-        let session_bytes = private_ai_proxy_aci::digest::jcs_bytes(&record).unwrap();
-        let current_id = private_ai_proxy_aci::digest::sha256_bare_hex(&session_bytes);
+        let session_bytes = private_ai_gateway::aci::digest::jcs_bytes(&record).unwrap();
+        let current_id = private_ai_gateway::aci::digest::sha256_bare_hex(&session_bytes);
         let keyset_digest = vector_report().workload_keyset_digest;
 
         let sid = current_id.clone();

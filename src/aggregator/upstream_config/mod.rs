@@ -11,11 +11,10 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
 
+use crate::aci::digest;
+use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
+use crate::aci::upstream::{ChutesSessionStore, UpstreamBackend, UpstreamError};
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
-use private_ai_proxy_aci::digest;
-use private_ai_proxy_aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
-use private_ai_proxy_aci::upstream::{ChutesSessionStore, UpstreamBackend, UpstreamError};
-pub use private_ai_proxy_aci::verifier::AttestationScope;
 
 mod builders;
 mod dynamic;
@@ -192,6 +191,10 @@ impl UpstreamProvider {
         }
     }
 }
+
+/// The channel boundary a provider's attestation proves, and thus what identifies
+/// its attested session.
+pub use crate::aci::verifier::AttestationScope;
 
 #[derive(Debug, Clone)]
 pub enum UpstreamVerifierMode {

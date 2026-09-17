@@ -2,12 +2,15 @@
 //! Attested Confidential Inference (ACI) gateway.
 //!
 //! The crate is organised so the protocol-bearing math (digests,
-//! identity, receipts) comes from the reusable `private-ai-proxy-aci` crate.
+//! identity, receipts) lives in the [`aci`] module and is reusable.
 //! The service composition and HTTP wiring live in [`aggregator`] and
 //! [`http`] respectively. dstack-specific key custody and TEE quoting
-//! live in that shared crate and use the Rust dstack SDK.
+//! live in [`dstack`] and use the Rust dstack SDK.
 
+pub use private_ai_proxy_aci::aci;
 pub mod aggregator;
+#[cfg(unix)]
+pub use private_ai_proxy_aci::dstack;
 pub(crate) mod error_payload;
 pub mod http;
 pub mod middleware;

@@ -5,7 +5,7 @@
 
 use std::fs;
 
-use private_ai_proxy_aci::types::AttestationReport;
+use private_ai_gateway::aci::types::AttestationReport;
 
 use crate::args::AuditArgs;
 use crate::checks::{

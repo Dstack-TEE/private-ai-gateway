@@ -21,8 +21,8 @@ use super::{
     DEFAULT_DCAP_PCCS_URL, DEFAULT_VERIFIER_CONNECT_TIMEOUT_SECONDS,
     DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS,
 };
-use crate::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
-use crate::types::{AttestationReport, SourceProvenance, WorkloadKeyset};
+use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use crate::aci::types::{AttestationReport, SourceProvenance, WorkloadKeyset};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AciServiceVerifierConfigError {

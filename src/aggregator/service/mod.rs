@@ -18,12 +18,12 @@
 
 use std::sync::{Arc, RwLock};
 
+use crate::aci::identity::SealedWorkloadKeyset;
+use crate::aci::keys::{KeyProvider, Quoter};
+use crate::aci::types::WorkloadKeyset;
+use crate::aci::upstream::UpstreamBackend;
 use crate::aggregator::metrics::{MetricsSnapshot, ServiceMetrics};
 use crate::aggregator::session_store::{InMemorySessionStore, SessionStore};
-use private_ai_proxy_aci::identity::SealedWorkloadKeyset;
-use private_ai_proxy_aci::keys::{KeyProvider, Quoter};
-use private_ai_proxy_aci::types::WorkloadKeyset;
-use private_ai_proxy_aci::upstream::UpstreamBackend;
 
 pub const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 pub const COMPLETIONS_PATH: &str = "/v1/completions";
@@ -47,12 +47,12 @@ mod receipts;
 mod streaming;
 mod wire;
 
+pub use crate::aci::verifier::{UpstreamVerificationRequest, UpstreamVerifier};
 pub use clock::{Clock, FixedClock, SystemClock};
 pub use config::{
     validate_source_provenance, AciServiceConfig, ReceiptOwner, DEFAULT_KEYSET_NOT_AFTER_SECONDS,
 };
 pub use errors::{E2eeError, ServiceError, UpstreamVerificationError};
-pub use private_ai_proxy_aci::verifier::{UpstreamVerificationRequest, UpstreamVerifier};
 pub use receipt_store::{InMemoryReceiptStore, ReceiptStore};
 pub use wire::{
     ChatCompletionRequest, E2eePreparedRequest, E2eeRequestContext, E2eeRequestParts,
@@ -218,8 +218,8 @@ fn validate_keyset(
     keyset: &WorkloadKeyset,
     _config: &AciServiceConfig,
 ) -> Result<(), ServiceError> {
-    use private_ai_proxy_aci::digest::sha256_raw;
-    use private_ai_proxy_aci::e2ee::is_aci_e2ee_suite;
+    use crate::aci::digest::sha256_raw;
+    use crate::aci::e2ee::is_aci_e2ee_suite;
 
     // The reference gateway always provisions at least one recognized E2EE v2
     // §4 suite, even while extension termination is explicitly disabled.

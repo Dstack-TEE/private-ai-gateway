@@ -11,13 +11,13 @@ use super::dstack::{verify_dstack_app_compose, verify_dstack_kms_receipt_custody
 use super::external::ExternalProviderVerifier;
 use super::*;
 use super::{AttestationScope, UpstreamVerificationRequest, UpstreamVerifier};
-use crate::keys::ALGO_ED25519;
-use crate::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
-use crate::types::{
+use crate::aci::keys::ALGO_ED25519;
+use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use crate::aci::types::{
     AttestationEnvelope, AttestationReport, KeyedPublicKey, SourceProvenance, TlsSpki,
     WorkloadKeyset,
 };
-use crate::upstream::ChutesSessionStore;
+use crate::aci::upstream::ChutesSessionStore;
 
 fn signing_key(byte: u8) -> SigningKey {
     SigningKey::from_slice(&[byte; 32]).unwrap()
@@ -1078,7 +1078,7 @@ fn rejects_receipt_custody_whose_key_is_not_in_the_keyset() {
 
 #[test]
 fn subject_anchor_requires_the_measured_app_id() {
-    use crate::types::SourceProvenance;
+    use crate::aci::types::SourceProvenance;
     let measured = [0xab; 20];
     let measured_subject = format!("app-id:0x{}", hex::encode(measured));
     let policy = AciServiceVerifierPolicy::new(

@@ -9,15 +9,15 @@ mod common;
 use async_trait::async_trait;
 use axum::body::{to_bytes, Body};
 use axum::http::{HeaderMap, Request, StatusCode};
+use private_ai_gateway::aci::types::ServiceCapabilities;
+use private_ai_gateway::aci::upstream::{
+    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
+};
+use private_ai_gateway::aci::verifier::PreverifiedUpstreamVerifier;
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore,
 };
 use private_ai_gateway::http::build_router;
-use private_ai_proxy_aci::types::ServiceCapabilities;
-use private_ai_proxy_aci::upstream::{
-    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
-};
-use private_ai_proxy_aci::verifier::PreverifiedUpstreamVerifier;
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -375,7 +375,7 @@ async fn aci_headers_present_on_bad_request_error() {
 
 #[tokio::test]
 async fn static_verifier_failed_for_aci_request_blocks_forwarding() {
-    use private_ai_proxy_aci::verifier::StaticUpstreamVerifier;
+    use private_ai_gateway::aci::verifier::StaticUpstreamVerifier;
     let keys = Arc::new(StaticKeyProvider::default());
     let quoter = Arc::new(StubQuoter::default());
     let upstream = Arc::new(StubUpstream);

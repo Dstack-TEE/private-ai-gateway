@@ -13,7 +13,7 @@ use super::{
     UpstreamResponse, UpstreamStreamResponse, DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS,
     DEFAULT_UPSTREAM_READ_TIMEOUT_SECONDS,
 };
-use crate::receipt::{ChannelBinding, UpstreamVerifiedEvent};
+use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent};
 
 /// Version header required by the native Anthropic API on every request.
 const ANTHROPIC_VERSION: &str = "2023-06-01";

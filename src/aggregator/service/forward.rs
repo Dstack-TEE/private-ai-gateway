@@ -3,17 +3,17 @@ use std::collections::HashSet;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::aci::digest;
+use crate::aci::receipt::{
+    ChannelBinding, ReceiptBuilder, ReceiptError, SignedReceipt, UpstreamVerifiedEvent,
+    VerificationResult,
+};
+use crate::aci::upstream::{PreparedUpstreamRequest, UpstreamError, UpstreamRequest};
 use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
 use crate::aggregator::session::{
     AttestedSession, EvidenceRef, SessionClaims, SessionDocument, WorkloadIdentityRef,
     SESSION_API_VERSION,
 };
-use private_ai_proxy_aci::digest;
-use private_ai_proxy_aci::receipt::{
-    ChannelBinding, ReceiptBuilder, ReceiptError, SignedReceipt, UpstreamVerifiedEvent,
-    VerificationResult,
-};
-use private_ai_proxy_aci::upstream::{PreparedUpstreamRequest, UpstreamError, UpstreamRequest};
 
 use super::claims::{chutes_instance_id, per_instance_session_claims, session_claims_for_event};
 use super::e2ee_crypto::encrypt_e2ee_response_body;

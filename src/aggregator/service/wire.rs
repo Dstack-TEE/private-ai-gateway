@@ -5,8 +5,8 @@ use bytes::Bytes;
 use futures_util::Stream;
 
 use super::{ReceiptOwner, ServiceError};
+use crate::aci::receipt::{ReceiptBuilder, SignedReceipt, UpstreamVerifiedEvent};
 use crate::aggregator::metrics::RequestMode;
-use private_ai_proxy_aci::receipt::{ReceiptBuilder, SignedReceipt, UpstreamVerifiedEvent};
 
 pub struct E2eeRequestParts<'a> {
     pub signing_algo: Option<&'a str>,

@@ -17,6 +17,14 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use private_ai_gateway::aci::keys::{verify_receipt_signature, KeyProvider};
+use private_ai_gateway::aci::receipt::{
+    receipt_signing_input, ChannelBinding, SignedReceipt, UpstreamVerifiedEvent,
+};
+use private_ai_gateway::aci::types::{ServiceCapabilities, TlsSpki};
+use private_ai_gateway::aci::upstream::{
+    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
+};
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore,
 };
@@ -24,14 +32,6 @@ use private_ai_gateway::aggregator::upstream_config::{
     UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
 use private_ai_gateway::http::{build_router, build_router_with_admin};
-use private_ai_proxy_aci::keys::{verify_receipt_signature, KeyProvider};
-use private_ai_proxy_aci::receipt::{
-    receipt_signing_input, ChannelBinding, SignedReceipt, UpstreamVerifiedEvent,
-};
-use private_ai_proxy_aci::types::{ServiceCapabilities, TlsSpki};
-use private_ai_proxy_aci::upstream::{
-    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
-};
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -89,7 +89,7 @@ impl UpstreamBackend for StubUpstream {
 struct TestHarness {
     service: Arc<AciService>,
     received: Arc<Mutex<Option<Vec<u8>>>>,
-    receipt_keys: Vec<private_ai_proxy_aci::types::KeyedPublicKey>,
+    receipt_keys: Vec<private_ai_gateway::aci::types::KeyedPublicKey>,
 }
 
 fn make_harness() -> TestHarness {
@@ -304,7 +304,7 @@ async fn attestation_report_v2_binds_sha256_of_address_and_tls_spki() {
         .unwrap();
     let mut preimage = hex::decode(signing_address).unwrap();
     preimage.extend(hex::decode(&spki).unwrap());
-    let expected = private_ai_proxy_aci::digest::sha256_hex(&preimage);
+    let expected = private_ai_gateway::aci::digest::sha256_hex(&preimage);
     let expected = expected.trim_start_matches("sha256:");
     assert_eq!(&report_data[0..64], expected);
     assert_eq!(&report_data[64..128], nonce);
@@ -395,12 +395,12 @@ async fn attestation_report_nonce_null_when_absent() {
         serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
 
     // Re-derive report_data with nonce=None and confirm match.
-    let stmt = private_ai_proxy_aci::identity::attestation_statement(
+    let stmt = private_ai_gateway::aci::identity::attestation_statement(
         h.service.workload_keyset_digest(),
         None,
     )
     .unwrap();
-    let expected_hex = hex::encode(private_ai_proxy_aci::identity::report_data(&stmt));
+    let expected_hex = hex::encode(private_ai_gateway::aci::identity::report_data(&stmt));
     assert_eq!(
         body.get("attestation")
             .unwrap()
@@ -455,7 +455,7 @@ async fn chat_default_required_fails_closed_without_verifier() {
     let receipt = h.service.get_receipt_by_receipt_id(&receipt_id).unwrap();
     assert_eq!(
         payload_event(&receipt, "response.returned")["body_hash"],
-        private_ai_proxy_aci::digest::sha256_hex(&body)
+        private_ai_gateway::aci::digest::sha256_hex(&body)
     );
 }
 
@@ -600,7 +600,7 @@ async fn chat_optional_verification_forwards_and_signs_receipt_with_failed_event
 
     // request.received body_hash matches the bytes the launcher received.
     let received = payload_event(&receipt, "request.received");
-    let expected = private_ai_proxy_aci::digest::sha256_hex(&request_bytes);
+    let expected = private_ai_gateway::aci::digest::sha256_hex(&request_bytes);
     assert_eq!(received["body_hash"].as_str().unwrap(), expected);
 
     // The signature covers JCS(document minus `signature`) (§7.2).
@@ -648,7 +648,7 @@ async fn chat_x_request_hash_is_ignored() {
         actual, attacker_hash,
         "the launcher MUST NOT use client-supplied X-Request-Hash"
     );
-    let expected = private_ai_proxy_aci::digest::sha256_hex(&request_bytes);
+    let expected = private_ai_gateway::aci::digest::sha256_hex(&request_bytes);
     assert_eq!(actual, expected);
 }
 
@@ -694,7 +694,7 @@ async fn attested_session_lookup_returns_audit_record() {
     // and the id is not inside the document.
     assert_eq!(
         session_id,
-        hex::encode(private_ai_proxy_aci::digest::sha256_raw(&raw))
+        hex::encode(private_ai_gateway::aci::digest::sha256_raw(&raw))
     );
     let body: serde_json::Value = serde_json::from_slice(&raw).unwrap();
     assert_eq!(body["api_version"], "aci/1");
@@ -1267,8 +1267,8 @@ fn legacy_ecdsa_signature_uses_the_e2ee_signing_address() {
     // returned signing_address field would still pass if the code signed with
     // the wrong key and merely relabeled the field.
     use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
-    use private_ai_proxy_aci::e2ee::E2EE_ALGO_LEGACY_ECDSA;
-    use private_ai_proxy_aci::keys::{
+    use private_ai_gateway::aci::e2ee::E2EE_ALGO_LEGACY_ECDSA;
+    use private_ai_gateway::aci::keys::{
         ethereum_address_from_uncompressed_public_key, LEGACY_ALGO_ECDSA,
     };
     use sha3::{Digest, Keccak256};
@@ -1449,7 +1449,7 @@ async fn chat_unconstrained_forwards_and_signs_receipt_with_failed_event() {
 
     assert_eq!(
         payload_event(&receipt, "request.received")["body_hash"],
-        private_ai_proxy_aci::digest::sha256_hex(&request_bytes)
+        private_ai_gateway::aci::digest::sha256_hex(&request_bytes)
     );
 }
 

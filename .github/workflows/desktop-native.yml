@@ -39,9 +39,9 @@ on:
     paths:
       - '.github/workflows/desktop-native.yml'
       - 'apps/desktop/**'
-      - 'src/**'
       - 'tests/private_ai_proxy_aci.rs'
       - 'tests/private_ai_proxy_cli.rs'
+      - 'src/http/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
   push:
@@ -50,9 +50,9 @@ on:
     paths:
       - '.github/workflows/desktop-native.yml'
       - 'apps/desktop/**'
-      - 'src/**'
       - 'tests/private_ai_proxy_aci.rs'
       - 'tests/private_ai_proxy_cli.rs'
+      - 'src/http/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
 

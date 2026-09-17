@@ -4,9 +4,9 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde_json::Value;
 
 use super::decode_hex_32;
-use crate::digest::sha256_hex;
-use crate::identity;
-use crate::types::{AttestationReport, WorkloadKeyset};
+use crate::aci::digest::sha256_hex;
+use crate::aci::identity;
+use crate::aci::types::{AttestationReport, WorkloadKeyset};
 
 #[derive(Debug, Clone)]
 pub struct ValidatedAciReport {
@@ -62,7 +62,7 @@ pub(super) fn verify_report_binding(
 ) -> Result<ReportBinding, AciReportValidationError> {
     // The digest is over the JCS form of the served object (§3.1): canonicalize
     // exactly what was parsed, unknown members included.
-    let keyset_jcs = crate::digest::jcs_bytes(&report.attestation.workload_keyset)
+    let keyset_jcs = crate::aci::digest::jcs_bytes(&report.attestation.workload_keyset)
         .map_err(|e| AciReportValidationError::InvalidKeyset(e.to_string()))?;
     let keyset_digest = format!("sha256:{}", sha256_hex_raw(&keyset_jcs));
     if keyset_digest != report.workload_keyset_digest {
@@ -95,7 +95,7 @@ pub(super) fn verify_report_binding(
 }
 
 fn sha256_hex_raw(bytes: &[u8]) -> String {
-    hex::encode(crate::digest::sha256_raw(bytes))
+    hex::encode(crate::aci::digest::sha256_raw(bytes))
 }
 
 /// Verify the ACI binding chain inside an attestation report (§9.1):
@@ -164,8 +164,8 @@ pub(super) fn raw_evidence(data: &[u8], content_type: &str, source_url: Option<&
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::identity::SealedWorkloadKeyset;
-    use crate::types::{AttestationEnvelope, KeyedPublicKey, SourceProvenance};
+    use crate::aci::identity::SealedWorkloadKeyset;
+    use crate::aci::types::{AttestationEnvelope, KeyedPublicKey, SourceProvenance};
 
     fn sealed_keyset() -> SealedWorkloadKeyset {
         SealedWorkloadKeyset::seal(WorkloadKeyset {

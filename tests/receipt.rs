@@ -3,8 +3,8 @@
 
 mod common;
 
-use private_ai_proxy_aci::keys::{verify_receipt_signature, KeyProvider};
-use private_ai_proxy_aci::receipt::{
+use private_ai_gateway::aci::keys::{verify_receipt_signature, KeyProvider};
+use private_ai_gateway::aci::receipt::{
     receipt_signing_input, ChannelBinding, ReceiptBuilder, ReceiptError,
 };
 

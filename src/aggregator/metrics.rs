@@ -5,7 +5,7 @@
 
 use prometheus::{Encoder, IntCounterVec, Opts, Registry, TextEncoder};
 
-use private_ai_proxy_aci::receipt::UpstreamVerifiedEvent;
+use crate::aci::receipt::UpstreamVerifiedEvent;
 
 #[derive(Clone)]
 pub struct ServiceMetrics {

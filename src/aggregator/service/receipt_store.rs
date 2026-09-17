@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::RwLock;
 
 use super::ReceiptOwner;
-use private_ai_proxy_aci::receipt::SignedReceipt;
+use crate::aci::receipt::SignedReceipt;
 
 /// stores request bodies — only the receipt (which holds hashes, not content).
 pub trait ReceiptStore: Send + Sync {

@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::{stream, Stream};
 
-use crate::receipt::UpstreamVerifiedEvent;
+use crate::aci::receipt::UpstreamVerifiedEvent;
 
 mod chutes;
 mod openai;

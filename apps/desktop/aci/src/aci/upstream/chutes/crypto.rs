@@ -30,7 +30,7 @@ use super::{
     ChutesE2eeRequest, CHUTES_INFO_REQ, CHUTES_INFO_RESP, CHUTES_INFO_STREAM, CHUTES_MLKEM_CT_SIZE,
     CHUTES_TAG_SIZE,
 };
-use crate::upstream::{UpstreamBodyStream, UpstreamError};
+use crate::aci::upstream::{UpstreamBodyStream, UpstreamError};
 
 pub(super) fn chutes_e2ee_pubkey_sha256(e2e_pubkey_b64: &str) -> Result<String, UpstreamError> {
     let pubkey = BASE64

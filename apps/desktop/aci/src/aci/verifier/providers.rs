@@ -10,8 +10,8 @@ use super::external::ExternalProviderVerifier;
 #[cfg(test)]
 use super::external::ProviderVerifierConfigError;
 use super::{AttestationScope, UpstreamVerificationRequest, UpstreamVerifier};
-use crate::receipt::{UpstreamVerifiedEvent, VerificationResult};
-use crate::upstream::ChutesSessionStore;
+use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
+use crate::aci::upstream::ChutesSessionStore;
 
 #[derive(Debug, Clone)]
 pub struct ChutesProviderVerifier {

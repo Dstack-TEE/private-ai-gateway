@@ -326,5 +326,4 @@ mod tests {
         let err = session_id("not-hex").unwrap_err();
         assert!(err.contains("spec 5.3"), "{err}");
     }
-
 }

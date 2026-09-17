@@ -1,8 +1,8 @@
 use super::helpers::legacy_signature_text;
 use super::{AciService, LegacySignatureResult, ReceiptOwner, ServiceError};
+use crate::aci::keys::{LegacySignature, LEGACY_ALGO_ECDSA};
+use crate::aci::receipt::{ReceiptError, SignedReceipt, EVENT_RESPONSE_RETURNED};
 use crate::aggregator::session::AttestedSession;
-use private_ai_proxy_aci::keys::{LegacySignature, LEGACY_ALGO_ECDSA};
-use private_ai_proxy_aci::receipt::{ReceiptError, SignedReceipt, EVENT_RESPONSE_RETURNED};
 
 impl AciService {
     pub fn get_receipt_by_receipt_id(&self, id: &str) -> Option<SignedReceipt> {
@@ -68,7 +68,7 @@ impl AciService {
 
     /// legacy `X-Signing-Algo` keys, for the legacy report/signature
     /// surfaces. Never part of the ACI keyset.
-    pub fn legacy_e2ee_keys(&self) -> Vec<private_ai_proxy_aci::types::KeyedPublicKey> {
+    pub fn legacy_e2ee_keys(&self) -> Vec<crate::aci::types::KeyedPublicKey> {
         self.keys.legacy_e2ee_keys()
     }
 }

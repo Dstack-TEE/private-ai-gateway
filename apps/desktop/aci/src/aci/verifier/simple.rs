@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use crate::receipt::{UpstreamVerifiedEvent, VerificationResult};
+use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
 
 use super::{UpstreamVerificationRequest, UpstreamVerifier};
 

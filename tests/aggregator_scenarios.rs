@@ -15,23 +15,23 @@ use async_trait::async_trait;
 use axum::body::{to_bytes, Body};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::Router;
+use private_ai_gateway::aci::digest::sha256_hex;
+use private_ai_gateway::aci::identity;
+use private_ai_gateway::aci::keys::{verify_receipt_signature, KeyProvider};
+use private_ai_gateway::aci::receipt::{
+    receipt_signing_input, SignedReceipt, UpstreamVerifiedEvent, VerificationResult,
+    EVENT_REQUEST_FORWARDED, EVENT_REQUEST_RECEIVED, EVENT_RESPONSE_RETURNED,
+    EVENT_UPSTREAM_VERIFIED,
+};
+use private_ai_gateway::aci::types::{KeyedPublicKey, ServiceCapabilities};
+use private_ai_gateway::aci::upstream::{
+    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
+};
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore, UpstreamVerificationRequest,
     UpstreamVerifier,
 };
 use private_ai_gateway::http::build_router;
-use private_ai_proxy_aci::digest::sha256_hex;
-use private_ai_proxy_aci::identity;
-use private_ai_proxy_aci::keys::{verify_receipt_signature, KeyProvider};
-use private_ai_proxy_aci::receipt::{
-    receipt_signing_input, SignedReceipt, UpstreamVerifiedEvent, VerificationResult,
-    EVENT_REQUEST_FORWARDED, EVENT_REQUEST_RECEIVED, EVENT_RESPONSE_RETURNED,
-    EVENT_UPSTREAM_VERIFIED,
-};
-use private_ai_proxy_aci::types::{KeyedPublicKey, ServiceCapabilities};
-use private_ai_proxy_aci::upstream::{
-    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
-};
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -441,7 +441,7 @@ async fn relying_party_can_verify_report_chat_receipt_chain() {
     );
 
     // Resolve the signing key in the keyset from the served report.
-    let keyset: private_ai_proxy_aci::types::WorkloadKeyset =
+    let keyset: private_ai_gateway::aci::types::WorkloadKeyset =
         serde_json::from_value(report.attestation.workload_keyset.clone()).unwrap();
     let signature = hex::decode(&receipt.signature_hex).unwrap();
     let receipt_key = keyset

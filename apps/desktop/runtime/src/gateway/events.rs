@@ -13,7 +13,10 @@ impl GatewayManager {
             }
             if runtime.stdout.len().saturating_add(bytes.len()) > MAX_EVENT_BYTES {
                 drop(runtime);
-                self.fail(generation, "Verifier emitted an oversized event".to_string())?;
+                self.fail(
+                    generation,
+                    "Verifier emitted an oversized event".to_string(),
+                )?;
                 return Ok(());
             }
             runtime.stdout.extend_from_slice(bytes);

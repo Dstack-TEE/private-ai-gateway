@@ -5,20 +5,20 @@ use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use k256::ecdsa::{RecoveryId, Signature as K256Signature, SigningKey as K256SigningKey};
 use sha3::{Digest, Keccak256};
 
-use private_ai_gateway::aggregator::service::UpstreamVerificationRequest;
-use private_ai_proxy_aci::e2ee::{
+use private_ai_gateway::aci::e2ee::{
     decrypt_legacy_ecdsa_with_secret_key, decrypt_legacy_ed25519_with_secret_key,
     decrypt_with_secret_key, decrypt_x25519_with_secret_key, ed25519_public_key_hex,
     legacy_ecdsa_public_key_from_secret, public_key_from_secret, secret_key_from_bytes,
     x25519_public_key_hex, x25519_secret_key_from_bytes, E2EE_ALGO_LEGACY_ECDSA,
     E2EE_ALGO_LEGACY_ED25519, E2EE_ALGO_SECP256K1_AESGCM, E2EE_ALGO_X25519_AESGCM,
 };
-use private_ai_proxy_aci::keys::{
+use private_ai_gateway::aci::keys::{
     ethereum_address_from_uncompressed_public_key, KeyError, KeyProvider, LegacySignature, Quote,
     Quoter, ALGO_ED25519, LEGACY_ALGO_ECDSA, LEGACY_ALGO_ED25519,
 };
-use private_ai_proxy_aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
-use private_ai_proxy_aci::types::{KeyedPublicKey, TlsSpki};
+use private_ai_gateway::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use private_ai_gateway::aci::types::{KeyedPublicKey, TlsSpki};
+use private_ai_gateway::aggregator::service::UpstreamVerificationRequest;
 use x25519_dalek::StaticSecret as X25519SecretKey;
 
 /// A `verified` upstream event with only identity fields, an enforceable

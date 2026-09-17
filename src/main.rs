@@ -27,6 +27,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use private_ai_gateway::aci::keys::{KeyProvider, Quoter};
+use private_ai_gateway::aci::types::{ServiceCapabilities, SourceProvenance, TlsSpki};
+use private_ai_gateway::aci::upstream::{
+    DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS, DEFAULT_UPSTREAM_READ_TIMEOUT_SECONDS,
+};
+use private_ai_gateway::aci::verifier::DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS;
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, Clock, InMemoryReceiptStore, SystemClock, UpstreamVerifier,
     DEFAULT_KEYSET_NOT_AFTER_SECONDS,
@@ -36,15 +42,9 @@ use private_ai_gateway::aggregator::upstream_config::{
     parse_config_text, PullRefreshOutcome, UpstreamConfigManager, UpstreamConfigPuller,
     UpstreamPullConfig, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
+use private_ai_gateway::dstack::{DstackAciProvider, DstackAciProviderConfig};
 use private_ai_gateway::http::{build_router_with_admin, build_router_with_admin_and_middleware};
 use private_ai_gateway::middleware::{Middleware, MiddlewareConfig};
-use private_ai_proxy_aci::dstack::{DstackAciProvider, DstackAciProviderConfig};
-use private_ai_proxy_aci::keys::{KeyProvider, Quoter};
-use private_ai_proxy_aci::types::{ServiceCapabilities, SourceProvenance, TlsSpki};
-use private_ai_proxy_aci::upstream::{
-    DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS, DEFAULT_UPSTREAM_READ_TIMEOUT_SECONDS,
-};
-use private_ai_proxy_aci::verifier::DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS;
 use rand::Rng;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};

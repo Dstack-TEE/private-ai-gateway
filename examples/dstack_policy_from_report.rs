@@ -12,7 +12,7 @@ use std::io::{self, Read};
 
 use k256::ecdsa::{RecoveryId, Signature as K256Signature, VerifyingKey as K256VerifyingKey};
 use k256::EncodedPoint;
-use private_ai_proxy_aci::types::AttestationReport;
+use private_ai_gateway::aci::types::AttestationReport;
 use serde_json::Value;
 use sha3::{Digest as Sha3Digest, Keccak256};
 

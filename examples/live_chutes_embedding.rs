@@ -24,8 +24,8 @@ use std::process;
 use std::time::Duration;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use private_ai_proxy_aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
-use private_ai_proxy_aci::upstream::{ChutesProviderBackend, UpstreamBackend, UpstreamRequest};
+use private_ai_gateway::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use private_ai_gateway::aci::upstream::{ChutesProviderBackend, UpstreamBackend, UpstreamRequest};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};

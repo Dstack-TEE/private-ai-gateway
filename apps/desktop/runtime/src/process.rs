@@ -340,15 +340,14 @@ fn supervise_command(mut command: Command) -> Result<ExitStatus, String> {
         match owner_gone_rx.recv_timeout(SUPERVISOR_POLL_INTERVAL) {
             Ok(()) | Err(RecvTimeoutError::Disconnected) => {
                 if let Err(kill_error) = child.kill() {
-                    if let Some(status) = child
-                        .try_wait()
-                        .map_err(|error| {
-                            format!("Cannot inspect verifier after owner exit: {error}")
-                        })?
-                    {
+                    if let Some(status) = child.try_wait().map_err(|error| {
+                        format!("Cannot inspect verifier after owner exit: {error}")
+                    })? {
                         return Ok(status);
                     }
-                    return Err(format!("Cannot stop verifier after owner exit: {kill_error}"));
+                    return Err(format!(
+                        "Cannot stop verifier after owner exit: {kill_error}"
+                    ));
                 }
                 return child
                     .wait()

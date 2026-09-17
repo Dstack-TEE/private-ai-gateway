@@ -8,7 +8,7 @@ use dcap_qvl::quote::{Quote, Report};
 use serde_json::Value;
 
 use super::decode_hex;
-use crate::identity;
+use crate::aci::identity;
 
 #[derive(Debug, thiserror::Error)]
 pub enum QuoteStepError {

@@ -19,11 +19,11 @@ use super::{
     MiddlewareStreamingForwarded, MiddlewareUpstreamError, ReceiptOwner, ServiceError,
     ServiceResponseStream, StreamingUpstreamError, UpstreamVerificationError,
 };
+use crate::aci::receipt::{ReceiptBuilder, UpstreamVerifiedEvent};
+use crate::aci::upstream::{UpstreamError, UpstreamRequest, UpstreamResponse};
 use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
 use crate::middleware::errors::{is_upstream_capacity_signal, recorded_attempt_status};
 use crate::sse_framing::SseFramingObserver;
-use private_ai_proxy_aci::receipt::{ReceiptBuilder, UpstreamVerifiedEvent};
-use private_ai_proxy_aci::upstream::{UpstreamError, UpstreamRequest, UpstreamResponse};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 

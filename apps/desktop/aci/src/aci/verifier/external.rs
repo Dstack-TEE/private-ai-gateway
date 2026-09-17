@@ -17,8 +17,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use super::{current_unix_secs, decode_hex_32, AttestationScope, UpstreamVerificationRequest};
-use crate::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
-use crate::upstream::{ChutesSessionStore, ChutesVerifiedDiscovery};
+use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use crate::aci::upstream::{ChutesSessionStore, ChutesVerifiedDiscovery};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderVerifierConfigError {

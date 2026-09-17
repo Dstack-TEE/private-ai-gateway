@@ -14,10 +14,10 @@ use super::{
     AciService, Clock, E2eeError, E2eeRequestContext, MiddlewareReceiptDraft,
     MiddlewareReceiptJournal, ReceiptOwner, ReceiptStore, ServiceError, ServiceResponseStream,
 };
+use crate::aci::keys::KeyProvider;
+use crate::aci::receipt::{ReceiptBuilder, ReceiptError};
+use crate::aci::upstream::UpstreamBodyStream;
 use crate::aggregator::metrics::{RequestMode, ServiceMetrics, StreamErrorKind};
-use private_ai_proxy_aci::keys::KeyProvider;
-use private_ai_proxy_aci::receipt::{ReceiptBuilder, ReceiptError};
-use private_ai_proxy_aci::upstream::UpstreamBodyStream;
 
 pub(super) struct MiddlewareProviderResponseDraftingStream {
     inner: UpstreamBodyStream,
