@@ -1,6 +1,6 @@
 # Private AI Proxy architecture
 
-Status: implemented; modular layout updated 2026-09-16.
+Status: implemented; modular layout updated 2026-09-17.
 
 ## Responsibilities
 
@@ -10,7 +10,7 @@ Status: implemented; modular layout updated 2026-09-16.
 | Private AI Proxy | Desktop profiles, agent connections, verification and usage | `apps/desktop/src/renderer` |
 | Local backend | Sessions, configuration transactions, local API and process ownership | `apps/desktop/runtime`, `apps/desktop/gateway` |
 | `private-ai-proxy` | Unified managed-client and ACI protocol commands | `apps/desktop/cli` |
-| `private-ai-proxy-service` | Per-user backend entry point | `apps/desktop/service` |
+| `private-ai-proxy-service` | Per-user backend entry point | `apps/desktop/cli/service.rs` |
 
 ## Shared implementation
 
@@ -19,11 +19,10 @@ commands. Management command execution and output live in
 `apps/desktop/runtime/src/cli`; ACI command modules live in `apps/desktop/cli`.
 There is one user-facing executable and one verifier implementation.
 Desktop integration adds opt-in lifecycle events and post-delivery receipt auditing.
-The explicit `desktop-client` Cargo feature keeps desktop dependencies out of
-ordinary gateway builds.
-The root Cargo manifest declares the client binaries at their desktop-owned paths;
-the gateway and protocol commands share `apps/desktop/aci`, re-exported through
-the existing `private_ai_gateway::aci` API.
+The desktop CLI package owns both console binaries and depends directly on the
+runtime and shared ACI crate. The root gateway package has no desktop feature or
+desktop dependencies. Both products use `crates/aci`; the gateway re-exports it
+through the existing `private_ai_gateway::aci` API.
 
 `private-ai-proxy verify/audit/sessions/send` do not initialize the managed backend or
 credential store. `private-ai-proxy serve` streams responses immediately and

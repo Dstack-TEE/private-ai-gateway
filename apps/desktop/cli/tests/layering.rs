@@ -1,6 +1,6 @@
 //! Private AI Proxy's ACI commands must not grow a second verifier.
 //!
-//! Verification steps belong in `apps/desktop/aci`, where the gateway's own
+//! Verification steps belong in `crates/aci`, where the gateway's own
 //! verifier consumes them; the CLI maps their outcomes to transcript lines.
 //! When both sides implement a step, they drift — and both sides keep passing
 //! their own tests while disagreeing about the same service.
@@ -41,7 +41,7 @@ fn test_only_modules(main_rs: &str) -> Vec<String> {
 
 #[test]
 fn the_cli_calls_no_verification_primitive_directly() {
-    let dir = Path::new("apps/desktop/cli");
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let main_rs = fs::read_to_string(dir.join("main.rs")).expect("CLI entry point");
     let test_only = test_only_modules(&main_rs);
     assert!(
@@ -67,7 +67,7 @@ fn the_cli_calls_no_verification_primitive_directly() {
             for primitive in VERIFICATION_PRIMITIVES {
                 if line.contains(primitive) {
                     offenders.push(format!(
-                        "{}:{}: {primitive} — put this step in apps/desktop/aci and call it from \
+                        "{}:{}: {primitive} — put this step in crates/aci and call it from \
                          both verifiers\n    {}",
                         path.display(),
                         n + 1,

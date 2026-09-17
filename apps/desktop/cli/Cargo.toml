@@ -1,0 +1,42 @@
+[package]
+name = "private-ai-proxy-cli"
+version = "0.1.0"
+description = "Private AI Proxy command-line client and user backend"
+license = "Apache-2.0"
+edition = "2021"
+rust-version = "1.91"
+
+[[bin]]
+name = "private-ai-proxy"
+path = "main.rs"
+
+[[bin]]
+name = "private-ai-proxy-service"
+path = "service.rs"
+
+[dependencies]
+async-stream = "0.3"
+axum = "0.7"
+base64 = "0.22"
+bytes = "1"
+clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
+desktop-runtime = { package = "private-ai-proxy-runtime", path = "../runtime" }
+futures-util = "0.3"
+hex = "0.4"
+private-ai-proxy-aci = { path = "../../../crates/aci" }
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "stream"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "process", "io-util", "sync", "time"] }
+tokio-util = "0.7"
+
+[dev-dependencies]
+async-trait = "0.1"
+desktop-gateway = { package = "private-ai-proxy-gateway", path = "../gateway" }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+private-ai-gateway = { path = "../../.." }
+tempfile = "3"
+
+[lints.rust]
+unused_must_use = "deny"

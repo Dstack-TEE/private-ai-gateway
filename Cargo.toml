@@ -8,10 +8,12 @@ license = "Apache-2.0"
 [workspace]
 members = [
     ".",
-    "apps/desktop/aci",
+    "crates/aci",
+    "apps/desktop/cli",
     "apps/desktop/gateway",
     "apps/desktop/runtime",
 ]
+default-members = ["."]
 resolver = "2"
 
 [lib]
@@ -22,23 +24,8 @@ path = "src/lib.rs"
 name = "private-ai-gateway"
 path = "src/main.rs"
 
-[[bin]]
-name = "private-ai-proxy"
-path = "apps/desktop/cli/main.rs"
-required-features = ["desktop-client"]
-
-[[bin]]
-name = "private-ai-proxy-service"
-path = "apps/desktop/service/main.rs"
-required-features = ["desktop-client"]
-
-[features]
-desktop-client = ["dep:clap", "dep:desktop_runtime", "dep:desktop_gateway"]
-
 [dependencies]
-private-ai-proxy-aci = { path = "apps/desktop/aci" }
-desktop_runtime = { package = "private-ai-proxy-runtime", path = "apps/desktop/runtime", optional = true }
-desktop_gateway = { package = "private-ai-proxy-gateway", path = "apps/desktop/gateway", optional = true }
+private-ai-proxy-aci = { path = "crates/aci" }
 # Canonical-JSON, types, and serialization.
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -88,18 +75,11 @@ prometheus = "0.13"
 # Async traits used by upstream and verifier abstractions.
 async-trait = "0.1"
 
-# Cancellation token for the serve delivery gate.
-tokio-util = "0.7"
-
-# Private AI Proxy CLI argument parsing.
-clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context"], optional = true }
-
 [dev-dependencies]
 chacha20poly1305 = "0.10"
 flate2 = "1"
 hkdf = "0.12"
 ml-kem = { version = "0.3", features = ["getrandom"] }
-tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
 serde_json = "1"
 

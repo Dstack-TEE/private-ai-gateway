@@ -98,7 +98,7 @@ def run_audit(
     nonce: str | None,
 ) -> int:
     cmd = [
-        "cargo", "run", "--quiet", "--features", "desktop-client",
+        "cargo", "run", "--quiet", "--manifest-path", "apps/desktop/cli/Cargo.toml",
         "--bin", "private-ai-proxy", "--",
         "audit", "--report", str(report_path), "--receipt", str(receipt_path), "--json",
     ]

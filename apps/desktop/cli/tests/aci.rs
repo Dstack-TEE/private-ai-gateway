@@ -4,9 +4,7 @@
 //! `private-ai-proxy audit`
 //! on them and check every transcript status — including the honest failures
 //! for the stub quote, which is not a real DCAP quote.
-#![cfg(feature = "desktop-client")]
-
-mod common;
+mod support;
 
 use std::collections::HashMap;
 use std::process::Command;
@@ -14,19 +12,19 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use private_ai_gateway::aci::digest::sha256_hex;
-use private_ai_gateway::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent};
-use private_ai_gateway::aci::upstream::{
-    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
-};
-use private_ai_gateway::aci::verifier::StaticUpstreamVerifier;
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore,
 };
 use private_ai_gateway::http::build_router;
+use private_ai_proxy_aci::aci::digest::sha256_hex;
+use private_ai_proxy_aci::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent};
+use private_ai_proxy_aci::aci::upstream::{
+    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
+};
+use private_ai_proxy_aci::aci::verifier::StaticUpstreamVerifier;
 use serde_json::Value;
 
-use common::{verified_event, StaticKeyProvider, StubQuoter};
+use support::{verified_event, StaticKeyProvider, StubQuoter};
 
 const NONCE: &str = "cd20088d763605cf78564e5b35524ad52715419624b76e029582a3652758708d";
 const REQUEST_BODY: &[u8] =
@@ -35,10 +33,10 @@ const RESPONSE_BODY: &[u8] = br#"{"id":"chat-xyz","object":"chat.completion","ch
 
 /// The checked-in §4.1 report shape, captured byte-exact from this in-process
 /// service (deterministic: fixed keys, stub quote, fixed clock, [`NONCE`]).
-/// Regenerate with `ACI_UPDATE_FIXTURES=1 cargo test --features desktop-client --test private_ai_proxy_aci`.
+/// Regenerate with `ACI_UPDATE_FIXTURES=1 cargo test --manifest-path apps/desktop/cli/Cargo.toml --test aci`.
 const REPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/aci_report_fixture.json"
+    "/../../../tests/fixtures/aci_report_fixture.json"
 );
 
 struct StubUpstream {
@@ -106,7 +104,7 @@ async fn audit_verifies_artifacts_captured_from_a_live_service() {
     let service = Arc::new(
         AciService::new_with_upstream_verifier(
             Arc::new(StaticKeyProvider::default()),
-            Arc::new(StubQuoter::default()),
+            Arc::new(StubQuoter),
             Arc::new(StubUpstream {
                 body: RESPONSE_BODY.to_vec(),
             }),
@@ -141,7 +139,7 @@ async fn audit_verifies_artifacts_captured_from_a_live_service() {
         report_bytes.as_ref(),
         std::fs::read(REPORT_FIXTURE).expect("read report fixture"),
         "the served report drifted from tests/fixtures/aci_report_fixture.json; \
-         regenerate with ACI_UPDATE_FIXTURES=1 cargo test --features desktop-client --test private_ai_proxy_aci"
+         regenerate with ACI_UPDATE_FIXTURES=1 cargo test --manifest-path apps/desktop/cli/Cargo.toml --test aci"
     );
     let chat = http
         .post(format!("{base}/v1/chat/completions"))

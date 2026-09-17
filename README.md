@@ -291,7 +291,7 @@ The script's `--chat-id` argument accepts either a chat id or a receipt id. To
 verify already captured artifacts, run Private AI Proxy offline:
 
 ```bash
-cargo run --features desktop-client --bin private-ai-proxy -- audit \
+cargo run --manifest-path apps/desktop/cli/Cargo.toml --bin private-ai-proxy -- audit \
   --report report.json \
   --receipt receipt.json \
   --nonce "$NONCE"
@@ -569,19 +569,18 @@ events, and metrics model ids.
 ## Repository Map
 
 ```text
-src/main.rs                    binary entrypoint and runtime config
-apps/desktop/aci/              Shared ACI protocol, dstack key custody, transport, and verification crate
-src/aggregator/service.rs      report, forwarding, E2EE, receipt finalization
+src/main.rs                       binary entrypoint and runtime config
+crates/aci/                       shared ACI protocol, dstack key custody, transport, and verification crate
+src/aggregator/service.rs         report, forwarding, E2EE, receipt finalization
 src/aggregator/upstream_config.rs runtime upstream config and provider adapters
-src/http/app.rs                Axum HTTP routers and middleware/backend wiring
-apps/desktop/cli/              Proxy CLI and shared ACI commands: verify, audit, sessions, send, serve
-apps/desktop/service/          Per-user Proxy backend entry point
-clients/                       verifier-ts verifier library (browser + node); pi-provider pi provider extension
-docs/                          design notes, configuration reference, provider reviews
-deploy/                        git-launcher and dstack compose examples
-examples/                      cargo example binaries + a reference control plane (control-plane/)
-scripts/                       local and Phala smoke tests
-tests/                         unit and integration coverage
+src/http/app.rs                   Axum HTTP routers and middleware/backend wiring
+apps/desktop/cli/                 Proxy CLI, user backend entry point, and ACI commands
+clients/                          verifier-ts verifier library (browser + node); pi-provider pi provider extension
+docs/                             design notes, configuration reference, provider reviews
+deploy/                           git-launcher and dstack compose examples
+examples/                         cargo example binaries + a reference control plane (control-plane/)
+scripts/                          local and Phala smoke tests
+tests/                            unit and integration coverage
 ```
 
 ## More Docs

@@ -49,12 +49,7 @@ impl ExternalProviderVerifier {
         timeout_seconds: u64,
         cache_ttl_seconds: u64,
     ) -> Self {
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let repository_root = manifest_dir
-            .ancestors()
-            .nth(3)
-            .expect("private-ai-proxy-aci must live under apps/desktop")
-            .to_path_buf();
+        let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let script = repository_root
             .join("scripts")
             .join("private_ai_provider_verifier.py");

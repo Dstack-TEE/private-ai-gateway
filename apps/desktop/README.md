@@ -22,7 +22,7 @@ same executable. It combines local management with ACI's `verify`,
 `audit`, `sessions`, `send` and `serve` commands using the same Rust source.
 There is no separate `aci` executable. The backend launches
 `private-ai-proxy serve` with post-delivery receipt auditing.
-Build the unified CLI with `cargo build --features desktop-client --bin private-ai-proxy`;
+Build the unified CLI with `cargo build --manifest-path apps/desktop/cli/Cargo.toml --bin private-ai-proxy`;
 ordinary gateway builds do not acquire desktop dependencies.
 
 macOS releases provide separate Apple Silicon (`arm64`) and Intel (`x64`)
@@ -42,7 +42,7 @@ manifests, uses the same distribution entry point as local builds, and avoids
 generating a redundant desktop ZIP.
 GitHub's official cache restore/save actions cache registry sources and Cargo
 dependency/build/fingerprint directories across all manifests. Cache keys cover
-the toolchain and all four manifests and lockfiles; final bundles are excluded.
+the toolchain, workspace manifests, and lockfiles; final bundles are excluded.
 Failed builds save a separate partial key so they cannot replace a complete cache.
 
 Launching with no profiles stays on Overview. Starting protection without a
@@ -1068,8 +1068,8 @@ from the GUI app so stdout works on Windows). A release build passes
 builds use the runtime crate version. The desktop gateway and Tauri crates declare
 `rust-version = 1.89`, the highest MSRV in their locked dependency graphs
 (`aes` 0.9.3: 1.89; `keyring` 4.2: 1.88), and commit their `Cargo.lock` files.
-The root gateway and integrated Proxy CLI follow the root workspace toolchain. CI tests the gateway,
-runtime, renderer, and Tauri backend, then compiles and bundles the same app on
+The shared ACI crate and Proxy CLI use the stable workspace toolchain. CI tests the
+gateway, runtime, CLI, renderer, and Tauri backend, then compiles and bundles the same app on
 macOS, Windows, and Linux. It also publishes UI-free CLI archives on all three
 platforms and CLI-only DEB/RPM packages on Linux. See
 [CLI distribution](docs/cli-distribution.md) for installed paths, PATH ownership,

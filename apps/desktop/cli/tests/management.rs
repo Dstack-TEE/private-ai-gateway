@@ -1,5 +1,4 @@
 //! Real binaries and isolated user state; no UI, provider calls, or OS secrets.
-#![cfg(feature = "desktop-client")]
 use serde_json::Value;
 use std::{
     fs,

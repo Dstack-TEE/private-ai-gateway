@@ -16,7 +16,7 @@ export ACI_URL=https://api.redpill.ai
 ## 1. Verify the service with one command
 
 ```bash
-cargo run --features desktop-client --bin private-ai-proxy -- verify "$ACI_URL"
+cargo run --manifest-path apps/desktop/cli/Cargo.toml --bin private-ai-proxy -- verify "$ACI_URL"
 ```
 
 The CLI fetches `GET /v1/aci/attestation` with a fresh 32-byte random nonce
@@ -27,7 +27,7 @@ PASS  id-1         hardware quote verifies to TEE vendor root and binds report_d
 PASS  id-2         binding chain: keyset JCS -> digest -> statement for our nonce -> report_data [9.1(2)] — keyset digest sha256:a1b4…c5c6; statement digest for nonce "9b2c…" matches report_data
 PASS  id-3         keyset not expired (now < not_after) [9.1(3)] — now 1783899770 < not_after 1786491770
 PASS  id-4         source provenance connects workload to public code [9.1(4)] — booted compose measured into RTMR3: compose-hash=7c1e…40db; repo=https://github.com/Dstack-TEE/private-ai-gateway.git commit=58b027d… (published, not independently rebuilt)
-SKIP  id-5         private-key custody and subject per policy [9.1(5)] — custody policy not implemented in this CLI yet (see apps/desktop/aci/src/aci/verifier/dstack.rs); subject: null (no policy constraints applied)
+SKIP  id-5         private-key custody and subject per policy [9.1(5)] — custody policy not implemented in this CLI yet (see crates/aci/src/aci/verifier/dstack.rs); subject: null (no policy constraints applied)
 PASS  id-6         the channel actually used is bound to the attested keyset (TLS SPKI or E2EE key) [9.1(6)] — observed SPKI 6ff3…9d21 for api.redpill.ai is in the attested keyset
 
 VERIFIED (5 pass, 1 skipped: custody policy not implemented)
@@ -52,7 +52,7 @@ hashes you accept with `--accept-compose`, repeatable and available on
 `verify`, `send`, `serve` and `audit`:
 
 ```bash
-cargo run --features desktop-client --bin private-ai-proxy -- serve "$ACI_URL" --accept-compose 7c1e...40db
+cargo run --manifest-path apps/desktop/cli/Cargo.toml --bin private-ai-proxy -- serve "$ACI_URL" --accept-compose 7c1e...40db
 ```
 
 For a production deployment, first run a dstack verifier over the report's
@@ -63,7 +63,7 @@ implements this check. Then appraise that hash with the ACI client's production
 allowlist:
 
 ```bash
-cargo run --features desktop-client --bin private-ai-proxy -- verify "$ACI_URL" --require-production-os
+cargo run --manifest-path apps/desktop/cli/Cargo.toml --bin private-ai-proxy -- verify "$ACI_URL" --require-production-os
 ```
 
 The ACI client verifies the DCAP quote and replays RTMR3, but does not perform
@@ -125,13 +125,13 @@ statement bytes, the digests, and the expected values.
 byte. To re-run the checks against saved artifacts:
 
 ```bash
-cargo run --features desktop-client --bin private-ai-proxy -- audit --report report.json --nonce "$NONCE"
+cargo run --manifest-path apps/desktop/cli/Cargo.toml --bin private-ai-proxy -- audit --report report.json --nonce "$NONCE"
 ```
 
 ## 3. Use it as a local endpoint
 
 ```bash
-cargo run --features desktop-client --bin private-ai-proxy -- serve "$ACI_URL"
+cargo run --manifest-path apps/desktop/cli/Cargo.toml --bin private-ai-proxy -- serve "$ACI_URL"
 ```
 
 `private-ai-proxy serve` verifies the service first, prints the transcript, and refuses
@@ -196,7 +196,7 @@ To go from trusting the service's own gating to pinning the exact sessions
 you accept, first audit the current attested sessions:
 
 ```bash
-cargo run --features desktop-client --bin private-ai-proxy -- sessions "$ACI_URL" --require-claim tee_attested=hardware_proven
+cargo run --manifest-path apps/desktop/cli/Cargo.toml --bin private-ai-proxy -- sessions "$ACI_URL" --require-claim tee_attested=hardware_proven
 ```
 
 Each current session record is fetched and audited
@@ -206,12 +206,12 @@ claims policy print as `ACCEPTED`. Then pin, either way:
 ```bash
 # Fixed accepted set: requests use its intersection with their own pins, or
 # this set when they supply none. A disjoint request fails locally.
-cargo run --features desktop-client --bin private-ai-proxy -- serve "$ACI_URL" --session <session-id>
+cargo run --manifest-path apps/desktop/cli/Cargo.toml --bin private-ai-proxy -- serve "$ACI_URL" --session <session-id>
 
 # Policy pins: derive the set from the required claims. Refuses to start if
 # nothing qualifies, and refreshes the set when the service refuses a
 # superseded pin (HTTP 412) before retrying the request once.
-cargo run --features desktop-client --bin private-ai-proxy -- serve "$ACI_URL" --require-claim tee_attested=hardware_proven
+cargo run --manifest-path apps/desktop/cli/Cargo.toml --bin private-ai-proxy -- serve "$ACI_URL" --require-claim tee_attested=hardware_proven
 ```
 
 A request that already carries `provider.aci_session_ids` is narrowed to its
@@ -222,7 +222,7 @@ against the pins (§9.3(6)) and the required claims (§9.2(3)).
 
 ```bash
 export ACI_API_KEY=<your api key>
-cargo run --features desktop-client --bin private-ai-proxy -- send "$ACI_URL" --prompt "What are you running on?"
+cargo run --manifest-path apps/desktop/cli/Cargo.toml --bin private-ai-proxy -- send "$ACI_URL" --prompt "What are you running on?"
 ```
 
 `private-ai-proxy send` verifies the service (fail closed), sends one chat completion

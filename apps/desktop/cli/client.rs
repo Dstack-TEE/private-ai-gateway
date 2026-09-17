@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use futures_util::StreamExt;
-use private_ai_gateway::aci::upstream::{observing_spki_client, SpkiObservations};
+use private_ai_proxy_aci::aci::upstream::{observing_spki_client, SpkiObservations};
 use rand::RngCore;
 
 const CONNECT_TIMEOUT_SECONDS: u64 = 10;
@@ -264,7 +264,7 @@ mod tests {
 
     /// Live-network check that a registered pin is enforced fail-closed:
     /// a handshake presenting any other key must abort the connection.
-    /// Run with: cargo test --features desktop-client --bin private-ai-proxy -- --ignored pin_mismatch
+    /// Run with: cargo test --manifest-path apps/desktop/cli/Cargo.toml --bin private-ai-proxy -- --ignored pin_mismatch
     #[tokio::test]
     #[ignore]
     async fn pin_mismatch_fails_closed_live() {

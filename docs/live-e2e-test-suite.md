@@ -85,7 +85,7 @@ uv run python scripts/live_e2e/user_verify.py \
   --chat-id chatcmpl-... \
   --request-body request.json \
   --response-body response.json
-cargo run --features desktop-client --bin private-ai-proxy -- audit \
+cargo run --manifest-path apps/desktop/cli/Cargo.toml --bin private-ai-proxy -- audit \
   --report report.json \
   --receipt receipt.json \
   --nonce nonce-used-for-report \

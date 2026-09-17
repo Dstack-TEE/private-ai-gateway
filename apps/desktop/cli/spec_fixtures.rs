@@ -9,22 +9,24 @@
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use ed25519_dalek::{Signer, SigningKey as Ed25519SigningKey};
-use private_ai_gateway::aci::digest::sha256_hex;
-use private_ai_gateway::aci::e2ee::{
+use private_ai_gateway::aggregator::session::{
+    AttestedSession, Claim, ClaimSource, EvidenceRef, SessionClaims, SessionDocument,
+};
+use private_ai_proxy_aci::aci::digest::sha256_hex;
+use private_ai_proxy_aci::aci::e2ee::{
     x25519_public_key_hex, x25519_secret_key_from_bytes, E2EE_ALGO_X25519_AESGCM,
 };
-use private_ai_gateway::aci::identity::{attestation_statement, report_data, SealedWorkloadKeyset};
-use private_ai_gateway::aci::keys::{KeyError, KeyProvider};
-use private_ai_gateway::aci::receipt::{
+use private_ai_proxy_aci::aci::identity::{
+    attestation_statement, report_data, SealedWorkloadKeyset,
+};
+use private_ai_proxy_aci::aci::keys::{KeyError, KeyProvider};
+use private_ai_proxy_aci::aci::receipt::{
     receipt_signing_input, ChannelBinding, ReceiptBuilder, UpstreamVerifiedEvent,
     VerificationResult,
 };
-use private_ai_gateway::aci::types::{
+use private_ai_proxy_aci::aci::types::{
     AttestationEnvelope, AttestationReport, KeyedPublicKey, ServiceCapabilities, SourceProvenance,
     TlsSpki, WorkloadKeyset,
-};
-use private_ai_gateway::aggregator::session::{
-    AttestedSession, Claim, ClaimSource, EvidenceRef, SessionClaims, SessionDocument,
 };
 use serde_json::{json, Value};
 
