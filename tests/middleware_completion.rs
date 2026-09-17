@@ -1497,9 +1497,9 @@ async fn a_later_candidate_that_never_answers_does_not_swallow_a_real_status() {
             "stream={stream}: only the routable candidate was contacted"
         );
 
-        // The committed failure must be reported last: dashboards read a request's
-        // user-facing status as the one at the highest attempt index, so a
-        // committed response sitting behind a later attempt would be misread.
+        // The committed failure must be reported last: a request's user-facing
+        // status is the one at the highest attempt index, so a committed response
+        // sitting behind a later attempt would be misread.
         let report = wait_for_post(&posts, |r| {
             r["status"].as_i64() == Some(503) && r["selectedRouteId"] == json!("plain:gpt-test")
         })
