@@ -126,6 +126,8 @@ pub struct MiddlewareForwarded {
     /// These are internal routing outcomes, not emitted as response headers;
     /// the committed reference for what happened is the receipt.
     pub selected_route: String,
+    /// Upstream API path used by the committed candidate.
+    pub selected_path: &'static str,
     /// Failed-over candidates in the order tried (see [`FailedAttempt`]). The
     /// committed route is `selected_route`; these are surfaced so the caller can
     /// observe every attempt, not just the one that served the response.
@@ -142,6 +144,8 @@ pub struct MiddlewareStreamingForwarded {
     /// These are internal routing outcomes, not emitted as response headers;
     /// the committed reference for what happened is the receipt.
     pub selected_route: String,
+    /// Upstream API path used by the committed candidate.
+    pub selected_path: &'static str,
     /// Failed-over candidates in the order tried (see [`FailedAttempt`]). The
     /// committed route is `selected_route`; these are surfaced so the caller can
     /// observe every attempt, not just the one that served the response.
@@ -389,12 +393,13 @@ pub struct GatewayRequestContext {
     pub user_tier: Option<String>,
 }
 
-/// One ordered failover candidate: a route id to try plus the request
-/// body to send to it. Callers may share a single body across candidates
-/// or give each candidate its own body. Candidates are tried in order
-/// until one succeeds.
+/// One ordered failover candidate: a route id to try, the request body to
+/// send to it, and the upstream path the body is shaped for. Callers may
+/// share a single body across candidates or give each candidate its own.
+/// Candidates are tried in order until one succeeds.
 #[derive(Debug, Clone)]
 pub struct ForwardCandidate {
     pub route_id: String,
     pub body: Vec<u8>,
+    pub path: &'static str,
 }

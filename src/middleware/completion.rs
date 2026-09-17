@@ -27,18 +27,21 @@ use crate::aggregator::service::{
     is_sse_content_type, AciService, ChatCompletionRequest, E2eeError, E2eeRequestContext,
     E2eeResponseInfo, FailedAttempt, ForwardCandidate, GatewayRequestContext,
     MiddlewareForwardResult, MiddlewareReceiptJournal, ReceiptOwner, ServiceError,
-    ServiceResponseStream, UpstreamVerificationError,
+    ServiceResponseStream, UpstreamVerificationError, RESPONSES_PATH,
 };
 
 use super::control::ControlClient;
 use super::errors::{self, Surface};
 use super::reasoning;
 use super::request_features;
-use super::request_transform::{build_candidates, Endpoint};
+use super::request_transform::{
+    build_candidates, responses_to_chat_params, validate_responses_request, Endpoint,
+    ResponsesCandidateInput, TransformError,
+};
 use super::sse::{KeepAliveStream, MeterStream, StreamReport};
-use super::stream_transform::{SseTransformStream, StreamTransform};
+use super::stream_transform::{SseTransformStream, StreamTransform, UpstreamUsage};
 use super::types::{
-    ErrorSource, PostReport, ProviderFormat, RouteCandidate, SpendMode, TenantIdentity,
+    ErrorClass, ErrorSource, PostReport, ProviderFormat, RouteCandidate, SpendMode, TenantIdentity,
 };
 use super::{pricing, response_transform, stream_transform};
 
@@ -69,135 +72,9 @@ pub struct CompletionInput {
     pub tee_only: bool,
 }
 
-/// Cap on the error-detail snippet in `request_outcome` lines. Long enough to
-/// carry a provider's error envelope, short enough to bound log growth and to
-/// avoid replaying large bodies into the log.
-const MAX_DETAIL_CHARS: usize = 240;
-
-/// Whether a terminal failure with this client-facing status gets a
-/// `request_outcome` line. Always-on for every model; the only exclusion is
-/// final 429s — the highest-volume, lowest-information class, already recorded
-/// per-attempt in the usage pipeline. Every other failure (4xx/5xx, client
-/// disconnects, stream failures) is logged with content-free structured
-/// fields (statuses, route, phase, finish reasons, timings); the raw error
-/// detail appears only with `request_outcome=debug`. Silence the target via
-/// `RUST_LOG` if ever needed — there is deliberately no config knob.
-pub(super) fn should_log_failure(status: u16) -> bool {
-    status != 429
-}
-
-/// Finish/stop reasons that mark a genuinely clean completion on the OpenAI
-/// and Anthropic surfaces. A completed stream whose collected reasons include
-/// anything outside this set is logged as an anomaly: an upstream signalling
-/// an error through a nonstandard finish reason would otherwise be recorded
-/// as a plain success.
-///
-/// This is a heuristic: a miss on a newly introduced legitimate value costs
-/// only an info-level false positive and a one-line addition here. Keep it a
-/// flat list — no provider-specific registries or runtime configuration.
-pub(super) const STANDARD_FINISH_REASONS: &[&str] = &[
-    "stop",
-    "length",
-    "tool_calls",
-    "function_call",
-    "content_filter",
-    "end_turn",
-    "max_tokens",
-    "stop_sequence",
-    "tool_use",
-    "pause_turn",
-    "refusal",
-    "model_context_window_exceeded",
-];
-
-pub(super) fn finish_reasons_anomalous<'a, I: IntoIterator<Item = &'a str>>(reasons: I) -> bool {
-    reasons
-        .into_iter()
-        .any(|r| !STANDARD_FINISH_REASONS.contains(&r))
-}
-
-/// Per-reason length cap for logged finish reasons. Long enough for every
-/// standard value and any plausible provider-specific token, short enough
-/// that a provider-controlled string cannot become a content channel in the
-/// always-on log.
-const MAX_REASON_CHARS: usize = 32;
-
-/// Log-safe form of a client-controlled identifier (the requested model
-/// name): single-line, control characters replaced, length-capped. The
-/// request body allows megabytes, so an unbounded identifier in an always-on
-/// info log would be a log-injection and disk-amplification vector.
-pub(super) fn sanitize_identifier(value: &str) -> String {
-    value
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .take(128)
-        .collect()
-}
-
-/// Log-safe form of a single provider-controlled finish reason:
-/// length-capped, with every control character (newlines, ANSI escapes)
-/// replaced — a JSON string can embed them after parsing, enabling forged
-/// log records or terminal-escape injection.
-pub(super) fn sanitize_reason(reason: &str) -> String {
-    reason
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .take(MAX_REASON_CHARS)
-        .collect()
-}
-
-/// Emission form of collected finish reasons: count-capped, each value
-/// sanitized. Anomaly *detection* runs on the raw values; only what gets
-/// stored or logged is bounded.
-pub(super) fn sanitized_reasons<'a, I: IntoIterator<Item = &'a str>>(reasons: I) -> String {
-    reasons
-        .into_iter()
-        .take(8)
-        .map(sanitize_reason)
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-/// Whether raw error detail may be included in `request_outcome` lines.
-/// Upstream error bodies can echo request content (validation errors quoting
-/// input, signed URLs), and this gateway's confidentiality model treats logs
-/// as operator-visible — so raw detail is opt-in via the tracing filter
-/// (`RUST_LOG=request_outcome=debug`); at the default level the structured
-/// fields (statuses, route, phase, finish reasons, timings) still identify
-/// the failure class.
-pub(super) fn debug_gated_detail(detail: &str) -> &str {
-    if tracing::enabled!(target: "request_outcome", tracing::Level::DEBUG) {
-        detail
-    } else {
-        ""
-    }
-}
-
-/// Single-line, length-capped snippet of an error body/message for the
-/// `request_outcome` `detail` field (char-boundary safe). The input is
-/// byte-capped before the lossy conversion so a large non-UTF-8 body is never
-/// copied whole; a char split at the cap degrades to a replacement character,
-/// which is fine for a log snippet.
-pub(super) fn detail_snippet(raw: &[u8]) -> String {
-    let capped = &raw[..raw.len().min(4 * MAX_DETAIL_CHARS)];
-    String::from_utf8_lossy(capped)
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .take(MAX_DETAIL_CHARS)
-        .collect()
-}
-
-/// `request_outcome` line for a terminal path that never settles a stream or a
-/// buffered 2xx: consult denials, routing/shaping failures, upstream error
-/// responses, and forward errors. Together with the stream-settle and
-/// buffered-2xx lines this makes observation exhaustive. Contract: a request
-/// emits at most one primary line, and a late finalization failure may append
-/// one supplemental `phase=finalize_error` line for the same request_id —
-/// aggregate by unique request_id, with `finalize_error` superseding the
-/// earlier record.
-/// Identity fields threaded into response finalization so a late failure
-/// there (E2EE encryption of a generated body) can record the actual
-/// client-facing terminal as `phase=finalize_error`.
+/// What response finalization needs to answer a request the gateway itself
+/// refuses: the surface to shape the error for, and the inputs of the refusal
+/// receipt.
 #[derive(Clone, Copy)]
 struct OutcomeCtx<'a> {
     surface: Surface,
@@ -205,39 +82,10 @@ struct OutcomeCtx<'a> {
     endpoint_path: &'a str,
     request_id: &'a str,
     model: &'a str,
-    started: Instant,
     /// The exact bytes the workload received — a §7.5 refusal receipt
     /// commits to them.
     received_body: &'a [u8],
     requester: &'a Option<ReceiptOwner>,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn log_generated_outcome(
-    request_id: &str,
-    model: &str,
-    phase: &'static str,
-    status: u16,
-    upstream_status: u16,
-    route: &str,
-    attempt: u32,
-    started: Instant,
-    detail: &str,
-) {
-    tracing::info!(
-        target: "request_outcome",
-        request_id = %request_id,
-        model = %sanitize_identifier(model),
-        route = %route,
-        attempt,
-        upstream_status,
-        status,
-        outcome = "Generated",
-        phase = %phase,
-        duration_ms = started.elapsed().as_millis() as u64,
-        detail = %debug_gated_detail(detail),
-        "generated response"
-    );
 }
 
 /// Run the completion flow and produce the client response.
@@ -276,51 +124,68 @@ pub async fn run(
     });
 
     let started = Instant::now();
-    let (params, reasoning_requirements, exclude_reasoning) = if endpoint == Endpoint::ChatComplete
-    {
-        match reasoning::normalize_chat_request(&params) {
-            Ok(normalized) => normalized,
-            Err(err) => {
-                let model = params.get("model").and_then(Value::as_str).unwrap_or("");
-                let message = err.to_string();
-                log_generated_outcome(
-                    &request_id,
-                    model,
-                    "reasoning_validation",
-                    400,
-                    0,
-                    "",
-                    0,
-                    started,
-                    &detail_snippet(message.as_bytes()),
-                );
-                let body = errors::envelope_bytes(
-                    surface,
-                    errors::error_type(surface, 400),
-                    &message,
-                    Some(&request_id),
-                );
-                return finalize_generated(
-                    400,
-                    body,
-                    &[],
-                    e2ee,
-                    OutcomeCtx {
-                        surface,
-                        service,
-                        endpoint_path,
-                        request_id: &request_id,
-                        model,
-                        started,
-                        received_body: received_body.as_slice(),
-                        requester: &requester,
-                    },
-                );
-            }
-        }
-    } else {
-        (params, None, false)
+    let client_endpoint = endpoint;
+    let validated = match endpoint {
+        Endpoint::ChatComplete => reasoning::normalize_chat_request(&params)
+            .map(Some)
+            .map_err(TransformError::invalid_request),
+        Endpoint::CreateModelResponse => validate_responses_request(&params).map(|()| None),
+        _ => Ok(None),
     };
+    let (params, reasoning_requirements, exclude_reasoning) = match validated {
+        Ok(normalized) => normalized.unwrap_or((params, None, false)),
+        Err(err) => {
+            let model = params.get("model").and_then(Value::as_str).unwrap_or("");
+            let message = err.to_string();
+            let body = errors::envelope_bytes(
+                surface,
+                errors::error_type(surface, 400),
+                &message,
+                Some(&request_id),
+            );
+            return finalize_generated(
+                400,
+                body,
+                &[],
+                e2ee,
+                OutcomeCtx {
+                    surface,
+                    service,
+                    endpoint_path,
+                    request_id: &request_id,
+                    model,
+                    received_body: received_body.as_slice(),
+                    requester: &requester,
+                },
+            );
+        }
+    };
+    let responses = (endpoint == Endpoint::CreateModelResponse).then(|| params.clone());
+    // A bridge-only conversion failure is retained until candidates are known:
+    // native Responses routes can still receive the original request, while
+    // Chat-only routes are skipped by `build_candidates`.
+    let (params, endpoint, reasoning_requirements, exclude_reasoning, responses_bridge_error) =
+        if let Some(original) = responses.as_ref() {
+            match responses_to_chat_params(original).and_then(|chat| {
+                reasoning::normalize_chat_request(&chat).map_err(TransformError::invalid_request)
+            }) {
+                Ok((chat, requirements, exclude)) => {
+                    (chat, Endpoint::ChatComplete, requirements, exclude, None)
+                }
+                Err(err) => (params, endpoint, None, false, Some(err)),
+            }
+        } else {
+            (
+                params,
+                endpoint,
+                reasoning_requirements,
+                exclude_reasoning,
+                None,
+            )
+        };
+    let echo = responses
+        .as_ref()
+        .map(|params| Arc::new(response_transform::responses_echo(params)));
     let model = params.get("model").and_then(Value::as_str);
     let outcome_ctx = OutcomeCtx {
         surface,
@@ -328,7 +193,6 @@ pub async fn run(
         endpoint_path,
         request_id: &request_id,
         model: model.unwrap_or(""),
-        started,
         received_body: received_body.as_slice(),
         requester: &requester,
     };
@@ -381,19 +245,11 @@ pub async fn run(
     if !consult.allow {
         let status = consult.status.unwrap_or(403);
         let message = consult.message.as_deref().unwrap_or("forbidden");
-        if should_log_failure(status) {
-            log_generated_outcome(
-                &request_id,
-                model.unwrap_or(""),
-                "consult_deny",
-                status,
-                0,
-                "",
-                0,
-                started,
-                &detail_snippet(message.as_bytes()),
-            );
-        }
+        let class = if status >= 500 {
+            ErrorClass::ControlUnavailable
+        } else {
+            ErrorClass::ControlDenied
+        };
         // Report every denial the control plane could attribute to a key
         // (identity present), plus 429/5xx regardless. Unauthenticated
         // denials (401/402/403, malformed-body 400) stay unreported: a report
@@ -401,7 +257,7 @@ pub async fn run(
         // flood the usage pipeline. ErrorSource::Control keeps these out of
         // upstream-health signals.
         if consult.tenant.user_id.is_some() || status == 429 || status >= 500 {
-            meter.gateway_failure(status, ErrorSource::Control, message, stream);
+            meter.gateway_failure(status, ErrorSource::Control, class, stream);
         }
         if status == 429 {
             if let Some(rate_limit) = &consult.rate_limit {
@@ -425,22 +281,9 @@ pub async fn run(
         // always said, and what an OpenAI-compatible client expects for a model
         // it cannot reach.
         let message = format!("no route available for model {}", model.unwrap_or("(none)"));
-        if should_log_failure(404) {
-            log_generated_outcome(
-                &request_id,
-                model.unwrap_or(""),
-                "no_route",
-                404,
-                0,
-                "",
-                0,
-                started,
-                "",
-            );
-        }
         // The control plane answered with nothing to route to; report it as
         // its failure so the request is accounted for, like a denial.
-        meter.gateway_failure(404, ErrorSource::Control, &message, stream);
+        meter.gateway_failure(404, ErrorSource::Control, ErrorClass::ModelNotFound, stream);
         let body = errors::envelope_bytes(surface, "model_not_found", &message, Some(&request_id));
         return finalize_generated(404, body, &[], e2ee, outcome_ctx);
     }
@@ -451,6 +294,10 @@ pub async fn run(
         endpoint,
         &candidates,
         reasoning_requirements.as_ref(),
+        responses.as_ref().map(|original| ResponsesCandidateInput {
+            original,
+            bridge_error: responses_bridge_error.as_ref(),
+        }),
     ) {
         Ok(shaped) => shaped,
         Err(err) => {
@@ -460,25 +307,12 @@ pub async fn run(
             // declined to send.
             let status = err.client_status();
             let message = format!("cannot shape this request: {err}");
-            if should_log_failure(status) {
-                // The route id lives only here — see `TransformError::detail`.
-                let logged = match err.detail() {
-                    Some(detail) => format!("{message} ({detail})"),
-                    None => message.clone(),
-                };
-                log_generated_outcome(
-                    &request_id,
-                    model.unwrap_or(""),
-                    "shape_error",
-                    status,
-                    0,
-                    "",
-                    0,
-                    started,
-                    &detail_snippet(logged.as_bytes()),
-                );
-            }
-            meter.gateway_failure(status, ErrorSource::Gateway, &message, stream);
+            meter.gateway_failure(
+                status,
+                ErrorSource::Gateway,
+                ErrorClass::RequestShapingFailed,
+                stream,
+            );
             let body = errors::envelope_bytes(
                 surface,
                 errors::error_type(surface, status),
@@ -490,9 +324,10 @@ pub async fn run(
     };
     let forward_candidates: Vec<ForwardCandidate> = shaped
         .into_iter()
-        .map(|(route_id, body)| ForwardCandidate {
+        .map(|(route_id, body, upstream_endpoint)| ForwardCandidate {
             route_id,
             body: serde_json::to_vec(&body).unwrap_or_default(),
+            path: upstream_endpoint.path(),
         })
         .collect();
 
@@ -587,11 +422,12 @@ pub async fn run(
                         continue;
                     }
                     let pipeline_inputs = StreamPipelineInputs {
-                        endpoint,
+                        endpoint: client_endpoint,
                         endpoint_path,
                         identity: identity.clone(),
                         exclude_reasoning,
                         candidates: candidates.clone(),
+                        echo: echo.clone(),
                     };
                     return build_early_streaming_response(
                         service.clone(),
@@ -605,7 +441,6 @@ pub async fn run(
                         received_body.clone(),
                         requester.clone(),
                         request_id.clone(),
-                        model.unwrap_or("").to_string(),
                         started,
                     );
                 }
@@ -632,12 +467,19 @@ pub async fn run(
             // may name a route twice) cannot disagree on format — and
             // same-id copies shape identically, so a skip can never split
             // them either.
-            let selected_format = candidates
+            let selected_candidate = candidates
                 .iter()
                 .find(|c| c.route_id == forward.selected_route)
-                .or_else(|| candidates.first())
-                .map(|c| c.format)
+                .or_else(|| candidates.first());
+            let selected_format = selected_candidate
+                .map(|candidate| candidate.format)
                 .unwrap_or(ProviderFormat::Openai);
+            let responses_passthrough = echo.is_some() && forward.selected_path == RESPONSES_PATH;
+            let upstream_endpoint = if echo.is_some() && !responses_passthrough {
+                Endpoint::ChatComplete
+            } else {
+                client_endpoint
+            };
 
             // The buffered forward commits the candidate even on non-2xx; a
             // non-2xx body is normalized rather than transformed, but the receipt
@@ -650,20 +492,12 @@ pub async fn run(
                         // success. Attribute it to the upstream (it sent an
                         // unparseable success body) and return 502.
                         let message = "upstream returned a malformed success body";
-                        if should_log_failure(502) {
-                            log_generated_outcome(
-                                &request_id,
-                                model.unwrap_or(""),
-                                "malformed_body",
-                                502,
-                                upstream_status,
-                                &forward.selected_route,
-                                attempt_index,
-                                started,
-                                message,
-                            );
-                        }
-                        meter.gateway_failure(502, ErrorSource::Upstream, message, false);
+                        meter.gateway_failure(
+                            502,
+                            ErrorSource::Upstream,
+                            ErrorClass::UpstreamMalformedResponse,
+                            false,
+                        );
                         let body = errors::envelope_bytes(
                             surface,
                             errors::error_type(surface, 502),
@@ -675,7 +509,7 @@ pub async fn run(
                 };
                 let mut transformed = response_transform::transform_response(
                     selected_format,
-                    endpoint,
+                    upstream_endpoint,
                     upstream_json,
                 );
                 if exclude_reasoning {
@@ -686,56 +520,18 @@ pub async fn run(
                 // Raw usage (pre-cost) goes to the report; cost is injected only
                 // into the client body's top-level usage.
                 let raw_usage = transformed.get("usage").cloned();
-                // A buffered 2xx is only observable when its finish reasons are
-                // nonstandard — an upstream error smuggled through a "success".
-                // Covers both response shapes: OpenAI `choices[].finish_reason`
-                // and Anthropic top-level `stop_reason`.
-                let mut finish_reasons: Vec<&str> = transformed
-                    .get("choices")
-                    .and_then(Value::as_array)
-                    .map(|choices| {
-                        choices
-                            .iter()
-                            .filter_map(|c| c.get("finish_reason").and_then(Value::as_str))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                if let Some(stop_reason) = transformed.get("stop_reason").and_then(Value::as_str) {
-                    finish_reasons.push(stop_reason);
+                if let Some(echo) = echo.as_ref().filter(|_| !responses_passthrough) {
+                    transformed = response_transform::openai_chat_to_responses(transformed, echo);
                 }
-                if finish_reasons_anomalous(finish_reasons.iter().copied()) {
-                    let out_tokens = raw_usage.as_ref().and_then(|u| {
-                        u.get("completion_tokens")
-                            .or_else(|| u.get("output_tokens"))
-                            .and_then(Value::as_u64)
-                    });
-                    tracing::info!(
-                        target: "request_outcome",
-                        request_id = %request_id,
-                        model = %sanitize_identifier(model.unwrap_or("")),
-                        route = %forward.selected_route,
-                        attempt = attempt_index,
-                        upstream_status,
-                        status = upstream_status,
-                        outcome = "Buffered",
-                        anomalous_finish = true,
-                        duration_ms = started.elapsed().as_millis() as u64,
-                        out_tokens,
-                        finish_reasons = %sanitized_reasons(finish_reasons.iter().copied()),
-                        "buffered response with nonstandard finish reason"
-                    );
-                }
-                meter.success(
-                    upstream_status,
-                    attempt_index,
-                    Some(&forward.selected_route),
-                    raw_usage,
-                    None,
-                );
-                meter.failed_attempts(&forward.failed_attempts, false);
 
+                // Priced from the usage that is reported, so the cost shown is the
+                // cost billed: the bridge's Responses usage cannot carry
+                // cache-creation tokens.
                 if let Some(pricing_config) = consult.pricing.as_ref().filter(|p| !p.is_null()) {
-                    if let Some(usage) = transformed.get("usage").cloned() {
+                    if let Some(usage) = raw_usage
+                        .clone()
+                        .or_else(|| transformed.get("usage").cloned())
+                    {
                         let cost = pricing::compute_cost(&usage, pricing_config);
                         if let Some(usage_obj) =
                             transformed.get_mut("usage").and_then(Value::as_object_mut)
@@ -750,9 +546,26 @@ pub async fn run(
                 // seen — can leak.
                 response_transform::canonicalize(
                     &mut transformed,
-                    endpoint,
+                    client_endpoint,
                     Some(request_id.as_str()),
                 );
+                // A valid Responses envelope can carry a failed operation over
+                // HTTP 200. Record its outcome after conversion and scrubbing,
+                // while retaining the upstream usage for billing.
+                let failed_response = echo.is_some()
+                    && transformed.get("status").and_then(Value::as_str) == Some("failed");
+                meter.success(
+                    if failed_response {
+                        502
+                    } else {
+                        upstream_status
+                    },
+                    attempt_index,
+                    Some(&forward.selected_route),
+                    raw_usage,
+                    failed_response.then_some(ErrorClass::UpstreamResponseFailed),
+                );
+                meter.failed_attempts(&forward.failed_attempts, false);
                 (
                     upstream_status,
                     serde_json::to_vec(&transformed).unwrap_or_default(),
@@ -765,25 +578,17 @@ pub async fn run(
                     received_body.as_slice(),
                     Some(&request_id),
                 );
-                if should_log_failure(mapped) {
-                    log_generated_outcome(
-                        &request_id,
-                        model.unwrap_or(""),
-                        "upstream_error_buffered",
-                        mapped,
-                        upstream_status,
-                        &forward.selected_route,
-                        attempt_index,
-                        started,
-                        &detail_snippet(&forward.upstream_body),
-                    );
-                }
+                let class = errors::classify_upstream(
+                    received_body.as_slice(),
+                    upstream_status,
+                    &forward.upstream_body,
+                );
                 meter.success(
                     reported_status(mapped, upstream_status, &forward.upstream_body),
                     attempt_index,
                     Some(&forward.selected_route),
                     None,
-                    errors::upstream_report_message(&forward.upstream_body),
+                    Some(class),
                 );
                 meter.failed_attempts(&forward.failed_attempts, false);
                 (mapped, body)
@@ -806,26 +611,7 @@ pub async fn run(
                 }
                 // The receipt finalizer consumed the E2EE context, so a generated
                 // error here is necessarily cleartext.
-                Err(err) => {
-                    // Any earlier outcome line for this request described the
-                    // upstream outcome; the client actually receives this
-                    // finalization error, so record the real terminal too.
-                    let status = forward_error_status(&err);
-                    if should_log_failure(status) {
-                        log_generated_outcome(
-                            &request_id,
-                            model.unwrap_or(""),
-                            "finalize_error",
-                            status,
-                            upstream_status,
-                            &forward.selected_route,
-                            attempt_index,
-                            started,
-                            &detail_snippet(err.to_string().as_bytes()),
-                        );
-                    }
-                    service_error_response(outcome_ctx, err, None)
-                }
+                Err(err) => service_error_response(outcome_ctx, err, None),
             }
         }
         Ok(MiddlewareForwardResult::Stream(forward)) => {
@@ -853,18 +639,6 @@ pub async fn run(
             // finalizer, which would refuse a stream already built.
             if e2ee.is_some() && !is_sse_content_type(Some(&content_type)) {
                 let err = ServiceError::E2ee(E2eeError::EncryptionFailed);
-                let status = forward_error_status(&err);
-                log_generated_outcome(
-                    &request_id,
-                    model.unwrap_or(""),
-                    "finalize_error",
-                    status,
-                    upstream_status,
-                    &forward.selected_route,
-                    attempt_index,
-                    started,
-                    &detail_snippet(err.to_string().as_bytes()),
-                );
                 meter.disarm();
                 return service_error_response(outcome_ctx, err, None);
             }
@@ -883,7 +657,7 @@ pub async fn run(
                 attempt_index: Some(attempt_index),
                 selected_route_id: Some(forward.selected_route.clone()),
                 error_source: Some(ErrorSource::Gateway),
-                error_message: Some("downstream finalizer failed after end of stream".to_string()),
+                error_message: Some(ErrorClass::DownstreamFinalizerFailed),
                 ..meter.base()
             };
             let late_failure_control = control.clone();
@@ -902,15 +676,17 @@ pub async fn run(
             // comments are injected downstream and never enter its line reassembly.
             let response_header_map = gateway_owned_headers(&content_type);
             let pipeline_inputs = StreamPipelineInputs {
-                endpoint,
+                endpoint: client_endpoint,
                 endpoint_path,
                 identity: identity.clone(),
                 exclude_reasoning,
                 candidates: candidates.clone(),
+                echo: echo.clone(),
             };
             let metered = build_metered_pipeline(
                 forward.body,
                 &forward.selected_route,
+                forward.selected_path,
                 report,
                 &pipeline_inputs,
             );
@@ -962,8 +738,6 @@ pub async fn run(
                     // instead — a clean HTTP body termination (h1 terminal
                     // chunk, h2 END_STREAM), leaving the connection reusable.
                     let stream_request_id = request_id.clone();
-                    let stream_model = model.unwrap_or("").to_string();
-                    let stream_route = forward.selected_route.clone();
                     let body = Body::from_stream(finalized.body.scan((), move |_, chunk| {
                         std::future::ready(match chunk {
                             Ok(bytes) => Some(Ok::<_, std::io::Error>(bytes)),
@@ -984,17 +758,6 @@ pub async fn run(
                                 // already settled Completed and will not emit,
                                 // so record the client-visible failure here.
                                 if meter_settled.load(Ordering::Relaxed) {
-                                    log_generated_outcome(
-                                        &stream_request_id,
-                                        &stream_model,
-                                        "finalize_error",
-                                        502,
-                                        upstream_status,
-                                        &stream_route,
-                                        attempt_index,
-                                        started,
-                                        &detail_snippet(err.to_string().as_bytes()),
-                                    );
                                     let mut report = late_failure.clone();
                                     report.duration_ms = started.elapsed().as_millis() as u64;
                                     spawn_report(&late_failure_control, report);
@@ -1008,22 +771,7 @@ pub async fn run(
                 Err(err) => {
                     // Synchronous finalizer failure. The pipeline it refused is
                     // dropped unpolled inside the finalizer, and the meter in
-                    // it reports that as a gateway failure against the route;
-                    // this line records what the client was told.
-                    let status = forward_error_status(&err);
-                    if should_log_failure(status) {
-                        log_generated_outcome(
-                            &request_id,
-                            model.unwrap_or(""),
-                            "finalize_error",
-                            status,
-                            upstream_status,
-                            &forward.selected_route,
-                            attempt_index,
-                            started,
-                            &detail_snippet(err.to_string().as_bytes()),
-                        );
-                    }
+                    // it reports that as a gateway failure against the route.
                     service_error_response(outcome_ctx, err, None)
                 }
             }
@@ -1039,20 +787,12 @@ pub async fn run(
                 received_body.as_slice(),
                 Some(&request_id),
             );
+            let class = errors::classify_upstream(
+                received_body.as_slice(),
+                forward.error.upstream_status,
+                &forward.error.upstream_body,
+            );
             let attempt_index = forward.failed_attempts.len() as u32;
-            if should_log_failure(status) {
-                log_generated_outcome(
-                    &request_id,
-                    model.unwrap_or(""),
-                    "upstream_error_stream",
-                    status,
-                    forward.error.upstream_status,
-                    &forward.selected_route,
-                    attempt_index,
-                    started,
-                    &detail_snippet(&forward.error.upstream_body),
-                );
-            }
             meter.failed_attempts(&forward.failed_attempts, true);
             meter.upstream_error(
                 reported_status(
@@ -1062,7 +802,7 @@ pub async fn run(
                 ),
                 attempt_index,
                 &forward.selected_route,
-                errors::upstream_report_message(&forward.error.upstream_body),
+                Some(class),
             );
             finalize_generated(status, body, &[], e2ee, outcome_ctx)
         }
@@ -1071,30 +811,17 @@ pub async fn run(
         // all-429 chain — exits via the UpstreamError arm above, which relays
         // that status). Report each attempt so deployment health and triage
         // see the full chain, then a summary row placed after them carrying
-        // the aggregated error message.
+        // the class of the aggregate failure.
         Ok(MiddlewareForwardResult::AllFailed(forward)) => {
             let status = forward_error_status(&forward.error);
             meter.failed_attempts(&forward.failed_attempts, stream);
-            if should_log_failure(status) {
-                log_generated_outcome(
-                    &request_id,
-                    model.unwrap_or(""),
-                    "all_candidates_failed",
-                    status,
-                    0,
-                    "",
-                    forward.failed_attempts.len() as u32,
-                    started,
-                    &detail_snippet(forward.error.to_string().as_bytes()),
-                );
-            }
             if status >= 500 {
                 meter.gateway_failure_at(
                     forward.failed_attempts.len() as u32,
                     None,
                     status,
                     forward_error_source(&forward.error),
-                    &forward.error.to_string(),
+                    ErrorClass::from(&forward.error),
                     stream,
                 );
             } else {
@@ -1110,21 +837,13 @@ pub async fn run(
         // The E2EE context is still available to encrypt the body.
         Err(err) => {
             let status = forward_error_status(&err);
-            if should_log_failure(status) {
-                log_generated_outcome(
-                    &request_id,
-                    model.unwrap_or(""),
-                    "forward_failed",
-                    status,
-                    0,
-                    "",
-                    0,
-                    started,
-                    &detail_snippet(err.to_string().as_bytes()),
-                );
-            }
             if status >= 500 {
-                meter.gateway_failure(status, forward_error_source(&err), &err.to_string(), stream);
+                meter.gateway_failure(
+                    status,
+                    forward_error_source(&err),
+                    ErrorClass::from(&err),
+                    stream,
+                );
             } else {
                 meter.disarm();
             }
@@ -1139,7 +858,7 @@ pub async fn run(
 /// a later copy that disagrees on format/engine/anything would make the
 /// route-id -> format lookup ambiguous, so it is dropped (keeping the first,
 /// which is what the lookups resolve to anyway) and logged as control's bug.
-/// This turns the invariant from an assumption about our control plane into a
+/// This turns the invariant from an assumption about the control plane into a
 /// property of whatever arrives on the wire.
 fn drop_conflicting_route_twins(candidates: Vec<RouteCandidate>) -> Vec<RouteCandidate> {
     let mut kept: Vec<RouteCandidate> = Vec::with_capacity(candidates.len());
@@ -1199,8 +918,6 @@ impl Meter {
     ) -> u16 {
         let meter = self;
         let request_id = &meter.request_id.clone();
-        let model = &meter.request_model.clone();
-        let started = meter.started;
         let is_streaming = meter.is_streaming;
         match result {
             Ok(MiddlewareForwardResult::UpstreamError(forward)) => {
@@ -1211,20 +928,12 @@ impl Meter {
                     received_body,
                     Some(request_id),
                 );
+                let class = errors::classify_upstream(
+                    received_body,
+                    forward.error.upstream_status,
+                    &forward.error.upstream_body,
+                );
                 let attempt_index = forward.failed_attempts.len() as u32;
-                if should_log_failure(status) {
-                    log_generated_outcome(
-                        request_id,
-                        model,
-                        "upstream_error_stream",
-                        status,
-                        forward.error.upstream_status,
-                        &forward.selected_route,
-                        attempt_index,
-                        started,
-                        &detail_snippet(&forward.error.upstream_body),
-                    );
-                }
                 meter.failed_attempts(&forward.failed_attempts, is_streaming);
                 meter.upstream_error(
                     reported_status(
@@ -1234,33 +943,20 @@ impl Meter {
                     ),
                     attempt_index,
                     &forward.selected_route,
-                    errors::upstream_report_message(&forward.error.upstream_body),
+                    Some(class),
                 );
                 status
             }
             Ok(MiddlewareForwardResult::AllFailed(forward)) => {
                 let status = forward_error_status(&forward.error);
                 meter.failed_attempts(&forward.failed_attempts, is_streaming);
-                if should_log_failure(status) {
-                    log_generated_outcome(
-                        request_id,
-                        model,
-                        "all_candidates_failed",
-                        status,
-                        0,
-                        "",
-                        forward.failed_attempts.len() as u32,
-                        started,
-                        &detail_snippet(forward.error.to_string().as_bytes()),
-                    );
-                }
                 if status >= 500 {
                     meter.gateway_failure_at(
                         forward.failed_attempts.len() as u32,
                         None,
                         status,
                         forward_error_source(&forward.error),
-                        &forward.error.to_string(),
+                        ErrorClass::from(&forward.error),
                         is_streaming,
                     );
                 } else {
@@ -1270,24 +966,11 @@ impl Meter {
             }
             Err(err) => {
                 let status = forward_error_status(&err);
-                if should_log_failure(status) {
-                    log_generated_outcome(
-                        request_id,
-                        model,
-                        "forward_failed",
-                        status,
-                        0,
-                        "",
-                        0,
-                        started,
-                        &detail_snippet(err.to_string().as_bytes()),
-                    );
-                }
                 if status >= 500 {
                     meter.gateway_failure(
                         status,
                         forward_error_source(&err),
-                        &err.to_string(),
+                        ErrorClass::from(&err),
                         is_streaming,
                     );
                 } else {
@@ -1302,7 +985,7 @@ impl Meter {
                 meter.gateway_failure(
                     502,
                     ErrorSource::Gateway,
-                    "unexpected forward result on the streaming path",
+                    ErrorClass::InternalError,
                     is_streaming,
                 );
                 502
@@ -1331,7 +1014,6 @@ fn build_early_streaming_response(
     received_body: Arc<Vec<u8>>,
     requester: Option<ReceiptOwner>,
     request_id: String,
-    model: String,
     started: Instant,
 ) -> Response {
     let endpoint_path = inputs.endpoint_path;
@@ -1347,7 +1029,7 @@ fn build_early_streaming_response(
         status: 502,
         is_streaming: Some(true),
         error_source: Some(ErrorSource::Gateway),
-        error_message: Some("downstream finalizer failed after end of stream".to_string()),
+        error_message: Some(ErrorClass::DownstreamFinalizerFailed),
         ..meter.base()
     };
 
@@ -1371,7 +1053,13 @@ fn build_early_streaming_response(
                     stream_abort.clone(),
                     stream_settled.clone(),
                 );
-                let mut pipeline = build_metered_pipeline(f.body, &selected_route, report, &inputs);
+                let mut pipeline = build_metered_pipeline(
+                    f.body,
+                    &selected_route,
+                    f.selected_path,
+                    report,
+                    &inputs,
+                );
                 while let Some(item) = pipeline.next().await {
                     yield item;
                 }
@@ -1430,7 +1118,6 @@ fn build_early_streaming_response(
         HeaderValue::from_static("no-cache"),
     );
     let scan_request_id = request_id.clone();
-    let scan_model = model.clone();
     let body = Body::from_stream(finalized.body.scan((), move |_, chunk| {
         std::future::ready(match chunk {
             Ok(bytes) => Some(Ok::<_, std::io::Error>(bytes)),
@@ -1446,17 +1133,6 @@ fn build_early_streaming_response(
                     let in_flight = late_journal.in_flight();
                     let attempt_index = in_flight.as_ref().map_or(0, |a| a.attempt_index);
                     let selected_route = in_flight.map(|a| a.route_id);
-                    log_generated_outcome(
-                        &scan_request_id,
-                        &scan_model,
-                        "finalize_error",
-                        502,
-                        0,
-                        selected_route.as_deref().unwrap_or(""),
-                        attempt_index,
-                        started,
-                        &detail_snippet(err.to_string().as_bytes()),
-                    );
                     let mut report = late_failure.clone();
                     report.duration_ms = started.elapsed().as_millis() as u64;
                     report.attempt_index = Some(attempt_index);
@@ -1482,6 +1158,7 @@ pub(super) struct StreamPipelineInputs {
     pub identity: Arc<response_transform::ResponseIdentity>,
     pub exclude_reasoning: bool,
     pub candidates: Vec<RouteCandidate>,
+    pub echo: Option<Arc<Value>>,
 }
 
 /// Assemble the client-facing streaming pipeline for one committed upstream
@@ -1491,22 +1168,28 @@ pub(super) struct StreamPipelineInputs {
 pub(super) fn build_metered_pipeline(
     body: ServiceResponseStream,
     selected_route: &str,
+    selected_path: &'static str,
     report: StreamReport,
     inputs: &StreamPipelineInputs,
 ) -> ServiceResponseStream {
-    // Looked up in the ORIGINAL list even though shaping may have skipped
-    // candidates: a route id names one deployment and a deployment has one
-    // format, so a repeated id cannot disagree on format, and same-id copies
-    // shape identically.
-    let selected_format = inputs
+    // Format is deployment metadata; the selected upstream path is carried by
+    // the forward result because it is a per-request shaping outcome.
+    let selected_candidate = inputs
         .candidates
         .iter()
         .find(|c| c.route_id == selected_route)
-        .or_else(|| inputs.candidates.first())
-        .map(|c| c.format)
+        .or_else(|| inputs.candidates.first());
+    let selected_format = selected_candidate
+        .map(|candidate| candidate.format)
         .unwrap_or(ProviderFormat::Openai);
+    let responses_passthrough = inputs.echo.is_some() && selected_path == RESPONSES_PATH;
+    let upstream_endpoint = if inputs.echo.is_some() && !responses_passthrough {
+        Endpoint::ChatComplete
+    } else {
+        inputs.endpoint
+    };
     let transformed: ServiceResponseStream =
-        match stream_transform::select_stream_transform(selected_format, inputs.endpoint) {
+        match stream_transform::select_stream_transform(selected_format, upstream_endpoint) {
             Some(transform) => Box::pin(SseTransformStream::new(body, transform)),
             None => body,
         };
@@ -1518,18 +1201,40 @@ pub(super) fn build_metered_pipeline(
     } else {
         transformed
     };
+    // The bridge reshapes usage for the client, so it hands the meter the
+    // upstream's own usage to report.
+    let bridge = inputs
+        .echo
+        .as_ref()
+        .filter(|_| !responses_passthrough)
+        .map(|echo| (echo.clone(), UpstreamUsage::default()));
+    let surfaced: ServiceResponseStream = match &bridge {
+        Some((echo, upstream_usage)) => Box::pin(SseTransformStream::new(
+            visible,
+            StreamTransform::OpenaiChatToResponses(
+                echo.clone(),
+                inputs.identity.clone(),
+                upstream_usage.clone(),
+            ),
+        )),
+        None => visible,
+    };
     // Unconditional, unlike the two above: same-format streaming skips every
     // other transform, and that is exactly the path that used to hand the
     // provider's bytes to the client verbatim.
     let sanitized: ServiceResponseStream = Box::pin(SseTransformStream::new(
-        visible,
+        surfaced,
         StreamTransform::SanitizeResponse(inputs.identity.clone(), inputs.endpoint),
     ));
-    Box::pin(MeterStream::new(
+    let meter = MeterStream::new(
         sanitized,
         report,
         errors::sse_protocol(inputs.endpoint_path),
-    ))
+    );
+    Box::pin(match bridge {
+        Some((_, upstream_usage)) => meter.with_upstream_usage(upstream_usage),
+        None => meter,
+    })
 }
 
 impl Meter {
@@ -1600,8 +1305,8 @@ impl Meter {
         }
     }
 
-    // `error_message` carries the upstream's own words when the attempt failed,
-    // already scrubbed to what a client may see. `error_source` stays unset:
+    // `error_class` names why the upstream's answer was an error, when it was
+    // one. `error_source` stays unset:
     // the control plane reads any value there as "one of our components broke",
     // which would misattribute a provider's failure and take it out of that
     // provider's health signal entirely.
@@ -1611,7 +1316,7 @@ impl Meter {
         attempt_index: u32,
         selected_route_id: Option<&str>,
         usage: Option<Value>,
-        error_message: Option<String>,
+        error_class: Option<ErrorClass>,
     ) {
         self.armed = None;
         self.spawn(PostReport {
@@ -1619,7 +1324,7 @@ impl Meter {
             attempt_index: Some(attempt_index),
             selected_route_id: selected_route_id.map(str::to_string),
             usage,
-            error_message,
+            error_message: error_class,
             ..self.base()
         });
     }
@@ -1629,7 +1334,7 @@ impl Meter {
         status: u16,
         attempt_index: u32,
         selected_route_id: &str,
-        error_message: Option<String>,
+        error_class: Option<ErrorClass>,
     ) {
         self.armed = None;
         self.spawn(PostReport {
@@ -1637,7 +1342,7 @@ impl Meter {
             is_streaming: Some(true),
             attempt_index: Some(attempt_index),
             selected_route_id: Some(selected_route_id.to_string()),
-            error_message,
+            error_message: error_class,
             ..self.base()
         });
     }
@@ -1662,10 +1367,10 @@ impl Meter {
         &mut self,
         status: u16,
         source: ErrorSource,
-        message: &str,
+        class: ErrorClass,
         is_streaming: bool,
     ) {
-        self.gateway_failure_at(0, None, status, source, message, is_streaming);
+        self.gateway_failure_at(0, None, status, source, class, is_streaming);
     }
 
     // Like `gateway_failure`, but placed at an explicit attempt index. Control
@@ -1678,7 +1383,7 @@ impl Meter {
         selected_route_id: Option<&str>,
         status: u16,
         source: ErrorSource,
-        message: &str,
+        class: ErrorClass,
         is_streaming: bool,
     ) {
         self.armed = None;
@@ -1688,7 +1393,7 @@ impl Meter {
             attempt_index: Some(attempt_index),
             selected_route_id: selected_route_id.map(str::to_string),
             error_source: Some(source),
-            error_message: Some(truncate(message, 500)),
+            error_message: Some(class),
             ..self.base()
         });
     }
@@ -1726,7 +1431,7 @@ impl Drop for Meter {
                     .map_or(abandoned.len() as u32, |a| a.attempt_index),
             ),
             selected_route_id: in_flight.map(|a| a.route_id),
-            error_message: Some("client disconnected before upstream response".to_string()),
+            error_message: Some(ErrorClass::ClientDisconnected),
             ..self.base()
         });
     }
@@ -1742,10 +1447,6 @@ fn spawn_report(control: &ControlClient, report: PostReport) {
             control.consult_post(&report).await;
         });
     }
-}
-
-pub(super) fn truncate(text: &str, max_chars: usize) -> String {
-    text.chars().take(max_chars).collect()
 }
 
 // The status reported to the control plane for a normalized upstream error: the
@@ -1905,19 +1606,6 @@ fn finalize_generated(
         // Fail-closed: never return the cleartext body when E2EE was requested.
         Err(err) => {
             tracing::error!(error = %err, "E2EE generated-response finalization failed");
-            // Any earlier outcome line recorded the pre-finalization status;
-            // the client actually receives this 500.
-            log_generated_outcome(
-                outcome.request_id,
-                outcome.model,
-                "finalize_error",
-                500,
-                0,
-                "",
-                0,
-                outcome.started,
-                &detail_snippet(err.to_string().as_bytes()),
-            );
             errors::error_response(
                 surface,
                 500,
@@ -1989,6 +1677,7 @@ mod tests {
     fn twin(route_id: &str, format: ProviderFormat) -> RouteCandidate {
         RouteCandidate {
             route_id: route_id.into(),
+            supported_endpoints: Vec::new(),
             format,
             engine: None,
             reasoning_format: None,
@@ -2011,40 +1700,5 @@ mod tests {
             .iter()
             .all(|c| c.format == ProviderFormat::Anthropic));
         assert_eq!(kept[2].route_id, "b:m");
-    }
-
-    #[test]
-    fn observed_failure_policy() {
-        // Every client-visible failure class is logged...
-        for status in [400u16, 401, 402, 404, 499, 500, 502, 503, 504] {
-            assert!(should_log_failure(status), "{status} must be observable");
-        }
-        // ...except final 429s, which are recorded in the usage pipeline.
-        assert!(!should_log_failure(429));
-    }
-
-    #[test]
-    fn client_controlled_identifier_is_bounded_and_single_line() {
-        let hostile = format!("bad\u{1b}[2Jmodel\n{}", "m".repeat(4096));
-        let cleaned = sanitize_identifier(&hostile);
-        assert!(cleaned.chars().count() <= 128);
-        assert!(!cleaned.contains('\n') && !cleaned.contains('\u{1b}'));
-        assert_eq!(sanitize_identifier("z-ai/glm-5.2"), "z-ai/glm-5.2");
-    }
-
-    #[test]
-    fn finish_reason_anomaly_detection() {
-        assert!(!finish_reasons_anomalous(["stop"]));
-        assert!(!finish_reasons_anomalous(["length", "tool_calls"]));
-        assert!(!finish_reasons_anomalous(["end_turn", "max_tokens"]));
-        // A legitimate context-window truncation is a successful response.
-        assert!(!finish_reasons_anomalous(["model_context_window_exceeded"]));
-        // Empty is not anomalous: truncation without a terminal is already a
-        // Failed outcome, and some surfaces terminate without finish reasons.
-        assert!(!finish_reasons_anomalous([]));
-        // Nonstandard values — the "error smuggled through a success"
-        // class — must trip the anomaly.
-        assert!(finish_reasons_anomalous(["upstream_error"]));
-        assert!(finish_reasons_anomalous(["stop", "weird_provider_reason"]));
     }
 }

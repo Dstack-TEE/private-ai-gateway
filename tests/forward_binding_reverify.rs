@@ -356,6 +356,7 @@ async fn middleware_single_candidate_caller_supplied_always_mismatch_flushes() {
 
     let candidates = vec![ForwardCandidate {
         route_id: "route-a".to_string(),
+        path: "/v1/chat/completions",
         body: CHAT_BODY.to_vec(),
     }];
     let journal = MiddlewareReceiptJournal::default();

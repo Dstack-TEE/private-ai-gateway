@@ -150,9 +150,9 @@ this verifier's per-`{model, endpoint}` wiring unchanged).
 ## Reproduce
 
 ```bash
-set -a; . /home/h4x/workspace/redpill/.env; set +a
+cd <private-ai-gateway checkout>
+set -a; . .env; set +a
 export DSTACK_VERIFIER_URL="http://localhost:8080"
-cd /home/h4x/workspace/redpill/private-ai-gateway
 echo '{"api_version":"aci.provider-verifier.request.v1","provider":"phala-direct",
   "upstream_name":"phala-direct-live","url_origin":"https://<model-endpoint>",
   "model_id":"<canonical-model>",

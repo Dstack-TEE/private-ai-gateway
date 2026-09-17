@@ -609,27 +609,14 @@ fn strip_aci_constraint(mut parsed: Value) -> (Value, bool) {
     (parsed, changed)
 }
 
-/// The 413 an oversize inference body earns: the surface's error envelope plus
-/// a `request_outcome` line carrying the request id, in place of the
-/// extractor's bare connection reset. Only the Anthropic envelope shape has a
-/// `request_id` field; the OpenAI envelope deliberately matches the upstream
-/// wire shape and carries none — there the id lives on the log line.
+/// The 413 an oversize inference body earns: the surface's error envelope, in
+/// place of the extractor's bare connection reset. Only the Anthropic envelope
+/// shape has a `request_id` field; the OpenAI envelope deliberately matches the
+/// upstream wire shape and carries none.
 fn body_too_large_response(
     surface: crate::middleware::errors::Surface,
     request_id: &str,
 ) -> Response {
-    tracing::info!(
-        target: "request_outcome",
-        request_id = %request_id,
-        model = "",
-        route = "",
-        attempt = 0u32,
-        upstream_status = 0u16,
-        status = 413u16,
-        outcome = "Generated",
-        phase = "body_too_large",
-        "request body exceeds the inference-surface limit"
-    );
     let body = crate::middleware::errors::envelope_bytes(
         surface,
         crate::middleware::errors::error_type(surface, 413),
@@ -652,9 +639,8 @@ pub(super) async fn openai_completion_endpoint(
     force_buffered: bool,
 ) -> Response {
     // The request id and surface exist before the body is read so an oversize
-    // body is refused with a proper envelope and a `request_outcome` line,
-    // rather than the extractor-level 413 (an unread upload hyper turns into a
-    // connection reset that never reaches request logging).
+    // body is refused with a proper envelope rather than the extractor-level
+    // 413 (an unread upload hyper turns into a connection reset).
     let request_id = generate_request_id();
     let surface = if endpoint_path == MESSAGES_PATH {
         Surface::Anthropic

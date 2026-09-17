@@ -102,8 +102,10 @@ pub enum UpstreamError {
     Timeout(String),
     #[error("upstream channel binding mismatch: {0}")]
     ChannelBindingMismatch(String),
-    #[error("upstream rejected request with status {status}: {body}")]
-    Upstream { status: u16, body: String },
+    /// Carries the status alone: an error's `Display` reaches logs, where a
+    /// response body has no place.
+    #[error("upstream rejected request with status {status}")]
+    Upstream { status: u16 },
 }
 
 /// Classify a reqwest failure. `is_timeout` walks the error's source chain,

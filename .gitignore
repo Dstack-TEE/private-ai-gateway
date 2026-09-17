@@ -9,6 +9,7 @@ __pycache__/
 *.py[cod]
 .DS_Store
 clients/pi-provider/packages/*/dist/
+.claude/settings.local.json
 /apps/desktop/dist/
 /apps/desktop/node_modules/
 /apps/desktop/brand/.generated/

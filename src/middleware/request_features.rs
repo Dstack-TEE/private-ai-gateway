@@ -2,9 +2,9 @@
 //!
 //! The control plane routes better when it knows what the request demands —
 //! how long the prompt is, which modalities it carries, whether it wants
-//! tools, structured output, or reasoning — but it is content-blind by
-//! contract. This module is the seam that keeps both: the content stays in
-//! the TEE, and only numbers, closed enums and a one-way hash cross.
+//! tools, structured output, or reasoning — and it can learn that without
+//! reading the request. This module is the seam that keeps both: the content
+//! stays in the TEE, and only numbers, closed enums and a one-way hash cross.
 //!
 //! The vocabulary is deliberately the industry's, not ours: modality values
 //! are the model catalog's (`text`/`image`/`file`/`audio`/`video`),

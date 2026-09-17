@@ -17,7 +17,7 @@ use super::errors::{
     is_quota_exhausted_error, looks_identifying, map_upstream_status, responses_error_event,
     responses_gateway_code, upstream_message, Surface,
 };
-use super::request_transform::Endpoint;
+use super::request_transform::{effective_responses_tools, Endpoint, ResponsesToolMap};
 use super::types::ProviderFormat;
 use crate::error_payload::envelope;
 
@@ -397,7 +397,7 @@ fn effective_error_kind(object: &serde_json::Map<String, Value>) -> Option<&Valu
 
 /// The `param` value to send: a string naming the request parameter at fault,
 /// per the surface contracts. A structured value or an identifying string
-/// (URL, host, opaque id) becomes null rather than reach the client.
+/// (URL, host) becomes null rather than reach the client.
 fn client_error_param(param: Option<&Value>) -> Option<String> {
     let text = param?.as_str()?;
     (!looks_identifying(text)).then(|| text.to_string())
@@ -936,6 +936,57 @@ pub(super) fn now_millis() -> u128 {
         .unwrap_or(0)
 }
 
+/// The cache counters of a Chat usage object: tokens read from cache, under
+/// either name an upstream uses, and tokens written to it.
+pub(super) fn chat_cache_tokens(usage: &Value) -> (Option<i64>, Option<i64>) {
+    // Read as the control plane reads a counter: a numeric string counts, and
+    // anything unreadable, negative included, is absent rather than zero, so
+    // the other name for the same bucket is still consulted.
+    let counter = |value: Option<&Value>| {
+        let number = match value? {
+            Value::String(text) => text.trim().parse::<f64>().ok()?,
+            other => other.as_f64()?,
+        };
+        (number.is_finite() && number >= 0.0).then_some(number as i64)
+    };
+    let cache_read = counter(usage.get("cache_read_input_tokens")).or_else(|| {
+        counter(
+            usage
+                .get("prompt_tokens_details")
+                .and_then(|details| details.get("cached_tokens")),
+        )
+    });
+    (
+        cache_read,
+        counter(usage.get("cache_creation_input_tokens")),
+    )
+}
+
+/// Anthropic usage for a Chat prompt total. Chat counts cached tokens inside
+/// `prompt_tokens`; Anthropic's `input_tokens` excludes them and states each
+/// cache bucket beside it, so the buckets are taken out of the total rather
+/// than counted a second time.
+pub(super) fn anthropic_usage(
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    cache_read: Option<i64>,
+    cache_creation: Option<i64>,
+) -> Value {
+    let cached = cache_read.unwrap_or(0) + cache_creation.unwrap_or(0);
+    let mut usage = json!({
+        "input_tokens": (prompt_tokens - cached).max(0),
+        "output_tokens": completion_tokens,
+    });
+    let map = usage.as_object_mut().unwrap();
+    if let Some(cache_read) = cache_read {
+        map.insert("cache_read_input_tokens".into(), json!(cache_read));
+    }
+    if let Some(cache_creation) = cache_creation {
+        map.insert("cache_creation_input_tokens".into(), json!(cache_creation));
+    }
+    usage
+}
+
 // Read a token count, accepting integer- or float-encoded numbers.
 pub(super) fn i64_field(value: &Value, key: &str) -> i64 {
     value
@@ -1079,6 +1130,363 @@ fn anthropic_complete_to_openai(response: Value) -> Value {
     })
 }
 
+// ── OpenAI chat.completion → Responses API object ────────────────────────────
+
+/// The request fields a Responses object echoes back, taken from the client's
+/// Responses request. `store` is always false: the gateway keeps nothing.
+pub fn responses_echo(params: &Value) -> Value {
+    let mut echo = serde_json::Map::new();
+    for key in [
+        "instructions",
+        "tool_choice",
+        "parallel_tool_calls",
+        "temperature",
+        "top_p",
+        "max_output_tokens",
+        "text",
+        "reasoning",
+        "metadata",
+        "truncation",
+        "user",
+    ] {
+        if let Some(value) = params.get(key) {
+            echo.insert(key.into(), value.clone());
+        }
+    }
+    if let Ok(tools) = effective_responses_tools(params) {
+        if !tools.is_empty() {
+            echo.insert("tools".into(), Value::Array(tools));
+        }
+    }
+    echo.insert("store".into(), Value::Bool(false));
+    Value::Object(echo)
+}
+
+/// Rebuild a chat completion as the Responses object answering the client:
+/// the first choice's reasoning, text (or refusal) and tool calls become
+/// output items in that order, `finish_reason` becomes `status`, and the
+/// usage buckets take their Responses names. `echo` supplies the request
+/// fields the object repeats.
+pub fn openai_chat_to_responses(response: Value, echo: &Value) -> Value {
+    let tool_map = ResponsesToolMap::from_echo(echo);
+    let choice = response
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .cloned();
+    let message = choice
+        .as_ref()
+        .and_then(|choice| choice.get("message"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let id = match response.get("id").and_then(Value::as_str) {
+        Some(id) if !id.is_empty() => id.to_string(),
+        _ => format!("resp_{}", now_millis()),
+    };
+
+    let mut output: Vec<Value> = Vec::new();
+    let mut invalid_tool_arguments = false;
+    let mut invalid_tool_call_identity = false;
+    if let Some(text) = reasoning_text(&message) {
+        let item_id = item_id("rs", &id, output.len());
+        output.push(reasoning_item(&item_id, text, "completed"));
+    }
+    if choice.is_some() {
+        let text = message.get("content").and_then(Value::as_str).unwrap_or("");
+        let refusal = message
+            .get("refusal")
+            .and_then(Value::as_str)
+            .filter(|refusal| !refusal.is_empty());
+        let tool_calls = message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let part = match refusal {
+            Some(refusal) => Some(refusal_part(refusal)),
+            // A turn with neither text nor tool calls is still an (empty) message.
+            None if !text.is_empty() || tool_calls.is_empty() => Some(output_text_part(text)),
+            None => None,
+        };
+        if let Some(part) = part {
+            let item_id = item_id("msg", &id, output.len());
+            output.push(message_item(&item_id, part, "completed"));
+        }
+        for call in &tool_calls {
+            let function = call.get("function");
+            let call_id = call.get("id").and_then(Value::as_str).unwrap_or("");
+            let name = function
+                .and_then(|f| f.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let arguments = function
+                .and_then(|f| f.get("arguments"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if call_id.trim().is_empty() || name.trim().is_empty() {
+                invalid_tool_call_identity = true;
+                continue;
+            }
+            if tool_map.is_custom(name) {
+                let Some(input) = custom_tool_input(arguments) else {
+                    invalid_tool_arguments = true;
+                    continue;
+                };
+                output.push(custom_tool_call_item(call_id, name, &input, "completed"));
+            } else {
+                let Some(arguments) = normalize_function_call_arguments(arguments) else {
+                    invalid_tool_arguments = true;
+                    continue;
+                };
+                let namespace = tool_map.namespace(name);
+                output.push(function_call_item(
+                    call_id,
+                    namespace.map_or(name, |tool| tool.name.as_str()),
+                    namespace.map(|tool| tool.namespace.as_str()),
+                    &arguments,
+                    "completed",
+                ));
+            }
+        }
+    }
+
+    let upstream_error = response
+        .get("error")
+        .filter(|error| !error.is_null())
+        .cloned();
+    let (status, incomplete_details, error) = match upstream_error {
+        Some(error) => ("failed", Value::Null, error),
+        None => {
+            let terminal = responses_terminal(
+                choice
+                    .as_ref()
+                    .and_then(|choice| choice.get("finish_reason"))
+                    .and_then(Value::as_str),
+            );
+            match terminal {
+                None => ("failed", Value::Null, invalid_finish_reason_error()),
+                Some(("completed", _)) if invalid_tool_call_identity => {
+                    ("failed", Value::Null, invalid_tool_call_identity_error())
+                }
+                Some(("completed", _)) if invalid_tool_arguments => {
+                    ("failed", Value::Null, invalid_tool_call_arguments_error())
+                }
+                Some((status, details)) => (status, details, Value::Null),
+            }
+        }
+    };
+    responses_object(
+        echo,
+        ResponsesHead {
+            id: &id,
+            created_at: now_secs(),
+            model: response.get("model").cloned().unwrap_or(Value::Null),
+            status,
+            incomplete_details,
+            error,
+        },
+        output,
+        Some(responses_usage(response.get("usage"))),
+    )
+}
+
+/// The per-response fields of a Responses object, beside the echoed request
+/// fields and the output.
+pub(super) struct ResponsesHead<'a> {
+    pub id: &'a str,
+    pub created_at: u64,
+    pub model: Value,
+    pub status: &'a str,
+    pub incomplete_details: Value,
+    pub error: Value,
+}
+
+/// Assemble a Responses object: the echoed request fields, the head, the
+/// output items, and usage where the lifecycle has produced one (`null` on the
+/// snapshots a stream opens with).
+pub(super) fn responses_object(
+    echo: &Value,
+    head: ResponsesHead<'_>,
+    output: Vec<Value>,
+    usage: Option<Value>,
+) -> Value {
+    let mut object = echo.as_object().cloned().unwrap_or_default();
+    object.extend(
+        [
+            ("id", json!(head.id)),
+            ("object", json!("response")),
+            ("created_at", json!(head.created_at)),
+            ("model", head.model),
+            ("status", json!(head.status)),
+            ("incomplete_details", head.incomplete_details),
+            ("error", head.error),
+            ("output", Value::Array(output)),
+            ("usage", usage.unwrap_or(Value::Null)),
+        ]
+        .map(|(key, value)| (key.to_string(), value)),
+    );
+    Value::Object(object)
+}
+
+/// An output item id: the kind, the response id, and the item's output index,
+/// so a response with two messages names them apart.
+pub(super) fn item_id(kind: &str, response_id: &str, output_index: usize) -> String {
+    format!("{kind}_{response_id}_{output_index}")
+}
+
+/// The reasoning a chat message or delta carries, under either wire spelling.
+pub(super) fn reasoning_text(message: &Value) -> Option<&str> {
+    ["reasoning_content", "reasoning"]
+        .into_iter()
+        .find_map(|key| message.get(key).and_then(Value::as_str))
+        .filter(|text| !text.is_empty())
+}
+
+pub(super) fn reasoning_item(id: &str, text: &str, status: &str) -> Value {
+    json!({
+        "id": id,
+        "type": "reasoning",
+        "summary": [],
+        "content": [{ "type": "reasoning_text", "text": text }],
+        "status": status,
+    })
+}
+
+pub(super) fn message_item(id: &str, part: Value, status: &str) -> Value {
+    json!({
+        "id": id,
+        "type": "message",
+        "role": "assistant",
+        "status": status,
+        "content": [part],
+    })
+}
+
+pub(super) fn output_text_part(text: &str) -> Value {
+    json!({ "type": "output_text", "text": text, "annotations": [] })
+}
+
+pub(super) fn refusal_part(refusal: &str) -> Value {
+    json!({ "type": "refusal", "refusal": refusal })
+}
+
+pub(super) fn function_call_item(
+    call_id: &str,
+    name: &str,
+    namespace: Option<&str>,
+    arguments: &str,
+    status: &str,
+) -> Value {
+    let mut item = json!({
+        "id": format!("fc_{call_id}"),
+        "type": "function_call",
+        "call_id": call_id,
+        "name": name,
+        "arguments": arguments,
+        "status": status,
+    });
+    if let Some(namespace) = namespace {
+        item["namespace"] = json!(namespace);
+    }
+    item
+}
+
+pub(super) fn custom_tool_call_item(call_id: &str, name: &str, input: &str, status: &str) -> Value {
+    json!({
+        "id": format!("ctc_{call_id}"),
+        "type": "custom_tool_call",
+        "call_id": call_id,
+        "name": name,
+        "input": input,
+        "status": status,
+    })
+}
+
+/// Decode only the wrapper we advertised upstream. Invalid or truncated JSON
+/// must never become executable custom-tool input.
+pub(super) fn custom_tool_input(arguments: &str) -> Option<String> {
+    serde_json::from_str::<Value>(arguments)
+        .ok()?
+        .as_object()?
+        .get("input")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Normalize Chat function arguments for a Responses function-call item.
+/// Empty arguments mean an empty object; every other value must be a JSON
+/// object so a later Responses history replay remains valid.
+pub(super) fn normalize_function_call_arguments(arguments: &str) -> Option<String> {
+    if arguments.trim().is_empty() {
+        return Some("{}".to_string());
+    }
+    matches!(
+        serde_json::from_str::<Value>(arguments),
+        Ok(Value::Object(_))
+    )
+    .then(|| arguments.to_string())
+}
+
+pub(super) fn invalid_tool_call_arguments_error() -> Value {
+    json!({
+        "code": "server_error",
+        "message": "The upstream provider returned invalid tool-call arguments",
+    })
+}
+
+pub(super) fn invalid_tool_call_identity_error() -> Value {
+    json!({
+        "code": "server_error",
+        "message": "The upstream provider returned a tool call without a valid id or name",
+    })
+}
+
+pub(super) fn invalid_finish_reason_error() -> Value {
+    json!({
+        "code": "server_error",
+        "message": "The upstream provider ended without a valid finish reason",
+    })
+}
+
+/// How a chat `finish_reason` ends a response: the `status`, and the
+/// `incomplete_details` that say why a cut-off one stopped.
+pub(super) fn responses_terminal(finish_reason: Option<&str>) -> Option<(&'static str, Value)> {
+    match finish_reason {
+        Some("stop" | "tool_calls") => Some(("completed", Value::Null)),
+        Some("length") => Some(("incomplete", json!({ "reason": "max_output_tokens" }))),
+        Some("content_filter") => Some(("incomplete", json!({ "reason": "content_filter" }))),
+        _ => None,
+    }
+}
+
+/// Responses `usage` from chat `usage`: the token buckets renamed, with the
+/// cache-read and reasoning counts nested where the Responses schema keeps them.
+pub(super) fn responses_usage(usage: Option<&Value>) -> Value {
+    let usage = usage.unwrap_or(&Value::Null);
+    let input = i64_field(usage, "prompt_tokens");
+    let output = i64_field(usage, "completion_tokens");
+    let cached = usage
+        .get("prompt_tokens_details")
+        .map(|details| i64_field(details, "cached_tokens"))
+        .filter(|cached| *cached != 0)
+        .unwrap_or_else(|| i64_field(usage, "cache_read_input_tokens"));
+    let reasoning = usage
+        .get("completion_tokens_details")
+        .map(|details| i64_field(details, "reasoning_tokens"))
+        .unwrap_or(0);
+    let total = match i64_field(usage, "total_tokens") {
+        0 => input + output,
+        total => total,
+    };
+    json!({
+        "input_tokens": input,
+        "input_tokens_details": { "cached_tokens": cached },
+        "output_tokens": output,
+        "output_tokens_details": { "reasoning_tokens": reasoning },
+        "total_tokens": total,
+    })
+}
+
 fn openai_to_anthropic_messages(response: Value) -> Value {
     let choice = response
         .get("choices")
@@ -1114,20 +1522,14 @@ fn openai_to_anthropic_messages(response: Value) -> Value {
         content.push(json!({ "type": "text", "text": "" }));
     }
 
-    let response_usage = response.get("usage");
-    let mut usage = json!({
-        "input_tokens": response_usage.map(|u| i64_field(u, "prompt_tokens")).unwrap_or(0),
-        "output_tokens": response_usage.map(|u| i64_field(u, "completion_tokens")).unwrap_or(0),
-    });
-    if let Some(u) = response_usage {
-        let map = usage.as_object_mut().unwrap();
-        if let Some(cache_read) = u.get("cache_read_input_tokens") {
-            map.insert("cache_read_input_tokens".into(), cache_read.clone());
-        }
-        if let Some(cache_creation) = u.get("cache_creation_input_tokens") {
-            map.insert("cache_creation_input_tokens".into(), cache_creation.clone());
-        }
-    }
+    let response_usage = response.get("usage").unwrap_or(&Value::Null);
+    let (cache_read, cache_creation) = chat_cache_tokens(response_usage);
+    let usage = anthropic_usage(
+        i64_field(response_usage, "prompt_tokens"),
+        i64_field(response_usage, "completion_tokens"),
+        cache_read,
+        cache_creation,
+    );
 
     let id = match response.get("id").and_then(Value::as_str) {
         Some(id) if !id.is_empty() => id.to_string(),
@@ -1988,6 +2390,57 @@ mod tests {
         let out = transform_response(ProviderFormat::Openai, Endpoint::Messages, body);
         assert_eq!(out["content"], json!([{ "type": "text", "text": "" }]));
         assert_eq!(out["stop_reason"], json!("end_turn"));
+    }
+
+    #[test]
+    fn chat_usage_becomes_anthropic_usage_without_counting_cache_twice() {
+        for (chat, expected) in [
+            (
+                json!({ "prompt_tokens": 1000, "completion_tokens": 200 }),
+                json!({ "input_tokens": 1000, "output_tokens": 200 }),
+            ),
+            (
+                json!({ "prompt_tokens": 1000, "completion_tokens": 200,
+                        "prompt_tokens_details": { "cached_tokens": 400 },
+                        "cache_creation_input_tokens": 100 }),
+                json!({ "input_tokens": 500, "output_tokens": 200,
+                        "cache_read_input_tokens": 400, "cache_creation_input_tokens": 100 }),
+            ),
+            // Either name for the cache-read bucket; the explicit one wins.
+            (
+                json!({ "prompt_tokens": 1000, "completion_tokens": 200,
+                        "cache_read_input_tokens": 300,
+                        "prompt_tokens_details": { "cached_tokens": 400 } }),
+                json!({ "input_tokens": 700, "output_tokens": 200, "cache_read_input_tokens": 300 }),
+            ),
+            // An unreadable counter is absent, so the other name is consulted.
+            (
+                json!({ "prompt_tokens": 1000, "completion_tokens": 200,
+                        "cache_read_input_tokens": -1,
+                        "prompt_tokens_details": { "cached_tokens": "400" } }),
+                json!({ "input_tokens": 600, "output_tokens": 200, "cache_read_input_tokens": 400 }),
+            ),
+            (
+                json!({ "prompt_tokens": 1000, "completion_tokens": 200,
+                        "prompt_tokens_details": { "cached_tokens": null } }),
+                json!({ "input_tokens": 1000, "output_tokens": 200 }),
+            ),
+            // Buckets larger than the total leave no uncached input.
+            (
+                json!({ "prompt_tokens": 100, "completion_tokens": 200,
+                        "prompt_tokens_details": { "cached_tokens": 400 } }),
+                json!({ "input_tokens": 0, "output_tokens": 200, "cache_read_input_tokens": 400 }),
+            ),
+        ] {
+            let (cache_read, cache_creation) = chat_cache_tokens(&chat);
+            let usage = anthropic_usage(
+                i64_field(&chat, "prompt_tokens"),
+                i64_field(&chat, "completion_tokens"),
+                cache_read,
+                cache_creation,
+            );
+            assert_eq!(usage, expected, "{chat}");
+        }
     }
 
     #[test]

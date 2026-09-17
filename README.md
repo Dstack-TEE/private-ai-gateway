@@ -192,8 +192,9 @@ container.
 | --- | --- |
 | Workload keyset, quote-bound keyset digest, attestation report | Implemented |
 | Signed receipts | Implemented |
-| Chat/completions, streaming, embeddings, `/v1/models` | Implemented; embeddings are buffered |
-| Downstream E2EE v2 compatibility extension and legacy vLLM E2EE | Implemented for chat/completions/embeddings; streaming E2EE for chat/completions |
+| Chat/completions, completions, streaming, embeddings, `/v1/models` | Implemented; embeddings are buffered |
+| Anthropic-format `/v1/messages`, OpenAI-format `/v1/responses` | Implemented, buffered and streaming. `/v1/responses` goes to a route that serves it natively, otherwise through chat completions |
+| Downstream E2EE v2 compatibility extension and legacy vLLM E2EE | Implemented for chat/completions/embeddings; streaming E2EE for chat/completions. Rejected with `400` on `/v1/messages` and `/v1/responses` |
 | Runtime upstream config file and admin API | Implemented |
 | Gateway-owned Prometheus metrics | Implemented |
 | Provider adapters | Implemented for Tinfoil, NEAR AI, Chutes, SecretAI, PhalaDirect, ACI service, and generic OpenAI-compatible upstreams |
@@ -430,21 +431,73 @@ backend:
   backend, transforms the response, injects usage cost, and reports usage back
   to the control plane. Verification facts still come from the backend.
 - Streaming responses stay streaming across backend, middleware, and frontend.
+- A `/v1/responses` request goes to a route whose control-plane candidate lists
+  that path in `supportedEndpoints` unchanged; any other route is sent a chat
+  completion and its response, buffered or streaming, is converted back to the
+  Responses shape. Usage is reported from the upstream body either way.
+- A `/v1/messages` request keeps the Anthropic shape downstream; the body sent
+  upstream is shaped for the selected route's provider format.
 - Middleware-generated OpenAI-compatible responses are passed through downstream
   E2EE when the original user request used E2EE.
 
 The middleware is configured by the `middleware` section of the static gateway
 config; see the [configuration reference](docs/configuration-reference.md#middleware).
 
+### What The Gateway Records
+
+Prompts, completions, and upstream error messages are not logged and are not
+reported; of an upstream response body, only its `usage` object is reported.
+What leaves the request path is listed here in full, so it can be checked
+against the code.
+
+| Destination | Contents | Defined in |
+| --- | --- | --- |
+| Pre-request consult to the control plane | SHA-256 of the API key, requested model, the caller's `provider` routing block, the TEE-only host flag, and — unless `send_request_features` is `false` — request features: a token-count estimate, input modalities, tool and response-format flags, reasoning intent, and `prefix_hash` | `consult_pre` in `src/middleware/control.rs`, `src/middleware/request_features.rs` |
+| Usage report to the control plane, one per attempt | Request id, endpoint, status, timings, streaming flag, attempt index, selected route, requested model, the upstream's `usage` object, the consult's own routing and billing fields echoed back unchanged — pricing and the tenant and virtual-key ids among them — `errorSource`, a failure class in `errorMessage`, and `prefix_hash` | `PostReport` in `src/middleware/types.rs` |
+| Receipt | SHA-256 hashes of request and response bodies, never the bodies | `apps/desktop/cli/aci/receipt.rs` |
+
+Two properties make the first paragraph checkable rather than a promise:
+
+- The field named `errorMessage` carries no message. Its name is the control
+  plane's wire contract; its type is `ErrorClass`, an enum with no
+  string-bearing variant, so what is sent is one fixed token out of a closed
+  list — `upstream_timeout`, `stream_truncated`, and so on. An upstream body or
+  a caller's input cannot be placed in it; the code would not compile. An
+  upstream error body is read only to choose a class (`classify_upstream` in
+  `src/middleware/errors.rs`).
+- `tests/middleware_completion.rs` plants a marker in upstream error text on the
+  buffered, streaming, and in-band stream paths, captures every log event at
+  `TRACE`, and fails if the marker appears in any log line or usage report.
+
+Two values in the table are not authored by the gateway. The requested model
+name is whatever the caller put in `model`, reported as sent. The `usage` object
+is the upstream's, forwarded as received.
+
+Requests are not logged: there is no access log and no per-request outcome
+line. What the gateway does log is its own errors — a failed control-plane call,
+an upstream timeout, a response body that fails partway (`stream_abort`, the one
+line that carries a request id). Such a line can name the requested model or the
+request host; it never carries request or response content.
+
+`prefix_hash` is derived from content: a digest of the conversation's first
+4 KB, truncated to 32 hex characters, used for cache-affinity routing. Set
+`middleware.prefix_hash_secret` so it is an HMAC the control plane cannot test
+guesses against; without the secret it is a plain SHA-256, which lets the
+control plane link equal prefixes and confirm a prefix it already knows.
+
 ## API Surface
 
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /` | Basic ACI version and keyset digest. |
+| `GET /health` | Liveness probe. |
 | `GET /v1/models` | OpenAI-compatible model list from backend or middleware. |
+| `GET /v1/embeddings/models` | Embedding model catalog; `404` in no-middleware mode. |
 | `POST /v1/chat/completions` | OpenAI-compatible chat completions. |
 | `POST /v1/completions` | OpenAI-compatible legacy completions. |
 | `POST /v1/embeddings` | OpenAI-compatible buffered embeddings. |
+| `POST /v1/messages` | Anthropic-compatible messages. E2EE v2 is rejected here. |
+| `POST /v1/responses` | OpenAI Responses, create only. E2EE v2 is rejected here. |
 | `GET /v1/aci/attestation?nonce=<n>` | Gateway attestation report: quote, keyset, provenance. |
 | `GET /v1/aci/receipts/{id}` | Signed ACI receipt by chat id or receipt id. |
 | `GET /v1/aci/sessions/{session_id}` | Attested-session record referenced by a receipt. |
