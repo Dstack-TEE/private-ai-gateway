@@ -17,8 +17,7 @@ use serde_json::{json, Map, Value};
 
 mod account;
 mod args;
-#[path = "output.rs"]
-mod human;
+mod output;
 mod schema;
 
 use args::*;
@@ -549,7 +548,7 @@ fn agent_change(
         return value(preview);
     }
     if !cli.yes && !cli.json && !cli.non_interactive && io::stdin().is_terminal() {
-        eprintln!("{}", human::details(&value(&preview)?));
+        eprintln!("{}", output::details(&value(&preview)?));
     }
     confirm(cli, "Apply these agent configuration changes?")?;
     value(client.apply_agent(id.into(), connect, preview.revision, options)?)
@@ -660,7 +659,7 @@ fn render_output(input: &impl Serialize, cli: &Cli) -> Result<String, String> {
     let text = if cli.json {
         serde_json::to_string(input).map_err(|_| "Cannot encode output")?
     } else {
-        human::render(&cli.command, &value(input)?)
+        output::render(&cli.command, &value(input)?)
     };
     Ok(text)
 }
@@ -714,11 +713,11 @@ mod tests {
     fn human_output_is_a_summary_not_a_state_dump() {
         let state = json!({"gateway": {"status": "verified", "activeProfileId": "work", "proxyUrl": "http://127.0.0.1:4180", "activity": [{"detail": "not part of status"}]}});
         assert_eq!(
-            human::render(&Action::Status { watch: false }, &state),
+            output::render(&Action::Status { watch: false }, &state),
             "Protected\nProfile: work\nLocal API: http://127.0.0.1:4180"
         );
         assert_eq!(
-            human::render(
+            output::render(
                 &Action::Profiles {
                     command: Profiles::List
                 },
@@ -727,7 +726,7 @@ mod tests {
             "No profiles."
         );
         assert_eq!(
-            human::render(
+            output::render(
                 &Action::Token {
                     command: Token::Show
                 },
@@ -735,7 +734,7 @@ mod tests {
             ),
             "sk-pap-example"
         );
-        let agents = human::render(
+        let agents = output::render(
             &Action::Agents {
                 command: Agents::List,
             },

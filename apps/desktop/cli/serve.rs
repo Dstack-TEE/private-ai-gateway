@@ -19,6 +19,12 @@ use axum::extract::Path;
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
 use axum::{Json, Router};
+use desktop_gateway::proxy::{hop_by_hop_names, MAX_BODY_BYTES, TAG_HEADER};
+use desktop_runtime::sidecar_protocol::{
+    IdentityEvent as SidecarIdentityEvent, RequestCompleteEvent as SidecarRequestEvent, ServeEvent,
+    ServeEventKind, ServiceCapabilities as SidecarCapabilities,
+    SourceProvenance as SidecarProvenance,
+};
 use private_ai_proxy::aci::types::{
     AttestationReport, PROVIDER_ACI_SESSION_IDS, PROVIDER_ACI_VERIFIED,
 };
@@ -34,24 +40,6 @@ use crate::sessions::audit_current_sessions;
 use crate::transcript::{Status, Transcript};
 use crate::verify::{verify_service, ServiceVerification};
 
-/// Connection-scoped headers a proxy re-derives per hop and never relays
-/// (RFC 9110 §7.6.1). Everything else passes through in both directions after
-/// E2EE input is rejected. Dropping a service header would hide protocol
-/// members this proxy does not know about (Appendix B).
-const HOP_BY_HOP_HEADERS: &[&str] = &[
-    "connection",
-    "proxy-connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
-    "host",
-    "content-length",
-];
-
 /// Headers that select either E2EE v2 or the legacy encrypted transport.
 /// `private-ai-proxy serve` exposes a plaintext local API, so even a partial encrypted
 /// request is rejected instead of being forwarded or silently downgraded.
@@ -63,10 +51,6 @@ const E2EE_REQUEST_HEADERS: &[&str] = &[
     "x-e2ee-nonce",
     "x-e2ee-timestamp",
 ];
-
-fn is_hop_by_hop(name: &str) -> bool {
-    HOP_BY_HOP_HEADERS.contains(&name.to_ascii_lowercase().as_str())
-}
 
 fn has_e2ee_request_headers(headers: &HeaderMap) -> bool {
     E2EE_REQUEST_HEADERS
@@ -101,7 +85,7 @@ pub struct RequestOutcome {
 }
 
 type Reporter = Arc<dyn Fn(RequestOutcome) + Send + Sync>;
-type EventSink = Arc<dyn Fn(Value) + Send + Sync>;
+type EventSink = Arc<dyn Fn(ServeEvent) + Send + Sync>;
 
 /// The attested identity the proxy currently trusts. Replaced wholesale when a
 /// keyset rotation forces a fresh verify.
@@ -151,7 +135,6 @@ enum ResponseDelivery {
 /// Recorded exchanges kept for on-demand verification (a bounded ring;
 /// oldest evicted first).
 const RECORDED_CAP: usize = 256;
-const SERVE_EVENT_SCHEMA_VERSION: u32 = 1;
 
 pub struct ProxyState {
     client: AciClient,
@@ -311,13 +294,14 @@ impl ProxyState {
         let identity = verification
             .identity
             .ok_or("verified run carried no established identity")?;
-        let identity_event = identity_event(
-            "identity_updated",
-            &verification.report,
-            &identity,
-            verification.observed_spki.as_deref(),
-            verification_summary,
-        );
+        let identity_event = ServeEvent::new(ServeEventKind::IdentityUpdated {
+            identity: identity_event(
+                &verification.report,
+                &identity,
+                verification.observed_spki.as_deref(),
+                verification_summary,
+            ),
+        });
         // The identity is being replaced: nothing admitted under the old one
         // may still be delivered.
         self.revoke_deliveries();
@@ -339,11 +323,7 @@ pub async fn run(args: ServeArgs, require_production_os: bool) -> Result<i32, St
     match run_inner(args, require_production_os).await {
         Ok(code) => Ok(code),
         Err(error) if json_events => {
-            write_json_event(&json!({
-                "type": "fatal",
-                "schema_version": SERVE_EVENT_SCHEMA_VERSION,
-                "message": error,
-            }))?;
+            write_json_event(&ServeEvent::new(ServeEventKind::Fatal { message: error }))?;
             Ok(1)
         }
         Err(error) => Err(error),
@@ -381,7 +361,6 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
     } = verification;
     let identity = identity.ok_or("verified run carried no established identity")?;
     let ready_identity = identity_event(
-        "ready",
         &report,
         &identity,
         observed_spki.as_deref(),
@@ -453,15 +432,17 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
         .map_err(|e| format!("cannot read control address: {e}"))?;
 
     if args.json_events {
-        let mut event = ready_identity;
-        event["proxy_url"] = json!(format!("http://{local}"));
-        event["control_url"] = json!(format!("http://{control_local}"));
-        event["remote_url"] = json!(base_url);
-        event["policy"] = json!({
-            "enforce_verified": !args.allow_unverified,
-            "require_production_os": require_production_os,
-            "accepted_composes": args.accepted_composes,
-            "pinned_sessions": state.active_pins(),
+        let event = ServeEvent::new(ServeEventKind::Ready {
+            identity: ready_identity,
+            proxy_url: format!("http://{local}"),
+            control_url: format!("http://{control_local}"),
+            remote_url: base_url,
+            policy: json!({
+                "enforce_verified": !args.allow_unverified,
+                "require_production_os": require_production_os,
+                "accepted_composes": args.accepted_composes,
+                "pinned_sessions": state.active_pins(),
+            }),
         });
         write_json_event(&event)?;
     } else {
@@ -506,10 +487,6 @@ fn build_control_router(state: Arc<ProxyState>) -> Router {
         .with_state(state)
 }
 
-/// Largest request body the proxy accepts; the desktop gateway in front of it
-/// applies the same limit so a body is never accepted there and refused here.
-pub const MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
-
 fn build_proxy_router(state: Arc<ProxyState>) -> Router {
     // No route list: every method and path forwards to the same path on the
     // service, so protocol surfaces this proxy does not know about
@@ -517,7 +494,7 @@ fn build_proxy_router(state: Arc<ProxyState>) -> Router {
     // gets the receipt check; everything else is read-only passthrough.
     Router::new()
         .fallback(proxy)
-        .layer(axum::extract::DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state)
 }
 
@@ -540,10 +517,9 @@ async fn proxy(
     }
     let identity_before = state.snapshot().keyset_digest;
     if let Err(reason) = state.ensure_unblocked().await {
-        (state.event_sink)(json!({
-            "type": "blocked",
-            "schema_version": SERVE_EVENT_SCHEMA_VERSION,
-            "reason": reason,
+        (state.event_sink)(ServeEvent::new(ServeEventKind::Blocked {
+            code: None,
+            reason: reason.clone(),
         }));
         eprintln!("!! {method} {path} -> 503 blocked: {reason}");
         return text_response(
@@ -601,9 +577,9 @@ async fn proxy_passthrough(
         local_policy_applied: false,
     });
     let mut builder = Response::builder().status(status);
-    let named = connection_named(&resp_headers);
+    let dropped = dropped_headers(&resp_headers);
     for (name, value) in resp_headers.iter() {
-        if !is_hop_by_hop(name.as_str()) && !named.contains(name.as_str()) {
+        if !dropped.contains(name.as_str()) {
             builder = builder.header(name, value);
         }
     }
@@ -713,9 +689,9 @@ async fn proxy_inference(
         .is_some_and(|ct| ct.contains("text/event-stream"));
 
     let mut builder = Response::builder().status(status);
-    let named = connection_named(&resp_headers);
+    let dropped = dropped_headers(&resp_headers);
     for (name, value) in resp_headers.iter() {
-        if !is_hop_by_hop(name.as_str()) && !named.contains(name.as_str()) {
+        if !dropped.contains(name.as_str()) {
             builder = builder.header(name, value);
         }
     }
@@ -1177,55 +1153,55 @@ fn json_reporter(outcome: RequestOutcome) {
     }
 }
 
-fn json_event_sink(event: Value) {
+fn json_event_sink(event: ServeEvent) {
     if let Err(error) = write_json_event(&event) {
         eprintln!("private-ai-proxy serve: cannot write JSON event: {error}");
     }
 }
 
 fn identity_event(
-    event_type: &str,
     report: &AttestationReport,
     identity: &EstablishedIdentity,
     observed_spki: Option<&str>,
     verification: Value,
-) -> Value {
-    json!({
-        "type": event_type,
-        "schema_version": SERVE_EVENT_SCHEMA_VERSION,
-        "trust_level": "hardware_verified",
-        "tee_type": report.attestation.tee_type,
-        "keyset_digest": report.workload_keyset_digest,
-        "keyset_not_after": identity.keyset.not_after,
-        "tls_spki": observed_spki,
-        "source_provenance": {
-            "repo_url": report.attestation.source_provenance.repo_url,
-            "repo_commit": report.attestation.source_provenance.repo_commit,
-            "image_digest": report.attestation.source_provenance.image_digest,
+) -> SidecarIdentityEvent {
+    SidecarIdentityEvent {
+        trust_level: "hardware_verified".to_string(),
+        tee_type: report.attestation.tee_type.clone(),
+        keyset_digest: report.workload_keyset_digest.clone(),
+        keyset_not_after: identity.keyset.not_after,
+        tls_spki: observed_spki.map(str::to_string),
+        source_provenance: SidecarProvenance {
+            repo_url: report.attestation.source_provenance.repo_url.clone(),
+            repo_commit: report.attestation.source_provenance.repo_commit.clone(),
+            image_digest: report.attestation.source_provenance.image_digest.clone(),
         },
-        "service_capabilities": report.service_capabilities,
-        "verification": verification,
+        service_capabilities: SidecarCapabilities {
+            serving: report.service_capabilities.serving.clone(),
+            supported_e2ee_versions: report.service_capabilities.supported_e2ee_versions.clone(),
+        },
+        verification,
+    }
+}
+
+fn request_outcome_event(outcome: RequestOutcome) -> ServeEvent {
+    ServeEvent::new(ServeEventKind::RequestComplete {
+        request: SidecarRequestEvent {
+            method: outcome.method.as_str().to_string(),
+            path: outcome.path,
+            status: outcome.status,
+            streamed: outcome.streamed,
+            receipt_id: outcome.receipt_id,
+            verified: outcome.verified,
+            detail: outcome.detail,
+            tag: outcome.tag,
+            rewritten: outcome.rewritten,
+            local_policy_applied: Some(outcome.local_policy_applied),
+        },
     })
 }
 
-fn request_outcome_event(outcome: RequestOutcome) -> Value {
-    json!({
-        "type": "request_complete",
-        "schema_version": SERVE_EVENT_SCHEMA_VERSION,
-        "method": outcome.method.as_str(),
-        "path": outcome.path,
-        "status": outcome.status,
-        "streamed": outcome.streamed,
-        "receipt_id": outcome.receipt_id,
-        "verified": outcome.verified,
-        "detail": outcome.detail,
-        "tag": outcome.tag,
-        "rewritten": outcome.rewritten,
-        "local_policy_applied": outcome.local_policy_applied,
-    })
-}
-
-fn write_json_event(event: &Value) -> Result<(), String> {
+fn write_json_event(event: &ServeEvent) -> Result<(), String> {
     let line = serde_json::to_string(event)
         .map_err(|error| format!("failed to serialize serve event: {error}"))?;
     let stdout = io::stdout();
@@ -1236,9 +1212,6 @@ fn write_json_event(event: &Value) -> Result<(), String> {
         .map_err(|error| format!("failed to flush serve event: {error}"))
 }
 
-/// Keyset-rotation gate (§3.4): a response advertising a digest other than
-/// the trusted one blocks further inference forwards until a fresh verify
-/// re-establishes trust.
 /// Race an upstream send against the delivery gate; `None` means revoked
 /// before (or while) sending, and nothing may be treated as delivered.
 async fn race_delivery<T>(
@@ -1260,6 +1233,9 @@ fn delivery_revoked_response(path: &str) -> Response {
     )
 }
 
+/// Keyset-rotation gate (§3.4): a response advertising a digest other than
+/// the trusted one blocks further inference forwards until a fresh verify
+/// re-establishes trust.
 fn rotation_gate(state: &ProxyState, trusted_digest: &str, headers: &HeaderMap) {
     if let Some(observed) = header_str(headers, "x-aci-keyset-digest") {
         if observed != trusted_digest {
@@ -1268,11 +1244,9 @@ fn rotation_gate(state: &ProxyState, trusted_digest: &str, headers: &HeaderMap) 
             let reason = format!(
                 "upstream keyset digest changed ({observed} != {trusted_digest}); re-verification required"
             );
-            (state.event_sink)(json!({
-                "type": "blocked",
-                "code": "keyset_changed",
-                "schema_version": SERVE_EVENT_SCHEMA_VERSION,
-                "reason": reason,
+            (state.event_sink)(ServeEvent::new(ServeEventKind::Blocked {
+                code: Some("keyset_changed".to_string()),
+                reason,
             }));
             eprintln!(
                 "!! upstream X-ACI-Keyset-Digest changed ({observed} != {trusted_digest}); \
@@ -1380,34 +1354,25 @@ async fn derive_policy_pins(state: &ProxyState) -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// Attribution header a local caller may set; recorded in outcomes, never forwarded.
-const TAG_HEADER: &str = "x-aci-tag";
-
 fn forward_headers(
     mut req: reqwest::RequestBuilder,
     headers: &HeaderMap,
 ) -> reqwest::RequestBuilder {
-    let named = connection_named(headers);
+    let dropped = dropped_headers(headers);
     for (name, value) in headers.iter() {
         let name_str = name.as_str();
-        if !is_hop_by_hop(name_str) && !named.contains(name_str) && name_str != TAG_HEADER {
+        if !dropped.contains(name_str) && name_str != TAG_HEADER {
             req = req.header(name, value);
         }
     }
     req
 }
 
-/// Header names the `Connection` header marks as hop-by-hop for this message
-/// (RFC 9110 §7.6.1), lowercased.
-fn connection_named(headers: &HeaderMap) -> std::collections::HashSet<String> {
-    headers
-        .get_all("connection")
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
-        .map(|token| token.trim().to_ascii_lowercase())
-        .filter(|token| !token.is_empty())
-        .collect()
+fn dropped_headers(headers: &HeaderMap) -> std::collections::HashSet<String> {
+    let mut names = hop_by_hop_names(headers);
+    names.insert("host".to_string());
+    names.insert("content-length".to_string());
+    names
 }
 
 /// The bearer token (credential only, `Bearer ` prefix stripped) for the
@@ -1568,10 +1533,13 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("connection", "close, X-Private".parse().unwrap());
         headers.insert("x-private", "1".parse().unwrap());
-        let named = connection_named(&headers);
-        assert!(named.contains("x-private"));
-        assert!(is_hop_by_hop("Proxy-Connection"));
-        assert!(!named.contains("x-receipt-id"));
+        headers.insert("proxy-connection", "keep-alive".parse().unwrap());
+        headers.insert("content-length", "1".parse().unwrap());
+        let dropped = dropped_headers(&headers);
+        assert!(dropped.contains("x-private"));
+        assert!(dropped.contains("proxy-connection"));
+        assert!(dropped.contains("content-length"));
+        assert!(!dropped.contains("x-receipt-id"));
     }
 
     #[test]
@@ -1588,7 +1556,7 @@ mod tests {
             rewritten: Some(false),
             local_policy_applied: true,
         };
-        let event = request_outcome_event(outcome);
+        let event = serde_json::to_value(request_outcome_event(outcome)).unwrap();
         assert_eq!(event["local_policy_applied"], true);
 
         assert_eq!(event["type"], "request_complete");
@@ -1614,7 +1582,8 @@ mod tests {
         headers.insert("x-aci-keyset-digest", "new-keyset".parse().unwrap());
         rotation_gate(&state, "old-keyset", &headers);
         assert!(previous.is_cancelled());
-        assert_eq!(received.recv().await.unwrap()["code"], "keyset_changed");
+        let rotation = serde_json::to_value(received.recv().await.unwrap()).unwrap();
+        assert_eq!(rotation["code"], "keyset_changed");
         let proxy = spawn_server(build_proxy_router(state)).await;
         let response = reqwest::Client::new()
             .get(format!("{proxy}/v1/models"))
@@ -1622,7 +1591,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let failure = received.recv().await.unwrap();
+        let failure = serde_json::to_value(received.recv().await.unwrap()).unwrap();
         assert_eq!(failure["type"], "blocked");
         assert!(failure.get("code").is_none());
     }
@@ -1631,13 +1600,19 @@ mod tests {
     fn identity_event_carries_the_verified_workload_summary() {
         let report = vector_report();
         let identity = crate::checks::established_identity(&report).unwrap();
-        let event = identity_event(
-            "ready",
-            &report,
-            &identity,
-            Some("sha256:observed"),
-            json!({ "checks": [] }),
-        );
+        let event = ServeEvent::new(ServeEventKind::Ready {
+            identity: identity_event(
+                &report,
+                &identity,
+                Some("sha256:observed"),
+                json!({ "checks": [] }),
+            ),
+            remote_url: "https://tee.example".to_string(),
+            proxy_url: "http://127.0.0.1:4181".to_string(),
+            control_url: "http://127.0.0.1:4182".to_string(),
+            policy: json!({}),
+        });
+        let event = serde_json::to_value(event).unwrap();
 
         assert_eq!(event["type"], "ready");
         assert_eq!(event["schema_version"], 1);

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
@@ -27,8 +28,7 @@ test("partial releases preserve independent platform versions and the complete l
 
 for (const [channel, version] of [["stable", "0.1.2"], ["beta", "0.1.2-beta.10"]]) {
 test(`${channel} manifests use signed platform artifacts and reject incomplete releases`, async () => {
-  await mkdir("playwright-artifacts", { recursive: true });
-  const directory = await mkdtemp(path.resolve("playwright-artifacts/update-manifest-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "pap-update-manifest-"));
   const run = () => promisify(execFile)(process.execPath, ["scripts/create-update-manifest.mjs", directory, version, "Dstack-TEE/private-ai-gateway", channel]);
   try {
     for (const specification of desktopPackages) {
@@ -87,7 +87,7 @@ test(`${channel} manifests use signed platform artifacts and reject incomplete r
 }
 
 test("native ARM64 artifacts are selected by matrix provenance and normalized without changing bytes", async () => {
-  const directory = await mkdtemp(path.resolve("playwright-artifacts/native-manifest-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "pap-native-manifest-"));
   const version = "0.1.2-beta.36";
   const paths = [];
   try {

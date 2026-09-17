@@ -175,11 +175,11 @@ impl UpstreamProvider {
     /// must choose its scope rather than inherit a default.
     pub(crate) fn attestation_scope(self) -> AttestationScope {
         match self {
-            UpstreamProvider::NearAi | UpstreamProvider::Tinfoil | UpstreamProvider::SecretAi => {
-                AttestationScope::PerRouter
-            }
-            UpstreamProvider::Chutes => AttestationScope::PerInstance,
-            UpstreamProvider::PhalaDirect => AttestationScope::PerModel,
+            UpstreamProvider::NearAi => AttestedProvider::NearAi.scope(),
+            UpstreamProvider::Tinfoil => AttestedProvider::Tinfoil.scope(),
+            UpstreamProvider::SecretAi => AttestedProvider::SecretAi.scope(),
+            UpstreamProvider::Chutes => AttestedProvider::Chutes.scope(),
+            UpstreamProvider::PhalaDirect => AttestedProvider::PhalaDirect.scope(),
             // Plain cloud APIs (OpenAI-compatible, Anthropic) have no verifier
             // and ACI service uses its own, so for all of these this only tunes
             // prewarm probe granularity. Per-model is the safe default — it
@@ -195,6 +195,7 @@ impl UpstreamProvider {
 /// The channel boundary a provider's attestation proves, and thus what identifies
 /// its attested session.
 pub use crate::aci::verifier::AttestationScope;
+use crate::aci::verifier::AttestedProvider;
 
 #[derive(Debug, Clone)]
 pub enum UpstreamVerifierMode {

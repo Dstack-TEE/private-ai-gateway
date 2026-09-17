@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use super::external::ExternalProviderVerifier;
 #[cfg(test)]
 use super::external::ProviderVerifierConfigError;
-use super::{AttestationScope, UpstreamVerificationRequest, UpstreamVerifier};
+use super::{AttestedProvider, UpstreamVerificationRequest, UpstreamVerifier};
 use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
 use crate::aci::upstream::ChutesSessionStore;
 
@@ -26,8 +26,7 @@ impl ChutesProviderVerifier {
     pub fn new_with_cache(timeout_seconds: u64, cache_ttl_seconds: u64) -> Self {
         Self {
             verifier: ExternalProviderVerifier::private_inference(
-                "chutes",
-                AttestationScope::PerInstance,
+                AttestedProvider::Chutes,
                 timeout_seconds,
                 cache_ttl_seconds,
             ),
@@ -41,8 +40,7 @@ impl ChutesProviderVerifier {
     ) -> Self {
         Self {
             verifier: ExternalProviderVerifier::private_inference(
-                "chutes",
-                AttestationScope::PerInstance,
+                AttestedProvider::Chutes,
                 timeout_seconds,
                 cache_ttl_seconds,
             )
@@ -97,9 +95,8 @@ impl ChutesProviderVerifier {
         timeout_seconds: u64,
     ) -> Result<Self, ProviderVerifierConfigError> {
         Ok(Self {
-            verifier: ExternalProviderVerifier::with_command(
-                "chutes",
-                AttestationScope::PerInstance,
+            verifier: ExternalProviderVerifier::with_attested_provider_command(
+                AttestedProvider::Chutes,
                 command,
                 timeout_seconds,
             )?,
@@ -113,9 +110,8 @@ impl ChutesProviderVerifier {
         session_store: Arc<ChutesSessionStore>,
     ) -> Result<Self, ProviderVerifierConfigError> {
         Ok(Self {
-            verifier: ExternalProviderVerifier::with_command(
-                "chutes",
-                AttestationScope::PerInstance,
+            verifier: ExternalProviderVerifier::with_attested_provider_command(
+                AttestedProvider::Chutes,
                 command,
                 timeout_seconds,
             )?
@@ -152,8 +148,7 @@ impl TinfoilProviderVerifier {
     pub fn new_with_cache(timeout_seconds: u64, cache_ttl_seconds: u64) -> Self {
         Self {
             verifier: ExternalProviderVerifier::private_inference(
-                "tinfoil",
-                AttestationScope::PerRouter,
+                AttestedProvider::Tinfoil,
                 timeout_seconds,
                 cache_ttl_seconds,
             ),
@@ -166,9 +161,8 @@ impl TinfoilProviderVerifier {
         timeout_seconds: u64,
     ) -> Result<Self, ProviderVerifierConfigError> {
         Ok(Self {
-            verifier: ExternalProviderVerifier::with_command(
-                "tinfoil",
-                AttestationScope::PerRouter,
+            verifier: ExternalProviderVerifier::with_attested_provider_command(
+                AttestedProvider::Tinfoil,
                 command,
                 timeout_seconds,
             )?,
@@ -204,8 +198,7 @@ impl NearAiProviderVerifier {
     pub fn new_with_cache(timeout_seconds: u64, cache_ttl_seconds: u64) -> Self {
         Self {
             verifier: ExternalProviderVerifier::private_inference(
-                "near-ai",
-                AttestationScope::PerRouter,
+                AttestedProvider::NearAi,
                 timeout_seconds,
                 cache_ttl_seconds,
             ),
@@ -223,9 +216,8 @@ impl NearAiProviderVerifier {
         timeout_seconds: u64,
     ) -> Result<Self, ProviderVerifierConfigError> {
         Ok(Self {
-            verifier: ExternalProviderVerifier::with_command(
-                "near-ai",
-                AttestationScope::PerRouter,
+            verifier: ExternalProviderVerifier::with_attested_provider_command(
+                AttestedProvider::NearAi,
                 command,
                 timeout_seconds,
             )?,
@@ -264,8 +256,7 @@ impl SecretAiProviderVerifier {
     pub fn new_with_cache(timeout_seconds: u64, cache_ttl_seconds: u64) -> Self {
         Self {
             verifier: ExternalProviderVerifier::private_inference(
-                "secret-ai",
-                AttestationScope::PerRouter,
+                AttestedProvider::SecretAi,
                 timeout_seconds,
                 cache_ttl_seconds,
             ),
@@ -291,9 +282,8 @@ impl SecretAiProviderVerifier {
         timeout_seconds: u64,
     ) -> Result<Self, ProviderVerifierConfigError> {
         Ok(Self {
-            verifier: ExternalProviderVerifier::with_command(
-                "secret-ai",
-                AttestationScope::PerRouter,
+            verifier: ExternalProviderVerifier::with_attested_provider_command(
+                AttestedProvider::SecretAi,
                 command,
                 timeout_seconds,
             )?,
@@ -338,8 +328,7 @@ impl PhalaDirectProviderVerifier {
     pub fn new_with_cache(timeout_seconds: u64, cache_ttl_seconds: u64) -> Self {
         Self {
             verifier: ExternalProviderVerifier::private_inference(
-                "phala-direct",
-                AttestationScope::PerModel,
+                AttestedProvider::PhalaDirect,
                 timeout_seconds,
                 cache_ttl_seconds,
             ),
@@ -361,9 +350,8 @@ impl PhalaDirectProviderVerifier {
         timeout_seconds: u64,
     ) -> Result<Self, ProviderVerifierConfigError> {
         Ok(Self {
-            verifier: ExternalProviderVerifier::with_command(
-                "phala-direct",
-                AttestationScope::PerModel,
+            verifier: ExternalProviderVerifier::with_attested_provider_command(
+                AttestedProvider::PhalaDirect,
                 command,
                 timeout_seconds,
             )?,

@@ -16,10 +16,9 @@ use super::appraisal::{
 use super::dstack::compressed_k256_public_key_hex;
 use super::quote::QuoteStepError;
 use super::report::AciReportValidationError;
-use super::{UpstreamVerificationRequest, UpstreamVerifier};
 use super::{
-    DEFAULT_DCAP_PCCS_URL, DEFAULT_VERIFIER_CONNECT_TIMEOUT_SECONDS,
-    DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS,
+    UpstreamVerificationRequest, UpstreamVerifier, DEFAULT_DCAP_PCCS_URL,
+    DEFAULT_VERIFIER_CONNECT_TIMEOUT_SECONDS, DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS,
 };
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crate::aci::types::{AttestationReport, SourceProvenance, WorkloadKeyset};

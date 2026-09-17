@@ -4,12 +4,11 @@ Verify a live ACI deployment yourself. The commands below run against
 `https://api.redpill.ai`, a live deployment of the reference implementation;
 point `ACI_URL` at any ACI service to verify that instead.
 
-You need `aci`, `curl`, `jq`, and `openssl`. `aci` is the ACI-focused alias
-installed with Private AI Proxy:
+You need `aci`, `curl`, `jq`, and `openssl`. Install Private AI Proxy from a
+[desktop or CLI release](https://github.com/Dstack-TEE/private-ai-gateway/releases);
+`aci` is an alias of its unified command-line client. Then select the service:
 
 ```bash
-git clone https://github.com/Dstack-TEE/private-ai-gateway.git
-cd private-ai-gateway
 export ACI_URL=https://api.redpill.ai
 ```
 

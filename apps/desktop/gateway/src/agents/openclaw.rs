@@ -522,7 +522,6 @@ fn validate_windows_acl(acl: &WindowsAcl) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-#[path = "openclaw_windows.rs"]
 mod windows;
 
 #[cfg(test)]

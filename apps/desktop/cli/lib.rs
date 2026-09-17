@@ -2,5 +2,3 @@
 //! Private AI Proxy package and reused by the gateway.
 
 pub mod aci;
-#[cfg(unix)]
-pub use aci::dstack;

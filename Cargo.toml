@@ -24,7 +24,7 @@ name = "private-ai-gateway"
 path = "src/main.rs"
 
 [dependencies]
-private-ai-proxy = { path = "apps/desktop/cli", default-features = false }
+private-ai-proxy = { path = "apps/desktop/cli", default-features = false, features = ["dstack-service"] }
 # Canonical-JSON, types, and serialization.
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

@@ -32,7 +32,6 @@ use tokio::{
     sync::{mpsc::Receiver, watch},
 };
 
-const EVENT_SCHEMA_VERSION: u64 = 1;
 const MAX_ACTIVITY: usize = 50;
 const MAX_DIAGNOSTIC_BYTES: usize = 4_096;
 const MAX_EVENT_BYTES: usize = 1_048_576;

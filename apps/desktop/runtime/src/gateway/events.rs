@@ -1,4 +1,7 @@
 use super::*;
+use crate::sidecar_protocol::{
+    IdentityEvent, RequestCompleteEvent, ServeEvent, ServeEventKind, EVENT_SCHEMA_VERSION,
+};
 
 impl GatewayManager {
     pub(super) fn handle_stdout(
@@ -41,16 +44,12 @@ impl GatewayManager {
     }
 
     pub(super) fn handle_line(self: &Arc<Self>, generation: u64, line: &str) -> Result<(), String> {
-        let event: Value = serde_json::from_str(line)
+        let event: ServeEvent = serde_json::from_str(line)
             .map_err(|_| "Verifier emitted invalid JSON event data".to_string())?;
-        let object = event
-            .as_object()
-            .ok_or_else(|| "Verifier emitted an invalid event".to_string())?;
-        if object.get("schema_version").and_then(Value::as_u64) != Some(EVENT_SCHEMA_VERSION) {
+        if event.schema_version != EVENT_SCHEMA_VERSION {
             return Err("Verifier emitted an unknown event schema".to_string());
         }
 
-        let event_type = required_string(object, "type")?;
         let mut runtime = self.lock()?;
         if runtime.generation != generation {
             return Ok(());
@@ -60,15 +59,18 @@ impl GatewayManager {
         let mut persist = None;
         let mut end_session = false;
         let mut retired_child = None;
-        match event_type.as_str() {
+        match event.kind {
             // Identity in (or rotated): a new epoch; the session stays closed
             // until the catalog read through this identity is in too.
-            "ready" | "identity_updated" => {
-                apply_identity_event(&mut runtime.state, object)?;
-                if event_type == "ready" {
-                    runtime.state.remote_url = Some(required_string(object, "remote_url")?);
-                    runtime.sidecar_url = Some(required_string(object, "proxy_url")?);
-                }
+            ServeEventKind::Ready {
+                identity,
+                remote_url,
+                proxy_url,
+                ..
+            } => {
+                apply_identity_event(&mut runtime.state, &identity);
+                runtime.state.remote_url = Some(remote_url);
+                runtime.sidecar_url = Some(proxy_url);
                 runtime.identity_ready = true;
                 runtime.epoch += 1;
                 runtime.state.status = "verifying".to_string();
@@ -76,17 +78,26 @@ impl GatewayManager {
                 runtime.state.catalog = None;
                 load_catalog = true;
             }
-            "request_complete" => {
-                if optional_string(object, "path").as_deref() != Some("/v1/models") {
-                    persist = Some(apply_request_event(&mut runtime.state, object)?);
+            ServeEventKind::IdentityUpdated { identity } => {
+                apply_identity_event(&mut runtime.state, &identity);
+                runtime.identity_ready = true;
+                runtime.epoch += 1;
+                runtime.state.status = "verifying".to_string();
+                runtime.state.progress = Some("Reading the verified model list".to_string());
+                runtime.state.catalog = None;
+                load_catalog = true;
+            }
+            ServeEventKind::RequestComplete { request } => {
+                if request.path != "/v1/models" {
+                    persist = Some(apply_request_event(&mut runtime.state, &request)?);
                 }
             }
             // Verification lost: one atomic barrier. The epoch moves so a
             // read still in flight can neither publish nor clear this error,
             // and the identity must be reported again before anything opens.
-            "blocked" => {
-                let rotating = optional_string(object, "code").as_deref() == Some("keyset_changed")
-                    && runtime.state.status != "blocked";
+            ServeEventKind::Blocked { code, reason } => {
+                let rotating =
+                    code.as_deref() == Some("keyset_changed") && runtime.state.status != "blocked";
                 end_session = !rotating && !runtime.verification_only;
                 runtime.epoch += 1;
                 runtime.identity_ready = false;
@@ -97,12 +108,9 @@ impl GatewayManager {
                 }
                 runtime.state.progress = None;
                 runtime.state.catalog = None;
-                runtime.state.error = Some(
-                    optional_string(object, "reason")
-                        .unwrap_or_else(|| "Verifier blocked forwarding".to_string()),
-                );
+                runtime.state.error = Some(reason);
             }
-            "fatal" => {
+            ServeEventKind::Fatal { message } => {
                 runtime.epoch += 1;
                 runtime.identity_ready = false;
                 if runtime.state.status != "blocked" {
@@ -111,12 +119,9 @@ impl GatewayManager {
                 runtime.state.reconnecting = crate::recovery::connection_intended(&runtime.state);
                 runtime.state.progress = None;
                 runtime.state.catalog = None;
-                runtime.state.error = Some(
-                    optional_string(object, "message")
-                        .unwrap_or_else(|| "Verifier failed".to_string()),
-                );
+                runtime.state.error = Some(message);
             }
-            _ => return Ok(()),
+            ServeEventKind::Unknown => return Ok(()),
         }
 
         let epoch = runtime.epoch;
@@ -212,49 +217,31 @@ pub(super) fn spawn_event_reader(
 
 /// Record the sidecar's identity and checks; the status is decided by the
 /// caller once the catalog is in.
-pub(super) fn apply_identity_event(
-    state: &mut GatewayState,
-    event: &Map<String, Value>,
-) -> Result<(), String> {
-    state.identity = Some(parse_identity(event)?);
-    state.checks = parse_checks(event.get("verification"));
+pub(super) fn apply_identity_event(state: &mut GatewayState, event: &IdentityEvent) {
+    state.identity = Some(parse_identity(event));
+    state.checks = parse_checks(Some(&event.verification));
     state.error = None;
-    Ok(())
 }
 
-pub(super) fn parse_identity(event: &Map<String, Value>) -> Result<GatewayIdentity, String> {
-    let source = event.get("source_provenance").and_then(Value::as_object);
-    let capabilities = event.get("service_capabilities").and_then(Value::as_object);
-
-    Ok(GatewayIdentity {
-        tee_type: required_string(event, "tee_type")?,
-        trust_level: required_string(event, "trust_level")?,
-        keyset_digest: required_string(event, "keyset_digest")?,
-        keyset_not_after: event
-            .get("keyset_not_after")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| "Verifier emitted an invalid identity event".to_string())?,
-        tls_spki: optional_string(event, "tls_spki"),
+pub(super) fn parse_identity(event: &IdentityEvent) -> GatewayIdentity {
+    GatewayIdentity {
+        tee_type: event.tee_type.clone(),
+        trust_level: event.trust_level.clone(),
+        keyset_digest: event.keyset_digest.clone(),
+        keyset_not_after: event.keyset_not_after,
+        tls_spki: event.tls_spki.clone(),
         source: SourceProvenance {
-            repo_url: source.and_then(|value| optional_string(value, "repo_url")),
-            repo_commit: source.and_then(|value| optional_string(value, "repo_commit")),
-            image_digest: source.and_then(|value| optional_string(value, "image_digest")),
+            repo_url: event.source_provenance.repo_url.clone(),
+            repo_commit: event.source_provenance.repo_commit.clone(),
+            image_digest: event.source_provenance.image_digest.clone(),
         },
-        serving: capabilities
-            .and_then(|value| optional_string(value, "serving"))
-            .unwrap_or_else(|| "aggregator".to_string()),
-        supported_e2ee_versions: capabilities
-            .and_then(|value| value.get("supported_e2ee_versions"))
-            .and_then(Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default(),
-    })
+        serving: if event.service_capabilities.serving.is_empty() {
+            "aggregator".to_string()
+        } else {
+            event.service_capabilities.serving.clone()
+        },
+        supported_e2ee_versions: event.service_capabilities.supported_e2ee_versions.clone(),
+    }
 }
 
 pub(super) fn parse_checks(value: Option<&Value>) -> Vec<VerificationCheck> {
@@ -283,33 +270,29 @@ pub(super) fn parse_checks(value: Option<&Value>) -> Vec<VerificationCheck> {
 
 pub(super) fn apply_request_event(
     state: &mut GatewayState,
-    event: &Map<String, Value>,
+    event: &RequestCompleteEvent,
 ) -> Result<RequestActivity, String> {
-    let status = event
-        .get("status")
-        .and_then(Value::as_u64)
-        .and_then(|value| u16::try_from(value).ok())
-        .ok_or_else(|| "Verifier emitted an invalid request event".to_string())?;
-    let receipt_id = optional_string(event, "receipt_id");
-    let (request_id, session_id, agent) = parse_request_tag(&required_string(event, "tag")?)?;
+    let (request_id, session_id, agent) = parse_request_tag(
+        event
+            .tag
+            .as_deref()
+            .ok_or_else(|| "Verifier event is missing tag".to_string())?,
+    )?;
     let activity = RequestActivity {
         id: request_id,
         session_id,
-        method: required_string(event, "method")?,
-        path: required_string(event, "path")?,
+        method: event.method.clone(),
+        path: event.path.clone(),
         model: None,
-        status,
-        streamed: event
-            .get("streamed")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        receipt_id: receipt_id.clone(),
-        verified: event.get("verified").and_then(Value::as_bool),
-        detail: optional_string(event, "detail").unwrap_or_default(),
+        status: event.status,
+        streamed: event.streamed,
+        receipt_id: event.receipt_id.clone(),
+        verified: event.verified,
+        detail: event.detail.clone(),
         at: now_secs(),
         agent: Some(agent),
-        local_policy_applied: event.get("local_policy_applied").and_then(Value::as_bool),
-        rewritten: event.get("rewritten").and_then(Value::as_bool),
+        local_policy_applied: event.local_policy_applied,
+        rewritten: event.rewritten,
         left_device: true,
         input_tokens: None,
         output_tokens: None,
@@ -374,10 +357,6 @@ fn parse_request_tag(tag: &str) -> Result<(String, String, String), String> {
         }
     }
     Err("Verifier emitted an invalid request attribution tag".to_string())
-}
-
-pub(super) fn required_string(object: &Map<String, Value>, key: &str) -> Result<String, String> {
-    optional_string(object, key).ok_or_else(|| format!("Verifier event is missing {key}"))
 }
 
 pub(super) fn optional_string(object: &Map<String, Value>, key: &str) -> Option<String> {

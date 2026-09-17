@@ -24,5 +24,6 @@ pub mod protocol;
 mod recovery;
 pub mod server;
 pub mod service_config;
+pub mod sidecar_protocol;
 pub mod transport;
 pub mod usage;

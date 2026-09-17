@@ -7,7 +7,7 @@
 //! construction.
 
 pub mod digest;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "dstack-service"))]
 pub mod dstack;
 pub mod e2ee;
 pub mod identity;

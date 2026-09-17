@@ -10,7 +10,6 @@ use super::appraisal::appraise_provenance;
 use super::dstack::{verify_dstack_app_compose, verify_dstack_kms_receipt_custody};
 use super::external::ExternalProviderVerifier;
 use super::*;
-use super::{AttestationScope, UpstreamVerificationRequest, UpstreamVerifier};
 use crate::aci::keys::ALGO_ED25519;
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crate::aci::types::{

@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Private AI Proxy",
+  "productName": "Desktop App",
   "version": "0.1.0",
-  "identifier": "org.dstack.private-ai-proxy",
+  "identifier": "com.invalid.desktop-app",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://127.0.0.1:1420",
@@ -14,7 +14,6 @@
       {
         "label": "main",
         "create": false,
-        "title": "Private AI Proxy",
         "width": 1052,
         "height": 840,
         "minWidth": 720,
@@ -37,14 +36,11 @@
       "devCsp": "default-src 'self'; connect-src ipc: http://ipc.localhost ws://127.0.0.1:1420; img-src 'self' https://img.clerk.com https://images.clerk.dev https://clerk.redpill.ai; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-src 'none'"
     }
   },
-  "plugins": {
-    "deep-link": { "desktop": { "schemes": ["org.dstack.private-ai-proxy"] } }
-  },
   "bundle": {
     "active": true,
     "targets": ["app", "dmg"],
     "category": "DeveloperTool",
-    "shortDescription": "Verified local AI proxy",
+    "shortDescription": "Desktop application",
     "externalBin": [
       "binaries/private-ai-proxy",
       "binaries/private-ai-proxy-service",

@@ -85,6 +85,39 @@ impl AttestationScope {
     }
 }
 
+/// Providers whose attested channel boundary is defined by this verifier.
+///
+/// Keeping this mapping beside the cache-key implementation prevents gateway
+/// configuration and verifier construction from assigning different scopes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttestedProvider {
+    Chutes,
+    Tinfoil,
+    NearAi,
+    SecretAi,
+    PhalaDirect,
+}
+
+impl AttestedProvider {
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Chutes => "chutes",
+            Self::Tinfoil => "tinfoil",
+            Self::NearAi => "near-ai",
+            Self::SecretAi => "secret-ai",
+            Self::PhalaDirect => "phala-direct",
+        }
+    }
+
+    pub const fn scope(self) -> AttestationScope {
+        match self {
+            Self::Chutes => AttestationScope::PerInstance,
+            Self::Tinfoil | Self::NearAi | Self::SecretAi => AttestationScope::PerRouter,
+            Self::PhalaDirect => AttestationScope::PerModel,
+        }
+    }
+}
+
 pub const DEFAULT_VERIFIER_CONNECT_TIMEOUT_SECONDS: u64 = 10;
 pub const DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS: u64 = 60;
 pub const DEFAULT_DCAP_PCCS_URL: &str = dcap_qvl::PHALA_PCCS_URL;

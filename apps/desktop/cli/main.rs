@@ -21,8 +21,6 @@ async fn main() {
         .name("private-ai-proxy")
         .about("Private AI Proxy: manage local protection and verify confidential AI services")
         .long_about("Manage profiles, coding agents and local protection, or verify and audit ACI services without starting the managed backend.")
-        .mut_subcommand("cli", |command| command.about("Manage installation of the private-ai-proxy command"))
-        .mut_subcommand("serve", |command| command.about("Run a local verifying proxy; stream responses and audit receipts after delivery"))
         .arg(clap::Arg::new("require_production_os").long("require-production-os").help("Require an attested production OS image").global(true).action(clap::ArgAction::SetTrue));
     let json = std::env::args_os()
         .skip(1)
@@ -35,22 +33,22 @@ async fn main() {
         }
         error.exit()
     });
-    let result = match matches.subcommand_name() {
-        Some("verify" | "audit" | "sessions" | "send" | "serve") => {
+    let json = matches.get_flag("json");
+    let result = match args::Command::from_arg_matches(&matches) {
+        Ok(command) => {
             let production = matches.get_flag("require_production_os");
-            match args::Command::from_arg_matches(&matches) {
-                Ok(args::Command::Verify(a)) => verify::run(a, production).await,
-                Ok(args::Command::Audit(a)) => audit::run(a, production).await,
-                Ok(args::Command::Sessions(a)) => sessions::run(a, production).await,
-                Ok(args::Command::Send(a)) => send::run(a, production).await,
-                Ok(args::Command::Serve(mut a)) => {
+            match command {
+                args::Command::Verify(a) => verify::run(a, production).await,
+                args::Command::Audit(a) => audit::run(a, production).await,
+                args::Command::Sessions(a) => sessions::run(a, production).await,
+                args::Command::Send(a) => send::run(a, production).await,
+                args::Command::Serve(mut a) => {
                     a.json_events |= json;
                     serve::run(a, production).await
                 }
-                Err(error) => Err(error.to_string()),
             }
         }
-        _ => managed::run_matches(&matches, command).map(|()| 0),
+        Err(_) => managed::run_matches(&matches, command).map(|()| 0),
     };
     let code = match result {
         Ok(code) => code,

@@ -10,7 +10,7 @@
 pub use private_ai_proxy::aci;
 pub mod aggregator;
 #[cfg(unix)]
-pub use private_ai_proxy::dstack;
+pub use private_ai_proxy::aci::dstack;
 pub(crate) mod error_payload;
 pub mod http;
 pub mod middleware;

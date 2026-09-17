@@ -16,7 +16,10 @@ use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use super::{current_unix_secs, decode_hex_32, AttestationScope, UpstreamVerificationRequest};
+use super::{
+    current_unix_secs, decode_hex_32, AttestationScope, AttestedProvider,
+    UpstreamVerificationRequest,
+};
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crate::aci::upstream::{ChutesSessionStore, ChutesVerifiedDiscovery};
 
@@ -44,8 +47,7 @@ pub(super) struct ExternalProviderVerifier {
 
 impl ExternalProviderVerifier {
     pub(super) fn private_inference(
-        provider: &'static str,
-        scope: AttestationScope,
+        provider: AttestedProvider,
         timeout_seconds: u64,
         cache_ttl_seconds: u64,
     ) -> Self {
@@ -60,8 +62,8 @@ impl ExternalProviderVerifier {
             script.display().to_string(),
         ];
         Self {
-            provider,
-            scope,
+            provider: provider.id(),
+            scope: provider.scope(),
             command,
             // Run `uv run` in the gateway project so the bridge uses the gateway's
             // own uv environment and the vendored `scripts/confidential_verifier`
@@ -78,6 +80,15 @@ impl ExternalProviderVerifier {
             verify_lock: Arc::new(tokio::sync::Mutex::new(())),
             chutes_session_store: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_attested_provider_command(
+        provider: AttestedProvider,
+        command: Vec<String>,
+        timeout_seconds: u64,
+    ) -> Result<Self, ProviderVerifierConfigError> {
+        Self::with_command(provider.id(), provider.scope(), command, timeout_seconds)
     }
 
     #[cfg(test)]

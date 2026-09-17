@@ -421,6 +421,14 @@ fn stopping_preserves_usage_but_not_the_protection_clock() {
 }
 use serde_json::json;
 
+fn identity_event(value: serde_json::Value) -> crate::sidecar_protocol::IdentityEvent {
+    serde_json::from_value(value).unwrap()
+}
+
+fn request_event(value: &serde_json::Value) -> crate::sidecar_protocol::RequestCompleteEvent {
+    serde_json::from_value(value.clone()).unwrap()
+}
+
 #[test]
 fn identity_alone_does_not_verify_and_requests_are_attributed() {
     let identity = json!({
@@ -439,7 +447,7 @@ fn identity_alone_does_not_verify_and_requests_are_attributed() {
         }]}
     });
     let mut state = GatewayState::default();
-    apply_identity_event(&mut state, identity.as_object().unwrap()).unwrap();
+    apply_identity_event(&mut state, &identity_event(identity));
     assert_eq!(
         state.status, "stopped",
         "status is decided once the catalog is in"
@@ -454,17 +462,17 @@ fn identity_alone_does_not_verify_and_requests_are_attributed() {
     for tag in [serde_json::Value::Null, json!("claude-code")] {
         let mut invalid = request.clone();
         invalid["tag"] = tag;
-        assert!(apply_request_event(&mut state, invalid.as_object().unwrap()).is_err());
+        assert!(apply_request_event(&mut state, &request_event(&invalid)).is_err());
         assert!(state.activity.is_empty());
     }
-    apply_request_event(&mut state, request.as_object().unwrap()).unwrap();
+    apply_request_event(&mut state, &request_event(&request)).unwrap();
     let verdict = json!({
         "method": "POST", "path": "/v1/messages", "status": 200, "streamed": true,
         "receipt_id": "rcpt-1", "verified": true, "rewritten": true,
         "local_policy_applied": true,
         "detail": "receipt verified", "tag": "pap:req-1:session-1:claude-code"
     });
-    apply_request_event(&mut state, verdict.as_object().unwrap()).unwrap();
+    apply_request_event(&mut state, &request_event(&verdict)).unwrap();
 
     assert_eq!(state.activity.len(), 1);
     let item = &state.activity[0];
@@ -512,7 +520,7 @@ fn proxy_receipt_and_usage_events_merge_into_one_complete_activity() {
         "detail": "receipt verified",
         "tag": "pap:req-merge:session-merge:claude-code"
     });
-    apply_request_event(&mut state, verdict.as_object().unwrap()).unwrap();
+    apply_request_event(&mut state, &request_event(&verdict)).unwrap();
 
     merge_activity(
         &mut state,
@@ -557,7 +565,7 @@ fn proxy_receipt_and_usage_events_merge_into_one_complete_activity() {
     timeout.status = 504;
     timeout.detail = "Client delivery timed out".into();
     merge_activity(&mut state, timeout);
-    apply_request_event(&mut state, verdict.as_object().unwrap()).unwrap();
+    apply_request_event(&mut state, &request_event(&verdict)).unwrap();
     assert_eq!(state.activity[0].status, 504);
     assert_eq!(state.activity[0].detail, "Client delivery timed out");
     assert_eq!(state.activity[0].input_tokens, Some(1_024));
@@ -572,7 +580,7 @@ fn proxy_receipt_and_usage_events_merge_into_one_complete_activity() {
     withheld["status"] = json!(502);
     withheld["detail"] = json!("Response withheld: receipt verification failed");
     withheld["verified"] = json!(false);
-    apply_request_event(&mut state, withheld.as_object().unwrap()).unwrap();
+    apply_request_event(&mut state, &request_event(&withheld)).unwrap();
     let proof = state
         .activity
         .iter()

@@ -9,18 +9,14 @@
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use ed25519_dalek::{Signer, SigningKey as Ed25519SigningKey};
-use private_ai_gateway::aggregator::session::{
-    AttestedSession, Claim, ClaimSource, EvidenceRef, SessionClaims, SessionDocument,
-};
-use private_ai_proxy::aci::digest::sha256_hex;
+use private_ai_proxy::aci::digest::{jcs_bytes, sha256_bare_hex, sha256_hex};
 use private_ai_proxy::aci::e2ee::{
     x25519_public_key_hex, x25519_secret_key_from_bytes, E2EE_ALGO_X25519_AESGCM,
 };
 use private_ai_proxy::aci::identity::{attestation_statement, report_data, SealedWorkloadKeyset};
 use private_ai_proxy::aci::keys::{KeyError, KeyProvider};
 use private_ai_proxy::aci::receipt::{
-    receipt_signing_input, ChannelBinding, ReceiptBuilder, UpstreamVerifiedEvent,
-    VerificationResult,
+    receipt_signing_input, ReceiptBuilder, UpstreamVerifiedEvent, VerificationResult,
 };
 use private_ai_proxy::aci::types::{
     AttestationEnvelope, AttestationReport, KeyedPublicKey, ServiceCapabilities, SourceProvenance,
@@ -89,51 +85,57 @@ pub fn vector_report() -> AttestationReport {
     }
 }
 
-/// The §8 session document, sealed once through the lib: the served bytes are
-/// the artifact and the id is the hash over them.
-pub fn vector_session() -> AttestedSession {
+/// The §8 session document. These fixtures test the relying-party parser, so
+/// they own the wire value rather than depending on the gateway's server-side
+/// session types.
+pub fn vector_session() -> Value {
     let evidence = b"example-evidence";
-    AttestedSession::seal(SessionDocument {
-        api_version: "aci/1".to_string(),
-        upstream_name: "demo-upstream".to_string(),
-        endpoint: Some("https://upstream.example.com".to_string()),
-        verifier_id: "example/1".to_string(),
-        established_at: SERVED_AT,
-        expires_at: SERVED_AT + 3_600,
-        identity: None,
-        channel_binding: vec![ChannelBinding::TlsSpkiSha256 {
-            origin: "https://upstream.example.com".to_string(),
-            spki_sha256: "d1".repeat(32),
+    json!({
+        "api_version": "aci/1",
+        "upstream_name": "demo-upstream",
+        "endpoint": "https://upstream.example.com",
+        "verifier_id": "example/1",
+        "established_at": SERVED_AT,
+        "expires_at": SERVED_AT + 3_600,
+        "channel_binding": [{
+            "type": "tls_spki_sha256",
+            "origin": "https://upstream.example.com",
+            "spki_sha256": "d1".repeat(32),
         }],
-        claims: SessionClaims {
-            tee_attested: Claim::asserted(ClaimSource::HardwareProven, "example quote verified"),
-            extra: [
-                ("gpu_arch".to_string(), "HOPPER".into()),
-                ("tcb_status".to_string(), "UpToDate".into()),
-            ]
-            .into_iter()
-            .collect(),
-            ..SessionClaims::default()
+        "claims": {
+            "tee_attested": {
+                "status": "asserted",
+                "source": "hardware_proven",
+                "reason": "example quote verified",
+            },
+            "gpu_attested": { "status": "unknown" },
+            "tcb_up_to_date": { "status": "unknown" },
+            "os_known_good": { "status": "unknown" },
+            "serving_software_known_good": { "status": "unknown" },
+            "model_weights_provenance": { "status": "unknown" },
+            "extra": {
+                "gpu_arch": "HOPPER",
+                "tcb_status": "UpToDate",
+            },
         },
-        evidence: EvidenceRef {
-            digest: Some(sha256_hex(evidence)),
-            data_uri: Some(format!(
+        "evidence": {
+            "digest": sha256_hex(evidence),
+            "data": format!(
                 "data:text/plain;base64,{}",
                 BASE64.encode(evidence)
-            )),
+            ),
         },
     })
-    .expect("fixture session seals")
 }
 
 /// The session document bytes in JCS form (§8).
 pub fn vector_session_bytes() -> Vec<u8> {
-    vector_session().bytes().to_vec()
+    jcs_bytes(&vector_session()).expect("fixture session canonicalizes")
 }
 
 /// The bare 64-hex content id over the document's JCS form (§8).
 pub fn vector_session_id() -> String {
-    vector_session().session_id().to_string()
+    sha256_bare_hex(&vector_session_bytes())
 }
 
 /// Minimal provider over the fixture receipt key (test-only custody).
