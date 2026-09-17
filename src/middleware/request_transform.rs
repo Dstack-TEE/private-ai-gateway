@@ -71,13 +71,12 @@ pub enum TransformError {
     /// A transform rejected the request body (e.g. unparseable tool-call
     /// arguments). Surfaced as a gateway-attributed failure (error_source "gateway").
     InvalidRequest {
-        /// Returned to the client. Must never name a route, provider or upstream:
-        /// this string reaches the caller verbatim, and `route <provider>:<model>`
-        /// used to be part of it.
+        /// Returned to the client verbatim, so it never names a route, provider
+        /// or upstream.
         message: String,
-        /// Operator-only context — which route could not be shaped. Logged, never
-        /// returned.
-        detail: Option<String>,
+        /// The route that could not be shaped. Logged as the `route` field,
+        /// never returned.
+        route_id: Option<String>,
     },
 }
 
@@ -85,14 +84,15 @@ impl TransformError {
     pub fn invalid_request(message: impl Into<String>) -> Self {
         TransformError::InvalidRequest {
             message: message.into(),
-            detail: None,
+            route_id: None,
         }
     }
 
-    /// Operator-only context, for the log line that accompanies the refusal.
-    pub fn detail(&self) -> Option<&str> {
+    /// The route that could not be shaped, for the log line that accompanies
+    /// the refusal.
+    pub fn route_id(&self) -> Option<&str> {
         match self {
-            TransformError::InvalidRequest { detail, .. } => detail.as_deref(),
+            TransformError::InvalidRequest { route_id, .. } => route_id.as_deref(),
             TransformError::Unsupported { .. } => None,
         }
     }
@@ -310,6 +310,7 @@ fn candidate_params(
     let derived = chat_template_reasoning_intent(&params, candidate, requested_reasoning);
     let requested_reasoning = requested_reasoning.or(derived.as_ref());
     let effective = resolve_effective_reasoning(candidate, &params, requested_reasoning);
+    let omit_output_limit = should_omit_structured_output_limit(candidate, &params);
     let object = params
         .as_object_mut()
         .ok_or_else(|| TransformError::invalid_request("request body must be a JSON object"))?;
@@ -322,12 +323,16 @@ fn candidate_params(
     if candidate.format == ProviderFormat::Openai {
         object.remove("thinking");
     }
+    if omit_output_limit {
+        object.remove("max_tokens");
+        object.remove("max_completion_tokens");
+    }
     let Some(effective) = effective else {
         return Ok(params);
     };
     validate_effective(&effective).map_err(|err| TransformError::InvalidRequest {
         message: format!("invalid effective reasoning: {err}"),
-        detail: Some(format!("route {}", candidate.route_id)),
+        route_id: Some(candidate.route_id.clone()),
     })?;
     sync_chat_template_reasoning(object, &effective);
     let reasoning_format = candidate.reasoning_format.unwrap_or_else(|| {
@@ -383,6 +388,31 @@ fn candidate_params(
         (ProviderFormat::Anthropic, _) => return invalid_reasoning(candidate, "has no adapter"),
     }
     Ok(params)
+}
+
+fn has_callable_tools(params: &Value, key: &str) -> bool {
+    params.get(key).is_some_and(|value| match value.as_array() {
+        Some(items) => !items.is_empty(),
+        None => !value.is_null(),
+    })
+}
+
+fn should_omit_structured_output_limit(candidate: &RouteCandidate, params: &Value) -> bool {
+    if candidate.format != ProviderFormat::Openai
+        || candidate
+            .reasoning_policy
+            .as_ref()
+            .and_then(|policy| policy.omit_max_tokens)
+            != Some(true)
+    {
+        return false;
+    }
+    let structured = params
+        .get("response_format")
+        .and_then(|format| format.get("type"))
+        .and_then(Value::as_str)
+        .is_some_and(|kind| matches!(kind, "json_object" | "json_schema"));
+    structured && !has_callable_tools(params, "tools") && !has_callable_tools(params, "functions")
 }
 
 /// Compute the effective reasoning config from the deployment's policy and the
@@ -550,7 +580,7 @@ fn set_chat_template_reasoning(
 fn invalid_reasoning<T>(candidate: &RouteCandidate, message: &str) -> Result<T, TransformError> {
     Err(TransformError::InvalidRequest {
         message: format!("the requested model {message}"),
-        detail: Some(format!("route {}", candidate.route_id)),
+        route_id: Some(candidate.route_id.clone()),
     })
 }
 
@@ -2594,6 +2624,58 @@ mod tests {
         // Candidate c has no policy — falls back to caller's requested reasoning.
         assert_eq!(bodies[2].1["reasoning"]["effort"], "medium");
         assert!(bodies[2].1.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn configured_structured_output_without_tools_omits_both_token_limits() {
+        let candidate: RouteCandidate = serde_json::from_value(json!({
+            "routeId": "managed:m",
+            "format": "openai",
+            "reasoningFormat": "reasoning_effort",
+            "reasoningPolicy": {
+                "override": { "effort": "none" },
+                "omitMaxTokens": true
+            }
+        }))
+        .unwrap();
+        let requested = ReasoningConfig {
+            effort: Some(ReasoningEffort::High),
+            ..Default::default()
+        };
+
+        let params = json!({
+            "response_format": { "type": "json_schema" },
+            "tools": [],
+            "max_tokens": 2000,
+            "max_completion_tokens": 2048
+        });
+        let bodies = build_candidates(
+            &params,
+            Endpoint::ChatComplete,
+            std::slice::from_ref(&candidate),
+            Some(&requested),
+            None,
+        )
+        .unwrap();
+        let body = &bodies[0].1;
+        assert!(body.get("max_tokens").is_none());
+        assert!(body.get("max_completion_tokens").is_none());
+        assert_eq!(params["max_tokens"], 2000);
+
+        let with_tools = json!({
+            "response_format": { "type": "json_schema" },
+            "tools": [{}],
+            "max_tokens": 2000
+        });
+        let bodies = build_candidates(
+            &with_tools,
+            Endpoint::ChatComplete,
+            &[candidate],
+            Some(&requested),
+            None,
+        )
+        .unwrap();
+        assert_eq!(bodies[0].1["max_tokens"], 2000);
     }
 
     #[test]

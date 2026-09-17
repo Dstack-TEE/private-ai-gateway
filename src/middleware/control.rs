@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 
 use super::config::MiddlewareConfig;
 use super::request_features::RequestFeatures;
-use super::types::{PostReport, PreConsult};
+use super::types::{PostReport, PreConsult, TenantIdentity};
 
 const DEFAULT_CONTROL_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_CONTROL_POST_TIMEOUT_MS: u64 = 10_000;
@@ -186,7 +186,7 @@ impl ControlClient {
                 if status != 200 {
                     tracing::error!(
                         status,
-                        body = %truncate(&text, 300),
+                        body_len = text.len(),
                         "consult_pre returned non-200"
                     );
                     return fail_closed();
@@ -195,8 +195,10 @@ impl ControlClient {
                     Ok(consult) => consult,
                     Err(err) => {
                         tracing::error!(
-                            error = %err,
-                            body = %truncate(&text, 300),
+                            category = ?err.classify(),
+                            line = err.line(),
+                            column = err.column(),
+                            body_len = text.len(),
                             "consult_pre returned invalid JSON"
                         );
                         fail_closed()
@@ -259,16 +261,12 @@ fn fail_closed() -> PreConsult {
         message: Some("control plane unavailable".to_string()),
         pricing: None,
         candidates: None,
-        user_id: None,
+        tenant: TenantIdentity::default(),
         virtual_key_id: None,
         spend_mode: None,
         user_tier: None,
         rate_limit: None,
     }
-}
-
-fn truncate(text: &str, max_chars: usize) -> String {
-    text.chars().take(max_chars).collect()
 }
 
 #[cfg(test)]

@@ -8,6 +8,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::aci::upstream::UpstreamError;
+use crate::aggregator::service::{ServiceError, UpstreamVerificationError};
+
 /// Opaque pricing block. Carried verbatim until cost computation lands.
 pub type PricingConfig = Value;
 
@@ -111,6 +114,9 @@ pub struct ReasoningPolicy {
     pub default_policy: Option<ReasoningConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threshold: Option<u64>,
+    /// Omit both OpenAI output-limit aliases for structured chat output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omit_max_tokens: Option<bool>,
 }
 
 /// One ordered failover candidate: a backend route id plus the upstream format.
@@ -166,10 +172,27 @@ pub struct RateLimit {
     pub reset_at: i64,
 }
 
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationScope {
+    pub organization_id: i64,
+    pub workspace_id: i64,
+}
+
+/// Anonymous requests omit identity; authenticated actors carry their resource scope.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TenantIdentity {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<i64>,
+    #[serde(flatten)]
+    pub organization: Option<OrganizationScope>,
+}
+
 /// Pre-request consult response. On `allow: false`, `status` and `message` carry
 /// the client-facing denial; otherwise `candidates` and `pricing` drive routing.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", try_from = "PreConsultWire")]
 pub struct PreConsult {
     pub allow: bool,
     #[serde(default)]
@@ -180,8 +203,8 @@ pub struct PreConsult {
     pub pricing: Option<PricingConfig>,
     #[serde(default)]
     pub candidates: Option<Vec<RouteCandidate>>,
-    #[serde(default)]
-    pub user_id: Option<i64>,
+    #[serde(flatten)]
+    pub tenant: TenantIdentity,
     #[serde(default)]
     pub virtual_key_id: Option<i64>,
     #[serde(default)]
@@ -190,6 +213,79 @@ pub struct PreConsult {
     pub user_tier: Option<String>,
     #[serde(default)]
     pub rate_limit: Option<RateLimit>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PreConsultWire {
+    allow: bool,
+    #[serde(default)]
+    status: Option<u16>,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    pricing: Option<PricingConfig>,
+    #[serde(default)]
+    candidates: Option<Vec<RouteCandidate>>,
+    #[serde(default)]
+    user_id: Option<i64>,
+    #[serde(default)]
+    organization_id: Option<i64>,
+    #[serde(default)]
+    workspace_id: Option<i64>,
+    #[serde(default)]
+    virtual_key_id: Option<i64>,
+    #[serde(default)]
+    spend_mode: Option<SpendMode>,
+    #[serde(default)]
+    user_tier: Option<String>,
+    #[serde(default)]
+    rate_limit: Option<RateLimit>,
+}
+
+impl TryFrom<PreConsultWire> for PreConsult {
+    type Error = &'static str;
+
+    fn try_from(wire: PreConsultWire) -> Result<Self, Self::Error> {
+        let user_id = match wire.user_id {
+            Some(user_id) if user_id > 0 => Some(user_id),
+            None => None,
+            Some(_) => return Err("userId must be a positive integer when provided"),
+        };
+        let organization = match (wire.organization_id, wire.workspace_id) {
+            (Some(organization_id), Some(workspace_id))
+                if organization_id > 0 && workspace_id > 0 =>
+            {
+                Some(OrganizationScope {
+                    organization_id,
+                    workspace_id,
+                })
+            }
+            (None, None) => None,
+            _ => {
+                return Err("organizationId and workspaceId must be positive and provided together")
+            }
+        };
+        if organization.is_some() != user_id.is_some() {
+            return Err("userId, organizationId and workspaceId must be provided together");
+        }
+
+        Ok(Self {
+            allow: wire.allow,
+            status: wire.status,
+            message: wire.message,
+            pricing: wire.pricing,
+            candidates: wire.candidates,
+            tenant: TenantIdentity {
+                user_id,
+                organization,
+            },
+            virtual_key_id: wire.virtual_key_id,
+            spend_mode: wire.spend_mode,
+            user_tier: wire.user_tier,
+            rate_limit: wire.rate_limit,
+        })
+    }
 }
 
 /// Which component a gateway-synthesized failure (no real upstream attempt) is
@@ -202,6 +298,105 @@ pub enum ErrorSource {
     Control,
     Upstream,
     Gateway,
+}
+
+/// Why a request or attempt failed, as a closed vocabulary.
+///
+/// This is the only description of a failure that a usage report can carry.
+/// No variant holds a string, so an upstream response body, a provider's error prose, and anything a caller sent
+/// cannot be recorded through it: the compiler rejects the attempt. Choosing
+/// a variant may read an upstream body — for a provider-declared kind, a fixed
+/// capacity marker, or the caller's own image URL — but what is kept is the
+/// variant alone.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorClass {
+    /// The control plane refused the request.
+    ControlDenied,
+    /// The control plane could not be consulted.
+    ControlUnavailable,
+    /// The control plane offered no route for the requested model.
+    ModelNotFound,
+    /// No candidate route could be given a provider-shaped request body.
+    RequestShapingFailed,
+    /// No attested route or session was eligible; no prompt was forwarded.
+    NoEligibleAttestedRoute,
+    /// The upstream answered with a non-2xx status.
+    UpstreamHttpError,
+    /// The upstream declared that this gateway's account with it is unpaid.
+    UpstreamQuotaExhausted,
+    /// The upstream rate-limited the gateway or signalled it has no capacity.
+    UpstreamCapacity,
+    /// The upstream could not fetch an image URL the caller supplied.
+    UpstreamImageFetchFailed,
+    /// The upstream did not answer before the gateway's deadline.
+    UpstreamTimeout,
+    /// The connection to the upstream failed.
+    UpstreamTransport,
+    /// The upstream's channel did not match its verified binding.
+    UpstreamChannelBindingMismatch,
+    /// The upstream could not be verified.
+    UpstreamVerificationFailed,
+    /// The upstream answered 2xx with a body the gateway could not use.
+    UpstreamMalformedResponse,
+    /// The upstream answered 2xx with a Responses envelope whose `status` is
+    /// `failed`.
+    UpstreamResponseFailed,
+    /// A 2xx stream carried an error event.
+    StreamInbandError,
+    /// A 2xx stream ended without its terminal marker.
+    StreamTruncated,
+    /// A stream line exceeded the gateway's size cap.
+    StreamLineOverflow,
+    /// The caller disconnected before the response completed.
+    ClientDisconnected,
+    /// End-to-end encryption of the request or response failed.
+    E2eeFailed,
+    /// The receipt for the response could not be produced.
+    ReceiptFailed,
+    /// The response could not be finalized after the upstream completed.
+    DownstreamFinalizerFailed,
+    /// A failure inside the gateway not covered above.
+    InternalError,
+}
+
+impl From<&UpstreamError> for ErrorClass {
+    fn from(err: &UpstreamError) -> Self {
+        match err {
+            UpstreamError::Routing(_) => Self::InternalError,
+            UpstreamError::Transport(_) => Self::UpstreamTransport,
+            UpstreamError::Timeout(_) => Self::UpstreamTimeout,
+            UpstreamError::ChannelBindingMismatch(_) => Self::UpstreamChannelBindingMismatch,
+            UpstreamError::Upstream { .. } => Self::UpstreamHttpError,
+        }
+    }
+}
+
+impl From<&ServiceError> for ErrorClass {
+    fn from(err: &ServiceError) -> Self {
+        match err {
+            ServiceError::UpstreamVerification(
+                UpstreamVerificationError::NoEligibleAttestedRoute(_)
+                | UpstreamVerificationError::NoEligibleAttestedSession(_),
+            ) => Self::NoEligibleAttestedRoute,
+            ServiceError::UpstreamVerification(
+                UpstreamVerificationError::NoVerifierResult
+                | UpstreamVerificationError::VerifierFailed(_),
+            ) => Self::UpstreamVerificationFailed,
+            ServiceError::Upstream(upstream) => upstream.into(),
+            ServiceError::E2ee(_) => Self::E2eeFailed,
+            ServiceError::Receipt(_) | ServiceError::NoReceiptKey => Self::ReceiptFailed,
+            ServiceError::TestKeysInProduction
+            | ServiceError::InvalidSourceProvenance
+            | ServiceError::Keyset(_)
+            | ServiceError::InvalidNonce(_)
+            | ServiceError::Key(_)
+            | ServiceError::SessionStore(_)
+            | ServiceError::Metrics(_)
+            | ServiceError::DownstreamTlsDomainMissing
+            | ServiceError::DownstreamTlsDomainUnknown(_) => Self::InternalError,
+        }
+    }
 }
 
 /// Post-request usage report. Fire-and-forget; drives billing and request logs.
@@ -237,16 +432,136 @@ pub struct PostReport {
     pub pricing: Option<PricingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spend_mode: Option<SpendMode>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_id: Option<i64>,
+    #[serde(flatten)]
+    pub tenant: TenantIdentity,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub virtual_key_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_source: Option<ErrorSource>,
+    /// Serialized as `errorMessage`: the class's fixed token, never free text.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error_message: Option<String>,
+    pub error_message: Option<ErrorClass>,
     /// Echo of the pre-consult request features' prefix hash, so billing can
     /// record which deployment actually served this prefix (cache affinity).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefix_hash: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ErrorClass, PreConsult};
+
+    /// The full reporting vocabulary. A report's `errorMessage` is always one
+    /// of these tokens; growing the list is a deliberate, reviewed change.
+    #[test]
+    fn error_class_serializes_to_its_fixed_token() {
+        let vocabulary = [
+            (ErrorClass::ControlDenied, "control_denied"),
+            (ErrorClass::ControlUnavailable, "control_unavailable"),
+            (ErrorClass::ModelNotFound, "model_not_found"),
+            (ErrorClass::RequestShapingFailed, "request_shaping_failed"),
+            (
+                ErrorClass::NoEligibleAttestedRoute,
+                "no_eligible_attested_route",
+            ),
+            (ErrorClass::UpstreamHttpError, "upstream_http_error"),
+            (
+                ErrorClass::UpstreamQuotaExhausted,
+                "upstream_quota_exhausted",
+            ),
+            (ErrorClass::UpstreamCapacity, "upstream_capacity"),
+            (
+                ErrorClass::UpstreamImageFetchFailed,
+                "upstream_image_fetch_failed",
+            ),
+            (ErrorClass::UpstreamTimeout, "upstream_timeout"),
+            (ErrorClass::UpstreamTransport, "upstream_transport"),
+            (
+                ErrorClass::UpstreamChannelBindingMismatch,
+                "upstream_channel_binding_mismatch",
+            ),
+            (
+                ErrorClass::UpstreamVerificationFailed,
+                "upstream_verification_failed",
+            ),
+            (
+                ErrorClass::UpstreamMalformedResponse,
+                "upstream_malformed_response",
+            ),
+            (
+                ErrorClass::UpstreamResponseFailed,
+                "upstream_response_failed",
+            ),
+            (ErrorClass::StreamInbandError, "stream_inband_error"),
+            (ErrorClass::StreamTruncated, "stream_truncated"),
+            (ErrorClass::StreamLineOverflow, "stream_line_overflow"),
+            (ErrorClass::ClientDisconnected, "client_disconnected"),
+            (ErrorClass::E2eeFailed, "e2ee_failed"),
+            (ErrorClass::ReceiptFailed, "receipt_failed"),
+            (
+                ErrorClass::DownstreamFinalizerFailed,
+                "downstream_finalizer_failed",
+            ),
+            (ErrorClass::InternalError, "internal_error"),
+        ];
+        for (class, token) in vocabulary {
+            assert_eq!(
+                serde_json::to_value(class).unwrap(),
+                serde_json::json!(token)
+            );
+        }
+    }
+
+    #[test]
+    fn tenant_identity_accepts_scoped_and_anonymous_requests() {
+        let user_with_resources: PreConsult = serde_json::from_value(serde_json::json!({
+            "allow": true,
+            "userId": 7,
+            "organizationId": 11,
+            "workspaceId": 13
+        }))
+        .unwrap();
+        assert_eq!(user_with_resources.tenant.user_id, Some(7));
+        assert_eq!(
+            user_with_resources
+                .tenant
+                .organization
+                .unwrap()
+                .organization_id,
+            11
+        );
+
+        let anonymous: PreConsult = serde_json::from_value(serde_json::json!({
+            "allow": false
+        }))
+        .unwrap();
+        assert!(anonymous.tenant.user_id.is_none());
+        assert!(anonymous.tenant.organization.is_none());
+    }
+
+    #[test]
+    fn tenant_identity_rejects_invalid_wire_shapes() {
+        for invalid in [
+            serde_json::json!({ "allow": true, "userId": 7 }),
+            serde_json::json!({ "allow": true, "userId": 0 }),
+            serde_json::json!({
+                "allow": true,
+                "userId": 7,
+                "organizationId": 11
+            }),
+            serde_json::json!({
+                "allow": true,
+                "userId": 7,
+                "organizationId": 11,
+                "workspaceId": 0
+            }),
+            serde_json::json!({
+                "allow": true,
+                "organizationId": 11,
+                "workspaceId": 13
+            }),
+        ] {
+            assert!(serde_json::from_value::<PreConsult>(invalid).is_err());
+        }
+    }
 }

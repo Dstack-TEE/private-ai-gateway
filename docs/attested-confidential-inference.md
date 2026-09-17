@@ -71,7 +71,7 @@ Save these response values:
 Generate a fresh nonce before fetching the attestation report.
 
 ```bash
-NONCE="$(openssl rand -hex 16)"
+NONCE="$(openssl rand -hex 32)"
 
 curl "$API_BASE_URL/v1/aci/attestation?nonce=$NONCE" \
   -o attestation-report.json

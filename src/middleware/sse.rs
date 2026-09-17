@@ -28,14 +28,10 @@ use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{ServiceError, ServiceResponseStream};
 use crate::sse_protocol::SseProtocol;
 
-use super::completion::{
-    debug_gated_detail, detail_snippet, finish_reasons_anomalous, sanitize_identifier,
-    sanitize_reason, should_log_failure, truncate,
-};
 use super::control::ControlClient;
 use super::pricing;
 use super::response_transform;
-use super::types::{ErrorSource, PostReport, SpendMode};
+use super::types::{ErrorClass, ErrorSource, PostReport, SpendMode, TenantIdentity};
 
 /// Cap on the partial-line reassembly buffer. An upstream that streams bytes
 /// without ever sending a `\n` would otherwise grow it without bound until the
@@ -64,13 +60,13 @@ fn metered_status(outcome: Outcome, upstream_status: u16, failure_status: u16) -
     }
 }
 
-/// How a stream failed, for the usage report: the status to record, the error's
-/// own words (already bounded), and which component broke when it was not the
-/// upstream. A stream that ends any other way carries the default.
-#[derive(Debug, Clone)]
+/// How a stream failed, for the usage report: the status to record, the class
+/// of the failure, and which component broke when it was not the upstream. A
+/// stream that ends any other way carries the default.
+#[derive(Debug, Clone, Copy)]
 pub(super) struct StreamFailure {
     pub status: u16,
-    pub message: Option<String>,
+    pub class: Option<ErrorClass>,
     pub source: Option<ErrorSource>,
 }
 
@@ -78,7 +74,7 @@ impl Default for StreamFailure {
     fn default() -> Self {
         Self {
             status: 502,
-            message: None,
+            class: None,
             source: None,
         }
     }
@@ -98,7 +94,7 @@ impl StreamFailure {
         };
         Self {
             status,
-            message: Some(truncate(&err.to_string(), 500)),
+            class: Some(ErrorClass::from(err)),
             source,
         }
     }
@@ -112,7 +108,7 @@ pub struct StreamReport {
     pub request_model: String,
     pub pricing: Option<Value>,
     pub spend_mode: Option<SpendMode>,
-    pub user_id: Option<i64>,
+    pub tenant: TenantIdentity,
     pub virtual_key_id: Option<i64>,
     pub selected_route_id: Option<String>,
     pub attempt_index: u32,
@@ -146,13 +142,13 @@ impl StreamReport {
         // count it against the serving route.
         let downstream =
             matches!(outcome, Outcome::Failed) && self.downstream_abort.load(Ordering::Relaxed);
-        let (error_source, error_message) = if downstream {
+        let (error_source, error_class) = if downstream {
             (
                 Some(ErrorSource::Gateway),
-                Some("downstream finalizer aborted the response".to_string()),
+                Some(ErrorClass::DownstreamFinalizerFailed),
             )
         } else if matches!(outcome, Outcome::Failed) {
-            (failure.source, failure.message)
+            (failure.source, failure.class)
         } else {
             (None, None)
         };
@@ -169,10 +165,10 @@ impl StreamReport {
             usage,
             pricing: self.pricing.clone(),
             spend_mode: self.spend_mode,
-            user_id: self.user_id,
+            tenant: self.tenant,
             virtual_key_id: self.virtual_key_id,
             error_source,
-            error_message,
+            error_message: error_class,
             prefix_hash: self.prefix_hash.clone(),
         };
         let control = self.control.clone();
@@ -213,40 +209,17 @@ pub struct MeterStream {
     inner_done: bool,
     last_usage: Option<Value>,
     ttft_ms: Option<u64>,
-    /// Diagnostic: any sign the response reached an end, including a per-choice
-    /// `finish_reason`. Feeds the settle log and anomaly detection, not the
-    /// outcome — the outcome comes from `framing`.
-    saw_terminal: bool,
     saw_error: bool,
     /// The client-facing outcome (Completed / Failed) is read from this shared
     /// observer, byte-accurate about SSE framing, so it agrees with what the
     /// finalizer does to the body. The line parse below stays for cost, TTFT and
-    /// diagnostics.
+    /// in-band error detection.
     framing: crate::sse_framing::SseFramingObserver,
     settled: bool,
     /// Recorded when the inner stream errors, so the settle reports the
-    /// failure's own status and words rather than a generic 502.
+    /// failure's own status and class rather than a generic 502.
     failure: StreamFailure,
-    // Observation state for the `request_outcome` settle log. Always
-    // collected; the distinct-reason list is capped so a pathological stream
-    // cannot grow it without bound.
-    data_events: u64,
-    // Sanitized at collection: length-capped, single-line. Raw values are
-    // judged for anomaly once and never retained (a provider-controlled
-    // reason near the SSE line cap must not be held per stream).
-    finish_reasons: Vec<String>,
-    anomalous_finish: bool,
-    terminal_marker: Option<&'static str>,
-    error_detail: Option<String>,
-    // Whether raw error detail may be collected at all, resolved once per
-    // stream from the `request_outcome` target's debug level: the 240-char
-    // output bound must also bound the transient memory producing it, so at
-    // the default level in-band error values are never serialized.
-    detail_enabled: bool,
 }
-
-/// Cap on distinct finish reasons retained for the observation log.
-const MAX_REASONS: usize = 8;
 
 impl MeterStream {
     pub fn new(inner: ServiceResponseStream, report: StreamReport, protocol: SseProtocol) -> Self {
@@ -261,19 +234,9 @@ impl MeterStream {
             inner_done: false,
             last_usage: None,
             ttft_ms: None,
-            saw_terminal: false,
             saw_error: false,
             framing: crate::sse_framing::SseFramingObserver::for_protocol(protocol),
             settled: false,
-            data_events: 0,
-            finish_reasons: Vec::new(),
-            anomalous_finish: false,
-            terminal_marker: None,
-            error_detail: None,
-            detail_enabled: tracing::enabled!(
-                target: "request_outcome",
-                tracing::Level::DEBUG
-            ),
         }
     }
 
@@ -308,69 +271,20 @@ impl MeterStream {
             return;
         }
         self.settled = true;
-        let status = metered_status(outcome, self.report.upstream_status, self.failure.status);
-        // Failures are always logged; a Completed stream is logged only when
-        // its finish reasons are nonstandard (an upstream error smuggled
-        // through a "success").
-        let anomalous_finish = self.anomalous_finish;
-        if (outcome != Outcome::Completed && should_log_failure(status)) || anomalous_finish {
-            let out_tokens = self.last_usage.as_ref().and_then(|u| {
-                u.get("completion_tokens")
-                    .or_else(|| u.get("output_tokens"))
-                    .and_then(Value::as_u64)
+        let mut failure = self.failure;
+        if outcome == Outcome::Failed && failure.class.is_none() {
+            failure.class = Some(if self.saw_error || self.framing.saw_error() {
+                ErrorClass::StreamInbandError
+            } else {
+                ErrorClass::StreamTruncated
             });
-            tracing::info!(
-                target: "request_outcome",
-                request_id = %self.report.request_id,
-                model = %sanitize_identifier(&self.report.request_model),
-                route = %self.report.selected_route_id.as_deref().unwrap_or(""),
-                attempt = self.report.attempt_index,
-                upstream_status = self.report.upstream_status,
-                status,
-                outcome = ?outcome,
-                anomalous_finish,
-                ttft_ms = self.ttft_ms,
-                duration_ms = self.report.started.elapsed().as_millis() as u64,
-                data_events = self.data_events,
-                out_tokens,
-                finish_reasons = %self.finish_reasons.join(","),
-                terminal = %self.terminal_marker.unwrap_or("none"),
-                saw_error = self.saw_error,
-                downstream_abort = self.report.downstream_abort.load(Ordering::Relaxed),
-                detail = %debug_gated_detail(self.error_detail.as_deref().unwrap_or("")),
-                "stream settled"
-            );
-        }
-        let mut failure = std::mem::take(&mut self.failure);
-        if outcome == Outcome::Failed && failure.message.is_none() {
-            failure.message = Some(
-                if self.saw_error || self.framing.saw_error() {
-                    "upstream stream carried an in-band error event"
-                } else {
-                    "upstream stream ended without a terminal marker"
-                }
-                .to_string(),
-            );
         }
         self.report
             .settle(outcome, self.last_usage.take(), self.ttft_ms, failure);
     }
 
-    // Judge the raw reason once, then retain only a sanitized copy for the
-    // observation log: distinct values, in arrival order, capped.
-    fn record_reason(&mut self, reason: &str) {
-        if finish_reasons_anomalous([reason]) {
-            self.anomalous_finish = true;
-        }
-        let sanitized = sanitize_reason(reason);
-        if self.finish_reasons.len() >= MAX_REASONS || self.finish_reasons.contains(&sanitized) {
-            return;
-        }
-        self.finish_reasons.push(sanitized);
-    }
-
-    // Detect in-band terminal/error signals, surface-agnostic (works on either
-    // the OpenAI or Anthropic shape).
+    // Detect in-band error signals, surface-agnostic (works on either the OpenAI
+    // or Anthropic shape).
     fn detect_outcome(&mut self, parsed: &Value) {
         let error_value = parsed
             .get("error")
@@ -384,47 +298,12 @@ impl MeterStream {
                     .and_then(|r| r.get("error"))
                     .filter(|e| !e.is_null())
             });
-        if let Some(error_value) = error_value {
+        // Only the event's presence is noted; its contents are not read.
+        if error_value.is_some() {
             self.saw_error = true;
-            let message = error_value
-                .get("message")
-                .and_then(Value::as_str)
-                .or_else(|| error_value.as_str())
-                .unwrap_or("in-band stream error");
-            // The usage record carries the error's own words (bounded copy;
-            // the full value can approach the 16 MiB SSE line cap and is never
-            // retained). Without this, a 200 stream failed by an in-band error
-            // settles as a bare 502 that nothing can be asked about.
-            if self.failure.message.is_none() {
-                self.failure.message = Some(truncate(message, 500));
-            }
-            // Log detail stays debug-gated separately: it may be echoed to the
-            // request_outcome line, whose exposure policy is the operator's.
-            if self.error_detail.is_none() && self.detail_enabled {
-                self.error_detail = Some(detail_snippet(message.as_bytes()));
-            }
-        }
-        let response_status = parsed
-            .get("response")
-            .and_then(|r| r.get("status"))
-            .and_then(Value::as_str);
-        // Each terminal counts only on the surface that defines it. A stray
-        // event from another protocol is a diagnostic signal at most; treating
-        // it as end-of-stream would report a stream completed while the
-        // finalizer was appending a client-visible error to it.
-        let event_type = parsed.get("type").and_then(Value::as_str);
-        if event_type == Some("message_stop") {
-            self.saw_terminal = true;
-            self.terminal_marker.get_or_insert("message_stop");
-        }
-        let responses_terminal = matches!(response_status, Some("completed") | Some("incomplete"))
-            || matches!(
-                event_type,
-                Some("response.completed" | "response.incomplete" | "response.failed")
-            );
-        if responses_terminal {
-            self.saw_terminal = true;
-            self.terminal_marker.get_or_insert("response_status");
+            self.failure
+                .class
+                .get_or_insert(ErrorClass::StreamInbandError);
         }
         let mut reasons: Vec<&str> = parsed
             .get("choices")
@@ -443,19 +322,11 @@ impl MeterStream {
         {
             reasons.push(reason);
         }
-        for reason in reasons {
-            if !reason.is_empty() {
-                self.saw_terminal = true;
-                self.terminal_marker.get_or_insert("finish_reason");
-                self.record_reason(reason);
-                if reason == "error" || reason.ends_with("_error") {
-                    self.saw_error = true;
-                    if self.error_detail.is_none() {
-                        self.error_detail =
-                            Some(format!("finish_reason={}", sanitize_reason(reason)));
-                    }
-                }
-            }
+        if reasons
+            .iter()
+            .any(|reason| *reason == "error" || reason.ends_with("_error"))
+        {
+            self.saw_error = true;
         }
     }
 
@@ -532,17 +403,14 @@ impl MeterStream {
                     }
                     // SSE allows `data:{...}` as well as `data: {...}` (at most
                     // one space after the colon is stripped). Match the field, not
-                    // the space, or a space-less line is missed — dropping its
-                    // usage/terminal and misrecording a clean end as a 502. `trim`
-                    // then covers that space and a trailing CR from CRLF endings.
+                    // the space, or a space-less line is missed and its usage
+                    // dropped. `trim` then covers that space and a trailing CR
+                    // from CRLF endings.
                     let Some(data) = line.strip_prefix("data:") else {
                         return line.to_string();
                     };
                     let data = data.trim();
-                    self.data_events += 1;
                     if data == "[DONE]" {
-                        self.saw_terminal = true;
-                        self.terminal_marker.get_or_insert("done");
                         return line.to_string();
                     }
                     let Ok(parsed) = serde_json::from_str::<Value>(data) else {
@@ -625,12 +493,9 @@ impl Stream for MeterStream {
                         Fed::Overflow => {
                             this.inner_done = true;
                             this.buf.clear();
-                            if this.failure.message.is_none() {
-                                this.failure.message = Some("sse line overflow".to_string());
-                            }
-                            if this.error_detail.is_none() {
-                                this.error_detail = Some("sse line overflow".to_string());
-                            }
+                            this.failure
+                                .class
+                                .get_or_insert(ErrorClass::StreamLineOverflow);
                             let outcome = this.protocol_outcome(false);
                             this.settle(outcome);
                             return Poll::Ready(Some(Err(ServiceError::Upstream(
@@ -646,9 +511,6 @@ impl Stream for MeterStream {
                 Poll::Ready(Some(Err(err))) => {
                     this.inner_done = true;
                     this.buf.clear();
-                    if this.error_detail.is_none() {
-                        this.error_detail = Some(detail_snippet(err.to_string().as_bytes()));
-                    }
                     this.failure = StreamFailure::from_error(&err);
                     let outcome = this.protocol_outcome(false);
                     this.settle(outcome);
@@ -688,7 +550,7 @@ impl Drop for MeterStream {
         if !self.started && self.report.downstream_abort.load(Ordering::Relaxed) {
             self.failure = StreamFailure {
                 status: 502,
-                message: Some("response pipeline dropped before the body was consumed".to_string()),
+                class: Some(ErrorClass::DownstreamFinalizerFailed),
                 source: Some(ErrorSource::Gateway),
             };
             self.settle(Outcome::Failed);
@@ -945,7 +807,7 @@ mod tests {
             request_model: "m".to_string(),
             pricing: None,
             spend_mode: None,
-            user_id: None,
+            tenant: TenantIdentity::default(),
             virtual_key_id: None,
             selected_route_id: None,
             attempt_index: 0,
@@ -959,121 +821,31 @@ mod tests {
         MeterStream::new(inner, report, protocol)
     }
 
-    // Observation state: finish reasons are collected distinct and in order,
-    // the terminal marker records how the stream ended, and data events are
-    // counted — the raw material for the `request_outcome` settle log.
+    // An in-band error event sets the failure class and nothing else: no part
+    // of the event is copied into the meter's state.
     #[test]
-    fn observation_state_collects_reasons_and_terminal() {
+    fn in_band_error_records_a_class_and_none_of_its_text() {
         let mut meter = test_meter();
-        let chunk = Bytes::from(concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"x\"},\"finish_reason\":null}]}\n",
-            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n",
-            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n",
-            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n",
-            "data: [DONE]\n",
-        ));
-        assert!(matches!(meter.process(&chunk), Fed::Emit(_)));
-
-        assert_eq!(meter.data_events, 5, "every data line is counted");
-        assert_eq!(
-            meter.finish_reasons,
-            vec!["tool_calls".to_string(), "stop".to_string()],
-            "reasons dedupe and keep arrival order"
-        );
-        assert_eq!(
-            meter.terminal_marker,
-            Some("finish_reason"),
-            "first terminal signal wins"
-        );
-        assert!(!meter.saw_error);
-    }
-
-    // An in-band error event is captured (truncated) as the `detail` for the
-    // settle log, and only the first error is retained. Detail collection is
-    // gated on the target's debug level, resolved once per stream.
-    #[test]
-    fn observation_captures_in_band_error_detail() {
-        let mut meter = test_meter();
-        meter.detail_enabled = true;
-        let chunk = Bytes::from(concat!(
-            "data: {\"error\":{\"message\":\"upstream exploded\",\"code\":500}}\n",
-            "data: {\"error\":{\"message\":\"second error ignored\"}}\n",
-        ));
+        let chunk =
+            Bytes::from("data: {\"error\":{\"message\":\"CANARY-in-band\",\"code\":500}}\n");
         assert!(matches!(meter.process(&chunk), Fed::Emit(_)));
         assert!(meter.saw_error);
-        let detail = meter.error_detail.as_deref().expect("detail captured");
+        assert_eq!(meter.failure.class, Some(ErrorClass::StreamInbandError));
         assert!(
-            detail.contains("upstream exploded"),
-            "first error message retained: {detail}"
-        );
-        assert!(!detail.contains("second error"), "first error wins");
-    }
-
-    // Without request_outcome=debug the in-band error value is never
-    // serialized into detail state — the output bound must also bound the
-    // transient memory producing it.
-    #[test]
-    fn in_band_error_detail_not_collected_at_default_level() {
-        let mut meter = test_meter();
-        meter.detail_enabled = false;
-        let chunk =
-            Bytes::from("data: {\"error\":{\"message\":\"upstream exploded\",\"code\":500}}\n");
-        assert!(matches!(meter.process(&chunk), Fed::Emit(_)));
-        assert!(meter.saw_error, "classification is unaffected");
-        assert!(
-            meter.error_detail.is_none(),
-            "no detail state at info level"
+            !format!("{:?}", meter.failure).contains("CANARY"),
+            "failure state holds no upstream text"
         );
     }
 
-    // A hostile finish reason (multi-line, near the SSE line cap) must be
-    // judged on the raw value but stored only in sanitized, bounded form —
-    // never retained raw (memory amplification) nor logged with newlines
-    // (log-record forgery).
+    // An error-ish finish_reason (no error object) still marks the stream.
     #[test]
-    fn hostile_finish_reason_is_bounded_and_single_line_at_collection() {
-        let mut meter = test_meter();
-        let hostile = format!("evil\nFORGED LOG LINE\n{}", "x".repeat(1024));
-        let chunk = Bytes::from(format!(
-            "data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":{}}}]}}\n",
-            serde_json::to_string(&hostile).unwrap()
-        ));
-        assert!(matches!(meter.process(&chunk), Fed::Emit(_)));
-        assert!(meter.anomalous_finish, "raw value judged anomalous");
-        assert_eq!(meter.finish_reasons.len(), 1);
-        let stored = &meter.finish_reasons[0];
-        assert!(stored.chars().count() <= 32, "length-capped: {stored:?}");
-        assert!(
-            !stored.contains('\n') && !stored.contains('\r'),
-            "single-line"
-        );
-    }
-
-    // An error-ish finish_reason (no error object) still yields a detail.
-    #[test]
-    fn observation_captures_error_finish_reason_detail() {
+    fn error_finish_reason_marks_the_stream_as_errored() {
         let mut meter = test_meter();
         let chunk = Bytes::from(
             "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"upstream_error\"}]}\n",
         );
         assert!(matches!(meter.process(&chunk), Fed::Emit(_)));
         assert!(meter.saw_error);
-        assert_eq!(
-            meter.error_detail.as_deref(),
-            Some("finish_reason=upstream_error")
-        );
-    }
-
-    // Observation state is always collected — there is no off switch — so a
-    // settle can decide on failure/anomaly logging for any request.
-    #[test]
-    fn observation_always_collects() {
-        let mut meter = test_meter();
-        let chunk =
-            Bytes::from("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n");
-        assert!(matches!(meter.process(&chunk), Fed::Emit(_)));
-        assert_eq!(meter.finish_reasons, vec!["stop".to_string()]);
-        assert!(meter.saw_terminal, "classification is unaffected");
     }
 
     // A usage-bearing SSE event split across two upstream chunks must still be
@@ -1100,7 +872,6 @@ mod tests {
             .expect("usage captured across split");
         assert_eq!(usage["prompt_tokens"], 11);
         assert_eq!(usage["completion_tokens"], 7);
-        assert!(meter.saw_terminal, "[DONE] recorded as a clean terminal");
 
         // Byte fidelity: the buffered chunk is emitted intact, nothing dropped.
         assert_eq!(out.as_ref(), [a.as_ref(), b.as_ref()].concat().as_slice());
@@ -1142,7 +913,6 @@ mod tests {
         let usage = meter.last_usage.as_ref().expect("usage captured");
         assert_eq!(usage["prompt_tokens"], 3);
         assert_eq!(usage["completion_tokens"], 9);
-        assert!(meter.saw_terminal, "space-less [DONE] is a clean terminal");
     }
 
     // A complete short line followed by an oversized still-open trailing run must

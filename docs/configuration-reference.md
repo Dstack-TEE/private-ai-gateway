@@ -94,39 +94,32 @@ out-of-process hop. When the section is omitted the gateway serves directly.
 | `middleware.send_request_features` | `true` | Extract content-derived request features (a low-biased token-count estimate — deliberately under real tokenizer output on ordinary text, but a heuristic, not a guaranteed bound; the control plane may steer on it but never empties a candidate list on it — plus input modalities, tools/response-format flags, reasoning intent, and a prefix hash for cache affinity) and send them in the pre-request consult. Content never leaves the gateway — only numbers, closed enums and a one-way hash. `false` restores the featureless consult body byte-for-byte; it is the rollback lever if extraction misbehaves. |
 | `middleware.tee_only_domains` | `[]` | Hosts (matched against the request `Host` header, case-insensitive) that serve TEE models only. On these hosts the model catalog is forced to `?tee=true`, a non-TEE model is refused with `404` at the pre-consult (before any forward), and serving is forced to attested (`aci_verified`) upstreams — a client cannot opt out via `provider.aci_verified:false`. Two predicates apply by design: the catalog/consult gate uses the model's `is_tee` capability flag, while serving is enforced against the deployment's attestation, so a listed `is_tee` model with no live attested deployment still fails closed (`503`). Empty (the default) leaves every host unrestricted. |
 
-Request outcome observation is always on and needs no configuration: every
-failed request that reaches the middleware completion path (consult denials,
-routing/shaping failures, upstream errors, stream failures, client
-disconnects; final 429s excepted, they are recorded per-attempt in the usage
-pipeline) emits a `request_outcome` tracing line carrying the client-facing
-and upstream status, route, attempt chain length, TTFT/duration, finish
-reasons, and terminal marker. Requests rejected before that path — malformed
-JSON, E2EE setup failures — do not produce lines, so
-complete request accounting still needs the usage pipeline; an oversized body
-does emit a `phase=body_too_large` line carrying the request id, and is
-answered with the surface's JSON `413` envelope (the Anthropic envelope shape
-also carries the id; the OpenAI shape, matching the upstream wire format,
-does not).
-A client that disconnects before the upstream's first byte is reported to the
-usage pipeline as a `499` with the route that was in flight and no TTFT; a
-gateway-enforced connect or read deadline is reported as a `504`, per attempt
-and as the client-facing status. Consult denials
-that carry a key identity (`userId` on the pre-consult response), every
-429/5xx denial, and the no-route 404 are also reported to the usage
-pipeline (`errorSource: "control"`, no route) so the control plane can
-account for them; unauthenticated denials (401/402/403) are trace-only. A
-request emits
-at most one primary line; a late receipt/E2EE finalization failure appends
-one supplemental `phase=finalize_error` line for the same `request_id`
-(aggregate by unique request id, letting `finalize_error` supersede).
-Completed
-responses are logged only when their finish reasons fall outside the standard
-OpenAI/Anthropic set (`anomalous_finish=true`) — the "error smuggled through a
-success" class. The `detail` field (a 240-char snippet of the upstream error
-body, which may quote request fragments) is emitted only when the
-`request_outcome` target is enabled at `debug`; at the default level it is
-blank. Silence or re-route the target via `RUST_LOG` (the subscriber uses
-`EnvFilter`).
+Failed requests are accounted for in the usage pipeline, one report per
+attempt; the gateway keeps no per-request log of them. A client that
+disconnects before the upstream's first byte is reported as a `499` with the
+route that was in flight and no TTFT; a gateway-enforced connect or read
+deadline is reported as a `504`, per attempt and as the client-facing status.
+Consult denials that carry a key identity (`userId` on the pre-consult
+response), every 429/5xx denial, and the no-route 404 are reported with
+`errorSource: "control"` and no route, so the control plane can account for
+them; unauthenticated denials (401/402/403) are not reported. Requests rejected
+before the middleware completion path — malformed JSON, E2EE setup failures, an
+oversized body (answered with the surface's JSON `413` envelope) — are not
+reported either.
+
+A report describes a failure by `status`, `errorSource`, and `errorMessage`.
+`errorMessage` holds a closed vocabulary and never free text: an upstream
+response body, a provider's error message, and request content have no field to
+travel in.
+
+| Origin | `errorMessage` values |
+| --- | --- |
+| Caller | `client_disconnected` |
+| Control plane | `control_denied`, `control_unavailable`, `model_not_found` |
+| Upstream response | `upstream_http_error`, `upstream_quota_exhausted`, `upstream_capacity`, `upstream_image_fetch_failed`, `upstream_malformed_response`, `upstream_response_failed` |
+| Upstream connection | `upstream_timeout`, `upstream_transport`, `upstream_channel_binding_mismatch`, `upstream_verification_failed` |
+| Stream | `stream_inband_error`, `stream_truncated`, `stream_line_overflow` |
+| Gateway | `request_shaping_failed`, `no_eligible_attested_route`, `e2ee_failed`, `receipt_failed`, `downstream_finalizer_failed`, `internal_error` |
 
 ```json
 {
