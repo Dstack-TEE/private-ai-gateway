@@ -1672,12 +1672,25 @@ async fn messages_report_and_price_every_usage_bucket_in_both_serving_modes() {
         "prompt_tokens": 1000, "completion_tokens": 200, "total_tokens": 1200
     }));
     let sse = |body: &Value| format!("data: {body}\n\ndata: [DONE]\n\n");
+    // A delta that repeats the input counters as zeros must not erase them.
+    let zero_filled_delta = anthropic_stream.replace(
+        r#""usage":{"output_tokens":200}"#,
+        r#""usage":{"input_tokens":0,"output_tokens":200,"cache_read_input_tokens":0,"cache_creation_input_tokens":null}"#,
+    );
+    assert_ne!(zero_filled_delta, anthropic_stream);
     for (format, streaming, wire, expected, cost) in [
         // 500 input + 400 cache read * 0.1 + 100 cache creation * 1.25 + 200 output * 2
         (
             "anthropic",
             true,
             anthropic_stream,
+            anthropic_usage.clone(),
+            1065,
+        ),
+        (
+            "anthropic",
+            true,
+            zero_filled_delta,
             anthropic_usage.clone(),
             1065,
         ),

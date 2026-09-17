@@ -936,7 +936,6 @@ pub(super) fn now_millis() -> u128 {
         .unwrap_or(0)
 }
 
-// Read a token count, accepting integer- or float-encoded numbers.
 /// The cache counters of a Chat usage object: tokens read from cache, under
 /// either name an upstream uses, and tokens written to it.
 pub(super) fn chat_cache_tokens(usage: &Value) -> (Option<i64>, Option<i64>) {
@@ -988,6 +987,7 @@ pub(super) fn anthropic_usage(
     usage
 }
 
+// Read a token count, accepting integer- or float-encoded numbers.
 pub(super) fn i64_field(value: &Value, key: &str) -> i64 {
     value
         .get(key)

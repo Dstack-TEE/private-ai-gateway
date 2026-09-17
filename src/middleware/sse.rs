@@ -519,12 +519,17 @@ impl MeterStream {
     }
 }
 
-/// `start` overlaid with every counter `delta` states: the delta is the later,
-/// cumulative figure, and the start supplies what the delta leaves out.
+/// `start` completed by `delta`. Anthropic's counters are cumulative, so where
+/// both events state one the larger is the later figure: a delta that repeats
+/// the input counters as zeros cannot erase what the start reported.
 fn complete_usage(mut start: Value, delta: &Value) -> Value {
     if let (Some(merged), Some(delta)) = (start.as_object_mut(), delta.as_object()) {
         for (key, value) in delta {
-            if !value.is_null() {
+            let keeps_start = match (merged.get(key).and_then(Value::as_f64), value.as_f64()) {
+                (Some(started), Some(latest)) => started > latest,
+                _ => value.is_null(),
+            };
+            if !keeps_start {
                 merged.insert(key.clone(), value.clone());
             }
         }
