@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
 
 use axum::body::Bytes;
@@ -25,14 +25,23 @@ use super::response_transform::{
     self, custom_tool_call_item, custom_tool_input, function_call_item, i64_field,
     invalid_finish_reason_error, invalid_tool_call_arguments_error,
     invalid_tool_call_identity_error, item_id, map_finish_reason, message_item,
-    normalize_function_call_arguments, now_millis, now_secs, output_text_part, reasoning_item,
-    reasoning_text, refusal_part, responses_object, responses_terminal, responses_usage,
-    transform_finish_reason, ResponseIdentity, ResponsesHead,
+    normalize_function_call_arguments, normalize_reasoning_usage_value, now_millis, now_secs,
+    output_text_part, reasoning_item, reasoning_text, refusal_part, responses_object,
+    responses_terminal, responses_usage, transform_finish_reason, ResponseIdentity, ResponsesHead,
 };
 use super::sse::MAX_SSE_LINE_BYTES;
 use super::types::ProviderFormat;
 
 const STRICT_OPENAI_COMPLIANCE: bool = true;
+
+/// Where the Responses bridge leaves the upstream's own usage for the meter.
+///
+/// The meter sits after the bridge and would otherwise read the Responses usage
+/// the client receives. That shape has no field for cache-creation tokens, and
+/// its `input_tokens` is a total where the control plane reads the same name as
+/// cache-excluded. The chat usage the upstream sent is unambiguous, and is what
+/// the buffered path reports.
+pub type UpstreamUsage = Arc<Mutex<Option<Value>>>;
 
 /// Which streaming transform applies.
 ///
@@ -42,7 +51,7 @@ const STRICT_OPENAI_COMPLIANCE: bool = true;
 pub enum StreamTransform {
     AnthropicToOpenaiChat,
     OpenaiToAnthropicMessages,
-    OpenaiChatToResponses(Arc<Value>, Arc<ResponseIdentity>),
+    OpenaiChatToResponses(Arc<Value>, Arc<ResponseIdentity>, UpstreamUsage),
     AnthropicCompleteToOpenai,
     ExcludeReasoning,
     /// Applied to every stream, including same-format passthrough, which is the
@@ -55,7 +64,7 @@ impl StreamTransform {
     fn provider(&self) -> &'static str {
         match self {
             StreamTransform::OpenaiToAnthropicMessages => "openai",
-            StreamTransform::OpenaiChatToResponses(_, _) => "openai",
+            StreamTransform::OpenaiChatToResponses(..) => "openai",
             StreamTransform::ExcludeReasoning => "openai",
             StreamTransform::SanitizeResponse(_, _) => "openai",
             _ => "anthropic",
@@ -102,8 +111,8 @@ impl StreamTransform {
             StreamTransform::OpenaiToAnthropicMessages => {
                 openai_to_anthropic_messages_stream(&event, fallback_id, state)
             }
-            StreamTransform::OpenaiChatToResponses(echo, identity) => {
-                openai_chat_to_responses_stream(&event, echo, identity, state)
+            StreamTransform::OpenaiChatToResponses(echo, identity, upstream_usage) => {
+                openai_chat_to_responses_stream(&event, echo, identity, upstream_usage, state)
             }
             StreamTransform::AnthropicCompleteToOpenai => anthropic_complete_stream(&event),
             StreamTransform::ExcludeReasoning | StreamTransform::SanitizeResponse(_, _) => {
@@ -1246,6 +1255,7 @@ fn openai_chat_to_responses_stream(
     event: &ParsedEvent,
     echo: &Value,
     identity: &ResponseIdentity,
+    upstream_usage: &UpstreamUsage,
     stream_state: &mut StreamState,
 ) -> Result<Option<String>, ()> {
     let payload = event.data.as_deref().unwrap_or("").trim();
@@ -1265,6 +1275,11 @@ fn openai_chat_to_responses_stream(
     }
     if let Some(usage) = parsed.get("usage").filter(|usage| !usage.is_null()) {
         state.usage = Some(usage.clone());
+        let mut reported = usage.clone();
+        let _ = normalize_reasoning_usage_value(&mut reported);
+        *upstream_usage
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(reported);
     }
     let choice = parsed
         .get("choices")
@@ -1630,7 +1645,7 @@ impl Stream for SseTransformStream {
                             this.fail("provider ended before sending a finish reason");
                         }
                     }
-                    if let StreamTransform::OpenaiChatToResponses(echo, _) = &this.transform {
+                    if let StreamTransform::OpenaiChatToResponses(echo, ..) = &this.transform {
                         if this.pending_error.is_none()
                             && this.state.responses.started
                             && !this.state.responses.terminated
@@ -2153,7 +2168,11 @@ mod tests {
         });
         let stream = SseTransformStream::new(
             inner,
-            StreamTransform::OpenaiChatToResponses(Arc::new(json!({})), identity),
+            StreamTransform::OpenaiChatToResponses(
+                Arc::new(json!({})),
+                identity,
+                UpstreamUsage::default(),
+            ),
         );
         let collected: Vec<Result<Bytes, ServiceError>> = stream.collect().await;
         let mut events = Vec::new();

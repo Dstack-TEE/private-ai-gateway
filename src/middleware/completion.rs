@@ -39,7 +39,7 @@ use super::request_transform::{
     ResponsesCandidateInput, TransformError,
 };
 use super::sse::{KeepAliveStream, MeterStream, StreamReport};
-use super::stream_transform::{SseTransformStream, StreamTransform};
+use super::stream_transform::{SseTransformStream, StreamTransform, UpstreamUsage};
 use super::types::{
     ErrorClass, ErrorSource, PostReport, ProviderFormat, RouteCandidate, SpendMode, TenantIdentity,
 };
@@ -1195,14 +1195,24 @@ pub(super) fn build_metered_pipeline(
     } else {
         transformed
     };
-    let surfaced: ServiceResponseStream =
-        match inputs.echo.as_ref().filter(|_| !responses_passthrough) {
-            Some(echo) => Box::pin(SseTransformStream::new(
-                visible,
-                StreamTransform::OpenaiChatToResponses(echo.clone(), inputs.identity.clone()),
-            )),
-            None => visible,
-        };
+    // The bridge reshapes usage for the client, so it hands the meter the
+    // upstream's own usage to report.
+    let bridge = inputs
+        .echo
+        .as_ref()
+        .filter(|_| !responses_passthrough)
+        .map(|echo| (echo.clone(), UpstreamUsage::default()));
+    let surfaced: ServiceResponseStream = match &bridge {
+        Some((echo, upstream_usage)) => Box::pin(SseTransformStream::new(
+            visible,
+            StreamTransform::OpenaiChatToResponses(
+                echo.clone(),
+                inputs.identity.clone(),
+                upstream_usage.clone(),
+            ),
+        )),
+        None => visible,
+    };
     // Unconditional, unlike the two above: same-format streaming skips every
     // other transform, and that is exactly the path that used to hand the
     // provider's bytes to the client verbatim.
@@ -1210,11 +1220,15 @@ pub(super) fn build_metered_pipeline(
         surfaced,
         StreamTransform::SanitizeResponse(inputs.identity.clone(), inputs.endpoint),
     ));
-    Box::pin(MeterStream::new(
+    let meter = MeterStream::new(
         sanitized,
         report,
         errors::sse_protocol(inputs.endpoint_path),
-    ))
+    );
+    Box::pin(match bridge {
+        Some((_, upstream_usage)) => meter.with_upstream_usage(upstream_usage),
+        None => meter,
+    })
 }
 
 impl Meter {

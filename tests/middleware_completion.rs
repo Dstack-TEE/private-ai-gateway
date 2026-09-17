@@ -1470,6 +1470,108 @@ async fn responses_tool_argument_failures_preserve_usage_and_meter_the_outcome()
     }
 }
 
+// The Responses bridge reshapes usage for the client. The usage report must
+// not follow it: Responses usage has no field for cache-creation tokens, so a
+// report read off the client stream would bill them at the input rate. Both
+// serving modes report the chat usage the upstream sent.
+#[tokio::test]
+async fn bridged_responses_report_the_upstream_usage_in_both_serving_modes() {
+    let anthropic_usage = json!({
+        "input_tokens": 50, "output_tokens": 5,
+        "cache_read_input_tokens": 30, "cache_creation_input_tokens": 20
+    });
+    let anthropic_stream = [
+        json!({ "type": "message_start", "message": {
+            "id": "m", "model": "claude", "role": "assistant", "content": [],
+            "usage": anthropic_usage
+        }}),
+        json!({ "type": "content_block_start", "index": 0,
+                "content_block": { "type": "text", "text": "" } }),
+        json!({ "type": "content_block_delta", "index": 0,
+                "delta": { "type": "text_delta", "text": "hi" } }),
+        json!({ "type": "content_block_stop", "index": 0 }),
+        json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" },
+                "usage": { "output_tokens": 5 } }),
+        json!({ "type": "message_stop" }),
+    ]
+    .iter()
+    .map(|event| {
+        format!(
+            "event: {}\ndata: {event}\n\n",
+            event["type"].as_str().unwrap()
+        )
+    })
+    .collect::<String>();
+    let anthropic_message = json!({
+        "id": "m", "type": "message", "role": "assistant", "model": "claude",
+        "content": [{ "type": "text", "text": "hi" }],
+        "stop_reason": "end_turn", "usage": anthropic_usage
+    });
+    let chat_completion = json!({
+        "id": "u", "model": "m",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": "hi" },
+            "delta": { "content": "hi" },
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 100, "completion_tokens": 5, "total_tokens": 105,
+            "prompt_tokens_details": { "cached_tokens": 40 }
+        }
+    });
+
+    for (format, route, buffered, streamed, expected) in [
+        (
+            "anthropic",
+            "anthropic:claude",
+            anthropic_message.to_string(),
+            anthropic_stream,
+            json!({
+                "prompt_tokens": 100, "completion_tokens": 5, "total_tokens": 105,
+                "cache_read_input_tokens": 30, "cache_creation_input_tokens": 20
+            }),
+        ),
+        (
+            "openai",
+            "compatible:gpt-test",
+            chat_completion.to_string(),
+            format!("data: {chat_completion}\n\ndata: [DONE]\n\n"),
+            chat_completion["usage"].clone(),
+        ),
+    ] {
+        for (streaming, wire, content_type) in [
+            (false, buffered.clone(), "application/json"),
+            (true, streamed.clone(), "text/event-stream"),
+        ] {
+            let (control_url, posts) = spawn_control_capturing(
+                200,
+                json!({
+                    "allow": true,
+                    "candidates": [{ "routeId": route, "format": format }],
+                    "userId": 7, "organizationId": 11, "workspaceId": 13
+                }),
+            )
+            .await;
+            let (service, _) = build_recording_service(200, wire.into_bytes(), content_type);
+            let response = middleware(control_url)
+                .handle_completion(&service, responses_input(streaming))
+                .await;
+            let (_, body) = raw_body(response).await;
+            assert!(
+                body.contains("input_tokens"),
+                "the client still receives Responses usage: {body}"
+            );
+
+            let report = wait_for_post(&posts, |r| r["selectedRouteId"] == json!(route)).await;
+            assert_eq!(
+                report["usage"], expected,
+                "{format} upstream, streaming={streaming}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn meter_stream_injects_cost_classifies_completed_and_reports() {
     let (control_url, posts) = spawn_control_capturing(200, json!({})).await;
