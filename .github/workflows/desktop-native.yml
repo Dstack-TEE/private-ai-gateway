@@ -104,9 +104,9 @@ jobs:
             ${{ env.CARGO_TARGET_DIR }}/*/*/.fingerprint
             ${{ env.CARGO_TARGET_DIR }}/*/*/deps
             ${{ env.CARGO_TARGET_DIR }}/*/*/build
-          key: pap-rust-v1-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'apps/desktop/aci/Cargo.toml', 'apps/desktop/gateway/Cargo.lock', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.lock', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml') }}
+          key: pap-rust-v1-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'apps/desktop/aci/Cargo.toml', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml') }}
           restore-keys: |
-            pap-rust-v1-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'apps/desktop/aci/Cargo.toml', 'apps/desktop/gateway/Cargo.lock', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.lock', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml') }}-partial-
+            pap-rust-v1-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'apps/desktop/aci/Cargo.toml', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml') }}-partial-
             pap-rust-v1-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-
       - name: Install Linux desktop dependencies
         run: |
@@ -146,17 +146,17 @@ jobs:
         run: npm run build:sidecars:debug
       - name: Verify Rust sources
         run: |
-          cargo fmt --manifest-path apps/desktop/aci/Cargo.toml -- --check
-          cargo +1.89 fmt --manifest-path apps/desktop/gateway/Cargo.toml -- --check
-          cargo +1.89 fmt --manifest-path apps/desktop/runtime/Cargo.toml -- --check
+          cargo fmt --package private-ai-proxy-aci -- --check
+          cargo +1.89 fmt --package private-ai-proxy-gateway -- --check
+          cargo +1.89 fmt --package private-ai-proxy-runtime -- --check
           cargo +1.89 fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
-          cargo clippy --locked --all-targets --manifest-path apps/desktop/aci/Cargo.toml -- -D warnings
-          cargo +1.89 clippy --locked --all-targets --manifest-path apps/desktop/gateway/Cargo.toml -- -D warnings
-          cargo +1.89 clippy --locked --all-targets --manifest-path apps/desktop/runtime/Cargo.toml -- -D warnings
+          cargo clippy --locked --all-targets --package private-ai-proxy-aci -- -D warnings
+          cargo +1.89 clippy --locked --all-targets --package private-ai-proxy-gateway -- -D warnings
+          cargo +1.89 clippy --locked --all-targets --package private-ai-proxy-runtime -- -D warnings
           cargo +1.89 clippy --locked --all-targets --manifest-path apps/desktop/src-tauri/Cargo.toml -- -D warnings
-          cargo test --locked --manifest-path apps/desktop/aci/Cargo.toml
-          cargo +1.89 test --locked --manifest-path apps/desktop/gateway/Cargo.toml
-          cargo +1.89 test --locked --manifest-path apps/desktop/runtime/Cargo.toml
+          cargo test --locked --package private-ai-proxy-aci
+          cargo +1.89 test --locked --package private-ai-proxy-gateway
+          cargo +1.89 test --locked --package private-ai-proxy-runtime
           cargo +1.89 test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
           cargo test --locked --bin private-ai-proxy --features desktop-client
           cargo test --locked --test private_ai_proxy_cli --features desktop-client

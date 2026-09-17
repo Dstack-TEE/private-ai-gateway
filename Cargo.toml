@@ -6,11 +6,11 @@ description = "Rust implementation of the Attested Confidential Inference (ACI) 
 license = "Apache-2.0"
 
 [workspace]
-members = [".", "apps/desktop/aci"]
-exclude = [
+members = [
+    ".",
+    "apps/desktop/aci",
     "apps/desktop/gateway",
     "apps/desktop/runtime",
-    "apps/desktop/src-tauri",
 ]
 resolver = "2"
 
