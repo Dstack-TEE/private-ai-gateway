@@ -466,7 +466,15 @@ impl MeterStream {
                             .pricing
                             .as_ref()
                             .expect("inject implies pricing");
-                        let cost = pricing::compute_cost(usage_obj, pricing);
+                        // Priced from the usage that is reported, so the cost
+                        // shown is the cost billed.
+                        let upstream_usage = self.upstream_usage.as_ref().and_then(|slot| {
+                            slot.lock().unwrap_or_else(PoisonError::into_inner).clone()
+                        });
+                        let cost = pricing::compute_cost(
+                            upstream_usage.as_ref().unwrap_or(&*usage_obj),
+                            pricing,
+                        );
                         if let Some(usage_map) = usage_obj.as_object_mut() {
                             usage_map.insert("cost".to_string(), pricing::cost_to_json(cost));
                         }

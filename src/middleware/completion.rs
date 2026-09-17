@@ -524,8 +524,14 @@ pub async fn run(
                     transformed = response_transform::openai_chat_to_responses(transformed, echo);
                 }
 
+                // Priced from the usage that is reported, so the cost shown is the
+                // cost billed: the bridge's Responses usage cannot carry
+                // cache-creation tokens.
                 if let Some(pricing_config) = consult.pricing.as_ref().filter(|p| !p.is_null()) {
-                    if let Some(usage) = transformed.get("usage").cloned() {
+                    if let Some(usage) = raw_usage
+                        .clone()
+                        .or_else(|| transformed.get("usage").cloned())
+                    {
                         let cost = pricing::compute_cost(&usage, pricing_config);
                         if let Some(usage_obj) =
                             transformed.get_mut("usage").and_then(Value::as_object_mut)

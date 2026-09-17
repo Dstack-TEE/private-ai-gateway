@@ -1473,9 +1473,10 @@ async fn responses_tool_argument_failures_preserve_usage_and_meter_the_outcome()
 // The Responses bridge reshapes usage for the client. The usage report must
 // not follow it: Responses usage has no field for cache-creation tokens, so a
 // report read off the client stream would bill them at the input rate. Both
-// serving modes report the chat usage the upstream sent.
+// serving modes report the chat usage the upstream sent, and price the cost
+// shown to the client from that same usage.
 #[tokio::test]
-async fn bridged_responses_report_the_upstream_usage_in_both_serving_modes() {
+async fn bridged_responses_report_and_price_the_upstream_usage_in_both_serving_modes() {
     let anthropic_usage = json!({
         "input_tokens": 50, "output_tokens": 5,
         "cache_read_input_tokens": 30, "cache_creation_input_tokens": 20
@@ -1521,7 +1522,13 @@ async fn bridged_responses_report_the_upstream_usage_in_both_serving_modes() {
         }
     });
 
-    for (format, route, buffered, streamed, expected) in [
+    // Distinct rates per bucket: a token priced from the wrong bucket, or a
+    // cache-creation token priced as input, changes the cost.
+    let pricing = json!({
+        "inputCostPerToken": "1", "outputCostPerToken": "2",
+        "cacheReadCostPerToken": "0.1", "cacheCreationCostPerToken": "1.25"
+    });
+    for (format, route, buffered, streamed, expected, cost) in [
         (
             "anthropic",
             "anthropic:claude",
@@ -1531,6 +1538,8 @@ async fn bridged_responses_report_the_upstream_usage_in_both_serving_modes() {
                 "prompt_tokens": 100, "completion_tokens": 5, "total_tokens": 105,
                 "cache_read_input_tokens": 30, "cache_creation_input_tokens": 20
             }),
+            // 50 input + 30 cache read * 0.1 + 20 cache creation * 1.25 + 5 output * 2
+            88,
         ),
         (
             "openai",
@@ -1538,6 +1547,8 @@ async fn bridged_responses_report_the_upstream_usage_in_both_serving_modes() {
             chat_completion.to_string(),
             format!("data: {chat_completion}\n\ndata: [DONE]\n\n"),
             chat_completion["usage"].clone(),
+            // 60 input + 40 cache read * 0.1 + 5 output * 2
+            74,
         ),
     ] {
         for (streaming, wire, content_type) in [
@@ -1549,6 +1560,7 @@ async fn bridged_responses_report_the_upstream_usage_in_both_serving_modes() {
                 json!({
                     "allow": true,
                     "candidates": [{ "routeId": route, "format": format }],
+                    "pricing": pricing,
                     "userId": 7, "organizationId": 11, "workspaceId": 13
                 }),
             )
@@ -1558,16 +1570,21 @@ async fn bridged_responses_report_the_upstream_usage_in_both_serving_modes() {
                 .handle_completion(&service, responses_input(streaming))
                 .await;
             let (_, body) = raw_body(response).await;
-            assert!(
-                body.contains("input_tokens"),
-                "the client still receives Responses usage: {body}"
-            );
+            let client_usage = if streaming {
+                sse_events(&body)
+                    .into_iter()
+                    .find(|event| event["type"] == "response.completed")
+                    .map(|event| event["response"]["usage"].clone())
+                    .expect("response.completed")
+            } else {
+                serde_json::from_str::<Value>(&body).unwrap()["usage"].clone()
+            };
+            let context = format!("{format} upstream, streaming={streaming}");
+            assert_eq!(client_usage["input_tokens"], 100, "{context}");
+            assert_eq!(client_usage["cost"], cost, "{context}");
 
             let report = wait_for_post(&posts, |r| r["selectedRouteId"] == json!(route)).await;
-            assert_eq!(
-                report["usage"], expected,
-                "{format} upstream, streaming={streaming}"
-            );
+            assert_eq!(report["usage"], expected, "{context}");
         }
     }
 }
