@@ -7,11 +7,11 @@ item.
 
 ## Verifier coverage
 
-1. **Private AI Proxy's ACI verifier has no custody policy.** §9.1(5) requires the verifier
+1. **The `aci` CLI has no custody policy.** §9.1(5) requires the verifier
    policy to check private-key custody (for this deployment, the dstack KMS
    signature chain in `attestation.evidence.key_custody`). The in-tree
    dstack chain validation (`crates/aci/src/aci/verifier/dstack.rs`) is not wired into
-   the CLI, so `private-ai-proxy verify` reports id-5 as an honest `skip`, never a pass.
+   the CLI, so `aci verify` reports id-5 as an honest `skip`, never a pass.
    The top-line verdict and exit code do not distinguish a skip from a pass:
    a run can end `VERIFIED` (exit 0) with custody unevaluated. The skip and
    its reason are always printed in the transcript and counted in the
@@ -43,7 +43,7 @@ item.
    seals per-instance sessions with an empty `evidence` object
    (`record_attested_upstream_session`), keeping them content-addressed on
    per-instance facts only. Consequence: the §9.2 deep-audit step fails
-   closed on Chutes-cited sessions (Private AI Proxy upstream-2; verifier-ts
+   closed on Chutes-cited sessions (`aci` CLI upstream-2; verifier-ts
    `checkSessionEvidence`) — a §9.2(4) deep audit is impossible for Chutes
    even once built (see the §9.2 audits item below), while receipt
    verification and the §9.1/§9.3 checks are unaffected. The
@@ -184,7 +184,7 @@ item.
 17. **The §9.2 session audits stop short of evidence appraisal.** Both
     verifiers prove the cited session hashes to its id, the validity window
     holds, and the evidence data hashes to its digest — §9.2(1)-(2). The
-    Private AI Proxy also appraises the typed claims against a caller policy
+    `aci` CLI also appraises the typed claims against a caller policy
     (§9.2(3), `--require-claim` on audit/sessions/send/serve); verifier-ts
     still only formats claims into the upstream detail. Neither implements
     §9.2(4), appraising the evidence itself. Candidate work items: a

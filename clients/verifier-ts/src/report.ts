@@ -116,7 +116,7 @@ function pushEqual(checks: Check[], name: string, actual: string, expected: stri
  * the RTMR3 the raw TDX quote states, then checks `sha256(app_compose)` equals
  * the measured `compose-hash`. Proves the compose against the quote's *stated*
  * RTMR3 only — a genuine, TCB-current quote needs a quote verifier (dcap-qvl.js /
- * Private AI Proxy), and whether the compose is acceptable is caller policy. Throws
+ * the `aci` CLI), and whether the compose is acceptable is caller policy. Throws
  * {@link AciFormatError} only for malformed evidence, never for a failed check.
  */
 export async function verifyComposeMeasurement(

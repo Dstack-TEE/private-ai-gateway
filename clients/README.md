@@ -21,14 +21,14 @@ and native coding-agent integrations:
   Both runtime transports and the CLI can pin reviewed RTMR3-bound compose hashes;
   self-declared repository and commit fields are informational labels.
   Key custody (§9.1 check 5) is an honest skip in both verifiers; the channel
-  check (6) needs an observed SPKI (or `private-ai-proxy serve` for a
+  check (6) needs an observed SPKI (or the `aci` CLI / `aci serve` proxy for a
   pinned channel) — this client ships no E2EE (§6) this round.
-- [`private-ai-proxy`](../apps/desktop/cli) — the unified command-line client.
-  It reuses the gateway's verification code:
-  `private-ai-proxy verify` (live attestation), `private-ai-proxy audit` (saved artifacts),
-  `private-ai-proxy sessions` (the §9.2 audit of the service's current attested
-  sessions, with a `--require-claim` claims policy), `private-ai-proxy send` (one
-  inference with receipt verification), and `private-ai-proxy serve` (a local verifying
+- `aci` — the ACI-focused alias provided by the unified command-line client at
+  [`../apps/desktop/cli`](../apps/desktop/cli). It reuses the gateway's verification code:
+  `aci verify` (live attestation), `aci audit` (saved artifacts),
+  `aci sessions` (the §9.2 audit of the service's current attested sessions,
+  with a `--require-claim` claims policy), `aci send` (one inference with
+  receipt verification), and `aci serve` (a local verifying
   proxy: forwards any endpoint over the pinned channel, records each
   exchange's digests for on-demand receipt verification, and pins sessions
   per §5.3 — a fixed `--session` list, or a `--require-claim` policy that
