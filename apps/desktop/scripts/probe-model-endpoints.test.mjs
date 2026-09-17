@@ -144,18 +144,21 @@ test("an auth failure during streaming stops further requests and leaves checks 
 test("rate limits count as compatibility and later models are still probed", async () => {
   let requests = 0;
   const report = await probe({
-    endpoint: "https://tee.redpill.ai", key: "test-key", concurrency: 1, basic: true,
-    fetchImpl: async (url) => {
+    endpoint: "https://tee.redpill.ai", key: "test-key", concurrency: 1,
+    modelIds: ["model-a", "model-b"], surfaceNames: ["responses"],
+    fetchImpl: async (url, options) => {
       if (url.endsWith("/models")) return Response.json({ data: [{ id: "model-a" }, { id: "model-b" }] });
       requests++;
-      if (requests === 1) return Response.json({ error: { code: "rate_limit" } }, { status: 429 });
-      const surface = url.split("/v1/")[1];
-      return Response.json(surface === "responses" ? { object: "response", status: "completed", output: [] }
-        : surface === "messages" ? { type: "message", role: "assistant", content: [] }
-          : { choices: [{ message: { role: "assistant", content: "OK" } }] });
+      const body = JSON.parse(options.body);
+      if (body.model === "model-a") {
+        return Response.json({ error: { code: "rate_limit" } }, { status: 429 });
+      }
+      if (!body.stream) return Response.json({ object: "response", status: "completed", output: [] });
+      const resumed = body.input.length > 1;
+      return sse(events("responses", Boolean(body.tools) && !resumed));
     },
   });
-  assert.equal(requests, 6);
+  assert.equal(requests, 5);
   assert.equal(report.results[0].status, "supported");
   assert.equal(report.results[0].reason, "temporary_rate_or_quota_limit");
   assert.equal(report.results.at(-1).status, "supported");

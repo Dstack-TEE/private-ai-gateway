@@ -6,15 +6,11 @@ import { Button } from "./components/ui/button";
 import { ToggleGroup, ToggleGroupItem } from "./components/ui/toggle-group";
 import { FieldLabel } from "./components/ui/field";
 import { Item, ItemContent, ItemTitle, ItemDescription, ItemActions } from "./components/ui/item";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "./components/ui/dialog";
 import { Progress } from "./components/ui/progress";
 import { useErrorAlert } from "./lib/error-alert";
 
-export function useUpdates(api: DesktopApi, native = false) {
+export function useUpdates(api: DesktopApi) {
   const [operation, setBusy] = useState<"installing" | "changing">();
-  const [progress, setProgress] = useState<UpdateProgress>();
-  const [installDialogOpen, setInstallDialogOpen] = useState(false);
-  const [installError, setInstallError] = useState<string>();
   const mounted = useRef(false);
   const inFlight = useRef(false);
   const readUpdate = useCallback(async () => {
@@ -40,8 +36,7 @@ export function useUpdates(api: DesktopApi, native = false) {
   }, [client, refetch]);
   useEffect(() => {
     mounted.current = true;
-    const unsubscribe = api.onUpdateProgress(setProgress);
-    return () => { mounted.current = false; unsubscribe(); };
+    return () => { mounted.current = false; };
   }, [api]);
 
   const changeChannel = async (next: UpdateChannel) => {
@@ -68,10 +63,7 @@ export function useUpdates(api: DesktopApi, native = false) {
     let dialogOpened = false;
     try {
       if (!await api.confirm({ title: "Install update?", message: "Protection will stop and connected agent configurations will be restored before the app restarts. In-flight requests may be interrupted.", confirmLabel: "Install and Restart" })) return;
-      setInstallError(undefined);
-      setProgress(undefined);
-      if (native) await api.openNativeDialog("update-progress");
-      else setInstallDialogOpen(true);
+      await api.openNativeDialog("update-progress");
       dialogOpened = true;
       await api.installUpdate();
     } catch {
@@ -79,7 +71,6 @@ export function useUpdates(api: DesktopApi, native = false) {
         if (!dialogOpened) {
           reportError("Could not open the update dialog. Please try again.");
         } else {
-          if (!native) setInstallError("The update could not be installed. Close this dialog and try again later.");
           // Installing consumes the native update handle. Refresh it for a retry
           // without duplicating the install error outside its progress window.
           await refresh();
@@ -90,20 +81,7 @@ export function useUpdates(api: DesktopApi, native = false) {
       if (mounted.current) setBusy(undefined);
     }
   };
-  return { info, currentVersion, busy, error, progress, channel, changeChannel, install, installDialogOpen, installError, closeInstallDialog: () => setInstallDialogOpen(false) };
-}
-
-export function UpdateProgressDialog({ updates }: { updates: ReturnType<typeof useUpdates> }): React.JSX.Element {
-  return <Dialog open={updates.installDialogOpen} onOpenChange={(open, details) => {
-    if (!open && !updates.installError) { details.cancel(); return; }
-    if (!open) updates.closeInstallDialog();
-  }}>
-    <DialogContent showCloseButton={Boolean(updates.installError)}>
-      <DialogHeader><DialogTitle>{updates.installError ? "Update failed" : "Installing update"}</DialogTitle><DialogDescription>{updates.installError ?? "The app will restart when installation completes."}</DialogDescription></DialogHeader>
-      {!updates.installError && <UpdateProgressMeter progress={updates.progress} />}
-      {updates.installError && <DialogFooter><Button variant="outline" onClick={updates.closeInstallDialog}>Done</Button></DialogFooter>}
-    </DialogContent>
-  </Dialog>;
+  return { info, currentVersion, busy, error, channel, changeChannel, install };
 }
 
 export function UpdateProgressMeter({ progress }: { progress?: UpdateProgress }): React.JSX.Element {

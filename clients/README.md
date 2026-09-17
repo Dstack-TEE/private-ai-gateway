@@ -24,7 +24,8 @@ and native coding-agent integrations:
   check (6) needs an observed SPKI (or the `aci` CLI / `aci serve` proxy for a
   pinned channel) — this client ships no E2EE (§6) this round.
 - `aci` — the ACI-focused alias provided by the unified command-line client at
-  [`../apps/desktop/cli`](../apps/desktop/cli). The gateway reuses the same verification code:
+  [`../apps/desktop/cli`](../apps/desktop/cli). Gateway and Proxy independently
+  implement their respective sides of the public ACI wire protocol:
   `aci verify` (live attestation), `aci audit` (saved artifacts),
   `aci sessions` (the §9.2 audit of the service's current attested sessions,
   with a `--require-claim` claims policy), `aci send` (one inference with

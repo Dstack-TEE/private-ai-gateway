@@ -1,19 +1,14 @@
 use super::*;
 
-fn version_one_inventory() -> EndpointInventory {
-    let mut value = serde_json::to_value(EndpointInventory::bundled().unwrap()).unwrap();
-    value["schemaVersion"] = json!(1);
-    value.as_object_mut().unwrap().remove("reasoningEffort");
-    for entry in value["results"].as_array_mut().unwrap() {
-        entry.as_object_mut().unwrap().remove("checks");
-    }
-    EndpointInventory::parse(&serde_json::to_vec(&value).unwrap()).unwrap()
-}
-
 #[test]
 fn downloaded_inventory_rejects_unknown_schema_duplicate_and_partial_observations() {
     let valid = serde_json::to_value(EndpointInventory::bundled().unwrap()).unwrap();
     for malformed in [
+        {
+            let mut value = valid.clone();
+            value["schemaVersion"] = json!(1);
+            value
+        },
         {
             let mut value = valid.clone();
             value["schemaVersion"] = json!(3);
@@ -72,7 +67,7 @@ fn observations_are_scoped_and_never_add_unlisted_models() {
         1,
     )
     .unwrap();
-    let inventory = version_one_inventory();
+    let inventory = EndpointInventory::bundled().unwrap();
     for endpoint in ["https://tee.redpill.ai", "https://inference.phala.com/v1"] {
         let mut catalog = original.clone();
         catalog
@@ -81,13 +76,18 @@ fn observations_are_scoped_and_never_add_unlisted_models() {
         assert_ne!(catalog.revision, original.revision);
         assert_eq!(catalog.openai_list(), original.openai_list());
         assert!(catalog
-            .models
-            .iter()
-            .all(|model| model.agent_surfaces.as_ref().is_some_and(Vec::is_empty)));
-        assert!(catalog
-            .for_agent_surface(Surface::ChatCompletions)
-            .models
-            .is_empty());
+            .get("new-unprobed-model")
+            .unwrap()
+            .agent_surfaces
+            .as_ref()
+            .is_some_and(Vec::is_empty));
+        assert_eq!(
+            catalog
+                .for_agent_surface(Surface::ChatCompletions)
+                .models
+                .len(),
+            2
+        );
         assert_eq!(catalog.for_surface(Surface::Responses).models.len(), 1);
         assert_eq!(catalog.for_surface(Surface::Messages).models.len(), 2);
         assert_eq!(
@@ -113,9 +113,8 @@ fn observations_are_scoped_and_never_add_unlisted_models() {
 }
 
 #[test]
-fn agent_projections_require_all_version_two_checks_without_blocking_basic_api_access() {
+fn agent_projections_require_all_checks_without_blocking_direct_api_access() {
     let mut value = serde_json::to_value(EndpointInventory::bundled().unwrap()).unwrap();
-    value["schemaVersion"] = json!(2);
     for entry in value["results"].as_array_mut().unwrap() {
         entry["checks"] = json!({
             "streaming": {"status": "supported", "reason": "valid_event_stream", "httpStatus": 200},
@@ -127,10 +126,10 @@ fn agent_projections_require_all_version_two_checks_without_blocking_basic_api_a
         }
     }
     let inventory = EndpointInventory::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
-    let mut basic = serde_json::to_value(version_one_inventory()).unwrap();
-    basic["checkedAt"] = json!("2026-09-16T23:59:59Z");
-    let basic = EndpointInventory::parse(&serde_json::to_vec(&basic).unwrap()).unwrap();
-    assert!(!basic.is_newer_than(&inventory));
+    let mut older = value.clone();
+    older["checkedAt"] = json!((inventory.checked_at - chrono::TimeDelta::seconds(1)).to_rfc3339());
+    let older = EndpointInventory::parse(&serde_json::to_vec(&older).unwrap()).unwrap();
+    assert!(!older.is_newer_than(&inventory));
     let mut catalog = Catalog::from_remote(&json!({"data": [{"id": "z-ai/glm-5.3"}]}), 1).unwrap();
     catalog
         .apply_endpoint_inventory("https://tee.redpill.ai", &inventory)

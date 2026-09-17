@@ -7,6 +7,8 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
+const ENDPOINT_INVENTORY_SCHEMA_VERSION: u32 = 2;
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RemoteModel {
     pub id: String,
@@ -48,8 +50,7 @@ struct EndpointObservation {
     reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     http_status: Option<u16>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    checks: Option<EndpointChecks>,
+    checks: EndpointChecks,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -106,39 +107,37 @@ enum ObservationStatus {
 
 impl EndpointInventory {
     pub fn is_newer_than(&self, other: &Self) -> bool {
-        self.schema_version >= other.schema_version && self.checked_at > other.checked_at
+        self.checked_at > other.checked_at
     }
 
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
         let inventory: Self = serde_json::from_slice(bytes)
             .map_err(|_| "Invalid model endpoint inventory".to_string())?;
         let mut pairs = HashSet::new();
-        if !matches!(inventory.schema_version, 1 | 2)
+        if inventory.schema_version != ENDPOINT_INVENTORY_SCHEMA_VERSION
             || inventory.endpoint != "https://tee.redpill.ai"
-            || inventory.reasoning_effort.as_deref().is_some_and(|effort| {
-                inventory.schema_version != 2 || !matches!(effort, "low" | "medium" | "high")
-            })
+            || inventory
+                .reasoning_effort
+                .as_deref()
+                .is_some_and(|effort| !matches!(effort, "low" | "medium" | "high"))
             || inventory.results.is_empty()
             || inventory.results.len() > 10_000
             || inventory.results.iter().any(|entry| {
                 entry.model.trim().is_empty()
                     || entry.model.len() > 256
                     || entry.reason.len() > 256
-                    || (inventory.schema_version == 2) != entry.checks.is_some()
-                    || entry.checks.as_ref().is_some_and(|checks| {
-                        checks.entries().iter().any(|check| {
-                            check.reason.is_empty()
-                                || check.reason.len() > 256
-                                || check
-                                    .http_status
-                                    .is_some_and(|status| !(100..600).contains(&status))
-                                || (check.status == ObservationStatus::Supported
-                                    && !supports_compatibility(
-                                        check.status,
-                                        &check.reason,
-                                        check.http_status,
-                                    ))
-                        })
+                    || entry.checks.entries().iter().any(|check| {
+                        check.reason.is_empty()
+                            || check.reason.len() > 256
+                            || check
+                                .http_status
+                                .is_some_and(|status| !(100..600).contains(&status))
+                            || (check.status == ObservationStatus::Supported
+                                && !supports_compatibility(
+                                    check.status,
+                                    &check.reason,
+                                    check.http_status,
+                                ))
                     })
                     || !matches!(
                         entry.endpoint.as_str(),
@@ -183,8 +182,7 @@ pub struct CatalogModel {
     /// None means this endpoint has no compatibility inventory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supported_surfaces: Option<Vec<Surface>>,
-    /// Version 2 observations also check streamed tool calls and tool-result turns.
-    /// None means these agent capabilities have not been probed.
+    /// None means agent capabilities have not been probed for this endpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_surfaces: Option<Vec<Surface>>,
 }
@@ -365,7 +363,7 @@ impl Catalog {
                 })
                 .collect(),
             );
-            model.agent_surfaces = Some(if inventory.schema_version == 2 {
+            model.agent_surfaces = Some(
                 [
                     Surface::ChatCompletions,
                     Surface::Messages,
@@ -377,13 +375,11 @@ impl Catalog {
                         entry.model == model.id()
                             && entry.endpoint == surface.path()
                             && entry.status == ObservationStatus::Supported
-                            && entry.checks.as_ref().is_some_and(EndpointChecks::supported)
+                            && entry.checks.supported()
                     })
                 })
-                .collect()
-            } else {
-                Vec::new()
-            });
+                .collect(),
+            );
         }
         let bytes = serde_json::to_vec(&self.models).map_err(|error| error.to_string())?;
         self.revision = format!("{:x}", Sha256::digest(bytes));

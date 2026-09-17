@@ -1,5 +1,5 @@
 import { useAgents } from "./hooks/use-agents";
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { cliRegistrationQuery, usagePageQuery } from "./lib/page-queries";
 import { useGatewayState } from "./lib/use-gateway-state";
@@ -7,22 +7,16 @@ import { useWindowReady } from "./lib/use-window-ready";
 import { errorMessage } from "./lib/error-message";
 import { showErrorAlert } from "./lib/error-alert";
 import { brand } from "./generated/brand";
-import { UpdateProgressDialog, useUpdates } from "./updates";
-import { LocalApiExamples } from "./components/local-api-examples";
-import { NotificationsSheet } from "./components/notifications";
-import type { AgentStatus, ConfidentialProfile, ConfidentialProfileInput, GatewayState, LocalApiConfig, LaunchPreferences, RequestActivity, SurfaceErrorScope } from "../shared/contracts";
-import { MacMenuBar, PageHeader, PreviewTrayMenu, Sidebar } from "./components/navigation";
+import { useUpdates } from "./updates";
+import type { AgentStatus, ConfidentialProfile, GatewayState, LaunchPreferences, RequestActivity, SurfaceErrorScope } from "../shared/contracts";
+import { PageHeader, Sidebar } from "./components/navigation";
 import type { SettingsTarget, View } from "./components/navigation";
-import { desktopApi, previewMode } from "./lib/environment";
-import { INITIAL_STATE, isProtected, protectionFlags, profileIsAvailable, unavailableState } from "./lib/protection";
+import { desktopApi } from "./lib/environment";
+import { INITIAL_STATE, protectionFlags, profileIsAvailable, unavailableState } from "./lib/protection";
 import { AgentsView } from "./features/agents";
 import { Overview } from "./features/overview";
-import { UsageEvidenceSheet, UsageView } from "./features/usage";
+import { UsageView } from "./features/usage";
 import { SettingsView } from "./features/settings";
-import { ProfilesSheet } from "./features/profiles";
-import { PrivacyVerificationSheet } from "./features/privacy";
-import { localEndpoint } from "./lib/format";
-import { LocalApiSheet } from "./features/local-api";
 
 const errorTitles: Record<SurfaceErrorScope, string> = {
   agents: "Agent action failed", protection: "Protection action failed", profiles: "Profile action failed",
@@ -30,10 +24,8 @@ const errorTitles: Record<SurfaceErrorScope, string> = {
 };
 
 export function App({ initialView = "overview" }: { initialView?: View }): React.JSX.Element {
-  const updates = useUpdates(desktopApi, !previewMode);
+  const updates = useUpdates(desktopApi);
   const [view, setView] = useState<View>(initialView);
-  const [settingsTarget, setSettingsTarget] = useState<SettingsTarget>();
-  const [profileEditorId, setProfileEditorId] = useState<string>();
   const gateway = useGatewayState(desktopApi, INITIAL_STATE);
   const state = gateway.error ? unavailableState(gateway.error) : gateway.data ?? INITIAL_STATE;
   const setState = gateway.setState;
@@ -55,13 +47,10 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
   }, []);
   const reportWindowError = useCallback((message: string) => reportSurfaceError("settings", message), [reportSurfaceError]);
   useWindowReady(stateLoaded, desktopApi.mainWindowReady, reportWindowError);
-  const [clientKeyError, setClientKeyError] = useState<string>();
   const [copied, setCopied] = useState<string>();
   const [clientKey, setClientKey] = useState("");
   const [clientKeyVisible, setClientKeyVisible] = useState(false);
-  const rotatingClientKey = useRef(false);
   const [applying, setApplying] = useState(false);
-  const [selectedUsage, setSelectedUsage] = useState<RequestActivity>();
   const [notice, setNotice] = useState<{ id: number; text: string } | undefined>(() => initialView === "settings" ? { id: Date.now(), text: "Settings reset" } : undefined);
   const notify = useCallback((message: string) => setNotice({ id: Date.now(), text: message }), []);
   const previousProfiles = useRef<ConfidentialProfile[] | undefined>(undefined);
@@ -75,15 +64,11 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
     if (saved) notify(`${saved.name} saved`);
   }, [state.profiles, stateLoaded]);
 
-  const [previewTrayOpen, setPreviewTrayOpen] = useState(false);
   const copyTimer = useRef<number | undefined>(undefined);
-  const [startAfterSetup, setStartAfterSetup] = useState(false);
   const { busy, running, verified, endpointDown } = protectionFlags(state);
   const { agents, pendingAgentChanges, loadAgents, applyAgent, problem: agentProblem } = useAgents(desktopApi, {
     active: view === "agents", revision: state.catalog?.revision, verified, notify,
   });
-  const models = state.catalog?.models ?? [];
-
   useEffect(() => desktopApi.onLaunchPreferencesChange((next) => {
     void client.cancelQueries({ queryKey: ["launch-preferences"] }).then(() => client.setQueryData(["launch-preferences"], next));
   }), [client]);
@@ -117,37 +102,10 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
     document.title = brand.productName;
   }, []);
 
-  useLayoutEffect(() => {
-    if (!previewMode) return undefined;
-    const frame = document.querySelector<HTMLElement>(".desktop-window");
-    if (!frame) return undefined;
-    const root = document.documentElement.style;
-    const sync = () => {
-      const bounds = frame.getBoundingClientRect();
-      root.setProperty("--window-center-x", `${bounds.left + bounds.width / 2}px`);
-      root.setProperty("--window-center-y", `${bounds.top + bounds.height / 2}px`);
-      root.setProperty("--window-dialog-width", `${bounds.width}px`);
-      root.setProperty("--window-dialog-height", `${bounds.height}px`);
-    };
-    sync();
-    const observer = new ResizeObserver(sync);
-    observer.observe(frame);
-    window.addEventListener("resize", sync);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener("resize", sync);
-      root.removeProperty("--window-center-x");
-      root.removeProperty("--window-center-y");
-      root.removeProperty("--window-dialog-width");
-      root.removeProperty("--window-dialog-height");
-    };
-  }, []);
-
   useEffect(() => {
     let active = true;
     const unsubscribeNavigate = desktopApi.onNavigate((section) => {
       if (active) {
-        setSettingsTarget(undefined);
         setView(section);
         window.requestAnimationFrame(() => document.getElementById(`page-title-${section}`)?.focus());
       }
@@ -159,12 +117,10 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
         (key) => {
           if (!active || read !== keyRead) return;
           setClientKey(key);
-          setClientKeyError(undefined);
         },
-        (error: unknown) => {
+        () => {
           if (!active || read !== keyRead) return;
           setClientKey("");
-          setClientKeyError(errorMessage(error));
         },
       );
     };
@@ -175,7 +131,6 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
         keyRead += 1;
         setClientKey("");
         setClientKeyVisible(false);
-        if (!rotatingClientKey.current) setClientKeyError("Client key unavailable. Rotate the key again to restore access.");
         return;
       }
       loadClientKey();
@@ -229,12 +184,6 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
   };
 
   const showProfiles = (repair: boolean) => {
-    if (previewMode) {
-      const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
-      setProfileEditorId(repair ? activeProfile?.id : undefined);
-      setSettingsTarget("confidential");
-      return;
-    }
     const scope = view === "settings" ? "settings" : "profiles";
     void desktopApi.openNativeDialog("profiles", { repair }).catch((error: unknown) => reportSurfaceError(scope, error));
   };
@@ -242,10 +191,9 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
   const toggleGateway = () => {
     const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
     if (!running && !busy && !state.reconnecting && !profileIsAvailable(activeProfile, state)) {
-      if (state.profiles.length === 0 && !previewMode) {
+      if (state.profiles.length === 0) {
         void desktopApi.openNativeDialog("setup-profile").catch((error: unknown) => reportSurfaceError("profiles", error));
       } else {
-        setStartAfterSetup(state.profiles.length === 0);
         showProfiles(Boolean(activeProfile));
       }
       return;
@@ -265,37 +213,6 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
     } catch (error) { reportSurfaceError("settings", error); }
     finally { setApplying(false); }
   };
-
-  const saveConfiguration = async (profile: ConfidentialProfileInput, key?: string): Promise<string | undefined> => {
-    const message = await applyStateAction(async () => {
-      const saved = await desktopApi.saveConfiguration(profile, !allowDevelopmentOs, key);
-      setStartAfterSetup(false);
-      return startAfterSetup ? desktopApi.start(saved.config) : saved;
-    }, `${profile.name.trim()} saved`);
-    return message;
-  };
-
-  const activateProfile = (profileId: string) => applyStateAction(() => desktopApi.activateProfile(profileId));
-
-  const deleteProfile = (profileId: string) => applyStateAction(() => desktopApi.deleteProfile(profileId), "AI service profile deleted");
-
-  const rotateClientKey = async (): Promise<string | undefined> => {
-    rotatingClientKey.current = true;
-    try {
-      setClientKey(await desktopApi.rotateClientKey());
-      setClientKeyVisible(true);
-      notify("Client key replaced");
-      return undefined;
-    } catch (error) {
-      setClientKey("");
-      setClientKeyVisible(false);
-      return errorMessage(error);
-    } finally {
-      rotatingClientKey.current = false;
-    }
-  };
-
-  const saveLocalApi = (config: LocalApiConfig) => applyStateAction(() => desktopApi.saveLocalApiConfig(config), "Local API settings saved");
 
   const copy = async (label: string, value: string) => {
     await runAction("local-api", async () => {
@@ -341,7 +258,6 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
     window.requestAnimationFrame(() => document.getElementById(`page-title-${next}`)?.focus());
   };
   const changeView = (next: View, focusHeading = true) => {
-    if (next === "settings") setSettingsTarget(undefined);
     setView(next);
     if (focusHeading) focusPageHeading(next);
   };
@@ -350,18 +266,10 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
       showProfiles(false);
       return;
     }
-    if (!previewMode) {
-      const scope: SurfaceErrorScope = view === "settings" ? "settings" : target === "privacy" ? "protection" : target === "local-api" || target === "local-api-example" ? "local-api" : "settings";
-      void desktopApi.openNativeDialog(target).catch((error: unknown) => reportSurfaceError(scope, error));
-      return;
-    }
-    setSettingsTarget(target);
+    const scope: SurfaceErrorScope = view === "settings" ? "settings" : target === "privacy" ? "protection" : target === "local-api" || target === "local-api-example" ? "local-api" : "settings";
+    void desktopApi.openNativeDialog(target).catch((error: unknown) => reportSurfaceError(scope, error));
   };
   const inspectUsage = useCallback((activity: RequestActivity) => {
-    if (previewMode) {
-      setSelectedUsage(activity);
-      return;
-    }
     void desktopApi.openNativeDialog("usage-proof", { recordId: activity.id }).catch((error: unknown) => reportSurfaceError("usage", error));
   }, [reportSurfaceError]);
 
@@ -379,7 +287,7 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
 
   const windowContent = (
     <main className="app-shell w-full h-full grid grid-cols-[var(--sidebar-width)_minmax(0,_1fr)] overflow-hidden bg-background max-[780px]:grid-cols-[154px_minmax(0,_1fr)] max-[620px]:grid-cols-[68px_minmax(0,_1fr)] max-[440px]:grid-cols-[56px_minmax(0,_1fr)]">
-      <Sidebar view={view} previewControls={previewMode} updateAvailable={Boolean(updates.info?.version)} updateBusy={Boolean(updates.busy)} onInstallUpdate={() => void updates.install()} onChange={changeView} />
+      <Sidebar view={view} updateAvailable={Boolean(updates.info?.version)} updateBusy={Boolean(updates.busy)} onInstallUpdate={() => void updates.install()} onChange={changeView} />
       <section className="workspace min-w-0 min-h-0 flex flex-col">
         <PageHeader
           view={view}
@@ -458,90 +366,10 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
         </div>
       </section>
 
-      {settingsTarget === "confidential" && (
-        <ProfilesSheet
-          state={state}
-          busy={busy}
-          running={running}
-          initialEditorProfileId={profileEditorId}
-          startAfterSave={startAfterSetup}
-          onSave={saveConfiguration}
-          onActivate={activateProfile}
-          onDelete={deleteProfile}
-          onClose={() => {
-            setStartAfterSetup(false);
-            setProfileEditorId(undefined);
-            setSettingsTarget(undefined);
-          }}
-        />
-      )}
-      {settingsTarget === "privacy" && (
-        <PrivacyVerificationSheet state={state} onClose={() => setSettingsTarget(undefined)} />
-      )}
-      {settingsTarget === "notifications" && <NotificationsSheet onClose={() => setSettingsTarget(undefined)} />}
-      {settingsTarget === "local-api-example" && <LocalApiExamples
-        api={desktopApi}
-        endpoint={state.proxyUrl ?? localEndpoint(state.localApi)}
-        models={models} onCopy={(value) => desktopApi.copyText(value)} onClose={() => setSettingsTarget(undefined)}
-      />}
-      {settingsTarget === "local-api" && (
-        <LocalApiSheet
-          state={state}
-          frozen={busy}
-          clientKey={clientKey}
-          clientKeyVisible={clientKeyVisible}
-          copied={copied}
-          externalError={clientKeyError}
-          onCopy={copy}
-          onToggleKey={() => setClientKeyVisible((visible) => !visible)}
-          onRotate={rotateClientKey}
-          onSave={saveLocalApi}
-          onClose={() => setSettingsTarget(undefined)}
-        />
-      )}
-      {selectedUsage && (
-        <UsageEvidenceSheet activity={selectedUsage} onClose={() => setSelectedUsage(undefined)} />
-      )}
       <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
         {notice?.text}
       </div>
-      {previewMode && <UpdateProgressDialog updates={updates} />}
     </main>
   );
-
-  if (!previewMode) {
-    return <div className="native-host w-full h-full">{windowContent}</div>;
-  }
-
-  return (
-    <div className="desktop-preview relative w-full h-full min-w-50 pt-12 pr-6 pb-6 pl-6 grid place-items-center overflow-hidden bg-background bg-[url('/macos-wallpaper.webp')] bg-center bg-cover bg-no-repeat max-[620px]:pt-10 max-[620px]:pr-2 max-[620px]:pb-2 max-[620px]:pl-2">
-      <MacMenuBar protected={isProtected(state)} trayOpen={previewTrayOpen} onTray={() => setPreviewTrayOpen((open) => !open)} />
-      <div className="desktop-window relative box-content w-[min(1052px,_calc(100%_-_2px))] h-[min(840px,_calc(100vh_-_74px))] min-h-140 overflow-hidden bg-background border border-[color-mix(in_srgb,_var(--color-black)_20%,_transparent)] rounded-lg [box-shadow:0_22px_60px_color-mix(in_srgb,_var(--color-black)_30%,_transparent),_0_2px_8px_color-mix(in_srgb,_var(--color-black)_16%,_transparent)] max-[620px]:w-[calc(100vw_-_16px)] max-[620px]:h-[calc(100vh_-_48px)] max-[620px]:min-h-0">{windowContent}</div>
-      {previewTrayOpen && (
-        <PreviewTrayMenu
-          state={state}
-          busy={busy}
-          running={running}
-          endpointDown={endpointDown}
-          developmentMode={allowDevelopmentOs}
-          openAtLogin={launchPreferences?.openAtLogin ?? false}
-          onProtection={toggleGateway}
-          onOpen={() => setPreviewTrayOpen(false)}
-          onSettings={() => {
-            setPreviewTrayOpen(false);
-            changeView("settings");
-          }}
-          onOpenAtLogin={() => void saveLaunchPreference("openAtLogin", !launchPreferences?.openAtLogin)}
-          onQuit={() => {
-            setPreviewTrayOpen(false);
-            notify("Quit is available in the installed macOS app");
-          }}
-          onStopAllQuit={() => {
-            setPreviewTrayOpen(false);
-            void requestStopAllAndQuit();
-          }}
-        />
-      )}
-    </div>
-  );
+  return <div className="native-host w-full h-full">{windowContent}</div>;
 }

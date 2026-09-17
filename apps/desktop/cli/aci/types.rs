@@ -61,8 +61,8 @@ impl WorkloadKeyset {
     /// Whether the keyset has expired at `now_secs` (§3.1): `not_after` is
     /// the first second a verifier stops accepting it.
     ///
-    /// Shared so the two verifiers cannot disagree on the boundary.
-    pub fn is_expired_at(&self, now_secs: u64) -> bool {
+    /// The single expiry rule used by PAP's live and offline verification paths.
+    pub(crate) fn is_expired_at(&self, now_secs: u64) -> bool {
         now_secs >= self.not_after
     }
 
@@ -70,9 +70,8 @@ impl WorkloadKeyset {
     /// `domain` is unrestricted, and one with a `domain` applies only to that
     /// hostname. Comparison is case-insensitive and ignores a trailing dot.
     ///
-    /// Both verifiers select candidates through this so they cannot disagree
-    /// about which attested SPKI a hostname may present.
-    pub fn tls_keys_for_host(&self, host: &str) -> Vec<&TlsSpki> {
+    /// Both PAP verification paths select candidates through this rule.
+    pub(crate) fn tls_keys_for_host(&self, host: &str) -> Vec<&TlsSpki> {
         let host = host.trim().trim_end_matches('.');
         self.tls_public_keys
             .iter()
@@ -98,7 +97,7 @@ pub struct SourceProvenance {
 }
 
 impl SourceProvenance {
-    pub fn is_unknown(&self) -> bool {
+    fn is_unknown(&self) -> bool {
         self.repo_url.is_none()
             && self.repo_commit.is_none()
             && self.image_digest.is_none()

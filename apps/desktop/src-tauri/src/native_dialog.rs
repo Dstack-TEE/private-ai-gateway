@@ -302,7 +302,7 @@ fn watch_presentation(window: &tauri::WebviewWindow) {
         // A deadline for a failed renderer handshake, not a presentation delay.
         tokio::time::sleep(std::time::Duration::from_secs(20)).await;
         pending.unlisten(listener);
-        if !presented.load(std::sync::atomic::Ordering::Acquire) && pending.is_visible().is_ok() {
+        if !presented.load(std::sync::atomic::Ordering::Acquire) {
             let app = pending.app_handle().clone();
             if pending.destroy().is_ok() {
                 let scope = match pending.label() {

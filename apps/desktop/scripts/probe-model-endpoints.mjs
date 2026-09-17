@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { EventSourceParserStream } from "eventsource-parser/stream";
 
 const surfaces = ["chat/completions", "responses", "messages"];
+const inventorySchemaVersion = 2;
 const unsupportedCodes = new Set([
   "unsupported_model", "model_not_supported", "model_not_found",
   "unsupported_endpoint", "endpoint_not_supported",
@@ -35,7 +36,7 @@ function retainConclusive(previous, current) {
   };
 }
 
-function mergeObservation(previous, current, schemaVersion) {
+function mergeObservation(previous, current) {
   const base = retainConclusive(previous, current);
   const merged = {
     model: current.model,
@@ -44,22 +45,19 @@ function mergeObservation(previous, current, schemaVersion) {
     reason: base.reason,
     ...(base.httpStatus ? { httpStatus: base.httpStatus } : {}),
   };
-  if (schemaVersion === 2) {
-    const currentChecks = current.checks ?? checks("not_probed_in_version_two");
-    const previousChecks = previous?.checks;
-    merged.checks = Object.fromEntries(["streaming", "tools", "toolResult"].map(name => [
-      name,
-      current.status === "unavailable"
-        ? currentChecks[name]
-        : retainConclusive(previousChecks?.[name], currentChecks[name]),
-    ]));
-  }
+  const previousChecks = previous?.checks;
+  merged.checks = Object.fromEntries(["streaming", "tools", "toolResult"].map(name => [
+    name,
+    current.status === "unavailable"
+      ? current.checks[name]
+      : retainConclusive(previousChecks?.[name], current.checks[name]),
+  ]));
   return merged;
 }
 
 export function mergeInventory(previous, current, catalogIds) {
-  if (!previous || previous.endpoint !== current.endpoint || ![1, 2].includes(previous.schemaVersion) ||
-      previous.schemaVersion > current.schemaVersion || !Array.isArray(previous.results) ||
+  if (!previous || previous.endpoint !== current.endpoint || previous.schemaVersion !== inventorySchemaVersion ||
+      current.schemaVersion !== inventorySchemaVersion || !Array.isArray(previous.results) ||
       previous.reasoningEffort !== current.reasoningEffort) {
     throw new Error("The previous inventory is incompatible with this probe.");
   }
@@ -72,14 +70,9 @@ export function mergeInventory(previous, current, catalogIds) {
       const endpoint = `/v1/${surface}`;
       const fresh = currentByKey.get(`${model}\n${endpoint}`);
       const prior = previousByKey.get(`${model}\n${endpoint}`);
-      if (fresh) return mergeObservation(prior, fresh, current.schemaVersion);
+      if (fresh) return mergeObservation(prior, fresh);
       if (!prior) return undefined;
-      return mergeObservation(prior, {
-        ...prior,
-        ...(current.schemaVersion === 2 && !prior.checks
-          ? { checks: checks("not_probed_in_version_two") }
-          : {}),
-      }, current.schemaVersion);
+      return mergeObservation(prior, prior);
     });
     if (entries.every(Boolean)) results.push(...entries);
   }
@@ -320,7 +313,7 @@ export function classify(surface, status, body) {
     : { status: "inconclusive", reason: "unexpected_response" };
 }
 
-export async function probe({ endpoint, key, modelIds = [], surfaceNames = surfaces, concurrency = 1, timeout = 30000, basic = false, reasoningEffort, previousInventory, fetchImpl = fetch }) {
+export async function probe({ endpoint, key, modelIds = [], surfaceNames = surfaces, concurrency = 1, timeout = 30000, reasoningEffort, previousInventory, fetchImpl = fetch }) {
   const base = new URL(endpoint);
   if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash) {
     throw new Error("Use an HTTPS endpoint without credentials, query, or fragment.");
@@ -333,8 +326,8 @@ export async function probe({ endpoint, key, modelIds = [], surfaceNames = surfa
       !Number.isInteger(timeout) || timeout < 1000 || timeout > 60000) {
     throw new Error("Concurrency must be 1-4 and timeout must be 1000-60000 milliseconds.");
   }
-  if (reasoningEffort && (!["low", "medium", "high"].includes(reasoningEffort) || basic)) {
-    throw new Error("Reasoning effort must be low, medium, or high, and requires full probes.");
+  if (reasoningEffort && !["low", "medium", "high"].includes(reasoningEffort)) {
+    throw new Error("Reasoning effort must be low, medium, or high.");
   }
   const root = base.href.replace(/\/$/, "").replace(/\/v1$/, "");
   const headers = { authorization: `Bearer ${key}`, "content-type": "application/json" };
@@ -388,43 +381,40 @@ export async function probe({ endpoint, key, modelIds = [], surfaceNames = surfa
       const index = cursor++;
       const { model, surface } = jobs[index];
       const { result, httpStatus } = await request(model, surface, payload(model, surface));
-      let capabilityChecks;
-      if (!basic) {
-        capabilityChecks = checks("not_probed");
-        if (result.status === "supported") {
-          const toolStream = await request(model, surface, payload(model, surface, {
-            stream: true, tools: true, reasoningEffort,
-          }));
-          capabilityChecks.streaming = withHttpStatus(toolStream.result, toolStream.httpStatus);
-          capabilityChecks.tools = withHttpStatus(toolStream.tools ?? toolStream.result, toolStream.httpStatus);
-          if (toolStream.temporary) {
-            capabilityChecks.toolResult = withHttpStatus(toolStream.result, toolStream.httpStatus);
-          } else {
-            if (!stopped && capabilityChecks.streaming.status !== "supported") {
-              const textStream = await request(model, surface, payload(model, surface, { stream: true }));
-              capabilityChecks.streaming = withHttpStatus(textStream.result, textStream.httpStatus);
-            }
-            if (capabilityChecks.streaming.status === "supported" && capabilityChecks.tools.status === "supported") {
-              try {
-                const resumed = await request(model, surface, toolResultPayload(model, surface, toolStream.body, reasoningEffort));
-                capabilityChecks.toolResult = withHttpStatus(
-                  resumed.result.status === "supported" && (resumed.temporary || hasText(surface, resumed.body))
-                    ? supported(resumed.result.reason === "valid_response" ? "valid_tool_result_response" : resumed.result.reason)
-                    : resumed.result.status === "supported" ? unknown("no_tool_result_text") : resumed.result,
-                  resumed.httpStatus,
-                );
-              } catch {
-                capabilityChecks.toolResult = unknown("invalid_tool_call_shape");
-              }
+      const capabilityChecks = checks("not_probed");
+      if (result.status === "supported") {
+        const toolStream = await request(model, surface, payload(model, surface, {
+          stream: true, tools: true, reasoningEffort,
+        }));
+        capabilityChecks.streaming = withHttpStatus(toolStream.result, toolStream.httpStatus);
+        capabilityChecks.tools = withHttpStatus(toolStream.tools ?? toolStream.result, toolStream.httpStatus);
+        if (toolStream.temporary) {
+          capabilityChecks.toolResult = withHttpStatus(toolStream.result, toolStream.httpStatus);
+        } else {
+          if (!stopped && capabilityChecks.streaming.status !== "supported") {
+            const textStream = await request(model, surface, payload(model, surface, { stream: true }));
+            capabilityChecks.streaming = withHttpStatus(textStream.result, textStream.httpStatus);
+          }
+          if (capabilityChecks.streaming.status === "supported" && capabilityChecks.tools.status === "supported") {
+            try {
+              const resumed = await request(model, surface, toolResultPayload(model, surface, toolStream.body, reasoningEffort));
+              capabilityChecks.toolResult = withHttpStatus(
+                resumed.result.status === "supported" && (resumed.temporary || hasText(surface, resumed.body))
+                  ? supported(resumed.result.reason === "valid_response" ? "valid_tool_result_response" : resumed.result.reason)
+                  : resumed.result.status === "supported" ? unknown("no_tool_result_text") : resumed.result,
+                resumed.httpStatus,
+              );
+            } catch {
+              capabilityChecks.toolResult = unknown("invalid_tool_call_shape");
             }
           }
         }
       }
-      results[index] = { model, endpoint: `/v1/${surface}`, ...result, ...(capabilityChecks ? { checks: capabilityChecks } : {}), ...(httpStatus ? { httpStatus } : {}) };
+      results[index] = { model, endpoint: `/v1/${surface}`, ...result, checks: capabilityChecks, ...(httpStatus ? { httpStatus } : {}) };
     }
   }
   await Promise.all(Array.from({ length: concurrency }, worker));
-  const report = { schemaVersion: basic ? 1 : 2, endpoint: root, checkedAt: new Date().toISOString(), ...(reasoningEffort ? { reasoningEffort } : {}), results };
+  const report = { schemaVersion: inventorySchemaVersion, endpoint: root, checkedAt: new Date().toISOString(), ...(reasoningEffort ? { reasoningEffort } : {}), results };
   return previousInventory ? mergeInventory(previousInventory, report, ids) : report;
 }
 
@@ -434,12 +424,12 @@ async function main() {
     model: { type: "string", multiple: true }, json: { type: "boolean" },
     surface: { type: "string", multiple: true },
     previous: { type: "string" },
-    basic: { type: "boolean" }, "reasoning-effort": { type: "string" },
+    "reasoning-effort": { type: "string" },
     concurrency: { type: "string", default: "1" }, timeout: { type: "string", default: "30000" },
     help: { type: "boolean" },
   } });
   if (values.help) {
-    console.log("Usage: node scripts/probe-model-endpoints.mjs --endpoint https://tee.redpill.ai [--key-env PAP_PROBE_API_KEY] [--model ID] [--surface responses] [--previous PATH] [--basic] [--reasoning-effort low|medium|high] [--json]\nChecks text, streaming, streamed tool calls, and tool results (up to 4 inferences per model and endpoint). --previous retains earlier conclusive evidence when a refresh is inconclusive. --basic checks text only. Requests may be billed. No retries.");
+    console.log("Usage: node scripts/probe-model-endpoints.mjs --endpoint https://tee.redpill.ai [--key-env PAP_PROBE_API_KEY] [--model ID] [--surface responses] [--previous PATH] [--reasoning-effort low|medium|high] [--json]\nChecks text, streaming, streamed tool calls, and tool results (up to 4 inferences per model and endpoint). --previous retains earlier conclusive evidence when a refresh is inconclusive. Requests may be billed. No retries.");
     return;
   }
   if (!values.endpoint) throw new Error("Provide --endpoint. Use --help for usage.");
@@ -451,7 +441,7 @@ async function main() {
   const report = await probe({
     endpoint: values.endpoint, key: process.env[values["key-env"]], modelIds: values.model,
     surfaceNames: values.surface,
-    basic: values.basic, reasoningEffort: values["reasoning-effort"],
+    reasoningEffort: values["reasoning-effort"],
     previousInventory,
     concurrency: Number(values.concurrency), timeout: Number(values.timeout),
   });

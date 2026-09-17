@@ -4,8 +4,8 @@
 an open window. Installations must keep `private-ai-proxy` (including the verifier), `private-ai-proxy-service`, and the
 credential helper together; see [distribution](cli-distribution.md).
 `pap` and `aci` are installed shortcuts to the same executable; all three names
-accept the same commands. `aci` is retained for compatibility with the original
-ACI CLI and is not a separate binary.
+accept the same commands. `aci` is the protocol-focused alias, not a separate
+binary or compatibility implementation.
 
 ## Discover Commands
 
@@ -18,7 +18,7 @@ changing shell configuration. Other supported shells are listed in its help.
 
 ## ACI Commands
 
-The same binary includes the original ACI protocol commands:
+The same binary includes the ACI protocol commands:
 
 | Command | Purpose |
 | --- | --- |

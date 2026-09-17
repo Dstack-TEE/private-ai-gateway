@@ -7,7 +7,7 @@ Status: implemented.
 | Component | Responsibility | Implementation |
 | --- | --- | --- |
 | Private AI Gateway | Remote attested inference service and signed receipts | `src/aggregator`, `src/middleware` |
-| Private AI Proxy | Desktop profiles, agent connections, verification and usage | `apps/desktop/src/renderer` |
+| Private AI Proxy | Desktop profiles, agent connections, verification and usage | `apps/desktop` |
 | Local backend | Sessions, configuration transactions, local API and process ownership | `apps/desktop/runtime`, `apps/desktop/gateway` |
 | `private-ai-proxy` | Unified managed-client and ACI protocol commands | `apps/desktop/cli` |
 | `private-ai-proxy-service` | Per-user backend entry point | `apps/desktop/cli/service.rs` |
@@ -49,7 +49,7 @@ helper. They do not contain an independent `aci` executable.
 - Renderer `index.tsx` owns bootstrap; `app.tsx` composes the window. `features/`
   contains pages and forms, `windows/` adapts them to native windows, `hooks/`
   owns reusable interactions, and `lib/` contains presentation rules and the
-  single live/preview API selection. Features never import the app or windows.
+  live desktop API binding. Features never import the app or windows.
 - Runtime `controller.rs` owns shared state and launch; its private modules group
   lifecycle, profiles, account login, credentials, agents and local endpoints.
   The same locks and transaction guards span these implementation modules.

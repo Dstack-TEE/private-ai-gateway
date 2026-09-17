@@ -1,28 +1,15 @@
-//! Test fixtures for the check engine.
+//! Published ACI wire fixtures consumed by Private AI Proxy tests.
 //!
-//! The `spec/test-vectors.md` fixture family (fixed seeds, no
-//! randomness), built with the lib's own constructions: a sealed keyset,
-//! a report bound to the fixed test nonce, a session document, and
-//! receipt envelopes citing it. Unit tests pin the published constants so
-//! the fixtures cannot drift; byte-exact pins live in
-//! `tests/spec_vectors.rs`.
+//! Producer-side construction is intentionally outside this crate. These
+//! constants keep PAP tests on the relying-party boundary: parse and verify
+//! artifacts exactly as a remote ACI service would send them.
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use ed25519_dalek::{Signer, SigningKey as Ed25519SigningKey};
-use private_ai_proxy::aci::digest::{jcs_bytes, sha256_bare_hex, sha256_hex};
-use private_ai_proxy::aci::e2ee::{
-    x25519_public_key_hex, x25519_secret_key_from_bytes, E2EE_ALGO_X25519_AESGCM,
-};
-use private_ai_proxy::aci::identity::{attestation_statement, report_data, SealedWorkloadKeyset};
-use private_ai_proxy::aci::keys::{KeyError, KeyProvider};
-use private_ai_proxy::aci::receipt::{
-    receipt_signing_input, ReceiptBuilder, UpstreamVerifiedEvent, VerificationResult,
-};
 use private_ai_proxy::aci::types::{
-    AttestationEnvelope, AttestationReport, KeyedPublicKey, ServiceCapabilities, SourceProvenance,
-    TlsSpki, WorkloadKeyset,
+    AttestationEnvelope, AttestationReport, ServiceCapabilities, SourceProvenance,
 };
 use serde_json::{json, Value};
+
+const WIRE_FIXTURES: &str = include_str!("tests/fixtures/aci_wire_fixtures.json");
 
 pub const TEST_NONCE: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 pub const KEYSET_NOT_AFTER: u64 = 1_800_000_000;
@@ -32,49 +19,33 @@ pub const REQUEST_BODY: &[u8] =
     br#"{"messages":[{"content":"hi","role":"user"}],"model":"demo-model"}"#;
 pub const RESPONSE_BODY: &[u8] = br#"{"choices":[],"id":"chatcmpl-123"}"#;
 
-fn receipt_signing_key() -> Ed25519SigningKey {
-    Ed25519SigningKey::from_bytes(&[0x02; 32])
-}
-
-/// The fixture keyset, sealed once (§3.1): its digest is over these exact
-/// serialized bytes for every fixture that references it.
-pub fn vector_sealed_keyset() -> SealedWorkloadKeyset {
-    let e2ee = x25519_secret_key_from_bytes(&[0x03; 32]).expect("fixture x25519 seed");
-    SealedWorkloadKeyset::seal(WorkloadKeyset {
-        subject: Some("dstack-app://example-app".to_string()),
-        not_after: KEYSET_NOT_AFTER,
-        receipt_signing_keys: vec![KeyedPublicKey {
-            key_id: "receipt-1".to_string(),
-            algo: "ed25519".to_string(),
-            public_key_hex: hex::encode(receipt_signing_key().verifying_key().as_bytes()),
-        }],
-        e2ee_public_keys: vec![KeyedPublicKey {
-            key_id: "e2ee-1".to_string(),
-            algo: E2EE_ALGO_X25519_AESGCM.to_string(),
-            public_key_hex: x25519_public_key_hex(&e2ee),
-        }],
-        tls_public_keys: vec![TlsSpki {
-            domain: Some("api.example.com".to_string()),
-            spki_sha256_hex: "c0".repeat(32),
-        }],
-    })
-    .expect("fixture keyset seals")
-}
-
-/// A self-consistent `aci/1` report over the fixture keyset, bound to
-/// [`TEST_NONCE`]. It carries no hardware quote and no provenance — the
-/// fail-closed checks are expected to say so.
 pub fn vector_report() -> AttestationReport {
-    let sealed = vector_sealed_keyset();
-    let statement =
-        attestation_statement(sealed.digest(), Some(TEST_NONCE)).expect("fixture nonce is valid");
     AttestationReport {
         api_version: "aci/1".to_string(),
-        workload_keyset_digest: sealed.digest().to_string(),
+        workload_keyset_digest:
+            "sha256:53a5cd44b30dcc51999754c719f2628a041f174ecbf9662a6f8e898a10cd9371".to_string(),
         attestation: AttestationEnvelope {
             tee_type: "tdx".to_string(),
-            workload_keyset: sealed.to_value(),
-            report_data_hex: hex::encode(report_data(&statement)),
+            workload_keyset: json!({
+                "subject": "dstack-app://example-app",
+                "not_after": KEYSET_NOT_AFTER,
+                "receipt_signing_keys": [{
+                    "key_id": "receipt-1",
+                    "algo": "ed25519",
+                    "public_key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+                }],
+                "e2ee_public_keys": [{
+                    "key_id": "e2ee-1",
+                    "algo": "x25519-aes-256-gcm-hkdf-sha256",
+                    "public_key": "5dfedd3b6bd47f6fa28ee15d969d5bb0ea53774d488bdaf9df1c6e0124b3ef22",
+                }],
+                "tls_public_keys": [{
+                    "domain": "api.example.com",
+                    "spki_sha256": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+                }],
+            }),
+            report_data_hex: "df2174d28130852b413646a3786927b93e94c11d770268b65def8bdba45cb49e"
+                .to_string(),
             source_provenance: SourceProvenance::default(),
             evidence: json!({}),
         },
@@ -85,170 +56,20 @@ pub fn vector_report() -> AttestationReport {
     }
 }
 
-/// The §8 session document. These fixtures test the relying-party parser, so
-/// they own the wire value rather than depending on the gateway's server-side
-/// session types.
-pub fn vector_session() -> Value {
-    let evidence = b"example-evidence";
-    json!({
-        "api_version": "aci/1",
-        "upstream_name": "demo-upstream",
-        "endpoint": "https://upstream.example.com",
-        "verifier_id": "example/1",
-        "established_at": SERVED_AT,
-        "expires_at": SERVED_AT + 3_600,
-        "channel_binding": [{
-            "type": "tls_spki_sha256",
-            "origin": "https://upstream.example.com",
-            "spki_sha256": "d1".repeat(32),
-        }],
-        "claims": {
-            "tee_attested": {
-                "status": "asserted",
-                "source": "hardware_proven",
-                "reason": "example quote verified",
-            },
-            "gpu_attested": { "status": "unknown" },
-            "tcb_up_to_date": { "status": "unknown" },
-            "os_known_good": { "status": "unknown" },
-            "serving_software_known_good": { "status": "unknown" },
-            "model_weights_provenance": { "status": "unknown" },
-            "extra": {
-                "gpu_arch": "HOPPER",
-                "tcb_status": "UpToDate",
-            },
-        },
-        "evidence": {
-            "digest": sha256_hex(evidence),
-            "data": format!(
-                "data:text/plain;base64,{}",
-                BASE64.encode(evidence)
-            ),
-        },
-    })
-}
-
-/// The session document bytes in JCS form (§8).
 pub fn vector_session_bytes() -> Vec<u8> {
-    jcs_bytes(&vector_session()).expect("fixture session canonicalizes")
+    private_ai_proxy::aci::digest::jcs_bytes(&wire_fixture("session"))
+        .expect("published session fixture canonicalizes")
 }
 
-/// The bare 64-hex content id over the document's JCS form (§8).
-pub fn vector_session_id() -> String {
-    sha256_bare_hex(&vector_session_bytes())
-}
-
-/// Minimal provider over the fixture receipt key (test-only custody).
-struct FixtureKeys;
-
-impl KeyProvider for FixtureKeys {
-    fn receipt_keys(&self) -> Vec<KeyedPublicKey> {
-        vector_sealed_keyset().keyset().receipt_signing_keys.clone()
-    }
-
-    fn sign_receipt(&self, key_id: &str, payload: &[u8]) -> Result<Vec<u8>, KeyError> {
-        if key_id != "receipt-1" {
-            return Err(KeyError::UnknownReceiptKeyId(key_id.to_string()));
-        }
-        Ok(receipt_signing_key().sign(payload).to_bytes().to_vec())
-    }
-
-    fn e2ee_keys(&self) -> Vec<KeyedPublicKey> {
-        Vec::new()
-    }
-
-    fn tls_spkis(&self) -> Vec<TlsSpki> {
-        Vec::new()
-    }
-
-    fn is_test_only(&self) -> bool {
-        true
-    }
-}
-
-/// The §7.2 receipt envelope: payload built and serialized once by the lib's
-/// own [`ReceiptBuilder`], Ed25519-signed over those exact bytes.
 pub fn vector_receipt_envelope() -> Value {
-    receipt_envelope_forwarding(REQUEST_BODY)
+    wire_fixture("receipt")
 }
 
-/// Like [`vector_receipt_envelope`] but recording a service-side rewrite:
-/// `request.forwarded` hashes different bytes than `request.received` (§9.3
-/// rewrite note).
 pub fn vector_receipt_envelope_rewritten() -> Value {
-    receipt_envelope_forwarding(b"rewritten-request-bytes")
+    wire_fixture("rewritten_receipt")
 }
 
-fn receipt_envelope_forwarding(forwarded_body: &[u8]) -> Value {
-    let mut builder = ReceiptBuilder::new(
-        "rcpt-0001".to_string(),
-        Some("chatcmpl-123".to_string()),
-        Some("demo-model".to_string()),
-        vector_sealed_keyset().digest().to_string(),
-        "/v1/chat/completions".to_string(),
-        "POST".to_string(),
-        SERVED_AT,
-    );
-    builder
-        .add_request_received(REQUEST_BODY)
-        .expect("fixture event");
-    builder
-        .add_request_forwarded(forwarded_body)
-        .expect("fixture event");
-    builder
-        .add_upstream_verified_with_session(
-            &UpstreamVerifiedEvent {
-                upstream_name: "demo-upstream".to_string(),
-                model_id: "demo-model".to_string(),
-                verifier_id: "example/1".to_string(),
-                result: VerificationResult::Verified,
-                required: true,
-                ..Default::default()
-            },
-            &vector_session_id(),
-        )
-        .expect("fixture event");
-    builder
-        .add_response_returned(RESPONSE_BODY)
-        .expect("fixture event");
-    builder
-        .finalize(&FixtureKeys, "receipt-1")
-        .expect("fixture receipt finalizes")
-        .document_json()
-        .expect("fixture receipt parses")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The published `spec/test-vectors.md` constants: if a fixture stops
-    /// reproducing them, the fixtures (or the lib) drifted from the doc.
-    #[test]
-    fn fixtures_reproduce_the_published_test_vector_constants() {
-        assert_eq!(
-            vector_sealed_keyset().digest(),
-            "sha256:53a5cd44b30dcc51999754c719f2628a041f174ecbf9662a6f8e898a10cd9371"
-        );
-        assert_eq!(
-            vector_report().attestation.report_data_hex,
-            "df2174d28130852b413646a3786927b93e94c11d770268b65def8bdba45cb49e"
-        );
-        assert_eq!(
-            vector_session_id(),
-            "95ad1cb4dd25445808c2e9d116caf420b05703730b506395e8fc1ca6faeae28f"
-        );
-
-        let document = vector_receipt_envelope();
-        let signing_input = receipt_signing_input(&document).unwrap();
-        assert_eq!(
-            sha256_hex(&signing_input),
-            "sha256:1bd328e6880a5a12b3915af95ea32111310e04ab9e21ac3d71ce268e33b965c9"
-        );
-        assert_eq!(
-            document["signature"],
-            "d5b005e093bde3b577faf270b7184b09e169cacb0ecb206b103bd2581f997db0\
-             3da616175454b063323a23ac1dc68f1ce506c2a6eba8aa0561d5e724f0b80c03"
-        );
-    }
+fn wire_fixture(name: &str) -> Value {
+    serde_json::from_str::<Value>(WIRE_FIXTURES).expect("published ACI wire fixtures parse")[name]
+        .clone()
 }

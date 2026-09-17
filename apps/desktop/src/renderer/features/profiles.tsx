@@ -18,7 +18,7 @@ import { Sheet, SheetActions } from "../components/sheet";
 import { FormField } from "../components/settings";
 import { ChoiceSelect } from "../components/choice-select";
 import type { ConfidentialProfile, ConfidentialProfileInput, GatewayState, ServiceProvider } from "../../shared/contracts";
-import { desktopApi, previewMode } from "../lib/environment";
+import { desktopApi } from "../lib/environment";
 import { profileIsAvailable } from "../lib/protection";
 import { ServiceLogo } from "../components/brand";
 import { serviceHost } from "../lib/format";
@@ -27,74 +27,43 @@ import { DEFAULT_SERVICE_PRESET, SERVICE_PROVIDER_OPTIONS, servicePreset, servic
 export function ProfilesSheet({
   state,
   busy,
-  running,
   initialEditorProfileId,
-  startAfterSave = false,
-  onSave,
   onActivate,
-  onDelete,
   onClose,
 }: {
   state: GatewayState;
   busy: boolean;
-  running: boolean;
   initialEditorProfileId?: string;
-  startAfterSave?: boolean;
-  onSave(profile: ConfidentialProfileInput, key?: string): Promise<string | undefined>;
   onActivate(profileId: string): Promise<string | undefined>;
-  onDelete(profileId: string): Promise<string | undefined>;
   onClose(): void;
 }): React.JSX.Element {
-  const [editor, setEditor] = useState<{ kind: "new" } | { kind: "edit"; profileId: string } | undefined>(() => {
-    if (state.profiles.length === 0) return { kind: "new" };
-    return initialEditorProfileId ? { kind: "edit", profileId: initialEditorProfileId } : undefined;
-  });
-  const completeEditor = () => setEditor(undefined);
   const [openError, setOpenError] = useState<string>();
-  const openEditor = (profileId?: string) => {
-    if (previewMode) {
-      setEditor(profileId ? { kind: "edit", profileId } : { kind: "new" });
-      return;
-    }
+  const openEditor = useCallback((profileId?: string) => {
     setOpenError(undefined);
     void desktopApi.openNativeDialog("profile-editor", { profileId }).catch((error: unknown) => setOpenError(errorMessage(error)));
-  };
+  }, []);
+  const requestedEditor = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!initialEditorProfileId || requestedEditor.current === initialEditorProfileId) return;
+    requestedEditor.current = initialEditorProfileId;
+    openEditor(initialEditorProfileId);
+  }, [initialEditorProfileId, openEditor]);
   return (
-    <>
-      {state.profiles.length > 0 && (
-        <ProfileListSheet
-          state={state}
-          busy={busy}
-          running={running}
-          onActivate={onActivate}
-          onNew={() => openEditor()}
-          onEdit={openEditor}
-          error={openError}
-          onClose={onClose}
-        />
-      )}
-      {(editor || state.profiles.length === 0) && (
-        <ProfileEditorSheet
-          state={state}
-          busy={busy}
-          running={running}
-          profile={editor?.kind === "edit" ? state.profiles.find((profile) => profile.id === editor.profileId) : undefined}
-          startAfterSave={startAfterSave}
-          onSave={onSave}
-          onDelete={onDelete}
-          onComplete={state.profiles.length === 0 ? onClose : completeEditor}
-          onDeleted={state.profiles.length === 1 ? onClose : completeEditor}
-          onClose={state.profiles.length === 0 ? onClose : completeEditor}
-        />
-      )}
-    </>
+    <ProfileListSheet
+      state={state}
+      busy={busy}
+      onActivate={onActivate}
+      onNew={() => openEditor()}
+      onEdit={openEditor}
+      error={openError}
+      onClose={onClose}
+    />
   );
 }
 
 function ProfileListSheet({
   state,
   busy,
-  running,
   onActivate,
   onNew,
   onEdit,
@@ -103,7 +72,6 @@ function ProfileListSheet({
 }: {
   state: GatewayState;
   busy: boolean;
-  running: boolean;
   onActivate(profileId: string): Promise<string | undefined>;
   onNew(): void;
   onEdit(profileId: string): void;

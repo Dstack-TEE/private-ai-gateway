@@ -6,7 +6,6 @@ import { IconButton } from "./controls";
 import { SettingsLink } from "./settings";
 import { showErrorAlert } from "../lib/error-alert";
 
-const mock = new URLSearchParams(window.location.search).has("mock");
 const filters = [{ name: "JSON", extensions: ["json"] }];
 
 export function ProfileTransfer({ api, disabled, onBusy, onMessage }: {
@@ -18,7 +17,7 @@ export function ProfileTransfer({ api, disabled, onBusy, onMessage }: {
     setBusy(true); onBusy(true);
     try {
       if (importing) {
-        const path = mock ? "profiles.json" : await open({ title: "Import Profile Configurations", multiple: false, filters });
+        const path = await open({ title: "Import Profile Configurations", multiple: false, filters });
         if (!path) return;
         const backup = await api.readProfileBackup(path);
         const names = backup.profiles.slice(0, 5).map((profile) => profile.name).join(", ");
@@ -26,7 +25,7 @@ export function ProfileTransfer({ api, disabled, onBusy, onMessage }: {
         const result = await api.importProfiles(backup);
         onMessage(`${result.imported} imported, ${result.skipped} duplicates skipped.`, false);
       } else {
-        const path = mock ? "profiles.json" : await save({ title: "Export Profiles to a New File (No Keys)", defaultPath: "private-ai-proxy-profiles.json", filters });
+        const path = await save({ title: "Export Profiles to a New File (No Keys)", defaultPath: "private-ai-proxy-profiles.json", filters });
         if (!path) return;
         await api.exportProfiles(path);
         onMessage("Profile configurations exported without credentials.", false);
@@ -46,7 +45,7 @@ export function ExportDiagnostics({ api, onMessage }: { api: DesktopApi; onMessa
     if (busy) return;
     setBusy(true);
     try {
-      const path = mock ? "diagnostics.json" : await save({ title: "Export Redacted Diagnostics to a New File", defaultPath: "private-ai-proxy-diagnostics.json", filters });
+      const path = await save({ title: "Export Redacted Diagnostics to a New File", defaultPath: "private-ai-proxy-diagnostics.json", filters });
       if (!path) return;
       await api.exportDiagnostics(path);
       onMessage("Diagnostics exported without keys, URLs, local paths or request content.");

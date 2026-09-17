@@ -14,7 +14,7 @@ import { NotificationsProvider, NotificationsSheet, useNotifications } from "../
 import { useDialogClose } from "../components/dialog-close";
 import { NativeDialogHost } from "../components/sheet";
 import type { GatewayState, LocalApiConfig } from "../../shared/contracts";
-import { desktopApi, previewMode, query } from "../lib/environment";
+import { desktopApi, query } from "../lib/environment";
 import { INITIAL_STATE, protectionFlags } from "../lib/protection";
 import { ProfileEditorSheet, ProfilesSheet } from "../features/profiles";
 import { localEndpoint } from "../lib/format";
@@ -43,7 +43,6 @@ function useNativeGatewayWindow(title: string, options: NativeWindowOptions = {}
   setState: React.Dispatch<React.SetStateAction<GatewayState>>;
   loaded: boolean;
   loadError?: string;
-  closed: boolean;
   close(): void;
 } {
   const initialState = useContext(NativeStateContext);
@@ -54,8 +53,7 @@ function useNativeGatewayWindow(title: string, options: NativeWindowOptions = {}
   const [presentationError, setLoadError] = useState<string>();
   const validationError = loaded ? options.validate?.(state) : undefined;
   const loadError = presentationError ?? options.contentError ?? validationError ?? (gateway.error ? errorMessage(gateway.error) : undefined);
-  const [closed, setClosed] = useState(false);
-  useWindowReady(loaded && (options.contentReady ?? true) && !loadError && !closed, desktopApi.nativeDialogReady, setLoadError);
+  useWindowReady(loaded && (options.contentReady ?? true) && !loadError, desktopApi.nativeDialogReady, setLoadError);
 
   useEffect(() => {
     document.title = `${title} - ${brand.productName}`;
@@ -64,22 +62,17 @@ function useNativeGatewayWindow(title: string, options: NativeWindowOptions = {}
     return () => { root.classList.remove("is-native-dialog"); };
   }, [title]);
 
-  const close = () => {
-    if (previewMode) {
-      setClosed(true);
-      return;
-    }
+  const close = useCallback(() => {
     void desktopApi.closeNativeDialog().catch((error: unknown) => setLoadError(errorMessage(error)));
-  };
-  return { state, setState, loaded, loadError, closed, close };
+  }, []);
+  return { state, setState, loaded, loadError, close };
 }
 
 function NativeUpdateProgressWindow(): React.JSX.Element {
   const [progress, setProgress] = useState<UpdateProgress>();
   const native = useNativeGatewayWindow("Software Update", { contentReady: Boolean(progress) });
-  useDialogClose(native.close, Boolean(progress?.error), !native.closed);
+  useDialogClose(native.close, Boolean(progress?.error));
   useEffect(() => desktopApi.onUpdateProgress(setProgress), []);
-  if (native.closed) return <main aria-label="Software update closed" />;
   if (native.loadError) return <NativeDialogStatus label="software update" error={native.loadError} onClose={native.close} />;
   return <NativeDialogHost className="p-6 flex flex-col gap-4" aria-labelledby="update-title">
     <h2 id="update-title" className="text-lg font-semibold">{progress?.error ? "Update failed" : "Installing update"}</h2>
@@ -116,7 +109,6 @@ function NativeProfilesWindow({ repair, editor = false, profileId, startAfterSav
     }
   };
 
-  if (native.closed) return <NativeDialogHost  aria-label="Profiles closed" />;
   if (!native.loaded || native.loadError) return <NativeDialogStatus label="profiles" error={native.loadError} onClose={native.close} />;
   const { busy, running } = protectionFlags(native.state);
   const editingProfileId = profileId;
@@ -138,11 +130,8 @@ function NativeProfilesWindow({ repair, editor = false, profileId, startAfterSav
         key={repairRequest}
         state={native.state}
         busy={busy}
-        running={running}
         initialEditorProfileId={repairRequest ? native.state.activeProfileId || undefined : undefined}
-        onSave={(profile, key) => run(() => desktopApi.saveConfiguration(profile, native.state.config.requireProductionOs, key))}
         onActivate={(profileId) => run(() => desktopApi.activateProfile(profileId))}
-        onDelete={(profileId) => run(() => desktopApi.deleteProfile(profileId))}
         onClose={native.close}
       />
     </NativeDialogHost>
@@ -155,7 +144,6 @@ function NativeNotificationsWindow(): React.JSX.Element {
     contentReady: Boolean(data),
     contentError: !data ? error : undefined,
   });
-  if (native.closed) return <main aria-label="Notifications closed" />;
   if (native.loadError) return <NativeDialogStatus label="notifications" error={native.loadError} onClose={native.close} />;
   return <NativeDialogHost ><NotificationsSheet onClose={native.close} /></NativeDialogHost>;
 }
@@ -168,7 +156,6 @@ function NativeLocalApiExampleWindow(): React.JSX.Element {
     setExampleReady(true);
   }, []);
   const native = useNativeGatewayWindow("Local API examples", { contentReady: exampleReady, contentError: exampleError });
-  if (native.closed) return <NativeDialogHost  aria-label="Local API examples closed" />;
   if (!native.loaded || native.loadError) return <NativeDialogStatus label="Local API examples" error={native.loadError} onClose={native.close} />;
   return <NativeDialogHost ><LocalApiExamples
     api={desktopApi}
@@ -181,7 +168,6 @@ function NativeLocalApiExampleWindow(): React.JSX.Element {
 
 function NativePrivacyWindow(): React.JSX.Element {
   const native = useNativeGatewayWindow("Privacy Verification");
-  if (native.closed) return <NativeDialogHost  aria-label="Privacy verification closed" />;
   if (!native.loaded || native.loadError) return <NativeDialogStatus label="privacy verification" error={native.loadError} onClose={native.close} />;
   return (
     <NativeDialogHost >
@@ -215,7 +201,6 @@ function NativeLocalApiWindow(): React.JSX.Element {
     );
   }, []);
   useEffect(() => {
-    if (native.closed) return;
     loadClientKey();
     const unsubscribe = desktopApi.onClientKeyChange((available) => {
       if (available) loadClientKey();
@@ -229,9 +214,8 @@ function NativeLocalApiWindow(): React.JSX.Element {
       unsubscribe();
       if (copyTimer.current !== undefined) window.clearTimeout(copyTimer.current);
     };
-  }, [loadClientKey, reportError, native.closed]);
+  }, [loadClientKey, reportError]);
 
-  if (native.closed) return <NativeDialogHost  aria-label="Local API settings closed" />;
   if (!native.loaded || !keyLoaded || native.loadError) {
     return <NativeDialogStatus label="Local API settings" error={native.loadError} onClose={native.close} />;
   }
@@ -297,7 +281,6 @@ function NativeUsageProofWindow({ initialRecordId }: { initialRecordId: string }
   const error = recordError ? errorMessage(recordError) : undefined;
   const native = useNativeGatewayWindow("Usage Proof", { contentReady: Boolean(activity), contentError: error });
   useEffect(() => desktopApi.onUsageProofRequest(setRecordId), []);
-  if (native.closed) return <NativeDialogHost  aria-label="Usage proof closed" />;
   if (!activity || error || native.loadError) return <NativeDialogStatus label="usage proof" error={error ?? native.loadError} onClose={native.close} />;
   return <NativeDialogHost ><UsageEvidenceSheet activity={activity} onClose={native.close} /></NativeDialogHost>;
 }

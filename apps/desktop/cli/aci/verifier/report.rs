@@ -163,33 +163,32 @@ pub(super) fn raw_evidence(data: &[u8], content_type: &str, source_url: Option<&
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aci::identity::SealedWorkloadKeyset;
-    use crate::aci::types::{AttestationEnvelope, KeyedPublicKey, SourceProvenance};
+    use crate::aci::types::{AttestationEnvelope, SourceProvenance};
 
-    fn sealed_keyset() -> SealedWorkloadKeyset {
-        SealedWorkloadKeyset::seal(WorkloadKeyset {
-            subject: None,
-            not_after: 2_000_000_000,
-            receipt_signing_keys: vec![KeyedPublicKey {
-                key_id: "r1".to_string(),
-                algo: "ed25519".to_string(),
-                public_key_hex: "aa".repeat(32),
+    fn keyset() -> Value {
+        serde_json::json!({
+            "subject": null,
+            "not_after": 2_000_000_000u64,
+            "receipt_signing_keys": [{
+                "key_id": "r1",
+                "algo": "ed25519",
+                "public_key": "aa".repeat(32),
             }],
-            e2ee_public_keys: Vec::new(),
-            tls_public_keys: Vec::new(),
+            "e2ee_public_keys": [],
+            "tls_public_keys": [],
         })
-        .unwrap()
     }
 
     fn report(nonce: Option<&str>) -> AttestationReport {
-        let sealed = sealed_keyset();
-        let statement = identity::attestation_statement(sealed.digest(), nonce).unwrap();
+        let keyset = keyset();
+        let digest = identity::workload_keyset_digest(&keyset).unwrap();
+        let statement = identity::attestation_statement(&digest, nonce).unwrap();
         AttestationReport {
             api_version: "aci/1".to_string(),
-            workload_keyset_digest: sealed.digest().to_string(),
+            workload_keyset_digest: digest,
             attestation: AttestationEnvelope {
                 tee_type: "tdx".to_string(),
-                workload_keyset: sealed.to_value(),
+                workload_keyset: keyset,
                 report_data_hex: hex::encode(identity::report_data(&statement)),
                 source_provenance: SourceProvenance::default(),
                 evidence: serde_json::json!({}),
@@ -203,7 +202,10 @@ mod tests {
         let nonce = "1a".repeat(32);
         let validated =
             validate_aci_report_binding(&report(Some(&nonce)), Some(&nonce), 1_000, None).unwrap();
-        assert_eq!(validated.workload_keyset_digest, sealed_keyset().digest());
+        assert_eq!(
+            validated.workload_keyset_digest,
+            identity::workload_keyset_digest(&keyset()).unwrap()
+        );
         assert_eq!(validated.keyset.receipt_signing_keys.len(), 1);
     }
 
