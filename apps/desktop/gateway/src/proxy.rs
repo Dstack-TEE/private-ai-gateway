@@ -403,15 +403,13 @@ impl Rejection {
 /// Bind the local endpoint synchronously and exclusively. A busy port surfaces
 /// here, before the app can start or connect anything.
 pub fn bind_std(addr: SocketAddr) -> Result<std::net::TcpListener, String> {
-    let listener = std::net::TcpListener::bind(addr)
-        .map_err(|error| format!("Cannot listen on {addr}: {error}"))?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|error| format!("Cannot configure the listener on {addr}: {error}"))?;
-    Ok(listener)
+    std::net::TcpListener::bind(addr).map_err(|error| format!("Cannot listen on {addr}: {error}"))
 }
 
 pub async fn serve(state: Arc<ProxyState>, listener: std::net::TcpListener) -> Result<(), String> {
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| format!("Cannot configure the local listener: {error}"))?;
     let listener = TcpListener::from_std(listener)
         .map_err(|error| format!("Cannot use the local listener: {error}"))?;
     axum::serve(listener, router(state))
