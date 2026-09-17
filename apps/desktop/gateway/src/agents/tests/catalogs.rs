@@ -574,7 +574,8 @@ fn agents_require_a_verified_catalog_model() {
     }
     // Without the bundled helper, agents cannot authenticate.
     fs::remove_file(&sandbox.projector.helper_exe).unwrap();
-    let status = &sandbox.projector.scan(Some(&catalog())).unwrap().0[1];
+    let statuses = sandbox.projector.scan(Some(&catalog())).unwrap().0;
+    let status = agent_status(&statuses, Agent::ClaudeCode);
     assert!(status
         .error
         .as_deref()

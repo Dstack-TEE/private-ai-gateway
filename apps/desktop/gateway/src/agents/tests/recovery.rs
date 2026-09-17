@@ -548,7 +548,8 @@ fn claude_takes_over_credentials_via_the_keyring_and_restores_them() {
     assert!(manifest.contains("secret_ref"));
 
     let smaller = Catalog::from_remote(&json!({ "data": [{ "id": "phala/qwen" }] }), 2).unwrap();
-    let status = &sandbox.projector.scan(Some(&smaller)).unwrap().0[1];
+    let statuses = sandbox.projector.scan(Some(&smaller)).unwrap().0;
+    let status = agent_status(&statuses, Agent::ClaudeCode);
     assert!(status.connected);
     assert!(status
         .attention
@@ -607,7 +608,8 @@ fn a_failed_disconnect_leaves_a_retryable_tombstone_and_never_reuses_the_token()
         sandbox.projector.scan(None).unwrap().1.is_empty(),
         "access stays revoked"
     );
-    let status = &sandbox.projector.scan(None).unwrap().0[1];
+    let statuses = sandbox.projector.scan(None).unwrap().0;
+    let status = agent_status(&statuses, Agent::ClaudeCode);
     assert!(status.attention.as_deref().unwrap().contains("retried"));
     // Reconnecting is refused while the tombstone exists.
     assert!(sandbox
@@ -777,12 +779,9 @@ fn revocation_is_durable_even_when_the_first_manifest_save_fails() {
         // still shown with an attention line.
         let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
         assert!(tokens.is_empty());
-        assert!(statuses[1].recorded);
-        assert!(statuses[1]
-            .attention
-            .as_deref()
-            .unwrap()
-            .contains("revoked"));
+        let status = agent_status(&statuses, Agent::ClaudeCode);
+        assert!(status.recorded);
+        assert!(status.attention.as_deref().unwrap().contains("revoked"));
         // The retry completes; a new connection never reuses the token.
         disconnect(&sandbox, Agent::ClaudeCode);
         assert!(sandbox.projector.load_store().unwrap().is_empty());
@@ -843,7 +842,8 @@ fn disconnect_fails_closed_when_revocation_cannot_be_persisted() {
     // visible for a retry.
     let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
     assert!(tokens.is_empty());
-    assert!(statuses[1].recorded && statuses[1].attention.is_some());
+    let status = agent_status(&statuses, Agent::ClaudeCode);
+    assert!(status.recorded && status.attention.is_some());
 
     sandbox.projector.tokens.set_sync_parent(tokens::sync_dir);
     disconnect(&sandbox, Agent::ClaudeCode);

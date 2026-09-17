@@ -38,6 +38,13 @@ pub(super) fn catalog() -> Catalog {
     .unwrap()
 }
 
+fn agent_status(statuses: &[AgentStatus], agent: Agent) -> &AgentStatus {
+    statuses
+        .iter()
+        .find(|status| status.id == agent.id())
+        .unwrap()
+}
+
 pub(super) struct Sandbox {
     pub(super) home: PathBuf,
     pub(super) projector: Projector,

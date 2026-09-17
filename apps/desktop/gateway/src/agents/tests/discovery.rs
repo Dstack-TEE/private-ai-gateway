@@ -365,7 +365,7 @@ fn invalid_recovery_never_guesses_paths_or_displays_structured_secrets() {
             &serde_json::to_string(&store).unwrap(),
         );
         let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
-        assert!(!statuses[1].authorized && tokens.is_empty());
+        assert!(!agent_status(&statuses, Agent::ClaudeCode).authorized && tokens.is_empty());
         let options = ConnectOptions::default();
         let preview = sandbox
             .projector

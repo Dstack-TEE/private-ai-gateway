@@ -875,7 +875,8 @@ fn drifted_or_broken_configs_deauthorize_tokens_but_stay_recoverable() {
         .unwrap();
     write(&path, &doc.render().unwrap());
     assert!(sandbox.projector.scan(None).unwrap().1.is_empty());
-    let status = &sandbox.projector.scan(None).unwrap().0[1];
+    let statuses = sandbox.projector.scan(None).unwrap().0;
+    let status = agent_status(&statuses, Agent::ClaudeCode);
     assert!(status.recorded && !status.authorized && !status.connected);
     assert!(status
         .attention
@@ -893,7 +894,8 @@ fn drifted_or_broken_configs_deauthorize_tokens_but_stay_recoverable() {
     assert_eq!(error.code(), "invalid_configuration");
     assert!(!error.to_string().contains("sk-old-secret"));
     assert!(sandbox.projector.scan(None).unwrap().1.is_empty());
-    let status = &sandbox.projector.scan(None).unwrap().0[1];
+    let statuses = sandbox.projector.scan(None).unwrap().0;
+    let status = agent_status(&statuses, Agent::ClaudeCode);
     assert!(status.recorded && !status.authorized);
     assert!(status.error.is_some());
     let preview = sandbox
@@ -929,7 +931,7 @@ fn drifted_or_broken_configs_deauthorize_tokens_but_stay_recoverable() {
 fn connect_creates_the_official_config_from_scratch() {
     let sandbox = sandbox("fresh-home");
     let (statuses, _) = sandbox.projector.scan(None).unwrap();
-    assert!(!statuses[1].installed);
+    assert!(!agent_status(&statuses, Agent::ClaudeCode).installed);
     let status = connect(&sandbox);
     assert!(status.connected);
     let text = fs::read_to_string(sandbox.home.join(".claude").join("settings.json")).unwrap();
