@@ -33,24 +33,57 @@ fn token_field(usage: &Value, keys: &[&str]) -> i64 {
     0
 }
 
+// The cached portion of an OpenAI Responses usage, or `None` when `usage` is not
+// that shape.
+//
+// Responses spells the total `input_tokens`, the same name Anthropic uses for
+// its cache-EXCLUDED count, so the name alone cannot say whether the cache
+// buckets must be added. The shape is therefore recognized only when it carries
+// no other cache signal, and a usage that resolves a cache bucket some other way
+// resolves exactly as it would without this function. A cached count outside
+// `0..=input_tokens` is a reporting error and is treated as absent. The control
+// plane resolves usage by the same rules, so the cost shown is the cost billed.
+fn responses_cached_tokens(usage: &Value) -> Option<i64> {
+    let carries_another_cache_signal = token_value(usage, "prompt_tokens").is_some()
+        || token_value(usage, "cache_read_input_tokens").is_some()
+        || token_value(usage, "cache_creation_input_tokens").is_some()
+        || usage
+            .get("prompt_tokens_details")
+            .is_some_and(Value::is_object);
+    if carries_another_cache_signal {
+        return None;
+    }
+    let input = token_value(usage, "input_tokens")?;
+    let cached = usage
+        .get("input_tokens_details")
+        .and_then(|details| token_value(details, "cached_tokens"))?;
+    (0..=input).contains(&cached).then_some(cached)
+}
+
 fn resolve_usage(usage: &Value) -> ResolvedUsage {
     let completion = token_field(usage, &["completion_tokens", "output_tokens"]);
+    let responses_cached = responses_cached_tokens(usage);
     let cache_read = token_value(usage, "cache_read_input_tokens")
         .or_else(|| {
             usage
                 .get("prompt_tokens_details")
                 .and_then(|d| token_value(d, "cached_tokens"))
         })
+        .or(responses_cached)
         .unwrap_or(0);
     let cache_creation = token_value(usage, "cache_creation_input_tokens").unwrap_or(0);
     // OpenAI's `prompt_tokens` already includes cached tokens; Anthropic's
     // `input_tokens` excludes them (cache_read/cache_creation are separate,
     // additive buckets). Normalize to the OpenAI convention (prompt includes
     // cache) so the uncached-input subtraction in `compute_cost` is correct for
-    // either family — otherwise native Anthropic usage under-counts input.
+    // either family — otherwise native Anthropic usage under-counts input. A
+    // Responses `input_tokens` is already that total: adding its cached portion
+    // again would count those tokens twice.
+    let input = token_value(usage, "input_tokens").unwrap_or(0);
     let prompt = match token_value(usage, "prompt_tokens") {
         Some(prompt_tokens) => prompt_tokens,
-        None => token_value(usage, "input_tokens").unwrap_or(0) + cache_read + cache_creation,
+        None if responses_cached.is_some() => input,
+        None => input + cache_read + cache_creation,
     };
     ResolvedUsage {
         prompt,
@@ -168,6 +201,89 @@ mod tests {
         // 10*1e-6 + 20*2e-6 = 5e-5
         let cost = compute_cost(&usage, &pricing);
         assert!((cost - 0.00005).abs() < 1e-15, "got {cost}");
+    }
+
+    // Distinct rates per bucket, so a token in the wrong bucket changes the cost.
+    // The rows and costs are the control plane's `resolveUsage` test: the cost
+    // the gateway shows must be the cost the control plane bills.
+    #[test]
+    fn usage_shapes_cost_what_the_control_plane_bills() {
+        let pricing = json!({
+            "inputCostPerToken": "1", "outputCostPerToken": "2",
+            "cacheReadCostPerToken": "0.1", "cacheCreationCostPerToken": "1.25"
+        });
+        for (name, usage, cost) in [
+            (
+                "OpenAI chat with a cached portion",
+                json!({ "prompt_tokens": 100, "completion_tokens": 5,
+                        "prompt_tokens_details": { "cached_tokens": 40 } }),
+                74.0,
+            ),
+            (
+                "Anthropic native, cache buckets added to the total",
+                json!({ "input_tokens": 60, "output_tokens": 5,
+                        "cache_read_input_tokens": 30, "cache_creation_input_tokens": 10 }),
+                85.5,
+            ),
+            (
+                "gateway Anthropic-to-chat transform",
+                json!({ "prompt_tokens": 100, "completion_tokens": 5,
+                        "cache_read_input_tokens": 30, "cache_creation_input_tokens": 20 }),
+                88.0,
+            ),
+            (
+                "Anthropic native without cache",
+                json!({ "input_tokens": 100, "output_tokens": 5 }),
+                110.0,
+            ),
+            // `input_tokens` already includes the cached portion here.
+            (
+                "OpenAI Responses cached portion, counted once",
+                json!({ "input_tokens": 100, "output_tokens": 5,
+                        "input_tokens_details": { "cached_tokens": 40 } }),
+                74.0,
+            ),
+            // An unreadable cached count is absent: billed at the input rate.
+            (
+                "Responses cached count above its total",
+                json!({ "input_tokens": 100, "output_tokens": 5,
+                        "input_tokens_details": { "cached_tokens": 999 } }),
+                110.0,
+            ),
+            (
+                "Responses cached count negative",
+                json!({ "input_tokens": 100, "output_tokens": 5,
+                        "input_tokens_details": { "cached_tokens": -5 } }),
+                110.0,
+            ),
+            (
+                "Responses null details",
+                json!({ "input_tokens": 100, "output_tokens": 5, "input_tokens_details": null }),
+                110.0,
+            ),
+            // `input_tokens_details` never overrides another cache signal.
+            (
+                "input_tokens_details beside an Anthropic cache bucket",
+                json!({ "input_tokens": 60, "output_tokens": 5, "cache_read_input_tokens": 30,
+                        "input_tokens_details": { "cached_tokens": 30 } }),
+                73.0,
+            ),
+            (
+                "input_tokens_details beside prompt_tokens",
+                json!({ "prompt_tokens": 100, "input_tokens": 100, "output_tokens": 5,
+                        "input_tokens_details": { "cached_tokens": 40 } }),
+                110.0,
+            ),
+            (
+                "input_tokens_details beside prompt_tokens_details",
+                json!({ "input_tokens": 100, "output_tokens": 5,
+                        "prompt_tokens_details": { "cached_tokens": 40 },
+                        "input_tokens_details": { "cached_tokens": 40 } }),
+                114.0,
+            ),
+        ] {
+            assert_eq!(compute_cost(&usage, &pricing), cost, "{name}");
+        }
     }
 
     #[test]

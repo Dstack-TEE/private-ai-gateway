@@ -139,6 +139,18 @@ pub struct RouteCandidate {
     /// Raw reasoning policy from deployment config; the gateway decides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_policy: Option<ReasoningPolicy>,
+    /// API paths implemented directly by the upstream. Endpoints omitted here
+    /// may still be served through a gateway conversion when one exists.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_endpoints: Vec<String>,
+}
+
+impl RouteCandidate {
+    pub fn supports_endpoint(&self, path: &str) -> bool {
+        self.supported_endpoints
+            .iter()
+            .any(|supported| supported == path)
+    }
 }
 
 /// Provider routing block, forwarded verbatim to the control plane.
@@ -327,6 +339,9 @@ pub enum ErrorClass {
     UpstreamVerificationFailed,
     /// The upstream answered 2xx with a body the gateway could not use.
     UpstreamMalformedResponse,
+    /// The upstream answered 2xx with a Responses envelope whose `status` is
+    /// `failed`.
+    UpstreamResponseFailed,
     /// A 2xx stream carried an error event.
     StreamInbandError,
     /// A 2xx stream ended without its terminal marker.
@@ -472,6 +487,10 @@ mod tests {
             (
                 ErrorClass::UpstreamMalformedResponse,
                 "upstream_malformed_response",
+            ),
+            (
+                ErrorClass::UpstreamResponseFailed,
+                "upstream_response_failed",
             ),
             (ErrorClass::StreamInbandError, "stream_inband_error"),
             (ErrorClass::StreamTruncated, "stream_truncated"),

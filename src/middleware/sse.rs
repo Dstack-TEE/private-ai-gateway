@@ -15,7 +15,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -31,6 +31,7 @@ use crate::sse_protocol::SseProtocol;
 use super::control::ControlClient;
 use super::pricing;
 use super::response_transform;
+use super::stream_transform::UpstreamUsage;
 use super::types::{ErrorClass, ErrorSource, PostReport, SpendMode, TenantIdentity};
 
 /// Cap on the partial-line reassembly buffer. An upstream that streams bytes
@@ -219,6 +220,10 @@ pub struct MeterStream {
     /// Recorded when the inner stream errors, so the settle reports the
     /// failure's own status and class rather than a generic 502.
     failure: StreamFailure,
+    /// Set when a stage ahead of the meter reshapes usage for the client: the
+    /// report then carries the upstream's own usage from here, not the reshaped
+    /// one read off the stream.
+    upstream_usage: Option<UpstreamUsage>,
 }
 
 impl MeterStream {
@@ -237,7 +242,15 @@ impl MeterStream {
             saw_error: false,
             framing: crate::sse_framing::SseFramingObserver::for_protocol(protocol),
             settled: false,
+            upstream_usage: None,
         }
+    }
+
+    /// Report the usage a stage ahead of the meter leaves in `upstream_usage`,
+    /// in place of the usage read off the stream.
+    pub fn with_upstream_usage(mut self, upstream_usage: UpstreamUsage) -> Self {
+        self.upstream_usage = Some(upstream_usage);
+        self
     }
 
     /// What the stream amounts to, read from the shared framing observer so it
@@ -279,8 +292,14 @@ impl MeterStream {
                 ErrorClass::StreamTruncated
             });
         }
-        self.report
-            .settle(outcome, self.last_usage.take(), self.ttft_ms, failure);
+        let usage = match &self.upstream_usage {
+            Some(upstream_usage) => upstream_usage
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take(),
+            None => self.last_usage.take(),
+        };
+        self.report.settle(outcome, usage, self.ttft_ms, failure);
     }
 
     // Detect in-band error signals, surface-agnostic (works on either the OpenAI
@@ -447,7 +466,15 @@ impl MeterStream {
                             .pricing
                             .as_ref()
                             .expect("inject implies pricing");
-                        let cost = pricing::compute_cost(usage_obj, pricing);
+                        // Priced from the usage that is reported, so the cost
+                        // shown is the cost billed.
+                        let upstream_usage = self.upstream_usage.as_ref().and_then(|slot| {
+                            slot.lock().unwrap_or_else(PoisonError::into_inner).clone()
+                        });
+                        let cost = pricing::compute_cost(
+                            upstream_usage.as_ref().unwrap_or(&*usage_obj),
+                            pricing,
+                        );
                         if let Some(usage_map) = usage_obj.as_object_mut() {
                             usage_map.insert("cost".to_string(), pricing::cost_to_json(cost));
                         }
