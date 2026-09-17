@@ -78,7 +78,7 @@ connection before forwarding.
 ## Reproduce
 
 ```bash
-cd /home/h4x/workspace/redpill/private-ai-gateway
+cd <private-ai-gateway checkout>
 echo '{"api_version":"aci.provider-verifier.request.v1","provider":"tinfoil",
   "upstream_name":"tinfoil-live","url_origin":"https://inference.tinfoil.sh",
   "model_id":"kimi-k2-6",

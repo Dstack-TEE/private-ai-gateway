@@ -480,10 +480,10 @@ The output is the `aci audit --json` transcript: a `checks` array (id,
 section, status, detail) and a `verdict` object carrying `verified`, the
 pass/fail/skip counts, and the established `workload_keyset_digest`.
 
-## OpenRouter-Derived Fidelity Checklist
+## Fidelity Checklist
 
-OpenRouter's compatibility surface is useful because it has to normalize many
-providers. Our suite should explicitly cover the same classes of behavior:
+A gateway that normalizes many providers behind one OpenAI-compatible surface
+has to hold these classes of behavior. The suite should cover each of them:
 
 - Standard chat parameters: `max_tokens`, `temperature`, `stop`, `seed`, and
   penalty fields where providers accept them.
