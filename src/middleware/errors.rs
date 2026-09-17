@@ -206,58 +206,33 @@ pub(crate) fn client_safe_error_text(message: &str) -> String {
 /// An upstream error message, fit to relay — or `None` to fall back to our own
 /// per-status text.
 ///
-/// Two stages, in order. First strip an error-code prefix by *shape*
-/// (`<400> Module.Sub.BadParam: …`), which works on providers we have never
-/// seen. Then, if what remains still carries a URL, a hostname, or an opaque id,
-/// drop the message entirely rather than try to clean it further.
+/// A message that carries a URL or a hostname is dropped entirely rather than
+/// cleaned further. Everything else is relayed as written, a provider's error
+/// code prefix included: a dotted head is far more often the field path the
+/// caller needs (`messages.0.content: …`) than a code namespace.
 ///
-/// Matched by shape, never by a maintained list of names. A bare company name in
-/// otherwise-neutral prose is therefore relayed — an accepted residual: it was
-/// a shape not seen in practice, while the shapes that were (code
-/// namespaces, hosts, headers) are all caught structurally or by the header
-/// allowlist, and a name list would have to be updated for every new upstream.
+/// Matched by shape, never by a maintained list of names. A bare company name
+/// or a vendor's code namespace in otherwise-neutral prose is therefore relayed
+/// — an accepted residual: neither names a host, and a name list would have to
+/// be updated for every new upstream.
 ///
 /// Biased toward dropping when a structural marker is present: a message we
-/// withhold costs the caller some detail, a message with a host or id in it can
-/// point at who served the request.
+/// withhold costs the caller some detail, a message with a host in it can point
+/// at who served the request.
 fn scrub_identifying_markers(raw: &str) -> Option<String> {
-    let message = strip_error_code_prefix(raw).trim();
+    let message = raw.trim();
     if message.is_empty() || looks_identifying(message) {
         return None;
     }
     Some(message.to_string())
 }
 
-/// Strip a leading `<400> ` status and/or a dotted error-code identifier chain
-/// (`Module.Sub.BadParam: `). Matched by shape, never by vendor
-/// name.
-fn strip_error_code_prefix(message: &str) -> &str {
-    let mut rest = message.trim_start();
-    if let Some(after_angle) = rest.strip_prefix('<') {
-        if let Some((code, after)) = after_angle.split_once('>') {
-            if !code.is_empty() && code.chars().all(|c| c.is_ascii_digit()) {
-                rest = after.trim_start();
-            }
-        }
-    }
-    let Some((head, tail)) = rest.split_once(':') else {
-        return rest;
-    };
-    let dotted_identifier = head.contains('.')
-        && !head.contains(char::is_whitespace)
-        && head
-            .split('.')
-            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric()));
-    if dotted_identifier {
-        tail.trim_start()
-    } else {
-        rest
-    }
-}
-
-/// Whether a message still carries a URL, a host, or an internal identifier —
-/// the structural shapes that point at who served a request. Names are matched by
-/// shape only; there is deliberately no list of company names to keep current.
+/// Whether a message carries a URL or a host — the structural shapes that point
+/// at who served a request. Names are matched by shape only; there is
+/// deliberately no list of company names to keep current. A bare request or
+/// trace id is not one of these shapes: it names no one, while the callers'
+/// own hashes and keys have that shape, so treating it as identifying threw
+/// away messages the caller could act on.
 /// `pub(crate)`: `response_transform` applies the same check to an error's
 /// `param` value, where the fallback is null rather than a generic line.
 pub(crate) fn looks_identifying(message: &str) -> bool {
@@ -266,13 +241,13 @@ pub(crate) fn looks_identifying(message: &str) -> bool {
     }
     message
         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_'))
-        // `.`/`-`/`_` are kept inside a token so a host or id stays whole, but they
-        // are also sentence punctuation: a host ending a sentence (`… api.acme.ai.`)
+        // `.`/`-`/`_` are kept inside a token so a host stays whole, but they are
+        // also sentence punctuation: a host ending a sentence (`… api.acme.ai.`)
         // would otherwise carry a trailing `.`, leaving an empty final label that
-        // fails every shape check below. A real host/IP/id never starts or ends with
-        // one, so trimming them is safe and closes that leak.
+        // fails the shape check below. A real host or IP never starts or ends
+        // with one, so trimming them is safe and closes that leak.
         .map(|word| word.trim_matches(|c| c == '.' || c == '-' || c == '_'))
-        .any(|word| is_hostname_like(word) || is_opaque_id(word))
+        .any(is_hostname_like)
 }
 
 /// Top-level domains a provider's infrastructure realistically appears under.
@@ -283,8 +258,8 @@ pub(crate) fn looks_identifying(message: &str) -> bool {
 /// field-path or filename segments (`app`, `run`, `dev`, `cloud`, `info`, `sh`, …)
 /// are deliberately excluded for the same reason — `config.dev`/`app.run`/
 /// `entrypoint.sh` are not hosts. A host under some TLD outside this list survives
-/// — that is the accepted cost of not discarding good errors, and `://` plus the
-/// opaque-id check still catch the common shapes.
+/// — that is the accepted cost of not discarding good errors, and `://` still
+/// catches the common shape.
 const HOST_TLDS: &[&str] = &[
     "com", "net", "org", "io", "ai", "cn", "eu", "uk", "de", "fr", "jp", "gg", "xyz", "local",
     "internal",
@@ -308,21 +283,6 @@ fn is_hostname_like(word: &str) -> bool {
         && parts[..parts.len() - 1]
             .iter()
             .all(|p| p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
-}
-
-/// A request id or trace id: a UUID, or a long unbroken hex run.
-fn is_opaque_id(word: &str) -> bool {
-    let hex = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit());
-    let groups: Vec<&str> = word.split('-').collect();
-    if groups.len() == 5
-        && [8, 4, 4, 4, 12]
-            .iter()
-            .zip(&groups)
-            .all(|(len, group)| group.len() == *len && hex(group))
-    {
-        return true;
-    }
-    word.len() >= 16 && hex(word)
 }
 
 /// The host component of an `http(s)://` URL (`https://a.example/x?y` -> `a.example`).
@@ -732,31 +692,21 @@ pub fn normalize_upstream_error(
 mod scrub_tests {
     use super::scrub_identifying_markers;
 
-    /// The shape captured from a provider that wraps its backend's error: a
-    /// bracketed status and a dotted code namespace, stripped to the actionable
-    /// text underneath. Works on providers never seen, because it matches shape.
+    /// The head before a colon is the caller's to read: it is usually the field
+    /// path at fault, and a provider's code namespace in the same position is
+    /// relayed with it rather than guessed apart.
     #[test]
-    fn strips_an_error_code_prefix_and_keeps_the_actionable_text() {
-        let raw = "<400> Module.Sub.BadParam: The requested parameter combination \
-                   is not supported by this model";
-        assert_eq!(
-            scrub_identifying_markers(raw).as_deref(),
-            Some("The requested parameter combination is not supported by this model")
-        );
+    fn keeps_the_head_before_a_colon() {
+        for message in [
+            "messages.0.content: Input should be a valid string",
+            "body.tools.0.function.parameters: invalid JSON schema",
+            "<400> Module.Sub.BadParam: The combination is not supported by this model",
+        ] {
+            assert_eq!(scrub_identifying_markers(message).as_deref(), Some(message));
+        }
     }
 
-    /// A bare dotted code with no bracketed status is the same shape.
-    #[test]
-    fn strips_a_dotted_code_without_a_bracketed_status() {
-        assert_eq!(
-            scrub_identifying_markers("InvalidParameter.Value: temperature is too large")
-                .as_deref(),
-            Some("temperature is too large")
-        );
-    }
-
-    /// A colon whose head is not a dotted code, and a non-ASCII body, are both
-    /// relayed verbatim rather than mistaken for a prefix or garbled.
+    /// Plain prose and a non-ASCII body are relayed verbatim, not garbled.
     #[test]
     fn keeps_a_clean_message_verbatim() {
         for message in [
@@ -770,21 +720,36 @@ mod scrub_tests {
         }
     }
 
-    /// A URL, a hostname, an IP, or an opaque id points at who served the
-    /// request, and is dropped by shape — no list of names involved.
+    /// A URL, a hostname or an IP points at who served the request, and is
+    /// dropped by shape — no list of names involved.
     #[test]
     fn drops_a_message_that_still_identifies_the_upstream() {
         for message in [
             "upstream https://api.acme.ai/v1 returned 500",
             "no route to inference-7.internal.acme.io",
             "backend 10.0.0.7 refused the connection",
-            "request 136e8d8a-e1ee-94c3-90f7-3b3bd3ecbf29 failed",
-            "trace 4f9a2c1de88b0771ab34 not found",
         ] {
             assert_eq!(
                 scrub_identifying_markers(message),
                 None,
                 "leaked: {message}"
+            );
+        }
+    }
+
+    /// A request or trace id names no one, and the callers' own hashes and keys
+    /// have the same shape, so an id is not a reason to discard an actionable
+    /// message.
+    #[test]
+    fn relays_a_message_carrying_only_an_id() {
+        for message in [
+            "request 136e8d8a-e1ee-94c3-90f7-3b3bd3ecbf29 failed",
+            "trace 4f9a2c1de88b0771ab34 not found",
+        ] {
+            assert_eq!(
+                scrub_identifying_markers(message).as_deref(),
+                Some(message),
+                "wrongly dropped: {message}"
             );
         }
     }
@@ -801,21 +766,6 @@ mod scrub_tests {
         );
     }
 
-    /// Stripping must not empty the message into a meaningless success.
-    #[test]
-    fn drops_a_message_that_was_only_a_code() {
-        assert_eq!(scrub_identifying_markers("<400> Internal.Algo.Bad: "), None);
-    }
-
-    /// Decimals and version-like tokens are not hostnames.
-    #[test]
-    fn does_not_mistake_numbers_for_hosts() {
-        assert_eq!(
-            scrub_identifying_markers("temperature must be between 0.0 and 2.0").as_deref(),
-            Some("temperature must be between 0.0 and 2.0")
-        );
-    }
-
     /// A dotted token is usually a field path or a library, not a host. Treating
     /// every one as identifying discarded messages the caller could act on, which
     /// is the opposite of useful: these are the most actionable errors there are.
@@ -829,6 +779,7 @@ mod scrub_tests {
             "response_format.type is not supported",
             "expected schema.properties.name to be a string",
             "upgrade to version 1.2.3",
+            "temperature must be between 0.0 and 2.0",
         ] {
             assert_eq!(
                 scrub_identifying_markers(message).as_deref(),
@@ -842,14 +793,11 @@ mod scrub_tests {
     #[test]
     fn still_drops_real_hosts_and_addresses() {
         for message in [
-            "no route to inference-7.internal.acme.io",
             "cannot connect to host files.example.com:443",
-            "backend 10.0.0.7 refused the connection",
             "resolve failed for api.acme.ai",
-            // A host/IP/id that ends the sentence carries a trailing period.
+            // A host or IP that ends the sentence carries a trailing period.
             "could not resolve host api.acme.ai.",
             "connection refused by 10.0.0.7.",
-            "unknown request 136e8d8a-e1ee-94c3-90f7-3b3bd3ecbf29.",
         ] {
             assert_eq!(
                 scrub_identifying_markers(message),
@@ -871,7 +819,8 @@ mod tests {
             br#"{"code":400, "reason":"INVALID_REQUEST_BODY", "message":"max_tokens must be between 0 and 393216"}"#.as_slice(),
             br#"{"message":"invalid request error","type":"invalid_request_error"}"#.as_slice(),
         ] {
-            let got = super::client_safe_error_message(body).expect("message extracted");
+            let got =
+                super::client_safe_error_message(body).expect("message extracted");
             assert!(!got.is_empty());
         }
         // No message anywhere stays None rather than fabricating one.

@@ -397,7 +397,7 @@ fn effective_error_kind(object: &serde_json::Map<String, Value>) -> Option<&Valu
 
 /// The `param` value to send: a string naming the request parameter at fault,
 /// per the surface contracts. A structured value or an identifying string
-/// (URL, host, opaque id) becomes null rather than reach the client.
+/// (URL, host) becomes null rather than reach the client.
 fn client_error_param(param: Option<&Value>) -> Option<String> {
     let text = param?.as_str()?;
     (!looks_identifying(text)).then(|| text.to_string())
