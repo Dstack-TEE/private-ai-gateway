@@ -18,6 +18,49 @@ fn matches_channel(version: &str, channel: UpdateChannel) -> bool {
     }
 }
 
+fn channel_name(channel: UpdateChannel) -> &'static str {
+    match channel {
+        UpdateChannel::Beta => "beta",
+        UpdateChannel::Stable => "stable",
+    }
+}
+
+fn channel_endpoint(
+    configured: &str,
+    channel: UpdateChannel,
+    target: &str,
+) -> Result<tauri::Url, String> {
+    let mut endpoint = tauri::Url::parse(configured)
+        .map_err(|_| "Updates are not configured correctly for this build")?;
+    let path = endpoint.path();
+    let marker = path
+        .rfind("/desktop-updates-")
+        .ok_or("Updates are not configured correctly for this build")?;
+    let feed = &path[marker + 1..];
+    if feed != "desktop-updates-beta/latest.json" && feed != "desktop-updates-stable/latest.json" {
+        return Err("Updates are not configured correctly for this build".to_string());
+    }
+    endpoint.set_path(&format!(
+        "{}/desktop-updates-{}/latest-{target}.json",
+        &path[..marker],
+        channel_name(channel)
+    ));
+    Ok(endpoint)
+}
+
+fn configured_endpoint(app: &AppHandle) -> Result<String, String> {
+    app.config()
+        .plugins
+        .0
+        .get("updater")
+        .and_then(|plugin| plugin.get("endpoints"))
+        .and_then(serde_json::Value::as_array)
+        .and_then(|endpoints| endpoints.first())
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "Updates are not configured correctly for this build".to_string())
+}
+
 #[tauri::command]
 pub async fn get_update_channel(
     app: AppHandle,
@@ -132,18 +175,13 @@ pub async fn check_update(
     *pending = None;
     let client = app.state::<Arc<Client>>();
     let channel = get_update_channel(app.clone(), client).await?;
-    let channel_name = match channel {
-        UpdateChannel::Beta => "beta",
-        UpdateChannel::Stable => "stable",
-    };
+    let channel_name = channel_name(channel);
     let target =
         tauri_plugin_updater::target().ok_or("Updates are unavailable on this platform")?;
-    let endpoint = format!("https://github.com/Dstack-TEE/private-ai-gateway/releases/download/desktop-updates-{channel_name}/latest-{target}.json");
+    let endpoint = channel_endpoint(&configured_endpoint(&app)?, channel, &target)?;
     let updater = app
         .updater_builder()
-        .endpoints(vec![endpoint
-            .parse()
-            .map_err(|_| "Invalid update endpoint")?])
+        .endpoints(vec![endpoint.clone()])
         .map_err(|_| "Invalid update endpoint")?
         .timeout(Duration::from_secs(30))
         .build()
@@ -157,7 +195,7 @@ pub async fn check_update(
                 .timeout(Duration::from_secs(30))
                 .build()
                 .map_err(|_| "Could not check the update channel")?
-                .head(&endpoint)
+                .head(endpoint.clone())
                 .send()
                 .await
                 .map_err(|_| "Could not reach the update channel")?;
@@ -237,7 +275,7 @@ async fn install(
 
 #[cfg(test)]
 mod tests {
-    use super::{matches_channel, UpdateChannel};
+    use super::{channel_endpoint, matches_channel, UpdateChannel};
 
     #[test]
     fn update_versions_must_belong_to_selected_channel() {
@@ -247,5 +285,22 @@ mod tests {
         assert!(!matches_channel("0.2.0", UpdateChannel::Beta));
         assert!(!matches_channel("0.2.0-rc.1", UpdateChannel::Beta));
         assert!(!matches_channel("invalid", UpdateChannel::Stable));
+    }
+
+    #[test]
+    fn update_channels_derive_from_the_configured_feed() {
+        let configured = "https://example.test/releases/download/desktop-updates-beta/latest.json";
+        let endpoint = channel_endpoint(configured, UpdateChannel::Stable, "windows-x86_64")
+            .expect("valid update endpoint");
+        assert_eq!(
+            endpoint.as_str(),
+            "https://example.test/releases/download/desktop-updates-stable/latest-windows-x86_64.json"
+        );
+        assert!(channel_endpoint(
+            "https://example.test/releases/latest.json",
+            UpdateChannel::Beta,
+            "darwin-aarch64"
+        )
+        .is_err());
     }
 }

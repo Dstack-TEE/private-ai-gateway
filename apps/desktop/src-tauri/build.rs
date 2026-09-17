@@ -1,12 +1,4 @@
 fn main() {
-    if std::env::var("PROFILE").as_deref() == Ok("release")
-        && std::env::var_os("TAURI_CONFIG").is_none()
-    {
-        panic!(
-            "release packages must be built with `npm run dist` so the brand overlay is applied"
-        );
-    }
-
     let manifest = tauri_build::AppManifest::new().commands(&[
         "start_backend_service",
         "get_gateway_state",
