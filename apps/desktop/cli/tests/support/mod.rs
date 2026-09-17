@@ -1,14 +1,12 @@
 use async_trait::async_trait;
 use ed25519_dalek::{Signer, SigningKey};
-use private_ai_proxy_aci::aci::e2ee::{
+use private_ai_proxy::aci::e2ee::{
     public_key_from_secret, secret_key_from_bytes, x25519_public_key_hex,
     x25519_secret_key_from_bytes, E2EE_ALGO_SECP256K1_AESGCM, E2EE_ALGO_X25519_AESGCM,
 };
-use private_ai_proxy_aci::aci::keys::{KeyError, KeyProvider, Quote, Quoter, ALGO_ED25519};
-use private_ai_proxy_aci::aci::receipt::{
-    ChannelBinding, UpstreamVerifiedEvent, VerificationResult,
-};
-use private_ai_proxy_aci::aci::types::{KeyedPublicKey, TlsSpki};
+use private_ai_proxy::aci::keys::{KeyError, KeyProvider, Quote, Quoter, ALGO_ED25519};
+use private_ai_proxy::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use private_ai_proxy::aci::types::{KeyedPublicKey, TlsSpki};
 
 pub fn verified_event(upstream_name: &str, model_id: &str) -> UpstreamVerifiedEvent {
     UpstreamVerifiedEvent {

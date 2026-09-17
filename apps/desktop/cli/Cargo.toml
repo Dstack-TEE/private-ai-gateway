@@ -1,40 +1,73 @@
 [package]
-name = "private-ai-proxy-cli"
+name = "private-ai-proxy"
 version = "0.1.0"
 description = "Private AI Proxy command-line client and user backend"
 license = "Apache-2.0"
 edition = "2021"
 rust-version = "1.91"
 
+[features]
+default = ["managed-client"]
+managed-client = [
+    "dep:async-stream",
+    "dep:axum",
+    "dep:clap",
+    "dep:desktop-runtime",
+    "dep:tokio-util",
+]
+
+[lib]
+name = "private_ai_proxy"
+path = "lib.rs"
+
 [[bin]]
 name = "private-ai-proxy"
 path = "main.rs"
+required-features = ["managed-client"]
 
 [[bin]]
 name = "private-ai-proxy-service"
 path = "service.rs"
+required-features = ["managed-client"]
 
 [dependencies]
-async-stream = "0.3"
-axum = "0.7"
+aes-gcm = "0.10"
+async-stream = { version = "0.3", optional = true }
+async-trait = "0.1"
+axum = { version = "0.7", optional = true }
 base64 = "0.22"
 bytes = "1"
-clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
-desktop-runtime = { package = "private-ai-proxy-runtime", path = "../runtime" }
+chacha20poly1305 = "0.10"
+clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context"], optional = true }
+curve25519-dalek = "4"
+dcap-qvl = { version = "0.3.12", default-features = false, features = ["std", "report", "rustcrypto"] }
+desktop-runtime = { package = "private-ai-proxy-runtime", path = "../runtime", optional = true }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+flate2 = "1"
 futures-util = "0.3"
 hex = "0.4"
-private-ai-proxy-aci = { path = "../../../crates/aci" }
+hkdf = "0.12"
+k256 = { version = "0.13", features = ["ecdsa", "arithmetic", "ecdh"] }
+ml-kem = { version = "0.3", features = ["getrandom"] }
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "stream"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
+sha3 = "0.10"
+thiserror = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "process", "io-util", "sync", "time"] }
-tokio-util = "0.7"
+tokio-util = { version = "0.7", optional = true }
+webpki-roots = "1"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+x509-parser = "0.16"
+
+[target.'cfg(unix)'.dependencies]
+dstack-sdk = "0.1.2"
 
 [dev-dependencies]
-async-trait = "0.1"
 desktop-gateway = { package = "private-ai-proxy-gateway", path = "../gateway" }
-ed25519-dalek = { version = "2", features = ["rand_core"] }
 private-ai-gateway = { path = "../../.." }
 tempfile = "3"
 

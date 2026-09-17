@@ -19,16 +19,16 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use private_ai_proxy_aci::aci::digest::{jcs_bytes, sha256_hex, sha256_raw};
-use private_ai_proxy_aci::aci::identity;
-use private_ai_proxy_aci::aci::keys::verify_receipt_signature;
-use private_ai_proxy_aci::aci::receipt::receipt_signing_input;
-use private_ai_proxy_aci::aci::types::{AttestationReport, WorkloadKeyset};
-use private_ai_proxy_aci::aci::verifier::{
+use private_ai_proxy::aci::digest::{jcs_bytes, sha256_hex, sha256_raw};
+use private_ai_proxy::aci::identity;
+use private_ai_proxy::aci::keys::verify_receipt_signature;
+use private_ai_proxy::aci::receipt::receipt_signing_input;
+use private_ai_proxy::aci::types::{AttestationReport, WorkloadKeyset};
+use private_ai_proxy::aci::verifier::{
     appraise_report, dstack_rtmr3_event, AppraisalInputs, CheckId, CheckResult, CustodyEvidence,
     DstackEventLog, Outcome,
 };
-pub use private_ai_proxy_aci::aci::verifier::{ChannelEvidence, QuoteSource};
+pub use private_ai_proxy::aci::verifier::{ChannelEvidence, QuoteSource};
 use serde_json::Value;
 
 use crate::client::{AciClient, HttpResult};
@@ -146,7 +146,7 @@ pub async fn run_report_checks(
         // (docs/reviews/aci-spec-conformance-gaps.md item 1).
         custody: CustodyEvidence::Unimplemented {
             reason: "custody policy not implemented in this CLI yet \
-                     (see crates/aci/src/aci/verifier/dstack.rs)",
+                     (see apps/desktop/cli/aci/verifier/dstack.rs)",
         },
         channel: cx.channel,
         explain: cx.explain,
@@ -880,7 +880,7 @@ mod tests {
         vector_session_bytes, KEYSET_NOT_AFTER, REQUEST_BODY, RESPONSE_BODY, SERVED_AT, TEST_NONCE,
     };
     use crate::transcript::Status;
-    use private_ai_proxy_aci::aci::verifier::validate_aci_report_binding;
+    use private_ai_proxy::aci::verifier::validate_aci_report_binding;
 
     fn offline_cx<'a>(nonce: Option<&'a str>, now_secs: u64) -> ReportCheckContext<'a> {
         ReportCheckContext {
@@ -1214,7 +1214,7 @@ mod tests {
     #[test]
     fn audit_session_record_agrees_with_the_fixture() {
         let bytes = vector_session_bytes();
-        let id = private_ai_proxy_aci::aci::digest::sha256_bare_hex(&bytes);
+        let id = private_ai_proxy::aci::digest::sha256_bare_hex(&bytes);
         let record: Value = serde_json::from_slice(&bytes).unwrap();
         let at = record.get("established_at").and_then(Value::as_u64);
         let audit = audit_session_record(&bytes, &id, at).unwrap();

@@ -3998,7 +3998,7 @@ dependencies = [
  "hyper-util",
  "k256",
  "ml-kem",
- "private-ai-proxy-aci",
+ "private-ai-proxy",
  "prometheus",
  "rand 0.8.6",
  "reqwest",
@@ -4019,14 +4019,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "private-ai-proxy-aci"
+name = "private-ai-proxy"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "async-stream",
  "async-trait",
+ "axum 0.7.9",
  "base64 0.22.1",
  "bytes",
  "chacha20poly1305",
+ "clap",
  "curve25519-dalek",
  "dcap-qvl",
  "dstack-sdk",
@@ -4037,6 +4040,9 @@ dependencies = [
  "hkdf 0.12.4",
  "k256",
  "ml-kem",
+ "private-ai-gateway",
+ "private-ai-proxy-gateway",
+ "private-ai-proxy-runtime",
  "rand 0.8.6",
  "reqwest",
  "rustls",
@@ -4044,37 +4050,13 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sha3 0.10.9",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-util",
  "webpki-roots",
  "x25519-dalek",
  "x509-parser",
-]
-
-[[package]]
-name = "private-ai-proxy-cli"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "async-trait",
- "axum 0.7.9",
- "base64 0.22.1",
- "bytes",
- "clap",
- "ed25519-dalek",
- "futures-util",
- "hex",
- "private-ai-gateway",
- "private-ai-proxy-aci",
- "private-ai-proxy-gateway",
- "private-ai-proxy-runtime",
- "rand 0.8.6",
- "reqwest",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "tokio",
- "tokio-util",
 ]
 
 [[package]]

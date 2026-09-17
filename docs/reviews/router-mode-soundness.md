@@ -103,7 +103,7 @@ cat /tmp/nearai-cloud-api/Dockerfile  # reproducible-build prologue
 cat /tmp/nearai-cloud-verifier/version_verifier.py
 
 # Gateway side
-sed -n '1,220p' crates/aci/src/aci/verifier/external.rs
+sed -n '1,220p' apps/desktop/cli/aci/verifier/external.rs
 sed -n '280,380p' scripts/private_ai_provider_verifier.py
 
 # Live probes
@@ -271,7 +271,7 @@ What we do today (read-only review, no changes made):
   `ExternalProviderVerifier::private_inference(...)` and run our Python bridge
   `scripts/private_ai_provider_verifier.py` (`verify_tinfoil`, `verify_nearai`).
   Each returns one `channel_bindings` entry of type `tls_spki_sha256` bound to
-  the provider URL origin (`crates/aci/src/aci/verifier/external.rs`,
+  the provider URL origin (`apps/desktop/cli/aci/verifier/external.rs`,
   `scripts/private_ai_provider_verifier.py:286-376`).
 - The ACI backend forwards over an HTTPS connection that enforces the verified
   SPKI; that part of the chain is consistent with what both routers expect.

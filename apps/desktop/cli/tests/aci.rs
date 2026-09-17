@@ -16,12 +16,12 @@ use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore,
 };
 use private_ai_gateway::http::build_router;
-use private_ai_proxy_aci::aci::digest::sha256_hex;
-use private_ai_proxy_aci::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent};
-use private_ai_proxy_aci::aci::upstream::{
+use private_ai_proxy::aci::digest::sha256_hex;
+use private_ai_proxy::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent};
+use private_ai_proxy::aci::upstream::{
     PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
 };
-use private_ai_proxy_aci::aci::verifier::StaticUpstreamVerifier;
+use private_ai_proxy::aci::verifier::StaticUpstreamVerifier;
 use serde_json::Value;
 
 use support::{verified_event, StaticKeyProvider, StubQuoter};

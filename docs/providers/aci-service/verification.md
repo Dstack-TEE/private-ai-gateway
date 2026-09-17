@@ -3,7 +3,7 @@
 - **TEE:** Intel TDX (CPU) + NVIDIA Confidential Compute, on dstack
 - **Session binding:** `tls_spki_sha256`
 - **Verifier:** native Rust — `AciServiceUpstreamVerifier`
-  (`crates/aci/src/aci/verifier/aci_service.rs`). No bridge / Python; this is the path
+  (`apps/desktop/cli/aci/verifier/aci_service.rs`). No bridge / Python; this is the path
   for the gateway's own ACI-compatible workers.
 - **Versions:** ACI report wire format `aci/1`; verifier implementation
   `aci-service/v2`.
@@ -18,7 +18,7 @@
 (the spec §4 report) from the worker and verifies it natively:
 
 1. **ACI report binding** (`validate_aci_report_binding`,
-   `crates/aci/src/aci/verifier/report.rs` — the spec §9.1(2–3) chain):
+   `apps/desktop/cli/aci/verifier/report.rs` — the spec §9.1(2–3) chain):
    the SHA-256 of the served `workload_keyset` object's JCS form must
    equal the reported `workload_keyset_digest`; rebuild the §3.2 statement
    `{"keyset_digest":…,"nonce":…,"purpose":"aci.report_data.v1"}` for the

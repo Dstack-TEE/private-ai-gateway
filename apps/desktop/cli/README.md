@@ -2,8 +2,8 @@
 
 Shared command-line implementation of the ACI protocol
 ([spec/aci.md](../../../spec/aci.md)). It reuses the gateway's own
-verification code. The packaged `private-ai-proxy` CLI (also available as
-`pap`) is the sole executable that owns these commands.
+verification code. The packaged `private-ai-proxy` CLI (also available through
+the `pap` and `aci` aliases) is the sole executable that owns these commands.
 
 ```bash
 cargo run --manifest-path apps/desktop/cli/Cargo.toml --bin private-ai-proxy -- <command> --help
@@ -42,8 +42,8 @@ boot measurements. See [How the OS image is classified](../../../docs/providers/
 
 ## Where verification lives
 
-Every verification step is `crates/aci`'s, so the gateway's own upstream
-verifier and this CLI run the same code — the quote steps, the §9.1(2)
+Every verification step lives in this package's `aci/` modules, so the gateway's
+own upstream verifier and this CLI run the same code — the quote steps, the §9.1(2)
 binding chain, the §3.1 TLS selection, receipt signatures, JCS digests. What
 lives here is the transcript: mapping each step's outcome to a pass, fail, or
 honest skip. Two implementations of one step drift, and both keep passing

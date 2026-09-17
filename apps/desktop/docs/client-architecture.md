@@ -19,10 +19,12 @@ commands. Management command execution and output live in
 `apps/desktop/runtime/src/cli`; ACI command modules live in `apps/desktop/cli`.
 There is one user-facing executable and one verifier implementation.
 Desktop integration adds opt-in lifecycle events and post-delivery receipt auditing.
-The desktop CLI package owns both console binaries and depends directly on the
-runtime and shared ACI crate. The root gateway package has no desktop feature or
-desktop dependencies. Both products use `crates/aci`; the gateway re-exports it
-through the existing `private_ai_gateway::aci` API.
+The Private AI Proxy package owns the user-facing CLI, its managed service binary,
+and the ACI library modules under `apps/desktop/cli/aci`. Its managed-client
+feature adds the desktop runtime only for the executable targets. The root gateway
+depends on the same package with default features disabled and re-exports ACI
+through the existing `private_ai_gateway::aci` API, so it does not acquire desktop
+dependencies.
 
 `private-ai-proxy verify/audit/sessions/send` do not initialize the managed backend or
 credential store. `private-ai-proxy serve` streams responses immediately and

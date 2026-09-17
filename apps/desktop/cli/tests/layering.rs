@@ -1,7 +1,7 @@
 //! Private AI Proxy's ACI commands must not grow a second verifier.
 //!
-//! Verification steps belong in `crates/aci`, where the gateway's own
-//! verifier consumes them; the CLI maps their outcomes to transcript lines.
+//! Verification steps belong in this package's `aci/` modules, which the
+//! gateway also consumes; the CLI maps their outcomes to transcript lines.
 //! When both sides implement a step, they drift — and both sides keep passing
 //! their own tests while disagreeing about the same service.
 
@@ -67,7 +67,7 @@ fn the_cli_calls_no_verification_primitive_directly() {
             for primitive in VERIFICATION_PRIMITIVES {
                 if line.contains(primitive) {
                     offenders.push(format!(
-                        "{}:{}: {primitive} — put this step in crates/aci and call it from \
+                        "{}:{}: {primitive} — put this step in the shared aci module and call it from \
                          both verifiers\n    {}",
                         path.display(),
                         n + 1,

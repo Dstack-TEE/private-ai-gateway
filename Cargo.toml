@@ -8,7 +8,6 @@ license = "Apache-2.0"
 [workspace]
 members = [
     ".",
-    "crates/aci",
     "apps/desktop/cli",
     "apps/desktop/gateway",
     "apps/desktop/runtime",
@@ -25,7 +24,7 @@ name = "private-ai-gateway"
 path = "src/main.rs"
 
 [dependencies]
-private-ai-proxy-aci = { path = "crates/aci" }
+private-ai-proxy = { path = "apps/desktop/cli", default-features = false }
 # Canonical-JSON, types, and serialization.
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

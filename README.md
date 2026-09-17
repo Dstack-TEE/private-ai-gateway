@@ -570,11 +570,10 @@ events, and metrics model ids.
 
 ```text
 src/main.rs                       binary entrypoint and runtime config
-crates/aci/                       shared ACI protocol, dstack key custody, transport, and verification crate
 src/aggregator/service.rs         report, forwarding, E2EE, receipt finalization
 src/aggregator/upstream_config.rs runtime upstream config and provider adapters
 src/http/app.rs                   Axum HTTP routers and middleware/backend wiring
-apps/desktop/cli/                 `private-ai-proxy` implementation; installs `pap` and `aci` aliases
+apps/desktop/cli/                 `private-ai-proxy`; `pap`/`aci` are aliases; includes ACI protocol and verifier implementation
 clients/                          verifier-ts verifier library (browser + node); pi-provider pi provider extension
 docs/                             design notes, configuration reference, provider reviews
 deploy/                           git-launcher and dstack compose examples
