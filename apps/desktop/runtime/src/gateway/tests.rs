@@ -262,7 +262,7 @@ fn keyset_change_requests_fresh_verification_without_ending_the_session() {
     manager
         .handle_line(
             proxy.session().generation,
-            r#"{"schema_version":1,"type":"blocked","code":"keyset_changed","reason":"rotation"}"#,
+            r#"{"type":"blocked","code":"keyset_changed","reason":"rotation"}"#,
         )
         .unwrap();
     let state = manager.snapshot().unwrap();
@@ -300,20 +300,22 @@ fn security_blocks_survive_process_failure_without_cancelling_candidate_sessions
         manager
             .handle_line(
                 generation,
-                r#"{"schema_version":1,"type":"blocked","reason":"identity rejected"}"#,
+                r#"{"type":"blocked","reason":"identity rejected"}"#,
             )
             .unwrap();
         assert_eq!(usage.active_session().unwrap().is_some(), verification_only);
         let running = manager.is_running().unwrap();
-        manager.handle_line(generation, r#"{"schema_version":1,"type":"blocked","code":"keyset_changed","reason":"late rotation"}"#).unwrap();
+        manager
+            .handle_line(
+                generation,
+                r#"{"type":"blocked","code":"keyset_changed","reason":"late rotation"}"#,
+            )
+            .unwrap();
         assert_eq!(manager.snapshot().unwrap().status, "blocked");
         assert_eq!(usage.active_session().unwrap().is_some(), verification_only);
         assert_eq!(manager.is_running().unwrap(), running);
         manager
-            .handle_line(
-                generation,
-                r#"{"schema_version":1,"type":"fatal","message":"process failed"}"#,
-            )
+            .handle_line(generation, r#"{"type":"fatal","message":"process failed"}"#)
             .unwrap();
         manager.terminated(generation).unwrap();
         manager.fail(generation, "reader failed".into()).unwrap();
@@ -432,15 +434,16 @@ fn request_event(value: &serde_json::Value) -> crate::sidecar_protocol::RequestC
 #[test]
 fn identity_alone_does_not_verify_and_requests_are_attributed() {
     let identity = json!({
-        "type": "ready",
-        "schema_version": 1,
-        "remote_url": "https://tee.redpill.ai",
-        "proxy_url": "http://127.0.0.1:53211",
         "tee_type": "tdx",
         "trust_level": "hardware_verified",
         "keyset_digest": "sha256:keyset",
         "keyset_not_after": 2_000_000_000,
+        "tls_spki": null,
         "source_provenance": { "repo_commit": "abc123" },
+        "service_capabilities": {
+            "serving": "aggregator",
+            "supported_e2ee_versions": []
+        },
         "verification": { "checks": [{
             "id": "id-1", "section": "9.1(1)", "title": "Hardware quote",
             "status": "pass", "detail": "TDX quote verified"

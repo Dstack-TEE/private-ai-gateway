@@ -1,7 +1,5 @@
 use super::*;
-use crate::sidecar_protocol::{
-    IdentityEvent, RequestCompleteEvent, ServeEvent, ServeEventKind, EVENT_SCHEMA_VERSION,
-};
+use crate::sidecar_protocol::{IdentityEvent, RequestCompleteEvent, ServeEvent};
 
 impl GatewayManager {
     pub(super) fn handle_stdout(
@@ -46,9 +44,6 @@ impl GatewayManager {
     pub(super) fn handle_line(self: &Arc<Self>, generation: u64, line: &str) -> Result<(), String> {
         let event: ServeEvent = serde_json::from_str(line)
             .map_err(|_| "Verifier emitted invalid JSON event data".to_string())?;
-        if event.schema_version != EVENT_SCHEMA_VERSION {
-            return Err("Verifier emitted an unknown event schema".to_string());
-        }
 
         let mut runtime = self.lock()?;
         if runtime.generation != generation {
@@ -59,10 +54,10 @@ impl GatewayManager {
         let mut persist = None;
         let mut end_session = false;
         let mut retired_child = None;
-        match event.kind {
+        match event {
             // Identity in (or rotated): a new epoch; the session stays closed
             // until the catalog read through this identity is in too.
-            ServeEventKind::Ready {
+            ServeEvent::Ready {
                 identity,
                 remote_url,
                 proxy_url,
@@ -78,7 +73,7 @@ impl GatewayManager {
                 runtime.state.catalog = None;
                 load_catalog = true;
             }
-            ServeEventKind::IdentityUpdated { identity } => {
+            ServeEvent::IdentityUpdated { identity } => {
                 apply_identity_event(&mut runtime.state, &identity);
                 runtime.identity_ready = true;
                 runtime.epoch += 1;
@@ -87,7 +82,7 @@ impl GatewayManager {
                 runtime.state.catalog = None;
                 load_catalog = true;
             }
-            ServeEventKind::RequestComplete { request } => {
+            ServeEvent::RequestComplete { request } => {
                 if request.path != "/v1/models" {
                     persist = Some(apply_request_event(&mut runtime.state, &request)?);
                 }
@@ -95,7 +90,7 @@ impl GatewayManager {
             // Verification lost: one atomic barrier. The epoch moves so a
             // read still in flight can neither publish nor clear this error,
             // and the identity must be reported again before anything opens.
-            ServeEventKind::Blocked { code, reason } => {
+            ServeEvent::Blocked { code, reason } => {
                 let rotating =
                     code.as_deref() == Some("keyset_changed") && runtime.state.status != "blocked";
                 end_session = !rotating && !runtime.verification_only;
@@ -110,7 +105,7 @@ impl GatewayManager {
                 runtime.state.catalog = None;
                 runtime.state.error = Some(reason);
             }
-            ServeEventKind::Fatal { message } => {
+            ServeEvent::Fatal { message } => {
                 runtime.epoch += 1;
                 runtime.identity_ready = false;
                 if runtime.state.status != "blocked" {
@@ -121,7 +116,6 @@ impl GatewayManager {
                 runtime.state.catalog = None;
                 runtime.state.error = Some(message);
             }
-            ServeEventKind::Unknown => return Ok(()),
         }
 
         let epoch = runtime.epoch;

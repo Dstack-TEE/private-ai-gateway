@@ -1,10 +1,8 @@
-//! Versioned JSON-lines contract between `private-ai-proxy serve` and the
-//! persistent desktop backend.
+//! JSON-lines contract between `private-ai-proxy serve` and the persistent
+//! desktop backend.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-pub const EVENT_SCHEMA_VERSION: u64 = 1;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IdentityEvent {
@@ -12,30 +10,22 @@ pub struct IdentityEvent {
     pub tee_type: String,
     pub keyset_digest: String,
     pub keyset_not_after: u64,
-    #[serde(default)]
     pub tls_spki: Option<String>,
-    #[serde(default)]
     pub source_provenance: SourceProvenance,
-    #[serde(default)]
     pub service_capabilities: ServiceCapabilities,
     pub verification: Value,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SourceProvenance {
-    #[serde(default)]
     pub repo_url: Option<String>,
-    #[serde(default)]
     pub repo_commit: Option<String>,
-    #[serde(default)]
     pub image_digest: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ServiceCapabilities {
-    #[serde(default)]
     pub serving: String,
-    #[serde(default)]
     pub supported_e2ee_versions: Vec<String>,
 }
 
@@ -44,25 +34,18 @@ pub struct RequestCompleteEvent {
     pub method: String,
     pub path: String,
     pub status: u16,
-    #[serde(default)]
     pub streamed: bool,
-    #[serde(default)]
     pub receipt_id: Option<String>,
-    #[serde(default)]
     pub verified: Option<bool>,
-    #[serde(default)]
     pub detail: String,
-    #[serde(default)]
     pub tag: Option<String>,
-    #[serde(default)]
     pub rewritten: Option<bool>,
-    #[serde(default)]
     pub local_policy_applied: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum ServeEventKind {
+pub enum ServeEvent {
     Ready {
         #[serde(flatten)]
         identity: IdentityEvent,
@@ -80,31 +63,13 @@ pub enum ServeEventKind {
         request: RequestCompleteEvent,
     },
     Blocked {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         code: Option<String>,
         reason: String,
     },
     Fatal {
         message: String,
     },
-    #[serde(other)]
-    Unknown,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ServeEvent {
-    pub schema_version: u64,
-    #[serde(flatten)]
-    pub kind: ServeEventKind,
-}
-
-impl ServeEvent {
-    pub fn new(kind: ServeEventKind) -> Self {
-        Self {
-            schema_version: EVENT_SCHEMA_VERSION,
-            kind,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -131,17 +96,17 @@ mod tests {
     #[test]
     fn events_round_trip_through_the_shared_contract() {
         let events = [
-            ServeEvent::new(ServeEventKind::Ready {
+            ServeEvent::Ready {
                 identity: identity(),
                 remote_url: "https://tee.example".to_string(),
                 proxy_url: "http://127.0.0.1:4181".to_string(),
                 control_url: "http://127.0.0.1:4182".to_string(),
                 policy: json!({ "enforce_verified": true }),
-            }),
-            ServeEvent::new(ServeEventKind::IdentityUpdated {
+            },
+            ServeEvent::IdentityUpdated {
                 identity: identity(),
-            }),
-            ServeEvent::new(ServeEventKind::RequestComplete {
+            },
+            ServeEvent::RequestComplete {
                 request: RequestCompleteEvent {
                     method: "POST".to_string(),
                     path: "/v1/responses".to_string(),
@@ -154,7 +119,7 @@ mod tests {
                     rewritten: Some(false),
                     local_policy_applied: Some(true),
                 },
-            }),
+            },
         ];
 
         for event in events {

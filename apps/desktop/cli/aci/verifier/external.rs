@@ -51,7 +51,7 @@ impl ExternalProviderVerifier {
         timeout_seconds: u64,
         cache_ttl_seconds: u64,
     ) -> Self {
-        let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let repository_root = gateway_repository_root();
         let script = repository_root
             .join("scripts")
             .join("private_ai_provider_verifier.py");
@@ -439,6 +439,16 @@ impl ExternalProviderVerifier {
     }
 }
 
+/// ACI is shared from `apps/desktop/cli`, while the provider bridge remains
+/// owned by the gateway repository's top-level `scripts` directory.
+fn gateway_repository_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("private-ai-proxy must live under apps/desktop/cli")
+        .to_path_buf()
+}
+
 #[derive(Serialize)]
 struct ExternalProviderVerifierInput<'a> {
     api_version: &'static str,
@@ -561,4 +571,16 @@ fn parse_external_channel_bindings(
 
 fn normalize_sha256_hex(value: &str) -> Result<String, String> {
     decode_hex_32(value).map(hex::encode)
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::gateway_repository_root;
+
+    #[test]
+    fn gateway_repository_root_contains_the_provider_bridge() {
+        assert!(gateway_repository_root()
+            .join("scripts/private_ai_provider_verifier.py")
+            .is_file());
+    }
 }
