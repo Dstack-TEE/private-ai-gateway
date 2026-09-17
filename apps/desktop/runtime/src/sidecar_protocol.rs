@@ -106,3 +106,61 @@ impl ServeEvent {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn identity() -> IdentityEvent {
+        IdentityEvent {
+            trust_level: "hardware_verified".to_string(),
+            tee_type: "tdx".to_string(),
+            keyset_digest: "sha256:keyset".to_string(),
+            keyset_not_after: 42,
+            tls_spki: Some("sha256:spki".to_string()),
+            source_provenance: SourceProvenance::default(),
+            service_capabilities: ServiceCapabilities {
+                serving: "aggregator".to_string(),
+                supported_e2ee_versions: vec!["2".to_string()],
+            },
+            verification: json!({ "checks": [] }),
+        }
+    }
+
+    #[test]
+    fn events_round_trip_through_the_shared_contract() {
+        let events = [
+            ServeEvent::new(ServeEventKind::Ready {
+                identity: identity(),
+                remote_url: "https://tee.example".to_string(),
+                proxy_url: "http://127.0.0.1:4181".to_string(),
+                control_url: "http://127.0.0.1:4182".to_string(),
+                policy: json!({ "enforce_verified": true }),
+            }),
+            ServeEvent::new(ServeEventKind::IdentityUpdated {
+                identity: identity(),
+            }),
+            ServeEvent::new(ServeEventKind::RequestComplete {
+                request: RequestCompleteEvent {
+                    method: "POST".to_string(),
+                    path: "/v1/responses".to_string(),
+                    status: 200,
+                    streamed: true,
+                    receipt_id: Some("receipt-1".to_string()),
+                    verified: Some(true),
+                    detail: "receipt verified".to_string(),
+                    tag: Some("pap:req:session:codex".to_string()),
+                    rewritten: Some(false),
+                    local_policy_applied: Some(true),
+                },
+            }),
+        ];
+
+        for event in events {
+            let value = serde_json::to_value(&event).unwrap();
+            let decoded: ServeEvent = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+        }
+    }
+}
