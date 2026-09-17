@@ -101,8 +101,9 @@ fn sha256_hex_raw(bytes: &[u8]) -> String {
 /// Verify the ACI binding chain inside an attestation report (§9.1):
 /// recompute the keyset digest over its JCS form, rebuild the §3.2 statement
 /// for the nonce the caller supplied, check `report_data`, and check keyset
-/// expiry. It deliberately does not verify the vendor quote; the client
-/// appraisal performs that independent hardware-verification step.
+/// expiry. It deliberately does not verify the vendor quote; provider
+/// adapters compose this with their own hardware-verification step (which
+/// must bind the returned `report_data`).
 pub fn validate_aci_report_binding(
     report: &AttestationReport,
     nonce: Option<&str>,

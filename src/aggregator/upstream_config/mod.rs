@@ -175,11 +175,11 @@ impl UpstreamProvider {
     /// must choose its scope rather than inherit a default.
     pub(crate) fn attestation_scope(self) -> AttestationScope {
         match self {
-            UpstreamProvider::NearAi => AttestedProvider::NearAi.scope(),
-            UpstreamProvider::Tinfoil => AttestedProvider::Tinfoil.scope(),
-            UpstreamProvider::SecretAi => AttestedProvider::SecretAi.scope(),
-            UpstreamProvider::Chutes => AttestedProvider::Chutes.scope(),
-            UpstreamProvider::PhalaDirect => AttestedProvider::PhalaDirect.scope(),
+            UpstreamProvider::NearAi | UpstreamProvider::Tinfoil | UpstreamProvider::SecretAi => {
+                AttestationScope::PerRouter
+            }
+            UpstreamProvider::Chutes => AttestationScope::PerInstance,
+            UpstreamProvider::PhalaDirect => AttestationScope::PerModel,
             // Plain cloud APIs (OpenAI-compatible, Anthropic) have no verifier
             // and ACI service uses its own, so for all of these this only tunes
             // prewarm probe granularity. Per-model is the safe default — it
@@ -193,9 +193,41 @@ impl UpstreamProvider {
 }
 
 /// The channel boundary a provider's attestation proves, and thus what identifies
-/// its attested session.
-pub use crate::aci::verifier::AttestationScope;
-use crate::aci::verifier::AttestedProvider;
+/// its attested session: one shared channel for a router (model dropped from the
+/// verifier cache key) or a distinct channel per model / per serving instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttestationScope {
+    PerRouter,
+    PerModel,
+    PerInstance,
+}
+
+impl AttestationScope {
+    /// Routers share one channel across models, so verification is keyed on the
+    /// channel alone (model dropped from the cache key).
+    pub(crate) fn is_per_router(self) -> bool {
+        matches!(self, AttestationScope::PerRouter)
+    }
+
+    /// Parse the scope token a provider verifier emits in its result.
+    pub(crate) fn from_declared(token: &str) -> Option<Self> {
+        match token {
+            "router" => Some(Self::PerRouter),
+            "model" => Some(Self::PerModel),
+            "instance" => Some(Self::PerInstance),
+            _ => None,
+        }
+    }
+
+    /// The wire token for this scope (matches [`Self::from_declared`]).
+    pub(crate) fn as_declared(self) -> &'static str {
+        match self {
+            Self::PerRouter => "router",
+            Self::PerModel => "model",
+            Self::PerInstance => "instance",
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum UpstreamVerifierMode {

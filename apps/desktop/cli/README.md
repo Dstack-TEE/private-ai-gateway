@@ -1,12 +1,13 @@
 # ACI Commands in Private AI Proxy
 
-Shared command-line implementation of the ACI protocol
-([spec/aci.md](../../../spec/aci.md)). It reuses the gateway's own
-verification code. The packaged `private-ai-proxy` CLI (also available through
-the `pap` and `aci` aliases) is the sole executable that owns these commands.
+Command-line implementation of the
+[ACI relying-party protocol](https://github.com/Dstack-TEE/private-ai-gateway/blob/main/spec/aci.md).
+The packaged `private-ai-proxy` CLI
+(also available through the `pap` and `aci` aliases) is the sole executable
+that owns these commands.
 
 ```bash
-cargo run --manifest-path apps/desktop/cli/Cargo.toml --bin private-ai-proxy -- <command> --help
+cargo run --manifest-path cli/Cargo.toml --bin private-ai-proxy -- <command> --help
 ```
 
 | Command | What it does |
@@ -38,20 +39,20 @@ verifies the DCAP quote and replays RTMR3, but it does not reconstruct MRTD or
 RTMR0-2 from the dstack OS image. Before relying on `policy-os: pass`, run a
 dstack verifier over the same quote, event log, and VM configuration, and
 require `is_valid: true`; that result establishes `os_image_hash` from those
-boot measurements. See [How the OS image is classified](../../../docs/providers/phala-direct/verification.md#how-the-os-image-is-classified).
+boot measurements. See
+[How the OS image is classified](https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/providers/phala-direct/verification.md#how-the-os-image-is-classified).
 
 ## Where verification lives
 
-Every verification step lives in this package's `aci/` modules, so the gateway's
-own upstream verifier and this CLI run the same code — the quote steps, the §9.1(2)
-binding chain, the §3.1 TLS selection, receipt signatures, JCS digests. What
-lives here is the transcript: mapping each step's outcome to a pass, fail, or
-honest skip. The package boundary, Cargo features, and behavior tests keep the
-CLI and gateway on the same verification implementation.
+Every relying-party verification step lives in this package's `aci/` modules:
+quote appraisal, the §9.1(2) binding chain, §3.1 TLS selection, receipt
+signatures, and JCS digests. The CLI maps those outcomes to a pass, fail, or
+honest skip. It interoperates with gateways through the ACI wire protocol and
+does not import a gateway implementation.
 
 Differences that are deliberate — the CLI's honest skips, and checks only a
 relying party can run — are recorded in
-[docs/reviews/aci-spec-conformance-gaps.md](../../../docs/reviews/aci-spec-conformance-gaps.md).
+[the ACI conformance notes](https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/reviews/aci-spec-conformance-gaps.md).
 
-[docs/quickstart.md](../../../docs/quickstart.md) walks all of this against
+[The ACI quickstart](https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/quickstart.md) walks all of this against
 a live deployment.

@@ -5,7 +5,6 @@ import { fileURLToPath } from "node:url";
 import { MACOS_TARGETS, UNIVERSAL_MACOS_TARGET } from "./build-config.mjs";
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const repoRoot = path.resolve(appRoot, "../..");
 const debug = process.argv.includes("--debug");
 const profile = debug ? "debug" : "release";
 const cargo = process.env.CARGO ?? "cargo";
@@ -19,7 +18,7 @@ const buildEnv = {
   ...(releaseVersion ? { PAP_BUILD_VERSION: releaseVersion } : {}),
 };
 const rustcOutput = execFileSync(rustc, ["-vV"], {
-  cwd: repoRoot,
+  cwd: appRoot,
   encoding: "utf8",
   env: buildEnv,
 });
@@ -52,14 +51,14 @@ for (const sidecar of sidecars) {
     const buildArgs = ["build", "--locked", "--manifest-path", sidecar.manifestPath, "--bin", sidecar.name];
     if (explicitTarget) buildArgs.push("--target", target);
     if (!debug) buildArgs.push("--release");
-    const build = spawnSync(cargo, buildArgs, { cwd: repoRoot, env: buildEnv, stdio: "inherit" });
+    const build = spawnSync(cargo, buildArgs, { cwd: appRoot, env: buildEnv, stdio: "inherit" });
     if (build.error) throw build.error;
     if (build.status !== 0) throw new Error(`cargo build ${sidecar.name} (${target}) failed: ${build.status ?? "unknown"}`);
   }
   const executable = process.platform === "win32" ? `${sidecar.name}.exe` : sidecar.name;
   const metadata = JSON.parse(execFileSync(cargo, [
     "metadata", "--no-deps", "--format-version", "1", "--manifest-path", sidecar.manifestPath,
-  ], { cwd: repoRoot, env: buildEnv, encoding: "utf8" }));
+  ], { cwd: appRoot, env: buildEnv, encoding: "utf8" }));
   const sources = targets.map((target) => path.join(metadata.target_directory, ...(explicitTarget ? [target] : []), profile, executable));
   const destinationName = process.platform === "win32"
     ? `${sidecar.name}-${targetTriple}.exe`

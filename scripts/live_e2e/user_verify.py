@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import secrets
 import subprocess
 import sys
@@ -30,6 +31,11 @@ def main() -> None:
     parser.add_argument("--request-body", type=Path)
     parser.add_argument("--response-body", type=Path)
     parser.add_argument("--skip-expiry", action="store_true")
+    parser.add_argument(
+        "--aci-bin",
+        default=os.environ.get("ACI_BIN", "aci"),
+        help="installed ACI client command (default: %(default)s)",
+    )
     args = parser.parse_args()
 
     if args.report_file and args.receipt_file:
@@ -98,9 +104,13 @@ def run_audit(
     nonce: str | None,
 ) -> int:
     cmd = [
-        "cargo", "run", "--quiet", "--manifest-path", "apps/desktop/cli/Cargo.toml",
-        "--bin", "private-ai-proxy", "--",
-        "audit", "--report", str(report_path), "--receipt", str(receipt_path), "--json",
+        args.aci_bin,
+        "audit",
+        "--report",
+        str(report_path),
+        "--receipt",
+        str(receipt_path),
+        "--json",
     ]
     if nonce:
         cmd.extend(["--nonce", nonce])
@@ -112,7 +122,7 @@ def run_audit(
         cmd.extend(["--response-body", str(args.response_body)])
     if args.skip_expiry:
         cmd.append("--skip-expiry")
-    # `private-ai-proxy audit --json` prints the transcript on stdout and exits non-zero
+    # `aci audit --json` prints the transcript on stdout and exits non-zero
     # when the verdict is NOT VERIFIED; pass both through.
     result = subprocess.run(cmd, cwd=ROOT, check=False)
     return result.returncode

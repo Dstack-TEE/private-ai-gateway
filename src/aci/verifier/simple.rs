@@ -3,8 +3,7 @@
 use async_trait::async_trait;
 
 use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
-
-use super::{UpstreamVerificationRequest, UpstreamVerifier};
+use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 
 /// Returns a caller-supplied event verbatim. The event's `required`
 /// field is overwritten by the service to reflect the client's

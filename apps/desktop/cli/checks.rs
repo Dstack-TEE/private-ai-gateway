@@ -144,9 +144,9 @@ pub async fn run_report_checks(
         accepted_composes: cx.accepted_composes,
         // §9.1(5) needs a custody policy this CLI does not implement yet
         // (docs/reviews/aci-spec-conformance-gaps.md item 1).
-        custody: CustodyEvidence::Unimplemented {
+        custody: CustodyEvidence {
             reason: "custody policy not implemented in this CLI yet \
-                     (see apps/desktop/cli/aci/verifier/dstack.rs)",
+                     (no client policy is configured)",
         },
         channel: cx.channel,
         explain: cx.explain,

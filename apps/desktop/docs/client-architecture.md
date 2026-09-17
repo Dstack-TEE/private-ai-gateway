@@ -12,19 +12,24 @@ Status: implemented.
 | `private-ai-proxy` | Unified managed-client and ACI protocol commands | `apps/desktop/cli` |
 | `private-ai-proxy-service` | Per-user backend entry point | `apps/desktop/cli/service.rs` |
 
-## Shared implementation
+## Project boundary
 
 `private-ai-proxy` composes the managed CLI's Clap command tree with its ACI
 commands. Management command execution and output live in
 `apps/desktop/runtime/src/cli`; ACI command modules live in `apps/desktop/cli`.
-There is one user-facing executable and one verifier implementation.
+There is one PAP user-facing executable and one PAP relying-party verifier.
 Desktop integration adds lifecycle events for process integration and post-delivery receipt auditing.
 The Private AI Proxy package owns the user-facing CLI, its managed service binary,
 and the ACI library modules under `apps/desktop/cli/aci`. Its managed-client
-feature adds the desktop runtime only for the executable targets. The root gateway
-depends on the same package with default features disabled and re-exports ACI
-through the existing `private_ai_gateway::aci` API, so it does not acquire desktop
-dependencies.
+feature adds the desktop runtime only for the executable targets.
+
+Private AI Gateway and Private AI Proxy are independent projects. Gateway owns
+its service-side ACI implementation; PAP owns its relying-party verification,
+audit, and local-proxy implementation. Neither Rust package imports the other,
+their tests do not reach across project directories, and each project has its own
+workspace and lockfile. They interoperate only through the published ACI and HTTP
+wire protocols. The `aci` command remains an alias of the single
+`private-ai-proxy` CLI, not a separate executable or crate.
 
 `private-ai-proxy verify/audit/sessions/send` do not initialize the managed backend or
 credential store. `private-ai-proxy serve` streams responses immediately and

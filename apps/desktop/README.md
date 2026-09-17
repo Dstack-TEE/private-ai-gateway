@@ -641,7 +641,7 @@ protocol is the service's own response, shown as such.
   The local HTTP listener is unencrypted and must not be exposed to the
   internet. Client host changes advertised URLs, not the bind address.
 - **AI service** names the remote endpoint in the UI. The protocol calls it an
-  [ACI service](../../spec/aci.md), which can serve inference directly or act
+  [ACI service](https://github.com/Dstack-TEE/private-ai-gateway/blob/main/spec/aci.md), which can serve inference directly or act
   as an aggregator. This label is not a verification verdict; the current
   verification state is displayed separately.
 - **Sessions.** The proxy forwards only while a *verified session* is

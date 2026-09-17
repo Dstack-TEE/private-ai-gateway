@@ -8,7 +8,6 @@ rust-version = "1.91"
 
 [features]
 default = ["managed-client"]
-dstack-service = ["dep:dstack-sdk"]
 managed-client = [
     "dep:async-stream",
     "dep:axum",
@@ -39,19 +38,16 @@ async-trait = "0.1"
 axum = { version = "0.7", optional = true }
 base64 = "0.22"
 bytes = "1"
-chacha20poly1305 = "0.10"
 clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context"], optional = true }
 curve25519-dalek = "4"
 dcap-qvl = { version = "0.3.12", default-features = false, features = ["std", "report", "rustcrypto"] }
 desktop-gateway = { package = "private-ai-proxy-gateway", path = "../gateway", optional = true }
 desktop-runtime = { package = "private-ai-proxy-runtime", path = "../runtime", optional = true }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
-flate2 = "1"
 futures-util = "0.3"
 hex = "0.4"
 hkdf = "0.12"
 k256 = { version = "0.13", features = ["ecdsa", "arithmetic", "ecdh"] }
-ml-kem = { version = "0.3", features = ["getrandom"] }
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
@@ -66,11 +62,7 @@ webpki-roots = "1"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 x509-parser = "0.16"
 
-[target.'cfg(unix)'.dependencies]
-dstack-sdk = { version = "0.1.2", optional = true }
-
 [dev-dependencies]
-private-ai-gateway = { path = "../../.." }
 tempfile = "3"
 
 [lints.rust]

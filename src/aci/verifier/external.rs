@@ -16,12 +16,11 @@ use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use super::{
-    current_unix_secs, decode_hex_32, AttestationScope, AttestedProvider,
-    UpstreamVerificationRequest,
-};
+use super::{current_unix_secs, decode_hex_32};
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crate::aci::upstream::{ChutesSessionStore, ChutesVerifiedDiscovery};
+use crate::aggregator::service::UpstreamVerificationRequest;
+use crate::aggregator::upstream_config::AttestationScope;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderVerifierConfigError {
@@ -47,12 +46,13 @@ pub(super) struct ExternalProviderVerifier {
 
 impl ExternalProviderVerifier {
     pub(super) fn private_inference(
-        provider: AttestedProvider,
+        provider: &'static str,
+        scope: AttestationScope,
         timeout_seconds: u64,
         cache_ttl_seconds: u64,
     ) -> Self {
-        let repository_root = gateway_repository_root();
-        let script = repository_root
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let script = manifest_dir
             .join("scripts")
             .join("private_ai_provider_verifier.py");
         let command = vec![
@@ -62,8 +62,8 @@ impl ExternalProviderVerifier {
             script.display().to_string(),
         ];
         Self {
-            provider: provider.id(),
-            scope: provider.scope(),
+            provider,
+            scope,
             command,
             // Run `uv run` in the gateway project so the bridge uses the gateway's
             // own uv environment and the vendored `scripts/confidential_verifier`
@@ -71,7 +71,7 @@ impl ExternalProviderVerifier {
             // external verifier checkout can still be selected by setting
             // PRIVATE_AI_VERIFIER_DIR in the gateway process environment, which the
             // spawned bridge inherits.
-            current_dir: Some(repository_root),
+            current_dir: Some(manifest_dir),
             env: Vec::new(),
             options: HashMap::new(),
             timeout_seconds,
@@ -80,15 +80,6 @@ impl ExternalProviderVerifier {
             verify_lock: Arc::new(tokio::sync::Mutex::new(())),
             chutes_session_store: None,
         }
-    }
-
-    #[cfg(test)]
-    pub(super) fn with_attested_provider_command(
-        provider: AttestedProvider,
-        command: Vec<String>,
-        timeout_seconds: u64,
-    ) -> Result<Self, ProviderVerifierConfigError> {
-        Self::with_command(provider.id(), provider.scope(), command, timeout_seconds)
     }
 
     #[cfg(test)]
@@ -439,16 +430,6 @@ impl ExternalProviderVerifier {
     }
 }
 
-/// ACI is shared from `apps/desktop/cli`, while the provider bridge remains
-/// owned by the gateway repository's top-level `scripts` directory.
-fn gateway_repository_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .expect("private-ai-proxy must live under apps/desktop/cli")
-        .to_path_buf()
-}
-
 #[derive(Serialize)]
 struct ExternalProviderVerifierInput<'a> {
     api_version: &'static str,
@@ -571,16 +552,4 @@ fn parse_external_channel_bindings(
 
 fn normalize_sha256_hex(value: &str) -> Result<String, String> {
     decode_hex_32(value).map(hex::encode)
-}
-
-#[cfg(test)]
-mod path_tests {
-    use super::gateway_repository_root;
-
-    #[test]
-    fn gateway_repository_root_contains_the_provider_bridge() {
-        assert!(gateway_repository_root()
-            .join("scripts/private_ai_provider_verifier.py")
-            .is_file());
-    }
 }

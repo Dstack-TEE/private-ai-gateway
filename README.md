@@ -454,7 +454,7 @@ against the code.
 | --- | --- | --- |
 | Pre-request consult to the control plane | SHA-256 of the API key, requested model, the caller's `provider` routing block, the TEE-only host flag, and — unless `send_request_features` is `false` — request features: a token-count estimate, input modalities, tool and response-format flags, reasoning intent, and `prefix_hash` | `consult_pre` in `src/middleware/control.rs`, `src/middleware/request_features.rs` |
 | Usage report to the control plane, one per attempt | Request id, endpoint, status, timings, streaming flag, attempt index, selected route, requested model, the upstream's `usage` object, the consult's own routing and billing fields echoed back unchanged — pricing and the tenant and virtual-key ids among them — `errorSource`, a failure class in `errorMessage`, and `prefix_hash` | `PostReport` in `src/middleware/types.rs` |
-| Receipt | SHA-256 hashes of request and response bodies, never the bodies | `apps/desktop/cli/aci/receipt.rs` |
+| Receipt | SHA-256 hashes of request and response bodies, never the bodies | `src/aci/receipt.rs` |
 
 Two properties make the first paragraph checkable rather than a promise:
 
@@ -622,17 +622,19 @@ events, and metrics model ids.
 ## Repository Map
 
 ```text
-src/main.rs                       binary entrypoint and runtime config
-src/aggregator/service.rs         report, forwarding, E2EE, receipt finalization
+src/main.rs                    binary entrypoint and runtime config
+src/dstack.rs                  dstack SDK KMS key provider and quote provider
+src/aci/                       gateway ACI wire types, keys, receipts, upstreams
+src/aggregator/service.rs      report, forwarding, E2EE, receipt finalization
 src/aggregator/upstream_config.rs runtime upstream config and provider adapters
-src/http/app.rs                   Axum HTTP routers and middleware/backend wiring
-apps/desktop/cli/                 `private-ai-proxy`; `pap`/`aci` are aliases; includes ACI protocol and verifier implementation
-clients/                          verifier-ts verifier library (browser + node); pi-provider pi provider extension
-docs/                             design notes, configuration reference, provider reviews
-deploy/                           git-launcher and dstack compose examples
-examples/                         cargo example binaries + a reference control plane (control-plane/)
-scripts/                          local and Phala smoke tests
-tests/                            unit and integration coverage
+src/http/app.rs                Axum HTTP routers and middleware/backend wiring
+apps/desktop/                  independently built Private AI Proxy desktop client and CLI
+clients/                       verifier-ts verifier library (browser + node); pi-provider pi provider extension
+docs/                          design notes, configuration reference, provider reviews
+deploy/                        git-launcher and dstack compose examples
+examples/                      cargo example binaries + a reference control plane (control-plane/)
+scripts/                       local and Phala smoke tests
+tests/                         unit and integration coverage
 ```
 
 ## More Docs

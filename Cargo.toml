@@ -5,16 +5,6 @@ edition = "2021"
 description = "Rust implementation of the Attested Confidential Inference (ACI) aggregator service"
 license = "Apache-2.0"
 
-[workspace]
-members = [
-    ".",
-    "apps/desktop/cli",
-    "apps/desktop/gateway",
-    "apps/desktop/runtime",
-]
-default-members = ["."]
-resolver = "2"
-
 [lib]
 name = "private_ai_gateway"
 path = "src/lib.rs"
@@ -24,10 +14,10 @@ name = "private-ai-gateway"
 path = "src/main.rs"
 
 [dependencies]
-private-ai-proxy = { path = "apps/desktop/cli", default-features = false, features = ["dstack-service"] }
 # Canonical-JSON, types, and serialization.
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+dstack-sdk = "0.1.2"
 bytes = "1"
 rust_decimal = "1"
 
@@ -36,12 +26,21 @@ sha2 = "0.10"
 sha3 = "0.10"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 k256 = { version = "0.13", features = ["ecdsa", "arithmetic", "ecdh"] }
+curve25519-dalek = "4"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
+aes-gcm = "0.10"
 base64 = "0.22"
+chacha20poly1305 = "0.10"
+flate2 = "1"
+hkdf = "0.12"
+ml-kem = { version = "0.3", features = ["getrandom"] }
 rand = "0.8"
+rand_core = "0.6"
 hex = "0.4"
 rustls-pemfile = "2"
 x509-parser = "0.16"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
 
 # HTTP server.
 axum = "0.7"
@@ -74,11 +73,10 @@ prometheus = "0.13"
 # Async traits used by upstream and verifier abstractions.
 async-trait = "0.1"
 
+# Upstream ACI/DCAP verification.
+dcap-qvl = { version = "0.3.12", default-features = false, features = ["std", "report", "rustcrypto"] }
+
 [dev-dependencies]
-chacha20poly1305 = "0.10"
-flate2 = "1"
-hkdf = "0.12"
-ml-kem = { version = "0.3", features = ["getrandom"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
 serde_json = "1"
 

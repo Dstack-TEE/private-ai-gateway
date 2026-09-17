@@ -1,4 +1,8 @@
-//! The §9.1(1) quote checks used by the ACI client transcript.
+//! The §9.1(1) quote steps, shared by the gateway and the CLI verifier.
+//!
+//! `verify_dcap_quote` folds these into one gate; a verifier rendering a
+//! per-check transcript runs them step by step and reports each outcome. Both
+//! go through here, so the order and the comparisons cannot drift.
 
 use dcap_qvl::quote::{Quote, Report};
 use serde_json::Value;

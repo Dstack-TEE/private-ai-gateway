@@ -1,6 +1,7 @@
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::Stream;
 
@@ -402,4 +403,31 @@ pub struct ForwardCandidate {
     pub route_id: String,
     pub body: Vec<u8>,
     pub path: &'static str,
+}
+
+/// Inputs needed to verify the selected upstream before forwarding a request.
+#[derive(Debug, Clone)]
+pub struct UpstreamVerificationRequest {
+    pub upstream_name: String,
+    pub url_origin: Option<String>,
+    pub model_id: String,
+    pub forwarded_body_hash: String,
+    pub required: bool,
+}
+
+/// Verifies that the selected upstream is acceptable for this request.
+///
+/// Production implementations cache provider attestation state and emit a
+/// deterministic `verifier_id` traceable to source provenance. Tests use this
+/// trait to exercise the real HTTP hot path without talking to a live upstream.
+#[async_trait]
+pub trait UpstreamVerifier: Send + Sync {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent;
+
+    async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        self.invalidate(&request);
+        self.verify(request).await
+    }
+
+    fn invalidate(&self, _request: &UpstreamVerificationRequest) {}
 }

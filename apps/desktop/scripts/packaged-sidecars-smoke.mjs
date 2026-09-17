@@ -40,7 +40,7 @@ function run(name, args, expected) {
 try {
   assert.match(await run("private-ai-proxy-helper", ["--help"], 0), /--agent-token/);
   await run("private-ai-proxy-helper", ["--agent-token", "codex", "unexpected"], 2);
-  const fixture = fileURLToPath(new URL("../../../tests/fixtures/aci_report_fixture.json", import.meta.url));
+  const fixture = fileURLToPath(new URL("../cli/tests/fixtures/aci_report_fixture.json", import.meta.url));
   const nonce = "cd20088d763605cf78564e5b35524ad52715419624b76e029582a3652758708d";
   const audit = JSON.parse(await run("private-ai-proxy", ["audit", "--report", fixture, "--nonce", nonce, "--json"], 1));
   assert.equal(audit.verdict.verified, false);

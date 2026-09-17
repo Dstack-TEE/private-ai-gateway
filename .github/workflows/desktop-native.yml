@@ -94,9 +94,9 @@ jobs:
             ${{ env.CARGO_TARGET_DIR }}/*/*/.fingerprint
             ${{ env.CARGO_TARGET_DIR }}/*/*/deps
             ${{ env.CARGO_TARGET_DIR }}/*/*/build
-          key: pap-rust-v1-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml') }}
+          key: pap-rust-v1-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml') }}
           restore-keys: |
-            pap-rust-v1-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml') }}-partial-
+            pap-rust-v1-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml') }}-partial-
             pap-rust-v1-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-
       - name: Install Linux desktop dependencies
         run: |
@@ -135,19 +135,20 @@ jobs:
         working-directory: apps/desktop
         run: npm run build:sidecars:debug
       - name: Verify Rust sources
+        working-directory: apps/desktop
         run: |
           cargo fmt --package private-ai-proxy -- --check
           cargo +1.89 fmt --package private-ai-proxy-gateway -- --check
           cargo +1.89 fmt --package private-ai-proxy-runtime -- --check
-          cargo +1.89 fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
+          cargo +1.89 fmt --manifest-path src-tauri/Cargo.toml -- --check
           cargo clippy --locked --all-targets --package private-ai-proxy -- -D warnings
           cargo +1.89 clippy --locked --all-targets --package private-ai-proxy-gateway -- -D warnings
           cargo +1.89 clippy --locked --all-targets --package private-ai-proxy-runtime -- -D warnings
-          cargo +1.89 clippy --locked --all-targets --manifest-path apps/desktop/src-tauri/Cargo.toml -- -D warnings
+          cargo +1.89 clippy --locked --all-targets --manifest-path src-tauri/Cargo.toml -- -D warnings
           cargo test --locked --package private-ai-proxy
           cargo +1.89 test --locked --package private-ai-proxy-gateway
           cargo +1.89 test --locked --package private-ai-proxy-runtime
-          cargo +1.89 test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+          cargo +1.89 test --locked --manifest-path src-tauri/Cargo.toml
       - &save-rust-cache
         name: Save Rust dependencies
         if: always() && !cancelled() && steps.rust-cache.outputs.cache-primary-key != '' && steps.rust-cache.outputs.cache-hit != 'true'

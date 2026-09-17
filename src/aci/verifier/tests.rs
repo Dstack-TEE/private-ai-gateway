@@ -17,6 +17,8 @@ use crate::aci::types::{
     WorkloadKeyset,
 };
 use crate::aci::upstream::ChutesSessionStore;
+use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
+use crate::aggregator::upstream_config::AttestationScope;
 
 fn signing_key(byte: u8) -> SigningKey {
     SigningKey::from_slice(&[byte; 32]).unwrap()

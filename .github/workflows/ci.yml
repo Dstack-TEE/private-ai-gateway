@@ -35,11 +35,8 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
-      - name: Run gateway tests
+      - name: Run tests
         run: cargo test --locked --all-targets
-
-      - name: Run ACI client tests
-        run: cargo test --locked --package private-ai-proxy
 
       - name: Compile Python helpers
         run: python3 -m compileall scripts

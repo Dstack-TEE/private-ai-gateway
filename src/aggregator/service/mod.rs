@@ -47,7 +47,6 @@ mod receipts;
 mod streaming;
 mod wire;
 
-pub use crate::aci::verifier::{UpstreamVerificationRequest, UpstreamVerifier};
 pub use clock::{Clock, FixedClock, SystemClock};
 pub use config::{
     validate_source_provenance, AciServiceConfig, ReceiptOwner, DEFAULT_KEYSET_NOT_AFTER_SECONDS,
@@ -62,6 +61,7 @@ pub use wire::{
     MiddlewareReceiptFinalization, MiddlewareReceiptJournal, MiddlewareStreamFinalization,
     MiddlewareStreamingForwarded, MiddlewareUpstreamError, ServiceResponseStream,
     StreamingForwardResult, StreamingForwardStream, StreamingUpstreamError,
+    UpstreamVerificationRequest, UpstreamVerifier,
 };
 
 pub struct AciService {

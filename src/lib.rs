@@ -7,10 +7,9 @@
 //! [`http`] respectively. dstack-specific key custody and TEE quoting
 //! live in [`dstack`] and use the Rust dstack SDK.
 
-pub use private_ai_proxy::aci;
+pub mod aci;
 pub mod aggregator;
-#[cfg(unix)]
-pub use private_ai_proxy::aci::dstack;
+pub mod dstack;
 pub(crate) mod error_payload;
 pub mod http;
 pub mod middleware;

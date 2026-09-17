@@ -1,4 +1,3 @@
-//! ACI protocol, transport, and verification implementation owned by the
-//! Private AI Proxy package and reused by the gateway.
+//! ACI relying-party verification and audit primitives owned by Private AI Proxy.
 
 pub mod aci;

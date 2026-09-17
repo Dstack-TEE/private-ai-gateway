@@ -12,9 +12,9 @@ use serde_json::Value;
 // ---------- §5.3 Serving constraints ----------
 
 /// Members of the request body's `provider` object that state serving
-/// constraints. These names are part of the published wire protocol: an
-/// unrecognized `aci_`-prefixed member is refused, so implementations must not
-/// rename them independently.
+/// constraints. The gateway's parser and the `aci` client both name them from
+/// here: an unrecognized `aci_`-prefixed member is refused, so a rename on one
+/// side alone would silently break the constraint end to end.
 pub const PROVIDER_ACI_VERIFIED: &str = "aci_verified";
 pub const PROVIDER_ACI_SESSION_IDS: &str = "aci_session_ids";
 

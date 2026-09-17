@@ -9,9 +9,10 @@ use async_trait::async_trait;
 use super::external::ExternalProviderVerifier;
 #[cfg(test)]
 use super::external::ProviderVerifierConfigError;
-use super::{AttestedProvider, UpstreamVerificationRequest, UpstreamVerifier};
 use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
 use crate::aci::upstream::ChutesSessionStore;
+use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
+use crate::aggregator::upstream_config::UpstreamProvider;
 
 #[derive(Debug, Clone)]
 pub struct ChutesProviderVerifier {
@@ -26,7 +27,8 @@ impl ChutesProviderVerifier {
     pub fn new_with_cache(timeout_seconds: u64, cache_ttl_seconds: u64) -> Self {
         Self {
             verifier: ExternalProviderVerifier::private_inference(
-                AttestedProvider::Chutes,
+                "chutes",
+                UpstreamProvider::Chutes.attestation_scope(),
                 timeout_seconds,
                 cache_ttl_seconds,
             ),
@@ -40,7 +42,8 @@ impl ChutesProviderVerifier {
     ) -> Self {
         Self {
             verifier: ExternalProviderVerifier::private_inference(
-                AttestedProvider::Chutes,
+                "chutes",
+                UpstreamProvider::Chutes.attestation_scope(),
                 timeout_seconds,
                 cache_ttl_seconds,
             )
@@ -95,8 +98,9 @@ impl ChutesProviderVerifier {
         timeout_seconds: u64,
     ) -> Result<Self, ProviderVerifierConfigError> {
         Ok(Self {
-            verifier: ExternalProviderVerifier::with_attested_provider_command(
-                AttestedProvider::Chutes,
+            verifier: ExternalProviderVerifier::with_command(
+                "chutes",
+                UpstreamProvider::Chutes.attestation_scope(),
                 command,
                 timeout_seconds,
             )?,
@@ -110,8 +114,9 @@ impl ChutesProviderVerifier {
         session_store: Arc<ChutesSessionStore>,
     ) -> Result<Self, ProviderVerifierConfigError> {
         Ok(Self {
-            verifier: ExternalProviderVerifier::with_attested_provider_command(
-                AttestedProvider::Chutes,
+            verifier: ExternalProviderVerifier::with_command(
+                "chutes",
+                UpstreamProvider::Chutes.attestation_scope(),
                 command,
                 timeout_seconds,
             )?
@@ -148,7 +153,8 @@ impl TinfoilProviderVerifier {
     pub fn new_with_cache(timeout_seconds: u64, cache_ttl_seconds: u64) -> Self {
         Self {
             verifier: ExternalProviderVerifier::private_inference(
-                AttestedProvider::Tinfoil,
+                "tinfoil",
+                UpstreamProvider::Tinfoil.attestation_scope(),
                 timeout_seconds,
                 cache_ttl_seconds,
             ),
@@ -161,8 +167,9 @@ impl TinfoilProviderVerifier {
         timeout_seconds: u64,
     ) -> Result<Self, ProviderVerifierConfigError> {
         Ok(Self {
-            verifier: ExternalProviderVerifier::with_attested_provider_command(
-                AttestedProvider::Tinfoil,
+            verifier: ExternalProviderVerifier::with_command(
+                "tinfoil",
+                UpstreamProvider::Tinfoil.attestation_scope(),
                 command,
                 timeout_seconds,
             )?,
@@ -198,7 +205,8 @@ impl NearAiProviderVerifier {
     pub fn new_with_cache(timeout_seconds: u64, cache_ttl_seconds: u64) -> Self {
         Self {
             verifier: ExternalProviderVerifier::private_inference(
-                AttestedProvider::NearAi,
+                "near-ai",
+                UpstreamProvider::NearAi.attestation_scope(),
                 timeout_seconds,
                 cache_ttl_seconds,
             ),
@@ -216,8 +224,9 @@ impl NearAiProviderVerifier {
         timeout_seconds: u64,
     ) -> Result<Self, ProviderVerifierConfigError> {
         Ok(Self {
-            verifier: ExternalProviderVerifier::with_attested_provider_command(
-                AttestedProvider::NearAi,
+            verifier: ExternalProviderVerifier::with_command(
+                "near-ai",
+                UpstreamProvider::NearAi.attestation_scope(),
                 command,
                 timeout_seconds,
             )?,
@@ -256,7 +265,8 @@ impl SecretAiProviderVerifier {
     pub fn new_with_cache(timeout_seconds: u64, cache_ttl_seconds: u64) -> Self {
         Self {
             verifier: ExternalProviderVerifier::private_inference(
-                AttestedProvider::SecretAi,
+                "secret-ai",
+                UpstreamProvider::SecretAi.attestation_scope(),
                 timeout_seconds,
                 cache_ttl_seconds,
             ),
@@ -282,8 +292,9 @@ impl SecretAiProviderVerifier {
         timeout_seconds: u64,
     ) -> Result<Self, ProviderVerifierConfigError> {
         Ok(Self {
-            verifier: ExternalProviderVerifier::with_attested_provider_command(
-                AttestedProvider::SecretAi,
+            verifier: ExternalProviderVerifier::with_command(
+                "secret-ai",
+                UpstreamProvider::SecretAi.attestation_scope(),
                 command,
                 timeout_seconds,
             )?,
@@ -328,7 +339,8 @@ impl PhalaDirectProviderVerifier {
     pub fn new_with_cache(timeout_seconds: u64, cache_ttl_seconds: u64) -> Self {
         Self {
             verifier: ExternalProviderVerifier::private_inference(
-                AttestedProvider::PhalaDirect,
+                "phala-direct",
+                UpstreamProvider::PhalaDirect.attestation_scope(),
                 timeout_seconds,
                 cache_ttl_seconds,
             ),
@@ -350,8 +362,9 @@ impl PhalaDirectProviderVerifier {
         timeout_seconds: u64,
     ) -> Result<Self, ProviderVerifierConfigError> {
         Ok(Self {
-            verifier: ExternalProviderVerifier::with_attested_provider_command(
-                AttestedProvider::PhalaDirect,
+            verifier: ExternalProviderVerifier::with_command(
+                "phala-direct",
+                UpstreamProvider::PhalaDirect.attestation_scope(),
                 command,
                 timeout_seconds,
             )?,
