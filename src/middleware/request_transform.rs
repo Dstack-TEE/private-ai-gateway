@@ -53,13 +53,12 @@ pub enum TransformError {
     /// A transform rejected the request body (e.g. unparseable tool-call
     /// arguments). Surfaced as a gateway-attributed failure (error_source "gateway").
     InvalidRequest {
-        /// Returned to the client. Must never name a route, provider or upstream:
-        /// this string reaches the caller verbatim, and `route <provider>:<model>`
-        /// used to be part of it.
+        /// Returned to the client verbatim, so it never names a route, provider
+        /// or upstream.
         message: String,
-        /// Operator-only context — which route could not be shaped. Logged, never
-        /// returned.
-        detail: Option<String>,
+        /// The route that could not be shaped. Logged as the `route` field,
+        /// never returned.
+        route_id: Option<String>,
     },
 }
 
@@ -67,14 +66,15 @@ impl TransformError {
     pub fn invalid_request(message: impl Into<String>) -> Self {
         TransformError::InvalidRequest {
             message: message.into(),
-            detail: None,
+            route_id: None,
         }
     }
 
-    /// Operator-only context, for the log line that accompanies the refusal.
-    pub fn detail(&self) -> Option<&str> {
+    /// The route that could not be shaped, for the log line that accompanies
+    /// the refusal.
+    pub fn route_id(&self) -> Option<&str> {
         match self {
-            TransformError::InvalidRequest { detail, .. } => detail.as_deref(),
+            TransformError::InvalidRequest { route_id, .. } => route_id.as_deref(),
             TransformError::Unsupported { .. } => None,
         }
     }
@@ -272,7 +272,7 @@ fn candidate_params(
     };
     validate_effective(&effective).map_err(|err| TransformError::InvalidRequest {
         message: format!("invalid effective reasoning: {err}"),
-        detail: Some(format!("route {}", candidate.route_id)),
+        route_id: Some(candidate.route_id.clone()),
     })?;
     sync_chat_template_reasoning(object, &effective);
     let reasoning_format = candidate.reasoning_format.unwrap_or_else(|| {
@@ -520,7 +520,7 @@ fn set_chat_template_reasoning(
 fn invalid_reasoning<T>(candidate: &RouteCandidate, message: &str) -> Result<T, TransformError> {
     Err(TransformError::InvalidRequest {
         message: format!("the requested model {message}"),
-        detail: Some(format!("route {}", candidate.route_id)),
+        route_id: Some(candidate.route_id.clone()),
     })
 }
 
