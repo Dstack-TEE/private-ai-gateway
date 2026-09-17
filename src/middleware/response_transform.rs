@@ -937,6 +937,55 @@ pub(super) fn now_millis() -> u128 {
 }
 
 // Read a token count, accepting integer- or float-encoded numbers.
+/// The cache counters of a Chat usage object: tokens read from cache, under
+/// either name an upstream uses, and tokens written to it.
+pub(super) fn chat_cache_tokens(usage: &Value) -> (Option<i64>, Option<i64>) {
+    let counter = |value: Option<&Value>| {
+        value.filter(|v| !v.is_null()).map(|v| {
+            v.as_i64()
+                .or_else(|| v.as_f64().map(|f| f as i64))
+                .unwrap_or(0)
+                .max(0)
+        })
+    };
+    let cache_read = counter(usage.get("cache_read_input_tokens")).or_else(|| {
+        counter(
+            usage
+                .get("prompt_tokens_details")
+                .and_then(|details| details.get("cached_tokens")),
+        )
+    });
+    (
+        cache_read,
+        counter(usage.get("cache_creation_input_tokens")),
+    )
+}
+
+/// Anthropic usage for a Chat prompt total. Chat counts cached tokens inside
+/// `prompt_tokens`; Anthropic's `input_tokens` excludes them and states each
+/// cache bucket beside it, so the buckets are taken out of the total rather
+/// than counted a second time.
+pub(super) fn anthropic_usage(
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    cache_read: Option<i64>,
+    cache_creation: Option<i64>,
+) -> Value {
+    let cached = cache_read.unwrap_or(0) + cache_creation.unwrap_or(0);
+    let mut usage = json!({
+        "input_tokens": (prompt_tokens - cached).max(0),
+        "output_tokens": completion_tokens,
+    });
+    let map = usage.as_object_mut().unwrap();
+    if let Some(cache_read) = cache_read {
+        map.insert("cache_read_input_tokens".into(), json!(cache_read));
+    }
+    if let Some(cache_creation) = cache_creation {
+        map.insert("cache_creation_input_tokens".into(), json!(cache_creation));
+    }
+    usage
+}
+
 pub(super) fn i64_field(value: &Value, key: &str) -> i64 {
     value
         .get(key)
@@ -1471,20 +1520,14 @@ fn openai_to_anthropic_messages(response: Value) -> Value {
         content.push(json!({ "type": "text", "text": "" }));
     }
 
-    let response_usage = response.get("usage");
-    let mut usage = json!({
-        "input_tokens": response_usage.map(|u| i64_field(u, "prompt_tokens")).unwrap_or(0),
-        "output_tokens": response_usage.map(|u| i64_field(u, "completion_tokens")).unwrap_or(0),
-    });
-    if let Some(u) = response_usage {
-        let map = usage.as_object_mut().unwrap();
-        if let Some(cache_read) = u.get("cache_read_input_tokens") {
-            map.insert("cache_read_input_tokens".into(), cache_read.clone());
-        }
-        if let Some(cache_creation) = u.get("cache_creation_input_tokens") {
-            map.insert("cache_creation_input_tokens".into(), cache_creation.clone());
-        }
-    }
+    let response_usage = response.get("usage").unwrap_or(&Value::Null);
+    let (cache_read, cache_creation) = chat_cache_tokens(response_usage);
+    let usage = anthropic_usage(
+        i64_field(response_usage, "prompt_tokens"),
+        i64_field(response_usage, "completion_tokens"),
+        cache_read,
+        cache_creation,
+    );
 
     let id = match response.get("id").and_then(Value::as_str) {
         Some(id) if !id.is_empty() => id.to_string(),
