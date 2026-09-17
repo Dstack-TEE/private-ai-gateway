@@ -858,7 +858,7 @@ pub async fn run(
 /// a later copy that disagrees on format/engine/anything would make the
 /// route-id -> format lookup ambiguous, so it is dropped (keeping the first,
 /// which is what the lookups resolve to anyway) and logged as control's bug.
-/// This turns the invariant from an assumption about our control plane into a
+/// This turns the invariant from an assumption about the control plane into a
 /// property of whatever arrives on the wire.
 fn drop_conflicting_route_twins(candidates: Vec<RouteCandidate>) -> Vec<RouteCandidate> {
     let mut kept: Vec<RouteCandidate> = Vec::with_capacity(candidates.len());

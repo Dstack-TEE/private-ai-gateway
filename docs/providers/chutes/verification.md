@@ -65,8 +65,8 @@ decrypts the response. A response that decrypts proves the bound enclave served 
 ## Reproduce
 
 ```bash
-set -a; . /home/h4x/workspace/redpill/.env; set +a
-cd /home/h4x/workspace/redpill/private-ai-gateway
+cd <private-ai-gateway checkout>
+set -a; . .env; set +a
 echo '{"api_version":"aci.provider-verifier.request.v1","provider":"chutes",
   "upstream_name":"chutes-live","url_origin":"https://api.chutes.ai",
   "model_id":"moonshotai/Kimi-K2.5-TEE",

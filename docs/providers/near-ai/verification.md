@@ -69,9 +69,9 @@ connection before forwarding.
 ## Reproduce
 
 ```bash
-set -a; . /home/h4x/workspace/redpill/.env; set +a
+cd <private-ai-gateway checkout>
+set -a; . .env; set +a
 export DSTACK_VERIFIER_URL="http://localhost:18080"
-cd /home/h4x/workspace/redpill/private-ai-gateway
 echo '{"api_version":"aci.provider-verifier.request.v1","provider":"near-ai",
   "upstream_name":"near-ai-live","url_origin":"https://cloud-api.near.ai",
   "model_id":"google/gemma-4-31B-it",
