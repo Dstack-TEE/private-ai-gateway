@@ -30,6 +30,14 @@ type NativeWindowOptions = {
   validate?(state: GatewayState): string | undefined;
 };
 
+type NativeWindowRequest = {
+  state?: GatewayState;
+  repair: boolean;
+  recordId?: string | null;
+  profileId?: string | null;
+  startAfterSave?: boolean;
+};
+
 function useNativeGatewayWindow(title: string, options: NativeWindowOptions = {}): {
   state: GatewayState;
   setState: React.Dispatch<React.SetStateAction<GatewayState>>;
@@ -296,7 +304,7 @@ function NativeUsageProofWindow({ initialRecordId }: { initialRecordId: string }
 
 export function NativeWindowContent(): React.JSX.Element | null {
   const nativeDialog = query.get("native-dialog");
-  const [request, setRequest] = useState<{ state?: GatewayState; repair: boolean; recordId?: string | null; profileId?: string | null; startAfterSave?: boolean } | null>(() => ({
+  const [request, setRequest] = useState<NativeWindowRequest | null>(() => ({
     state: initialGatewayState, repair: query.get("repair") === "1",
     recordId: query.get("record"), profileId: query.get("profile"), startAfterSave: query.get("start") === "1",
   }));
@@ -311,14 +319,23 @@ export function NativeWindowContent(): React.JSX.Element | null {
     return () => { opened(); dismissed(); };
   }, []);
   if (!request) return null;
-  const content = nativeDialog === "profiles" ? <NativeProfilesWindow repair={request.repair} />
-    : nativeDialog === "update-progress" ? <NativeUpdateProgressWindow />
-    : nativeDialog === "local-api-example" ? <NativeLocalApiExampleWindow />
-    : nativeDialog === "notifications" ? <NativeNotificationsWindow />
-    : nativeDialog === "profile-editor" ? <NativeProfilesWindow repair={false} editor profileId={request.profileId} startAfterSave={request.startAfterSave} />
-    : nativeDialog === "privacy" ? <NativePrivacyWindow />
-      : nativeDialog === "local-api" ? <NativeLocalApiWindow />
-        : nativeDialog === "usage-proof" ? <NativeUsageProofWindow initialRecordId={request.recordId ?? ""} />
-          : null;
-  return <NativeStateContext.Provider key={generation} value={request.state}><NotificationsProvider api={desktopApi}>{content}</NotificationsProvider></NativeStateContext.Provider>;
+  const content = nativeWindowContent(nativeDialog, request);
+  return <NativeStateContext.Provider key={generation} value={request.state}>{content}</NativeStateContext.Provider>;
+}
+
+function nativeWindowContent(
+  kind: string | null,
+  request: NativeWindowRequest,
+): React.JSX.Element | null {
+  switch (kind) {
+    case "profiles": return <NativeProfilesWindow repair={request.repair} />;
+    case "update-progress": return <NativeUpdateProgressWindow />;
+    case "local-api-example": return <NativeLocalApiExampleWindow />;
+    case "notifications": return <NotificationsProvider api={desktopApi}><NativeNotificationsWindow /></NotificationsProvider>;
+    case "profile-editor": return <NativeProfilesWindow repair={false} editor profileId={request.profileId} startAfterSave={request.startAfterSave} />;
+    case "privacy": return <NativePrivacyWindow />;
+    case "local-api": return <NativeLocalApiWindow />;
+    case "usage-proof": return <NativeUsageProofWindow initialRecordId={request.recordId ?? ""} />;
+    default: return null;
+  }
 }

@@ -20,7 +20,7 @@ impl DesktopRuntime {
             return Ok(());
         }
         let state = self.manager.snapshot()?;
-        if protection_active(&state) && self.proxy.session().verified {
+        if state.is_protected() && self.proxy.session().verified {
             self.recovery.reset_retry();
         }
         let retry = crate::recovery::should_retry(&state)

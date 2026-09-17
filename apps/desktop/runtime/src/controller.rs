@@ -382,7 +382,7 @@ impl DesktopRuntime {
                     result = states.changed() => {
                         if result.is_err() { break; }
                         let state = states.borrow();
-                        let policy = (protection_active(&state), state.catalog.as_ref().map(|catalog| catalog.revision.clone()));
+                        let policy = (state.is_protected(), state.catalog.as_ref().map(|catalog| catalog.revision.clone()));
                         if previous.as_ref() == Some(&policy) { continue; }
                         previous = Some(policy);
                     },
@@ -499,13 +499,6 @@ fn agent_failures(failures: Vec<(String, String)>) -> String {
         .map(|(agent, error)| format!("{agent}: {error}"))
         .collect::<Vec<_>>()
         .join("; ")
-}
-
-fn protection_active(state: &GatewayState) -> bool {
-    state.status == "verified"
-        && !state.configuration_verification
-        && state.api_key_saved
-        && state.endpoint_error.is_none()
 }
 
 fn with_client_token(

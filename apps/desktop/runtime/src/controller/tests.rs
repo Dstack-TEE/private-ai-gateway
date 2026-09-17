@@ -296,7 +296,7 @@ fn offline_removal_queues_cleanup_and_uncommitted_retirement_preserves_active_ke
         .queue_retired(RetiredCredential {
             profile_id: profile.id.clone(),
             action: "revoke".into(),
-            provider: profile.provider.clone(),
+            provider: profile.provider,
             key: "old-secret".into(),
             entry: entry.clone(),
             revoke: true,
@@ -839,16 +839,16 @@ fn only_live_protection_allows_agent_projection() {
     };
     for status in ["stopped", "verifying", "blocked", "error"] {
         state.status = status.to_string();
-        assert!(!protection_active(&state));
+        assert!(!state.is_protected());
     }
     state.status = "verified".to_string();
-    assert!(protection_active(&state));
+    assert!(state.is_protected());
     state.configuration_verification = true;
-    assert!(!protection_active(&state));
+    assert!(!state.is_protected());
     state.configuration_verification = false;
     state.api_key_saved = false;
-    assert!(!protection_active(&state));
+    assert!(!state.is_protected());
     state.api_key_saved = true;
     state.endpoint_error = Some("Listener unavailable".to_string());
-    assert!(!protection_active(&state));
+    assert!(!state.is_protected());
 }

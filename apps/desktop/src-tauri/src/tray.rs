@@ -353,7 +353,7 @@ fn sync_inner(app: &AppHandle, state: &GatewayState) {
         if let Err(error) = sync_profiles(app, state, &menu) {
             eprintln!("Cannot refresh tray profiles: {error}");
         }
-        let protected = is_protected(state);
+        let protected = state.is_protected();
         if menu.protected_icon.load(Ordering::Relaxed) != protected {
             if let Err(error) = apply_icon(
                 app,
@@ -424,15 +424,8 @@ fn tray_icon(protected: bool, dark: bool) -> tauri::Result<tauri::image::Image<'
     ))
 }
 
-fn is_protected(state: &GatewayState) -> bool {
-    state.status == "verified"
-        && !state.configuration_verification
-        && state.api_key_saved
-        && state.endpoint_error.is_none()
-}
-
 fn protection_title(state: &GatewayState) -> String {
-    if !is_protected(state) {
+    if !state.is_protected() {
         return menu_state(state).into();
     }
     let mode = if state.config.require_production_os {

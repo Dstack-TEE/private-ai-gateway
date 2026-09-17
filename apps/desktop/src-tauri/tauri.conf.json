@@ -72,7 +72,7 @@
     "linux": {
       "deb": {
         "preInstallScript": "installer/deb-pre-install.sh",
-        "preRemoveScript": "installer/deb-pre-remove.sh",
+        "preRemoveScript": "installer/linux-pre-remove.sh",
         "files": {
           "/usr/bin/pap": "installer/pap.sh",
           "/usr/bin/aci": "installer/pap.sh"
@@ -80,7 +80,7 @@
       },
       "rpm": {
         "preInstallScript": "installer/rpm-pre-install.sh",
-        "preRemoveScript": "installer/rpm-pre-remove.sh",
+        "preRemoveScript": "installer/linux-pre-remove.sh",
         "files": {
           "/usr/bin/pap": "installer/pap.sh",
           "/usr/bin/aci": "installer/pap.sh"

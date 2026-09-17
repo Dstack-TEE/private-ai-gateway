@@ -18,6 +18,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import semver from "semver";
 
 export const binaries = ["private-ai-proxy", "private-ai-proxy-service", "private-ai-proxy-helper"];
 export const aliases = ["pap", "aci"];
@@ -26,12 +27,12 @@ const scriptPath = fileURLToPath(import.meta.url);
 const appRoot = path.resolve(path.dirname(scriptPath), "..");
 
 export function releaseVersionParts(version) {
-  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?$/.exec(version);
-  if (!match) {
+  const parsed = semver.parse(version);
+  if (!parsed || semver.valid(version) !== version || parsed.build.length > 0) {
     throw new Error(`CLI package version must be SemVer, got ${JSON.stringify(version)}`);
   }
-  const base = `${match[1]}.${match[2]}.${match[3]}`;
-  const prerelease = match[4];
+  const base = `${parsed.major}.${parsed.minor}.${parsed.patch}`;
+  const prerelease = parsed.prerelease.length > 0 ? parsed.prerelease.join(".") : undefined;
   return {
     deb: prerelease ? `${base}~${prerelease}` : base,
     rpmVersion: base,
@@ -183,7 +184,7 @@ async function createDeb(options, scratch, packageRoot) {
     `Package: private-ai-proxy-cli\nVersion: ${deb}\nSection: utils\nPriority: optional\nArchitecture: ${architecture}\nInstalled-Size: ${installedSize}\nMaintainer: Dstack <support@dstack.org>\nHomepage: https://github.com/Dstack-TEE/private-ai-gateway\nDescription: Private AI Proxy command line client and user backend\n`,
   );
   await copyInstallerScript("deb-pre-install.sh", path.join(controlDir, "preinst"));
-  await copyInstallerScript("deb-pre-remove.sh", path.join(controlDir, "prerm"));
+  await copyInstallerScript("linux-pre-remove.sh", path.join(controlDir, "prerm"));
   const output = path.join(options.output, `private-ai-proxy-cli_${deb}_${architecture}.deb`);
   execFileSync("dpkg-deb", ["--build", "--root-owner-group", packageRoot, output], { stdio: "inherit" });
   return output;
@@ -201,7 +202,7 @@ async function createRpm(options, scratch, portable) {
     await copyFile(path.join(portable, name), path.join(sources, name));
   }
   const preInstall = await rpmScriptlet("rpm-pre-install.sh");
-  const preRemove = await rpmScriptlet("rpm-pre-remove.sh");
+  const preRemove = await rpmScriptlet("linux-pre-remove.sh");
   const spec = path.join(specs, "private-ai-proxy-cli.spec");
   await writeFile(
     spec,

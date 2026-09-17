@@ -28,8 +28,8 @@ The same binary includes the original ACI protocol commands:
 | `private-ai-proxy send <url>` | Send an inference request using the ACI client. |
 | `private-ai-proxy serve <url>` | Run the local streaming proxy with post-delivery receipt audits. |
 
-`pap` and `aci` accept these same commands. They are compiled from the shared
-ACI crate, not forwarded to another executable. `serve` is standalone;
+`pap` and `aci` accept these same commands. They are compiled from this package's
+ACI modules, not forwarded to another executable. `serve` is standalone;
 `start` below manages the persistent background service and saved profiles.
 
 ## Lifecycle

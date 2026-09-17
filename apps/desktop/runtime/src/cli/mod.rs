@@ -204,11 +204,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                         id: id.clone(),
                         name: name.clone(),
                         remote_url: url.clone(),
-                        provider: match provider {
-                            Provider::Phala => ServiceProvider::Phala,
-                            Provider::Redpill => ServiceProvider::Redpill,
-                            Provider::Custom => ServiceProvider::Custom,
-                        },
+                        provider: service_provider(*provider),
                     };
                     // Validate before reading a credential or making a request.
                     crate::service_config::resolve_profile(profile.clone(), None)?;
@@ -272,9 +268,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                     let profile = ConfidentialProfileInput {
                         id: saved.id.clone(),
                         name: name.clone().unwrap_or_else(|| saved.name.clone()),
-                        provider: provider
-                            .map(service_provider)
-                            .unwrap_or_else(|| saved.provider.clone()),
+                        provider: provider.map(service_provider).unwrap_or(saved.provider),
                         remote_url: url.clone().unwrap_or_else(|| saved.remote_url.clone()),
                     };
                     let resolved = crate::service_config::resolve_profile(profile.clone(), None)?;

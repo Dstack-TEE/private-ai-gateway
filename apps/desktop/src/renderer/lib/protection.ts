@@ -1,6 +1,6 @@
 import { errorMessage } from "./error-message";
 import { brand } from "../generated/brand";
-import { type Tone } from "./usage-presentation";
+import type { Tone } from "./tone";
 import type { ConfidentialProfile, GatewayState } from "../../shared/contracts";
 import { serviceKeyLabel } from "./services";
 

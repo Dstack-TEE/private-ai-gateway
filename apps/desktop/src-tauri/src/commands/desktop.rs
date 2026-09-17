@@ -3,16 +3,7 @@ use crate::*;
 #[tauri::command]
 pub(crate) async fn open_agent_website(app: AppHandle, agent_id: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
-    let url = match agent_id.as_str() {
-        "claude-code" => "https://code.claude.com",
-        "codex" => "https://developers.openai.com/codex/cli/",
-        "opencode" => "https://opencode.ai",
-        "pi" => "https://pi.dev",
-        "hermes" => "https://hermes-agent.nousresearch.com",
-        "openclaw" => "https://openclaw.ai",
-        "oh-my-pi" => "https://omp.sh",
-        _ => return Err("Unknown agent".to_string()),
-    };
+    let url = desktop_gateway::agents::Agent::from_id(&agent_id)?.website();
     run_blocking(move || {
         app.opener()
             .open_url(url, None::<&str>)

@@ -1,6 +1,6 @@
 # Private AI Proxy architecture
 
-Status: implemented; modular layout updated 2026-09-17.
+Status: implemented.
 
 ## Responsibilities
 
@@ -18,7 +18,7 @@ Status: implemented; modular layout updated 2026-09-17.
 commands. Management command execution and output live in
 `apps/desktop/runtime/src/cli`; ACI command modules live in `apps/desktop/cli`.
 There is one user-facing executable and one verifier implementation.
-Desktop integration adds opt-in lifecycle events and post-delivery receipt auditing.
+Desktop integration adds lifecycle events for process integration and post-delivery receipt auditing.
 The Private AI Proxy package owns the user-facing CLI, its managed service binary,
 and the ACI library modules under `apps/desktop/cli/aci`. Its managed-client
 feature adds the desktop runtime only for the executable targets. The root gateway
@@ -123,7 +123,6 @@ console executables and do not require the desktop UI.
 ## Sources
 
 Repository: https://github.com/Dstack-TEE/private-ai-gateway
-Main integrated before this change: `c2d31a8`.
 Primary contracts: `apps/desktop/cli/args.rs`, `apps/desktop/runtime/src/cli/args.rs`,
 `apps/desktop/runtime/src/process.rs`, `apps/desktop/scripts/package-cli.mjs`.
 

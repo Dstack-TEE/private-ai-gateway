@@ -171,7 +171,7 @@ impl DesktopRuntime {
             if let Err(error) = self.queue_retired(RetiredCredential {
                 profile_id: candidate.id.clone(),
                 action: "revoke".into(),
-                provider: old.provider.clone(),
+                provider: old.provider,
                 key: old_key.clone(),
                 entry: service_config::profile_credential_entry(old)?,
                 revoke: old.provider == ServiceProvider::Redpill
@@ -197,7 +197,7 @@ impl DesktopRuntime {
             if let Err(error) = self.queue_retired(RetiredCredential {
                 profile_id: candidate.id.clone(),
                 action: "activate".into(),
-                provider: candidate.provider.clone(),
+                provider: candidate.provider,
                 key: candidate_key.clone(),
                 entry: candidate_entry.clone(),
                 revoke: true,
@@ -319,7 +319,7 @@ impl DesktopRuntime {
                 self.queue_retired(RetiredCredential {
                     profile_id: removed.id.clone(),
                     action: "revoke".into(),
-                    provider: removed.provider.clone(),
+                    provider: removed.provider,
                     key: key.clone(),
                     entry: entry.clone(),
                     revoke: true,
@@ -392,7 +392,7 @@ impl DesktopRuntime {
                     self.queue_retired(RetiredCredential {
                         profile_id: profile.id.clone(),
                         action: "revoke".into(),
-                        provider: profile.provider.clone(),
+                        provider: profile.provider,
                         key: key.clone(),
                         entry: entry.clone(),
                         revoke: true,

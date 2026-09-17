@@ -1,6 +1,6 @@
 import { Ban, Shield, ShieldCheck, ShieldX, TriangleAlert } from "lucide-react";
 import type { RequestActivity } from "../../shared/contracts";
-export type Tone = "success" | "warning" | "danger" | "neutral";
+import type { Tone } from "./tone";
 
 export function outcomeOf(activity: RequestActivity): { label: string; tone: Tone; icon: typeof ShieldCheck } {
   if (!activity.leftDevice) return { label: "Blocked locally", tone: "neutral", icon: Ban };

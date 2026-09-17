@@ -15,7 +15,7 @@ cargo run --manifest-path apps/desktop/cli/Cargo.toml --bin private-ai-proxy -- 
 | `audit` | The same checks offline, over saved artifacts (report, receipt, bodies, session). |
 | `sessions <url>` | Audit the service's current attested sessions (spec 9.2), optionally under a `--require-claim` policy. The accepted ids are what you pin (spec 5.3). |
 | `send <url>` | One verified chat completion end to end: verify, send over the pinned channel, then verify the receipt and its cited session. |
-| `serve <url>` | Local verifying proxy. Streams over the pinned channel and records each POST exchange's digests. `--audit-receipts` audits after delivery; on-demand audits use the control endpoint (default `127.0.0.1:4181`). Receipt checks never delay response delivery. |
+| `serve <url>` | Local verifying proxy. Streams over the pinned channel, records each POST exchange's digests, and audits receipts after delivery. On-demand retries use the control endpoint (default `127.0.0.1:4181`). Receipt checks never delay response delivery. |
 
 `serve --json-events` is the desktop/process-integration mode. Its stdout is
 JSON Lines only: `ready` after verification and both listeners are bound,
@@ -46,10 +46,8 @@ Every verification step lives in this package's `aci/` modules, so the gateway's
 own upstream verifier and this CLI run the same code — the quote steps, the §9.1(2)
 binding chain, the §3.1 TLS selection, receipt signatures, JCS digests. What
 lives here is the transcript: mapping each step's outcome to a pass, fail, or
-honest skip. Two implementations of one step drift, and both keep passing
-their own tests while disagreeing about the same service, so
-`tests/layering.rs` fails the build if this CLI reaches for a verification
-primitive directly.
+honest skip. The package boundary, Cargo features, and behavior tests keep the
+CLI and gateway on the same verification implementation.
 
 Differences that are deliberate — the CLI's honest skips, and checks only a
 relying party can run — are recorded in

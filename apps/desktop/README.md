@@ -1,9 +1,7 @@
 # Private AI Proxy
 
 Guides: [architecture](docs/client-architecture.md), [CLI](docs/cli.md),
-[distribution](docs/cli-distribution.md), [account login](docs/account-login.md),
-[Apple design](docs/apple-design-review.md), and
-[release readiness](docs/product-readiness-checklist.md).
+[distribution](docs/cli-distribution.md), and [account login](docs/account-login.md).
 
 Cross-platform Tauri desktop app that turns the bundled `private-ai-proxy serve` verifier
 into a local gateway for Codex, Claude Code, OpenCode, Pi, Hermes, OpenClaw, and
@@ -124,12 +122,12 @@ Tailwind Preflight and shadcn's standard CSS are enabled. System selects retain
 their browser/platform picker. Do not override component dimensions, radii,
 shadows or typography; choose from the official component variants instead.
 
-Component sources in `src/renderer/components/ui` were obtained from the official
-`https://ui.shadcn.com/r/styles/base-luma/{component}.json` registry on 2026-09-05.
+Component sources in `src/renderer/components/ui` come from the official
+`https://ui.shadcn.com/r/styles/base-luma/{component}.json` registry.
 Local changes are import paths and Lucide icon substitution. The account summary follows
 [Item composition](https://ui.shadcn.com/docs/components/base/item#composition)
 and [Item vs Field](https://ui.shadcn.com/docs/components/base/item#item-vs-field).
-Its action menu uses the official Base Luma Dropdown Menu registry (2026-09-09),
+Its action menu uses the official Base Luma Dropdown Menu registry,
 with portal ownership passed into native HTML dialogs.
 Protection controls use the standard 44x20 switch geometry and Base UI behavior.
 Overview aligns the switch with the status text at the top right;
@@ -142,9 +140,10 @@ Sidebar buttons use Luma's default 36px size, not its 56px large variant.
 `components.json` configures subsequent
 shadcn additions. Use these components for new standard controls; retain semantic
 HTML for navigation/list rows and the operating-system APIs for native surfaces.
-Product statuses use semantic tokens: success for verified/available/connected, muted for
+Product statuses use semantic tokens: a primary-colored leading dot for
+verified/available/connected, muted for
 unknown/inactive, warning for caution states, destructive for errors, and chart tokens for usage.
-Primary remains reserved for commands and selection. The default Luma
+Primary otherwise remains reserved for commands and selection. The default Luma
 appearance is not an AppKit emulation: WebView content is still web content.
 
 Typography uses the platform system font and Tailwind typography tokens:
@@ -156,9 +155,7 @@ Calendar's weekday labels, retains the shadcn default.
 Sidebar selection uses standard weight
 and fixed control geometry; this prevents control movement, not changes in glyph
 advance widths. CSS cannot add a variation axis missing from a font. Apple's
-SF Pro download inspected on 2026-09-07 (Version 22.0d4e4) exposes only
-`wdth`, `opsz`, and `wght`, not `GRAD`. The inspected `SF-Pro.ttf` SHA-256 was
-`26e2ab7338d25b79276b9363f22bb7576850f7f326a8fb97ba2419cf0f923012`.
+SF Pro download exposes only `wdth`, `opsz`, and `wght`, not `GRAD`.
 The downloadable font is not a guarantee about every OS-internal font build.
 Strict grade-only emphasis would require a licensed, locally bundled font with
 that axis, such as Roboto Flex, while keeping `font-weight` unchanged.
@@ -475,9 +472,7 @@ Required update configuration is `TAURI_SIGNING_PRIVATE_KEY` (`desktop-release` 
 and `TAURI_UPDATER_PUBLIC_KEY` (repository Variable), independently of Apple
 signing credentials. Never rotate these casually: installed clients trust the
 embedded public key. Packages without a release version remain non-updating
-test builds. Existing 0.1.0 test installations need one manual installation of
-an updater-enabled version. The withdrawn 0.1.1 used the retired
-`desktop-updates` URL and also needs a manual migration. That URL is not reused.
+test builds.
 Settings > Advanced > Update channel selects Stable or Beta and persists locally.
 The initial default follows the installed package's version. Switching clears
 any pending update and immediately checks the selected channel. Installation
@@ -552,8 +547,8 @@ Requests in flight can be interrupted. Saving identical settings is a no-op.
 
 ## Application Updates
 
-On macOS, Windows, and installed Linux DEB/RPM builds, the main window checks once at launch; Settings also
-supports manual checks. Installation requires confirmation. The official Tauri
+On macOS, Windows, and installed Linux DEB/RPM builds, updates are checked
+automatically. Installation requires confirmation. The official Tauri
 updater downloads and verifies the signed archive before the runtime restores
 agent configurations and allows installation. Failed download/signature
 verification leaves running protection untouched; failed installation leaves
@@ -587,6 +582,8 @@ Each platform's feed advances independently using Tauri's target identifiers:
 `releases/download/desktop-updates-{beta|stable}/latest-{target}-{arch}.json`
 (for example, `latest-darwin-aarch64.json`). Linux feeds include both DEB and RPM.
 Partial releases leave other platform feeds untouched, including their version.
+Feed publication derives the selected targets from the published release manifest;
+there is no second platform list that can drift from the packaged assets.
 The legacy `latest.json` feed advances only on full releases, so older clients
 never receive an old binary advertised as a newer version. Actions artifacts are not a feed.
 Do not replace an existing version's assets or rotate the signing key casually.
@@ -836,8 +833,8 @@ protocol is the service's own response, shown as such.
   `Rewritten by service`.
 - **Proxy limits.** Request bodies are buffered (32 MiB, the same limit the
   sidecar enforces, 60 s read timeout) only so the `model` can be checked
-  against the catalog. Desktop uses `--audit-receipts`: response chunks are
-  forwarded immediately and hashed incrementally without buffering the full body.
+  against the catalog. Response chunks are forwarded immediately and hashed
+  incrementally without buffering the full body.
   After completion, at most 16 concurrent audits fetch receipts using the request's
   transient credential, with a 30-second deadline. Failed audits update Usage;
   they do not change the delivered HTTP status or retract content. Missing receipts
@@ -864,7 +861,7 @@ helper. Windows checks the helper's ACL without changing it. Configuration
 edits preserve JSON5 comments and unrelated fields. An explicit model selection
 changes only `agents.defaults.model.primary`; existing fallback lists stay intact.
 
-OpenClaw 2026.9.2 was checked offline with a real generated configuration and
+OpenClaw is checked offline with a real generated configuration and
 exec-secret audit. This is not real inference or a guarantee for older releases.
 Remote gateways, non-default profiles, ambiguous legacy paths, `$include`, and
 unsafe helper/configuration conflicts are refused rather than rewritten. WSL and
@@ -883,7 +880,7 @@ Chat Completions; Pi keeps its independent Chat Completions configuration. Conne
 default model in the native settings file; restart after reconnecting, because command
 credentials can be cached by the CLI process. Named profiles and pending legacy
 JSON migration are refused rather than silently redirected or rewritten.
-Official Oh My Pi v18.1.12 was checked offline on Linux for generated configuration
+Official Oh My Pi is checked offline on Linux for generated configuration
 loading, helper success/failure and YAML file priority. Windows/macOS CLI shell
 execution and real inference are not claimed by those checks.
 
@@ -1068,7 +1065,7 @@ from the GUI app so stdout works on Windows). A release build passes
 builds use the runtime crate version. The desktop gateway and Tauri crates declare
 `rust-version = 1.89`, the highest MSRV in their locked dependency graphs
 (`aes` 0.9.3: 1.89; `keyring` 4.2: 1.88), and commit their `Cargo.lock` files.
-The shared ACI crate and Proxy CLI use the stable workspace toolchain. CI tests the
+The unified Proxy package uses the stable workspace toolchain. CI tests the
 gateway, runtime, CLI, renderer, and Tauri backend, then compiles and bundles the same app on
 macOS, Windows, and Linux. It also publishes UI-free CLI archives on all three
 platforms and CLI-only DEB/RPM packages on Linux. See

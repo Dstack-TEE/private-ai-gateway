@@ -17,13 +17,12 @@ import { IconButton } from "../components/controls";
 import { Sheet, SheetActions } from "../components/sheet";
 import { FormField } from "../components/settings";
 import { ChoiceSelect } from "../components/choice-select";
-import type { ConfidentialProfile, ConfidentialProfileInput, GatewayState } from "../../shared/contracts";
+import type { ConfidentialProfile, ConfidentialProfileInput, GatewayState, ServiceProvider } from "../../shared/contracts";
 import { desktopApi, previewMode } from "../lib/environment";
 import { profileIsAvailable } from "../lib/protection";
 import { ServiceLogo } from "../components/brand";
 import { serviceHost } from "../lib/format";
-import { SERVICE_PRESETS, servicePreset } from "../lib/services";
-import type { ServicePreset } from "../lib/services";
+import { DEFAULT_SERVICE_PRESET, SERVICE_PROVIDER_OPTIONS, servicePreset, serviceProviderOption, serviceProviderPreset } from "../lib/services";
 
 export function ProfilesSheet({
   state,
@@ -144,7 +143,7 @@ function ProfileListSheet({
     <Sheet title="Profiles" className="profiles-sheet w-[min(560px,_calc(var(--window-dialog-width,_100vw)_-_32px))] h-[min(500px,_calc(var(--window-dialog-height,_100vh)_-_32px))] [&[open]]:flex [&[open]]:flex-col" dismissible={!workingProfileId && !transferBusy} onClose={onClose}>
       <p className="sheet-text mt-3 text-sm [&.error]:text-destructive">Choose the service used when protection starts.</p>
       {!activeProfileAvailable && (
-        <p className="banner pt-2.25 pr-3 pb-2.25 pl-3 flex items-start gap-1.75 text-destructive bg-[var(--danger-bg)] rounded-lg wrap-anywhere sheet-banner mt-2.5 profile-availability text-warning bg-[var(--warning-bg)]">
+        <p className="banner sheet-banner profile-availability mt-2.5 flex items-start gap-1.75 rounded-lg bg-[var(--warning-bg)] px-3 py-2.25 text-warning wrap-anywhere">
           <TriangleAlert size={15} aria-hidden="true" />
           {activeProfile ? `Sign in or add an API key for “${activeProfile.name}” to start protection.` : "Add a profile to start protection."}
         </p>
@@ -212,9 +211,9 @@ export function ProfileEditorSheet({
   const isNew = !profile;
   const [draft, setDraft] = useState<ConfidentialProfileInput>(() => ({
     id: profile?.id ?? `profile-${crypto.randomUUID()}`,
-    name: profile?.name ?? "Phala",
-    provider: profile?.provider ?? "phala",
-    remoteUrl: profile?.remoteUrl ?? "https://inference.phala.com",
+    name: profile?.name ?? DEFAULT_SERVICE_PRESET.name,
+    provider: profile?.provider ?? DEFAULT_SERVICE_PRESET.id,
+    remoteUrl: profile?.remoteUrl ?? DEFAULT_SERVICE_PRESET.url,
   }));
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [saving, setSaving] = useState(false);
@@ -241,7 +240,7 @@ export function ProfileEditorSheet({
       await account.start(draft);
     } catch (error) { reportError(error); }
   };
-  const selectedPreset = SERVICE_PRESETS.find((service) => service.id === draft.provider);
+  const selectedPreset = serviceProviderPreset(draft.provider);
   const keyLabel = selectedPreset?.keyLabel ?? "API key";
   const draftUrl = draft.remoteUrl.trim().replace(/\/$/, "");
   const profileChanged = !profile
@@ -276,19 +275,22 @@ export function ProfileEditorSheet({
     && !authorized && (!savedCredentialApplies || profile?.auth.kind !== "oauth");
 
 
-  const chooseService = async (next: ServicePreset) => {
+  const chooseService = async (next: ServiceProvider) => {
     if (!await account.cancel()) return;
     pendingWorkspaceSave.current = undefined;
     setSelectedWorkspaceId(undefined);
-    const preset = SERVICE_PRESETS.find((service) => service.id === next);
-    setDraft((current) => ({
-      ...current,
-      provider: next,
-      name: current.name === (SERVICE_PRESETS.find((service) => service.id === current.provider)?.name ?? "Custom")
-        ? preset?.name ?? "Custom"
-        : current.name,
-      remoteUrl: preset?.url ?? (servicePreset(current.remoteUrl) ? "" : current.remoteUrl),
-    }));
+    const nextOption = serviceProviderOption(next);
+    if (!nextOption) return;
+    const nextPreset = serviceProviderPreset(next);
+    setDraft((current) => {
+      const currentName = serviceProviderOption(current.provider)?.name;
+      return {
+        ...current,
+        provider: next,
+        name: current.name === currentName ? nextOption.name : current.name,
+        remoteUrl: nextPreset?.url ?? (servicePreset(current.remoteUrl) ? "" : current.remoteUrl),
+      };
+    });
     setAuthMethod(next === "custom" ? "apiKey" : "account");
     setApiKeyDraft("");
   };
@@ -363,19 +365,14 @@ export function ProfileEditorSheet({
         <FieldGroup className="gap-4 [&_[data-slot=field]]:gap-2">
         <Field>
         <FieldLabel id="profile-provider-label">Provider</FieldLabel>
-        <ToggleGroup variant="outline" className="service-presets w-full grid grid-cols-3 gap-2 max-[440px]:grid-cols-1" value={[draft.provider]} disabled={frozen || working} aria-labelledby="profile-provider-label" onValueChange={([value]) => { if (value === "phala" || value === "redpill" || value === "custom") void chooseService(value); }}>
-          {SERVICE_PRESETS.map((service) => (
+        <ToggleGroup variant="outline" className="service-presets w-full grid grid-cols-3 gap-2 max-[440px]:grid-cols-1" value={[draft.provider]} disabled={frozen || working} aria-labelledby="profile-provider-label" onValueChange={([value]) => { const option = value && serviceProviderOption(value); if (option) void chooseService(option.id); }}>
+          {SERVICE_PROVIDER_OPTIONS.map((service) => (
             <ToggleGroupItem key={service.id} value={service.id} className="service-preset min-w-0 text-left [&_.service-logo]:w-4.5 [&_.service-logo]:h-4.5 [&_.service-custom-icon]:w-4.5 [&_.service-custom-icon]:h-4.5 [&_strong]:min-w-0 [&_strong]:flex-auto [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_>_svg]:flex-none [&_>_svg]:text-foreground" aria-label={service.name}>
               <ServiceLogo url={service.url} />
               <strong>{service.name}</strong>
               {draft.provider === service.id && <Check size={15} aria-hidden="true" />}
             </ToggleGroupItem>
           ))}
-          <ToggleGroupItem value="custom" className="service-preset min-w-0 text-left [&_.service-logo]:w-4.5 [&_.service-logo]:h-4.5 [&_.service-custom-icon]:w-4.5 [&_.service-custom-icon]:h-4.5 [&_strong]:min-w-0 [&_strong]:flex-auto [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_>_svg]:flex-none [&_>_svg]:text-foreground" aria-label="Custom">
-            <ServiceLogo url="custom://service" />
-            <strong>Custom</strong>
-            {draft.provider === "custom" && <Check size={15} aria-hidden="true" />}
-          </ToggleGroupItem>
         </ToggleGroup>
         </Field>
           <FormField id="profile-name" label="Profile name"><Input id="profile-name" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} disabled={frozen || working} autoComplete="off" /></FormField>

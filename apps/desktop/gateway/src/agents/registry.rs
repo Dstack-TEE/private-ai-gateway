@@ -125,6 +125,18 @@ impl Agent {
         }
     }
 
+    pub fn website(self) -> &'static str {
+        match self {
+            Agent::Codex => "https://developers.openai.com/codex/cli/",
+            Agent::ClaudeCode => "https://code.claude.com",
+            Agent::OpenCode => "https://opencode.ai",
+            Agent::Pi => "https://pi.dev",
+            Agent::Hermes => "https://hermes-agent.nousresearch.com",
+            Agent::OpenClaw => "https://openclaw.ai",
+            Agent::OhMyPi => "https://omp.sh",
+        }
+    }
+
     /// The official CLI executable name, for install detection on PATH.
     pub(super) fn cli_names(self) -> &'static [&'static str] {
         match self {

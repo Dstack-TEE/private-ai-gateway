@@ -1,6 +1,6 @@
 import React from "react";
 import { useErrorAlert } from "../lib/error-alert";
-import { ExternalLink, TriangleAlert } from "lucide-react";
+import { ExternalLink } from "lucide-react";
 import claudeCodeIcon from "@lobehub/icons-static-svg/icons/claudecode-color.svg";
 import codexIcon from "@lobehub/icons-static-svg/icons/codex-color.svg";
 import hermesIcon from "@lobehub/icons-static-svg/icons/hermesagent.svg";
@@ -11,13 +11,14 @@ import { Button } from "../components/ui/button";
 import { StateLabel } from "../components/state-label";
 import { AgentAttention } from "../components/agent-attention";
 import ohMyPiIcon from "../assets/oh-my-pi.svg";
-import { type Tone } from "../lib/usage-presentation";
+import type { Tone } from "../lib/tone";
 import { Item, ItemActions, ItemContent, ItemTitle } from "../components/ui/item";
 import { Separator } from "../components/ui/separator";
 import { SwitchControl } from "../components/controls";
 import type { AgentStatus } from "../../shared/contracts";
 import { EmptyState } from "../components/detail";
 import { desktopApi } from "../lib/environment";
+import { cn } from "../lib/utils";
 
 const AGENT_ICONS: Record<string, string> = {
   codex: codexIcon,
@@ -32,7 +33,10 @@ const AGENT_ICONS: Record<string, string> = {
 function AgentMark({ agent }: { agent: Pick<AgentStatus, "id" | "name"> }): React.JSX.Element {
   const icon = AGENT_ICONS[agent.id];
   return (
-    <span className={agent.id === "oh-my-pi" ? "mark [&.mark-oh-my-pi]:bg-[#0d0d0d] flex-none w-8 h-8 grid place-items-center overflow-hidden text-muted-foreground bg-white border border-border rounded-xl text-xs font-bold [&_img]:w-5 [&_img]:h-5 [&_img]:object-contain mark-oh-my-pi" : "mark [&.mark-oh-my-pi]:bg-[#0d0d0d] flex-none w-8 h-8 grid place-items-center overflow-hidden text-muted-foreground bg-white border border-border rounded-xl text-xs font-bold [&_img]:w-5 [&_img]:h-5 [&_img]:object-contain"} aria-hidden="true">
+    <span className={cn(
+      "grid size-8 flex-none place-items-center overflow-hidden rounded-xl border border-border bg-white text-xs font-bold text-muted-foreground [&_img]:size-5 [&_img]:object-contain",
+      agent.id === "oh-my-pi" && "bg-[#0d0d0d]",
+    )} aria-hidden="true">
       {icon ? <img src={icon} alt="" /> : agent.name.slice(0, 2).toUpperCase()}
     </span>
   );
@@ -93,17 +97,17 @@ export function AgentRow({
   onSelect(connect: boolean): void;
 }): React.JSX.Element {
   const name = agent.name;
-  const presence = pendingConnection !== undefined
-    ? { label: pendingConnection ? "Connecting…" : "Disconnecting…", tone: "neutral" as Tone, icon: undefined }
+  const presence: { label: string; tone: Tone } = pendingConnection !== undefined
+    ? { label: pendingConnection ? "Connecting…" : "Disconnecting…", tone: "neutral" }
     : !agent.installed
-    ? { label: "Not installed", tone: "neutral" as Tone, icon: undefined }
+    ? { label: "Not installed", tone: "neutral" }
     : agent.attention
-      ? { label: "Needs attention", tone: "warning" as Tone, icon: TriangleAlert }
+      ? { label: "Needs attention", tone: "warning" }
       : agent.error
-        ? { label: "Error", tone: "danger" as Tone, icon: TriangleAlert }
+        ? { label: "Error", tone: "danger" }
         : agent.connected
-          ? { label: "Connected", tone: "success" as Tone, icon: undefined }
-          : { label: "Not connected", tone: "neutral" as Tone, icon: undefined };
+          ? { label: "Connected", tone: "success" }
+          : { label: "Not connected", tone: "neutral" };
   const disconnecting = pendingConnection ?? agent.recorded;
   const actionable = disconnecting || !agent.error;
   const note = agent.attention ?? agent.error;

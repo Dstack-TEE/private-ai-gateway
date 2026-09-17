@@ -172,8 +172,8 @@ What the proxy does:
   id and body digests are recorded (the last 256 exchanges), and a 2xx
   inference response with no receipt header is flagged immediately
   ([aci.md](../spec/aci.md) §5.2).
-- `--audit-receipts` audits receipts after delivery using the request bearer
-  transiently. It never delays streaming or retracts delivered responses.
+- Receipt audits run after delivery using the request bearer transiently. They
+  never delay streaming or retract delivered responses.
   Selecting verified AttestedSessions and enforcing the attested connection
   remain the pre-delivery checks; receipt checks are retrospective only.
   The control endpoint on `127.0.0.1:4181` also supports inspection and

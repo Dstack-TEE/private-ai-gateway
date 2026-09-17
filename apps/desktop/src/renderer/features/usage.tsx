@@ -19,6 +19,7 @@ import { Sheet, DismissSheetAction } from "../components/sheet";
 import { ChoiceSelect } from "../components/choice-select";
 import type { AgentStatus, GatewayState, RequestActivity, UsagePage } from "../../shared/contracts";
 import { formatTimestamp } from "../lib/format";
+import { VerificationVerdict } from "../components/verification-verdict";
 
 const UsageDatePicker = lazy(() => import("../components/usage-date-picker").then((module) => ({ default: module.UsageDatePicker })));
 
@@ -174,12 +175,15 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
       : undefined,
     activity.rewritten ? "The service rewrote the request before inference; the receipt records it." : undefined,
   ].filter(Boolean);
+  const verdictTone = receiptVerified ? "success" : activity.leftDevice && activity.verified === false ? "danger" : "neutral";
   return (
     <>
-    <div className={`[&.state-success]:text-primary [&.state-neutral]:text-muted-foreground [&.state-warning]:text-warning [&.state-danger]:text-destructive privacy-verdict [&.state-neutral]:bg-transparent [&.state-neutral]:border-border [&.state-danger]:bg-transparent [&.state-danger]:border-current p-3.5 flex items-start gap-3 bg-muted border border-border rounded-2xl [&.state-success]:bg-primary/10 [&.state-success]:border-[color-mix(in_srgb,_var(--primary)_18%,_transparent)] [&_>_svg]:flex-none [&_>_span]:min-w-0 [&_>_span]:grid [&_>_span]:gap-1.5 [&_>_span]:wrap-anywhere [&_strong]:text-foreground [&_small]:text-muted-foreground [&_small]:text-xs state-${receiptVerified ? "success" : activity.leftDevice && activity.verified === false ? "danger" : "neutral"}`}>
-      <ReceiptIcon size={22} aria-hidden="true" />
-      <span><strong>{!activity.leftDevice ? "Request kept on this device" : receiptVerified ? "Signed receipt verified" : activity.verified === false ? "Receipt verification failed" : "No verified receipt"}</strong><small>{!activity.leftDevice ? "Nothing was sent to the provider. No remote receipt is needed." : activity.verified === false ? "Receipt audit failed. Content may already have reached the client and cannot be retracted. See the recorded reason below." : receiptVerified ? "The signed receipt matches the request and response bytes recorded by the verifier." : "No successful verification result is recorded for this request."}</small></span>
-    </div>
+    <VerificationVerdict
+      tone={verdictTone}
+      icon={ReceiptIcon}
+      title={!activity.leftDevice ? "Request kept on this device" : receiptVerified ? "Signed receipt verified" : activity.verified === false ? "Receipt verification failed" : "No verified receipt"}
+      detail={!activity.leftDevice ? "Nothing was sent to the provider. No remote receipt is needed." : activity.verified === false ? "Receipt audit failed. Content may already have reached the client and cannot be retracted. See the recorded reason below." : receiptVerified ? "The signed receipt matches the request and response bytes recorded by the verifier." : "No successful verification result is recorded for this request."}
+    />
     <dl className="evidence [&_dd]:select-text grid grid-cols-[82px_minmax(0,_1fr)] gap-y-3.5 gap-x-4 text-sm [&_dt]:text-muted-foreground [&_dt]:font-semibold [&_dd]:min-w-0 [&_dd]:text-muted-foreground [&_dd]:wrap-anywhere [&_dd_>_code]:block [&_dd_>_code]:mt-0.5 [&_dd_>_code]:text-muted-foreground max-[440px]:grid-cols-1 max-[440px]:[&_dt]:mt-1.25">
       <dt>Request</dt>
       <dd>
@@ -235,7 +239,7 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
 export function UsageEvidenceSheet({ activity, onClose }: { activity: RequestActivity; onClose(): void }): React.JSX.Element {
   return (
     <Sheet title="Usage proof" className="usage-evidence-sheet w-[min(540px,_calc(var(--window-dialog-width,_100vw)_-_32px))] h-[min(500px,_calc(var(--window-dialog-height,_100vh)_-_32px))]" headingClassName="usage-proof-heading [&>span:last-child]:min-w-0 [&>span:last-child]:grid [&>span:last-child]:gap-0.5 [&_small]:text-muted-foreground [&_small]:text-xs" description={formatTimestamp(activity.at * 1_000, true)} onClose={onClose}>
-      <div className="proof-card p-0 mt-4 flex flex-col gap-5 [&_.evidence]:text-sm [&_.evidence]:gap-y-4.5 [&_.privacy-verdict]:shrink-0"><Evidence activity={activity} /></div>
+      <div className="proof-card p-0 mt-4 flex flex-col gap-5 [&_.evidence]:text-sm [&_.evidence]:gap-y-4.5 [&_[data-slot=verification-verdict]]:shrink-0"><Evidence activity={activity} /></div>
       <DismissSheetAction onClose={onClose} />
     </Sheet>
   );

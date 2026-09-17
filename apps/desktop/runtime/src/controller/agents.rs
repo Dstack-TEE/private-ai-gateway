@@ -35,8 +35,7 @@ impl DesktopRuntime {
 
     // Call under agent_policy so scans cannot reauthorize during recovery.
     pub(super) fn publish_agent_tokens(&self, tokens: TokenSet) -> Result<bool, String> {
-        let protected =
-            protection_active(&self.manager.snapshot()?) && self.proxy.session().verified;
+        let protected = self.manager.snapshot()?.is_protected() && self.proxy.session().verified;
         self.proxy.set_tokens(with_client_token(
             if protected {
                 tokens
@@ -113,7 +112,7 @@ impl DesktopRuntime {
         let catalog = session.verified.then_some(session.catalog).flatten();
         let projector = self.current_projector()?;
         let (mut statuses, tokens) = projector.scan(catalog.as_ref())?;
-        if !protection_active(&self.manager.snapshot()?) || !session.verified {
+        if !self.manager.snapshot()?.is_protected() || !session.verified {
             for status in &mut statuses {
                 status.authorized = false;
             }
@@ -215,11 +214,7 @@ impl DesktopRuntime {
                 if failures.is_empty() {
                     Ok(statuses)
                 } else {
-                    Err(failures
-                        .into_iter()
-                        .map(|(agent, error)| format!("{agent}: {error}"))
-                        .collect::<Vec<_>>()
-                        .join("; "))
+                    Err(agent_failures(failures))
                 }
             }
         }
@@ -235,7 +230,7 @@ impl DesktopRuntime {
             .map_err(|_| "Agent state unavailable")?;
         let state = self.manager.snapshot()?;
         let session = self.proxy.session();
-        let protected = protection_active(&state) && session.verified;
+        let protected = state.is_protected() && session.verified;
         if !protected && crate::recovery::connection_intended(&state) {
             self.publish_agent_tokens(TokenSet::default())?;
             return Ok(());
@@ -279,11 +274,7 @@ impl DesktopRuntime {
             return Ok(None);
         }
         let state = self.manager.snapshot()?;
-        if state.status != "verified"
-            || state.configuration_verification
-            || state.endpoint_error.is_some()
-            || !state.api_key_saved
-        {
+        if !state.is_protected() {
             return Ok(None);
         }
         let session = self.proxy.session();

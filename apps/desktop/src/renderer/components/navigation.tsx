@@ -10,6 +10,8 @@ import { BrandMark } from "./brand";
 import { presentation, profileIsAvailable } from "../lib/protection";
 import { serviceHost } from "../lib/format";
 import { ProtectedControl, ProtectionStatus } from "./protection";
+import { toneTextClass } from "../lib/tone";
+import { cn } from "../lib/utils";
 
 const TRAY_ITEM_CLASS = "preview-tray-item w-full min-h-7.5 pt-0.75 pr-3.5 pb-0.75 pl-3.5 flex items-center text-inherit bg-transparent border-0 text-left text-sm hover:text-primary-foreground hover:bg-primary hover:shadow-none focus-visible:text-primary-foreground focus-visible:bg-primary focus-visible:shadow-none [&:hover_.preview-tray-check]:text-primary-foreground [&:focus-visible_.preview-tray-check]:text-primary-foreground";
 
@@ -202,8 +204,8 @@ export function PageHeader({
       <h1 id={`page-title-${view}`} tabIndex={-1}>{title}</h1>
       {view !== "overview" && (
         <div className="page-protection min-w-0 ml-auto flex items-center gap-2">
-          {developmentMode && <span className="state inline-flex items-center gap-1.25 text-muted-foreground text-xs font-medium [&_.dot]:w-1.5 [&_.dot]:h-1.5 [&_.dot]:flex-[0_0_6px] [&_.dot]:bg-current [&_.dot]:rounded-full state-warning text-warning">Dev mode</span>}
-          <span className={`[&.state-success]:text-primary [&.state-neutral]:text-muted-foreground [&.state-warning]:text-warning [&.state-danger]:text-destructive page-switch-copy min-w-0 grid justify-items-end leading-4 [&_strong]:text-xs [&_small]:text-xs [&_small]:text-muted-foreground [&_small.is-on]:text-primary [&_small.is-development]:text-warning [&_small.is-error]:text-destructive [&_.protection-status]:grid [&_.protection-status]:grid-cols-[14px_auto] [&_.protection-status]:justify-items-end [&_.protection-status]:gap-x-1.25 [&_.protection-status]:gap-y-0 [&_.protection-duration]:col-span-full state-${verdict.tone}`}>
+          {developmentMode && <span className="inline-flex items-center gap-1.25 text-xs font-medium text-warning">Dev mode</span>}
+          <span className={cn("page-switch-copy min-w-0 grid justify-items-end leading-4 [&_strong]:text-xs [&_.protection-status]:grid [&_.protection-status]:grid-cols-[14px_auto] [&_.protection-status]:justify-items-end [&_.protection-status]:gap-x-1.25 [&_.protection-status]:gap-y-0 [&_.protection-duration]:col-span-full", toneTextClass[verdict.tone])}>
             <strong><ProtectionStatus state={state} label={verdict.title} /></strong>
           </span>
           <ProtectedControl

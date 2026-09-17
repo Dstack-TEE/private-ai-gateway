@@ -2,12 +2,11 @@ import { execFileSync } from "node:child_process";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { publishedRelease, shouldAdvance } from "./release-channel.mjs";
-import { desktopPackages } from "./release-artifacts.mjs";
+import { manifestTargets } from "./release-artifacts.mjs";
 import { updateFeeds } from "./update-feeds.mjs";
 
 const repo = process.env.GH_REPO;
 const tag = process.env.TAG;
-const selectedPlatforms = process.env.RELEASE_PLATFORMS?.trim() || "all";
 if (!/^[\w.-]+\/[\w.-]+$/.test(repo ?? "")) throw new Error("Invalid repository");
 const gh = (...args) => execFileSync("gh", [...args, "--repo", repo], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 const metadata = JSON.parse(gh("release", "view", tag, "--json", "tagName,isDraft,isPrerelease"));
@@ -21,14 +20,7 @@ const request = async (url, options = {}) => {
 };
 const manifest = await (await request(`${prefix}latest.json`)).json();
 if (manifest.version !== release.version || manifest.channel !== release.channel) throw new Error("Manifest and release channel do not match");
-const selected = selectedPlatforms === "all" ? null : new Set(selectedPlatforms.split(",").map((value) => value.trim()).filter(Boolean));
-if (selected && [...selected].some((platform) => !desktopPackages.some((entry) => `${entry.platform}-${entry.arch}` === platform))) {
-  throw new Error("Unknown release platform");
-}
-const selectedTargets = desktopPackages
-  .filter((entry) => !selected || selected.has(`${entry.platform}-${entry.arch}`))
-  .flatMap((entry) => entry.targets);
-if (selected && selectedTargets.length === 0) throw new Error("At least one release platform is required");
+const selectedTargets = manifestTargets(manifest);
 for (const platform of selectedTargets) {
   const entry = manifest.platforms?.[platform];
   if (typeof entry?.signature !== "string" || !entry.signature.trim() || typeof entry.url !== "string" || !entry.url.startsWith(prefix)) throw new Error(`Invalid update entry: ${platform}`);

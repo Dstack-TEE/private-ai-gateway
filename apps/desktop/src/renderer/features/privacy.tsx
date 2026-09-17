@@ -1,10 +1,21 @@
 import React from "react";
-import { Check, LockOpen, ShieldCheck, ShieldX } from "lucide-react";
+import { Check, LockOpen, RefreshCw, ShieldCheck, ShieldX } from "lucide-react";
 import { Sheet, DismissSheetAction } from "../components/sheet";
 import type { GatewayState, VerificationCheck } from "../../shared/contracts";
 import { hasLiveVerification } from "../lib/protection";
 import { formatTimestamp, hardwareName, shorten, trustName } from "../lib/format";
 import { Detail } from "../components/detail";
+import { VerificationVerdict } from "../components/verification-verdict";
+import { cn } from "../lib/utils";
+import { toneTextClass, type Tone } from "../lib/tone";
+
+const CHECK_ICON_CLASS = "grid size-4.5 flex-none place-items-center rounded-full";
+const CHECK_PRESENTATION: Record<VerificationCheck["status"], { iconClass: string; tone: Tone }> = {
+  pass: { iconClass: "bg-primary text-primary-foreground", tone: "success" },
+  fail: { iconClass: "bg-[var(--danger-bg)] text-destructive", tone: "danger" },
+  skip: { iconClass: "bg-[var(--warning-bg)] text-warning", tone: "warning" },
+  info: { iconClass: "bg-[var(--warning-bg)] text-warning", tone: "warning" },
+};
 
 const CHECK_TITLES: Record<string, string> = {
   "id-1": "Hardware attestation is genuine",
@@ -27,7 +38,6 @@ export function PrivacyVerificationSheet({ state, onClose }: { state: GatewaySta
   return <Sheet title="Privacy verification" className="privacy-sheet w-[min(680px,_calc(var(--window-dialog-width,_100vw)_-_32px))] h-[min(680px,_calc(var(--window-dialog-height,_100vh)_-_32px))]" onClose={onClose}><PrivacyVerification state={state} /><DismissSheetAction onClose={onClose} /></Sheet>;
 }
 
-/** The three facts behind "Protected", each shown only when it holds now. */
 function PrivacyVerification({ state }: { state: GatewayState }): React.JSX.Element {
   const verified = hasLiveVerification(state);
   const identity = state.identity;
@@ -59,21 +69,25 @@ function PrivacyVerification({ state }: { state: GatewayState }): React.JSX.Elem
         : "No recent receipts. Each request is verified separately in Usage.",
     },
   ];
+  const verdictTone = verified ? "success" : state.status === "blocked" || state.status === "error" ? "danger" : "neutral";
+  const VerdictIcon = verified ? ShieldCheck : state.status === "verifying" ? RefreshCw : ShieldX;
   return (
     <section className="privacy-content mt-3.5" aria-label="Privacy">
-      <div className={`[&.state-success]:text-primary [&.state-neutral]:text-muted-foreground [&.state-warning]:text-warning [&.state-danger]:text-destructive privacy-verdict [&.state-neutral]:bg-transparent [&.state-neutral]:border-border [&.state-danger]:bg-transparent [&.state-danger]:border-current p-3.5 flex items-start gap-3 bg-muted border border-border rounded-2xl [&.state-success]:bg-primary/10 [&.state-success]:border-[color-mix(in_srgb,_var(--primary)_18%,_transparent)] [&_>_svg]:flex-none [&_>_span]:min-w-0 [&_>_span]:grid [&_>_span]:gap-1.5 [&_>_span]:wrap-anywhere [&_strong]:text-foreground [&_small]:text-muted-foreground [&_small]:text-xs state-${verified ? "success" : state.status === "blocked" || state.status === "error" ? "danger" : "neutral"}`}>
-        {verified ? <ShieldCheck size={22} aria-hidden="true" /> : <ShieldX size={22} aria-hidden="true" />}
-        <span><strong>{verified ? "Service identity and connection verified" : state.status === "verifying" ? "Checking the service" : "No verified live connection"}</strong><small>{verified ? "This app checked the service's hardware evidence and bound the encrypted connection to its attested key." : "A saved profile is not evidence of a currently protected connection. Protection must establish a new verified session."}</small></span>
-      </div>
-      <div className="sheet-card privacy-facts mt-4 [&_.row]:p-3.5 [&_.row-main]:grid [&_.row-main]:gap-1.25">
+      <VerificationVerdict
+        tone={verdictTone}
+        icon={VerdictIcon}
+        title={verified ? "Service identity and connection verified" : state.status === "verifying" ? "Checking the service" : "No verified live connection"}
+        detail={verified ? "This app checked the service's hardware evidence and bound the encrypted connection to its attested key." : "A saved profile is not evidence of a currently protected connection. Protection must establish a new verified session."}
+      />
+      <div className="sheet-card privacy-facts mt-4">
         {facts.map((fact) => (
-          <div className="row min-h-12.5 pt-2.25 pr-3 pb-2.25 pl-3 flex items-center gap-3 border-b border-b-border last:border-b-0 fact items-start" key={fact.title}>
-            <span className={fact.ok ? "check-icon w-4.5 h-4.5 flex-none grid place-items-center rounded-full [&.check-pass]:text-primary-foreground [&.check-pass]:bg-primary [&.check-fail]:text-destructive [&.check-fail]:bg-[var(--danger-bg)] [&.check-skip]:text-warning [&.check-skip]:bg-[var(--warning-bg)] [&.check-info]:text-warning [&.check-info]:bg-[var(--warning-bg)] check-pass" : "check-icon w-4.5 h-4.5 flex-none grid place-items-center rounded-full [&.check-pass]:text-primary-foreground [&.check-pass]:bg-primary [&.check-fail]:text-destructive [&.check-fail]:bg-[var(--danger-bg)] [&.check-skip]:text-warning [&.check-skip]:bg-[var(--warning-bg)] [&.check-info]:text-warning [&.check-info]:bg-[var(--warning-bg)] check-skip"} aria-hidden="true">
+          <div className="fact flex min-h-12.5 items-start gap-3 border-b border-border p-3.5 last:border-b-0" key={fact.title}>
+            <span className={cn(CHECK_ICON_CLASS, CHECK_PRESENTATION[fact.ok ? "pass" : "skip"].iconClass)} aria-hidden="true">
               {fact.ok ? <Check size={12} /> : <LockOpen size={11} />}
             </span>
-            <span className="row-main min-w-0 flex-auto flex flex-wrap items-center gap-y-0.5 gap-x-2">
-              {fact.title}
-              <span className="row-note flex-[1_0_100%] block text-muted-foreground text-xs wrap-anywhere [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [code&]:overflow-hidden [code&]:text-ellipsis [code&]:whitespace-nowrap">{fact.detail}</span>
+            <span className="grid min-w-0 flex-auto gap-1.25">
+              <span className="font-medium">{fact.title}</span>
+              <span className="text-xs text-muted-foreground wrap-anywhere">{fact.detail}</span>
             </span>
           </div>
         ))}
@@ -81,8 +95,8 @@ function PrivacyVerification({ state }: { state: GatewayState }): React.JSX.Elem
       <p className="proof-boundary mt-3 mr-0 mb-4.5 ml-0 text-muted-foreground text-xs">{passed("id-5") ? "Key custody evidence passed." : "Key custody is not independently established by these checks."} Responses are forwarded immediately; receipts are audited afterward and cannot retract delivered content. This summary does not verify upstream inference or answer accuracy. {!state.config.requireProductionOs && "Development OS images are allowed."}</p>
       {identity && (
         <section className="privacy-section mt-6" aria-labelledby="verified-identity-title">
-          <div className="privacy-section-heading min-h-9 pt-0 pr-0.5 pb-2 pl-0.5 flex items-center flex-wrap justify-between gap-y-1 gap-x-4 [&_h3]:m-0 [&_h3]:text-foreground [&_h3]:text-sm [&_h3]:font-semibold [&_>_span]:text-muted-foreground [&_>_span]:text-xs"><h3 id="verified-identity-title">{verified ? "Current service identity" : "Last reported identity"}</h3><span>{checkCount(checks)} checks passed</span></div>
-          <div className="sheet-card identity-grid [&_strong]:select-text p-3.5 grid grid-cols-2 gap-y-4 gap-x-5 border-t-border [&_>_div]:min-w-0 [&_.wide]:col-span-full [&_span]:block [&_span]:mb-0.5 [&_span]:text-muted-foreground [&_span]:text-xs [&_strong]:block [&_strong]:font-semibold [&_strong.mono]:font-medium [&_strong.mono]:wrap-anywhere [&_strong.mono]:whitespace-normal border-t-0">
+          <SectionHeading id="verified-identity-title" title={verified ? "Current service identity" : "Last reported identity"} summary={`${checkCount(checks)} checks passed`} />
+          <div className="sheet-card identity-grid grid grid-cols-2 gap-x-5 gap-y-4 p-3.5 [&_.wide]:col-span-full [&_>_div]:min-w-0 [&_span]:mb-0.5 [&_span]:block [&_span]:text-xs [&_span]:text-muted-foreground [&_strong]:block [&_strong]:select-text [&_strong]:font-semibold [&_strong.mono]:whitespace-normal [&_strong.mono]:font-medium [&_strong.mono]:wrap-anywhere">
             <Detail label="Hardware" value={hardwareName(identity.teeType)} />
             <Detail label="Trust" value={trustName(identity.trustLevel)} />
             <Detail label="Source commit" value={identity.source.repoCommit ?? "Unknown"} mono wide />
@@ -98,8 +112,8 @@ function PrivacyVerification({ state }: { state: GatewayState }): React.JSX.Elem
       )}
       {checks.length > 0 && (
         <section className="privacy-section mt-6" aria-labelledby="verification-checks-title">
-          <div className="privacy-section-heading min-h-9 pt-0 pr-0.5 pb-2 pl-0.5 flex items-center flex-wrap justify-between gap-y-1 gap-x-4 [&_h3]:m-0 [&_h3]:text-foreground [&_h3]:text-sm [&_h3]:font-semibold [&_>_span]:text-muted-foreground [&_>_span]:text-xs"><h3 id="verification-checks-title">Verification checks</h3><span>{checks.length} total</span></div>
-          <div className="sheet-card check-list [&_.check-row:first-child]:border-t-0">{checks.map((check) => <CheckRow key={check.id} check={check} />)}</div>
+          <SectionHeading id="verification-checks-title" title="Verification checks" summary={`${checks.length} total`} />
+          <div className="sheet-card check-list">{checks.map((check) => <CheckRow key={check.id} check={check} />)}</div>
         </section>
       )}
     </section>
@@ -108,15 +122,20 @@ function PrivacyVerification({ state }: { state: GatewayState }): React.JSX.Elem
 
 function CheckRow({ check }: { check: VerificationCheck }): React.JSX.Element {
   const title = CHECK_TITLES[check.id] ?? check.title;
+  const presentation = CHECK_PRESENTATION[check.status];
   return (
-    <div className="row min-h-12.5 pt-2.25 pr-3 pb-2.25 pl-3 flex items-center gap-3 border-b border-b-border last:border-b-0 check-row [&_.row-note]:select-text min-h-9 border-t border-t-border border-b-0 [&_.row-main]:overflow-hidden [&_.row-main]:text-ellipsis grid grid-cols-[18px_minmax(0,_1fr)_auto] items-start gap-3 pt-3 pr-3.5 pb-3 pl-3.5 [&_.row-main]:min-w-0 [&_.row-main]:grid [&_.row-main]:whitespace-normal [&_.row-note]:mt-1.25">
-      <span className={`check-icon w-4.5 h-4.5 flex-none grid place-items-center rounded-full [&.check-pass]:text-primary-foreground [&.check-pass]:bg-primary [&.check-fail]:text-destructive [&.check-fail]:bg-[var(--danger-bg)] [&.check-skip]:text-warning [&.check-skip]:bg-[var(--warning-bg)] [&.check-info]:text-warning [&.check-info]:bg-[var(--warning-bg)] check-${check.status}`} aria-hidden="true">
+    <div className="check-row grid min-h-9 grid-cols-[18px_minmax(0,_1fr)_auto] items-start gap-3 border-b border-border px-3.5 py-3 last:border-b-0">
+      <span className={cn(CHECK_ICON_CLASS, presentation.iconClass)} aria-hidden="true">
         {check.status === "pass" && <Check size={12} />}
       </span>
-      <span className="row-main min-w-0 flex-auto flex flex-wrap items-center gap-y-0.5 gap-x-2"><span className="row-title font-medium">{title}</span><span className="row-note flex-[1_0_100%] block text-muted-foreground text-xs wrap-anywhere [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [code&]:overflow-hidden [code&]:text-ellipsis [code&]:whitespace-nowrap">{check.detail}</span></span>
-      <span className={`[&.result-pass]:text-primary [&.result-fail]:text-destructive [&.result-skip]:text-warning [&.result-info]:text-warning result flex-none text-xs font-semibold result-${check.status}`}>{checkStatusLabel(check.status)}</span>
+      <span className="grid min-w-0 gap-1.25"><span className="font-medium">{title}</span><span className="select-text text-xs text-muted-foreground wrap-anywhere">{check.detail}</span></span>
+      <span className={cn("flex-none text-xs font-semibold", toneTextClass[presentation.tone])}>{checkStatusLabel(check.status)}</span>
     </div>
   );
+}
+
+function SectionHeading({ id, title, summary }: { id: string; title: string; summary: string }): React.JSX.Element {
+  return <div className="flex min-h-9 flex-wrap items-center justify-between gap-x-4 gap-y-1 px-0.5 pb-2"><h3 id={id} className="text-sm font-semibold text-foreground">{title}</h3><span className="text-xs text-muted-foreground">{summary}</span></div>;
 }
 
 function checkStatusLabel(status: VerificationCheck["status"]): string {

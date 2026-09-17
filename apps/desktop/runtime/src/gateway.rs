@@ -186,7 +186,7 @@ impl GatewayManager {
             return Err("Gateway is already running".to_string());
         }
 
-        let mut args = Vec::with_capacity(9);
+        let mut args = Vec::with_capacity(8);
         if config.require_production_os {
             args.push("--require-production-os".to_string());
         }
@@ -198,7 +198,6 @@ impl GatewayManager {
             "--control".to_string(),
             "127.0.0.1:0".to_string(),
             "--json-events".to_string(),
-            "--audit-receipts".to_string(),
         ]);
 
         let (receiver, mut child) = self.launcher.spawn(args)?;

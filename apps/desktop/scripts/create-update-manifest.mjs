@@ -1,7 +1,7 @@
 import { readdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { releaseChannel } from "./release-channel.mjs";
-import { artifactName, desktopPackages } from "./release-artifacts.mjs";
+import { artifactName, desktopBuildId, desktopPackages, selectDesktopBuilds } from "./release-artifacts.mjs";
 
 const [directory, version, repository, channel = "beta", selectedPlatforms = "all"] = process.argv.slice(2);
 const release = releaseChannel(version, channel);
@@ -12,14 +12,10 @@ const entries = await readdir(directory, { recursive: true, withFileTypes: true 
 const files = entries.filter((entry) => entry.isFile()).map((entry) => path.join(entry.parentPath, entry.name));
 const tag = release.tag;
 const platforms = {};
-const requested = selectedPlatforms === "all" ? null : new Set(selectedPlatforms.split(",").map((value) => value.trim()).filter(Boolean));
-const supported = new Set(desktopPackages.map(({ platform, arch }) => `${platform}-${arch}`));
-if (requested && (!requested.size || [...requested].some((platform) => !supported.has(platform)))) {
-  throw new Error(`Platforms must be all or a subset of ${[...supported].join(", ")}`);
-}
+const requested = new Set(selectDesktopBuilds(selectedPlatforms).map(desktopBuildId));
 for (const specification of desktopPackages) {
-  const packageId = `${specification.platform}-${specification.arch}`;
-  if (requested && !requested.has(packageId)) continue;
+  const packageId = desktopBuildId(specification);
+  if (!requested.has(packageId)) continue;
   const { suffix, targets } = specification;
   const filename = artifactName({ version, ...specification });
   // download-artifact keeps matrix job names as directories. Use that provenance

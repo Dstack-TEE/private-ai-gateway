@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::contracts::{
-    ConfidentialProfile, ConfidentialProfileInput, ProfileAuth, ServiceProvider, StartGatewayConfig,
+    ConfidentialProfile, ConfidentialProfileInput, ProfileAuth, StartGatewayConfig,
 };
 
 const CONFIG_FILE: &str = "confidential-ai.json";
@@ -134,14 +134,13 @@ pub fn resolve_profile(
         return Err("Profile name must be between 1 and 80 characters".to_string());
     }
     let remote_url = normalize_url(&input.remote_url)?;
-    match input.provider {
-        ServiceProvider::Phala if remote_url != "https://inference.phala.com" => {
-            return Err("The Phala preset must use https://inference.phala.com".to_string());
+    if let Some(expected) = input.provider.preset_url() {
+        if remote_url != expected {
+            return Err(format!(
+                "The {} preset must use {expected}",
+                input.provider.label()
+            ));
         }
-        ServiceProvider::Redpill if remote_url != "https://tee.redpill.ai" => {
-            return Err("The RedPill preset must use https://tee.redpill.ai".to_string());
-        }
-        _ => {}
     }
     Ok(ConfidentialProfile {
         id: input.id,
@@ -206,7 +205,7 @@ fn resolve_settings(mut settings: ServiceSettings) -> Result<ServiceSettings, St
             ConfidentialProfileInput {
                 id: profile.id.clone(),
                 name: profile.name.clone(),
-                provider: profile.provider.clone(),
+                provider: profile.provider,
                 remote_url: profile.remote_url.clone(),
             },
             profile.verified_at,
@@ -288,6 +287,7 @@ fn config_path() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contracts::ServiceProvider;
 
     fn input(remote_url: &str) -> ConfidentialProfileInput {
         ConfidentialProfileInput {

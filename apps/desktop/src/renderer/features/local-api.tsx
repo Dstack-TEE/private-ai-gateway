@@ -16,6 +16,7 @@ import { FormField } from "../components/settings";
 import type { GatewayState, LocalApiConfig } from "../../shared/contracts";
 import { maskClientKey } from "../lib/format";
 import { desktopApi } from "../lib/environment";
+import { cn } from "../lib/utils";
 
 export function LocalApiPanel({
   proxyUrl,
@@ -36,31 +37,56 @@ export function LocalApiPanel({
   const keyLabel = "Client key";
   return (
     <div className="copy-rows relative grid auto-rows-auto gap-3">
-      <Item variant="muted" size="xs" className="copy-row relative min-w-0 h-14 overflow-hidden">
-        <Button variant="ghost"
-          className="copy-surface absolute inset-0 min-w-0 min-h-0 pt-2.25 pr-[min(100px,_40%)] pb-2.25 pl-3 flex flex-col items-start justify-center gap-0.5 bg-transparent border-0 text-left [&_>_*]:max-w-full [&_>_.row-title-line]:w-full [&_>_.row-title-line]:min-w-0 [&_>_.row-note]:w-full [&_>_.row-note]:min-w-0 [&_>_.row-title-line]:overflow-hidden [&_>_.row-title-line_>_*]:min-w-0 [&_>_.row-title-line_>_*]:overflow-hidden [&_>_.row-title-line_>_*]:text-ellipsis [&_>_.row-title-line_>_*]:whitespace-nowrap [&_>_.row-note]:flex-none [&_.row-title]:text-muted-foreground [&_.row-title]:text-xs [&_.row-title]:font-normal [&_code.row-note]:text-foreground [&_code.row-note]:text-sm hover:bg-muted [&_code]:max-w-full [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [&:hover_.copy-feedback]:opacity-100 [&:focus-visible_.copy-feedback]:opacity-100 h-full w-full rounded-none"
-          disabled={!proxyUrl}
-          aria-label={`${endpointLabel}: ${proxyUrl ?? "Unavailable"}. Copy`}
-          onClick={() => proxyUrl && void onCopy(endpointLabel, proxyUrl)}
-        >
-          <span className="row-title-line max-w-full flex items-center flex-wrap gap-y-1 gap-x-2">
-            <span className="row-title">Endpoint</span>
-          </span>
-          <code className="row-note flex-[1_0_100%] block text-muted-foreground text-xs wrap-anywhere [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [code&]:overflow-hidden [code&]:text-ellipsis [code&]:whitespace-nowrap">{proxyUrl ?? "Unavailable"}</code>
-          <span className={`copy-feedback absolute right-13.5 top-[50%] opacity-0 -translate-y-1/2 text-muted-foreground text-xs font-semibold [transition:opacity_120ms_ease] [&.is-copied]:opacity-100 [&.is-copied]:text-primary ${copied === endpointLabel ? "is-copied" : ""}`}>{copied === endpointLabel ? "Copied" : "Copy"}</span>
-        </Button>
-      </Item>
-      <Item variant="muted" size="xs" className="copy-row relative min-w-0 h-14 overflow-hidden">
-        <Button variant="ghost" className="copy-surface absolute inset-0 min-w-0 min-h-0 pt-2.25 pr-[min(100px,_40%)] pb-2.25 pl-3 flex flex-col items-start justify-center gap-0.5 bg-transparent border-0 text-left [&_>_*]:max-w-full [&_>_.row-title-line]:w-full [&_>_.row-title-line]:min-w-0 [&_>_.row-note]:w-full [&_>_.row-note]:min-w-0 [&_>_.row-title-line]:overflow-hidden [&_>_.row-title-line_>_*]:min-w-0 [&_>_.row-title-line_>_*]:overflow-hidden [&_>_.row-title-line_>_*]:text-ellipsis [&_>_.row-title-line_>_*]:whitespace-nowrap [&_>_.row-note]:flex-none [&_.row-title]:text-muted-foreground [&_.row-title]:text-xs [&_.row-title]:font-normal [&_code.row-note]:text-foreground [&_code.row-note]:text-sm hover:bg-muted [&_code]:max-w-full [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [&:hover_.copy-feedback]:opacity-100 [&:focus-visible_.copy-feedback]:opacity-100 h-full w-full rounded-none" disabled={!clientKey} aria-label={`${keyLabel}: ${clientKeyVisible ? clientKey : "hidden"}. Copy`} onClick={() => clientKey && void onCopy(keyLabel, clientKey)}>
-          <span className="row-title-line max-w-full flex items-center flex-wrap gap-y-1 gap-x-2">
-            <span className="row-title">Client key</span>
-          </span>
-          <code className="row-note flex-[1_0_100%] block text-muted-foreground text-xs wrap-anywhere [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [code&]:overflow-hidden [code&]:text-ellipsis [code&]:whitespace-nowrap">{clientKey ? clientKeyVisible ? clientKey : maskClientKey(clientKey) : "Unavailable"}</code>
-          <span className={`copy-feedback absolute right-13.5 top-[50%] opacity-0 -translate-y-1/2 text-muted-foreground text-xs font-semibold [transition:opacity_120ms_ease] [&.is-copied]:opacity-100 [&.is-copied]:text-primary ${copied === keyLabel ? "is-copied" : ""}`}>{copied === keyLabel ? "Copied" : "Copy"}</span>
-        </Button>
+      <CopyRow title="Endpoint" copyLabel={endpointLabel} value={proxyUrl} copied={copied} onCopy={onCopy} />
+      <CopyRow
+        title="Client key"
+        copyLabel={keyLabel}
+        value={clientKey || undefined}
+        displayValue={clientKey ? (clientKeyVisible ? clientKey : maskClientKey(clientKey)) : undefined}
+        ariaValue={clientKey ? (clientKeyVisible ? clientKey : "hidden") : undefined}
+        copied={copied}
+        onCopy={onCopy}
+      >
         <IconButton className="row-action relative z-2 ml-auto" label={clientKeyVisible ? "Hide client key" : "Reveal client key"} disabled={!clientKey} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}</IconButton>
-      </Item>
+      </CopyRow>
     </div>
+  );
+}
+
+function CopyRow({
+  title,
+  copyLabel,
+  value,
+  displayValue = value,
+  ariaValue = displayValue,
+  copied,
+  onCopy,
+  children,
+}: React.PropsWithChildren<{
+  title: string;
+  copyLabel: string;
+  value?: string;
+  displayValue?: string;
+  ariaValue?: string;
+  copied?: string;
+  onCopy(label: string, value: string): Promise<void>;
+}>): React.JSX.Element {
+  const isCopied = copied === copyLabel;
+  return (
+    <Item variant="muted" size="xs" className="copy-row relative h-14 min-w-0 overflow-hidden">
+      <Button
+        variant="ghost"
+        className="copy-surface absolute inset-0 flex size-full min-h-0 min-w-0 flex-col items-start justify-center gap-0.5 rounded-none border-0 bg-transparent py-2.25 pr-[min(100px,_40%)] pl-3 text-left hover:bg-muted [&:focus-visible_.copy-feedback]:opacity-100 [&:hover_.copy-feedback]:opacity-100 [&_code]:max-w-full [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap"
+        disabled={!value}
+        aria-label={`${copyLabel}: ${ariaValue ?? "Unavailable"}. Copy`}
+        onClick={() => value && void onCopy(copyLabel, value)}
+      >
+        <span className="row-title text-xs font-normal text-muted-foreground">{title}</span>
+        <code className="row-note block w-full flex-none overflow-hidden text-ellipsis whitespace-nowrap text-sm text-foreground">{displayValue ?? "Unavailable"}</code>
+        <span className={cn("copy-feedback absolute right-13.5 top-1/2 -translate-y-1/2 text-xs font-semibold text-muted-foreground opacity-0 transition-opacity duration-150", isCopied && "text-primary opacity-100")}>{isCopied ? "Copied" : "Copy"}</span>
+      </Button>
+      {children}
+    </Item>
   );
 }
 

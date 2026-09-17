@@ -1,7 +1,6 @@
 /* Application semantics, separate from the CLI-managed shadcn theme. */
 @layer base {
   * { @apply border-border outline-ring/50; }
-  body { @apply bg-background text-foreground; }
 }
 @theme inline {
   --color-warning: var(--warning);
@@ -24,7 +23,6 @@
   --sidebar-width: 196px;
   --warning: var(--color-amber-700);
   --warning-bg: color-mix(in oklch, var(--warning) 10%, transparent);
-  --danger: var(--destructive);
   --danger-bg: color-mix(in oklch, var(--destructive) 10%, transparent);
   --backdrop: color-mix(in oklch, var(--color-black) 32%, transparent);
 }

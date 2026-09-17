@@ -136,12 +136,30 @@ pub struct CatalogSummary {
     pub removed: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ServiceProvider {
     Phala,
     Redpill,
     Custom,
+}
+
+impl ServiceProvider {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Phala => "Phala",
+            Self::Redpill => "RedPill",
+            Self::Custom => "Custom",
+        }
+    }
+
+    pub const fn preset_url(self) -> Option<&'static str> {
+        match self {
+            Self::Phala => Some("https://inference.phala.com"),
+            Self::Redpill => Some("https://tee.redpill.ai"),
+            Self::Custom => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -372,6 +390,13 @@ pub struct GatewayState {
 }
 
 impl GatewayState {
+    pub fn is_protected(&self) -> bool {
+        self.status == "verified"
+            && !self.configuration_verification
+            && self.api_key_saved
+            && self.endpoint_error.is_none()
+    }
+
     /// Shared by the native action label and the management client's toggle.
     pub fn should_stop_protection(&self) -> bool {
         !self.configuration_verification

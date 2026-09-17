@@ -39,7 +39,7 @@ pub(super) fn login(
     let provider = options
         .provider
         .map(service_provider)
-        .or_else(|| existing.map(|p| p.provider.clone()))
+        .or_else(|| existing.map(|p| p.provider))
         .unwrap_or(ServiceProvider::Redpill);
     if provider == ServiceProvider::Custom {
         return Err(
@@ -50,10 +50,10 @@ pub(super) fn login(
     if options.callback_stdin && provider != ServiceProvider::Redpill {
         return Err("Phala uses a browser device code; omit --callback-stdin.".into());
     }
-    let (label, remote_url) = match provider {
-        ServiceProvider::Phala => ("Phala", "https://inference.phala.com"),
-        _ => ("RedPill", "https://tee.redpill.ai"),
-    };
+    let label = provider.label();
+    let remote_url = provider
+        .preset_url()
+        .ok_or("Account login requires a provider preset")?;
     let profile = ConfidentialProfileInput {
         id: options.id.clone(),
         name: options

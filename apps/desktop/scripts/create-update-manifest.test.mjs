@@ -4,12 +4,15 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
-import { artifactName, desktopPackages } from "./release-artifacts.mjs";
+import { artifactName, desktopPackages, desktopTargets, manifestTargets } from "./release-artifacts.mjs";
 import { updateFeeds } from "./update-feeds.mjs";
 
 test("partial releases preserve independent platform versions and the complete legacy feed", () => {
-  const targets = desktopPackages.flatMap((entry) => entry.targets);
+  const targets = desktopTargets;
   const manifest = { version: "0.1.2-beta.38", channel: "beta", platforms: Object.fromEntries(targets.map((target) => [target, { url: target, signature: target }])) };
+  assert.deepEqual(manifestTargets(manifest), targets);
+  assert.throws(() => manifestTargets({ platforms: { unsupported: {} } }), /unsupported desktop targets: unsupported/);
+  assert.throws(() => manifestTargets({ platforms: {} }), /no desktop targets/);
   const complete = updateFeeds(manifest, targets);
   assert.equal(complete.size, 7);
   assert.deepEqual(complete.get("latest.json"), manifest);

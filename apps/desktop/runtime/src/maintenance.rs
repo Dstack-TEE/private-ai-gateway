@@ -35,7 +35,7 @@ impl ProfileBackup {
                 .iter()
                 .map(|profile| ProfileConfiguration {
                     name: profile.name.clone(),
-                    provider: profile.provider.clone(),
+                    provider: profile.provider,
                     remote_url: profile.remote_url.clone(),
                 })
                 .collect(),
@@ -109,7 +109,7 @@ fn resolve(profile: &ProfileConfiguration) -> Result<ConfidentialProfile, String
         ConfidentialProfileInput {
             id: "import-validation".into(),
             name: profile.name.clone(),
-            provider: profile.provider.clone(),
+            provider: profile.provider,
             remote_url: profile.remote_url.clone(),
         },
         None,

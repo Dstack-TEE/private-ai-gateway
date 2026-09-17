@@ -165,7 +165,6 @@ pub struct ProxyState {
     accepted_composes: Vec<String>,
     /// Apply the production dstack OS-image policy on startup and re-verification.
     require_production_os: bool,
-    audit_receipts: bool,
     audits: Arc<tokio::sync::Semaphore>,
     trusted: Mutex<TrustedIdentity>,
     /// Set when an upstream response advertised a keyset digest other than the
@@ -218,7 +217,6 @@ impl ProxyState {
             enforce_verified,
             accepted_composes,
             require_production_os,
-            audit_receipts: false,
             audits: Arc::new(tokio::sync::Semaphore::new(16)),
             trusted: Mutex::new(TrustedIdentity {
                 report: Arc::new(report),
@@ -403,7 +401,7 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
     } else {
         Arc::new(|_| {})
     };
-    let mut state = ProxyState::new(
+    let state = ProxyState::new(
         client,
         base_url.clone(),
         host,
@@ -417,7 +415,6 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
         reporter,
         event_sink,
     );
-    state.audit_receipts = args.audit_receipts;
     let state = Arc::new(state);
     // §5.3 prevention: a claims policy derives the pin set from the current
     // attested sessions before any traffic — and nothing acceptable to pin
@@ -468,11 +465,6 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
         });
         write_json_event(&event)?;
     } else {
-        let receipt_mode = if args.audit_receipts {
-            "responses stream immediately; receipts are audited after delivery."
-        } else {
-            "POST receipt verification is available on demand."
-        };
         println!();
         println!(
             "private-ai-proxy serve: proxying {base_url} on http://{local} (plain HTTP, localhost)"
@@ -480,7 +472,7 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
         println!(
             "forwarding every method and path; Authorization passed through unchanged; every \
              upstream hop pinned to the attested TLS key; each POST response's receipt id and \
-             body digests recorded; {receipt_mode}\n\
+             body digests recorded; responses stream immediately and receipts are audited after delivery.\n\
              verify on demand: GET http://{control_local}/receipts lists recent exchanges, \
              POST http://{control_local}/receipts/<id>/verify checks one (send Authorization \
              if the receipt fetch needs it).\n{}",
@@ -747,58 +739,21 @@ async fn proxy_inference(
             StreamEnd::Cancelled(partial) => (partial, ResponseDelivery::Cancelled),
         };
         let outcome =
-            |receipt_id: Option<String>, verified: Option<bool>, detail: String| RequestOutcome {
+            |receipt_id: Option<String>, verified: Option<bool>, detail: &str| RequestOutcome {
                 method: Method::POST,
                 path: hook_path.clone(),
                 status,
                 streamed,
                 receipt_id,
                 verified,
-                detail,
+                detail: detail.to_string(),
                 tag: tag.clone(),
                 rewritten: None,
                 local_policy_applied,
             };
-        let outcome = match &receipt_id {
-            Some(id) => match &delivery {
-                ResponseDelivery::Complete => outcome(
-                    Some(id.clone()),
-                    None,
-                    if hook_state.audit_receipts {
-                        "Response delivered; receipt audit pending".to_string()
-                    } else {
-                        format!("receipt {id} recorded; verification available on demand")
-                    },
-                ),
-                ResponseDelivery::Failed(_) => outcome(
-                    Some(id.clone()),
-                    None,
-                    "Response stream ended before delivery completed".to_string(),
-                ),
-                ResponseDelivery::Cancelled => outcome(
-                    Some(id.clone()),
-                    None,
-                    "Response stream was canceled by the client; no complete proof is available"
-                        .to_string(),
-                ),
-            },
-            // A 2xx POST completion with no receipt header can never be
-            // audited: fail loudly (spec 5.2 puts a receipt on every
-            // inference response). Non-2xx responses legitimately carry none.
-            None if (200..300).contains(&status) => outcome(
-                None,
-                Some(false),
-                "no X-Receipt-Id on a 2xx POST response (spec 5.2); nothing recorded".to_string(),
-            ),
-            None => outcome(
-                None,
-                None,
-                "no X-Receipt-Id returned; nothing to verify".to_string(),
-            ),
-        };
         if let Some(receipt_id) = receipt_id {
             let exchange = RecordedExchange {
-                receipt_id,
+                receipt_id: receipt_id.clone(),
                 path: hook_path.clone(),
                 status,
                 streamed,
@@ -812,15 +767,28 @@ async fn proxy_inference(
                 local_policy_applied,
             };
             hook_state.record(exchange.clone());
-            if hook_state.audit_receipts {
-                if matches!(delivery, ResponseDelivery::Complete) {
-                    (hook_state.reporter)(outcome);
-                }
-                audit_exchange(hook_state, trusted, exchange, audit_bearer);
-                return;
+            if matches!(delivery, ResponseDelivery::Complete) {
+                (hook_state.reporter)(outcome(
+                    Some(receipt_id),
+                    None,
+                    "Response delivered; receipt audit pending",
+                ));
             }
+            audit_exchange(hook_state, trusted, exchange, audit_bearer);
+            return;
         }
-        (hook_state.reporter)(outcome);
+        // A 2xx POST completion with no receipt header can never be audited:
+        // fail loudly (spec 5.2 puts a receipt on every inference response).
+        // Non-2xx responses legitimately carry none.
+        let (verified, detail) = if (200..300).contains(&status) {
+            (
+                Some(false),
+                "no X-Receipt-Id on a 2xx POST response (spec 5.2); nothing recorded",
+            )
+        } else {
+            (None, "no X-Receipt-Id returned; nothing to verify")
+        };
+        (hook_state.reporter)(outcome(None, verified, detail));
     });
 
     let upstream = async_stream::stream! {
@@ -861,6 +829,7 @@ fn audit_exchange(
             .lock()
             .expect("recorded ring poisoned")
             .iter_mut()
+            .rev()
             .find(|entry| entry.receipt_id == exchange.receipt_id && entry.at == exchange.at)
         {
             entry.verified = verified;
@@ -1925,7 +1894,12 @@ mod tests {
 
         let outcome = rx.recv().await.expect("retried outcome reported");
         assert_eq!(outcome.status, 200);
-        assert!(outcome.detail.contains("recorded"), "{}", outcome.detail);
+        assert_eq!(outcome.verified, None);
+        assert!(
+            outcome.detail.contains("audit pending"),
+            "{}",
+            outcome.detail
+        );
         // The refreshed set replaced the stale pin.
         assert_eq!(*state.policy_pins.lock().unwrap(), vec![current_id]);
     }
@@ -2025,6 +1999,9 @@ mod tests {
         assert_eq!(outcome.path, "/v1/chat/completions");
         assert_eq!(outcome.receipt_id.as_deref(), Some("rcpt-0001"));
         assert_eq!(outcome.verified, None);
+        let audited = rx.recv().await.expect("inference audit reported");
+        assert_eq!(audited.path, "/v1/chat/completions");
+        assert_eq!(audited.verified, Some(true));
 
         // Any POST path is inference-capable: an Anthropic-style /v1/messages
         // forward is recorded the same way without being enumerated.
@@ -2041,6 +2018,9 @@ mod tests {
         let outcome = rx.recv().await.expect("messages outcome reported");
         assert_eq!(outcome.path, "/v1/messages");
         assert_eq!(outcome.verified, None);
+        let audited = rx.recv().await.expect("messages audit reported");
+        assert_eq!(audited.path, "/v1/messages");
+        assert_eq!(audited.verified, Some(true));
 
         // The control endpoint lists both recorded exchanges, newest first.
         let listed: Value = http
@@ -2053,7 +2033,7 @@ mod tests {
             .unwrap();
         assert_eq!(listed.as_array().unwrap().len(), 2);
         assert_eq!(listed[0]["path"], "/v1/messages");
-        assert_eq!(listed[0]["verified"], Value::Null);
+        assert_eq!(listed[0]["verified"], Value::Bool(true));
 
         // On-demand verification runs the full receipt + session audit
         // against the recorded digests.
@@ -2177,9 +2157,7 @@ mod tests {
                     ([("content-type", "application/json")], vector_session_bytes())
                 }));
             let (tx, mut outcomes) = mpsc::unbounded_channel();
-            let mut state = state_over(spawn_server(upstream).await, tx);
-            let config = Arc::get_mut(&mut state).unwrap();
-            config.audit_receipts = true;
+            let state = state_over(spawn_server(upstream).await, tx);
             let proxy = spawn_server(build_proxy_router(state)).await;
             let response = reqwest::Client::new()
                 .post(format!("{proxy}/v1/chat/completions"))

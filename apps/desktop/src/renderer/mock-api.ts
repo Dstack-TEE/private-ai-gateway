@@ -9,6 +9,7 @@ import type {
   RequestActivity,
   UsageQuery,
 } from "../shared/contracts";
+import { isProtected } from "./lib/protection";
 
 /**
  * Stateful in-browser stand-in for the desktop bridge (`?mock=<scenario>`),
@@ -191,6 +192,10 @@ const usageSummary = (items: RequestActivity[]): GatewayState["sessionUsage"] =>
   failedProof: items.filter((item) => item.verified === false).length,
 });
 
+function shouldReconnectAfterProfileChange(state: GatewayState): boolean {
+  return !state.configurationVerification && (state.status === "verified" || state.status === "blocked");
+}
+
 const CODEX: AgentStatus = {
   id: "codex",
   name: "Codex",
@@ -346,7 +351,7 @@ export function mockApi(name: string | null): DesktopApi {
   if (name === "mixed-agents") agents = agents.map((agent) => ({ ...agent, installed: agent.id !== "pi" }));
   if (name === "one-agent") agents = agents.map((agent) => ({ ...agent, installed: agent.id === "codex" }));
   if (name === "no-agents") agents = agents.map((agent) => ({ ...agent, installed: false }));
-  if (state.status === "verified" && !state.configurationVerification) state.protectedSince = Math.floor(Date.now() / 1_000) - 600;
+  if (isProtected(state)) state.protectedSince = Math.floor(Date.now() / 1_000) - 600;
   const listeners = new Set<(state: GatewayState) => void>();
   const keyListeners = new Set<(available: boolean) => void>();
   const updateListeners = new Set<(progress: { downloaded: number; total: number }) => void>();
@@ -363,7 +368,7 @@ export function mockApi(name: string | null): DesktopApi {
   let clientKey = "sk-pap-2f8a19c4d7e6b305a418b62f903c7de84fd119b7a02e65c83b34f09c719a5d2e";
   const credentialProfiles = new Set(state.profiles.filter((profile) => profile.credentialSaved).map((profile) => profile.id));
   const publish = () => {
-    const protectedNow = state.status === "verified" && !state.configurationVerification && state.apiKeySaved;
+    const protectedNow = isProtected(state);
     agents = agents.map((agent) => ({ ...agent, authorized: agent.connected && protectedNow }));
     listeners.forEach((listener) => listener(state));
   };
@@ -554,7 +559,7 @@ export function mockApi(name: string | null): DesktopApi {
     saveConfiguration: async (profile, requireProductionOs, key) => {
       const existing = state.profiles.find((entry) => entry.id === profile.id);
       if (!key?.trim() && !credentialProfiles.has(profile.id)) throw new Error("Enter an API key");
-      const reconnect = !state.configurationVerification && (state.status === "verified" || state.status === "blocked");
+      const reconnect = shouldReconnectAfterProfileChange(state);
       const saved: ConfidentialProfile = { ...profile, auth: key?.trim() ? { kind: "apiKey" } : existing?.auth ?? { kind: "apiKey" }, credentialSaved: true };
       credentialProfiles.add(profile.id);
       state = { ...state, profiles: [...state.profiles.filter((entry) => entry.id !== profile.id), saved], activeProfileId: profile.id, apiKeySaved: true, status: reconnect ? "verified" : "stopped", configurationVerification: false, config: { remoteUrl: profile.remoteUrl, requireProductionOs } };
@@ -626,7 +631,7 @@ export function mockApi(name: string | null): DesktopApi {
     openTopUp: async (provider, organizationId) => { window.dispatchEvent(new CustomEvent("mock:top-up", { detail: { provider, organizationId } })); },
     cancelAccountLogin: async (id) => { if (login?.id === id) login = undefined; },
     verifyConfiguration: async (profile, requireProductionOs, key) => {
-      const reconnect = !state.configurationVerification && (state.status === "verified" || state.status === "blocked");
+      const reconnect = shouldReconnectAfterProfileChange(state);
       const existing = state.profiles.find((entry) => entry.id === profile.id);
       const profileChanged = !existing
         || existing.provider !== profile.provider
@@ -673,7 +678,7 @@ export function mockApi(name: string | null): DesktopApi {
       return state;
     },
     activateProfile: async (profileId) => {
-      const reconnect = !state.configurationVerification && (state.status === "verified" || state.status === "blocked");
+      const reconnect = shouldReconnectAfterProfileChange(state);
       const profile = state.profiles.find((entry) => entry.id === profileId);
       if (!profile) throw new Error("AI service profile not found");
       state = {
@@ -862,7 +867,7 @@ export function mockApi(name: string | null): DesktopApi {
       }
       agents = agents.map((agent) =>
         agent.id === agentId
-          ? { ...agent, connected: connect, recorded: connect, authorized: connect && state.status === "verified" && !state.configurationVerification && state.apiKeySaved, attention: undefined }
+          ? { ...agent, connected: connect, recorded: connect, authorized: connect && isProtected(state), attention: undefined }
           : agent,
       );
       return agents.find((agent) => agent.id === agentId) ?? claude();

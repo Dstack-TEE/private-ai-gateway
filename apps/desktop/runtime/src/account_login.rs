@@ -269,7 +269,7 @@ impl PendingLogin {
         id: &str,
     ) -> Result<(ServiceProvider, String), String> {
         self.validate(id)?;
-        let provider = self.profile.provider.clone();
+        let provider = self.profile.provider;
         let secret = self
             .resolve()
             .await?
@@ -328,7 +328,7 @@ impl PendingLogin {
     }
 
     pub async fn cancel(&mut self) -> Result<(), String> {
-        let provider = self.profile.provider.clone();
+        let provider = self.profile.provider;
         if self.saved || provider != ServiceProvider::Redpill {
             return Ok(());
         }

@@ -76,11 +76,6 @@ fn command_discovery_is_detailed_and_machine_readable() {
             .output()
             .unwrap();
         assert_success(&output);
-        if name == "serve" {
-            let help = String::from_utf8(output.stdout).unwrap();
-            assert!(help.contains("--audit-receipts"));
-            assert!(!help.contains("--verify-receipts"));
-        }
     }
     let json_flag = schema["arguments"]
         .as_array()

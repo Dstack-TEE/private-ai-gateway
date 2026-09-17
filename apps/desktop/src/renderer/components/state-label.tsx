@@ -1,8 +1,9 @@
-import type { Tone } from "../lib/usage-presentation";
+import { toneDotClass, type Tone } from "../lib/tone";
+import { cn } from "../lib/utils";
 import { Badge } from "./ui/badge";
 
 export function StatusDot({ tone }: { tone: Tone }) {
-  return <span data-slot="status-dot" className={`size-1.5 shrink-0 rounded-full ${tone === "success" ? "bg-primary" : tone === "warning" ? "bg-warning" : tone === "danger" ? "bg-destructive" : "bg-muted-foreground"}`} aria-hidden="true" />;
+  return <span data-slot="status-dot" className={cn("size-1.5 shrink-0 rounded-full", toneDotClass[tone])} aria-hidden="true" />;
 }
 
 export function StateLabel({ tone, text }: { tone: Tone; text: string }) {

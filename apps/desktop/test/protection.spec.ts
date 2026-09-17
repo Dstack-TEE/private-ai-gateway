@@ -29,7 +29,6 @@ test("fail-closed states stay explicit and never show the success effects", asyn
   for (const name of ["Agents", "Usage", "Settings"]) {
     await nav(page, name).click();
     await expect(page.locator(".page-protection").getByText("Protection blocked", { exact: true })).toBeVisible();
-    await expect(page.locator(".page-switch-copy")).toHaveClass(/state-danger/);
   }
 
   await page.goto("/?mock=endpoint-busy");
