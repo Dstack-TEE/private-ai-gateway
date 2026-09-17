@@ -8,17 +8,17 @@ use super::{
     ConfiguredUpstreams, ProviderSessionRegistry, UpstreamConfig, UpstreamConfigError,
     UpstreamProvider, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
-use crate::aci::digest;
-use crate::aci::upstream::{
+use crate::aggregator::service::UpstreamVerifier;
+use private_ai_proxy_aci::digest;
+use private_ai_proxy_aci::upstream::{
     ChutesProviderBackend, ChutesSessionStore, ModelRoute, ModelRouterBackend,
     OpenAICompatibleBackend, UpstreamBackend,
 };
-use crate::aci::verifier::{
+use private_ai_proxy_aci::verifier::{
     AciServiceUpstreamVerifier, AciServiceVerifierPolicy, ChutesProviderVerifier,
     NearAiProviderVerifier, PhalaDirectProviderVerifier, PreverifiedUpstreamVerifier,
     RoutingUpstreamVerifier, SecretAiProviderVerifier, TinfoilProviderVerifier,
 };
-use crate::aggregator::service::UpstreamVerifier;
 
 pub(super) fn build_state(
     config: &[UpstreamConfig],

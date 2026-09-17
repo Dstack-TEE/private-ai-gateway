@@ -11,7 +11,7 @@ use sha3::Keccak256;
 
 use super::aci_service::{dcap_rtmr3, AciServiceVerificationError, AciServiceVerifierPolicy};
 use super::decode_hex;
-use crate::aci::types::WorkloadKeyset;
+use crate::types::WorkloadKeyset;
 
 const DSTACK_RUNTIME_EVENT_TYPE: u32 = 0x08000001;
 

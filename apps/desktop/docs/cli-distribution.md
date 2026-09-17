@@ -1,7 +1,7 @@
 # Private AI Proxy CLI Distribution
 
 There is one user-facing CLI: `private-ai-proxy`, including all five ACI commands.
-`pap` is a shortcut to that same executable, not a separately compiled CLI. The
+`pap` and `aci` are shortcuts to that same executable, not separately compiled CLIs. The
 desktop bundle and standalone CLI distribution do not ship a separate `aci`.
 They contain the same three executables:
 
@@ -48,8 +48,8 @@ register manually without opening the app:
 "/Applications/Private AI Proxy.app/Contents/MacOS/private-ai-proxy" cli install
 ```
 
-The default command path is `~/.local/bin/private-ai-proxy`, with `pap` beside it.
-Both commands are symlinks to the canonical executable and does not edit shell startup files, so the user
+The default command path is `~/.local/bin/private-ai-proxy`, with `pap` and `aci` beside it.
+All three commands resolve to the canonical executable. Registration does not edit shell startup files, so the user
 must add `~/.local/bin` to PATH if needed. `--directory` accepts an existing,
 current-user-owned directory that is not writable by other users.
 `/usr/local/bin` on macOS is reserved for an already-authorized installer or
@@ -58,8 +58,8 @@ administrator context; `private-ai-proxy` never requests elevation itself.
 ## Standalone CLI
 
 Every platform publishes a portable archive containing the three sibling
-executables plus the `pap` shortcut and no desktop UI. Windows uses ZIP with a
-`pap.cmd` forwarding script; macOS and Linux archives use tar.gz with a symlink.
+executables plus the `pap` and `aci` shortcuts and no desktop UI. Windows uses ZIP with
+`.cmd` forwarding scripts; macOS and Linux archives use tar.gz with symlinks.
 Extract each version into a fresh directory rather than overlaying older files.
 Run `private-ai-proxy cli install` from a stable extracted location when PATH registration
 is wanted.

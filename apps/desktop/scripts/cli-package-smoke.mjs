@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { binaries } from "./package-cli.mjs";
+import { aliases, binaries } from "./package-cli.mjs";
 
 const [directory, expectedVersion, aliasDirectory = directory] = process.argv.slice(2);
 assert.ok(directory && path.isAbsolute(directory), "Supply an absolute CLI binary directory");
@@ -26,10 +26,12 @@ const version = execFileSync(pap, ["--version"], {
   timeout: 10_000,
 }).trim();
 assert.equal(version, `private-ai-proxy ${expectedVersion}`);
-const aliasVersion = process.platform === "win32"
-  ? execFileSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", `""${path.join(aliasDirectory, "pap.cmd")}" --version"`], { encoding: "utf8", timeout: 10_000, windowsVerbatimArguments: true })
-  : execFileSync(path.join(aliasDirectory, "pap"), ["--version"], { encoding: "utf8", timeout: 10_000 });
-assert.equal(aliasVersion.trim(), version, "pap must resolve to the canonical CLI");
+for (const alias of aliases) {
+  const aliasVersion = process.platform === "win32"
+    ? execFileSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", `""${path.join(aliasDirectory, `${alias}.cmd`)}" --version"`], { encoding: "utf8", timeout: 10_000, windowsVerbatimArguments: true })
+    : execFileSync(path.join(aliasDirectory, alias), ["--version"], { encoding: "utf8", timeout: 10_000 });
+  assert.equal(aliasVersion.trim(), version, `${alias} must resolve to the canonical CLI`);
+}
 
 const execute = promisify(execFile);
 const home = await mkdtemp(path.join(os.tmpdir(), "pap-cli-smoke-"));

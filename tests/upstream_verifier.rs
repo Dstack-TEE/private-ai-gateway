@@ -4,14 +4,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use private_ai_gateway::aci::receipt::ChannelBinding;
-use private_ai_gateway::aci::upstream::{
-    UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
-};
-use private_ai_gateway::aci::verifier::validate_aci_report_binding;
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore,
 };
+use private_ai_proxy_aci::receipt::ChannelBinding;
+use private_ai_proxy_aci::upstream::{
+    UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
+};
+use private_ai_proxy_aci::verifier::validate_aci_report_binding;
 
 use common::{verified_event, StaticKeyProvider, StubQuoter};
 
@@ -125,7 +125,7 @@ async fn aci_report_binding_validation_rejects_tampered_keyset_digest() {
 
 #[tokio::test]
 async fn service_fails_if_selected_backend_cannot_enforce_channel_binding() {
-    let event = private_ai_gateway::aci::receipt::UpstreamVerifiedEvent {
+    let event = private_ai_proxy_aci::receipt::UpstreamVerifiedEvent {
         url_origin: Some("https://noop-upstream.example".to_string()),
         verifier_id: "fixture-verifier/v1".to_string(),
         channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {

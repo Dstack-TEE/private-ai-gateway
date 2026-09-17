@@ -39,10 +39,9 @@ on:
     paths:
       - '.github/workflows/desktop-native.yml'
       - 'apps/desktop/**'
-      - 'src/aci/**'
+      - 'src/**'
       - 'tests/private_ai_proxy_aci.rs'
       - 'tests/private_ai_proxy_cli.rs'
-      - 'src/http/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
   push:
@@ -51,10 +50,9 @@ on:
     paths:
       - '.github/workflows/desktop-native.yml'
       - 'apps/desktop/**'
-      - 'src/aci/**'
+      - 'src/**'
       - 'tests/private_ai_proxy_aci.rs'
       - 'tests/private_ai_proxy_cli.rs'
-      - 'src/http/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
 
@@ -105,9 +103,9 @@ jobs:
             ${{ env.CARGO_TARGET_DIR }}/*/*/.fingerprint
             ${{ env.CARGO_TARGET_DIR }}/*/*/deps
             ${{ env.CARGO_TARGET_DIR }}/*/*/build
-          key: pap-rust-v1-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'apps/desktop/gateway/Cargo.lock', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.lock', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml') }}
+          key: pap-rust-v1-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'apps/desktop/aci/Cargo.toml', 'apps/desktop/gateway/Cargo.lock', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.lock', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml') }}
           restore-keys: |
-            pap-rust-v1-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'apps/desktop/gateway/Cargo.lock', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.lock', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml') }}-partial-
+            pap-rust-v1-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'apps/desktop/aci/Cargo.toml', 'apps/desktop/gateway/Cargo.lock', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.lock', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml') }}-partial-
             pap-rust-v1-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-
       - name: Install Linux desktop dependencies
         run: |
@@ -476,7 +474,7 @@ jobs:
             if (Test-Path "$installDir/uninstall.exe") {
               Run-Installer "$installDir/uninstall.exe" "/S _?=$installDir"
             }
-            foreach ($binary in @('private-ai-proxy-desktop.exe', 'private-ai-proxy.exe', 'pap.cmd', 'private-ai-proxy-service.exe', 'private-ai-proxy-helper.exe')) {
+            foreach ($binary in @('private-ai-proxy-desktop.exe', 'private-ai-proxy.exe', 'pap.cmd', 'aci.cmd', 'private-ai-proxy-service.exe', 'private-ai-proxy-helper.exe')) {
               if (Test-Path "$installDir/$binary") { throw "Uninstall left $binary" }
             }
             $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -502,7 +500,7 @@ jobs:
             if dpkg-query -W "$package" >/dev/null 2>&1; then
               sudo apt-get remove -y "$package" || status=1
             fi
-            for binary in private-ai-proxy-desktop private-ai-proxy private-ai-proxy-service private-ai-proxy-helper; do
+            for binary in private-ai-proxy-desktop private-ai-proxy pap aci private-ai-proxy-service private-ai-proxy-helper; do
               if [[ -e "/usr/bin/$binary" ]]; then status=1; fi
             done
             rm -rf "$scratch"
@@ -615,6 +613,8 @@ jobs:
           done
           test -L "$registration_home/.local/bin/pap"
           test "$(readlink "$registration_home/.local/bin/pap")" = "$(realpath "$app_bundle/Contents/MacOS/private-ai-proxy")"
+          test -L "$registration_home/.local/bin/aci"
+          test "$(readlink "$registration_home/.local/bin/aci")" = "$(realpath "$app_bundle/Contents/MacOS/private-ai-proxy")"
           test -L "$registration_home/.local/bin/private-ai-proxy"
           test "$(readlink "$registration_home/.local/bin/private-ai-proxy")" = "$(realpath "$app_bundle/Contents/MacOS/private-ai-proxy")"
           registration_after="$(HOME="$registration_home" PRIVATE_AI_PROXY_HOME="$registration_home" \

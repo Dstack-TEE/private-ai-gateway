@@ -22,13 +22,13 @@ use std::pin::Pin;
 use futures_util::StreamExt;
 use serde_json::Value;
 
-use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{
     is_sse_content_type, AciService, ChatCompletionRequest, E2eeError, E2eeRequestContext,
     E2eeResponseInfo, FailedAttempt, ForwardCandidate, GatewayRequestContext,
     MiddlewareForwardResult, MiddlewareReceiptJournal, ReceiptOwner, ServiceError,
     ServiceResponseStream, UpstreamVerificationError,
 };
+use private_ai_proxy_aci::upstream::UpstreamError;
 
 use super::control::ControlClient;
 use super::errors::{self, Surface};

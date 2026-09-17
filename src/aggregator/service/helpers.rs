@@ -2,8 +2,10 @@ use futures_util::StreamExt;
 use rand::RngCore;
 
 use super::ServiceError;
-use crate::aci::receipt::{SignedReceipt, EVENT_REQUEST_RECEIVED, EVENT_RESPONSE_RETURNED};
-use crate::aci::upstream::UpstreamBodyStream;
+use private_ai_proxy_aci::receipt::{
+    SignedReceipt, EVENT_REQUEST_RECEIVED, EVENT_RESPONSE_RETURNED,
+};
+use private_ai_proxy_aci::upstream::UpstreamBodyStream;
 
 pub(super) async fn collect_upstream_body(
     mut body: UpstreamBodyStream,

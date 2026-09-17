@@ -2,12 +2,12 @@
 //!
 //! ACI §1.2: every upstream that offers TEE attestation is verified
 //! before it serves, the aggregator reaches it only over the channel
-//! that verification bound, and each receipt records the outcome (§7.5). The trait [`crate::aggregator::service::UpstreamVerifier`]
-//! is the seam; this module provides two small concrete
+//! that verification bound, and each receipt records the outcome (§7.5). The
+//! [`UpstreamVerifier`] trait is the seam; this module provides two small concrete
 //! implementations that are useful right now:
 //!
 //! * [`StaticUpstreamVerifier`] — returns a fixed
-//!   [`crate::aci::receipt::UpstreamVerifiedEvent`]. Useful in tests
+//!   [`crate::receipt::UpstreamVerifiedEvent`]. Useful in tests
 //!   and during bring-up when the deployment trusts a single hard-coded
 //!   upstream and the verifier_id field is the only thing a relying
 //!   party needs.
@@ -27,8 +27,67 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
+
+use crate::receipt::UpstreamVerifiedEvent;
+
+/// One upstream channel verification request.
+#[derive(Debug, Clone)]
+pub struct UpstreamVerificationRequest {
+    pub upstream_name: String,
+    pub url_origin: Option<String>,
+    pub model_id: String,
+    pub forwarded_body_hash: String,
+    pub required: bool,
+}
+
+/// Verifies that the selected upstream is acceptable for a request.
+#[async_trait]
+pub trait UpstreamVerifier: Send + Sync {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent;
+
+    async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        self.invalidate(&request);
+        self.verify(request).await
+    }
+
+    fn invalidate(&self, _request: &UpstreamVerificationRequest) {}
+}
+
+/// The channel boundary a provider attests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttestationScope {
+    PerRouter,
+    PerModel,
+    PerInstance,
+}
+
+impl AttestationScope {
+    pub fn is_per_router(self) -> bool {
+        matches!(self, Self::PerRouter)
+    }
+
+    pub fn from_declared(token: &str) -> Option<Self> {
+        match token {
+            "router" => Some(Self::PerRouter),
+            "model" => Some(Self::PerModel),
+            "instance" => Some(Self::PerInstance),
+            _ => None,
+        }
+    }
+
+    pub fn as_declared(self) -> &'static str {
+        match self {
+            Self::PerRouter => "router",
+            Self::PerModel => "model",
+            Self::PerInstance => "instance",
+        }
+    }
+}
+
 pub const DEFAULT_VERIFIER_CONNECT_TIMEOUT_SECONDS: u64 = 10;
 pub const DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS: u64 = 60;
+pub const DEFAULT_DCAP_PCCS_URL: &str = dcap_qvl::PHALA_PCCS_URL;
 
 mod aci_service;
 mod appraisal;

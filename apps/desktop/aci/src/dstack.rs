@@ -14,19 +14,19 @@ use serde_json::json;
 use sha3::{Digest, Keccak256};
 use x25519_dalek::StaticSecret as X25519SecretKey;
 
-use crate::aci::e2ee::{
+use crate::e2ee::{
     decrypt_legacy_ecdsa_with_secret_key, decrypt_legacy_ed25519_with_secret_key,
     decrypt_with_secret_key, decrypt_x25519_with_secret_key, ed25519_public_key_hex,
     legacy_ecdsa_public_key_from_secret, public_key_from_secret, secret_key_from_bytes,
     x25519_public_key_hex, x25519_secret_key_from_bytes, E2EE_ALGO_LEGACY_ECDSA,
     E2EE_ALGO_LEGACY_ED25519, E2EE_ALGO_SECP256K1_AESGCM, E2EE_ALGO_X25519_AESGCM,
 };
-use crate::aci::identity::report_data_slot;
-use crate::aci::keys::{
+use crate::identity::report_data_slot;
+use crate::keys::{
     ethereum_address_from_uncompressed_public_key, KeyError, KeyProvider, LegacySignature, Quote,
     Quoter, ALGO_ED25519, LEGACY_ALGO_ECDSA, LEGACY_ALGO_ED25519,
 };
-use crate::aci::types::{KeyedPublicKey, TlsSpki};
+use crate::types::{KeyedPublicKey, TlsSpki};
 
 const RECEIPT_PURPOSE: &str = "aci.receipt.ed25519.v1";
 const E2EE_X25519_PURPOSE: &str = "aci.e2ee.x25519.v1";

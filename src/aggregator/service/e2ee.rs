@@ -12,13 +12,13 @@ use super::{
     E2eeRequestParts, ServiceError,
 };
 
-use crate::aci::e2ee::{
+use private_ai_proxy_aci::e2ee::{
     is_aci_e2ee_suite, normalize_aci_e2ee_public_key_hex, E2EE_ALGO_LEGACY_ECDSA,
     E2EE_ALGO_LEGACY_ED25519, E2EE_VERSION_V1, E2EE_VERSION_V2,
 };
-use crate::aci::identity::{attestation_statement, report_data};
-use crate::aci::keys::{LEGACY_ALGO_ECDSA, LEGACY_ALGO_ED25519};
-use crate::aci::types::{AttestationEnvelope, AttestationReport};
+use private_ai_proxy_aci::identity::{attestation_statement, report_data};
+use private_ai_proxy_aci::keys::{LEGACY_ALGO_ECDSA, LEGACY_ALGO_ED25519};
+use private_ai_proxy_aci::types::{AttestationEnvelope, AttestationReport};
 
 impl AciService {
     pub async fn attestation_report(
@@ -100,7 +100,7 @@ impl AciService {
     /// The signing-key identity bytes the legacy report_data binds, matching the
     /// `signing_address` the shim reports: the 20-byte secp256k1 Ethereum
     /// address for `ecdsa`, or the 32-byte ed25519 public key for `ed25519`.
-    /// Legacy keys come from [`crate::aci::keys::KeyProvider::legacy_e2ee_keys`];
+    /// Legacy keys come from [`private_ai_proxy_aci::keys::KeyProvider::legacy_e2ee_keys`];
     /// they are not part of the ACI keyset.
     fn legacy_signing_key_bytes(
         &self,
@@ -110,8 +110,11 @@ impl AciService {
             .unwrap_or(LEGACY_ALGO_ECDSA)
             .to_ascii_lowercase();
         let legacy_keys = self.keys.legacy_e2ee_keys();
-        let key_err =
-            |msg: &str| ServiceError::Key(crate::aci::keys::KeyError::Crypto(msg.to_string()));
+        let key_err = |msg: &str| {
+            ServiceError::Key(private_ai_proxy_aci::keys::KeyError::Crypto(
+                msg.to_string(),
+            ))
+        };
         match signing_algo.as_str() {
             LEGACY_ALGO_ECDSA => {
                 let key = legacy_keys
@@ -120,9 +123,10 @@ impl AciService {
                     .ok_or_else(|| {
                         key_err("no secp256k1 legacy key for legacy report_data binding")
                     })?;
-                let address = crate::aci::keys::ethereum_address_from_uncompressed_public_key(
-                    &key.public_key_hex,
-                )?;
+                let address =
+                    private_ai_proxy_aci::keys::ethereum_address_from_uncompressed_public_key(
+                        &key.public_key_hex,
+                    )?;
                 hex::decode(address.trim_start_matches("0x"))
                     .map_err(|e| key_err(&format!("invalid signing address hex: {e}")))
             }
@@ -137,7 +141,7 @@ impl AciService {
                     .map_err(|e| key_err(&format!("invalid ed25519 public key hex: {e}")))
             }
             other => Err(ServiceError::Key(
-                crate::aci::keys::KeyError::UnsupportedAlgo(other.to_string()),
+                private_ai_proxy_aci::keys::KeyError::UnsupportedAlgo(other.to_string()),
             )),
         }
     }
@@ -146,7 +150,8 @@ impl AciService {
     /// the request's `domain`. Errors when no matching TLS key is published
     /// (v2 cannot be produced without one — matching the proxy).
     fn legacy_tls_spki_fingerprint(&self, domain: Option<&str>) -> Result<[u8; 32], ServiceError> {
-        let key_err = |msg: String| ServiceError::Key(crate::aci::keys::KeyError::Crypto(msg));
+        let key_err =
+            |msg: String| ServiceError::Key(private_ai_proxy_aci::keys::KeyError::Crypto(msg));
         let spki_hex = domain
             .and_then(normalize_downstream_domain)
             .and_then(|domain| {
@@ -172,7 +177,7 @@ impl AciService {
     fn assemble_report(
         &self,
         report_data_bytes: &[u8],
-        quote: crate::aci::keys::Quote,
+        quote: private_ai_proxy_aci::keys::Quote,
         domain: Option<&str>,
     ) -> Result<AttestationReport, ServiceError> {
         let mut evidence = json!({

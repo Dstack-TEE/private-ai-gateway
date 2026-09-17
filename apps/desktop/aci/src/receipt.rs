@@ -41,7 +41,7 @@ pub enum ReceiptError {
     #[error("receipt payload serialization failed: {0}")]
     Serialize(#[from] serde_json::Error),
     #[error("receipt violates the ACI document constraints: {0}")]
-    Canonicalization(#[from] crate::aci::digest::JcsError),
+    Canonicalization(#[from] crate::digest::JcsError),
     #[error("session id is not bare 64-hex (§8): {0:?}")]
     InvalidSessionId(String),
     #[error("key provider error: {0}")]
@@ -473,8 +473,8 @@ impl ReceiptBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aci::keys::verify_receipt_signature;
-    use crate::aci::types::{KeyedPublicKey, TlsSpki};
+    use crate::keys::verify_receipt_signature;
+    use crate::types::{KeyedPublicKey, TlsSpki};
     use ed25519_dalek::SigningKey;
 
     struct TestKeys {

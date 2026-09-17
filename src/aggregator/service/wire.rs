@@ -1,13 +1,12 @@
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::Stream;
 
 use super::{ReceiptOwner, ServiceError};
-use crate::aci::receipt::{ReceiptBuilder, SignedReceipt, UpstreamVerifiedEvent};
 use crate::aggregator::metrics::RequestMode;
+use private_ai_proxy_aci::receipt::{ReceiptBuilder, SignedReceipt, UpstreamVerifiedEvent};
 
 pub struct E2eeRequestParts<'a> {
     pub signing_algo: Option<&'a str>,
@@ -398,31 +397,4 @@ pub struct GatewayRequestContext {
 pub struct ForwardCandidate {
     pub route_id: String,
     pub body: Vec<u8>,
-}
-
-/// Provider HTTP statuses that trigger failover to the next candidate when
-#[derive(Debug, Clone)]
-pub struct UpstreamVerificationRequest {
-    pub upstream_name: String,
-    pub url_origin: Option<String>,
-    pub model_id: String,
-    pub forwarded_body_hash: String,
-    pub required: bool,
-}
-
-/// Verifies that the selected upstream is acceptable for this request.
-///
-/// Production implementations cache provider attestation state and emit a
-/// deterministic `verifier_id` traceable to source provenance. Tests use this
-/// trait to exercise the real HTTP hot path without talking to a live upstream.
-#[async_trait]
-pub trait UpstreamVerifier: Send + Sync {
-    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent;
-
-    async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
-        self.invalidate(&request);
-        self.verify(request).await
-    }
-
-    fn invalidate(&self, _request: &UpstreamVerificationRequest) {}
 }

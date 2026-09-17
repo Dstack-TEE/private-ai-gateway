@@ -2,7 +2,7 @@
 //!
 //! These tests cover the HTTP forwarding side of concrete provider
 //! adapters. Provider-owned verifier scripts are covered by unit tests
-//! in `aci::verifier`, where each supported provider has its own Rust
+//! in `private_ai_proxy_aci::verifier`, where each supported provider has its own Rust
 //! struct.
 
 use std::collections::BTreeMap;
@@ -33,15 +33,6 @@ use ml_kem::{
     },
     MlKem768,
 };
-use private_ai_gateway::aci::digest::sha256_hex;
-use private_ai_gateway::aci::receipt::{
-    ChannelBinding, UpstreamVerifiedEvent, EVENT_REQUEST_FORWARDED, EVENT_UPSTREAM_VERIFIED,
-};
-use private_ai_gateway::aci::upstream::{
-    ChutesProviderBackend, ChutesSessionStore, ChutesVerifiedDiscovery, ChutesVerifiedInstance,
-    OpenAICompatibleBackend, UpstreamRequest,
-};
-use private_ai_gateway::aci::verifier::StaticUpstreamVerifier;
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore,
 };
@@ -50,6 +41,15 @@ use private_ai_gateway::aggregator::upstream_config::{
     UpstreamVerifierMode,
 };
 use private_ai_gateway::http::build_router;
+use private_ai_proxy_aci::digest::sha256_hex;
+use private_ai_proxy_aci::receipt::{
+    ChannelBinding, UpstreamVerifiedEvent, EVENT_REQUEST_FORWARDED, EVENT_UPSTREAM_VERIFIED,
+};
+use private_ai_proxy_aci::upstream::{
+    ChutesProviderBackend, ChutesSessionStore, ChutesVerifiedDiscovery, ChutesVerifiedInstance,
+    OpenAICompatibleBackend, UpstreamRequest,
+};
+use private_ai_proxy_aci::verifier::StaticUpstreamVerifier;
 use rand::RngCore;
 use serde_json::{json, Value};
 use sha2::Digest;
@@ -489,7 +489,7 @@ fn service_for_manager(manager: Arc<UpstreamConfigManager>) -> Arc<AciService> {
 }
 
 fn receipt_event(
-    receipt: &private_ai_gateway::aci::receipt::SignedReceipt,
+    receipt: &private_ai_proxy_aci::receipt::SignedReceipt,
     event_type: &str,
 ) -> Value {
     // §7.2: the receipt is one JSON document; events are read from it.
@@ -513,16 +513,16 @@ fn provider_evidence_fixture(name: &str) -> Value {
     })
 }
 
-fn chutes_key_binding(e2e_pubkey: &str) -> private_ai_gateway::aci::receipt::ChannelBinding {
+fn chutes_key_binding(e2e_pubkey: &str) -> private_ai_proxy_aci::receipt::ChannelBinding {
     chutes_key_binding_for(CHUTES_INSTANCE_ID, e2e_pubkey)
 }
 
 fn chutes_key_binding_for(
     instance_id: &str,
     e2e_pubkey: &str,
-) -> private_ai_gateway::aci::receipt::ChannelBinding {
+) -> private_ai_proxy_aci::receipt::ChannelBinding {
     let pubkey = BASE64.decode(e2e_pubkey).unwrap();
-    private_ai_gateway::aci::receipt::ChannelBinding::E2eePublicKeySha256 {
+    private_ai_proxy_aci::receipt::ChannelBinding::E2eePublicKeySha256 {
         provider: "chutes".to_string(),
         key_id: Some(instance_id.to_string()),
         algorithm: "chutes-ml-kem-768".to_string(),
@@ -932,7 +932,7 @@ async fn openai_compatible_provider_refuses_unenforceable_tls_binding() {
         verifier_id: "fixture-spki-verifier/v1".to_string(),
         evidence: Some(provider_evidence_fixture("attestation")),
         channel_bindings: vec![
-            private_ai_gateway::aci::receipt::ChannelBinding::TlsSpkiSha256 {
+            private_ai_proxy_aci::receipt::ChannelBinding::TlsSpkiSha256 {
                 origin: base_url,
                 spki_sha256: "aa".repeat(32),
             },
@@ -1443,7 +1443,7 @@ async fn chutes_provider_refuses_unverified_e2ee_key() {
         verifier_id: "fixture-chutes-verifier/v1".to_string(),
         evidence: Some(provider_evidence_fixture("chutes-attestation")),
         channel_bindings: vec![
-            private_ai_gateway::aci::receipt::ChannelBinding::E2eePublicKeySha256 {
+            private_ai_proxy_aci::receipt::ChannelBinding::E2eePublicKeySha256 {
                 provider: "chutes".to_string(),
                 key_id: Some(CHUTES_INSTANCE_ID.to_string()),
                 algorithm: "chutes-ml-kem-768".to_string(),

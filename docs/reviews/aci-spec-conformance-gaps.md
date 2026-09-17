@@ -10,7 +10,7 @@ item.
 1. **Private AI Proxy's ACI verifier has no custody policy.** §9.1(5) requires the verifier
    policy to check private-key custody (for this deployment, the dstack KMS
    signature chain in `attestation.evidence.key_custody`). The in-tree
-   dstack chain validation (`src/aci/verifier/dstack.rs`) is not wired into
+   dstack chain validation (`apps/desktop/aci/src/verifier/dstack.rs`) is not wired into
    the CLI, so `private-ai-proxy verify` reports id-5 as an honest `skip`, never a pass.
    The top-line verdict and exit code do not distinguish a skip from a pass:
    a run can end `VERIFIED` (exit 0) with custody unevaluated. The skip and

@@ -42,7 +42,7 @@ boot measurements. See [How the OS image is classified](../../../docs/providers/
 
 ## Where verification lives
 
-Every verification step is `src/aci`'s, so the gateway's own upstream
+Every verification step is `apps/desktop/aci`'s, so the gateway's own upstream
 verifier and this CLI run the same code — the quote steps, the §9.1(2)
 binding chain, the §3.1 TLS selection, receipt signatures, JCS digests. What
 lives here is the transcript: mapping each step's outcome to a pass, fail, or

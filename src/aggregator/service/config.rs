@@ -1,5 +1,5 @@
 use super::ServiceError;
-use crate::aci::types::{ServiceCapabilities, SourceProvenance, TlsSpki};
+use private_ai_proxy_aci::types::{ServiceCapabilities, SourceProvenance, TlsSpki};
 
 /// Default keyset lifetime: launch time + 30 days (§3.4 bounded lifetime).
 /// The launcher computes `keyset_not_after` from this unless configured.
@@ -99,7 +99,7 @@ impl ReceiptOwner {
     /// token. The raw bytes are hashed immediately and never kept.
     pub fn from_bearer(token: &str) -> Self {
         Self {
-            auth_token_sha256: crate::aci::digest::sha256_hex(token.as_bytes()),
+            auth_token_sha256: private_ai_proxy_aci::digest::sha256_hex(token.as_bytes()),
         }
     }
 }

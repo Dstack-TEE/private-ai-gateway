@@ -39,56 +39,98 @@ mod windows_alias {
     use std::path::Path;
 
     const SCRIPT: &[u8] = b"@echo off\r\n\"%~dp0private-ai-proxy.exe\" %*\r\n";
+    const ALIASES: [&str; 2] = ["pap", "aci"];
 
     pub(super) fn install(executable: &Path) -> Result<(), String> {
         reject_alias_collision(executable)?;
-        let alias = executable.with_file_name("pap.cmd");
+        let mut created = Vec::new();
+        for name in ALIASES {
+            match install_one(executable, name) {
+                Ok(true) => created.push(name),
+                Ok(false) => {}
+                Err(error) => {
+                    for name in created {
+                        let _ = fs::remove_file(alias_path(executable, name, "cmd"));
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn install_one(executable: &Path, name: &str) -> Result<bool, String> {
+        let alias = alias_path(executable, name, "cmd");
         match OpenOptions::new().write(true).create_new(true).open(&alias) {
             Ok(mut file) => {
                 let written = file.write_all(SCRIPT).and_then(|()| file.sync_all());
                 drop(file);
                 if written.is_err() {
                     fs::remove_file(&alias)
-                        .map_err(|_| "Cannot clean up the incomplete pap.cmd alias".to_string())?;
-                    return Err("Cannot write the pap.cmd alias".to_string());
+                        .map_err(|_| format!("Cannot clean up the incomplete {name}.cmd alias"))?;
+                    return Err(format!("Cannot write the {name}.cmd alias"));
                 }
-                Ok(())
+                Ok(true)
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 if matches(&alias)? {
-                    Ok(())
+                    Ok(false)
                 } else {
-                    Err("Refusing to replace an unrelated pap.cmd".to_string())
+                    Err(format!("Refusing to replace an unrelated {name}.cmd"))
                 }
             }
-            Err(_) => Err("Cannot create the pap.cmd alias".to_string()),
+            Err(_) => Err(format!("Cannot create the {name}.cmd alias")),
         }
     }
 
     pub(super) fn uninstall(executable: &Path) -> Result<(), String> {
-        let alias = executable.with_file_name("pap.cmd");
-        match fs::symlink_metadata(&alias) {
-            Ok(_) if matches(&alias)? => {
-                fs::remove_file(alias).map_err(|_| "Cannot remove the pap.cmd alias".to_string())
+        let mut existing = Vec::new();
+        for name in ALIASES {
+            let alias = alias_path(executable, name, "cmd");
+            match fs::symlink_metadata(&alias) {
+                Ok(_) if matches(&alias)? => existing.push((name, alias)),
+                Ok(_) => return Err(format!("Refusing to remove an unrelated {name}.cmd")),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(_) => return Err(format!("Cannot inspect the {name}.cmd alias")),
             }
-            Ok(_) => Err("Refusing to remove an unrelated pap.cmd".to_string()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(_) => Err("Cannot inspect the pap.cmd alias".to_string()),
         }
+        for (name, alias) in existing {
+            fs::remove_file(alias).map_err(|_| format!("Cannot remove the {name}.cmd alias"))?;
+        }
+        Ok(())
     }
 
     pub(super) fn reject_alias_collision(executable: &Path) -> Result<(), String> {
-        match fs::symlink_metadata(executable.with_file_name("pap.exe")) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Ok(_) => Err("An existing pap.exe shadows the pap alias; remove the conflicting executable or choose a clean directory".to_string()),
-            Err(_) => Err("Cannot inspect the pap.exe command".to_string()),
+        for name in ALIASES {
+            match fs::symlink_metadata(alias_path(executable, name, "exe")) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Ok(_) => return Err(format!("An existing {name}.exe shadows the {name} alias; remove the conflicting executable or choose a clean directory")),
+                Err(_) => return Err(format!("Cannot inspect the {name}.exe command")),
+            }
         }
+        Ok(())
     }
 
     pub(super) fn matches(alias: &Path) -> Result<bool, String> {
         fs::read(alias)
             .map(|bytes| bytes == SCRIPT)
-            .map_err(|_| "Cannot verify the pap.cmd alias".to_string())
+            .map_err(|_| format!("Cannot verify the {} alias", alias.display()))
+    }
+
+    #[cfg(windows)]
+    pub(super) fn all_match(executable: &Path) -> bool {
+        ALIASES
+            .iter()
+            .all(|name| matches(&alias_path(executable, name, "cmd")).unwrap_or(false))
+    }
+
+    #[cfg(windows)]
+    pub(super) fn names() -> impl Iterator<Item = &'static str> {
+        ALIASES.into_iter()
+    }
+
+    fn alias_path(executable: &Path, name: &str, extension: &str) -> std::path::PathBuf {
+        executable.with_file_name(format!("{name}.{extension}"))
     }
 
     #[cfg(test)]
@@ -99,19 +141,26 @@ mod windows_alias {
         fn registration_accepts_only_the_matching_alias() {
             let root = tempfile::tempdir().unwrap();
             let executable = root.path().join("private-ai-proxy.exe");
-            let alias = root.path().join("pap.cmd");
             fs::write(&executable, b"cli").unwrap();
             install(&executable).unwrap();
             install(&executable).unwrap();
-            assert_eq!(fs::read(&alias).unwrap(), SCRIPT);
+            for name in ALIASES {
+                assert_eq!(
+                    fs::read(root.path().join(format!("{name}.cmd"))).unwrap(),
+                    SCRIPT
+                );
+            }
             uninstall(&executable).unwrap();
-            assert!(!alias.exists());
+            for name in ALIASES {
+                assert!(!root.path().join(format!("{name}.cmd")).exists());
+            }
             assert!(executable.exists());
+            let alias = root.path().join("pap.cmd");
             fs::write(&alias, b"other").unwrap();
             assert!(install(&executable).is_err());
             assert!(uninstall(&executable).is_err());
             assert_eq!(fs::read(alias).unwrap(), b"other");
-            let conflicting = executable.with_file_name("pap.exe");
+            let conflicting = executable.with_file_name("aci.exe");
             fs::write(&conflicting, b"other cli").unwrap();
             assert!(reject_alias_collision(&executable).is_err());
             assert!(install(&executable).is_err());
@@ -209,7 +258,7 @@ mod platform {
         executable: &Path,
         directory: &Path,
     ) -> Result<Vec<(PathBuf, CommandState)>, String> {
-        ["private-ai-proxy", "pap"]
+        ["private-ai-proxy", "pap", "aci"]
             .into_iter()
             .map(|name| {
                 let path = directory.join(name);
@@ -268,7 +317,7 @@ mod platform {
             .map_err(|_| format!("Cannot resolve {}", command_path.display()))?;
         #[cfg(target_os = "linux")]
         if executable == Path::new("/usr/bin/private-ai-proxy")
-            && target == Path::new("/usr/bin/pap")
+            && (target == Path::new("/usr/bin/pap") || target == Path::new("/usr/bin/aci"))
             && metadata.permissions().mode() & 0o111 != 0
             && fs::read(&target)
                 .is_ok_and(|bytes| bytes == b"#!/bin/sh\nexec /usr/bin/private-ai-proxy \"$@\"\n")
@@ -464,6 +513,7 @@ mod platform {
                 directory.canonicalize().unwrap().join("private-ai-proxy")
             );
             assert_eq!(directory.join("pap").canonicalize().unwrap(), executable);
+            assert_eq!(directory.join("aci").canonicalize().unwrap(), executable);
             assert!(matches!(
                 command_state(&executable, &directory.join("private-ai-proxy")).unwrap(),
                 CommandState::ManagedLink
@@ -491,6 +541,7 @@ mod platform {
             for (name, target) in [
                 ("private-ai-proxy", root.path().join("missing")),
                 ("pap", executable.with_file_name("pap")),
+                ("aci", executable.with_file_name("aci")),
             ] {
                 let command = root.path().join(name);
                 std::os::unix::fs::symlink(&target, &command).unwrap();
@@ -625,7 +676,7 @@ mod platform {
         let installed = path_entries(&path_value)
             .iter()
             .any(|entry| same_path_text(entry, &directory))
-            && windows_alias::matches(&directory.join("pap.cmd")).unwrap_or(false);
+            && windows_alias::all_match(&executable);
         Ok(Registration {
             executable: PathBuf::from(path_text(&executable)?),
             command_path: PathBuf::from(path_text(&command_path)?),
@@ -676,25 +727,27 @@ mod platform {
                 ));
             }
         }
-        if let Some(found) = first_process_path_command("pap.exe") {
-            if found.parent().and_then(|path| path.canonicalize().ok())
-                != executable.parent().map(Path::to_path_buf)
-            {
-                return Err(format!(
-                    "An unrelated pap.exe is already on PATH at {}",
-                    found.display()
-                ));
+        for alias in windows_alias::names() {
+            if let Some(found) = first_process_path_command(&format!("{alias}.exe")) {
+                if found.parent().and_then(|path| path.canonicalize().ok())
+                    != executable.parent().map(Path::to_path_buf)
+                {
+                    return Err(format!(
+                        "An unrelated {alias}.exe is already on PATH at {}",
+                        found.display()
+                    ));
+                }
             }
-        }
-        if let Some(found) = first_process_path_command("pap.cmd") {
-            if found.parent().and_then(|path| path.canonicalize().ok())
-                != executable.parent().map(Path::to_path_buf)
-                || !windows_alias::matches(&found)?
-            {
-                return Err(format!(
-                    "An unrelated pap.cmd is already on PATH at {}",
-                    found.display()
-                ));
+            if let Some(found) = first_process_path_command(&format!("{alias}.cmd")) {
+                if found.parent().and_then(|path| path.canonicalize().ok())
+                    != executable.parent().map(Path::to_path_buf)
+                    || !windows_alias::matches(&found)?
+                {
+                    return Err(format!(
+                        "An unrelated {alias}.cmd is already on PATH at {}",
+                        found.display()
+                    ));
+                }
             }
         }
         Ok(())

@@ -8,7 +8,7 @@ use super::{
     chutes_binding_matches, ChutesAcceptedBinding, ChutesVerifiedDiscovery, SelectedChutesInstance,
     CHUTES_DEFAULT_NONCE_TTL_SECONDS, CHUTES_MODEL_CACHE_TTL_SECONDS,
 };
-use crate::aci::upstream::UpstreamError;
+use crate::upstream::UpstreamError;
 
 #[derive(Debug)]
 pub struct ChutesSessionStore {

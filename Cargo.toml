@@ -27,6 +27,7 @@ required-features = ["desktop-client"]
 desktop-client = ["dep:clap", "dep:desktop_runtime", "dep:desktop_gateway"]
 
 [dependencies]
+private-ai-proxy-aci = { path = "apps/desktop/aci" }
 desktop_runtime = { package = "private-ai-proxy-runtime", path = "apps/desktop/runtime", optional = true }
 desktop_gateway = { package = "private-ai-proxy-gateway", path = "apps/desktop/gateway", optional = true }
 # Canonical-JSON, types, and serialization.
@@ -40,22 +41,12 @@ sha2 = "0.10"
 sha3 = "0.10"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 k256 = { version = "0.13", features = ["ecdsa", "arithmetic", "ecdh"] }
-curve25519-dalek = "4"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
-aes-gcm = "0.10"
 base64 = "0.22"
-chacha20poly1305 = "0.10"
-flate2 = "1"
-hkdf = "0.12"
-ml-kem = { version = "0.3", features = ["getrandom"] }
 rand = "0.8"
-rand_core = "0.6"
 hex = "0.4"
 rustls-pemfile = "2"
 x509-parser = "0.16"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-webpki-roots = "1"
-rcgen = "0.14"
 
 # HTTP server.
 axum = "0.7"
@@ -91,16 +82,14 @@ async-trait = "0.1"
 # Cancellation token for the serve delivery gate.
 tokio-util = "0.7"
 
-# Upstream ACI/DCAP verification.
-dcap-qvl = { version = "0.3.12", default-features = false, features = ["std", "report", "rustcrypto"] }
-
 # Private AI Proxy CLI argument parsing.
 clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context"], optional = true }
 
-[target.'cfg(unix)'.dependencies]
-dstack-sdk = "0.1.2"
-
 [dev-dependencies]
+chacha20poly1305 = "0.10"
+flate2 = "1"
+hkdf = "0.12"
+ml-kem = { version = "0.3", features = ["getrandom"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
 serde_json = "1"

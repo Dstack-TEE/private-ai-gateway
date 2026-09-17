@@ -16,10 +16,13 @@ use super::appraisal::{
 use super::dstack::compressed_k256_public_key_hex;
 use super::quote::QuoteStepError;
 use super::report::AciReportValidationError;
-use super::{DEFAULT_VERIFIER_CONNECT_TIMEOUT_SECONDS, DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS};
-use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
-use crate::aci::types::{AttestationReport, SourceProvenance, WorkloadKeyset};
-use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
+use super::{UpstreamVerificationRequest, UpstreamVerifier};
+use super::{
+    DEFAULT_DCAP_PCCS_URL, DEFAULT_VERIFIER_CONNECT_TIMEOUT_SECONDS,
+    DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS,
+};
+use crate::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use crate::types::{AttestationReport, SourceProvenance, WorkloadKeyset};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AciServiceVerifierConfigError {
@@ -481,7 +484,7 @@ impl AciServiceUpstreamVerifier {
     ) -> Result<Self, AciServiceVerifierConfigError> {
         Self::new_with_timeouts(
             report_base_url,
-            dcap_qvl::PHALA_PCCS_URL.to_string(),
+            DEFAULT_DCAP_PCCS_URL.to_string(),
             policy,
             cache_ttl_seconds,
             connect_timeout_seconds,

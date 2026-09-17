@@ -11,7 +11,7 @@ use super::{
     PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
     UpstreamStreamResponse,
 };
-use crate::aci::receipt::UpstreamVerifiedEvent;
+use crate::receipt::UpstreamVerifiedEvent;
 
 pub struct ModelRoute {
     pub public_model_id: String,

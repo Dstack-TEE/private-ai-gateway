@@ -17,8 +17,8 @@ use axum::body::Bytes;
 use futures_util::Stream;
 use serde_json::{json, Value};
 
-use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{ServiceError, ServiceResponseStream};
+use private_ai_proxy_aci::upstream::UpstreamError;
 
 use super::request_transform::Endpoint;
 use super::response_transform::{

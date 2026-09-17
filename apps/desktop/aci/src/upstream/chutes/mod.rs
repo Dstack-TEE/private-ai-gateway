@@ -22,7 +22,7 @@ use super::{
     transport_error, OpenAICompatibleBackend, PreparedUpstreamRequest, UpstreamBackend,
     UpstreamBodyStream, UpstreamError, UpstreamRequest, UpstreamResponse, UpstreamStreamResponse,
 };
-use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use crate::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crypto::{
     build_chutes_e2ee_request, chutes_e2ee_pubkey_sha256, decrypt_chutes_response,
     ChutesE2eeDecryptingStream,

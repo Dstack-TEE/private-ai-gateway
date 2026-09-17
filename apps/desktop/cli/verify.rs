@@ -4,7 +4,8 @@
 //! whose leaf SPKI is recorded, then checks online: DCAP collateral
 //! fetched, observed channel bound.
 
-use private_ai_gateway::aci::types::AttestationReport;
+use private_ai_proxy_aci::types::AttestationReport;
+use private_ai_proxy_aci::verifier::DEFAULT_DCAP_PCCS_URL;
 
 use crate::args::VerifyArgs;
 use crate::checks::{
@@ -69,7 +70,7 @@ pub async fn verify_service(
             now_secs: now_secs(),
             expiry_skipped: false,
             quote: QuoteSource::Online {
-                pccs_url: dcap_qvl::PHALA_PCCS_URL,
+                pccs_url: DEFAULT_DCAP_PCCS_URL,
             },
             channel,
             accepted_composes,

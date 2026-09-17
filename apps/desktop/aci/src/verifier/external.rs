@@ -16,11 +16,9 @@ use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use super::{current_unix_secs, decode_hex_32};
-use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
-use crate::aci::upstream::{ChutesSessionStore, ChutesVerifiedDiscovery};
-use crate::aggregator::service::UpstreamVerificationRequest;
-use crate::aggregator::upstream_config::AttestationScope;
+use super::{current_unix_secs, decode_hex_32, AttestationScope, UpstreamVerificationRequest};
+use crate::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use crate::upstream::{ChutesSessionStore, ChutesVerifiedDiscovery};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderVerifierConfigError {
@@ -52,7 +50,12 @@ impl ExternalProviderVerifier {
         cache_ttl_seconds: u64,
     ) -> Self {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let script = manifest_dir
+        let repository_root = manifest_dir
+            .ancestors()
+            .nth(3)
+            .expect("private-ai-proxy-aci must live under apps/desktop")
+            .to_path_buf();
+        let script = repository_root
             .join("scripts")
             .join("private_ai_provider_verifier.py");
         let command = vec![
@@ -71,7 +74,7 @@ impl ExternalProviderVerifier {
             // external verifier checkout can still be selected by setting
             // PRIVATE_AI_VERIFIER_DIR in the gateway process environment, which the
             // spawned bridge inherits.
-            current_dir: Some(manifest_dir),
+            current_dir: Some(repository_root),
             env: Vec::new(),
             options: HashMap::new(),
             timeout_seconds,

@@ -6,11 +6,6 @@ use std::sync::{Arc, Mutex};
 mod common;
 
 use async_trait::async_trait;
-use private_ai_gateway::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
-use private_ai_gateway::aci::types::{ServiceCapabilities, SourceProvenance};
-use private_ai_gateway::aci::upstream::{
-    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
-};
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore, ServiceError,
     UpstreamVerificationError,
@@ -18,12 +13,17 @@ use private_ai_gateway::aggregator::service::{
 use private_ai_gateway::aggregator::session::{AttestedSession, ClaimStatus};
 use private_ai_gateway::aggregator::session_store::SessionStore;
 use private_ai_gateway::aggregator::upstream_config::UpstreamSessionSink;
+use private_ai_proxy_aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use private_ai_proxy_aci::types::{ServiceCapabilities, SourceProvenance};
+use private_ai_proxy_aci::upstream::{
+    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
+};
 
 use common::{failed_event, verified_event, StaticKeyProvider, StubQuoter};
 
 /// Find one event object in a signed receipt's payload.
 fn payload_event(
-    receipt: &private_ai_gateway::aci::receipt::SignedReceipt,
+    receipt: &private_ai_proxy_aci::receipt::SignedReceipt,
     event_type: &str,
 ) -> serde_json::Value {
     receipt.document_json().unwrap()["event_log"]
@@ -260,7 +260,7 @@ async fn verified_upstream_binding_creates_attested_session() {
     assert_eq!(session.session_id(), session_id);
     assert_eq!(
         session_id,
-        hex::encode(private_ai_gateway::aci::digest::sha256_raw(session.bytes()))
+        hex::encode(private_ai_proxy_aci::digest::sha256_raw(session.bytes()))
     );
     let document = session.document();
     assert_eq!(document.api_version, "aci/1");
@@ -315,7 +315,7 @@ async fn chutes_instance_session_is_stable_across_evidence_rounds() {
         url_origin: Some("https://stub-upstream".to_string()),
         verifier_id: "private-ai-verifier/chutes/v1".to_string(),
         evidence: Some(serde_json::json!({
-            "digest": private_ai_gateway::aci::digest::sha256_hex(round.as_bytes()),
+            "digest": private_ai_proxy_aci::digest::sha256_hex(round.as_bytes()),
             "data": format!("data:application/json;base64,{}", round),
         })),
         channel_bindings: vec![ChannelBinding::E2eePublicKeySha256 {
@@ -597,24 +597,24 @@ fn service_init_accepts_image_digest_only_provenance() {
 /// role-separation case) the receipt key republished as an E2EE key.
 struct MisshapenKeyProvider {
     inner: StaticKeyProvider,
-    e2ee_keys: Vec<private_ai_gateway::aci::types::KeyedPublicKey>,
+    e2ee_keys: Vec<private_ai_proxy_aci::types::KeyedPublicKey>,
 }
 
-impl private_ai_gateway::aci::keys::KeyProvider for MisshapenKeyProvider {
-    fn receipt_keys(&self) -> Vec<private_ai_gateway::aci::types::KeyedPublicKey> {
+impl private_ai_proxy_aci::keys::KeyProvider for MisshapenKeyProvider {
+    fn receipt_keys(&self) -> Vec<private_ai_proxy_aci::types::KeyedPublicKey> {
         self.inner.receipt_keys()
     }
     fn sign_receipt(
         &self,
         key_id: &str,
         payload: &[u8],
-    ) -> Result<Vec<u8>, private_ai_gateway::aci::keys::KeyError> {
+    ) -> Result<Vec<u8>, private_ai_proxy_aci::keys::KeyError> {
         self.inner.sign_receipt(key_id, payload)
     }
-    fn e2ee_keys(&self) -> Vec<private_ai_gateway::aci::types::KeyedPublicKey> {
+    fn e2ee_keys(&self) -> Vec<private_ai_proxy_aci::types::KeyedPublicKey> {
         self.e2ee_keys.clone()
     }
-    fn tls_spkis(&self) -> Vec<private_ai_gateway::aci::types::TlsSpki> {
+    fn tls_spkis(&self) -> Vec<private_ai_proxy_aci::types::TlsSpki> {
         self.inner.tls_spkis()
     }
     fn is_test_only(&self) -> bool {
@@ -642,8 +642,8 @@ fn service_init_requires_a_recognized_e2ee_key_in_the_keyset() {
 
 #[test]
 fn service_init_accepts_secp256k1_as_the_only_e2ee_v2_suite() {
-    use private_ai_gateway::aci::e2ee::E2EE_ALGO_SECP256K1_AESGCM;
-    use private_ai_gateway::aci::keys::KeyProvider as _;
+    use private_ai_proxy_aci::e2ee::E2EE_ALGO_SECP256K1_AESGCM;
+    use private_ai_proxy_aci::keys::KeyProvider as _;
 
     let inner = StaticKeyProvider::default();
     let e2ee_keys = inner
@@ -674,7 +674,7 @@ fn service_init_accepts_secp256k1_as_the_only_e2ee_v2_suite() {
 
 #[test]
 fn service_init_rejects_a_receipt_key_reused_as_e2ee_key() {
-    use private_ai_gateway::aci::keys::KeyProvider as _;
+    use private_ai_proxy_aci::keys::KeyProvider as _;
     let inner = StaticKeyProvider::default();
     let mut reused = inner.receipt_keys().remove(0);
     reused.algo = "x25519-aes-256-gcm-hkdf-sha256".to_string();

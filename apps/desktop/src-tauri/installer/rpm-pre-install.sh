@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-# Check ownership of the canonical command and its alias.
-for cli in /usr/bin/private-ai-proxy /usr/bin/pap; do
+# Check ownership of the canonical command and its aliases.
+for cli in /usr/bin/private-ai-proxy /usr/bin/pap /usr/bin/aci; do
   [ -e "$cli" ] || [ -L "$cli" ] || continue
   owner=$(rpm -qf --qf '%{NAME}\n' "$cli" 2>/dev/null || true)
   if [ -z "$owner" ] || [ "$owner" != "@PACKAGE_NAME@" ]; then

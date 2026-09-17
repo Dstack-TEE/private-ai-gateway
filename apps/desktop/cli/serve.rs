@@ -19,7 +19,7 @@ use axum::extract::Path;
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
 use axum::{Json, Router};
-use private_ai_gateway::aci::types::{
+use private_ai_proxy_aci::types::{
     AttestationReport, PROVIDER_ACI_SESSION_IDS, PROVIDER_ACI_VERIFIED,
 };
 use serde_json::{json, Value};
@@ -126,12 +126,10 @@ pub struct RecordedExchange {
     pub streamed: bool,
     /// Digest of the plaintext request bytes this proxy forwarded.
     pub request: BodyDigest,
-    /// Digest of the response wire bytes as forwarded — the full body, or
-    /// everything before the truncation recorded alongside.
+    /// Digest of the response wire bytes observed by the proxy: the full body,
+    /// or the partial body when delivery failed or the client stopped reading.
     pub response: BodyDigest,
-    /// The upstream stream error, when the response was truncated. The
-    /// recorded partial digest then honestly fails receipt-4 (§9.3(4)).
-    pub truncation: Option<String>,
+    delivery: ResponseDelivery,
     /// The client's §5.3 pinned session ids from the request body.
     pub pinned_sessions: Vec<String>,
     pub at: u64,
@@ -141,6 +139,13 @@ pub struct RecordedExchange {
     pub tag: Option<String>,
     /// Whether the forwarded body differs from what the caller sent.
     pub local_policy_applied: bool,
+}
+
+#[derive(Clone)]
+enum ResponseDelivery {
+    Complete,
+    Failed(String),
+    Cancelled,
 }
 
 /// Recorded exchanges kept for on-demand verification (a bounded ring;
@@ -469,7 +474,9 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
             "POST receipt verification is available on demand."
         };
         println!();
-        println!("private-ai-proxy serve: proxying {base_url} on http://{local} (plain HTTP, localhost)");
+        println!(
+            "private-ai-proxy serve: proxying {base_url} on http://{local} (plain HTTP, localhost)"
+        );
         println!(
             "forwarding every method and path; Authorization passed through unchanged; every \
              upstream hop pinned to the attested TLS key; each POST response's receipt id and \
@@ -732,11 +739,12 @@ async fn proxy_inference(
     let pinned_sessions = pinned_session_ids(&request_body);
     let audit_bearer = bearer_token(&headers);
     let hook: CompletionHook = Box::new(move |end| {
-        let (response, truncation) = match end {
-            StreamEnd::Complete(digest) => (digest, None),
+        let (response, delivery) = match end {
+            StreamEnd::Complete(digest) => (digest, ResponseDelivery::Complete),
             // ACI §9.3(4) uses the wire hash to catch truncation, so it must
             // reach the report rather than vanish.
-            StreamEnd::Errored { partial, error } => (partial, Some(error)),
+            StreamEnd::Errored { partial, error } => (partial, ResponseDelivery::Failed(error)),
+            StreamEnd::Cancelled(partial) => (partial, ResponseDelivery::Cancelled),
         };
         let outcome =
             |receipt_id: Option<String>, verified: Option<bool>, detail: String| RequestOutcome {
@@ -752,15 +760,28 @@ async fn proxy_inference(
                 local_policy_applied,
             };
         let outcome = match &receipt_id {
-            Some(id) => outcome(
-                Some(id.clone()),
-                None,
-                if hook_state.audit_receipts {
-                    "Response delivered; receipt audit pending".to_string()
-                } else {
-                    format!("receipt {id} recorded; verification available on demand")
-                },
-            ),
+            Some(id) => match &delivery {
+                ResponseDelivery::Complete => outcome(
+                    Some(id.clone()),
+                    None,
+                    if hook_state.audit_receipts {
+                        "Response delivered; receipt audit pending".to_string()
+                    } else {
+                        format!("receipt {id} recorded; verification available on demand")
+                    },
+                ),
+                ResponseDelivery::Failed(_) => outcome(
+                    Some(id.clone()),
+                    None,
+                    "Response stream ended before delivery completed".to_string(),
+                ),
+                ResponseDelivery::Cancelled => outcome(
+                    Some(id.clone()),
+                    None,
+                    "Response stream was canceled by the client; no complete proof is available"
+                        .to_string(),
+                ),
+            },
             // A 2xx POST completion with no receipt header can never be
             // audited: fail loudly (spec 5.2 puts a receipt on every
             // inference response). Non-2xx responses legitimately carry none.
@@ -783,7 +804,7 @@ async fn proxy_inference(
                 streamed,
                 request: request_digest,
                 response,
-                truncation,
+                delivery: delivery.clone(),
                 pinned_sessions,
                 at: crate::checks::now_secs(),
                 verified: None,
@@ -792,7 +813,9 @@ async fn proxy_inference(
             };
             hook_state.record(exchange.clone());
             if hook_state.audit_receipts {
-                (hook_state.reporter)(outcome);
+                if matches!(delivery, ResponseDelivery::Complete) {
+                    (hook_state.reporter)(outcome);
+                }
                 audit_exchange(hook_state, trusted, exchange, audit_bearer);
                 return;
             }
@@ -855,14 +878,26 @@ fn audit_exchange(
             local_policy_applied: exchange.local_policy_applied,
         });
     };
-    if exchange.truncation.is_some() {
-        report(
-            Some(false),
-            "Response delivery was incomplete; the receipt cannot verify the partial response."
-                .into(),
-            None,
-        );
-        return;
+    match &exchange.delivery {
+        ResponseDelivery::Complete => {}
+        ResponseDelivery::Failed(_) => {
+            report(
+                Some(false),
+                "Response delivery failed before the complete response was received; the receipt does not match the partial response."
+                    .into(),
+                None,
+            );
+            return;
+        }
+        ResponseDelivery::Cancelled => {
+            report(
+                None,
+                "Response stream was canceled by the client; no complete response proof was recorded."
+                    .into(),
+                None,
+            );
+            return;
+        }
     }
     let Ok(permit) = state.audits.clone().try_acquire_owned() else {
         report(
@@ -915,7 +950,8 @@ async fn control_list(
                     "path": exchange.path,
                     "status": exchange.status,
                     "streamed": exchange.streamed,
-                    "truncated": exchange.truncation.is_some(),
+                    "truncated": matches!(&exchange.delivery, ResponseDelivery::Failed(_)),
+                    "cancelled": matches!(&exchange.delivery, ResponseDelivery::Cancelled),
                     "at": exchange.at,
                     "verified": exchange.verified,
                 })
@@ -1005,6 +1041,12 @@ async fn verify_exchange(
     exchange: &RecordedExchange,
     bearer: Option<&str>,
 ) -> Result<(Transcript, String), String> {
+    if matches!(&exchange.delivery, ResponseDelivery::Cancelled) {
+        return Err(
+            "the client canceled the response stream before its complete bytes were observed"
+                .to_string(),
+        );
+    }
     let receipt_resp = state
         .client
         .fetch_receipt(&state.base_url, &exchange.receipt_id, bearer)
@@ -1047,7 +1089,7 @@ async fn verify_exchange(
             &trusted.report.service_capabilities.serving,
         )
     );
-    if let Some(error) = &exchange.truncation {
+    if let ResponseDelivery::Failed(error) = &exchange.delivery {
         detail.push_str(&format!(
             " (response truncated at {} bytes: {error})",
             exchange.response.len
@@ -1657,6 +1699,34 @@ mod tests {
         ))
     }
 
+    #[tokio::test]
+    async fn client_cancelled_stream_is_not_a_failed_proof() {
+        let (tx, mut outcomes) = mpsc::unbounded_channel();
+        let state = state_over("http://127.0.0.1:9".to_string(), tx);
+        let exchange = RecordedExchange {
+            receipt_id: "rcpt-cancelled".to_string(),
+            path: "/v1/responses".to_string(),
+            status: 200,
+            streamed: true,
+            request: BodyDigest::of(REQUEST_BODY),
+            response: BodyDigest::of(b"data: partial\n\n"),
+            delivery: ResponseDelivery::Cancelled,
+            pinned_sessions: Vec::new(),
+            at: crate::checks::now_secs(),
+            verified: None,
+            tag: Some("pap:req-1:session-1:codex".to_string()),
+            local_policy_applied: false,
+        };
+        state.record(exchange.clone());
+        let trusted = state.snapshot();
+
+        audit_exchange(state, trusted, exchange, None);
+
+        let outcome = outcomes.recv().await.expect("cancellation outcome");
+        assert_eq!(outcome.verified, None);
+        assert!(outcome.detail.contains("canceled by the client"));
+    }
+
     #[test]
     fn apply_constraints_tightens_plaintext_body() {
         // Plain body: the member is added.
@@ -1761,8 +1831,8 @@ mod tests {
         let now = crate::checks::now_secs();
         record["established_at"] = json!(now - 10);
         record["expires_at"] = json!(now + 3600);
-        let session_bytes = private_ai_gateway::aci::digest::jcs_bytes(&record).unwrap();
-        let current_id = private_ai_gateway::aci::digest::sha256_bare_hex(&session_bytes);
+        let session_bytes = private_ai_proxy_aci::digest::jcs_bytes(&record).unwrap();
+        let current_id = private_ai_proxy_aci::digest::sha256_bare_hex(&session_bytes);
         let keyset_digest = vector_report().workload_keyset_digest;
 
         let sid = current_id.clone();

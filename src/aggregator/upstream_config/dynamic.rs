@@ -7,12 +7,12 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use super::ConfiguredUpstreams;
-use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
-use crate::aci::upstream::{
+use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
+use private_ai_proxy_aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
+use private_ai_proxy_aci::upstream::{
     PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
     UpstreamStreamResponse,
 };
-use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 
 pub(super) struct EmptyUpstreamBackend;
 

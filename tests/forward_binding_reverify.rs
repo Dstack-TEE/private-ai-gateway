@@ -13,15 +13,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use private_ai_gateway::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
-use private_ai_gateway::aci::upstream::{
-    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
-    UpstreamStreamResponse,
-};
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, ChatCompletionRequest, FixedClock, ForwardCandidate,
     GatewayRequestContext, InMemoryReceiptStore, MiddlewareForwardResult, MiddlewareReceiptJournal,
     ServiceError, UpstreamVerificationError, UpstreamVerificationRequest, UpstreamVerifier,
+};
+use private_ai_proxy_aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use private_ai_proxy_aci::upstream::{
+    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
+    UpstreamStreamResponse,
 };
 
 use common::{event_from_request, verified_event, StaticKeyProvider, StubQuoter};

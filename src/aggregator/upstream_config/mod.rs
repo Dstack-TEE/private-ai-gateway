@@ -11,10 +11,11 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
 
-use crate::aci::digest;
-use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
-use crate::aci::upstream::{ChutesSessionStore, UpstreamBackend, UpstreamError};
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
+use private_ai_proxy_aci::digest;
+use private_ai_proxy_aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
+use private_ai_proxy_aci::upstream::{ChutesSessionStore, UpstreamBackend, UpstreamError};
+pub use private_ai_proxy_aci::verifier::AttestationScope;
 
 mod builders;
 mod dynamic;
@@ -188,43 +189,6 @@ impl UpstreamProvider {
             UpstreamProvider::OpenAiCompatible
             | UpstreamProvider::Anthropic
             | UpstreamProvider::AciService => AttestationScope::PerModel,
-        }
-    }
-}
-
-/// The channel boundary a provider's attestation proves, and thus what identifies
-/// its attested session: one shared channel for a router (model dropped from the
-/// verifier cache key) or a distinct channel per model / per serving instance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AttestationScope {
-    PerRouter,
-    PerModel,
-    PerInstance,
-}
-
-impl AttestationScope {
-    /// Routers share one channel across models, so verification is keyed on the
-    /// channel alone (model dropped from the cache key).
-    pub(crate) fn is_per_router(self) -> bool {
-        matches!(self, AttestationScope::PerRouter)
-    }
-
-    /// Parse the scope token a provider verifier emits in its result.
-    pub(crate) fn from_declared(token: &str) -> Option<Self> {
-        match token {
-            "router" => Some(Self::PerRouter),
-            "model" => Some(Self::PerModel),
-            "instance" => Some(Self::PerInstance),
-            _ => None,
-        }
-    }
-
-    /// The wire token for this scope (matches [`Self::from_declared`]).
-    pub(crate) fn as_declared(self) -> &'static str {
-        match self {
-            Self::PerRouter => "router",
-            Self::PerModel => "model",
-            Self::PerInstance => "instance",
         }
     }
 }

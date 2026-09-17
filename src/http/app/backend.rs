@@ -11,12 +11,12 @@ use futures_util::StreamExt;
 use rand::RngCore;
 use serde_json::Value;
 
-use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{
     AciService, ChatCompletionRequest, E2eeRequestContext, E2eeResponseInfo, GatewayRequestContext,
     ReceiptOwner, ServiceError, StreamingForwardResult, UpstreamVerificationError,
 };
 use crate::aggregator::upstream_config::{AttestationUpstreamTarget, UpstreamProvider};
+use private_ai_proxy_aci::upstream::UpstreamError;
 
 use super::error_responses::{
     e2ee_error_response, error_response, gateway_timeout_response, insert_str_header,
@@ -437,7 +437,7 @@ fn nearai_nvidia_payload(body: &Value, target: &AttestationUpstreamTarget) -> Op
 }
 
 pub(super) fn upstream_direct_response(
-    upstream: crate::aci::upstream::UpstreamResponse,
+    upstream: private_ai_proxy_aci::upstream::UpstreamResponse,
     default_content_type: &'static str,
 ) -> Response {
     let mut headers = upstream_direct_response_headers();
@@ -451,7 +451,9 @@ pub(super) fn upstream_direct_response(
     (status, headers, upstream.body).into_response()
 }
 
-pub(super) fn upstream_proxy_error_response(err: crate::aci::upstream::UpstreamError) -> Response {
+pub(super) fn upstream_proxy_error_response(
+    err: private_ai_proxy_aci::upstream::UpstreamError,
+) -> Response {
     tracing::warn!(error = %err, "upstream proxy request failed");
     error_response(StatusCode::BAD_GATEWAY, "upstream_error", err.to_string())
 }

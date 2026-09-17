@@ -6,7 +6,7 @@
 
 use std::io::Write;
 
-use private_ai_gateway::aci::types::{PROVIDER_ACI_SESSION_IDS, PROVIDER_ACI_VERIFIED};
+use private_ai_proxy_aci::types::{PROVIDER_ACI_SESSION_IDS, PROVIDER_ACI_VERIFIED};
 use serde_json::{json, Value};
 
 use crate::args::SendArgs;

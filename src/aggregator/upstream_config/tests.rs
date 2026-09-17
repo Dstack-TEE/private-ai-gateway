@@ -1,8 +1,8 @@
 use super::builders::build_verifier;
 use super::dynamic::{DynamicUpstreamVerifier, EmptyUpstreamBackend};
 use super::*;
-use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
 use async_trait::async_trait;
+use private_ai_proxy_aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct CountingVerifier {

@@ -17,27 +17,27 @@ use axum::http::{HeaderMap, Request, StatusCode};
 use axum::Router;
 use bytes::Bytes;
 use futures_util::stream;
-use private_ai_gateway::aci::digest::sha256_hex;
-use private_ai_gateway::aci::e2ee::{
-    decrypt_legacy_ecdsa_with_secret_key, decrypt_with_secret_key, decrypt_x25519_with_secret_key,
-    encrypt_for_public_key, encrypt_legacy_for_public_key, encrypt_x25519_for_public_key,
-    legacy_ecdsa_public_key_from_secret, public_key_from_secret, x25519_public_key_hex,
-    E2EE_ALGO_LEGACY_ECDSA, E2EE_ALGO_X25519_AESGCM, E2EE_VERSION_V2,
-};
-use private_ai_gateway::aci::keys::verify_receipt_signature;
-use private_ai_gateway::aci::receipt::{
-    receipt_signing_input, SignedReceipt, UpstreamVerifiedEvent, VerificationResult,
-};
-use private_ai_gateway::aci::types::{ServiceCapabilities, TlsSpki};
-use private_ai_gateway::aci::upstream::{
-    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
-    UpstreamStreamResponse,
-};
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore, UpstreamVerificationRequest,
     UpstreamVerifier,
 };
 use private_ai_gateway::http::build_router;
+use private_ai_proxy_aci::digest::sha256_hex;
+use private_ai_proxy_aci::e2ee::{
+    decrypt_legacy_ecdsa_with_secret_key, decrypt_with_secret_key, decrypt_x25519_with_secret_key,
+    encrypt_for_public_key, encrypt_legacy_for_public_key, encrypt_x25519_for_public_key,
+    legacy_ecdsa_public_key_from_secret, public_key_from_secret, x25519_public_key_hex,
+    E2EE_ALGO_LEGACY_ECDSA, E2EE_ALGO_X25519_AESGCM, E2EE_VERSION_V2,
+};
+use private_ai_proxy_aci::keys::verify_receipt_signature;
+use private_ai_proxy_aci::receipt::{
+    receipt_signing_input, SignedReceipt, UpstreamVerifiedEvent, VerificationResult,
+};
+use private_ai_proxy_aci::types::{ServiceCapabilities, TlsSpki};
+use private_ai_proxy_aci::upstream::{
+    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
+    UpstreamStreamResponse,
+};
 use serde_json::Value;
 use tower::ServiceExt;
 use x25519_dalek::StaticSecret as X25519SecretKey;
@@ -397,7 +397,7 @@ fn header<'a>(headers: &'a HeaderMap, name: &str) -> &'a str {
 
 /// E2EE v2 request AAD: JCS of the purpose-tagged object.
 fn aci_request_aad(algo: &str, model: &str, field: &str, nonce: &str, ts: u64) -> Vec<u8> {
-    private_ai_gateway::aci::digest::jcs_bytes(&serde_json::json!({
+    private_ai_proxy_aci::digest::jcs_bytes(&serde_json::json!({
         "purpose": "aci.e2ee.request.v2",
         "algo": algo,
         "model": model,
@@ -418,7 +418,7 @@ fn aci_response_aad(
     nonce: &str,
     ts: u64,
 ) -> Vec<u8> {
-    private_ai_gateway::aci::digest::jcs_bytes(&serde_json::json!({
+    private_ai_proxy_aci::digest::jcs_bytes(&serde_json::json!({
         "purpose": "aci.e2ee.response.v2",
         "algo": algo,
         "model": model,
@@ -663,19 +663,19 @@ async fn aci_attestation_report_binds_nonce_and_serves_exact_keyset_bytes() {
     assert!(keyset_value.is_object());
     assert_eq!(
         report["workload_keyset_digest"].as_str().unwrap(),
-        sha256_hex(&private_ai_gateway::aci::digest::jcs_bytes(keyset_value).unwrap())
+        sha256_hex(&private_ai_proxy_aci::digest::jcs_bytes(keyset_value).unwrap())
     );
     assert_eq!(*keyset_value, h.service.keyset_value());
 
     // report_data = sha256 of the §3.2 statement for the supplied nonce.
-    let statement = private_ai_gateway::aci::identity::attestation_statement(
+    let statement = private_ai_proxy_aci::identity::attestation_statement(
         h.service.workload_keyset_digest(),
         Some("9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0"),
     )
     .unwrap();
     assert_eq!(
         report["attestation"]["report_data"].as_str().unwrap(),
-        hex::encode(private_ai_gateway::aci::identity::report_data(&statement))
+        hex::encode(private_ai_proxy_aci::identity::report_data(&statement))
     );
 }
 

@@ -19,6 +19,10 @@ pub enum StreamEnd {
     /// far plus the error. ACI §9.3(4) makes truncation exactly the case a
     /// wire-hash verifier must surface, so it must not end unreported.
     Errored { partial: BodyDigest, error: String },
+    /// The downstream client stopped reading before end-of-stream. The partial
+    /// digest is retained for diagnostics, but it cannot prove or disprove the
+    /// complete response the service signed.
+    Cancelled(BodyDigest),
 }
 
 /// Fired once with how the stream ended.
@@ -31,23 +35,20 @@ struct Capture {
 }
 
 impl Capture {
-    fn finish(&mut self, error: Option<String>) {
+    fn digest(&self) -> BodyDigest {
+        BodyDigest::from_sha256(self.hasher.clone().finalize().into(), self.len)
+    }
+
+    fn finish(&mut self, end: impl FnOnce(BodyDigest) -> StreamEnd) {
         if let Some(hook) = self.hook.take() {
-            let digest = BodyDigest::from_sha256(self.hasher.clone().finalize().into(), self.len);
-            hook(match error {
-                Some(error) => StreamEnd::Errored {
-                    partial: digest,
-                    error,
-                },
-                None => StreamEnd::Complete(digest),
-            });
+            hook(end(self.digest()));
         }
     }
 }
 
 impl Drop for Capture {
     fn drop(&mut self) {
-        self.finish(Some("Response stream closed before completion".into()));
+        self.finish(StreamEnd::Cancelled);
     }
 }
 
@@ -68,13 +69,17 @@ pub fn tee<E: std::error::Error + Send + Sync + 'static>(
                     yield Ok(chunk);
                 }
                 Err(error) => {
-                    capture.finish(Some(error.to_string()));
+                    let error = error.to_string();
+                    capture.finish(|partial| StreamEnd::Errored {
+                        partial,
+                        error: error.clone(),
+                    });
                     yield Err(std::io::Error::other(error));
                     return;
                 }
             }
         }
-        capture.finish(None);
+        capture.finish(StreamEnd::Complete);
     }
 }
 
@@ -109,7 +114,9 @@ mod tests {
         assert_eq!(out.concat(), b"hello");
         match rx.try_recv().unwrap() {
             StreamEnd::Complete(digest) => assert_eq!(digest, BodyDigest::of(b"hello")),
-            StreamEnd::Errored { .. } => panic!("clean end reported as errored"),
+            StreamEnd::Errored { .. } | StreamEnd::Cancelled(_) => {
+                panic!("clean end reported as incomplete")
+            }
         }
     }
 
@@ -129,16 +136,23 @@ mod tests {
                 assert_eq!(partial, BodyDigest::of(b"he"));
                 assert!(error.contains("upstream died"));
             }
-            StreamEnd::Complete(_) => panic!("truncation reported as complete"),
+            StreamEnd::Complete(_) | StreamEnd::Cancelled(_) => {
+                panic!("upstream error reported with the wrong outcome")
+            }
         }
     }
 
     #[tokio::test]
-    async fn a_dropped_stream_records_incomplete_delivery() {
+    async fn a_dropped_stream_records_client_cancellation() {
         let (mut teed, rx) = chunks(vec![Ok(Bytes::from_static(b"he"))]);
         let _ = teed.next().await;
         drop(teed);
-        assert!(matches!(rx.try_recv().unwrap(), StreamEnd::Errored { .. }));
+        match rx.try_recv().unwrap() {
+            StreamEnd::Cancelled(partial) => assert_eq!(partial, BodyDigest::of(b"he")),
+            StreamEnd::Complete(_) | StreamEnd::Errored { .. } => {
+                panic!("downstream cancellation reported with the wrong outcome")
+            }
+        }
         assert!(
             rx.try_recv().is_err(),
             "completion is reported exactly once"

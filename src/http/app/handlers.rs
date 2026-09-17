@@ -13,19 +13,19 @@ use rand::RngCore;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::aci::e2ee::{E2EE_ALGO_LEGACY_ECDSA, E2EE_ALGO_LEGACY_ED25519};
-use crate::aci::keys::{
-    ethereum_address_from_uncompressed_public_key, KeyError, LEGACY_ALGO_ECDSA, LEGACY_ALGO_ED25519,
-};
-use crate::aci::types::{
-    AttestationReport, KeyedPublicKey, PROVIDER_ACI_SESSION_IDS, PROVIDER_ACI_VERIFIED,
-};
 use crate::aggregator::service::{
     E2eeRequestParts, GatewayRequestContext, ReceiptOwner, ServiceError, CHAT_COMPLETIONS_PATH,
     COMPLETIONS_PATH, EMBEDDINGS_PATH, MESSAGES_PATH, RESPONSES_PATH,
 };
 use crate::aggregator::session_store::sort_sessions_newest_first;
 use crate::aggregator::upstream_config::{parse_config_text, UpstreamProvider};
+use private_ai_proxy_aci::e2ee::{E2EE_ALGO_LEGACY_ECDSA, E2EE_ALGO_LEGACY_ED25519};
+use private_ai_proxy_aci::keys::{
+    ethereum_address_from_uncompressed_public_key, KeyError, LEGACY_ALGO_ECDSA, LEGACY_ALGO_ED25519,
+};
+use private_ai_proxy_aci::types::{
+    AttestationReport, KeyedPublicKey, PROVIDER_ACI_SESSION_IDS, PROVIDER_ACI_VERIFIED,
+};
 
 use super::backend::{
     fetch_upstream_nvidia_payload, forward_to_backend, generate_request_id,

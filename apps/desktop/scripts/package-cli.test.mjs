@@ -28,17 +28,21 @@ test("stages the three sibling CLI executables and portable alias and Linux pack
     }
 
     assert.equal(await readlink(path.join(portable, "pap")), "private-ai-proxy");
+    assert.equal(await readlink(path.join(portable, "aci")), "private-ai-proxy");
     const windows = path.join(root, "windows");
     for (const name of binaries) {
       await writeFile(path.join(source, `${name}.exe`), name);
     }
     await stagePortable({ sourceDir: source, targetTriple: "x86_64-pc-windows-msvc", platform: "windows", destination: windows });
     assert.equal(await readFile(path.join(windows, "pap.cmd"), "utf8"), '@echo off\r\n"%~dp0private-ai-proxy.exe" %*\r\n');
+    assert.equal(await readFile(path.join(windows, "aci.cmd"), "utf8"), '@echo off\r\n"%~dp0private-ai-proxy.exe" %*\r\n');
 
     await stageLinuxPackageRoot(portable, packageRoot);
     assert.equal(await readlink(path.join(packageRoot, "usr/bin/private-ai-proxy")), "../libexec/private-ai-proxy/private-ai-proxy");
     assert.equal(await readlink(path.join(packageRoot, "usr/bin/pap")), "../libexec/private-ai-proxy/private-ai-proxy");
     assert.ok((await lstat(path.join(packageRoot, "usr/bin/pap"))).isSymbolicLink());
+    assert.equal(await readlink(path.join(packageRoot, "usr/bin/aci")), "../libexec/private-ai-proxy/private-ai-proxy");
+    assert.ok((await lstat(path.join(packageRoot, "usr/bin/aci"))).isSymbolicLink());
     for (const name of binaries) {
       assert.equal(
         await readFile(path.join(packageRoot, "usr/libexec/private-ai-proxy", name), "utf8"),

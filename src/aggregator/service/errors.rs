@@ -1,7 +1,7 @@
-use crate::aci::identity::InvalidStatementInput;
-use crate::aci::keys::KeyError;
-use crate::aci::receipt::ReceiptError;
-use crate::aci::upstream::UpstreamError;
+use private_ai_proxy_aci::identity::InvalidStatementInput;
+use private_ai_proxy_aci::keys::KeyError;
+use private_ai_proxy_aci::receipt::ReceiptError;
+use private_ai_proxy_aci::upstream::UpstreamError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServiceError {

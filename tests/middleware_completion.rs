@@ -12,11 +12,6 @@ use async_trait::async_trait;
 use axum::body::Bytes;
 use axum::{body::to_bytes, routing::post, Json, Router};
 use futures_util::StreamExt;
-use private_ai_gateway::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
-use private_ai_gateway::aci::upstream::{
-    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
-    UpstreamStreamResponse,
-};
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, ChatCompletionRequest, FailedAttempt, FixedClock,
     ForwardCandidate, GatewayRequestContext, InMemoryReceiptStore, MiddlewareForwardResult,
@@ -32,6 +27,11 @@ use private_ai_gateway::middleware::request_transform::Endpoint;
 use private_ai_gateway::middleware::sse::{MeterStream, StreamReport};
 use private_ai_gateway::middleware::types::{OrganizationScope, TenantIdentity};
 use private_ai_gateway::middleware::{CompletionInput, Middleware, MiddlewareConfig};
+use private_ai_proxy_aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use private_ai_proxy_aci::upstream::{
+    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
+    UpstreamStreamResponse,
+};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 

@@ -825,7 +825,7 @@ mod tests {
 
     #[test]
     fn evidence_data_not_matching_its_digest_is_skipped_on_replay() {
-        use crate::aci::digest;
+        use private_ai_proxy_aci::digest;
 
         // A document whose evidence digest covers "abc" but whose data was
         // swapped for "xyz": the session id still matches the (tampered) bytes,

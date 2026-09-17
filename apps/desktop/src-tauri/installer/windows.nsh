@@ -119,6 +119,14 @@ Var PapStartupLockPath
     !insertmacro PAP_FAIL "A pap.exe executable shadows the pap shortcut in the install directory. Remove the conflicting executable or choose another directory."
   ${EndIf}
   !insertmacro PAP_CHECK_CLI "pap.cmd"
+  SearchPath $R0 "aci.exe"
+  ${If} $R0 != ""
+    !insertmacro PAP_FAIL "An aci.exe executable shadows the aci shortcut at $R0. Remove the conflicting executable before installing ${PRODUCTNAME}."
+  ${EndIf}
+  ${If} ${FileExists} "$INSTDIR\aci.exe"
+    !insertmacro PAP_FAIL "An aci.exe executable shadows the aci shortcut in the install directory. Remove the conflicting executable or choose another directory."
+  ${EndIf}
+  !insertmacro PAP_CHECK_CLI "aci.cmd"
   StrCpy $R4 "$INSTDIR\private-ai-proxy.exe"
   ${If} ${FileExists} "$R4"
     ExecWait '"$R4" --yes service stop' $R0
@@ -135,6 +143,9 @@ Var PapStartupLockPath
   ${EndIf}
   ${IfNot} ${FileExists} "$INSTDIR\pap.cmd"
     !insertmacro PAP_FAIL "Private AI Proxy was installed, but its pap shortcut is missing."
+  ${EndIf}
+  ${IfNot} ${FileExists} "$INSTDIR\aci.cmd"
+    !insertmacro PAP_FAIL "Private AI Proxy was installed, but its aci shortcut is missing."
   ${EndIf}
   !insertmacro PAP_RELEASE_STARTUP_LOCK
 !macroend

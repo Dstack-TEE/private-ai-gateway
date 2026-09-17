@@ -9,26 +9,26 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use axum::Router;
 use k256::ecdsa::{RecoveryId, Signature as K256Signature, VerifyingKey as K256VerifyingKey};
-use private_ai_gateway::aci::digest::sha256_hex;
-use private_ai_gateway::aci::identity;
-use private_ai_gateway::aci::keys::{verify_receipt_signature, KeyProvider, Quoter, ALGO_ED25519};
-use private_ai_gateway::aci::receipt::{
-    receipt_signing_input, SignedReceipt, EVENT_REQUEST_RECEIVED, EVENT_RESPONSE_RETURNED,
-};
-use private_ai_gateway::aci::types::{ServiceCapabilities, SourceProvenance, TlsSpki};
-use private_ai_gateway::aci::upstream::{
-    UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
-};
-use private_ai_gateway::aci::verifier::{
-    AciServiceUpstreamVerifier, AciServiceVerifierPolicy, PreverifiedUpstreamVerifier,
-};
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, ChatCompletionRequest, FixedClock, GatewayRequestContext,
     InMemoryReceiptStore, SystemClock, UpstreamVerificationRequest, UpstreamVerifier,
     CHAT_COMPLETIONS_PATH,
 };
-use private_ai_gateway::dstack::{DstackAciProvider, DstackAciProviderConfig};
 use private_ai_gateway::http::build_router;
+use private_ai_proxy_aci::digest::sha256_hex;
+use private_ai_proxy_aci::dstack::{DstackAciProvider, DstackAciProviderConfig};
+use private_ai_proxy_aci::identity;
+use private_ai_proxy_aci::keys::{verify_receipt_signature, KeyProvider, Quoter, ALGO_ED25519};
+use private_ai_proxy_aci::receipt::{
+    receipt_signing_input, SignedReceipt, EVENT_REQUEST_RECEIVED, EVENT_RESPONSE_RETURNED,
+};
+use private_ai_proxy_aci::types::{ServiceCapabilities, SourceProvenance, TlsSpki};
+use private_ai_proxy_aci::upstream::{
+    UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
+};
+use private_ai_proxy_aci::verifier::{
+    AciServiceUpstreamVerifier, AciServiceVerifierPolicy, PreverifiedUpstreamVerifier,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use sha3::{Digest as Sha3Digest, Keccak256};
@@ -178,12 +178,12 @@ async fn dstack_live_provider_loads_kms_keys_and_quote() {
     assert_eq!(e2ee_keys.len(), 2);
     assert_eq!(
         e2ee_keys[0].algo,
-        private_ai_gateway::aci::e2ee::E2EE_ALGO_SECP256K1_AESGCM
+        private_ai_proxy_aci::e2ee::E2EE_ALGO_SECP256K1_AESGCM
     );
     assert_eq!(e2ee_keys[0].public_key_hex.len(), 130);
     assert_eq!(
         e2ee_keys[1].algo,
-        private_ai_gateway::aci::e2ee::E2EE_ALGO_X25519_AESGCM
+        private_ai_proxy_aci::e2ee::E2EE_ALGO_X25519_AESGCM
     );
     assert_eq!(e2ee_keys[1].public_key_hex.len(), 64);
 
@@ -342,7 +342,7 @@ async fn dstack_live_aci_report_and_receipt_chain_verify() {
     );
     assert_eq!(upstream_calls.lock().unwrap().len(), 1);
 
-    let keyset: private_ai_gateway::aci::types::WorkloadKeyset =
+    let keyset: private_ai_proxy_aci::types::WorkloadKeyset =
         serde_json::from_value(report.attestation.workload_keyset.clone()).unwrap();
     let receipt_key = keyset
         .receipt_signing_keys
@@ -420,7 +420,7 @@ async fn dstack_live_aci_service_upstream_verifier_accepts_real_aci_service() {
 
     assert_eq!(
         event.result,
-        private_ai_gateway::aci::receipt::VerificationResult::Verified,
+        private_ai_proxy_aci::receipt::VerificationResult::Verified,
         "{:?}",
         event.reason
     );
@@ -429,7 +429,7 @@ async fn dstack_live_aci_service_upstream_verifier_accepts_real_aci_service() {
     assert_eq!(
         event.channel_bindings,
         vec![
-            private_ai_gateway::aci::receipt::ChannelBinding::TlsSpkiSha256 {
+            private_ai_proxy_aci::receipt::ChannelBinding::TlsSpkiSha256 {
                 origin: base_url,
                 spki_sha256: "aa".repeat(32),
             }

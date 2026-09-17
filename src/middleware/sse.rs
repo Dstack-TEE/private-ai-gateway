@@ -24,9 +24,9 @@ use futures_util::Stream;
 use serde_json::Value;
 use tokio::time::{sleep, Sleep};
 
-use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{ServiceError, ServiceResponseStream};
 use crate::sse_protocol::SseProtocol;
+use private_ai_proxy_aci::upstream::UpstreamError;
 
 use super::completion::{
     debug_gated_detail, detail_snippet, finish_reasons_anomalous, sanitize_identifier,

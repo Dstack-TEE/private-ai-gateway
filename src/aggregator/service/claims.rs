@@ -1,9 +1,9 @@
 use serde_json::Value;
 
 use super::AciService;
-use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crate::aggregator::session::{Claim, ClaimSource, SessionClaims};
 use crate::aggregator::upstream_config::UpstreamSessionSink;
+use private_ai_proxy_aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 
 impl UpstreamSessionSink for AciService {
     fn record_session(&self, event: &UpstreamVerifiedEvent) {
@@ -409,8 +409,10 @@ pub(super) fn secret_ai_gpu_claim(event: &UpstreamVerifiedEvent) -> Claim {
 #[cfg(test)]
 mod claim_mapping_tests {
     use super::session_claims_for_event;
-    use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
     use crate::aggregator::session::{ClaimSource, ClaimStatus};
+    use private_ai_proxy_aci::receipt::{
+        ChannelBinding, UpstreamVerifiedEvent, VerificationResult,
+    };
     use serde_json::{json, Value};
 
     fn event(

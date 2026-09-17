@@ -17,7 +17,8 @@ system.
 The app is now Private AI Proxy; the remote inference service remains Private AI
 Gateway. This is a fresh application identity (`org.dstack.private-ai-proxy`)
 with its own data and credential namespace; old beta configuration is not migrated.
-The only installed CLI is `private-ai-proxy`. It combines local management with ACI's `verify`,
+The only installed CLI is `private-ai-proxy`. The `pap` and `aci` commands are aliases to that
+same executable. It combines local management with ACI's `verify`,
 `audit`, `sessions`, `send` and `serve` commands using the same Rust source.
 There is no separate `aci` executable. The backend launches
 `private-ai-proxy serve` with post-delivery receipt auditing.

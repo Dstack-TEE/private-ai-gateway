@@ -9,10 +9,9 @@ use async_trait::async_trait;
 use super::external::ExternalProviderVerifier;
 #[cfg(test)]
 use super::external::ProviderVerifierConfigError;
-use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
-use crate::aci::upstream::ChutesSessionStore;
-use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
-use crate::aggregator::upstream_config::UpstreamProvider;
+use super::{AttestationScope, UpstreamVerificationRequest, UpstreamVerifier};
+use crate::receipt::{UpstreamVerifiedEvent, VerificationResult};
+use crate::upstream::ChutesSessionStore;
 
 #[derive(Debug, Clone)]
 pub struct ChutesProviderVerifier {
@@ -28,7 +27,7 @@ impl ChutesProviderVerifier {
         Self {
             verifier: ExternalProviderVerifier::private_inference(
                 "chutes",
-                UpstreamProvider::Chutes.attestation_scope(),
+                AttestationScope::PerInstance,
                 timeout_seconds,
                 cache_ttl_seconds,
             ),
@@ -43,7 +42,7 @@ impl ChutesProviderVerifier {
         Self {
             verifier: ExternalProviderVerifier::private_inference(
                 "chutes",
-                UpstreamProvider::Chutes.attestation_scope(),
+                AttestationScope::PerInstance,
                 timeout_seconds,
                 cache_ttl_seconds,
             )
@@ -100,7 +99,7 @@ impl ChutesProviderVerifier {
         Ok(Self {
             verifier: ExternalProviderVerifier::with_command(
                 "chutes",
-                UpstreamProvider::Chutes.attestation_scope(),
+                AttestationScope::PerInstance,
                 command,
                 timeout_seconds,
             )?,
@@ -116,7 +115,7 @@ impl ChutesProviderVerifier {
         Ok(Self {
             verifier: ExternalProviderVerifier::with_command(
                 "chutes",
-                UpstreamProvider::Chutes.attestation_scope(),
+                AttestationScope::PerInstance,
                 command,
                 timeout_seconds,
             )?
@@ -154,7 +153,7 @@ impl TinfoilProviderVerifier {
         Self {
             verifier: ExternalProviderVerifier::private_inference(
                 "tinfoil",
-                UpstreamProvider::Tinfoil.attestation_scope(),
+                AttestationScope::PerRouter,
                 timeout_seconds,
                 cache_ttl_seconds,
             ),
@@ -169,7 +168,7 @@ impl TinfoilProviderVerifier {
         Ok(Self {
             verifier: ExternalProviderVerifier::with_command(
                 "tinfoil",
-                UpstreamProvider::Tinfoil.attestation_scope(),
+                AttestationScope::PerRouter,
                 command,
                 timeout_seconds,
             )?,
@@ -206,7 +205,7 @@ impl NearAiProviderVerifier {
         Self {
             verifier: ExternalProviderVerifier::private_inference(
                 "near-ai",
-                UpstreamProvider::NearAi.attestation_scope(),
+                AttestationScope::PerRouter,
                 timeout_seconds,
                 cache_ttl_seconds,
             ),
@@ -226,7 +225,7 @@ impl NearAiProviderVerifier {
         Ok(Self {
             verifier: ExternalProviderVerifier::with_command(
                 "near-ai",
-                UpstreamProvider::NearAi.attestation_scope(),
+                AttestationScope::PerRouter,
                 command,
                 timeout_seconds,
             )?,
@@ -266,7 +265,7 @@ impl SecretAiProviderVerifier {
         Self {
             verifier: ExternalProviderVerifier::private_inference(
                 "secret-ai",
-                UpstreamProvider::SecretAi.attestation_scope(),
+                AttestationScope::PerRouter,
                 timeout_seconds,
                 cache_ttl_seconds,
             ),
@@ -294,7 +293,7 @@ impl SecretAiProviderVerifier {
         Ok(Self {
             verifier: ExternalProviderVerifier::with_command(
                 "secret-ai",
-                UpstreamProvider::SecretAi.attestation_scope(),
+                AttestationScope::PerRouter,
                 command,
                 timeout_seconds,
             )?,
@@ -340,7 +339,7 @@ impl PhalaDirectProviderVerifier {
         Self {
             verifier: ExternalProviderVerifier::private_inference(
                 "phala-direct",
-                UpstreamProvider::PhalaDirect.attestation_scope(),
+                AttestationScope::PerModel,
                 timeout_seconds,
                 cache_ttl_seconds,
             ),
@@ -364,7 +363,7 @@ impl PhalaDirectProviderVerifier {
         Ok(Self {
             verifier: ExternalProviderVerifier::with_command(
                 "phala-direct",
-                UpstreamProvider::PhalaDirect.attestation_scope(),
+                AttestationScope::PerModel,
                 command,
                 timeout_seconds,
             )?,
