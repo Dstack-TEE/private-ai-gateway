@@ -24,6 +24,7 @@ pub use crate::sse_protocol::{
     stream_error_event, stream_error_tail, SseProtocol,
 };
 
+use super::types::ErrorClass;
 use crate::error_payload::envelope;
 
 /// Flatten an upstream status to the client-facing status. The mapping is uniform
@@ -156,8 +157,7 @@ fn extract_error_message(body: &[u8]) -> Option<String> {
             .map(str::to_string),
         // Some providers put the message at the top level
         // (`{"code":400,"message":"..."}` or `{"message":"...","type":"..."}`)
-        // with no `error` member at all; without this fallback their 4xx/5xx
-        // record as status-only rows nothing can be asked about.
+        // with no `error` member at all.
         None => value
             .get("message")
             .and_then(Value::as_str)
@@ -165,20 +165,31 @@ fn extract_error_message(body: &[u8]) -> Option<String> {
     }
 }
 
-/// The upstream's own words for the usage record, bounded but unscrubbed:
-/// the record is internal telemetry, and a message the relay policy withholds
-/// from the caller is still the only way to ask why a route started failing.
-/// The client-facing envelope keeps using `client_safe_error_message`.
-pub(crate) fn upstream_report_message(body: &[u8]) -> Option<String> {
-    extract_error_message(body).map(|m| m.chars().take(500).collect())
+/// The class an upstream error response is recorded under.
+///
+/// The body is read only to choose among fixed classes; none of it is carried
+/// into the result. The account signal honours the provider-declared kind alone
+/// (see [`declares_quota_exhausted`]), so a caller cannot steer the record by
+/// putting a provider's wording into a prompt.
+pub(crate) fn classify_upstream(
+    received_body: &[u8],
+    upstream_status: u16,
+    upstream_body: &[u8],
+) -> ErrorClass {
+    if declares_quota_exhausted(upstream_status, upstream_body) {
+        ErrorClass::UpstreamQuotaExhausted
+    } else if is_upstream_capacity_signal(upstream_status, upstream_body) {
+        ErrorClass::UpstreamCapacity
+    } else if classify_image_input_error(received_body, upstream_status, upstream_body).is_some() {
+        ErrorClass::UpstreamImageFetchFailed
+    } else {
+        ErrorClass::UpstreamHttpError
+    }
 }
 
 /// The upstream's message, fit to hand to the client, or `None` to fall back to
-/// our own per-status text.
-///
-/// `pub(crate)` so the usage record can carry it too: what is safe to show a
-/// caller is safe to store, and a status code alone leaves no way to ask why a
-/// route started failing.
+/// our own per-status text. It goes into the response to the caller and nowhere
+/// else.
 pub(crate) fn client_safe_error_message(body: &[u8]) -> Option<String> {
     scrub_identifying_markers(&extract_error_message(body)?)
 }
@@ -854,17 +865,54 @@ mod tests {
     use super::is_upstream_capacity_signal;
 
     #[test]
-    fn top_level_message_bodies_still_yield_a_report_message() {
+    fn top_level_message_bodies_still_yield_a_client_message() {
         // Provider error bodies without an `error` member, message at the top.
         for body in [
             br#"{"code":400, "reason":"INVALID_REQUEST_BODY", "message":"max_tokens must be between 0 and 393216"}"#.as_slice(),
             br#"{"message":"invalid request error","type":"invalid_request_error"}"#.as_slice(),
         ] {
-            let got = upstream_report_message(body).expect("message extracted");
+            let got = super::client_safe_error_message(body).expect("message extracted");
             assert!(!got.is_empty());
         }
         // No message anywhere stays None rather than fabricating one.
-        assert!(upstream_report_message(br#"{"code":400}"#).is_none());
+        assert!(super::client_safe_error_message(br#"{"code":400}"#).is_none());
+    }
+
+    #[test]
+    fn upstream_errors_are_recorded_under_a_fixed_class() {
+        use super::{classify_upstream, ErrorClass};
+        let image_request =
+            br#"{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://img.example/cat.png"}}]}]}"#;
+        let cases: [(&[u8], u16, &[u8], ErrorClass); 5] = [
+            (
+                b"{}",
+                400,
+                br#"{"error":{"message":"bad field","type":"invalid_request_error"}}"#,
+                ErrorClass::UpstreamHttpError,
+            ),
+            (
+                b"{}",
+                429,
+                br#"{"error":{"code":"insufficient_quota","message":"out of credit"}}"#,
+                ErrorClass::UpstreamQuotaExhausted,
+            ),
+            (
+                b"{}",
+                429,
+                br#"{"error":{"message":"slow down"}}"#,
+                ErrorClass::UpstreamCapacity,
+            ),
+            (
+                image_request,
+                500,
+                br#"{"error":{"message":"could not fetch https://img.example/cat.png"}}"#,
+                ErrorClass::UpstreamImageFetchFailed,
+            ),
+            (b"{}", 500, b"not json", ErrorClass::UpstreamHttpError),
+        ];
+        for (request, status, body, expected) in cases {
+            assert_eq!(classify_upstream(request, status, body), expected);
+        }
     }
 
     /// The same 429 carries both "slow down" and "your account is unpaid", and

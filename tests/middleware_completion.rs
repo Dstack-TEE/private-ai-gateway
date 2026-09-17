@@ -439,6 +439,68 @@ async fn wait_for_post(posts: &Arc<Mutex<Vec<Value>>>, pred: impl Fn(&Value) -> 
     panic!("no matching consult_post report captured");
 }
 
+/// Marker planted in upstream error text. It stands in for caller content a
+/// provider quotes back, and must reach the caller's response and nothing else.
+const CANARY: &str = "CANARY-7f3a";
+
+#[derive(Clone, Default)]
+struct LogCapture(Arc<Mutex<Vec<u8>>>);
+
+impl LogCapture {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+impl std::io::Write for LogCapture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+    type Writer = LogCapture;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// Every tracing event this test binary emits, at TRACE — the most verbose
+/// level there is. One process-wide subscriber: tests run in parallel, and a
+/// per-thread subscriber would race tracing's callsite interest cache.
+fn captured_logs() -> &'static LogCapture {
+    static LOGS: std::sync::OnceLock<LogCapture> = std::sync::OnceLock::new();
+    LOGS.get_or_init(|| {
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(capture.clone())
+            .finish();
+        tracing::subscriber::set_global_default(subscriber).expect("no other subscriber is set");
+        capture
+    })
+}
+
+/// The canary appears in no usage report and nowhere in the log output. A
+/// probe event written first must show up in the capture, so the absence is not
+/// an artefact of logging being off.
+fn assert_canary_absent(posts: &Arc<Mutex<Vec<Value>>>, probe: &str) {
+    for post in posts.lock().unwrap().iter() {
+        assert!(!post.to_string().contains(CANARY), "usage report: {post}");
+    }
+    tracing::trace!(probe, "log capture probe");
+    let logs = captured_logs().text();
+    assert!(logs.contains(probe), "the capture records TRACE events");
+    assert!(!logs.contains(CANARY), "log output carries upstream text");
+}
+
 fn middleware(control_url: String) -> Middleware {
     Middleware::new(&MiddlewareConfig {
         control_url,
@@ -1100,9 +1162,8 @@ async fn streaming_upstream_non_2xx_reports_the_serving_route() {
     );
     assert_eq!(report["isStreaming"], json!(true));
     assert_eq!(report["attemptIndex"], json!(0));
-    // The record carries the upstream's own words (bounded, unscrubbed): the
-    // client-facing envelope is the scrubbed surface, the report is not.
-    assert_eq!(report["errorMessage"], json!("unavailable"));
+    // The record names the failure's class; the upstream's body stays out of it.
+    assert_eq!(report["errorMessage"], json!("upstream_http_error"));
     // A real upstream attempt, not a gateway-generated failure: error_source
     // stays empty so the status is attributed to the route itself.
     assert!(
@@ -1697,8 +1758,8 @@ async fn downstream_abort_before_settle_reports_gateway_failure_not_client_close
 
 // Post-settle: once the meter settled Completed at a clean end-of-stream, a
 // later finalizer error (flag set just before the drop) must not emit a
-// second, conflicting usage report — the supplemental request_outcome line is
-// the response wrapper's job, not the meter's.
+// second, conflicting usage report — the late failure is the response
+// wrapper's to report, not the meter's.
 #[tokio::test]
 async fn downstream_abort_after_settle_does_not_double_report() {
     let (control_url, posts) = spawn_control_capturing(200, json!({})).await;
@@ -2378,10 +2439,7 @@ async fn client_disconnect_before_upstream_response_reports_499_with_route() {
         .get("errorSource")
         .map(Value::is_null)
         .unwrap_or(true));
-    assert!(report["errorMessage"]
-        .as_str()
-        .unwrap_or("")
-        .contains("before upstream response"));
+    assert_eq!(report["errorMessage"], json!("client_disconnected"));
 
     // Exactly one report for this request: the drop must not race a second row.
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -2441,7 +2499,7 @@ async fn upstream_timeout_is_recorded_as_504_per_attempt_and_summary() {
 }
 
 #[tokio::test]
-async fn mid_stream_read_timeout_settles_504_with_message() {
+async fn mid_stream_read_timeout_settles_504_as_upstream_timeout() {
     // A streaming response that begins, then the upstream read deadline fires
     // mid-body. The client already has 200 headers, so only the usage report
     // carries the failure: 504, with the timeout's own words.
@@ -2492,10 +2550,7 @@ async fn mid_stream_read_timeout_settles_504_with_message() {
 
     let report = wait_for_post(&posts, |r| r["requestId"] == json!("r-readtimeout")).await;
     assert_eq!(report["status"], json!(504));
-    assert!(report["errorMessage"]
-        .as_str()
-        .unwrap_or("")
-        .contains("timed out"));
+    assert_eq!(report["errorMessage"], json!("upstream_timeout"));
 }
 
 // A mock upstream that waits before returning a normal streaming success —
@@ -2950,9 +3005,59 @@ async fn same_route_retry_is_not_committed_early_and_relays_the_429() {
 }
 
 #[tokio::test]
-async fn in_band_stream_error_message_reaches_the_usage_report() {
-    // A 200 stream failed by an in-band error event must settle with the
-    // error's own words, not a bare 502 nothing can be asked about.
+async fn buffered_upstream_error_text_reaches_the_caller_and_nothing_else() {
+    captured_logs();
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({ "allow": true, "candidates": [{ "routeId": "openai:gpt", "format": "openai" }] }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    let upstream_body = json!({
+        "error": { "type": "invalid_request_error", "message": format!("{CANARY} is not valid") }
+    });
+    let service = build_service_with_upstream(400, upstream_body.to_string().into_bytes());
+
+    let (status, _, body) =
+        response_parts(mw.handle_completion(&service, chat_input()).await).await;
+    assert_eq!(status, 400);
+    assert!(
+        body.to_string().contains(CANARY),
+        "the caller is told why their request was rejected: {body}"
+    );
+
+    let report = wait_for_post(&posts, |r| r["status"].as_i64() == Some(400)).await;
+    assert_eq!(report["errorMessage"], json!("upstream_http_error"));
+    assert_canary_absent(&posts, "probe-canary-buffered");
+}
+
+#[tokio::test]
+async fn streaming_upstream_error_text_stays_out_of_reports_and_logs() {
+    captured_logs();
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({ "allow": true, "candidates": [{ "routeId": "openai:gpt", "format": "openai" }] }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    let upstream_body = json!({ "error": { "message": format!("{CANARY} overloaded") } });
+    let service = build_service_with_upstream(503, upstream_body.to_string().into_bytes());
+    let mut input = chat_input();
+    input.stream = true;
+
+    let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
+    assert_eq!(status, 503);
+
+    let report = wait_for_post(&posts, |r| r["status"].as_i64() == Some(503)).await;
+    assert_eq!(report["errorMessage"], json!("upstream_http_error"));
+    assert_canary_absent(&posts, "probe-canary-stream");
+}
+
+#[tokio::test]
+async fn in_band_stream_error_settles_with_a_class_and_none_of_its_text() {
+    captured_logs();
+    // A 200 stream failed by an in-band error event settles as
+    // `stream_inband_error`; the event's message appears nowhere in the report.
     let (control_url, posts) = spawn_control_capturing(200, json!({})).await;
     let control = ControlClient::new(&MiddlewareConfig {
         control_url,
@@ -2982,9 +3087,9 @@ async fn in_band_stream_error_message_reaches_the_usage_report() {
         downstream_abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
-    let events: Vec<Result<Bytes, ServiceError>> = vec![Ok(Bytes::from(
-        "data: {\"error\":{\"message\":\"Failed to compile json grammar: unsupported\"}}\n\ndata: [DONE]\n\n",
-    ))];
+    let events: Vec<Result<Bytes, ServiceError>> = vec![Ok(Bytes::from(format!(
+        "data: {{\"error\":{{\"message\":\"{CANARY} quoted prompt text\"}}}}\n\ndata: [DONE]\n\n",
+    )))];
     let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
     let mut metered = MeterStream::new(inner, report, SseProtocol::OpenaiChat);
     while metered.next().await.is_some() {}
@@ -2992,8 +3097,6 @@ async fn in_band_stream_error_message_reaches_the_usage_report() {
 
     let report = wait_for_post(&posts, |r| r["requestId"] == json!("r-inband")).await;
     assert_eq!(report["status"], json!(502));
-    assert!(report["errorMessage"]
-        .as_str()
-        .unwrap_or("")
-        .contains("Failed to compile json grammar"));
+    assert_eq!(report["errorMessage"], json!("stream_inband_error"));
+    assert_canary_absent(&posts, "probe-canary-inband");
 }

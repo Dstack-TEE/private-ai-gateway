@@ -221,10 +221,7 @@ impl ChutesProviderBackend {
         let status = resp.status().as_u16();
         let body = resp.bytes().await.map_err(transport_error)?;
         if !(200..300).contains(&status) {
-            return Err(UpstreamError::Upstream {
-                status,
-                body: String::from_utf8_lossy(&body).into_owned(),
-            });
+            return Err(UpstreamError::Upstream { status });
         }
         let chutes: ChutesLookupResponse =
             serde_json::from_slice(&body).map_err(|e| UpstreamError::Transport(e.to_string()))?;
@@ -259,10 +256,7 @@ impl ChutesProviderBackend {
         let status = resp.status().as_u16();
         let body = resp.bytes().await.map_err(transport_error)?;
         if !(200..300).contains(&status) {
-            return Err(UpstreamError::Upstream {
-                status,
-                body: String::from_utf8_lossy(&body).into_owned(),
-            });
+            return Err(UpstreamError::Upstream { status });
         }
         serde_json::from_slice(&body).map_err(|e| UpstreamError::Transport(e.to_string()))
     }
@@ -345,10 +339,7 @@ impl ChutesProviderBackend {
         let status = resp.status().as_u16();
         let body = resp.bytes().await.map_err(transport_error)?;
         if !(200..300).contains(&status) {
-            return Err(UpstreamError::Upstream {
-                status,
-                body: String::from_utf8_lossy(&body).into_owned(),
-            });
+            return Err(UpstreamError::Upstream { status });
         }
         let parsed: ChutesEvidenceResponse =
             serde_json::from_slice(&body).map_err(|e| UpstreamError::Transport(e.to_string()))?;

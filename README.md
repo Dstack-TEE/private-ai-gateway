@@ -436,6 +436,45 @@ backend:
 The middleware is configured by the `middleware` section of the static gateway
 config; see the [configuration reference](docs/configuration-reference.md#middleware).
 
+### What The Gateway Records
+
+Prompts, completions, and upstream error messages are not logged and are not
+reported; of an upstream response body, only its `usage` object is reported.
+What leaves the request path is listed here in full, so it can be checked
+against the code.
+
+| Destination | Contents | Defined in |
+| --- | --- | --- |
+| Pre-request consult to the control plane | SHA-256 of the API key, requested model, the caller's `provider` routing block, the TEE-only host flag, and — unless `send_request_features` is `false` — request features: a token-count estimate, input modalities, tool and response-format flags, reasoning intent, and `prefix_hash` | `consult_pre` in `src/middleware/control.rs`, `src/middleware/request_features.rs` |
+| Usage report to the control plane, one per attempt | Request id, endpoint, status, timings, streaming flag, attempt index, selected route, requested model, the upstream's `usage` object, pricing, tenant and virtual-key ids, `errorSource`, `errorMessage`, and `prefix_hash` | `PostReport` in `src/middleware/types.rs` |
+| Receipt | SHA-256 hashes of request and response bodies, never the bodies | `src/aci/receipt.rs` |
+
+Two properties make the first paragraph checkable rather than a promise:
+
+- `errorMessage` is an `ErrorClass`, an enum with no string-bearing variant. An
+  upstream body or a caller's input cannot be placed in it; the code would not
+  compile. An upstream error body is read only to choose a class
+  (`classify_upstream` in `src/middleware/errors.rs`).
+- `tests/middleware_completion.rs` plants a marker in upstream error text on the
+  buffered, streaming, and in-band stream paths, captures every log event at
+  `TRACE`, and fails if the marker appears in any log line or usage report.
+
+Two values in the table are not authored by the gateway. The requested model
+name is whatever the caller put in `model`, reported as sent. The `usage` object
+is the upstream's, forwarded as received.
+
+Requests are not logged: there is no access log and no per-request outcome
+line. What the gateway does log is its own errors — a failed control-plane call,
+an upstream timeout, a response body that fails partway (`stream_abort`, the one
+line that carries a request id). Such a line can name the requested model or the
+request host; it never carries request or response content.
+
+`prefix_hash` is derived from content: a digest of the conversation's first
+4 KB, truncated to 32 hex characters, used for cache-affinity routing. Set
+`middleware.prefix_hash_secret` so it is an HMAC the control plane cannot test
+guesses against; without the secret it is a plain SHA-256, which lets the
+control plane link equal prefixes and confirm a prefix it already knows.
+
 ## API Surface
 
 | Endpoint | Purpose |

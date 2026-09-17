@@ -186,7 +186,7 @@ impl ControlClient {
                 if status != 200 {
                     tracing::error!(
                         status,
-                        body = %truncate(&text, 300),
+                        body_len = text.len(),
                         "consult_pre returned non-200"
                     );
                     return fail_closed();
@@ -195,8 +195,10 @@ impl ControlClient {
                     Ok(consult) => consult,
                     Err(err) => {
                         tracing::error!(
-                            error = %err,
-                            body = %truncate(&text, 300),
+                            category = ?err.classify(),
+                            line = err.line(),
+                            column = err.column(),
+                            body_len = text.len(),
                             "consult_pre returned invalid JSON"
                         );
                         fail_closed()
@@ -265,10 +267,6 @@ fn fail_closed() -> PreConsult {
         user_tier: None,
         rate_limit: None,
     }
-}
-
-fn truncate(text: &str, max_chars: usize) -> String {
-    text.chars().take(max_chars).collect()
 }
 
 #[cfg(test)]
