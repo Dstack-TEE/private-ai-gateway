@@ -940,13 +940,15 @@ pub(super) fn now_millis() -> u128 {
 /// The cache counters of a Chat usage object: tokens read from cache, under
 /// either name an upstream uses, and tokens written to it.
 pub(super) fn chat_cache_tokens(usage: &Value) -> (Option<i64>, Option<i64>) {
+    // Read as the control plane reads a counter: a numeric string counts, and
+    // anything unreadable, negative included, is absent rather than zero, so
+    // the other name for the same bucket is still consulted.
     let counter = |value: Option<&Value>| {
-        value.filter(|v| !v.is_null()).map(|v| {
-            v.as_i64()
-                .or_else(|| v.as_f64().map(|f| f as i64))
-                .unwrap_or(0)
-                .max(0)
-        })
+        let number = match value? {
+            Value::String(text) => text.trim().parse::<f64>().ok()?,
+            other => other.as_f64()?,
+        };
+        (number.is_finite() && number >= 0.0).then_some(number as i64)
     };
     let cache_read = counter(usage.get("cache_read_input_tokens")).or_else(|| {
         counter(
@@ -2388,6 +2390,57 @@ mod tests {
         let out = transform_response(ProviderFormat::Openai, Endpoint::Messages, body);
         assert_eq!(out["content"], json!([{ "type": "text", "text": "" }]));
         assert_eq!(out["stop_reason"], json!("end_turn"));
+    }
+
+    #[test]
+    fn chat_usage_becomes_anthropic_usage_without_counting_cache_twice() {
+        for (chat, expected) in [
+            (
+                json!({ "prompt_tokens": 1000, "completion_tokens": 200 }),
+                json!({ "input_tokens": 1000, "output_tokens": 200 }),
+            ),
+            (
+                json!({ "prompt_tokens": 1000, "completion_tokens": 200,
+                        "prompt_tokens_details": { "cached_tokens": 400 },
+                        "cache_creation_input_tokens": 100 }),
+                json!({ "input_tokens": 500, "output_tokens": 200,
+                        "cache_read_input_tokens": 400, "cache_creation_input_tokens": 100 }),
+            ),
+            // Either name for the cache-read bucket; the explicit one wins.
+            (
+                json!({ "prompt_tokens": 1000, "completion_tokens": 200,
+                        "cache_read_input_tokens": 300,
+                        "prompt_tokens_details": { "cached_tokens": 400 } }),
+                json!({ "input_tokens": 700, "output_tokens": 200, "cache_read_input_tokens": 300 }),
+            ),
+            // An unreadable counter is absent, so the other name is consulted.
+            (
+                json!({ "prompt_tokens": 1000, "completion_tokens": 200,
+                        "cache_read_input_tokens": -1,
+                        "prompt_tokens_details": { "cached_tokens": "400" } }),
+                json!({ "input_tokens": 600, "output_tokens": 200, "cache_read_input_tokens": 400 }),
+            ),
+            (
+                json!({ "prompt_tokens": 1000, "completion_tokens": 200,
+                        "prompt_tokens_details": { "cached_tokens": null } }),
+                json!({ "input_tokens": 1000, "output_tokens": 200 }),
+            ),
+            // Buckets larger than the total leave no uncached input.
+            (
+                json!({ "prompt_tokens": 100, "completion_tokens": 200,
+                        "prompt_tokens_details": { "cached_tokens": 400 } }),
+                json!({ "input_tokens": 0, "output_tokens": 200, "cache_read_input_tokens": 400 }),
+            ),
+        ] {
+            let (cache_read, cache_creation) = chat_cache_tokens(&chat);
+            let usage = anthropic_usage(
+                i64_field(&chat, "prompt_tokens"),
+                i64_field(&chat, "completion_tokens"),
+                cache_read,
+                cache_creation,
+            );
+            assert_eq!(usage, expected, "{chat}");
+        }
     }
 
     #[test]
