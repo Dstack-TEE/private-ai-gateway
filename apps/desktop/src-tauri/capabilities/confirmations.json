@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "confirmations",
+  "description": "Native confirmation dialogs for destructive or disruptive actions",
+  "windows": ["main", "profiles", "profile-editor", "local-api"],
+  "permissions": ["dialog:allow-message"]
+}

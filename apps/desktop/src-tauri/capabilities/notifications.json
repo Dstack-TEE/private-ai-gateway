@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "notifications-window",
+  "description": "Application and system notification preferences",
+  "windows": ["notifications"],
+  "permissions": [
+    "allow-get-notification-settings",
+    "allow-save-notification-settings",
+    "allow-request-notification-permission",
+    "allow-open-notification-settings"
+  ]
+}

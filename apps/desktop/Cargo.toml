@@ -1,0 +1,12 @@
+[workspace]
+members = [
+    "cli",
+    "gateway",
+    "runtime",
+]
+default-members = [
+    "cli",
+    "gateway",
+    "runtime",
+]
+resolver = "2"

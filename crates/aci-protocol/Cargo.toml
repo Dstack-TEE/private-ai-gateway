@@ -1,0 +1,18 @@
+[package]
+name = "aci-protocol"
+version = "0.1.0"
+description = "Wire types and deterministic encoding rules for Attested Confidential Inference"
+license = "Apache-2.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+
+[dependencies]
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+thiserror = "1"
+
+[lints.rust]
+unused_must_use = "deny"

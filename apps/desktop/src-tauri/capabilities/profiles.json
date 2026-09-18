@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "profiles-window",
+  "description": "Profile selection and profile backup management",
+  "windows": ["profiles"],
+  "permissions": [
+    "allow-open-native-dialog",
+    "allow-activate-profile",
+    "allow-read-profile-backup",
+    "allow-import-profiles",
+    "allow-export-profiles"
+  ]
+}

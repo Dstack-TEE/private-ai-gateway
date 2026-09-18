@@ -1,3 +1,8 @@
+[workspace]
+members = ["crates/aci-protocol"]
+default-members = ["."]
+resolver = "2"
+
 [package]
 name = "private-ai-gateway"
 version = "0.1.0"
@@ -14,6 +19,7 @@ name = "private-ai-gateway"
 path = "src/main.rs"
 
 [dependencies]
+aci-protocol = { path = "crates/aci-protocol" }
 # Canonical-JSON, types, and serialization.
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -41,7 +47,6 @@ rustls-pemfile = "2"
 x509-parser = "0.16"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1"
-rcgen = "0.14"
 
 # HTTP server.
 axum = "0.7"
@@ -76,9 +81,6 @@ async-trait = "0.1"
 
 # Upstream ACI/DCAP verification.
 dcap-qvl = { version = "0.3.12", default-features = false, features = ["std", "report", "rustcrypto"] }
-
-# `aci` CLI argument parsing.
-clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

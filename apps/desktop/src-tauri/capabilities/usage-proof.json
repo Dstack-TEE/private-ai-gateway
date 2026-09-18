@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "usage-proof-window",
+  "description": "Read one local usage proof record",
+  "windows": ["usage-proof"],
+  "permissions": [
+    "allow-get-usage-record"
+  ]
+}

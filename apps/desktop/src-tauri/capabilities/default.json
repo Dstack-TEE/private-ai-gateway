@@ -1,0 +1,25 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Core permissions shared by application windows",
+  "windows": [
+    "main",
+    "profiles",
+    "profile-editor",
+    "privacy",
+    "local-api",
+    "usage-proof",
+    "local-api-example",
+    "notifications"
+  ],
+  "permissions": [
+    "core:app:allow-version",
+    "core:event:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize",
+    "allow-show-edit-menu",
+    "allow-get-appearance",
+    "allow-show-error-alert",
+    "allow-get-gateway-state"
+  ]
+}

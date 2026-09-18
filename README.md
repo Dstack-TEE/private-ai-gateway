@@ -292,7 +292,7 @@ The script's `--chat-id` argument accepts either a chat id or a receipt id. To
 verify already captured artifacts, run the `aci` CLI offline:
 
 ```bash
-cargo run --bin aci -- audit \
+aci audit \
   --report report.json \
   --receipt receipt.json \
   --nonce "$NONCE"
@@ -624,11 +624,12 @@ events, and metrics model ids.
 ```text
 src/main.rs                    binary entrypoint and runtime config
 src/dstack.rs                  dstack SDK KMS key provider and quote provider
-src/aci/                       ACI wire types, keys, receipts, upstreams
+crates/aci-protocol/           shared ACI wire types and deterministic encoding
+src/aci/                       gateway ACI keys, receipts, verification, upstreams
 src/aggregator/service.rs      report, forwarding, E2EE, receipt finalization
 src/aggregator/upstream_config.rs runtime upstream config and provider adapters
 src/http/app.rs                Axum HTTP routers and middleware/backend wiring
-src/bin/aci/                   `aci` verifier CLI: verify, audit, sessions, send, serve
+apps/desktop/                  independently built Private AI Proxy desktop client and CLI
 clients/                       verifier-ts verifier library (browser + node); pi-provider pi provider extension
 docs/                          design notes, configuration reference, provider reviews
 deploy/                        git-launcher and dstack compose examples

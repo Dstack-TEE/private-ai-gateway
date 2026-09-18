@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "native-dialogs",
+  "description": "Presentation lifecycle shared by native dialog windows",
+  "windows": [
+    "profiles",
+    "profile-editor",
+    "privacy",
+    "local-api",
+    "usage-proof",
+    "local-api-example",
+    "notifications"
+  ],
+  "permissions": [
+    "allow-native-dialog-ready",
+    "allow-close-native-dialog"
+  ]
+}
