@@ -6,12 +6,8 @@ import { errorMessage } from "../lib/error-message";
 import { showErrorAlert, useErrorAlert } from "../lib/error-alert";
 import { initialGatewayState } from "../desktop-api";
 import { brand } from "../generated/brand";
-import { UpdateProgressMeter } from "../updates";
-import type { UpdateProgress } from "../../shared/contracts";
-import { Button } from "../components/ui/button";
 import { LocalApiExamples } from "../components/local-api-examples";
 import { NotificationsProvider, NotificationsSheet, useNotifications } from "../components/notifications";
-import { useDialogClose } from "../components/dialog-close";
 import { NativeDialogHost } from "../components/sheet";
 import type { GatewayState, LocalApiConfig } from "../../shared/contracts";
 import { desktopApi, query } from "../lib/environment";
@@ -66,20 +62,6 @@ function useNativeGatewayWindow(title: string, options: NativeWindowOptions = {}
     void desktopApi.closeNativeDialog().catch((error: unknown) => setLoadError(errorMessage(error)));
   }, []);
   return { state, setState, loaded, loadError, close };
-}
-
-function NativeUpdateProgressWindow(): React.JSX.Element {
-  const [progress, setProgress] = useState<UpdateProgress>();
-  const native = useNativeGatewayWindow("Software Update", { contentReady: Boolean(progress) });
-  useDialogClose(native.close, Boolean(progress?.error));
-  useEffect(() => desktopApi.onUpdateProgress(setProgress), []);
-  if (native.loadError) return <NativeDialogStatus label="software update" error={native.loadError} onClose={native.close} />;
-  return <NativeDialogHost className="p-6 flex flex-col gap-4" aria-labelledby="update-title">
-    <h2 id="update-title" className="text-lg font-semibold">{progress?.error ? "Update failed" : "Installing update"}</h2>
-    <p className="min-h-0 overflow-auto break-words text-sm text-muted-foreground" role={progress?.error ? "alert" : undefined}>{progress?.error ?? "The app will restart when installation completes."}</p>
-    {!progress?.error && <UpdateProgressMeter progress={progress} />}
-    {progress?.error && <div className="mt-auto flex justify-end"><Button variant="outline" onClick={native.close}>Done</Button></div>}
-  </NativeDialogHost>;
 }
 
 function NativeDialogStatus({ label, error, onClose }: { label: string; error?: string; onClose(): void }): React.JSX.Element | null {
@@ -312,7 +294,6 @@ function nativeWindowContent(
 ): React.JSX.Element | null {
   switch (kind) {
     case "profiles": return <NativeProfilesWindow repair={request.repair} />;
-    case "update-progress": return <NativeUpdateProgressWindow />;
     case "local-api-example": return <NativeLocalApiExampleWindow />;
     case "notifications": return <NotificationsProvider api={desktopApi}><NativeNotificationsWindow /></NotificationsProvider>;
     case "profile-editor": return <NativeProfilesWindow repair={false} editor profileId={request.profileId} startAfterSave={request.startAfterSave} />;

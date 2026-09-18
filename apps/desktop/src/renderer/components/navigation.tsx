@@ -1,5 +1,5 @@
 import React from "react";
-import { Bot, ChartNoAxesColumn, Download, LayoutGrid, Settings } from "lucide-react";
+import { Bot, ChartNoAxesColumn, LayoutGrid, RotateCw, Settings } from "lucide-react";
 import { brand } from "../generated/brand";
 import { Badge } from "./ui/badge";
 import { SidebarProvider, SidebarMenu, SidebarMenuItem, SidebarMenuButton } from "./ui/sidebar";
@@ -25,14 +25,14 @@ const VIEWS: { id: View; label: string; icon: typeof LayoutGrid }[] = [
 export function Sidebar({
   view,
   onChange,
-  updateAvailable,
+  updateReady,
   updateBusy,
-  onInstallUpdate,
+  onRestartUpdate,
 }: {
   view: View;
-  updateAvailable: boolean;
+  updateReady: boolean;
   updateBusy: boolean;
-  onInstallUpdate(): void;
+  onRestartUpdate(): void;
   onChange(view: View, focusHeading?: boolean): void;
 }): React.JSX.Element {
   const onKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
@@ -77,9 +77,9 @@ export function Sidebar({
         </SidebarMenu>
       </nav>
       </SidebarProvider>
-      {updateAvailable && <div className="mt-auto pt-4">
-        <Badge variant="outline" className="h-8 w-full gap-2 text-sm hover:bg-muted [&>svg]:size-4!" render={<button type="button" disabled={updateBusy} />} aria-label="Update available" onClick={onInstallUpdate}>
-          <Download aria-hidden="true" /><span className="max-[620px]:hidden">Update available</span>
+      {updateReady && <div className="mt-auto pt-4">
+        <Badge variant="outline" className="h-8 w-full gap-2 text-sm hover:bg-muted [&>svg]:size-4!" render={<button type="button" disabled={updateBusy} />} aria-label="Restart to update" onClick={onRestartUpdate}>
+          <RotateCw aria-hidden="true" /><span className="max-[620px]:hidden">Restart to update</span>
         </Badge>
       </div>}
     </aside>

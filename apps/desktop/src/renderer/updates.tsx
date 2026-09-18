@@ -1,21 +1,20 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Download } from "lucide-react";
-import type { DesktopApi, UpdateInfo, UpdateProgress, UpdateChannel } from "../shared/contracts";
+import { RotateCw } from "lucide-react";
+import type { DesktopApi, UpdateInfo, UpdateChannel } from "../shared/contracts";
 import { Button } from "./components/ui/button";
 import { ToggleGroup, ToggleGroupItem } from "./components/ui/toggle-group";
 import { FieldLabel } from "./components/ui/field";
 import { Item, ItemContent, ItemTitle, ItemDescription, ItemActions } from "./components/ui/item";
-import { Progress } from "./components/ui/progress";
 import { useErrorAlert } from "./lib/error-alert";
 
 export function useUpdates(api: DesktopApi) {
-  const [operation, setBusy] = useState<"installing" | "changing">();
+  const [operation, setBusy] = useState<"restarting" | "changing">();
   const mounted = useRef(false);
   const inFlight = useRef(false);
   const readUpdate = useCallback(async () => {
     const channel = await api.getUpdateChannel();
-    return { channel, info: await api.checkUpdate() };
+    return { channel, info: await api.prepareUpdate() };
   }, [api]);
   const client = useQueryClient();
   const { data: snapshot, error: checkError, isFetching: checking, refetch } = useQuery<{
@@ -28,11 +27,11 @@ export function useUpdates(api: DesktopApi) {
   const channel = snapshot?.channel;
   const currentVersion = installedVersion ?? info?.currentVersion;
   const busy = operation ?? (checking ? "checking" : undefined);
-  const error = checkError ? "Could not check for updates. Retrying automatically." : undefined;
+  const error = checkError ? "Could not prepare software updates. Retrying automatically." : undefined;
   const reportError = useErrorAlert("Software update unavailable", undefined, api);
   const refresh = useCallback(async () => {
     await client.cancelQueries({ queryKey: ["app-update"] });
-    await refetch();
+    return refetch();
   }, [client, refetch]);
   useEffect(() => {
     mounted.current = true;
@@ -56,37 +55,31 @@ export function useUpdates(api: DesktopApi) {
     }
   };
 
-  const install = async () => {
+  const restart = async () => {
     if (inFlight.current || checking || !info?.version) return;
     inFlight.current = true;
-    setBusy("installing");
-    let dialogOpened = false;
+    setBusy("restarting");
+    let retry = false;
+    let installAttempted = false;
     try {
-      if (!await api.confirm({ title: "Install update?", message: "Protection will stop and connected agent configurations will be restored before the app restarts. In-flight requests may be interrupted.", confirmLabel: "Install and Restart" })) return;
-      await api.openNativeDialog("update-progress");
-      dialogOpened = true;
-      await api.installUpdate();
-    } catch {
+      const latest = await refresh();
+      if (latest.error) throw latest.error;
+      if (!latest.data?.info?.version) return;
+      if (!await api.confirm({ title: "Restart to update?", message: `Version ${latest.data.info.version} is ready. Protection will stop and connected agent configurations will be restored before the app restarts. In-flight requests may be interrupted.`, confirmLabel: "Restart to update" })) return;
+      installAttempted = true;
+      await api.restartToUpdate();
+    } catch (failure) {
       if (mounted.current) {
-        if (!dialogOpened) {
-          reportError("Could not open the update dialog. Please try again.");
-        } else {
-          // Installing consumes the native update handle. Refresh it for a retry
-          // without duplicating the install error outside its progress window.
-          await refresh();
-        }
+        reportError(failure);
+        retry = installAttempted;
       }
     } finally {
       inFlight.current = false;
       if (mounted.current) setBusy(undefined);
     }
+    if (retry && mounted.current) void refresh();
   };
-  return { info, currentVersion, busy, error, channel, changeChannel, install };
-}
-
-export function UpdateProgressMeter({ progress }: { progress?: UpdateProgress }): React.JSX.Element {
-  const percent = progress?.total ? Math.min(100, Math.floor(progress.downloaded / progress.total * 100)) : null;
-  return <><Progress value={percent} aria-label="Update progress" /><p className="text-sm text-muted-foreground" role="status">{percent === 100 ? "Verifying and installing…" : percent === null ? "Preparing download…" : `Downloading ${percent}%`}</p></>;
+  return { info, currentVersion, busy, error, channel, changeChannel, restart };
 }
 
 export function UpdateChannelControl({ updates }: { updates: ReturnType<typeof useUpdates> }): React.JSX.Element {
@@ -105,7 +98,7 @@ export function UpdateChannelControl({ updates }: { updates: ReturnType<typeof u
 
 export function UpdateControl({ updates, productName }: { updates: ReturnType<typeof useUpdates>; productName: string }): React.JSX.Element {
   const { info, currentVersion, busy, error } = updates;
-  const label = busy === "changing" ? "Saving update channel…" : busy === "checking" ? "Checking for updates…"
+  const label = busy === "changing" ? "Saving update channel…" : busy === "restarting" ? "Restarting to update…" : busy === "checking" ? "Checking for updates…"
     : error ? "Update status unavailable" : (info?.enabled === false ? "Automatic updates unavailable in this build"
       : info?.channelPublished === false ? "No releases published in this channel yet"
       : info?.version ? `Version ${info.version} is available`
@@ -116,7 +109,7 @@ export function UpdateControl({ updates, productName }: { updates: ReturnType<ty
     </ItemContent>
     <ItemActions className="ml-auto max-w-full flex-wrap justify-end text-right">
       <span className="text-sm font-medium tabular-nums" data-slot="app-version">{currentVersion ? `v${currentVersion}` : "Version unavailable"}</span>
-      {info?.version ? <Button disabled={Boolean(busy)} onClick={() => void updates.install()}><Download aria-hidden="true" />Install and Restart</Button> : <ItemDescription className="max-w-sm text-right" role="status">{label}</ItemDescription>}
+      {info?.version ? <Button disabled={Boolean(busy)} onClick={() => void updates.restart()}><RotateCw aria-hidden="true" />Restart to update</Button> : <ItemDescription className="max-w-sm text-right" role="status">{label}</ItemDescription>}
       {info?.version && <span role="status" className="sr-only">{label}</span>}
     </ItemActions>
   </Item>;

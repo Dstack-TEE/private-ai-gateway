@@ -36,9 +36,9 @@ pub(crate) async fn set_launch_preference(
 pub(crate) async fn reset_settings(
     app: AppHandle,
     client: State<'_, Arc<Client>>,
-    pending: State<'_, updates::PendingUpdate>,
+    prepared: State<'_, updates::PreparedUpdate>,
 ) -> Result<GatewayState, String> {
-    let mut pending = pending
+    let mut prepared = prepared
         .0
         .try_lock()
         .map_err(|_| "An update operation is in progress")?;
@@ -71,7 +71,7 @@ pub(crate) async fn reset_settings(
         Ok(state)
     })
     .await;
-    *pending = None;
+    *prepared = None;
     refresh_preferences(&app, &client);
     let state = result.map_err(|error| {
         format!("Reset did not finish. Review the error and retry Reset settings. {error}")

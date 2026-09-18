@@ -281,11 +281,10 @@ pub fn run() {
                 )
                 .build(),
         )
-        .manage(updates::PendingUpdate::default())
+        .manage(updates::PreparedUpdate::default())
         .manage(CliStartup::default())
         .manage(native_dialog::DialogCache::default())
         .manage(tray::MainWindowPresentation::default())
-        .manage(updates::UpdateProgress::default())
         .plugin(tauri_plugin_notification::init())
         .manage(notifications::Settings::default())
         .invoke_handler(tauri::generate_handler![
@@ -302,11 +301,10 @@ pub fn run() {
             notifications::open_notification_settings,
             commands::settings::get_appearance,
             commands::settings::set_appearance,
-            updates::check_update,
+            updates::prepare_update,
             updates::get_update_channel,
             updates::set_update_channel,
-            updates::install_update,
-            updates::get_update_progress,
+            updates::restart_to_update,
             commands::settings::get_launch_preferences,
             commands::settings::set_launch_preference,
             commands::gateway::start_gateway,

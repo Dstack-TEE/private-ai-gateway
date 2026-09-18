@@ -34,11 +34,9 @@ const USAGE_PROOF_LABEL: &str = "usage-proof";
 const PROFILE_REPAIR_EVENT: &str = "gateway://profile-repair";
 const USAGE_PROOF_EVENT: &str = "gateway://usage-proof";
 const PRESENTED_EVENT: &str = "gateway://dialog-presented";
-const UPDATE_PROGRESS_LABEL: &str = "update-progress";
-const DIALOG_LABELS: [&str; 8] = [
+const DIALOG_LABELS: [&str; 7] = [
     "notifications",
     "local-api-example",
-    UPDATE_PROGRESS_LABEL,
     PROFILES_LABEL,
     PROFILE_EDITOR_LABEL,
     PRIVACY_LABEL,
@@ -84,15 +82,6 @@ pub fn open(
             min_width: 560.0,
             min_height: 440.0,
             query: "index.html?native-dialog=local-api-example".to_string(),
-        },
-        "update-progress" => DialogSpec {
-            label: UPDATE_PROGRESS_LABEL,
-            title: "Software Update",
-            width: 480.0,
-            height: 240.0,
-            min_width: 480.0,
-            min_height: 240.0,
-            query: "index.html?native-dialog=update-progress".to_string(),
         },
         "profile-editor" | "setup-profile" => DialogSpec {
             label: PROFILE_EDITOR_LABEL,
@@ -171,10 +160,6 @@ pub fn open(
         *label != spec.label && !(spec.label == PROFILE_EDITOR_LABEL && *label == PROFILES_LABEL)
     }) {
         if let Some(window) = active_window(app, label) {
-            if spec.label == UPDATE_PROGRESS_LABEL {
-                focus_if_visible(&window)?;
-                return Err("Close the open dialog before installing an update".to_string());
-            }
             return focus_if_visible(&window);
         }
     }
@@ -198,10 +183,6 @@ pub fn open(
                 return Err(window_error(error));
             }
             return Ok(());
-        }
-        if spec.label == UPDATE_PROGRESS_LABEL {
-            focus_if_visible(&window)?;
-            return Err("An update dialog is already open".to_string());
         }
         if spec.label == PROFILES_LABEL && repair {
             window
@@ -237,9 +218,6 @@ pub fn open(
     } else {
         "\"light\""
     };
-    if spec.label == UPDATE_PROGRESS_LABEL {
-        crate::updates::reset_progress(app);
-    }
     let mut builder =
         WebviewWindowBuilder::new(app, spec.label, WebviewUrl::App(spec.query.into()))
             .initialization_script(format!(
@@ -407,11 +385,6 @@ pub fn close(window: &tauri::WebviewWindow) -> Result<(), String> {
             return Err("Close the profile editor first".to_string());
         }
     }
-    if window.label() == UPDATE_PROGRESS_LABEL
-        && !crate::updates::can_close_progress(window.app_handle())
-    {
-        return Err("Wait for the update to finish".to_string());
-    }
     if !DIALOG_LABELS.contains(&window.label()) {
         return Err("Only native dialog windows can close themselves".to_string());
     }
@@ -433,10 +406,8 @@ pub fn close(window: &tauri::WebviewWindow) -> Result<(), String> {
             parent.set_focus().map_err(window_error)?;
         }
     }
-    // Update windows are one-shot. Windows/Linux editor ownership is fixed at creation.
-    if window.label() == UPDATE_PROGRESS_LABEL
-        || (!cfg!(target_os = "macos") && window.label() == PROFILE_EDITOR_LABEL)
-    {
+    // Windows/Linux editor ownership is fixed at creation.
+    if !cfg!(target_os = "macos") && window.label() == PROFILE_EDITOR_LABEL {
         return window.destroy().map_err(window_error);
     }
     if let Err(error) = window.emit_to(window.label(), "gateway://dialog-dismissed", ()) {

@@ -17,12 +17,6 @@ export interface UpdateInfo {
 export type UpdateChannel = "beta" | "stable";
 export type Appearance = "system" | "light" | "dark";
 
-export interface UpdateProgress {
-  downloaded: number;
-  total?: number | null;
-  error?: string | null;
-}
-
 export interface VerificationCheck {
   id: string;
   section: string;
@@ -338,9 +332,8 @@ export interface DesktopApi {
   getAppVersion(): Promise<string>;
   getUpdateChannel(): Promise<UpdateChannel>;
   setUpdateChannel(channel: UpdateChannel): Promise<UpdateChannel>;
-  checkUpdate(): Promise<UpdateInfo>;
-  installUpdate(): Promise<void>;
-  onUpdateProgress(listener: (progress: UpdateProgress) => void): () => void;
+  prepareUpdate(): Promise<UpdateInfo>;
+  restartToUpdate(): Promise<void>;
   getLaunchPreferences(): Promise<LaunchPreferences>;
   setLaunchPreference(name: keyof LaunchPreferences, enabled: boolean): Promise<LaunchPreferences>;
   onLaunchPreferencesChange(listener: (preferences: LaunchPreferences) => void): () => void;
@@ -372,7 +365,7 @@ export interface DesktopApi {
   onProfileRepairRequest(listener: () => void): () => void;
   onUsageProofRequest(listener: (recordId: string) => void): () => void;
   onClientKeyChange(listener: (available: boolean) => void): () => void;
-  openNativeDialog(kind: "profiles" | "profile-editor" | "setup-profile" | "privacy" | "local-api" | "usage-proof" | "update-progress" | "local-api-example" | "notifications", options?: { repair?: boolean; recordId?: string; profileId?: string }): Promise<void>;
+  openNativeDialog(kind: "profiles" | "profile-editor" | "setup-profile" | "privacy" | "local-api" | "usage-proof" | "local-api-example" | "notifications", options?: { repair?: boolean; recordId?: string; profileId?: string }): Promise<void>;
   nativeDialogReady(): Promise<void>;
   mainWindowReady(): Promise<void>;
   onNativeDialogOpen(listener: (request: { state: GatewayState; repair: boolean; recordId?: string | null; profileId?: string | null; startAfterSave?: boolean }) => void): () => void;

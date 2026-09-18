@@ -2,11 +2,17 @@ use std::{sync::Arc, time::Duration};
 
 use desktop_runtime::{client::Client, preferences::UpdateChannel, protocol::Preference};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
+pub(crate) struct DownloadedUpdate {
+    channel: UpdateChannel,
+    update: Update,
+    bytes: Vec<u8>,
+}
+
 #[derive(Default)]
-pub struct PendingUpdate(pub(crate) tokio::sync::Mutex<Option<Update>>);
+pub struct PreparedUpdate(pub(crate) tokio::sync::Mutex<Option<DownloadedUpdate>>);
 
 fn matches_channel(version: &str, channel: UpdateChannel) -> bool {
     let Ok(version) = semver::Version::parse(version) else {
@@ -85,10 +91,10 @@ pub async fn get_update_channel(
 #[tauri::command]
 pub async fn set_update_channel(
     channel: UpdateChannel,
-    pending: State<'_, PendingUpdate>,
+    prepared: State<'_, PreparedUpdate>,
     client: State<'_, Arc<Client>>,
 ) -> Result<UpdateChannel, String> {
-    let mut pending = pending
+    let mut prepared = prepared
         .0
         .try_lock()
         .map_err(|_| "An update operation is already in progress")?;
@@ -100,7 +106,7 @@ pub async fn set_update_channel(
             .map_err(|_| "Could not save update channel".to_string())
     })
     .await?;
-    *pending = None;
+    *prepared = None;
     Ok(channel)
 }
 
@@ -113,55 +119,11 @@ pub struct UpdateInfo {
     channel_published: bool,
 }
 
-#[derive(Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DownloadProgress {
-    downloaded: u64,
-    total: Option<u64>,
-    error: Option<String>,
-}
-
-#[derive(Default)]
-pub struct UpdateProgress(std::sync::Mutex<DownloadProgress>);
-
 #[tauri::command]
-pub fn get_update_progress(
-    progress: State<'_, UpdateProgress>,
-) -> Result<DownloadProgress, String> {
-    progress
-        .0
-        .lock()
-        .map(|value| value.clone())
-        .map_err(|_| "Update progress is unavailable".to_string())
-}
-
-pub fn can_close_progress(app: &AppHandle) -> bool {
-    app.state::<UpdateProgress>()
-        .0
-        .lock()
-        .is_ok_and(|value| value.error.is_some())
-}
-
-pub fn reset_progress(app: &AppHandle) {
-    publish_progress(app, DownloadProgress::default());
-}
-
-fn publish_progress(app: &AppHandle, progress: DownloadProgress) {
-    if let Ok(mut current) = app.state::<UpdateProgress>().0.lock() {
-        *current = progress.clone();
-    }
-    let _ = app.emit("gateway://update-progress", progress);
-}
-
-#[tauri::command]
-pub async fn check_update(
+pub async fn prepare_update(
     app: AppHandle,
-    pending: State<'_, PendingUpdate>,
+    prepared: State<'_, PreparedUpdate>,
 ) -> Result<UpdateInfo, String> {
-    let mut pending = pending
-        .0
-        .try_lock()
-        .map_err(|_| "An update operation is already in progress")?;
     let enabled = app.config().plugins.0.contains_key("updater");
     let mut info = UpdateInfo {
         enabled,
@@ -172,7 +134,10 @@ pub async fn check_update(
     if !enabled {
         return Ok(info);
     }
-    *pending = None;
+    let mut prepared = prepared
+        .0
+        .try_lock()
+        .map_err(|_| "An update operation is already in progress")?;
     let client = app.state::<Arc<Client>>();
     let channel = get_update_channel(app.clone(), client).await?;
     let channel_name = channel_name(channel);
@@ -200,6 +165,7 @@ pub async fn check_update(
                 .await
                 .map_err(|_| "Could not reach the update channel")?;
             if response.status() == reqwest::StatusCode::NOT_FOUND {
+                *prepared = None;
                 info.channel_published = false;
                 return Ok(info);
             }
@@ -215,54 +181,54 @@ pub async fn check_update(
             != Some(channel_name)
             || !matches_channel(&update.version, channel)
     }) {
+        *prepared = None;
         return Err("The update does not match the selected channel".to_string());
     }
-    *pending = update;
-    info.version = pending.as_ref().map(|update| update.version.clone());
+    let Some(update) = update else {
+        *prepared = None;
+        return Ok(info);
+    };
+    let version = update.version.clone();
+    if prepared
+        .as_ref()
+        .is_some_and(|download| download.channel == channel && download.update.version == version)
+    {
+        info.version = Some(version);
+        return Ok(info);
+    }
+    // Only one release can be installed. Drop an older prepared archive before
+    // downloading the latest release selected by the official updater.
+    *prepared = None;
+    // Tauri verifies the downloaded archive signature before returning the bytes.
+    let bytes = update
+        .download(|_, _| {}, || {})
+        .await
+        .map_err(|_| "The update could not be downloaded or verified. Retrying automatically.")?;
+    *prepared = Some(DownloadedUpdate {
+        channel,
+        update,
+        bytes,
+    });
+    info.version = Some(version);
     Ok(info)
 }
 
 #[tauri::command]
-pub async fn install_update(
+pub async fn restart_to_update(
     app: AppHandle,
-    pending: State<'_, PendingUpdate>,
+    prepared: State<'_, PreparedUpdate>,
     client: State<'_, Arc<Client>>,
 ) -> Result<(), String> {
-    let result = install(app.clone(), pending, client).await;
-    if let Err(error) = &result {
-        publish_progress(
-            &app,
-            DownloadProgress {
-                error: Some(error.clone()),
-                ..Default::default()
-            },
-        );
-    }
-    result
-}
-
-async fn install(
-    app: AppHandle,
-    pending: State<'_, PendingUpdate>,
-    client: State<'_, Arc<Client>>,
-) -> Result<(), String> {
-    let mut pending = pending
+    let mut prepared = prepared
         .0
         .try_lock()
         .map_err(|_| "An update operation is already in progress")?;
-    let update = pending
-        .take()
-        .ok_or("Check for an update before installing")?;
-    let mut downloaded = 0_u64;
-    // The official plugin verifies the archive signature before returning these bytes.
-    let bytes = update.download(|chunk, total| {
-        downloaded = downloaded.saturating_add(chunk as u64);
-        publish_progress(&app, DownloadProgress { downloaded, total, error: None });
-    }, || {}).await.map_err(|_| "The update could not be downloaded or its signature could not be verified. Check for updates to retry.")?;
+    let download = prepared.take().ok_or("The update is not ready yet")?;
+    drop(prepared);
     let client = client.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         client.install_update(|| {
-            update.install(bytes).map_err(|_| {
+            download.update.install(download.bytes).map_err(|_| {
                 "Installation failed. Protection is stopped; check for updates to retry."
                     .to_string()
             })
