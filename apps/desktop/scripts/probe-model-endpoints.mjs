@@ -30,6 +30,7 @@ function checks(reason) {
 
 function retainConclusive(previous, current) {
   if (!previous || current.status !== "inconclusive" || previous.status === "inconclusive") return current;
+  if (previous.httpStatus && (previous.httpStatus < 200 || previous.httpStatus >= 300)) return previous;
   return {
     ...previous,
     reason: `retained_previous_${previous.status}_after_${current.reason}`,
@@ -400,7 +401,7 @@ export async function probe({ endpoint, key, modelIds = [], surfaceNames = surfa
               const resumed = await request(model, surface, toolResultPayload(model, surface, toolStream.body, reasoningEffort));
               capabilityChecks.toolResult = withHttpStatus(
                 resumed.result.status === "supported" && (resumed.temporary || hasText(surface, resumed.body))
-                  ? supported(resumed.result.reason === "valid_response" ? "valid_tool_result_response" : resumed.result.reason)
+                  ? supported(resumed.temporary ? resumed.result.reason : "valid_tool_result_response")
                   : resumed.result.status === "supported" ? unknown("no_tool_result_text") : resumed.result,
                 resumed.httpStatus,
               );

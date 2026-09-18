@@ -244,15 +244,31 @@ fn inventory_refresh_updates_active_catalog_without_rotating_credentials() {
             .join(if cfg!(windows) { "pi.exe" } else { "pi" }),
         "test cli",
     );
-    let mut catalog = catalog();
+    let inventory = crate::catalog::EndpointInventory::bundled().unwrap();
+    let value = serde_json::to_value(&inventory).unwrap();
+    let model = value["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| {
+            entry["endpoint"].as_str() == Some("/v1/chat/completions")
+                && entry["status"].as_str() == Some("supported")
+                && entry["checks"].as_object().is_some_and(|checks| {
+                    checks.values().all(|check| check["status"] == "supported")
+                })
+        })
+        .and_then(|entry| entry["model"].as_str())
+        .unwrap();
+    let mut catalog = Catalog::from_remote(
+        &json!({"data": [{"id": model}, {"id": "unprobed/model"}]}),
+        1,
+    )
+    .unwrap();
     let options = ConnectOptions::default();
     apply_connect(&sandbox, agent, &catalog, &options);
     let token = sandbox.projector.tokens.read(agent.id()).unwrap();
     catalog
-        .apply_endpoint_inventory(
-            "https://tee.redpill.ai",
-            &crate::catalog::EndpointInventory::bundled().unwrap(),
-        )
+        .apply_endpoint_inventory("https://tee.redpill.ai", &inventory)
         .unwrap();
     assert!(sandbox
         .projector

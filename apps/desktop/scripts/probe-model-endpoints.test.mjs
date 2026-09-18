@@ -103,6 +103,7 @@ test("full probes consume chunked SSE and publish only observations, not respons
   for (const result of report.results) {
     assert.equal(result.status, "supported");
     assert.deepEqual(Object.values(result.checks).map(check => check.status), ["supported", "supported", "supported"]);
+    assert.equal(result.checks.toolResult.reason, "valid_tool_result_response");
   }
   assert.doesNotMatch(JSON.stringify(report), /test-private-key|call-1|probe_echo/);
 });
@@ -182,12 +183,13 @@ test("temporary server responses keep agent surfaces available", async () => {
 test("inconclusive refreshes retain prior conclusive capability evidence", async () => {
   const prior = {
     schemaVersion: 2, endpoint: "https://tee.redpill.ai", checkedAt: "2026-09-15T00:00:00Z",
-    results: surfaces.map(surface => ({
-      model: "model-a", endpoint: `/v1/${surface}`, status: "supported", reason: "valid_response", httpStatus: 200,
+    results: surfaces.map((surface, index) => ({
+      model: "model-a", endpoint: `/v1/${surface}`, status: "supported",
+      reason: index === 0 ? "temporary_server_error" : "valid_response", httpStatus: index === 0 ? 503 : 200,
       checks: {
-        streaming: { status: "supported", reason: "valid_event_stream", httpStatus: 200 },
-        tools: { status: "supported", reason: "valid_streamed_tool_call", httpStatus: 200 },
-        toolResult: { status: "supported", reason: "valid_tool_result_response", httpStatus: 200 },
+        streaming: { status: "supported", reason: index === 0 ? "temporary_server_error" : "valid_event_stream", httpStatus: index === 0 ? 503 : 200 },
+        tools: { status: "supported", reason: index === 0 ? "temporary_server_error" : "valid_streamed_tool_call", httpStatus: index === 0 ? 503 : 200 },
+        toolResult: { status: "supported", reason: index === 0 ? "temporary_server_error" : "valid_tool_result_response", httpStatus: index === 0 ? 503 : 200 },
       },
     })),
   };
@@ -200,7 +202,9 @@ test("inconclusive refreshes retain prior conclusive capability evidence", async
   assert.equal(report.results.length, 3);
   for (const result of report.results) {
     assert.equal(result.status, "supported");
-    assert.match(result.reason, /^retained_previous_supported_after_network_timeout_or_invalid_response$/);
+    assert.equal(result.reason, result.httpStatus === 503
+      ? "temporary_server_error"
+      : "retained_previous_supported_after_network_timeout_or_invalid_response");
     assert.equal(result.checks.streaming.status, "supported");
   }
 });

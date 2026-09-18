@@ -81,19 +81,20 @@ fn observations_are_scoped_and_never_add_unlisted_models() {
             .agent_surfaces
             .as_ref()
             .is_some_and(Vec::is_empty));
-        assert_eq!(
-            catalog
-                .for_agent_surface(Surface::ChatCompletions)
-                .models
-                .len(),
-            2
-        );
-        assert_eq!(catalog.for_surface(Surface::Responses).models.len(), 1);
-        assert_eq!(catalog.for_surface(Surface::Messages).models.len(), 2);
-        assert_eq!(
-            catalog.for_surface(Surface::ChatCompletions).models.len(),
-            2
-        );
+        for surface in [
+            Surface::ChatCompletions,
+            Surface::Messages,
+            Surface::Responses,
+        ] {
+            assert!(catalog
+                .for_surface(surface)
+                .get("new-unprobed-model")
+                .is_none());
+            assert!(catalog
+                .for_agent_surface(surface)
+                .get("new-unprobed-model")
+                .is_none());
+        }
     }
     for endpoint in [
         "https://example.com",
