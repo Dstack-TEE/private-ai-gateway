@@ -316,29 +316,6 @@ jobs:
           printf '%s' "$APPLE_API_PRIVATE_KEY" > "$key_path"
           echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
 
-      - name: Prepare Windows package
-        if: runner.os == 'Windows'
-        working-directory: apps/desktop
-        run: npm run dist:prepare
-
-      - name: Sign bundled Windows executables
-        if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE_THUMBPRINT != ''
-        working-directory: apps/desktop
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $architecture = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
-          $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\$architecture\signtool.exe" |
-            Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
-            Select-Object -First 1
-          if (!$signTool) { throw "Windows SignTool was not found for $architecture" }
-          $binaries = @(Get-ChildItem 'src-tauri/binaries/*.exe')
-          if ($binaries.Count -ne 3) { throw "Expected three bundled Windows executables, found $($binaries.Count)" }
-          foreach ($binary in $binaries) {
-            & $signTool.FullName sign /sha1 $env:WINDOWS_CERTIFICATE_THUMBPRINT /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $binary.FullName
-            if ($LASTEXITCODE -ne 0) { throw "SignTool failed for $($binary.Name)" }
-          }
-
       - name: Build production macOS package
         if: runner.os == 'macOS' && inputs.release_version != ''
         working-directory: apps/desktop
@@ -366,7 +343,7 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.release_version && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.release_version && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
-        run: npm run dist:bundle -- --bundles ${{ matrix.bundles }}
+        run: npm run dist -- --bundles ${{ matrix.bundles }}
 
       - name: Build Linux package
         if: runner.os == 'Linux'
@@ -468,17 +445,17 @@ jobs:
         run: |
           set -euo pipefail
           version="${DESKTOP_RELEASE_VERSION:-0.1.0}"
-          deb=(release/private-ai-proxy-cli_*.deb)
-          rpm=(release/private-ai-proxy-cli-*.rpm)
-          test "${#deb[@]}" -eq 1
-          test "${#rpm[@]}" -eq 1
+          deb="release/private-ai-proxy-cli-${version}-linux-${{ matrix.cli_arch }}.deb"
+          rpm="release/private-ai-proxy-cli-${version}-linux-${{ matrix.cli_arch }}.rpm"
+          test -f "$deb"
+          test -f "$rpm"
           scratch="$(mktemp -d "$RUNNER_TEMP/cli-native.XXXXXX")"
           trap 'rm -rf "$scratch"' EXIT
           mkdir "$scratch/deb" "$scratch/rpm"
-          dpkg-deb -x "${deb[0]}" "$scratch/deb"
+          dpkg-deb -x "$deb" "$scratch/deb"
           node scripts/cli-package-smoke.mjs "$scratch/deb/usr/libexec/private-ai-proxy" "$version" "$scratch/deb/usr/bin"
           test "$(readlink "$scratch/deb/usr/bin/private-ai-proxy")" = ../libexec/private-ai-proxy/private-ai-proxy
-          (cd "$scratch/rpm" && rpm2cpio "$GITHUB_WORKSPACE/apps/desktop/${rpm[0]}" | cpio -idm --quiet)
+          (cd "$scratch/rpm" && rpm2cpio "$GITHUB_WORKSPACE/apps/desktop/$rpm" | cpio -idm --quiet)
           node scripts/cli-package-smoke.mjs "$scratch/rpm/usr/libexec/private-ai-proxy" "$version" "$scratch/rpm/usr/bin"
           test "$(readlink "$scratch/rpm/usr/bin/private-ai-proxy")" = ../libexec/private-ai-proxy/private-ai-proxy
 
@@ -736,7 +713,6 @@ jobs:
             apps/desktop/release/*.dmg
             apps/desktop/release/*.app.tar.gz*
             apps/desktop/release/private-ai-proxy-cli-*
-            apps/desktop/release/private-ai-proxy-cli_*
             ${{ env.PAP_BUNDLE_DIR }}/nsis/*.exe
             ${{ env.PAP_BUNDLE_DIR }}/deb/*.deb
             ${{ env.PAP_BUNDLE_DIR }}/deb/*.sig
@@ -793,10 +769,11 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_PLATFORMS: ${{ inputs.release_platforms || 'all' }}
           RELEASE_SUMMARY: ${{ inputs.release_summary || '' }}
         run: |
           set -euo pipefail
-          node apps/desktop/scripts/create-update-manifest.mjs release-artifacts "$VERSION" "$GITHUB_REPOSITORY" "$CHANNEL" "${{ inputs.release_platforms || 'all' }}"
+          node apps/desktop/scripts/create-update-manifest.mjs release-artifacts "$VERSION" "$GITHUB_REPOSITORY" "$CHANNEL" "$RELEASE_PLATFORMS"
           node apps/desktop/scripts/release-assets.mjs release-artifacts > release-assets.list
           mapfile -d '' assets < release-assets.list
           node apps/desktop/scripts/release-notes.mjs release-artifacts "$GITHUB_REPOSITORY" "$GITHUB_SHA" > release-notes.md

@@ -2,16 +2,23 @@ import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { desktopBuilds, desktopBuildId } from "./release-artifacts.mjs";
 import { releaseChannel } from "./release-channel.mjs";
 
-const platforms = [
-  { platform: "macos", arch: "arm64", title: "macOS Apple Silicon" },
-  { platform: "macos", arch: "x64", title: "macOS Intel" },
-  { platform: "windows", arch: "x64", title: "Windows x64" },
-  { platform: "windows", arch: "arm64", title: "Windows ARM64" },
-  { platform: "linux", arch: "x64", title: "Linux x64" },
-  { platform: "linux", arch: "arm64", title: "Linux ARM64" },
-];
+const platformTitles = {
+  "macos-arm64": "macOS Apple Silicon",
+  "macos-x64": "macOS Intel",
+  "windows-x64": "Windows x64",
+  "windows-arm64": "Windows ARM64",
+  "linux-x64": "Linux x64",
+  "linux-arm64": "Linux ARM64",
+};
+const platforms = desktopBuilds.map(({ platform, arch }) => {
+  const id = desktopBuildId({ platform, arch });
+  const title = platformTitles[id];
+  if (!title) throw new Error(`Missing release-note title for ${id}`);
+  return { platform, arch, title };
+});
 const installerExtensions = [".dmg", ".exe", ".deb", ".rpm"];
 const portableExtensions = [".zip", ".tar.gz"];
 

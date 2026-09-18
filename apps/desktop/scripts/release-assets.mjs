@@ -3,7 +3,6 @@ import { readdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { releaseChannel } from "./release-channel.mjs";
 import { artifactName, desktopBuilds, desktopPackages } from "./release-artifacts.mjs";
-import { releaseVersionParts } from "./package-cli.mjs";
 
 const [directory] = process.argv.slice(2);
 if (!directory) throw new Error("Supply the release artifact directory");
@@ -49,18 +48,12 @@ function releaseAssetNames(version) {
       cli: true,
     });
     names.set(archive, archive);
-  }
-
-  const { deb } = releaseVersionParts(version);
-  for (const [packageArch, arch] of [["amd64", "x64"], ["arm64", "arm64"]]) {
-    const canonical = artifactName({ version, platform: "linux", arch, suffix: ".deb", cli: true });
-    names.set(canonical, canonical);
-    names.set(`private-ai-proxy-cli_${deb}_${packageArch}.deb`, canonical);
-  }
-  for (const [packageArch, arch] of [["x86_64", "x64"], ["aarch64", "arm64"]]) {
-    const canonical = artifactName({ version, platform: "linux", arch, suffix: ".rpm", cli: true });
-    names.set(canonical, canonical);
-    names.set(`private-ai-proxy-cli-${version}.${packageArch}.rpm`, canonical);
+    if (platform === "linux") {
+      for (const suffix of [".deb", ".rpm"]) {
+        const nativePackage = artifactName({ version, platform, arch, suffix, cli: true });
+        names.set(nativePackage, nativePackage);
+      }
+    }
   }
   return names;
 }

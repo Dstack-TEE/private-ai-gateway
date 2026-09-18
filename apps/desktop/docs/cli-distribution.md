@@ -99,13 +99,16 @@ test packages only; `package_only` cannot be combined with a version.
   is shared with ACI client releases. Beta and stable updater feeds remain
   independent.
 
-`release_summary` accepts Markdown paragraphs or list items, not headings.
+`release_summary` accepts Markdown paragraphs or list items, not headings. Pass
+multiline summaries with `gh workflow run -f release_summary="$summary"`; the
+GitHub Actions form exposes this input as a single-line field.
 Windows Authenticode signing is optional. When `WINDOWS_CERTIFICATE` (a base64
 PFX) and `WINDOWS_CERTIFICATE_PASSWORD` are configured in the protected
-environment, CI imports the certificate only for the Windows package job, signs
-bundled executables before NSIS packaging, verifies the installer and installed
-executables, and removes the certificate afterward. Unsigned Windows builds are
-valid release artifacts but may trigger stronger SmartScreen warnings.
+environment, CI imports the certificate only for the Windows package job. Tauri
+signs the application, bundled executables, and NSIS installer during packaging;
+CI verifies the resulting signatures and removes the certificate afterward.
+Unsigned Windows builds are valid release artifacts but may trigger stronger
+SmartScreen warnings.
 
 ## Updates
 

@@ -16,8 +16,6 @@
     "dev": "npm run prepare:brand && npm run build:sidecars:debug && tauri dev --config src-tauri/tauri.brand.conf.json",
     "dev:renderer": "npm run prepare:brand && vite --host 127.0.0.1 --port 1420",
     "dist": "node scripts/dist.mjs",
-    "dist:prepare": "node scripts/dist.mjs --prepare-only",
-    "dist:bundle": "node scripts/dist.mjs --bundle-only",
     "test:probe": "node --test scripts/probe-model-endpoints.test.mjs",
     "test:release": "node --test scripts/create-update-manifest.test.mjs scripts/package-cli.test.mjs scripts/release-channel.test.mjs scripts/release-notes.test.mjs"
   },

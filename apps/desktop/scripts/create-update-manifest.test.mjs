@@ -5,7 +5,6 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
-import { releaseVersionParts } from "./package-cli.mjs";
 import { artifactName, desktopPackages, desktopTargets, manifestTargets } from "./release-artifacts.mjs";
 import { updateFeeds } from "./update-feeds.mjs";
 
@@ -38,9 +37,8 @@ test(`${channel} manifests use signed platform artifacts and reject incomplete r
       await writeFile(path.join(directory, file), "fixture");
       await writeFile(path.join(directory, `${file}.sig`), `${file}-signature\n`);
     }
-    const { deb } = releaseVersionParts(version);
-    await writeFile(path.join(directory, `private-ai-proxy-cli_${deb}_amd64.deb`), "cli fixture");
-    await writeFile(path.join(directory, `private-ai-proxy-cli-${version}.x86_64.rpm`), "cli fixture");
+    await writeFile(path.join(directory, `private-ai-proxy-cli-${version}-linux-x64.deb`), "cli fixture");
+    await writeFile(path.join(directory, `private-ai-proxy-cli-${version}-linux-x64.rpm`), "cli fixture");
     await run();
     const manifest = JSON.parse(await readFile(path.join(directory, "latest.json"), "utf8"));
     assert.equal(manifest.version, version);
@@ -82,8 +80,8 @@ test(`${channel} manifests use signed platform artifacts and reject incomplete r
       assert.ok(selected.includes(`private-ai-proxy-${version}-macos-${arch}.dmg`));
       assert.ok((await readFile(path.join(directory, "SHA256SUMS"), "utf8")).includes(`  private-ai-proxy-${version}-macos-${arch}.dmg\n`));
     }
-    assert.ok(!selected.some((file) => file.endsWith(".sig") || file === "duplicate-app.zip" || file.startsWith("private-ai-proxy-cli_")));
-    await writeFile(path.join(directory, "private-ai-proxy-cli_9.9.9_amd64.deb"), "wrong version");
+    assert.ok(!selected.some((file) => file.endsWith(".sig") || file === "duplicate-app.zip"));
+    await writeFile(path.join(directory, "private-ai-proxy-cli-9.9.9-linux-x64.deb"), "wrong version");
     await assert.rejects(selectAssets(), /does not match version/);
     await rm(path.join(directory, `private-ai-proxy-${version}-linux-x64.rpm.sig`));
     await assert.rejects(run);
