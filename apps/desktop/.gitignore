@@ -2,6 +2,7 @@
 /node_modules/
 /brand/.generated/
 /release/
+/target/
 /gateway/target/
 /runtime/target/
 /src-tauri/binaries/*

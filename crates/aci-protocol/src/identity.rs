@@ -7,13 +7,13 @@
 
 use serde_json::Value;
 
-use super::digest;
+use crate::digest;
 
 /// Purpose tag embedded in the attestation statement (§3.2).
-const REPORT_DATA_PURPOSE: &str = "aci.report_data.v1";
+pub const REPORT_DATA_PURPOSE: &str = "aci.report_data.v1";
 
 /// Exact nonce length: a 32-byte value as lowercase hex (§3.2).
-const NONCE_LEN: usize = 64;
+pub const NONCE_LEN: usize = 64;
 
 /// A statement input violates the escape-free template constraints (§3.2).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -31,7 +31,7 @@ pub fn workload_keyset_digest(keyset: &Value) -> Result<String, digest::JcsError
 
 /// True when `nonce` is exactly 64 lowercase hex characters — a 32-byte
 /// value (§3.2). Hex-only input keeps the statement template escape-free.
-fn is_valid_nonce(nonce: &str) -> bool {
+pub fn is_valid_nonce(nonce: &str) -> bool {
     nonce.len() == NONCE_LEN
         && nonce
             .bytes()
@@ -80,7 +80,7 @@ pub fn report_data(statement: &[u8]) -> [u8; 32] {
 
 /// Place the 32-byte `report_data` in a 64-byte TEE report-data slot:
 /// digest in bytes 0–31, zero in bytes 32–63 (§3.2).
-pub(crate) fn report_data_slot(report_data: [u8; 32]) -> [u8; 64] {
+pub fn report_data_slot(report_data: [u8; 32]) -> [u8; 64] {
     let mut out = [0u8; 64];
     out[..32].copy_from_slice(&report_data);
     out

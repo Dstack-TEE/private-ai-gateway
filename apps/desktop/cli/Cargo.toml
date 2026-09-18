@@ -32,6 +32,7 @@ path = "service.rs"
 required-features = ["managed-client"]
 
 [dependencies]
+aci-protocol = { path = "../../../crates/aci-protocol" }
 async-stream = { version = "0.3", optional = true }
 axum = { version = "0.7", optional = true }
 base64 = "0.22"

@@ -45,10 +45,11 @@ boot measurements. See
 ## Where verification lives
 
 Every relying-party verification step lives in this package's `aci/` modules:
-quote appraisal, the §9.1(2) binding chain, §3.1 TLS selection, receipt
-signatures, and JCS digests. The CLI maps those outcomes to a pass, fail, or
-honest skip. It interoperates with gateways through the ACI wire protocol and
-does not import a gateway implementation.
+quote appraisal, the §9.1(2) binding chain, §3.1 TLS selection, and receipt
+signatures. The neutral `aci-protocol` crate supplies only wire types, JCS,
+attestation-statement construction, and receipt canonicalization. The CLI maps
+verification outcomes to a pass, fail, or honest skip and does not import a
+gateway implementation.
 
 Differences that are deliberate — the CLI's honest skips, and checks only a
 relying party can run — are recorded in

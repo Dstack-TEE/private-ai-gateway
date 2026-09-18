@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use super::digest;
+use crate::digest;
 
 /// Return the canonical bytes covered by an ACI receipt signature: the
 /// document without its `signature` member, encoded as JCS (§7.2).

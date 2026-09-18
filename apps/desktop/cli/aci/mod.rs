@@ -1,9 +1,6 @@
 //! ACI relying-party protocol, verification, and audit primitives.
 
-pub mod digest;
-pub mod identity;
+pub use aci_protocol::{digest, identity, receipt, types};
 pub mod keys;
-pub mod receipt;
 pub mod tls;
-pub mod types;
 pub mod verifier;

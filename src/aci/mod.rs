@@ -1,16 +1,13 @@
-//! ACI core: protocol-bearing math and types.
+//! Gateway-side ACI implementation.
 //!
-//! Nothing in this module depends on the HTTP framework, the upstream
-//! client, or the dstack SDK. The launcher and any other host should
-//! be able to consume the public re-exports as the authoritative
-//! source of ACI digest formulas, attestation binding, and receipt
-//! construction.
+//! Wire types and deterministic encoding come from the neutral
+//! `aci-protocol` crate. This module adds Gateway-owned key custody, receipt
+//! production, upstream verification, and transport behavior.
 
-pub mod digest;
+pub use aci_protocol::{digest, types};
 pub mod e2ee;
 pub mod identity;
 pub mod keys;
 pub mod receipt;
-pub mod types;
 pub mod upstream;
 pub mod verifier;

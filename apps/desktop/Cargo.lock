@@ -3,6 +3,17 @@
 version = 4
 
 [[package]]
+name = "aci-protocol"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "aes"
 version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2444,6 +2455,7 @@ dependencies = [
 name = "private-ai-proxy"
 version = "0.1.0"
 dependencies = [
+ "aci-protocol",
  "async-stream",
  "axum",
  "base64 0.22.1",

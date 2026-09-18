@@ -12,9 +12,8 @@ use serde_json::Value;
 // ---------- §5.3 Serving constraints ----------
 
 /// Members of the request body's `provider` object that state serving
-/// constraints. The gateway's parser and the `aci` client both name them from
-/// here: an unrecognized `aci_`-prefixed member is refused, so a rename on one
-/// side alone would silently break the constraint end to end.
+/// constraints. An unrecognized `aci_`-prefixed member is refused, so all
+/// implementations use these published wire names.
 pub const PROVIDER_ACI_VERIFIED: &str = "aci_verified";
 pub const PROVIDER_ACI_SESSION_IDS: &str = "aci_session_ids";
 
@@ -61,7 +60,7 @@ impl WorkloadKeyset {
     /// Whether the keyset has expired at `now_secs` (§3.1): `not_after` is
     /// the first second a verifier stops accepting it.
     ///
-    /// Shared so the two verifiers cannot disagree on the boundary.
+    /// Shared so protocol implementations cannot disagree on the boundary.
     pub fn is_expired_at(&self, now_secs: u64) -> bool {
         now_secs >= self.not_after
     }
@@ -70,8 +69,8 @@ impl WorkloadKeyset {
     /// `domain` is unrestricted, and one with a `domain` applies only to that
     /// hostname. Comparison is case-insensitive and ignores a trailing dot.
     ///
-    /// Both verifiers select candidates through this so they cannot disagree
-    /// about which attested SPKI a hostname may present.
+    /// Protocol implementations select candidates through this rule so they
+    /// cannot disagree about which attested SPKI a hostname may present.
     pub fn tls_keys_for_host(&self, host: &str) -> Vec<&TlsSpki> {
         let host = host.trim().trim_end_matches('.');
         self.tls_public_keys

@@ -624,7 +624,8 @@ events, and metrics model ids.
 ```text
 src/main.rs                    binary entrypoint and runtime config
 src/dstack.rs                  dstack SDK KMS key provider and quote provider
-src/aci/                       gateway ACI wire types, keys, receipts, upstreams
+crates/aci-protocol/           shared ACI wire types and deterministic encoding
+src/aci/                       gateway ACI keys, receipts, verification, upstreams
 src/aggregator/service.rs      report, forwarding, E2EE, receipt finalization
 src/aggregator/upstream_config.rs runtime upstream config and provider adapters
 src/http/app.rs                Axum HTTP routers and middleware/backend wiring

@@ -1,3 +1,8 @@
+[workspace]
+members = ["crates/aci-protocol"]
+default-members = ["."]
+resolver = "2"
+
 [package]
 name = "private-ai-gateway"
 version = "0.1.0"
@@ -14,6 +19,7 @@ name = "private-ai-gateway"
 path = "src/main.rs"
 
 [dependencies]
+aci-protocol = { path = "crates/aci-protocol" }
 # Canonical-JSON, types, and serialization.
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

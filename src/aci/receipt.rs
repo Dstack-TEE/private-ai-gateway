@@ -11,6 +11,7 @@ use serde_json::{Map, Value};
 
 use super::digest;
 use super::keys::{KeyError, KeyProvider, ALGO_ED25519};
+pub use aci_protocol::receipt::receipt_signing_input;
 
 pub const RECEIPT_API_VERSION: &str = "aci/1";
 
@@ -169,16 +170,6 @@ impl SignedReceipt {
     pub fn document_json(&self) -> Result<Value, serde_json::Error> {
         serde_json::from_slice(&self.document)
     }
-}
-
-/// The bytes a receipt signature covers (§7.2): the document without its
-/// `signature` member, in JCS form.
-pub fn receipt_signing_input(document: &Value) -> Result<Vec<u8>, digest::JcsError> {
-    let mut unsigned = document.clone();
-    if let Some(obj) = unsigned.as_object_mut() {
-        obj.remove("signature");
-    }
-    digest::jcs_bytes(&unsigned)
 }
 
 /// Assemble a receipt event log inside the TEE.

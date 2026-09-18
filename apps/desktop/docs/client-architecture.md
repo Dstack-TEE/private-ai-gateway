@@ -20,16 +20,17 @@ commands. Management command execution and output live in
 There is one PAP user-facing executable and one PAP relying-party verifier.
 Desktop integration adds lifecycle events for process integration and post-delivery receipt auditing.
 The Private AI Proxy package owns the user-facing CLI, its managed service binary,
-and the ACI library modules under `apps/desktop/cli/aci`. Its managed-client
-feature adds the desktop runtime only for the executable targets.
+and its relying-party ACI modules under `apps/desktop/cli/aci`; shared protocol
+encoding lives in `crates/aci-protocol`. Its managed-client feature adds the
+desktop runtime only for the executable targets.
 
 Private AI Gateway and Private AI Proxy are independent projects. Gateway owns
 its service-side ACI implementation; PAP owns its relying-party verification,
-audit, and local-proxy implementation. Neither Rust package imports the other,
-their tests do not reach across project directories, and each project has its own
-workspace and lockfile. They interoperate only through the published ACI and HTTP
-wire protocols. The `aci` command remains an alias of the single
-`private-ai-proxy` CLI, not a separate executable or crate.
+audit, and local-proxy implementation. Neither Rust package imports the other;
+both depend on the neutral `aci-protocol` crate for wire types and deterministic
+encoding only. Verification policy and security decisions are not shared, and
+each project retains its own workspace and lockfile. The `aci` command remains
+an alias of the single `private-ai-proxy` CLI, not a separate executable or crate.
 
 `private-ai-proxy verify/audit/sessions/send` do not initialize the managed backend or
 credential store. `private-ai-proxy serve` streams responses immediately and

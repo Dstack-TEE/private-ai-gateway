@@ -10,8 +10,8 @@ The desktop product and the remote Private AI Gateway are independent projects:
   receipt production.
 - Proxy owns local profiles, relying-party verification, post-delivery receipt
   audits, agent configuration, usage history, and desktop lifecycle.
-- They share no Rust packages or lockfile. They interoperate only through the
-  published ACI and HTTP wire protocols.
+- They share only the neutral `aci-protocol` wire types and canonical encoding
+  crate. Producer logic and relying-party verification remain independent.
 
 The user-facing command is `private-ai-proxy`. `pap` and `aci` are aliases to
 that same executable, not separate binaries or crates.
@@ -33,6 +33,7 @@ that same executable, not separate binaries or crates.
 | `runtime` | Persistent backend, profiles, sessions, IPC, lifecycle, usage |
 | `gateway` | Local inference API and reversible agent configuration |
 | `cli` | Unified CLI, ACI relying-party verifier, and local streaming proxy |
+| `../../crates/aci-protocol` | Shared ACI wire types and deterministic encoding rules |
 | `brand` | Source branding and icon assets |
 | `scripts` | Reproducible build, packaging, release, and endpoint-probe tooling |
 
