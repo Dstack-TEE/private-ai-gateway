@@ -8,8 +8,11 @@ const UsagePlot = lazy(() => import("./usage-chart-plot"));
 export function modelChartData(page: Pick<UsagePage, "modelSeries" | "series"> & Partial<Pick<UsagePage, "models">>, range: string, metric: UsageMetric, bounds?: { start?: Date; end?: Date }) {
   const amount = (point: UsagePage["modelSeries"][number]) => metric === "cost" ? point.costUsd : metric === "tokens" ? point.tokens : point.requests;
   const totals = new Map<string | null, number>();
-  for (const point of page.modelSeries) totals.set(point.model, (totals.get(point.model) ?? 0) + point.tokens);
-  const models = [...totals.keys()].sort((a, b) => (totals.get(b) ?? 0) - (totals.get(a) ?? 0) || (a ?? "").localeCompare(b ?? ""));
+  for (const point of page.modelSeries) totals.set(point.model, (totals.get(point.model) ?? 0) + amount(point));
+  const models = [...totals.entries()]
+    .filter(([, total]) => total > 0)
+    .sort(([a, aTotal], [b, bTotal]) => bTotal - aTotal || (a ?? "").localeCompare(b ?? ""))
+    .map(([model]) => model);
   const colorDomain = [...new Set([...(page.models ?? []), ...models.filter((model) => model !== null)])].sort();
   const series = models.slice(0, 10).map((model, index) => ({ key: `model${index}`, label: model ?? "Unknown model", color: model === null ? "var(--muted-foreground)" : `var(--chart-${colorDomain.indexOf(model) % 10 + 1})` }));
   if (models.length > 10) series.push({ key: "other", label: "Other", color: "var(--muted-foreground)" });

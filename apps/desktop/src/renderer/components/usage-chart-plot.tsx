@@ -13,7 +13,13 @@ export default memo(function UsagePlot({ rows, series, monthly, metric, formatVa
       <CartesianGrid vertical={false} />
       <XAxis dataKey="period" tickLine={false} axisLine={false} minTickGap={28} tickFormatter={(value: string) => monthly ? value : value.slice(5)} />
       <YAxis width={48} tickLine={false} axisLine={false} tickFormatter={(value: number) => metric === "cost" ? `$${compactNumber.format(value)}` : compactNumber.format(value)} />
-      <ChartTooltip content={<ChartTooltipContent className="max-w-72" formatter={(value, name, item) => <div className="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2"><span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: item.color }} /><span className="min-w-0 break-words text-muted-foreground">{config[String(name)]?.label}</span><span className="font-mono">{formatValue(Number(value))}</span></div>} />} />
+      <ChartTooltip content={({ active, label, payload }) => <ChartTooltipContent
+        active={active}
+        label={label}
+        payload={payload.filter((item) => Number(item.value) !== 0)}
+        className="max-w-72"
+        formatter={(value, name, item) => <div className="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2"><span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: item.color }} /><span className="min-w-0 break-words text-muted-foreground">{config[String(name)]?.label}</span><span className="font-mono">{formatValue(Number(value))}</span></div>}
+      />} />
       <ChartLegend content={<ChartLegendContent className="max-h-24 flex-wrap justify-start overflow-y-auto [&>div]:max-w-full [&>div]:break-all" />} />
       {series.map(({ key, color }) => <Bar key={key} dataKey={key} name={key} stackId="models" fill={color} maxBarSize={48} isAnimationActive={false} />)}
     </BarChart>
