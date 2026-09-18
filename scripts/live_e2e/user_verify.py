@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Fetch ACI artifacts and audit them with Private AI Proxy."""
+"""Fetch ACI artifacts for a received response and run `aci audit` on them."""
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import secrets
 import subprocess
 import sys
@@ -31,11 +30,6 @@ def main() -> None:
     parser.add_argument("--request-body", type=Path)
     parser.add_argument("--response-body", type=Path)
     parser.add_argument("--skip-expiry", action="store_true")
-    parser.add_argument(
-        "--aci-bin",
-        default=os.environ.get("ACI_BIN", "aci"),
-        help="installed ACI client command (default: %(default)s)",
-    )
     args = parser.parse_args()
 
     if args.report_file and args.receipt_file:
@@ -104,13 +98,8 @@ def run_audit(
     nonce: str | None,
 ) -> int:
     cmd = [
-        args.aci_bin,
-        "audit",
-        "--report",
-        str(report_path),
-        "--receipt",
-        str(receipt_path),
-        "--json",
+        "cargo", "run", "--quiet", "--bin", "aci", "--",
+        "audit", "--report", str(report_path), "--receipt", str(receipt_path), "--json",
     ]
     if nonce:
         cmd.extend(["--nonce", nonce])

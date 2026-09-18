@@ -85,7 +85,7 @@ uv run python scripts/live_e2e/user_verify.py \
   --chat-id chatcmpl-... \
   --request-body request.json \
   --response-body response.json
-aci audit \
+cargo run --bin aci -- audit \
   --report report.json \
   --receipt receipt.json \
   --nonce nonce-used-for-report \

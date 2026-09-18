@@ -1,0 +1,10 @@
+/dist/
+/node_modules/
+/brand/.generated/
+/release/
+/gateway/target/
+/runtime/target/
+/src-tauri/binaries/*
+/src-tauri/icons/Assets.car
+/src-tauri/target/
+/src-tauri/tauri.brand.conf.json
