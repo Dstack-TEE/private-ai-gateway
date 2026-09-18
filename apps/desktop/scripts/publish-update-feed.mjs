@@ -47,8 +47,9 @@ for (const [name, candidate] of updateFeeds(manifest, selectedTargets)) {
 if (pending.length) {
   const title = `Private AI Proxy ${release.channel} update feed`;
   const notes = "Signed Private AI Proxy update manifests. This release is maintained by automation.";
-  if (feed) gh("release", "edit", release.feedTag, "--title", title, "--notes", notes, "--prerelease", "--latest=false");
-  else gh("release", "create", release.feedTag, "--target", process.env.GITHUB_SHA, "--title", title, "--notes", notes, "--prerelease", "--latest=false");
+  const releaseFlags = [`--prerelease=${release.prerelease}`, "--latest=false"];
+  if (feed) gh("release", "edit", release.feedTag, "--title", title, "--notes", notes, ...releaseFlags);
+  else gh("release", "create", release.feedTag, "--target", process.env.GITHUB_SHA, "--title", title, "--notes", notes, ...releaseFlags);
   const directory = await mkdtemp(path.resolve(".update-feed-"));
   try {
     const files = [];
