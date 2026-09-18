@@ -99,12 +99,13 @@ test packages only; `package_only` cannot be combined with a version.
   is shared with ACI client releases. Beta and stable updater feeds remain
   independent.
 
-`release_summary` accepts Markdown paragraphs or list items, not headings. Stable
-Windows releases require `WINDOWS_CERTIFICATE` (a base64 PFX) and
-`WINDOWS_CERTIFICATE_PASSWORD` in the protected environment. CI imports the
-certificate only for the Windows package job, signs bundled executables before
-NSIS packaging, verifies the installer and installed executables, and removes
-the certificate afterward.
+`release_summary` accepts Markdown paragraphs or list items, not headings.
+Windows Authenticode signing is optional. When `WINDOWS_CERTIFICATE` (a base64
+PFX) and `WINDOWS_CERTIFICATE_PASSWORD` are configured in the protected
+environment, CI imports the certificate only for the Windows package job, signs
+bundled executables before NSIS packaging, verifies the installer and installed
+executables, and removes the certificate afterward. Unsigned Windows builds are
+valid release artifacts but may trigger stronger SmartScreen warnings.
 
 ## Updates
 

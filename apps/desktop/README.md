@@ -181,8 +181,8 @@ Release and updater behavior is documented in
 [CLI distribution](docs/cli-distribution.md) and implemented by
 `.github/workflows/desktop-native.yml`. Published updates use Tauri's signed
 updater artifacts. macOS distribution additionally requires Developer ID
-signing and notarization. Stable Windows releases additionally require an
-Authenticode certificate; CI imports it only for the package job, configures
+signing and notarization. Windows Authenticode signing is optional; when its
+certificate is configured, CI imports it only for the package job, configures
 Tauri with its thumbprint, signs the bundled executables before packaging,
 verifies the installer and installed executables, and removes it afterward.
 

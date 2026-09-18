@@ -239,7 +239,7 @@ jobs:
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci
-      - name: Import Windows code-signing certificate
+      - name: Import optional Windows code-signing certificate
         if: runner.os == 'Windows' && inputs.release_version != ''
         shell: pwsh
         env:
@@ -250,9 +250,6 @@ jobs:
           $hasCertificate = ![string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE)
           $hasPassword = ![string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)
           if ($hasCertificate -ne $hasPassword) { throw 'Set both Windows code-signing secrets or neither' }
-          if ($env:DESKTOP_RELEASE_CHANNEL -eq 'stable' -and !$hasCertificate) {
-            throw 'Stable Windows releases require Authenticode signing'
-          }
           if (!$hasCertificate) { exit 0 }
 
           $certificatePath = Join-Path $env:RUNNER_TEMP 'private-ai-proxy-code-signing.pfx'
