@@ -405,7 +405,7 @@ pub struct ForwardCandidate {
     pub path: &'static str,
 }
 
-/// Inputs needed to verify the selected upstream before forwarding a request.
+/// Provider HTTP statuses that trigger failover to the next candidate when
 #[derive(Debug, Clone)]
 pub struct UpstreamVerificationRequest {
     pub upstream_name: String,
