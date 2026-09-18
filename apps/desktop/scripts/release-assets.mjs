@@ -29,16 +29,15 @@ await writeFile(checksum, sums.join("\n") + "\n");
 process.stdout.write([...normalized, checksum].join("\0") + "\0");
 
 function releaseAssetNames(version) {
-  const names = new Map();
-  names.set("latest.json", "latest.json");
+  const names = new Set(["latest.json"]);
   for (const specification of desktopPackages) {
     const canonical = artifactName({ version, ...specification });
-    names.set(canonical, canonical);
+    names.add(canonical);
   }
   for (const { platform, arch } of desktopBuilds) {
     if (platform === "macos") {
       const diskImage = artifactName({ version, platform, arch, suffix: ".dmg" });
-      names.set(diskImage, diskImage);
+      names.add(diskImage);
     }
     const archive = artifactName({
       version,
@@ -47,11 +46,11 @@ function releaseAssetNames(version) {
       suffix: platform === "windows" ? ".zip" : ".tar.gz",
       cli: true,
     });
-    names.set(archive, archive);
+    names.add(archive);
     if (platform === "linux") {
       for (const suffix of [".deb", ".rpm"]) {
         const nativePackage = artifactName({ version, platform, arch, suffix, cli: true });
-        names.set(nativePackage, nativePackage);
+        names.add(nativePackage);
       }
     }
   }
@@ -60,8 +59,7 @@ function releaseAssetNames(version) {
 
 function releaseAssetName(file, names, version) {
   const name = path.basename(file);
-  const normalized = names.get(name);
-  if (normalized) return normalized;
+  if (names.has(name)) return name;
   if (/^private-ai-proxy(?:-cli)?[-_].*\.(?:dmg|exe|deb|rpm|zip|tar\.gz|app\.tar\.gz)$/.test(name)) {
     throw new Error(`Release asset ${name} does not match version ${version} or a supported platform`);
   }

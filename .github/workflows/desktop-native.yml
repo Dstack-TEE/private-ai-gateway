@@ -337,16 +337,8 @@ jobs:
           APPLE_SIGNING_IDENTITY: '-'
         run: npm run dist -- --bundles ${{ matrix.bundles }}
 
-      - name: Build Windows package
-        if: runner.os == 'Windows'
-        working-directory: apps/desktop
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.release_version && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.release_version && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
-        run: npm run dist -- --bundles ${{ matrix.bundles }}
-
-      - name: Build Linux package
-        if: runner.os == 'Linux'
+      - name: Build non-macOS package
+        if: runner.os != 'macOS'
         working-directory: apps/desktop
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.release_version && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
