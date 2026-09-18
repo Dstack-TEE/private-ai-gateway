@@ -4,19 +4,18 @@ Verify a live ACI deployment yourself. The commands below run against
 `https://api.redpill.ai`, a live deployment of the reference implementation;
 point `ACI_URL` at any ACI service to verify that instead.
 
-You need a Rust toolchain plus `curl`, `jq`, and `openssl`. The `aci` CLI
-lives in this repository:
+You need `aci`, `curl`, `jq`, and `openssl`. Install Private AI Proxy from a
+[desktop or CLI release](https://github.com/Dstack-TEE/private-ai-gateway/releases);
+`aci` is an alias of its unified command-line client. Then select the service:
 
 ```bash
-git clone https://github.com/Dstack-TEE/private-ai-gateway.git
-cd private-ai-gateway
 export ACI_URL=https://api.redpill.ai
 ```
 
 ## 1. Verify the service with one command
 
 ```bash
-cargo run --bin aci -- verify "$ACI_URL"
+aci verify "$ACI_URL"
 ```
 
 The CLI fetches `GET /v1/aci/attestation` with a fresh 32-byte random nonce
@@ -27,7 +26,7 @@ PASS  id-1         hardware quote verifies to TEE vendor root and binds report_d
 PASS  id-2         binding chain: keyset JCS -> digest -> statement for our nonce -> report_data [9.1(2)] — keyset digest sha256:a1b4…c5c6; statement digest for nonce "9b2c…" matches report_data
 PASS  id-3         keyset not expired (now < not_after) [9.1(3)] — now 1783899770 < not_after 1786491770
 PASS  id-4         source provenance connects workload to public code [9.1(4)] — booted compose measured into RTMR3: compose-hash=7c1e…40db; repo=https://github.com/Dstack-TEE/private-ai-gateway.git commit=58b027d… (published, not independently rebuilt)
-SKIP  id-5         private-key custody and subject per policy [9.1(5)] — custody policy not implemented in this CLI yet (see src/aci/verifier/dstack.rs); subject: null (no policy constraints applied)
+SKIP  id-5         private-key custody and subject per policy [9.1(5)] — custody policy not implemented in this CLI yet; subject: null (no policy constraints applied)
 PASS  id-6         the channel actually used is bound to the attested keyset (TLS SPKI or E2EE key) [9.1(6)] — observed SPKI 6ff3…9d21 for api.redpill.ai is in the attested keyset
 
 VERIFIED (5 pass, 1 skipped: custody policy not implemented)
@@ -52,7 +51,7 @@ hashes you accept with `--accept-compose`, repeatable and available on
 `verify`, `send`, `serve` and `audit`:
 
 ```bash
-cargo run --bin aci -- serve "$ACI_URL" --accept-compose 7c1e...40db
+aci serve "$ACI_URL" --accept-compose 7c1e...40db
 ```
 
 For a production deployment, first run a dstack verifier over the report's
@@ -63,7 +62,7 @@ implements this check. Then appraise that hash with the ACI client's production
 allowlist:
 
 ```bash
-cargo run --bin aci -- verify "$ACI_URL" --require-production-os
+aci verify "$ACI_URL" --require-production-os
 ```
 
 The ACI client verifies the DCAP quote and replays RTMR3, but does not perform
@@ -125,13 +124,13 @@ statement bytes, the digests, and the expected values.
 byte. To re-run the checks against saved artifacts:
 
 ```bash
-cargo run --bin aci -- audit --report report.json --nonce "$NONCE"
+aci audit --report report.json --nonce "$NONCE"
 ```
 
 ## 3. Use it as a local endpoint
 
 ```bash
-cargo run --bin aci -- serve "$ACI_URL"
+aci serve "$ACI_URL"
 ```
 
 `aci serve` verifies the service first, prints the transcript, and refuses
@@ -167,13 +166,17 @@ What the proxy does:
   `--allow-unverified` drops the demand.
 - Every upstream connection enforces the attested TLS SPKI pin for the
   hostname and fails closed on a mismatch.
-- Responses stream through byte-exact while the proxy digests the raw wire
-  bytes — bodies are never buffered or stored. Each POST response's receipt
+- Responses always stream through byte-exact while the proxy digests the wire
+  bytes for later audit. Each POST response's receipt
   id and body digests are recorded (the last 256 exchanges), and a 2xx
   inference response with no receipt header is flagged immediately
   ([aci.md](../spec/aci.md) §5.2).
-- Verification runs on demand from the control endpoint on
-  `127.0.0.1:4181`, not per request:
+- Receipt audits run after delivery using the request bearer transiently. They
+  never delay streaming or retract delivered responses.
+  Selecting verified AttestedSessions and enforcing the attested connection
+  remain the pre-delivery checks; receipt checks are retrospective only.
+  The control endpoint on `127.0.0.1:4181` also supports inspection and
+  explicit re-verification:
 
   ```bash
   curl -sS http://127.0.0.1:4181/receipts        # recent exchanges
@@ -192,7 +195,7 @@ To go from trusting the service's own gating to pinning the exact sessions
 you accept, first audit the current attested sessions:
 
 ```bash
-cargo run --bin aci -- sessions "$ACI_URL" --require-claim tee_attested=hardware_proven
+aci sessions "$ACI_URL" --require-claim tee_attested=hardware_proven
 ```
 
 Each current session record is fetched and audited
@@ -202,12 +205,12 @@ claims policy print as `ACCEPTED`. Then pin, either way:
 ```bash
 # Fixed accepted set: requests use its intersection with their own pins, or
 # this set when they supply none. A disjoint request fails locally.
-cargo run --bin aci -- serve "$ACI_URL" --session <session-id>
+aci serve "$ACI_URL" --session <session-id>
 
 # Policy pins: derive the set from the required claims. Refuses to start if
 # nothing qualifies, and refreshes the set when the service refuses a
 # superseded pin (HTTP 412) before retrying the request once.
-cargo run --bin aci -- serve "$ACI_URL" --require-claim tee_attested=hardware_proven
+aci serve "$ACI_URL" --require-claim tee_attested=hardware_proven
 ```
 
 A request that already carries `provider.aci_session_ids` is narrowed to its
@@ -218,7 +221,7 @@ against the pins (§9.3(6)) and the required claims (§9.2(3)).
 
 ```bash
 export ACI_API_KEY=<your api key>
-cargo run --bin aci -- send "$ACI_URL" --prompt "What are you running on?"
+aci send "$ACI_URL" --prompt "What are you running on?"
 ```
 
 `aci send` verifies the service (fail closed), sends one chat completion

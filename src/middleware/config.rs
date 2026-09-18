@@ -34,8 +34,8 @@ pub struct MiddlewareConfig {
     /// the upstream answers and the stream finalizes, the receipt is issued
     /// and fetchable by the response id, but an early-committed stream whose
     /// forward fails never drafts one. Requests carrying an ACI constraint
-    /// (`provider.aci_verified` — the aci CLI's default — or pinned session
-    /// ids) are never committed early: their refusal-receipt and 412
+    /// (`provider.aci_verified` or pinned session ids) are never committed
+    /// early: their refusal-receipt and 412
     /// semantics only exist as HTTP responses. Neither is a candidate that has
     /// already failed once in this request: a same-route retry usually ends in
     /// a relayable HTTP status (429 above all), which an early 200 would

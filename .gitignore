@@ -10,3 +10,14 @@ __pycache__/
 .DS_Store
 clients/pi-provider/packages/*/dist/
 .claude/settings.local.json
+/apps/desktop/dist/
+/apps/desktop/node_modules/
+/apps/desktop/brand/.generated/
+/apps/desktop/src-tauri/tauri.brand.conf.json
+/apps/desktop/src-tauri/icons/Assets.car
+/apps/desktop/release/
+/apps/desktop/src-tauri/binaries/*
+/apps/desktop/gateway/target/
+/apps/desktop/runtime/target/
+/apps/desktop/src-tauri/target/
+/artifacts/
