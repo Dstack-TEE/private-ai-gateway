@@ -302,7 +302,6 @@ pub fn run() {
             commands::settings::get_appearance,
             commands::settings::set_appearance,
             updates::prepare_update,
-            updates::get_update_channel,
             updates::set_update_channel,
             updates::restart_to_update,
             commands::settings::get_launch_preferences,

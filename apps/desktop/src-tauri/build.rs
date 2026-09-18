@@ -14,7 +14,6 @@ fn main() {
         "get_appearance",
         "set_appearance",
         "prepare_update",
-        "get_update_channel",
         "set_update_channel",
         "restart_to_update",
         "get_launch_preferences",

@@ -12,19 +12,14 @@ export function useUpdates(api: DesktopApi) {
   const [operation, setBusy] = useState<"restarting" | "changing">();
   const mounted = useRef(false);
   const inFlight = useRef(false);
-  const readUpdate = useCallback(async () => {
-    const channel = await api.getUpdateChannel();
-    return { channel, info: await api.prepareUpdate() };
-  }, [api]);
+  const readUpdate = useCallback(() => api.prepareUpdate(), [api]);
   const client = useQueryClient();
-  const { data: snapshot, error: checkError, isFetching: checking, refetch } = useQuery<{
-    channel: UpdateChannel; info?: UpdateInfo;
-  }>({ queryKey: ["app-update"], queryFn: readUpdate, enabled: !operation,
+  const { data: snapshot, error: checkError, isFetching: checking, refetch } = useQuery<UpdateInfo>({ queryKey: ["app-update"], queryFn: readUpdate, enabled: !operation,
     refetchInterval: (query) => query.state.error ? 60_000 : 6 * 60 * 60_000, staleTime: 15 * 60_000, retry: false,
   });
   const { data: installedVersion } = useQuery({ queryKey: ["app-version"], queryFn: () => api.getAppVersion(), staleTime: Infinity });
-  const info = checkError && snapshot?.info ? { ...snapshot.info, version: null } : snapshot?.info;
-  const channel = snapshot?.channel;
+  const info = checkError && snapshot ? { ...snapshot, version: null } : snapshot;
+  const channel = info?.channel;
   const currentVersion = installedVersion ?? info?.currentVersion;
   const busy = operation ?? (checking ? "checking" : undefined);
   const error = checkError ? "Could not prepare software updates. Retrying automatically." : undefined;
@@ -45,7 +40,7 @@ export function useUpdates(api: DesktopApi) {
     try {
       const saved = await api.setUpdateChannel(next);
       if (!mounted.current) return;
-      client.setQueryData(["app-update"], { channel: saved });
+      client.setQueryData<UpdateInfo | undefined>(["app-update"], (current) => current ? { ...current, channel: saved, version: null } : current);
       await refresh();
     } catch {
       if (mounted.current) reportError("Could not save update channel.");
@@ -64,8 +59,8 @@ export function useUpdates(api: DesktopApi) {
     try {
       const latest = await refresh();
       if (latest.error) throw latest.error;
-      if (!latest.data?.info?.version) return;
-      if (!await api.confirm({ title: "Restart to update?", message: `Version ${latest.data.info.version} is ready. Protection will stop and connected agent configurations will be restored before the app restarts. In-flight requests may be interrupted.`, confirmLabel: "Restart to update" })) return;
+      if (!latest.data?.version) return;
+      if (!await api.confirm({ title: "Restart to update?", message: `Version ${latest.data.version} is ready. Protection will stop and connected agent configurations will be restored before the app restarts. In-flight requests may be interrupted.`, confirmLabel: "Restart to update" })) return;
       installAttempted = true;
       await api.restartToUpdate();
     } catch (failure) {

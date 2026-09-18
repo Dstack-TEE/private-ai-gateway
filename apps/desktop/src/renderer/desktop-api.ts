@@ -37,7 +37,6 @@ export const desktopApi: DesktopApi = {
   setAppearance: (appearance) => invoke("set_appearance", { appearance }),
   onAppearanceChange: (listener) => subscribe("gateway://appearance", listener),
   getAppVersion: getVersion,
-  getUpdateChannel: () => invoke("get_update_channel"),
   setUpdateChannel: (channel) => invoke("set_update_channel", { channel }),
   prepareUpdate: () => invoke("prepare_update"),
   restartToUpdate: () => invoke("restart_to_update"),

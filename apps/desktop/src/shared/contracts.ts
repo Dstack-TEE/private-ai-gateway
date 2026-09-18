@@ -10,6 +10,7 @@ export type CheckStatus = "pass" | "fail" | "skip" | "info";
 export interface UpdateInfo {
   enabled: boolean;
   currentVersion: string;
+  channel: UpdateChannel;
   version?: string | null;
   channelPublished: boolean;
 }
@@ -330,7 +331,6 @@ export interface DesktopApi {
   setAppearance(appearance: Appearance): Promise<void>;
   onAppearanceChange(listener: (appearance: Appearance) => void): () => void;
   getAppVersion(): Promise<string>;
-  getUpdateChannel(): Promise<UpdateChannel>;
   setUpdateChannel(channel: UpdateChannel): Promise<UpdateChannel>;
   prepareUpdate(): Promise<UpdateInfo>;
   restartToUpdate(): Promise<void>;

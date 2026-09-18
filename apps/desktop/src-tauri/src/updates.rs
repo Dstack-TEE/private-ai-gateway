@@ -67,23 +67,18 @@ fn configured_endpoint(app: &AppHandle) -> Result<String, String> {
         .ok_or_else(|| "Updates are not configured correctly for this build".to_string())
 }
 
-#[tauri::command]
-pub async fn get_update_channel(
-    app: AppHandle,
-    client: State<'_, Arc<Client>>,
-) -> Result<UpdateChannel, String> {
-    let client = client.inner().clone();
+async fn update_channel(app: &AppHandle, client: &Arc<Client>) -> Result<UpdateChannel, String> {
+    let client = client.clone();
+    let default = if app.package_info().version.pre.is_empty() {
+        UpdateChannel::Stable
+    } else {
+        UpdateChannel::Beta
+    };
     crate::run_blocking(move || {
         let saved = client
             .preferences()
             .map_err(|_| "Could not read update preferences")?;
-        Ok(saved.update_channel.unwrap_or_else(|| {
-            if app.package_info().version.pre.is_empty() {
-                UpdateChannel::Stable
-            } else {
-                UpdateChannel::Beta
-            }
-        }))
+        Ok(saved.update_channel.unwrap_or(default))
     })
     .await
 }
@@ -115,6 +110,7 @@ pub async fn set_update_channel(
 pub struct UpdateInfo {
     enabled: bool,
     current_version: String,
+    channel: UpdateChannel,
     version: Option<String>,
     channel_published: bool,
 }
@@ -125,21 +121,23 @@ pub async fn prepare_update(
     prepared: State<'_, PreparedUpdate>,
 ) -> Result<UpdateInfo, String> {
     let enabled = app.config().plugins.0.contains_key("updater");
-    let mut info = UpdateInfo {
-        enabled,
-        current_version: app.package_info().version.to_string(),
-        version: None,
-        channel_published: true,
-    };
-    if !enabled {
-        return Ok(info);
-    }
     let mut prepared = prepared
         .0
         .try_lock()
         .map_err(|_| "An update operation is already in progress")?;
-    let client = app.state::<Arc<Client>>();
-    let channel = get_update_channel(app.clone(), client).await?;
+    let client = app.state::<Arc<Client>>().inner().clone();
+    let channel = update_channel(&app, &client).await?;
+    let mut info = UpdateInfo {
+        enabled,
+        current_version: app.package_info().version.to_string(),
+        channel,
+        version: None,
+        channel_published: true,
+    };
+    if !enabled {
+        *prepared = None;
+        return Ok(info);
+    }
     let channel_name = channel_name(channel);
     let target =
         tauri_plugin_updater::target().ok_or("Updates are unavailable on this platform")?;
