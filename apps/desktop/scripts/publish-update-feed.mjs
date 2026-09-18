@@ -45,7 +45,10 @@ for (const [name, candidate] of updateFeeds(manifest, selectedTargets)) {
   }
 }
 if (pending.length) {
-  if (!feed) gh("release", "create", release.feedTag, "--target", process.env.GITHUB_SHA, "--title", `Desktop ${release.channel} update feed`, "--notes", "Signed desktop update manifest.", "--prerelease", "--latest=false");
+  const title = `Private AI Proxy ${release.channel} update feed`;
+  const notes = "Signed Private AI Proxy update manifests. This release is maintained by automation.";
+  if (feed) gh("release", "edit", release.feedTag, "--title", title, "--notes", notes, "--prerelease", "--latest=false");
+  else gh("release", "create", release.feedTag, "--target", process.env.GITHUB_SHA, "--title", title, "--notes", notes, "--prerelease", "--latest=false");
   const directory = await mkdtemp(path.resolve(".update-feed-"));
   try {
     const files = [];

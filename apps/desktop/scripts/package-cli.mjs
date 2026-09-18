@@ -111,7 +111,7 @@ async function main() {
     if (options.platform === "linux") {
       const packageRoot = path.join(scratch, "package-root");
       await stageLinuxPackageRoot(portable, packageRoot);
-      artifacts.push(await createDeb(options, scratch, packageRoot));
+      artifacts.push(await createDeb(options, packageRoot));
       artifacts.push(await createRpm(options, scratch, portable));
     }
 
@@ -173,11 +173,12 @@ function createArchive(platform, parent, directory, output) {
   }
 }
 
-async function createDeb(options, scratch, packageRoot) {
+async function createDeb(options, packageRoot) {
   const { deb } = releaseVersionParts(options.version);
   const architecture = options.arch === "x64" ? "amd64" : "arm64";
   const controlDir = path.join(packageRoot, "DEBIAN");
   await mkdir(controlDir, { recursive: true });
+  await chmod(controlDir, 0o755);
   const installedSize = Math.max(1, Math.ceil((await treeSize(packageRoot)) / 1024));
   await writeFile(
     path.join(controlDir, "control"),
@@ -185,7 +186,13 @@ async function createDeb(options, scratch, packageRoot) {
   );
   await copyInstallerScript("deb-pre-install.sh", path.join(controlDir, "preinst"));
   await copyInstallerScript("linux-pre-remove.sh", path.join(controlDir, "prerm"));
-  const output = path.join(options.output, `private-ai-proxy-cli_${deb}_${architecture}.deb`);
+  const output = path.join(options.output, artifactName({
+    version: options.version,
+    platform: options.platform,
+    arch: options.arch,
+    suffix: ".deb",
+    cli: true,
+  }));
   execFileSync("dpkg-deb", ["--build", "--root-owner-group", packageRoot, output], { stdio: "inherit" });
   return output;
 }
@@ -215,7 +222,13 @@ async function createRpm(options, scratch, portable) {
   if (!rpm) {
     throw new Error("rpmbuild did not produce an RPM package");
   }
-  const output = path.join(options.output, `private-ai-proxy-cli-${options.version}.${architecture}.rpm`);
+  const output = path.join(options.output, artifactName({
+    version: options.version,
+    platform: options.platform,
+    arch: options.arch,
+    suffix: ".rpm",
+    cli: true,
+  }));
   await copyFile(rpm, output);
   return output;
 }

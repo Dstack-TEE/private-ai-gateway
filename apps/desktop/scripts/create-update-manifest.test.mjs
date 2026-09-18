@@ -30,14 +30,15 @@ for (const [channel, version] of [["stable", "0.1.2"], ["beta", "0.1.2-beta.10"]
 test(`${channel} manifests use signed platform artifacts and reject incomplete releases`, async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "pap-update-manifest-"));
   const run = () => promisify(execFile)(process.execPath, ["scripts/create-update-manifest.mjs", directory, version, "Dstack-TEE/private-ai-gateway", channel]);
+  const selectAssets = () => promisify(execFile)(process.execPath, ["scripts/release-assets.mjs", directory]);
   try {
     for (const specification of desktopPackages) {
       const file = artifactName({ version, ...specification });
       await writeFile(path.join(directory, file), "fixture");
       await writeFile(path.join(directory, `${file}.sig`), `${file}-signature\n`);
     }
-    await writeFile(path.join(directory, "private-ai-proxy-cli_0.1.2_amd64.deb"), "cli fixture");
-    await writeFile(path.join(directory, "private-ai-proxy-cli-0.1.2.x86_64.rpm"), "cli fixture");
+    await writeFile(path.join(directory, `private-ai-proxy-cli-${version}-linux-x64.deb`), "cli fixture");
+    await writeFile(path.join(directory, `private-ai-proxy-cli-${version}-linux-x64.rpm`), "cli fixture");
     await run();
     const manifest = JSON.parse(await readFile(path.join(directory, "latest.json"), "utf8"));
     assert.equal(manifest.version, version);
@@ -66,18 +67,22 @@ test(`${channel} manifests use signed platform artifacts and reject incomplete r
     for (const arch of ["arm64", "x64"]) {
       await writeFile(path.join(directory, `private-ai-proxy-${version}-macos-${arch}.dmg`), "disk image");
     }
-    await writeFile(path.join(directory, "private-ai-proxy-cli-0.1.2-linux-x64.tar.gz"), "cli archive");
-    const selected = (await promisify(execFile)(process.execPath, ["scripts/release-assets.mjs", directory])).stdout.split("\0").filter(Boolean).map((file) => path.basename(file));
+    await writeFile(path.join(directory, `private-ai-proxy-cli-${version}-linux-x64.tar.gz`), "cli archive");
+    const selected = (await selectAssets()).stdout.split("\0").filter(Boolean).map((file) => path.basename(file));
     for (const entry of Object.values(manifest.platforms)) {
       assert.ok(selected.includes(path.basename(new URL(entry.url).pathname)));
     }
-    assert.ok(selected.includes("private-ai-proxy-cli-0.1.2-linux-x64.tar.gz"));
+    assert.ok(selected.includes(`private-ai-proxy-cli-${version}-linux-x64.tar.gz`));
+    assert.ok(selected.includes(`private-ai-proxy-cli-${version}-linux-x64.deb`));
+    assert.ok(selected.includes(`private-ai-proxy-cli-${version}-linux-x64.rpm`));
     assert.ok(selected.includes("SHA256SUMS"));
     for (const arch of ["arm64", "x64"]) {
       assert.ok(selected.includes(`private-ai-proxy-${version}-macos-${arch}.dmg`));
       assert.ok((await readFile(path.join(directory, "SHA256SUMS"), "utf8")).includes(`  private-ai-proxy-${version}-macos-${arch}.dmg\n`));
     }
-    assert.ok(!selected.some((file) => file.endsWith(".sig") || file === "duplicate-app.zip" || file.startsWith("private-ai-proxy-cli_")));
+    assert.ok(!selected.some((file) => file.endsWith(".sig") || file === "duplicate-app.zip"));
+    await writeFile(path.join(directory, "private-ai-proxy-cli-9.9.9-linux-x64.deb"), "wrong version");
+    await assert.rejects(selectAssets(), /does not match version/);
     await rm(path.join(directory, `private-ai-proxy-${version}-linux-x64.rpm.sig`));
     await assert.rejects(run);
   } finally {

@@ -181,12 +181,16 @@ Release and updater behavior is documented in
 [CLI distribution](docs/cli-distribution.md) and implemented by
 `.github/workflows/desktop-native.yml`. Published updates use Tauri's signed
 updater artifacts. macOS distribution additionally requires Developer ID
-signing and notarization. Windows Authenticode is a separate release concern and
-is not implied by installer branding.
+signing and notarization. Windows Authenticode signing is optional; when its
+certificate is configured, CI imports it only for the package job, configures
+Tauri with its thumbprint, signs the bundled executables before packaging,
+verifies the installer and installed executables, and removes it afterward.
 
 Beta and stable are independent update channels. A release version, channel,
 published assets, and feed metadata must agree; partial platform releases update
-only their selected feeds.
+only their selected beta feeds. Stable releases must run from `main` and include
+all supported platforms. The tag, title, notes, asset naming, signing credentials,
+and channel rules are defined in [CLI distribution](docs/cli-distribution.md).
 
 ## Design Rules
 

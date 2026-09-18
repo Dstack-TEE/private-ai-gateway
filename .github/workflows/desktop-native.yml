@@ -3,11 +3,6 @@ name: Desktop Tauri
 on:
   workflow_dispatch:
     inputs:
-      production_macos:
-        description: Sign and notarize the macOS package for distribution
-        required: true
-        default: false
-        type: boolean
       release_version:
         description: 'Optional update version matching the channel (for example 0.1.2-beta.1)'
         required: false
@@ -20,6 +15,10 @@ on:
         options:
           - beta
           - stable
+      release_summary:
+        description: Markdown bullets or paragraphs for What's changed (required for stable)
+        required: false
+        type: string
       release_platforms:
         description: Comma-separated package targets, or all (macos-arm64, macos-x64, windows-arm64, windows-x64, linux-arm64, linux-x64)
         required: true
@@ -141,6 +140,7 @@ jobs:
           cargo +1.89 test --locked --package private-ai-proxy-gateway
           cargo +1.89 test --locked --package private-ai-proxy-runtime
           cargo +1.89 test --locked --manifest-path src-tauri/Cargo.toml
+          cargo +1.89 test --locked --manifest-path ../../crates/aci-protocol/Cargo.toml
       - &save-rust-cache
         name: Save Rust dependencies
         if: always() && !cancelled() && steps.rust-cache.outputs.cache-primary-key != '' && steps.rust-cache.outputs.cache-hit != 'true'
@@ -151,8 +151,7 @@ jobs:
 
   select-platforms:
     name: Select release platforms
-    needs: verify
-    if: ${{ always() && (inputs.package_only == true || github.event_name == 'workflow_dispatch' || inputs.release_version != '') }}
+    if: ${{ github.event_name == 'workflow_dispatch' || inputs.release_version != '' }}
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.platforms.outputs.matrix }}
@@ -160,18 +159,39 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Install release tooling
+        working-directory: apps/desktop
+        run: npm ci --ignore-scripts
       - id: platforms
         name: Build package matrix
         working-directory: apps/desktop
         env:
+          PACKAGE_ONLY: ${{ inputs.package_only }}
+          PUBLISH_RELEASE: ${{ inputs.publish_release }}
+          RELEASE_CHANNEL: ${{ inputs.release_channel || 'beta' }}
           RELEASE_PLATFORMS: ${{ inputs.release_platforms || 'all' }}
+          RELEASE_REF: ${{ github.ref }}
+          RELEASE_SUMMARY: ${{ inputs.release_summary || '' }}
           RELEASE_VERSION: ${{ inputs.release_version || '' }}
         run: |
           set -euo pipefail
-          if [[ "$RELEASE_VERSION" != "" && "${{ inputs.package_only }}" == "true" ]]; then
-            echo 'package_only cannot be used for a release'
-            exit 1
-          fi
+          node --input-type=module -e '
+            import { validateReleaseRequest } from "./scripts/release-channel.mjs";
+            validateReleaseRequest({
+              version: process.env.RELEASE_VERSION,
+              channel: process.env.RELEASE_CHANNEL,
+              platforms: process.env.RELEASE_PLATFORMS,
+              ref: process.env.RELEASE_REF,
+              publish: process.env.PUBLISH_RELEASE === "true",
+              packageOnly: process.env.PACKAGE_ONLY === "true",
+              summary: process.env.RELEASE_SUMMARY,
+            });
+          '
           matrix="$(node scripts/select-release-platforms.mjs "$RELEASE_PLATFORMS")"
           node --input-type=module -e 'const value = JSON.parse(process.argv[1]); if (!Array.isArray(value.include) || value.include.length === 0) process.exit(1)' "$matrix"
           printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
@@ -179,9 +199,9 @@ jobs:
   package:
     name: Package (${{ matrix.platform }})
     needs: [verify, select-platforms]
-    if: ${{ always() && (needs.verify.result == 'success' || inputs.package_only == true) && (github.event_name == 'workflow_dispatch' || inputs.release_version != '') }}
+    if: ${{ always() && needs.select-platforms.result == 'success' && (needs.verify.result == 'success' || inputs.package_only == true) && (github.event_name == 'workflow_dispatch' || inputs.release_version != '') }}
     environment:
-      name: ${{ (inputs.production_macos || inputs.release_version != '') && 'desktop-release' || 'desktop-build' }}
+      name: ${{ inputs.release_version != '' && 'desktop-release' || 'desktop-build' }}
     env:
       DESKTOP_RELEASE_VERSION: ${{ inputs.release_version }}
       PAP_BUILD_TARGET: ${{ matrix.target }}
@@ -219,21 +239,58 @@ jobs:
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci
+      - name: Import optional Windows code-signing certificate
+        if: runner.os == 'Windows' && inputs.release_version != ''
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $hasCertificate = ![string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE)
+          $hasPassword = ![string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)
+          if ($hasCertificate -ne $hasPassword) { throw 'Set both Windows code-signing secrets or neither' }
+          if (!$hasCertificate) { exit 0 }
+
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'private-ai-proxy-code-signing.pfx'
+          [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $certificates = @()
+          try {
+            $securePassword = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            $certificates = @(Import-PfxCertificate -FilePath $certificatePath -CertStoreLocation Cert:\CurrentUser\My -Password $securePassword)
+            $signingCertificates = @($certificates | Where-Object { $_.HasPrivateKey })
+            if ($signingCertificates.Count -ne 1 -or [string]::IsNullOrWhiteSpace($signingCertificates[0].Thumbprint)) {
+              throw 'Expected exactly one Windows certificate with a private key'
+            }
+            $now = Get-Date
+            if ($signingCertificates[0].NotBefore -gt $now -or $signingCertificates[0].NotAfter -le $now) {
+              throw 'Windows code-signing certificate is not currently valid'
+            }
+            "WINDOWS_CERTIFICATE_PATH=$certificatePath" | Out-File -FilePath $env:GITHUB_ENV -Append
+            "WINDOWS_CERTIFICATE_IMPORTED_THUMBPRINTS=$(($certificates.Thumbprint | Where-Object { $_ }) -join ';')" | Out-File -FilePath $env:GITHUB_ENV -Append
+            "WINDOWS_CERTIFICATE_THUMBPRINT=$($signingCertificates[0].Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          } catch {
+            foreach ($certificate in $certificates) {
+              if (![string]::IsNullOrWhiteSpace($certificate.Thumbprint)) {
+                Remove-Item "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -ErrorAction SilentlyContinue
+              }
+            }
+            Remove-Item $certificatePath -Force -ErrorAction SilentlyContinue
+            throw
+          }
       - name: Validate updater release configuration
         if: inputs.release_version != ''
         working-directory: apps/desktop
         shell: bash
         env:
-          PRODUCTION_MACOS: ${{ inputs.production_macos }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           node --input-type=module -e 'import { releaseChannel } from "./scripts/release-channel.mjs"; releaseChannel(process.env.DESKTOP_RELEASE_VERSION, process.env.DESKTOP_RELEASE_CHANNEL)'
-          test "$PRODUCTION_MACOS" = true
           test -n "$TAURI_UPDATER_PUBLIC_KEY"
           test -n "$TAURI_SIGNING_PRIVATE_KEY"
       - name: Prepare Apple notarization key
-        if: runner.os == 'macOS' && inputs.production_macos
+        if: runner.os == 'macOS' && inputs.release_version != ''
         shell: bash
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -260,7 +317,7 @@ jobs:
           echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
 
       - name: Build production macOS package
-        if: runner.os == 'macOS' && inputs.production_macos
+        if: runner.os == 'macOS' && inputs.release_version != ''
         working-directory: apps/desktop
         env:
           TAURI_BUNDLER_DMG_IGNORE_CI: 'true'
@@ -273,7 +330,7 @@ jobs:
         run: npm run dist -- --bundles ${{ matrix.bundles }}
 
       - name: Build ad-hoc macOS package
-        if: runner.os == 'macOS' && inputs.production_macos != true
+        if: runner.os == 'macOS' && inputs.release_version == ''
         working-directory: apps/desktop
         env:
           TAURI_BUNDLER_DMG_IGNORE_CI: 'true'
@@ -287,6 +344,22 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.release_version && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.release_version && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
         run: npm run dist -- --bundles ${{ matrix.bundles }}
+
+      - name: Verify Windows Authenticode signatures
+        if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE_THUMBPRINT != ''
+        working-directory: apps/desktop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = @(
+            Get-ChildItem "$env:PAP_BUNDLE_DIR/nsis/*.exe"
+            Get-ChildItem 'src-tauri/binaries/*.exe'
+          )
+          if ($files.Count -ne 4) { throw "Expected one installer and three standalone binaries, found $($files.Count)" }
+          foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature $file.FullName
+            if ($signature.Status -ne 'Valid') { throw "$($file.Name) has Authenticode status $($signature.Status)" }
+          }
 
       - name: Verify macOS executables
         if: runner.os == 'macOS'
@@ -364,22 +437,22 @@ jobs:
         run: |
           set -euo pipefail
           version="${DESKTOP_RELEASE_VERSION:-0.1.0}"
-          deb=(release/private-ai-proxy-cli_*.deb)
-          rpm=(release/private-ai-proxy-cli-*.rpm)
-          test "${#deb[@]}" -eq 1
-          test "${#rpm[@]}" -eq 1
+          deb="release/private-ai-proxy-cli-${version}-linux-${{ matrix.cli_arch }}.deb"
+          rpm="release/private-ai-proxy-cli-${version}-linux-${{ matrix.cli_arch }}.rpm"
+          test -f "$deb"
+          test -f "$rpm"
           scratch="$(mktemp -d "$RUNNER_TEMP/cli-native.XXXXXX")"
           trap 'rm -rf "$scratch"' EXIT
           mkdir "$scratch/deb" "$scratch/rpm"
-          dpkg-deb -x "${deb[0]}" "$scratch/deb"
+          dpkg-deb -x "$deb" "$scratch/deb"
           node scripts/cli-package-smoke.mjs "$scratch/deb/usr/libexec/private-ai-proxy" "$version" "$scratch/deb/usr/bin"
           test "$(readlink "$scratch/deb/usr/bin/private-ai-proxy")" = ../libexec/private-ai-proxy/private-ai-proxy
-          (cd "$scratch/rpm" && rpm2cpio "$GITHUB_WORKSPACE/apps/desktop/${rpm[0]}" | cpio -idm --quiet)
+          (cd "$scratch/rpm" && rpm2cpio "$GITHUB_WORKSPACE/apps/desktop/$rpm" | cpio -idm --quiet)
           node scripts/cli-package-smoke.mjs "$scratch/rpm/usr/libexec/private-ai-proxy" "$version" "$scratch/rpm/usr/bin"
           test "$(readlink "$scratch/rpm/usr/bin/private-ai-proxy")" = ../libexec/private-ai-proxy/private-ai-proxy
 
       - name: Notarize production macOS disk image
-        if: runner.os == 'macOS' && inputs.production_macos
+        if: runner.os == 'macOS' && inputs.release_version != ''
         working-directory: apps/desktop
         shell: bash
         env:
@@ -439,6 +512,14 @@ jobs:
           }
           try {
             Run-Installer $installers[0].FullName "/S /D=$installDir"
+            if (![string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_THUMBPRINT)) {
+              $executables = @(Get-ChildItem "$installDir/*.exe" | Where-Object { $_.Name -ne 'uninstall.exe' })
+              if ($executables.Count -ne 4) { throw "Expected four installed executables, found $($executables.Count)" }
+              foreach ($executable in $executables) {
+                $signature = Get-AuthenticodeSignature $executable.FullName
+                if ($signature.Status -ne 'Valid') { throw "$($executable.Name) has Authenticode status $($signature.Status)" }
+              }
+            }
             node scripts/packaged-sidecars-smoke.mjs $installDir
             if ($LASTEXITCODE -ne 0) { throw 'Installed sidecar checks failed' }
             $registration = (& "$installDir/private-ai-proxy.exe" --json cli status | ConvertFrom-Json)
@@ -506,7 +587,7 @@ jobs:
         working-directory: apps/desktop
         shell: bash
         env:
-          PRODUCTION_MACOS: ${{ inputs.production_macos }}
+          SIGNED_RELEASE: ${{ inputs.release_version != '' }}
         run: |
           set -euo pipefail
           mkdir -p release
@@ -522,7 +603,7 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$app_bundle/Contents/Info.plist")" = Icon
           codesign --verify --deep --strict --verbose=2 "$app_bundle"
           codesign_details="$(codesign --display --verbose=4 "$app_bundle" 2>&1)"
-          if [[ "$PRODUCTION_MACOS" == "true" ]]; then
+          if [[ "$SIGNED_RELEASE" == "true" ]]; then
             grep -q '^Authority=Developer ID Application:' <<<"$codesign_details"
             if grep -q '^Signature=adhoc$' <<<"$codesign_details"; then
               echo 'Production package was signed ad-hoc instead of with Developer ID'
@@ -634,13 +715,25 @@ jobs:
             ${{ env.PAP_BUNDLE_DIR }}/nsis/*.sig
 
       - name: Remove Apple notarization key
-        if: always() && runner.os == 'macOS' && inputs.production_macos
+        if: always() && runner.os == 'macOS' && inputs.release_version != ''
         shell: bash
         run: rm -f "${APPLE_API_KEY_PATH:-}"
+      - name: Remove Windows code-signing certificate
+        if: always() && runner.os == 'Windows' && inputs.release_version != ''
+        shell: pwsh
+        run: |
+          if (![string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_IMPORTED_THUMBPRINTS)) {
+            foreach ($thumbprint in $env:WINDOWS_CERTIFICATE_IMPORTED_THUMBPRINTS.Split(';')) {
+              Remove-Item "Cert:\CurrentUser\My\$thumbprint" -ErrorAction SilentlyContinue
+            }
+          }
+          if (![string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PATH)) {
+            Remove-Item $env:WINDOWS_CERTIFICATE_PATH -Force -ErrorAction SilentlyContinue
+          }
       - *save-rust-cache
 
   draft-release:
-    if: inputs.release_version != '' && inputs.production_macos
+    if: inputs.release_version != ''
     needs: package
     environment: desktop-release
     runs-on: ubuntu-24.04
@@ -668,15 +761,18 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_PLATFORMS: ${{ inputs.release_platforms || 'all' }}
+          RELEASE_SUMMARY: ${{ inputs.release_summary || '' }}
         run: |
           set -euo pipefail
-          node apps/desktop/scripts/create-update-manifest.mjs release-artifacts "$VERSION" "$GITHUB_REPOSITORY" "$CHANNEL" "${{ inputs.release_platforms || 'all' }}"
+          node apps/desktop/scripts/create-update-manifest.mjs release-artifacts "$VERSION" "$GITHUB_REPOSITORY" "$CHANNEL" "$RELEASE_PLATFORMS"
           node apps/desktop/scripts/release-assets.mjs release-artifacts > release-assets.list
           mapfile -d '' assets < release-assets.list
-          node apps/desktop/scripts/release-notes.mjs release-artifacts "$GITHUB_REPOSITORY" > release-notes.md
+          node apps/desktop/scripts/release-notes.mjs release-artifacts "$GITHUB_REPOSITORY" "$GITHUB_SHA" > release-notes.md
+          title="$(node --input-type=module -e 'import { releaseTitle } from "./apps/desktop/scripts/release-channel.mjs"; process.stdout.write(releaseTitle(process.env.VERSION, process.env.CHANNEL))')"
           release_args=()
           if [[ "$CHANNEL" == beta ]]; then release_args+=(--prerelease); fi
-          gh release create "desktop-v$VERSION" "${assets[@]}" "${release_args[@]}" --draft --latest=false --target "$GITHUB_SHA" --title "Private AI Proxy $VERSION" --notes-file release-notes.md
+          gh release create "desktop-v$VERSION" "${assets[@]}" "${release_args[@]}" --draft --latest=false --target "$GITHUB_SHA" --title "$title" --notes-file release-notes.md
       - name: Publish desktop version
         if: inputs.publish_release
         env:
@@ -684,7 +780,7 @@ jobs:
         run: gh release edit "desktop-v$VERSION" --draft=false --latest=false
 
   update-feed:
-    if: inputs.publish_release && inputs.release_version != '' && inputs.production_macos
+    if: inputs.publish_release && inputs.release_version != ''
     needs: draft-release
     permissions:
       contents: write
