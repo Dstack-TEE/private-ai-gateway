@@ -1,0 +1,294 @@
+name: Private AI Proxy npm packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published desktop release tag to package (for example desktop-v0.1.3)
+        required: true
+        type: string
+      publish:
+        description: Publish the verified tarballs to npm
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-ai-proxy-npm-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      dist_tag: ${{ steps.release.outputs.dist_tag }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Install packaging dependencies
+        working-directory: apps/desktop
+        run: npm ci --ignore-scripts
+      - id: release
+        name: Validate release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLISH: ${{ inputs.publish }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$PUBLISH" == true && "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "npm publication must run from main" >&2
+            exit 1
+          fi
+          metadata="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,tagName)"
+          node --input-type=module - "$metadata" "$RELEASE_TAG" "$GITHUB_OUTPUT" <<'NODE'
+          import { appendFileSync } from "node:fs";
+          import semver from "./apps/desktop/node_modules/semver/index.js";
+          import { validateNpmVersion } from "./apps/desktop/scripts/package-npm.mjs";
+
+          const [metadataJson, requestedTag, output] = process.argv.slice(2);
+          const metadata = JSON.parse(metadataJson);
+          if (metadata.isDraft || metadata.tagName !== requestedTag || !requestedTag.startsWith("desktop-v")) {
+            throw new Error("release_tag must name a published desktop-v* GitHub release");
+          }
+          const version = validateNpmVersion(requestedTag.slice("desktop-v".length));
+          const distTag = semver.prerelease(version) ? "beta" : "latest";
+          appendFileSync(output, `version=${version}\ndist_tag=${distTag}\n`);
+          NODE
+      - name: Download and verify CLI release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir release-downloads
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir release-downloads \
+            --pattern SHA256SUMS \
+            --pattern "private-ai-proxy-cli-${VERSION}-*.tar.gz" \
+            --pattern "private-ai-proxy-cli-${VERSION}-*.zip"
+
+          expected=()
+          for target in macos-arm64 macos-x64 linux-arm64 linux-x64; do
+            expected+=("private-ai-proxy-cli-${VERSION}-${target}.tar.gz")
+          done
+          for target in windows-arm64 windows-x64; do
+            expected+=("private-ai-proxy-cli-${VERSION}-${target}.zip")
+          done
+          : > release-downloads/npm-SHA256SUMS
+          for filename in "${expected[@]}"; do
+            test -f "release-downloads/$filename"
+            line="$(awk -v filename="$filename" '$2 == filename { print }' release-downloads/SHA256SUMS)"
+            test "$(printf '%s\n' "$line" | grep -c .)" -eq 1
+            printf '%s\n' "$line" >> release-downloads/npm-SHA256SUMS
+          done
+          cd release-downloads
+          sha256sum --check npm-SHA256SUMS
+      - name: Build npm tarballs
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir extracted npm-packages
+          while read -r platform arch extension; do
+            base="private-ai-proxy-cli-${VERSION}-${platform}-${arch}"
+            destination="extracted/${platform}-${arch}"
+            mkdir "$destination"
+            if [[ "$extension" == zip ]]; then
+              unzip -q "release-downloads/${base}.zip" -d "$destination"
+            else
+              tar -xzf "release-downloads/${base}.tar.gz" -C "$destination"
+            fi
+            node apps/desktop/scripts/package-npm.mjs platform \
+              --platform "$platform" \
+              --arch "$arch" \
+              --version "$VERSION" \
+              --source "$destination/$base" \
+              --output npm-packages
+          done <<'TARGETS'
+          macos arm64 tar.gz
+          macos x64 tar.gz
+          linux arm64 tar.gz
+          linux x64 tar.gz
+          windows arm64 zip
+          windows x64 zip
+          TARGETS
+          node apps/desktop/scripts/package-npm.mjs wrapper \
+            --version "$VERSION" \
+            --output npm-packages
+      - name: Verify npm tarballs
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          while read -r platform npm_platform arch extension binary_extension; do
+            if [[ "$binary_extension" == none ]]; then binary_extension=""; fi
+            target="${npm_platform}-${arch}"
+            package_version="${VERSION}-${target}"
+            tarball="npm-packages/private-ai-proxy-${package_version}.tgz"
+            source="extracted/${platform}-${arch}/private-ai-proxy-cli-${VERSION}-${platform}-${arch}"
+            destination="verified/${platform}-${arch}"
+            mkdir -p "$destination"
+            tar -xzf "$tarball" -C "$destination"
+            diff -u \
+              <(printf '%s\n' package/LICENSE package/README.md package/package.json "package/vendor/private-ai-proxy${binary_extension}" "package/vendor/private-ai-proxy-helper${binary_extension}" "package/vendor/private-ai-proxy-service${binary_extension}" | sort) \
+              <(tar -tzf "$tarball" | sort)
+            for binary in private-ai-proxy private-ai-proxy-helper private-ai-proxy-service; do
+              cmp "$source/${binary}${binary_extension}" "$destination/package/vendor/${binary}${binary_extension}"
+            done
+            node --input-type=module - "$destination/package/package.json" "$package_version" "$npm_platform" "$arch" <<'NODE'
+            import { readFile } from "node:fs/promises";
+            const [file, version, platform, arch] = process.argv.slice(2);
+            const manifest = JSON.parse(await readFile(file, "utf8"));
+            if (manifest.name !== "private-ai-proxy" || manifest.version !== version) {
+              throw new Error("platform package identity mismatch");
+            }
+            if (JSON.stringify(manifest.os) !== JSON.stringify([platform])) throw new Error("platform package os mismatch");
+            if (JSON.stringify(manifest.cpu) !== JSON.stringify([arch])) throw new Error("platform package cpu mismatch");
+            NODE
+          done <<'TARGETS'
+          macos darwin arm64 tar.gz none
+          macos darwin x64 tar.gz none
+          linux linux arm64 tar.gz none
+          linux linux x64 tar.gz none
+          windows win32 arm64 zip .exe
+          windows win32 x64 zip .exe
+          TARGETS
+
+          wrapper="npm-packages/private-ai-proxy-${VERSION}.tgz"
+          mkdir -p verified/wrapper
+          tar -xzf "$wrapper" -C verified/wrapper
+          diff -u \
+            <(printf '%s\n' package/LICENSE package/README.md package/bin/private-ai-proxy.cjs package/package.json | sort) \
+            <(tar -tzf "$wrapper" | sort)
+          node --input-type=module - verified/wrapper/package/package.json "$VERSION" <<'NODE'
+          import { readFile } from "node:fs/promises";
+          const [file, version] = process.argv.slice(2);
+          const manifest = JSON.parse(await readFile(file, "utf8"));
+          if (manifest.name !== "private-ai-proxy" || manifest.version !== version) throw new Error("wrapper package identity mismatch");
+          const targets = [
+            "darwin-arm64",
+            "darwin-x64",
+            "linux-arm64",
+            "linux-x64",
+            "win32-arm64",
+            "win32-x64",
+          ];
+          const expected = Object.fromEntries(targets.map((target) => [
+            `private-ai-proxy-${target}`,
+            `npm:private-ai-proxy@${version}-${target}`,
+          ]));
+          if (JSON.stringify(manifest.optionalDependencies) !== JSON.stringify(expected)) {
+            throw new Error("wrapper optional dependency map mismatch");
+          }
+          NODE
+      - name: Smoke-test a global npm installation
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          prefix="$RUNNER_TEMP/private-ai-proxy-npm"
+          npm install --global --prefix "$prefix" --ignore-scripts --no-audit --no-fund \
+            "private-ai-proxy-linux-x64@file:$GITHUB_WORKSPACE/npm-packages/private-ai-proxy-${VERSION}-linux-x64.tgz" \
+            "file:$GITHUB_WORKSPACE/npm-packages/private-ai-proxy-${VERSION}.tgz"
+          test "$("$prefix/bin/private-ai-proxy" --version)" = "private-ai-proxy $VERSION"
+          test "$("$prefix/bin/pap" --version)" = "private-ai-proxy $VERSION"
+          test "$("$prefix/bin/aci" --version)" = "private-ai-proxy $VERSION"
+      - name: Upload npm tarballs
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: private-ai-proxy-npm-${{ steps.release.outputs.version }}
+          if-no-files-found: error
+          retention-days: 14
+          path: npm-packages/*.tgz
+
+  publish:
+    if: ${{ inputs.publish }}
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: private-ai-proxy-npm-${{ needs.package.outputs.version }}
+          path: npm-packages
+      - name: Publish platform versions, then wrapper
+        env:
+          DIST_TAG: ${{ needs.package.outputs.dist_tag }}
+          NPM_BOOTSTRAP_TOKEN: ${{ secrets.NPM_BOOTSTRAP_TOKEN }}
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$NPM_BOOTSTRAP_TOKEN" ]]; then
+            export NODE_AUTH_TOKEN="$NPM_BOOTSTRAP_TOKEN"
+          fi
+          npm_version="$(npm --version)"
+          node -e 'const [major, minor] = process.argv[1].split(".").map(Number); if (major < 11 || (major === 11 && minor < 5)) process.exit(1)' "$npm_version"
+          publish_if_missing() {
+            local tarball="$1"
+            local expected_version="$2"
+            local tag="$3"
+            local manifest name package_version
+            manifest="$(tar -xOf "$tarball" package/package.json)"
+            name="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).name)' "$manifest")"
+            package_version="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).version)' "$manifest")"
+            test "$name" = private-ai-proxy
+            test "$package_version" = "$expected_version"
+            local local_integrity registry_integrity
+            local_integrity="sha512-$(openssl dgst -sha512 -binary "$tarball" | openssl base64 -A)"
+            if npm view "$name@$package_version" version >/dev/null 2>&1; then
+              registry_integrity="$(npm view "$name@$package_version" dist.integrity)"
+              if [[ "$registry_integrity" != "$local_integrity" ]]; then
+                echo "$name@$package_version exists with different contents" >&2
+                exit 1
+              fi
+              echo "$name@$package_version already exists with matching contents; skipping"
+            else
+              npm publish "$tarball" --access public --provenance --tag "$tag"
+            fi
+          }
+
+          for target in \
+            darwin-arm64 \
+            darwin-x64 \
+            linux-arm64 \
+            linux-x64 \
+            win32-arm64 \
+            win32-x64
+          do
+            platform_tag="$target"
+            if [[ "$DIST_TAG" != latest ]]; then
+              platform_tag="${DIST_TAG}-${target}"
+            fi
+            platform_version="${VERSION}-${target}"
+            publish_if_missing \
+              "npm-packages/private-ai-proxy-${platform_version}.tgz" \
+              "$platform_version" \
+              "$platform_tag"
+          done
+          publish_if_missing \
+            "npm-packages/private-ai-proxy-${VERSION}.tgz" \
+            "$VERSION" \
+            "$DIST_TAG"
