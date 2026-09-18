@@ -230,6 +230,7 @@ const releaseVersion = process.env.DESKTOP_RELEASE_VERSION?.trim();
 const release = releaseVersion ? releaseChannel(releaseVersion, process.env.DESKTOP_RELEASE_CHANNEL || "beta") : undefined;
 const updaterKey = process.env.TAURI_UPDATER_PUBLIC_KEY?.trim();
 const updaterEndpoint = process.env.TAURI_UPDATER_ENDPOINT?.trim();
+const windowsCertificateThumbprint = process.env.WINDOWS_CERTIFICATE_THUMBPRINT?.trim();
 const nativeUpdater = Boolean(updaterKey);
 if (Boolean(updaterKey) !== Boolean(updaterEndpoint)) {
   throw new Error("Set both TAURI_UPDATER_PUBLIC_KEY and TAURI_UPDATER_ENDPOINT, or neither");
@@ -241,6 +242,9 @@ if (updaterEndpoint) {
   if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password) {
     throw new Error("The updater endpoint must use HTTPS without embedded credentials");
   }
+}
+if (windowsCertificateThumbprint && !/^[0-9a-f]{40}$/i.test(windowsCertificateThumbprint)) {
+  throw new Error("WINDOWS_CERTIFICATE_THUMBPRINT must be a SHA-1 certificate thumbprint");
 }
 const rpmPreinstall = await readFile(path.join(appRoot, "src-tauri/installer/rpm-pre-install.sh"), "utf8");
 const rpmPackageName = brand.productName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
@@ -272,6 +276,13 @@ await writeFile(
           },
         },
         windows: {
+          ...(windowsCertificateThumbprint
+            ? {
+                certificateThumbprint: windowsCertificateThumbprint,
+                digestAlgorithm: "sha256",
+                timestampUrl: "http://timestamp.digicert.com",
+              }
+            : {}),
           nsis: {
             installerIcon: "icons/icon.ico",
             uninstallerIcon: "icons/icon.ico",

@@ -80,6 +80,32 @@ starts the sibling `private-ai-proxy-service`, checks status, persists an appear
 stops it, and verifies repeated query-only status remains `not_running`. It does
 not configure a provider or access credentials.
 
+## Release Contract
+
+`Desktop Tauri` uses one versioned release path. Supplying `release_version`
+enables updater signing, macOS Developer ID signing and notarization, and the
+protected `desktop-release` environment. A run without a release version creates
+test packages only; `package_only` cannot be combined with a version.
+
+- Tags are `desktop-v<semver>` and titles are `Private AI Proxy v<semver>`.
+- Beta versions use `x.y.z-beta.n`; stable versions use `x.y.z`.
+- Stable releases must run from `main`, include all six platform builds, and
+  provide a non-empty `release_summary`.
+- Release notes always contain status, `What's changed`, desktop downloads,
+  standalone CLI downloads, checksums, updater integrity, and build provenance.
+- Public assets use `private-ai-proxy-<version>-<platform>-<arch>.<format>` or
+  `private-ai-proxy-cli-<version>-<platform>-<arch>.<format>`.
+- Desktop releases use `--latest=false` because the repository-wide Latest slot
+  is shared with ACI client releases. Beta and stable updater feeds remain
+  independent.
+
+`release_summary` accepts Markdown paragraphs or list items, not headings. Stable
+Windows releases require `WINDOWS_CERTIFICATE` (a base64 PFX) and
+`WINDOWS_CERTIFICATE_PASSWORD` in the protected environment. CI imports the
+certificate only for the Windows package job, signs bundled executables before
+NSIS packaging, verifies the installer and installed executables, and removes
+the certificate afterward.
+
 ## Updates
 
 AppImage is intentionally unsupported. Its temporary mount cannot provide a
