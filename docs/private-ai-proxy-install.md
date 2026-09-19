@@ -14,6 +14,26 @@ npm selects the native package for the current operating system and CPU
 architecture. Do not use `--omit=optional` because the native payload is an
 optional dependency.
 
+## Homebrew
+
+Install the CLI Formula or macOS desktop Cask directly from the official tap:
+
+```sh
+brew install dstack-tee/private-ai/private-ai-proxy
+brew install --cask dstack-tee/private-ai/private-ai-proxy
+```
+
+To use the shorter commands after tapping once:
+
+```sh
+brew tap dstack-tee/private-ai
+brew install private-ai-proxy
+brew install --cask private-ai-proxy
+```
+
+The Formula exposes `pap`, `private-ai-proxy`, and `aci`. Homebrew owns upgrades
+and removal for both the Formula and Cask installations.
+
 ## macOS and Linux install script
 
 Review and run the official installer:
