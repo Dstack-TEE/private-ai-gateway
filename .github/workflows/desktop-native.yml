@@ -812,8 +812,14 @@ jobs:
         run: |
           set -euo pipefail
           version="${{ inputs.release_version || '0.1.0' }}"
-          mapfile -t desktop_debs < <(find "$GITHUB_WORKSPACE/linux-package" -type f -name "private-ai-proxy-${version}-linux-${{ matrix.cli_arch }}.deb")
-          mapfile -t cli_debs < <(find "$GITHUB_WORKSPACE/linux-package" -type f -name "private-ai-proxy-cli-${version}-linux-${{ matrix.cli_arch }}.deb")
+          desktop_debs=()
+          cli_debs=()
+          while IFS= read -r -d '' candidate; do
+            case "$(dpkg-deb -f "$candidate" Package)" in
+              private-ai-proxy) desktop_debs+=("$candidate") ;;
+              private-ai-proxy-cli) cli_debs+=("$candidate") ;;
+            esac
+          done < <(find "$GITHUB_WORKSPACE/linux-package" -type f -name '*.deb' -print0)
           test "${#desktop_debs[@]}" -eq 1
           test "${#cli_debs[@]}" -eq 1
           node scripts/package-arch.mjs --kind desktop --source "${desktop_debs[0]}" --version "$version" --arch '${{ matrix.cli_arch }}' --output release
