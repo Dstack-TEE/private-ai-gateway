@@ -1,6 +1,16 @@
 name: Private AI Proxy npm packages
 
 on:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Published desktop release tag to package
+        required: true
+        type: string
+      publish:
+        description: Publish the verified tarballs to npm
+        required: true
+        type: boolean
   workflow_dispatch:
     inputs:
       release_tag:
@@ -237,13 +247,9 @@ jobs:
       - name: Publish platform versions, then wrapper
         env:
           DIST_TAG: ${{ needs.package.outputs.dist_tag }}
-          NPM_BOOTSTRAP_TOKEN: ${{ secrets.NPM_BOOTSTRAP_TOKEN }}
           VERSION: ${{ needs.package.outputs.version }}
         run: |
           set -euo pipefail
-          if [[ -n "$NPM_BOOTSTRAP_TOKEN" ]]; then
-            export NODE_AUTH_TOKEN="$NPM_BOOTSTRAP_TOKEN"
-          fi
           npm_version="$(npm --version)"
           node -e 'const [major, minor] = process.argv[1].split(".").map(Number); if (major < 11 || (major === 11 && minor < 5)) process.exit(1)' "$npm_version"
           publish_if_missing() {
