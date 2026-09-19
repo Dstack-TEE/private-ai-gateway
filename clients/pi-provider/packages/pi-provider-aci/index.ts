@@ -53,7 +53,7 @@ import {
 import { createAccountOAuthAuth, createApiKeyAuth } from "./src/auth.ts";
 import { PROVIDER_VERSION } from "./src/constants.ts";
 import { DEFAULT_PROFILE, resolveProfile, type ProviderProfile } from "./src/profile.ts";
-import { mapAciModelToPi } from "./src/models.ts";
+import { mapAciModelToPi, resolveModelCompatOverride } from "./src/models.ts";
 import { isAciProjectConfigApproved } from "./src/project-trust.ts";
 import {
   closeAciProvider,
@@ -142,7 +142,7 @@ function toPiModels(
   models: readonly AciModel[],
 ): Model<"openai-completions">[] {
   return models.map((model) => ({
-    ...mapAciModelToPi(model),
+    ...mapAciModelToPi(model, resolveModelCompatOverride(state.config, model.id)),
     api: "openai-completions",
     provider: state.profile.providerId,
     baseUrl: state.config.baseUrl,
@@ -478,7 +478,14 @@ export const PROVIDER_ID = DEFAULT_PROFILE.providerId;
 export { PROVIDER_VERSION };
 export { resolveProfile as getProviderProfile } from "./src/profile.ts";
 export { loadAciCloudConfig } from "./src/config.ts";
-export { discoverAciModels, mapAciModelToPi, mapAciServerModel } from "./src/models.ts";
+export {
+  discoverAciModels,
+  mapAciModelToPi,
+  mapAciServerModel,
+  resolveModelCompatOverride,
+  BUILTIN_MODEL_COMPAT_OVERRIDES,
+} from "./src/models.ts";
+export type { ModelCompatOverride } from "./src/models.ts";
 
 /**
  * Lazily load the heavyweight ACI provider implementation (pulls the

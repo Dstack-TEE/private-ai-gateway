@@ -95,6 +95,48 @@ test("validateAciCloudConfig: allowlist with empty string is rejected", () => {
   assert.throws(() => validateAciCloudConfig(bad), /expected a non-empty string/);
 });
 
+test("validateAciCloudConfig: accepts per-model overrides and carries them through", () => {
+  const config = {
+    ...BASE,
+    models: {
+      ...BASE.models,
+      overrides: {
+        "qwen/qwen3.8-27b": { supportsDeveloperRole: false },
+        "openai/gpt-oss-120b": { thinkingLevelMap: { off: null, high: "xhigh" } },
+        "qwen/qwen3-vl-30b-a3b-instruct": { maxTokens: 16384 },
+      },
+    },
+  };
+  const validated = validateAciCloudConfig(config);
+  assert.deepEqual(validated.models.overrides, config.models.overrides);
+});
+
+test("validateAciCloudConfig: rejects malformed overrides", () => {
+  const badLevel = {
+    ...BASE,
+    models: { ...BASE.models, overrides: { "m/1": { thinkingLevelMap: { ultra: "x" } } } },
+  };
+  assert.throws(() => validateAciCloudConfig(badLevel), /unknown thinking level/);
+
+  const badType = {
+    ...BASE,
+    models: { ...BASE.models, overrides: { "m/1": { supportsDeveloperRole: "yes" } } },
+  };
+  assert.throws(
+    () => validateAciCloudConfig(badType),
+    /\/models\/overrides\/m\/1\/supportsDeveloperRole: expected a boolean/,
+  );
+
+  const badTokens = {
+    ...BASE,
+    models: { ...BASE.models, overrides: { "m/1": { maxTokens: -5 } } },
+  };
+  assert.throws(
+    () => validateAciCloudConfig(badTokens),
+    /\/models\/overrides\/m\/1\/maxTokens: expected a positive integer/,
+  );
+});
+
 test("loadHomeAciCloudConfig rejects a malformed persisted config", (t) => {
   const home = mkdtempSync(join(tmpdir(), "pi-provider-aci-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));

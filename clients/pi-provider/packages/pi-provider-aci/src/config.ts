@@ -28,12 +28,20 @@ import {
 } from "@phala/aci-provider/config";
 
 import { DEFAULT_PROFILE, type ProviderProfile } from "./profile.ts";
+import type { ModelCompatOverride } from "./models.ts";
+
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 export interface AciModelsConfig {
   /** Only register models whose /v1/models entry has is_tee === true. */
   isTeeOnly: boolean;
   /** Optional model-id allowlist. When set, only these ids are registered. */
   allowlist?: string[];
+  /**
+   * Per-model compatibility patches over the builtin override table (known
+   * upstream quirks). Keyed by catalog model id.
+   */
+  overrides?: Record<string, ModelCompatOverride>;
 }
 
 export interface AciCloudConfig {
@@ -61,6 +69,7 @@ export type AciCloudConfigPatch = {
   models?: Partial<{
     isTeeOnly: unknown;
     allowlist: unknown;
+    overrides: unknown;
   }>;
   trust?: Partial<{
     acceptedComposeHashes: unknown;
@@ -194,6 +203,53 @@ function requireRecord(raw: unknown, configPath: string, pointer: string): Recor
   );
 }
 
+/** Validate the models.overrides record; unknown model ids are allowed. */
+function validateModelOverrides(
+  raw: unknown,
+  configPath: string,
+): Record<string, ModelCompatOverride> | undefined {
+  if (raw === undefined) return undefined;
+  const record = requireRecord(raw, configPath, "/models/overrides");
+  const result: Record<string, ModelCompatOverride> = {};
+  for (const [modelId, patch] of Object.entries(record)) {
+    const pointer = `/models/overrides/${modelId}`;
+    const p = requireRecord(patch, configPath, pointer);
+    const override: ModelCompatOverride = {};
+    if (p.supportsDeveloperRole !== undefined) {
+      if (typeof p.supportsDeveloperRole !== "boolean") {
+        fail(configPath, `${pointer}/supportsDeveloperRole`, "expected a boolean");
+      }
+      override.supportsDeveloperRole = p.supportsDeveloperRole;
+    }
+    if (p.maxTokens !== undefined) {
+      if (typeof p.maxTokens !== "number" || !Number.isInteger(p.maxTokens) || p.maxTokens <= 0) {
+        fail(configPath, `${pointer}/maxTokens`, "expected a positive integer");
+      }
+      override.maxTokens = p.maxTokens;
+    }
+    if (p.thinkingLevelMap !== undefined) {
+      const map = requireRecord(p.thinkingLevelMap, configPath, `${pointer}/thinkingLevelMap`);
+      const levelMap: ModelCompatOverride["thinkingLevelMap"] = {};
+      for (const [level, value] of Object.entries(map)) {
+        if (!(THINKING_LEVELS as readonly string[]).includes(level)) {
+          fail(
+            configPath,
+            `${pointer}/thinkingLevelMap/${level}`,
+            `unknown thinking level (expected one of: ${THINKING_LEVELS.join(", ")})`,
+          );
+        }
+        if (value !== null && typeof value !== "string") {
+          fail(configPath, `${pointer}/thinkingLevelMap/${level}`, "expected a string or null");
+        }
+        levelMap[level as keyof typeof levelMap] = value;
+      }
+      override.thinkingLevelMap = levelMap;
+    }
+    result[modelId] = override;
+  }
+  return result;
+}
+
 export function validateAciCloudConfig(
   raw: unknown,
   configPath = "<aci-config>",
@@ -225,11 +281,13 @@ export function validateAciCloudConfig(
       },
       {},
     );
+    const overrides = validateModelOverrides(models.overrides, configPath);
     return {
       baseUrl: resolved.baseURL,
       models: {
         isTeeOnly: resolved.models.isTeeOnly,
         ...(resolved.models.allowlist ? { allowlist: [...resolved.models.allowlist] } : {}),
+        ...(overrides ? { overrides } : {}),
       },
       trust: {
         ...(resolved.trust.acceptedComposeHashes
