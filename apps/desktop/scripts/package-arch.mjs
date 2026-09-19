@@ -145,12 +145,21 @@ async function main() {
     const checksum = createHash("sha256").update(await readFile(payload)).digest("hex");
     await writeFile(path.join(build, "PKGBUILD"), archPkgbuild(metadata, checksum));
     await writeFile(path.join(build, `${metadata.name}.install`), archInstallScript(metadata.name));
+    const makepkgEnvironment = {
+      ...process.env,
+      PACKAGER: "Dstack <support@dstack.org>",
+      PKGEXT: ".pkg.tar.zst",
+    };
     execFileSync("makepkg", ["--nodeps", "--clean", "--cleanbuild", "--force", "--noconfirm"], {
       cwd: build,
-      env: { ...process.env, PACKAGER: "Dstack <support@dstack.org>" },
+      env: makepkgEnvironment,
       stdio: "inherit",
     });
-    const packagePath = execFileSync("makepkg", ["--packagelist"], { cwd: build, encoding: "utf8" })
+    const packagePath = execFileSync("makepkg", ["--packagelist"], {
+      cwd: build,
+      env: makepkgEnvironment,
+      encoding: "utf8",
+    })
       .trim().split(/\r?\n/).filter(Boolean).at(-1);
     if (!packagePath || !(await stat(packagePath).catch(() => undefined))?.isFile()) {
       throw new Error("makepkg did not produce an Arch Linux package");
