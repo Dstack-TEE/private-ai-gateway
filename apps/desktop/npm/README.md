@@ -30,10 +30,12 @@ The example creates `private-ai-proxy-0.1.3-linux-x64.tgz` and `private-ai-proxy
 
 ## Release
 
-Publishing a versioned desktop release from `main` automatically calls the
-`Private AI Proxy npm packages` reusable workflow with the same `desktop-v*`
-tag. A manual workflow dispatch remains available for a package-only review or
-an idempotent retry against an already published desktop release.
+Publishing a versioned `desktop-v*` release automatically triggers the
+`Private AI Proxy npm packages` workflow with that release tag. Keeping the
+publish job in its own event-triggered workflow makes its GitHub OIDC identity
+match the npm trusted publisher. A manual workflow dispatch remains available
+for a package-only review or an idempotent retry against an already published
+Desktop release.
 
 The workflow verifies the GitHub release checksums, checks every tarball
 allowlist and manifest, compares every packaged native binary byte-for-byte with
