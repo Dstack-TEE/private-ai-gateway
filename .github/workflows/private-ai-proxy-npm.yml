@@ -1,6 +1,14 @@
 name: Private AI Proxy npm packages
 
 on:
+  workflow_call:
+    inputs:
+      release_tag:
+        required: true
+        type: string
+      publish:
+        required: true
+        type: boolean
   release:
     types: [published]
   workflow_dispatch:
@@ -79,7 +87,7 @@ jobs:
       - name: Download and verify CLI release assets
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
           VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
