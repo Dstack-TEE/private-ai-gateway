@@ -79,7 +79,7 @@ jobs:
       - name: Download and verify CLI release assets
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
           VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
