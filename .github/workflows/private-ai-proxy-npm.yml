@@ -25,7 +25,7 @@ concurrency:
 jobs:
   package:
     if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'desktop-v') }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
     outputs:
       dist_tag: ${{ steps.release.outputs.dist_tag }}

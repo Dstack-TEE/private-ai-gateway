@@ -37,7 +37,7 @@ export const desktopBuilds = [
     packages: [{ suffix: ".exe", targets: ["windows-aarch64"] }],
   },
   {
-    os: "ubuntu-24.04",
+    os: "ubuntu-22.04",
     platform: "linux",
     arch: "x64",
     target: "",
@@ -49,7 +49,7 @@ export const desktopBuilds = [
     ],
   },
   {
-    os: "ubuntu-24.04-arm",
+    os: "ubuntu-22.04-arm",
     platform: "linux",
     arch: "arm64",
     target: "",
