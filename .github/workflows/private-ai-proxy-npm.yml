@@ -243,6 +243,24 @@ jobs:
           set -euo pipefail
           if [[ -n "$NPM_BOOTSTRAP_TOKEN" ]]; then
             export NODE_AUTH_TOKEN="$NPM_BOOTSTRAP_TOKEN"
+            publisher="$(npm whoami)"
+            membership="$(npm org ls phala "$publisher" --json)"
+            node -e '
+              const [raw, publisher] = process.argv.slice(1);
+              const membership = JSON.parse(raw);
+              const role = typeof membership === "string" ? membership : membership[publisher];
+              if (!["developer", "admin", "owner"].includes(role)) {
+                throw new Error(`${publisher} is not a member of the Phala npm organization`);
+              }
+            ' "$membership" "$publisher"
+            teams="$(npm team ls phala --json)"
+            node -e '
+              const teams = JSON.parse(process.argv[1]);
+              const names = Array.isArray(teams) ? teams : Object.keys(teams);
+              if (!names.some((name) => name === "developers" || name.endsWith(":developers"))) {
+                throw new Error("phala:developers does not exist");
+              }
+            ' "$teams"
           fi
           npm_version="$(npm --version)"
           node -e 'const [major, minor] = process.argv[1].split(".").map(Number); if (major < 11 || (major === 11 && minor < 5)) process.exit(1)' "$npm_version"
@@ -270,6 +288,7 @@ jobs:
             fi
           }
 
+          first_platform=true
           for target in \
             darwin-arm64 \
             darwin-x64 \
@@ -287,6 +306,10 @@ jobs:
               "npm-packages/private-ai-proxy-${platform_version}.tgz" \
               "$platform_version" \
               "$platform_tag"
+            if [[ "$first_platform" == true && -n "$NPM_BOOTSTRAP_TOKEN" ]]; then
+              npm access grant read-write phala:developers private-ai-proxy
+              first_platform=false
+            fi
           done
           publish_if_missing \
             "npm-packages/private-ai-proxy-${VERSION}.tgz" \

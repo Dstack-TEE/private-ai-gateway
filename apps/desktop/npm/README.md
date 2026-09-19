@@ -38,9 +38,9 @@ Publishing uploads the six platform versions before the wrapper. Platform versio
 
 An npm trusted publisher can only be attached after a package exists. For the first release:
 
-1. Confirm `private-ai-proxy` is still available and the npm account that will own it.
-2. Add a one-time granular publish token as the `NPM_BOOTSTRAP_TOKEN` secret in the protected `npm` GitHub environment.
-3. Run the workflow from `main` with `publish` enabled.
+1. Confirm `private-ai-proxy` is still available and use an npm account that belongs to the `phala` organization.
+2. Create a one-time granular token with package publish access and read/write access to the `phala` organization, then add it as the `NPM_BOOTSTRAP_TOKEN` secret in the protected `npm` GitHub environment.
+3. Run the workflow from `main` with `publish` enabled. Before publishing, it verifies the token owner belongs to `phala` and that `phala:developers` exists. After creating the first platform version, it grants that team read/write access to the unscoped package.
 4. Configure one trusted GitHub Actions publisher on `private-ai-proxy`:
    - organization: `Dstack-TEE`
    - repository: `private-ai-gateway`
