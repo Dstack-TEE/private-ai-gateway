@@ -29,15 +29,13 @@ import {
   type Provider,
 } from "@earendil-works/pi-ai";
 import { type SettingItem, SettingsList, truncateToWidth } from "@earendil-works/pi-tui";
-import {
-  createAciProvider,
-  formatAciInspection,
-  inspectAciProvider,
-  type AccountApiKeyAuth,
-  type AciModel,
-  type AciInspectionRequest,
-  type AciProvider,
-  type AciProviderProfile,
+import type {
+  AccountApiKeyAuth,
+  AciModel,
+  AciInspectionRequest,
+  AciProvider,
+  AciProviderConfig,
+  AciProviderProfile,
 } from "@phala/aci-provider";
 import os from "node:os";
 import { isDeepStrictEqual } from "node:util";
@@ -52,10 +50,10 @@ import {
   saveProjectAciCloudConfig,
   toAciProviderConfig,
 } from "./src/config.ts";
-import { createApiKeyAuth } from "./src/auth.ts";
+import { createAccountOAuthAuth, createApiKeyAuth } from "./src/auth.ts";
 import { PROVIDER_VERSION } from "./src/constants.ts";
 import { DEFAULT_PROFILE, resolveProfile, type ProviderProfile } from "./src/profile.ts";
-import { mapAciModelToPi } from "./src/models.ts";
+import { mapAciModelToPi, resolveModelCompatOverride } from "./src/models.ts";
 import { isAciProjectConfigApproved } from "./src/project-trust.ts";
 import {
   closeAciProvider,
@@ -100,18 +98,18 @@ function isOpenAICompletionsApi(api: unknown): api is OpenAICompletionsApi {
 }
 
 // Pi exposes compat stream factories at the root module for extensions while
-// managed installs intentionally omit Pi peer packages.
+// managed installs intentionally omit Pi peer packages. pi >= 0.80.8 removed
+// the root re-export in plain-Node resolution, so fall back to the lazy
+// factory wired to the ./api/* subpath (same implementation, loaded on first
+// use). Mirrors pi-provider-kimi-code's runtime detection.
 function getHostOpenAICompletionsApi(): OpenAICompletionsApi {
-  if (!("openAICompletionsApi" in piAi)) {
-    throw new Error("Pi does not provide the OpenAI Completions API");
-  }
-  const factory = piAi.openAICompletionsApi;
-  if (typeof factory !== "function") {
-    throw new Error("Pi provides an invalid OpenAI Completions API factory");
-  }
-  const api: unknown = factory();
+  const factory = (piAi as typeof piAi & { openAICompletionsApi?: unknown }).openAICompletionsApi;
+  const api: unknown =
+    typeof factory === "function"
+      ? factory()
+      : piAi.lazyApi(() => import("@earendil-works/pi-ai/api/openai-completions"));
   if (!isOpenAICompletionsApi(api)) {
-    throw new Error("Pi provides an invalid OpenAI Completions API");
+    throw new Error("Pi does not provide the OpenAI Completions API");
   }
   return api;
 }
@@ -144,7 +142,7 @@ function toPiModels(
   models: readonly AciModel[],
 ): Model<"openai-completions">[] {
   return models.map((model) => ({
-    ...mapAciModelToPi(model),
+    ...mapAciModelToPi(model, resolveModelCompatOverride(state.config, model.id)),
     api: "openai-completions",
     provider: state.profile.providerId,
     baseUrl: state.config.baseUrl,
@@ -154,11 +152,19 @@ function toPiModels(
 function nativeAciProvider(state: AciRuntimeState): Provider<"openai-completions"> {
   const streams = getHostOpenAICompletionsApi();
   const fetch = providerFetch(state);
+  // Account login (device code / auth URL) is surfaced as Pi account sign-in
+  // (`auth.oauth`) so it shows up in the "Sign in with an account" login list.
+  const accountOAuth = state.accountAuth
+    ? createAccountOAuthAuth(state.profile, state.accountAuth)
+    : undefined;
   return createPiProvider({
     id: state.profile.providerId,
     name: state.profile.label,
     baseUrl: state.config.baseUrl,
-    auth: { apiKey: createApiKeyAuth(state.profile, state.accountAuth) },
+    auth: {
+      apiKey: createApiKeyAuth(state.profile, accountOAuth ? undefined : state.accountAuth),
+      ...(accountOAuth ? { oauth: accountOAuth } : {}),
+    },
     models: [],
     async fetchModels({ signal }) {
       return toPiModels(state, await refreshAciModels(state, signal));
@@ -332,6 +338,8 @@ async function runInspectionCommand(
     if (!state.provider) {
       throw new Error(state.connectionError ?? "no verified connection is available");
     }
+    const { inspectAciProvider, formatAciInspection } =
+      await import("@phala/aci-provider/inspection");
     const result = await inspectAciProvider(state.provider, request);
     ctx.ui.notify(formatAciInspection(result, { providerLabel: state.profile.label }), "info");
   } catch (error) {
@@ -377,13 +385,26 @@ export function createProvider({
       state.renderConnectionStatus?.();
       const projectTrusted = isAciProjectConfigApproved(ctx);
       applyEffectiveConfig(pi, state, ctx.cwd, projectTrusted);
-      try {
+      // Seed the catalog only when Pi has no stored copy: attestation +
+      // /v1/models costs seconds of network and quote-verification CPU, so
+      // steady-state launches stay lazy (catalog hydrates from Pi's
+      // models-store, /model picker and post-login refresh cover updates,
+      // first inference connects on demand via providerFetch). A missing
+      // catalog entry means first run — refresh once so headless
+      // `pi --model <provider>/<id> -p` can resolve models.
+      await ctx.modelRegistry.refresh({
+        providers: [state.profile.providerId],
+        allowNetwork: false,
+      });
+      const hasCatalog = ctx.modelRegistry
+        .getAll()
+        .some((model) => model.provider === state.profile.providerId);
+      if (!hasCatalog) {
         await ctx.modelRegistry.refresh({
           providers: [state.profile.providerId],
         });
-      } finally {
-        state.renderConnectionStatus?.();
       }
+      state.renderConnectionStatus?.();
     });
 
     pi.on("session_shutdown", async () => {
@@ -457,5 +478,21 @@ export const PROVIDER_ID = DEFAULT_PROFILE.providerId;
 export { PROVIDER_VERSION };
 export { resolveProfile as getProviderProfile } from "./src/profile.ts";
 export { loadAciCloudConfig } from "./src/config.ts";
-export { discoverAciModels, mapAciModelToPi, mapAciServerModel } from "./src/models.ts";
-export { createAciProvider } from "@phala/aci-provider";
+export {
+  discoverAciModels,
+  mapAciModelToPi,
+  mapAciServerModel,
+  resolveModelCompatOverride,
+  BUILTIN_MODEL_COMPAT_OVERRIDES,
+} from "./src/models.ts";
+export type { ModelCompatOverride } from "./src/models.ts";
+
+/**
+ * Lazily load the heavyweight ACI provider implementation (pulls the
+ * attestation/verifier dependency chain). Kept async so importing this
+ * package stays cheap for hosts that never open a verified connection.
+ */
+export async function createAciProvider(config: AciProviderConfig): Promise<AciProvider> {
+  const { createAciProvider: create } = await import("@phala/aci-provider/provider");
+  return create(config);
+}

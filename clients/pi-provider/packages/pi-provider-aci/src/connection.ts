@@ -36,7 +36,7 @@ function connectionConfig(config: AciConnectionConfig): string {
 
 export async function ensureAciConnection<TProvider extends ConnectableAciProvider>(
   state: AciConnectionState<TProvider>,
-  createProvider: () => TProvider,
+  createProvider: () => TProvider | Promise<TProvider>,
 ): Promise<void> {
   const configKey = connectionConfig(state.config);
   if (state.provider && state.providerConfigKey === configKey) return;
@@ -53,7 +53,7 @@ export async function ensureAciConnection<TProvider extends ConnectableAciProvid
     state.connectionError = undefined;
     state.renderConnectionStatus?.();
     try {
-      const provider = createProvider();
+      const provider = await createProvider();
       await provider.connect();
       state.provider = provider;
       state.providerConfigKey = configKey;

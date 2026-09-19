@@ -43,6 +43,41 @@
       "types": "./dist/profiles.d.ts",
       "import": "./dist/profiles.js",
       "default": "./dist/profiles.js"
+    },
+    "./account-auth": {
+      "types": "./dist/account-auth.d.ts",
+      "import": "./dist/account-auth.js",
+      "default": "./dist/account-auth.js"
+    },
+    "./config": {
+      "types": "./dist/config.d.ts",
+      "import": "./dist/config.js",
+      "default": "./dist/config.js"
+    },
+    "./inspection": {
+      "types": "./dist/inspection.d.ts",
+      "import": "./dist/inspection.js",
+      "default": "./dist/inspection.js"
+    },
+    "./models": {
+      "types": "./dist/models.d.ts",
+      "import": "./dist/models.js",
+      "default": "./dist/models.js"
+    },
+    "./profile": {
+      "types": "./dist/profile.d.ts",
+      "import": "./dist/profile.js",
+      "default": "./dist/profile.js"
+    },
+    "./provider": {
+      "types": "./dist/provider.d.ts",
+      "import": "./dist/provider.js",
+      "default": "./dist/provider.js"
+    },
+    "./session": {
+      "types": "./dist/session.d.ts",
+      "import": "./dist/session.js",
+      "default": "./dist/session.js"
     }
   },
   "publishConfig": {
