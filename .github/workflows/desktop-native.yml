@@ -911,10 +911,18 @@ jobs:
   publish-npm:
     if: inputs.publish_release && inputs.release_version != ''
     needs: update-feed
+    runs-on: ubuntu-24.04
     permissions:
+      actions: write
       contents: read
-      id-token: write
-    uses: ./.github/workflows/private-ai-proxy-npm.yml
-    with:
-      release_tag: desktop-v${{ inputs.release_version }}
-      publish: true
+    steps:
+      - name: Start npm publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: desktop-v${{ inputs.release_version }}
+        run: |
+          gh workflow run private-ai-proxy-npm.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f release_tag="$RELEASE_TAG" \
+            -f publish=true
