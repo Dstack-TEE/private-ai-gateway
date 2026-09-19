@@ -149,16 +149,16 @@ jobs:
             for binary in private-ai-proxy private-ai-proxy-helper private-ai-proxy-service; do
               cmp "$source/${binary}${binary_extension}" "$destination/package/vendor/${binary}${binary_extension}"
             done
-            node --input-type=module - "$destination/package/package.json" "$package_version" "$npm_platform" "$arch" <<'NODE'
-            import { readFile } from "node:fs/promises";
-            const [file, version, platform, arch] = process.argv.slice(2);
-            const manifest = JSON.parse(await readFile(file, "utf8"));
-            if (manifest.name !== "private-ai-proxy" || manifest.version !== version) {
-              throw new Error("platform package identity mismatch");
-            }
-            if (JSON.stringify(manifest.os) !== JSON.stringify([platform])) throw new Error("platform package os mismatch");
-            if (JSON.stringify(manifest.cpu) !== JSON.stringify([arch])) throw new Error("platform package cpu mismatch");
-            NODE
+            node --input-type=module -e '
+              import { readFile } from "node:fs/promises";
+              const [file, version, platform, arch] = process.argv.slice(1);
+              const manifest = JSON.parse(await readFile(file, "utf8"));
+              if (manifest.name !== "private-ai-proxy" || manifest.version !== version) {
+                throw new Error("platform package identity mismatch");
+              }
+              if (JSON.stringify(manifest.os) !== JSON.stringify([platform])) throw new Error("platform package os mismatch");
+              if (JSON.stringify(manifest.cpu) !== JSON.stringify([arch])) throw new Error("platform package cpu mismatch");
+            ' "$destination/package/package.json" "$package_version" "$npm_platform" "$arch"
           done <<'TARGETS'
           macos darwin arm64 tar.gz none
           macos darwin x64 tar.gz none
