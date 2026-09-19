@@ -818,7 +818,10 @@ jobs:
         if: inputs.publish_release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release edit "desktop-v$VERSION" --draft=false --latest=false
+        run: |
+          latest_args=(--latest=false)
+          if [[ "$CHANNEL" == stable ]]; then latest_args=(--latest); fi
+          gh release edit "desktop-v$VERSION" --draft=false "${latest_args[@]}"
 
   update-feed:
     if: inputs.publish_release && inputs.release_version != ''
