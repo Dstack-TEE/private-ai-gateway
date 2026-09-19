@@ -15,12 +15,14 @@ test("release notes use the stable product format and deterministic platform ord
       "private-ai-proxy-0.2.0-linux-x64.rpm",
       "private-ai-proxy-0.2.0-macos-arm64.dmg",
       "private-ai-proxy-0.2.0-linux-x64.deb",
+      "private-ai-proxy-0.2.0-linux-x64.pkg.tar.zst",
       "private-ai-proxy-0.2.0-windows-x64.exe",
       "private-ai-proxy-cli-0.2.0-macos-arm64.tar.gz",
       "private-ai-proxy-cli-0.2.0-windows-x64.zip",
       "private-ai-proxy-cli-0.2.0-linux-x64.tar.gz",
       "private-ai-proxy-cli-0.2.0-linux-x64.deb",
       "private-ai-proxy-cli-0.2.0-linux-x64.rpm",
+      "private-ai-proxy-cli-0.2.0-linux-x64.pkg.tar.zst",
       "SHA256SUMS",
     ]) await writeFile(path.join(directory, name), name);
 
@@ -29,8 +31,9 @@ test("release notes use the stable product format and deterministic platform ord
     assert.match(notes, /## What's changed\n\n- Initial stable release/);
     assert.ok(notes.indexOf("macOS Apple Silicon") < notes.indexOf("Windows x64"));
     assert.ok(notes.indexOf("[DEB]") < notes.indexOf("[RPM]"));
+    assert.ok(notes.indexOf("[RPM]") < notes.indexOf("[ARCH]"));
     assert.match(notes, /<summary>Standalone CLI downloads<\/summary>/);
-    assert.match(notes, /Linux x64 \| \[TAR\.GZ\].*\[DEB\].*\[RPM\]/);
+    assert.match(notes, /Linux x64 \| \[TAR\.GZ\].*\[DEB\].*\[RPM\].*\[ARCH\]/);
     assert.match(notes, /## Integrity and updates/);
     assert.match(notes, /Build commit: \[`aaaaaaa`\]/);
     await assert.rejects(

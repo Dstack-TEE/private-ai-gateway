@@ -39,6 +39,7 @@ test(`${channel} manifests use signed platform artifacts and reject incomplete r
     }
     await writeFile(path.join(directory, `private-ai-proxy-cli-${version}-linux-x64.deb`), "cli fixture");
     await writeFile(path.join(directory, `private-ai-proxy-cli-${version}-linux-x64.rpm`), "cli fixture");
+    await writeFile(path.join(directory, `private-ai-proxy-cli-${version}-linux-x64.pkg.tar.zst`), "cli fixture");
     await run();
     const manifest = JSON.parse(await readFile(path.join(directory, "latest.json"), "utf8"));
     assert.equal(manifest.version, version);
@@ -67,6 +68,7 @@ test(`${channel} manifests use signed platform artifacts and reject incomplete r
     for (const arch of ["arm64", "x64"]) {
       await writeFile(path.join(directory, `private-ai-proxy-${version}-macos-${arch}.dmg`), "disk image");
     }
+    await writeFile(path.join(directory, `private-ai-proxy-${version}-linux-x64.pkg.tar.zst`), "arch package");
     await writeFile(path.join(directory, `private-ai-proxy-cli-${version}-linux-x64.tar.gz`), "cli archive");
     const selected = (await selectAssets()).stdout.split("\0").filter(Boolean).map((file) => path.basename(file));
     for (const entry of Object.values(manifest.platforms)) {
@@ -75,6 +77,8 @@ test(`${channel} manifests use signed platform artifacts and reject incomplete r
     assert.ok(selected.includes(`private-ai-proxy-cli-${version}-linux-x64.tar.gz`));
     assert.ok(selected.includes(`private-ai-proxy-cli-${version}-linux-x64.deb`));
     assert.ok(selected.includes(`private-ai-proxy-cli-${version}-linux-x64.rpm`));
+    assert.ok(selected.includes(`private-ai-proxy-cli-${version}-linux-x64.pkg.tar.zst`));
+    assert.ok(selected.includes(`private-ai-proxy-${version}-linux-x64.pkg.tar.zst`));
     assert.ok(selected.includes("SHA256SUMS"));
     for (const arch of ["arm64", "x64"]) {
       assert.ok(selected.includes(`private-ai-proxy-${version}-macos-${arch}.dmg`));

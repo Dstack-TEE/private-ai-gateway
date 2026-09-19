@@ -78,13 +78,14 @@ export function useUpdates(api: DesktopApi) {
 }
 
 export function UpdateChannelControl({ updates }: { updates: ReturnType<typeof useUpdates> }): React.JSX.Element {
+  const systemManaged = updates.info?.systemManaged === true;
   return <Item>
     <ItemContent>
       <ItemTitle><FieldLabel id="update-channel-label">Update channel</FieldLabel></ItemTitle>
-      <ItemDescription id="update-channel-note">{updates.channel === "beta" ? "Pre-release builds" : "Stable releases"}</ItemDescription>
+      <ItemDescription id="update-channel-note">{systemManaged ? "Managed by pacman" : updates.channel === "beta" ? "Pre-release builds" : "Stable releases"}</ItemDescription>
     </ItemContent>
     <ItemActions>
-      <ToggleGroup size="sm" variant="outline" spacing={0} aria-labelledby="update-channel-label" aria-describedby="update-channel-note" value={updates.channel ? [updates.channel] : []} disabled={!updates.channel || Boolean(updates.busy)} onValueChange={([value]) => {
+      <ToggleGroup size="sm" variant="outline" spacing={0} aria-labelledby="update-channel-label" aria-describedby="update-channel-note" value={updates.channel ? [updates.channel] : []} disabled={systemManaged || !updates.channel || Boolean(updates.busy)} onValueChange={([value]) => {
         if (value === "stable" || value === "beta") void updates.changeChannel(value);
       }}><ToggleGroupItem value="stable">Stable</ToggleGroupItem><ToggleGroupItem value="beta">Beta</ToggleGroupItem></ToggleGroup>
     </ItemActions>
@@ -94,7 +95,8 @@ export function UpdateChannelControl({ updates }: { updates: ReturnType<typeof u
 export function UpdateControl({ updates, productName }: { updates: ReturnType<typeof useUpdates>; productName: string }): React.JSX.Element {
   const { info, currentVersion, busy, error } = updates;
   const label = busy === "changing" ? "Saving update channel…" : busy === "restarting" ? "Restarting to update…" : busy === "checking" ? "Checking for updates…"
-    : error ? "Update status unavailable" : (info?.enabled === false ? "Automatic updates unavailable in this build"
+    : error ? "Update status unavailable" : (info?.systemManaged ? "Updates are managed by pacman"
+      : info?.enabled === false ? "Automatic updates unavailable in this build"
       : info?.channelPublished === false ? "No releases published in this channel yet"
       : info?.version ? `Version ${info.version} is available`
       : info ? "You're up to date" : "Update status unavailable");

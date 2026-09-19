@@ -34,6 +34,7 @@ export function releaseVersionParts(version) {
   const base = `${parsed.major}.${parsed.minor}.${parsed.patch}`;
   const prerelease = parsed.prerelease.length > 0 ? parsed.prerelease.join(".") : undefined;
   return {
+    arch: prerelease ? `${base}${prerelease.replace(/[^0-9A-Za-z.]+/g, ".")}` : base,
     deb: prerelease ? `${base}~${prerelease}` : base,
     rpmVersion: base,
     rpmRelease: prerelease ? `0.${prerelease.replace(/[^0-9A-Za-z.]+/g, ".")}.1` : "1",
@@ -267,7 +268,7 @@ async function walk(root) {
   return files;
 }
 
-async function writeChecksum(file) {
+export async function writeChecksum(file) {
   const digest = createHash("sha256").update(await readFile(file)).digest("hex");
   await writeFile(`${file}.sha256`, `${digest}  ${path.basename(file)}\n`);
 }

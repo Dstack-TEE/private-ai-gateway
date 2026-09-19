@@ -9,6 +9,7 @@ export type CheckStatus = "pass" | "fail" | "skip" | "info";
 
 export interface UpdateInfo {
   enabled: boolean;
+  systemManaged: boolean;
   currentVersion: string;
   channel: UpdateChannel;
   version?: string | null;

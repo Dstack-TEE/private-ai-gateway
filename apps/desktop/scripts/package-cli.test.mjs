@@ -56,11 +56,13 @@ test("stages the three sibling CLI executables and portable alias and Linux pack
 
 test("maps prerelease versions to native package ordering", () => {
   assert.deepEqual(releaseVersionParts("1.2.3-beta.4"), {
+    arch: "1.2.3beta.4",
     deb: "1.2.3~beta.4",
     rpmVersion: "1.2.3",
     rpmRelease: "0.beta.4.1",
   });
   assert.deepEqual(releaseVersionParts("1.2.3"), {
+    arch: "1.2.3",
     deb: "1.2.3",
     rpmVersion: "1.2.3",
     rpmRelease: "1",

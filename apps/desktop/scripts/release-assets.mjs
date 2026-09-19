@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { releaseChannel } from "./release-channel.mjs";
-import { artifactName, desktopBuilds, desktopPackages } from "./release-artifacts.mjs";
+import { artifactName, desktopBuilds, desktopPackages, linuxNativePackageSuffixes } from "./release-artifacts.mjs";
 
 const [directory] = process.argv.slice(2);
 if (!directory) throw new Error("Supply the release artifact directory");
@@ -39,6 +39,9 @@ function releaseAssetNames(version) {
       const diskImage = artifactName({ version, platform, arch, suffix: ".dmg" });
       names.add(diskImage);
     }
+    if (platform === "linux") {
+      names.add(artifactName({ version, platform, arch, suffix: ".pkg.tar.zst" }));
+    }
     const archive = artifactName({
       version,
       platform,
@@ -48,7 +51,7 @@ function releaseAssetNames(version) {
     });
     names.add(archive);
     if (platform === "linux") {
-      for (const suffix of [".deb", ".rpm"]) {
+      for (const suffix of linuxNativePackageSuffixes) {
         const nativePackage = artifactName({ version, platform, arch, suffix, cli: true });
         names.add(nativePackage);
       }
@@ -60,7 +63,7 @@ function releaseAssetNames(version) {
 function releaseAssetName(file, names, version) {
   const name = path.basename(file);
   if (names.has(name)) return name;
-  if (/^private-ai-proxy(?:-cli)?[-_].*\.(?:dmg|exe|deb|rpm|zip|tar\.gz|app\.tar\.gz)$/.test(name)) {
+  if (/^private-ai-proxy(?:-cli)?[-_].*\.(?:dmg|exe|deb|rpm|zip|tar\.gz|app\.tar\.gz|pkg\.tar\.zst)$/.test(name)) {
     throw new Error(`Release asset ${name} does not match version ${version} or a supported platform`);
   }
   return undefined;
