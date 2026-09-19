@@ -266,7 +266,7 @@ jobs:
               fi
               echo "$name@$package_version already exists with matching contents; skipping"
             else
-              npm publish "$tarball" --access public --provenance --tag "$tag"
+              npm publish "$(realpath "$tarball")" --access public --provenance --tag "$tag"
             fi
           }
 
