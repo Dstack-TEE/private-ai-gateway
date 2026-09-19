@@ -1518,7 +1518,7 @@ fn openai_to_anthropic_messages(response: Value) -> Result<Value, ResponseTransf
         .and_then(Value::as_object)
         .ok_or_else(|| malformed_response("chat response requires a message"))?;
     let finish_reason = choice.get("finish_reason").and_then(Value::as_str);
-    let stop_reason = map_finish_reason(finish_reason)
+    let mut stop_reason = map_finish_reason(finish_reason)
         .ok_or_else(|| malformed_response("chat response has an invalid finish reason"))?;
     let truncated = matches!(finish_reason, Some("length" | "content_filter"));
 
@@ -1583,11 +1583,12 @@ fn openai_to_anthropic_messages(response: Value) -> Result<Value, ResponseTransf
             }));
         }
     }
-    if stop_reason == "tool_use"
-        && !content
-            .iter()
-            .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
-    {
+    let has_tool_calls = content
+        .iter()
+        .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"));
+    if stop_reason == "end_turn" && has_tool_calls {
+        stop_reason = "tool_use";
+    } else if stop_reason == "tool_use" && !has_tool_calls {
         return Err(malformed_response(
             "chat response finished for tool calls without a valid tool call",
         ));
@@ -2517,6 +2518,20 @@ mod tests {
             truncated["content"],
             json!([{ "type": "text", "text": "" }])
         );
+
+        let stopped_with_call = transform_response(
+            ProviderFormat::Openai,
+            Endpoint::Messages,
+            response(
+                json!({
+                    "type": "function", "id": "call_1",
+                    "function": { "name": "f", "arguments": "{}" }
+                }),
+                "stop",
+            ),
+        )
+        .unwrap();
+        assert_eq!(stopped_with_call["stop_reason"], "tool_use");
     }
 
     #[test]

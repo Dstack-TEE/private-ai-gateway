@@ -1056,7 +1056,9 @@ fn anthropic_complete_stop(params: &Value) -> Result<Option<Value>, TransformErr
 
 // ── Anthropic Messages → OpenAI Chat Completions transforms ──────────────────
 
-/// Reject Messages features whose behavior Chat Completions cannot preserve.
+/// Reject model-visible Messages features Chat Completions cannot preserve.
+/// Target-specific cache placement and tool-error annotations are discarded by
+/// the converters below while their text payload remains available to the model.
 /// This runs per candidate, so an Anthropic-native route can still receive the
 /// original request when an OpenAI bridge candidate cannot represent it.
 fn validate_messages_chat_compatibility(params: &Value) -> Result<(), TransformError> {
@@ -1076,6 +1078,8 @@ fn validate_messages_chat_compatibility(params: &Value) -> Result<(), TransformE
         "tools",
         "tool_choice",
         "metadata",
+        // Cache placement is an optimization, not model-visible content.
+        "cache_control",
         // Gateway routing metadata, consumed before the upstream request.
         "provider",
     ];
@@ -1117,6 +1121,27 @@ fn required_map_string<'a>(
         })
 }
 
+fn anthropic_text_blocks<'a>(
+    blocks: &'a [Value],
+    context: &str,
+) -> Result<Vec<&'a str>, TransformError> {
+    blocks
+        .iter()
+        .map(|block| {
+            let block = object_with_only(block, &["type", "text", "cache_control"], context)?;
+            if block.get("type").and_then(Value::as_str) != Some("text") {
+                return Err(TransformError::invalid_request(format!(
+                    "only text {context}s can be served through Chat Completions"
+                )));
+            }
+            block
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or_else(|| TransformError::invalid_request(format!("{context} requires text")))
+        })
+        .collect()
+}
+
 fn push_openai_message(
     messages: &mut Vec<Value>,
     role: &str,
@@ -1126,24 +1151,27 @@ fn push_openai_message(
     if content.is_empty() && tool_calls.is_empty() {
         return;
     }
+    let content = std::mem::take(content);
+    let tool_calls = std::mem::take(tool_calls);
     let mut message = Map::new();
     message.insert("role".into(), json!(role));
-    if content.len() == 1 && content[0].get("type").and_then(Value::as_str) == Some("text") {
-        message.insert(
-            "content".into(),
-            content[0].get("text").cloned().unwrap_or_else(|| json!("")),
-        );
+    if content
+        .iter()
+        .all(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+    {
+        let text = content
+            .iter()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        message.insert("content".into(), Value::String(text));
     } else if !content.is_empty() {
-        message.insert("content".into(), Value::Array(std::mem::take(content)));
+        message.insert("content".into(), Value::Array(content));
     }
     if !tool_calls.is_empty() {
-        message.insert(
-            "tool_calls".into(),
-            Value::Array(std::mem::take(tool_calls)),
-        );
+        message.insert("tool_calls".into(), Value::Array(tool_calls));
         message.entry("content").or_insert_with(|| json!(""));
     }
-    content.clear();
     messages.push(Value::Object(message));
 }
 
@@ -1152,31 +1180,20 @@ fn oai_transform_messages(params: &Value) -> Result<Option<Value>, TransformErro
 
     if let Some(system) = params.get("system") {
         match system {
-            Value::String(s) if !s.is_empty() => {
+            Value::Null => {}
+            Value::String(s) if s.is_empty() => {}
+            Value::String(s) => {
                 messages.push(json!({ "role": "system", "content": s }));
             }
             Value::Array(blocks) => {
-                let content = blocks
-                    .iter()
-                    .map(|block| {
-                        let block = object_with_only(block, &["type", "text"], "system block")?;
-                        if block.get("type").and_then(Value::as_str) != Some("text") {
-                            return Err(TransformError::invalid_request(
-                                "only text system blocks can be served through Chat Completions",
-                            ));
-                        }
-                        let text = block.get("text").and_then(Value::as_str).ok_or_else(|| {
-                            TransformError::invalid_request("system text block requires text")
-                        })?;
-                        Ok(json!({ "type": "text", "text": text }))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                if content.is_empty() {
-                    return Err(TransformError::invalid_request(
-                        "system content must not be empty",
-                    ));
+                let content = anthropic_text_blocks(blocks, "system block")?
+                    .into_iter()
+                    .filter(|text| !text.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                if !content.is_empty() {
+                    messages.push(json!({ "role": "system", "content": content }));
                 }
-                messages.push(json!({ "role": "system", "content": content }));
             }
             _ => {
                 return Err(TransformError::invalid_request(
@@ -1218,7 +1235,11 @@ fn oai_transform_messages(params: &Value) -> Result<Option<Value>, TransformErro
                                     "assistant text after tool_use requires native /v1/messages support",
                                 ));
                             }
-                            let block = object_with_only(block, &["type", "text"], "text block")?;
+                            let block = object_with_only(
+                                block,
+                                &["type", "text", "cache_control"],
+                                "text block",
+                            )?;
                             let text =
                                 block.get("text").and_then(Value::as_str).ok_or_else(|| {
                                     TransformError::invalid_request("text block requires text")
@@ -1231,8 +1252,11 @@ fn oai_transform_messages(params: &Value) -> Result<Option<Value>, TransformErro
                                     "assistant image blocks require native /v1/messages support",
                                 ));
                             }
-                            let block =
-                                object_with_only(block, &["type", "source"], "image block")?;
+                            let block = object_with_only(
+                                block,
+                                &["type", "source", "cache_control"],
+                                "image block",
+                            )?;
                             let source = block.get("source").ok_or_else(|| {
                                 TransformError::invalid_request("image block requires source")
                             })?;
@@ -1275,7 +1299,7 @@ fn oai_transform_messages(params: &Value) -> Result<Option<Value>, TransformErro
                             }
                             let block = object_with_only(
                                 block,
-                                &["type", "id", "name", "input"],
+                                &["type", "id", "name", "input", "cache_control"],
                                 "tool_use block",
                             )?;
                             let id = required_map_string(block, "id", "tool_use block")?;
@@ -1303,13 +1327,33 @@ fn oai_transform_messages(params: &Value) -> Result<Option<Value>, TransformErro
                             }
                             let block = object_with_only(
                                 block,
-                                &["type", "tool_use_id", "content"],
+                                &[
+                                    "type",
+                                    "tool_use_id",
+                                    "content",
+                                    "is_error",
+                                    "cache_control",
+                                ],
                                 "tool_result block",
                             )?;
+                            // Chat tool messages have no typed error bit. Keep
+                            // the result content and validate, then drop, the hint.
+                            if !matches!(
+                                block.get("is_error"),
+                                None | Some(Value::Null | Value::Bool(_))
+                            ) {
+                                return Err(TransformError::invalid_request(
+                                    "tool_result.is_error must be a boolean",
+                                ));
+                            }
                             let tool_use_id =
                                 required_map_string(block, "tool_use_id", "tool_result block")?;
                             let content_value = match block.get("content") {
                                 Some(Value::String(text)) => Value::String(text.clone()),
+                                Some(Value::Array(blocks)) => Value::String(
+                                    anthropic_text_blocks(blocks, "tool_result content block")?
+                                        .join("\n\n"),
+                                ),
                                 None | Some(Value::Null) => json!(""),
                                 _ => {
                                     return Err(TransformError::invalid_request(
@@ -1330,8 +1374,11 @@ fn oai_transform_messages(params: &Value) -> Result<Option<Value>, TransformErro
                                     "assistant document blocks require native /v1/messages support",
                                 ));
                             }
-                            let block =
-                                object_with_only(block, &["type", "source"], "document block")?;
+                            let block = object_with_only(
+                                block,
+                                &["type", "source", "cache_control"],
+                                "document block",
+                            )?;
                             let source = block.get("source").ok_or_else(|| {
                                 TransformError::invalid_request("document block requires source")
                             })?;
@@ -1436,7 +1483,14 @@ fn oai_transform_tools(params: &Value) -> Result<Option<Value>, TransformError> 
             .map(|tool| {
                 let tool = object_with_only(
                     tool,
-                    &["type", "name", "description", "input_schema", "strict"],
+                    &[
+                        "type",
+                        "name",
+                        "description",
+                        "input_schema",
+                        "strict",
+                        "cache_control",
+                    ],
                     "tool",
                 )?;
                 match tool.get("type") {
@@ -2604,6 +2658,7 @@ fn anthropic_messages_config() -> ProviderConfig {
     let mut config = pass!(
         "cache_control",
         "container",
+        "context_management",
         "inference_geo",
         "mcp_servers",
         "metadata",
@@ -2824,6 +2879,10 @@ mod tests {
         let bridgeable = json!({
             "model": "m",
             "max_tokens": 64,
+            "system": [
+                { "type": "text", "text": "", "cache_control": { "type": "ephemeral" } },
+                { "type": "text", "text": "system", "cache_control": { "type": "ephemeral" } }
+            ],
             "messages": [
                 {
                     "role": "assistant",
@@ -2831,14 +2890,21 @@ mod tests {
                         "type": "tool_use",
                         "id": "call_1",
                         "name": "lookup",
-                        "input": { "q": "x" }
+                        "input": { "q": "x" },
+                        "cache_control": { "type": "ephemeral" }
                     }]
                 },
                 {
                     "role": "user",
                     "content": [
-                        { "type": "tool_result", "tool_use_id": "call_1", "content": "ok" },
-                        { "type": "text", "text": "continue" }
+                        {
+                            "type": "tool_result", "tool_use_id": "call_1", "content": [
+                                { "type": "text", "text": "failed", "cache_control": { "type": "ephemeral" } },
+                                { "type": "text", "text": "details" }
+                            ],
+                            "is_error": true, "cache_control": { "type": "ephemeral" }
+                        },
+                        { "type": "text", "text": "continue", "cache_control": { "type": "ephemeral" } }
                     ]
                 }
             ],
@@ -2846,10 +2912,12 @@ mod tests {
                 "name": "lookup",
                 "description": "Lookup",
                 "input_schema": { "type": "object" },
-                "strict": true
+                "strict": true,
+                "cache_control": { "type": "ephemeral" }
             }],
             "tool_choice": { "type": "none", "disable_parallel_tool_use": true },
-            "metadata": { "user_id": "user-1" }
+            "metadata": { "user_id": "user-1" },
+            "cache_control": { "type": "ephemeral" }
         });
         let body = transform_to_provider_request(
             ProviderFormat::Openai,
@@ -2862,8 +2930,37 @@ mod tests {
         assert_eq!(body["parallel_tool_calls"], false);
         assert_eq!(body["tools"][0]["function"]["strict"], true);
         assert_eq!(body["user"], "user-1");
-        assert_eq!(body["messages"][1]["role"], "tool");
-        assert_eq!(body["messages"][2]["content"], "continue");
+        assert_eq!(body["messages"][0]["content"], "system");
+        assert_eq!(body["messages"][2]["role"], "tool");
+        assert_eq!(body["messages"][2]["content"], "failed\n\ndetails");
+        assert_eq!(body["messages"][3]["content"], "continue");
+        let wire = body.to_string();
+        assert!(!wire.contains("cache_control"));
+        assert!(!wire.contains("is_error"));
+
+        for system in [
+            Value::Null,
+            json!(""),
+            json!([]),
+            json!([{
+                "type": "text", "text": "", "cache_control": { "type": "ephemeral" }
+            }]),
+        ] {
+            let body = transform_to_provider_request(
+                ProviderFormat::Openai,
+                &json!({
+                    "model": "m", "max_tokens": 8, "system": system,
+                    "messages": [{ "role": "user", "content": "hi" }]
+                }),
+                Endpoint::Messages,
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                body["messages"],
+                json!([{ "role": "user", "content": "hi" }])
+            );
+        }
 
         for incompatible in [
             json!({
@@ -2885,6 +2982,16 @@ mod tests {
                 "messages": [{ "role": "user", "content": "hi" }],
                 "tool_choice": { "type": "tool" }
             }),
+            json!({
+                "model": "m", "max_tokens": 8,
+                "messages": [{
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result", "tool_use_id": "call_1",
+                        "content": "failed", "is_error": "yes"
+                    }]
+                }]
+            }),
         ] {
             assert!(
                 transform_to_provider_request(
@@ -2904,6 +3011,7 @@ mod tests {
             "messages": [{ "role": "user", "content": "hi" }],
             "thinking": { "type": "enabled", "budget_tokens": 1024 },
             "cache_control": { "type": "ephemeral" },
+            "context_management": { "edits": [] },
             "inference_geo": "us",
             "output_config": { "effort": "high" }
         });
@@ -2918,6 +3026,10 @@ mod tests {
         assert_eq!(bodies[0].0, "anthropic:m");
         assert_eq!(bodies[0].1["thinking"], native_only["thinking"]);
         assert_eq!(bodies[0].1["cache_control"], native_only["cache_control"]);
+        assert_eq!(
+            bodies[0].1["context_management"],
+            native_only["context_management"]
+        );
         assert_eq!(bodies[0].1["inference_geo"], native_only["inference_geo"]);
         assert_eq!(bodies[0].1["output_config"], native_only["output_config"]);
     }

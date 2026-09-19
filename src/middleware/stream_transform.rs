@@ -173,6 +173,16 @@ struct MessageToolCall {
     content_index: Option<i64>,
 }
 
+impl MessageToolCall {
+    fn has_payload(&self) -> bool {
+        !self.id.trim().is_empty() || !self.name.trim().is_empty() || !self.arguments.is_empty()
+    }
+
+    fn has_identity(&self) -> bool {
+        !self.id.trim().is_empty() && !self.name.trim().is_empty()
+    }
+}
+
 #[derive(Default)]
 struct ResponsesStream {
     sequence: u64,
@@ -618,15 +628,18 @@ fn anthropic_stream_tail(state: &mut StreamState) -> Result<String, ()> {
         ));
     }
 
-    let stop_reason = map_finish_reason(Some(fr)).ok_or(())?;
+    let mut stop_reason = map_finish_reason(Some(fr)).ok_or(())?;
     let truncated = matches!(fr, "length" | "content_filter");
     let mut output = flush_ready_message_calls(state);
-    let has_unstarted = state
+    let invalid_identity = state
         .message_calls
         .values()
-        .any(|call| call.content_index.is_none());
-    if has_unstarted && !truncated {
+        .any(|call| call.has_payload() && !call.has_identity());
+    if invalid_identity && !truncated {
         return Err(());
+    }
+    if !truncated {
+        output.push_str(&open_pending_message_calls(state));
     }
     if !truncated
         && state
@@ -637,22 +650,18 @@ fn anthropic_stream_tail(state: &mut StreamState) -> Result<String, ()> {
     {
         return Err(());
     }
-    if stop_reason == "tool_use"
-        && !state
-            .message_calls
-            .values()
-            .any(|call| call.content_index.is_some())
-    {
+    let has_tool_calls = state
+        .message_calls
+        .values()
+        .any(|call| call.content_index.is_some());
+    if stop_reason == "end_turn" && has_tool_calls {
+        stop_reason = "tool_use";
+    } else if stop_reason == "tool_use" && !has_tool_calls {
         return Err(());
     }
 
     state.terminated = true;
-    if let Some(index) = state.text_content_index.take() {
-        output.push_str(&sse_event(
-            "content_block_stop",
-            &json!({ "type": "content_block_stop", "index": index }),
-        ));
-    }
+    output.push_str(&close_message_text(state));
     for call in state.message_calls.values_mut() {
         if let Some(index) = call.content_index.take() {
             output.push_str(&sse_event(
@@ -692,39 +701,59 @@ fn flush_ready_message_calls(state: &mut StreamState) -> String {
     let mut output = String::new();
     loop {
         let index = state.next_message_call_index;
-        let ready = state.message_calls.get(&index).is_some_and(|call| {
-            call.content_index.is_none() && !call.id.is_empty() && !call.name.is_empty()
-        });
+        let ready = state
+            .message_calls
+            .get(&index)
+            .is_some_and(|call| call.content_index.is_none() && call.has_identity());
         if !ready {
             break;
         }
-        output.push_str(&close_message_text(state));
-        let content_index = state.next_content_index;
-        state.next_content_index += 1;
         state.next_message_call_index += 1;
-        let call = state
-            .message_calls
-            .get_mut(&index)
-            .expect("ready message tool call exists");
-        call.content_index = Some(content_index);
+        output.push_str(&open_message_call(index, state));
+    }
+    output
+}
+
+fn open_pending_message_calls(state: &mut StreamState) -> String {
+    let pending = state
+        .message_calls
+        .iter()
+        .filter(|(_, call)| call.content_index.is_none() && call.has_identity())
+        .map(|(index, _)| *index)
+        .collect::<Vec<_>>();
+    let mut output = String::new();
+    for index in pending {
+        output.push_str(&open_message_call(index, state));
+    }
+    output
+}
+
+fn open_message_call(index: i64, state: &mut StreamState) -> String {
+    let mut output = close_message_text(state);
+    let content_index = state.next_content_index;
+    state.next_content_index += 1;
+    let call = state
+        .message_calls
+        .get_mut(&index)
+        .expect("message tool call exists");
+    call.content_index = Some(content_index);
+    output.push_str(&sse_event(
+        "content_block_start",
+        &json!({
+            "type": "content_block_start",
+            "index": content_index,
+            "content_block": { "type": "tool_use", "id": call.id, "name": call.name, "input": {} },
+        }),
+    ));
+    if !call.arguments.is_empty() {
         output.push_str(&sse_event(
-            "content_block_start",
+            "content_block_delta",
             &json!({
-                "type": "content_block_start",
+                "type": "content_block_delta",
                 "index": content_index,
-                "content_block": { "type": "tool_use", "id": call.id, "name": call.name, "input": {} },
+                "delta": { "type": "input_json_delta", "partial_json": call.arguments },
             }),
         ));
-        if !call.arguments.is_empty() {
-            output.push_str(&sse_event(
-                "content_block_delta",
-                &json!({
-                    "type": "content_block_delta",
-                    "index": content_index,
-                    "delta": { "type": "input_json_delta", "partial_json": call.arguments },
-                }),
-            ));
-        }
     }
     output
 }
@@ -861,9 +890,6 @@ fn openai_to_anthropic_messages_stream(
         Some(_) => return Err(()),
     };
     if let Some(content) = content {
-        if !state.message_calls.is_empty() {
-            return Err(());
-        }
         let content_index = match state.text_content_index {
             Some(index) => index,
             None => {
@@ -2531,6 +2557,52 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(tail.contains(r#""stop_reason":"tool_use""#));
+
+        let call_1 = tool_event(json!({
+            "index": 1, "id": "call_2",
+            "function": { "name": "second", "arguments": "{\"b\":2}" }
+        }));
+        let call_0 = tool_event(json!({
+            "index": 0, "id": "call_1",
+            "function": { "name": "first", "arguments": "{\"a\":1}" }
+        }));
+        let content = r#"data: {"choices":[{"delta":{"content":"after"}}]}"#;
+        let finish = r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#;
+        let ordered = run(
+            transform.clone(),
+            &[&call_1, &call_0, content, finish, "data: [DONE]"],
+        );
+        let blocks = ordered
+            .iter()
+            .filter(|event| event["type"] == "content_block_start")
+            .map(|event| event["content_block"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(blocks[0]["name"], "first");
+        assert_eq!(blocks[1]["name"], "second");
+        assert_eq!(blocks[2]["type"], "text");
+        assert_eq!(
+            ordered
+                .iter()
+                .find(|event| event["type"] == "message_delta")
+                .unwrap()["delta"]["stop_reason"],
+            "tool_use"
+        );
+
+        let sparse = tool_event(json!({
+            "index": 2, "id": "call_3",
+            "function": { "name": "sparse", "arguments": "{}" }
+        }));
+        let sparse_out = run(
+            transform.clone(),
+            &[
+                &sparse,
+                r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+                "data: [DONE]",
+            ],
+        );
+        assert!(sparse_out.iter().any(|event| {
+            event["type"] == "content_block_start" && event["content_block"]["name"] == "sparse"
+        }));
 
         for events in [
             vec![tool_event(json!({
