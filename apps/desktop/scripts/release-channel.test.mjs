@@ -28,12 +28,24 @@ test("stable release requests come from main and cover every platform", () => {
   assert.throws(() => validateReleaseRequest({ version: "0.2.0", channel: "stable", ref: "refs/heads/main", platforms: "macos-arm64" }), /every supported platform/);
   assert.throws(() => validateReleaseRequest({ version: "0.2.0", channel: "stable", ref: "refs/heads/main", platforms: "all" }), /release summary/);
   assert.throws(() => validateReleaseRequest({ version: "0.2.0-beta.1", summary: "## Heading" }), /must not contain Markdown headings/);
+  assert.throws(
+    () => validateReleaseRequest({ version: "0.2.0-beta.1", channel: "beta", ref: "refs/heads/feature", platforms: "all", publish: true }),
+    /Published releases must be built from main/,
+  );
+  assert.throws(
+    () => validateReleaseRequest({ version: "0.2.0-beta.1", channel: "beta", ref: "refs/heads/main", platforms: "macos-arm64", publish: true }),
+    /Published releases must include every supported platform/,
+  );
   assert.equal(
     validateReleaseRequest({ version: "0.2.0", channel: "stable", ref: "refs/heads/main", platforms: "all", publish: true, summary: "- Initial stable release" }).tag,
     "desktop-v0.2.0",
   );
   assert.equal(
     validateReleaseRequest({ version: "0.2.0-beta.1", channel: "beta", ref: "refs/heads/feature", platforms: "macos-arm64" }).tag,
+    "desktop-v0.2.0-beta.1",
+  );
+  assert.equal(
+    validateReleaseRequest({ version: "0.2.0-beta.1", channel: "beta", ref: "refs/heads/main", platforms: "all", publish: true }).tag,
     "desktop-v0.2.0-beta.1",
   );
 });

@@ -1,6 +1,8 @@
 name: Private AI Proxy npm packages
 
 on:
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       release_tag:
@@ -17,11 +19,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: private-ai-proxy-npm-${{ inputs.release_tag }}
+  group: private-ai-proxy-npm-${{ inputs.release_tag || github.event.release.tag_name }}
   cancel-in-progress: false
 
 jobs:
   package:
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'desktop-v') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     outputs:
@@ -43,12 +46,12 @@ jobs:
         name: Validate release
         env:
           GH_TOKEN: ${{ github.token }}
-          PUBLISH: ${{ inputs.publish }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
+          PUBLISH: ${{ github.event_name == 'release' || inputs.publish }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          if [[ "$PUBLISH" == true && "$GITHUB_REF" != refs/heads/main ]]; then
-            echo "npm publication must run from main" >&2
+          if [[ "$PUBLISH" == true && "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "Manual npm publication must run from main" >&2
             exit 1
           fi
           metadata="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,tagName)"
@@ -66,6 +69,13 @@ jobs:
           const distTag = semver.prerelease(version) ? "beta" : "latest";
           appendFileSync(output, `version=${version}\ndist_tag=${distTag}\n`);
           NODE
+          if [[ "$PUBLISH" == true ]]; then
+            comparison="$(gh api "repos/$GITHUB_REPOSITORY/compare/$RELEASE_TAG...main" --jq .status)"
+            if [[ "$comparison" != ahead && "$comparison" != identical ]]; then
+              echo "$RELEASE_TAG is not contained in main" >&2
+              exit 1
+            fi
+          fi
       - name: Download and verify CLI release assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -216,7 +226,7 @@ jobs:
           path: npm-packages/*.tgz
 
   publish:
-    if: ${{ inputs.publish }}
+    if: ${{ github.event_name == 'release' || inputs.publish }}
     needs: package
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -237,13 +247,9 @@ jobs:
       - name: Publish platform versions, then wrapper
         env:
           DIST_TAG: ${{ needs.package.outputs.dist_tag }}
-          NPM_BOOTSTRAP_TOKEN: ${{ secrets.NPM_BOOTSTRAP_TOKEN }}
           VERSION: ${{ needs.package.outputs.version }}
         run: |
           set -euo pipefail
-          if [[ -n "$NPM_BOOTSTRAP_TOKEN" ]]; then
-            export NODE_AUTH_TOKEN="$NPM_BOOTSTRAP_TOKEN"
-          fi
           npm_version="$(npm --version)"
           node -e 'const [major, minor] = process.argv[1].split(".").map(Number); if (major < 11 || (major === 11 && minor < 5)) process.exit(1)' "$npm_version"
           publish_if_missing() {
