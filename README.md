@@ -18,6 +18,8 @@ can fetch, build, and run inside a dstack v2 application VM.
 
 Start here:
 
+- [Install Private AI Proxy](docs/private-ai-proxy-install.md) — desktop, npm,
+  native CLI, and official install-script options.
 - [ACI quickstart](docs/quickstart.md) — verify a live deployment with the
   `aci` CLI, then use it as a local OpenAI-compatible endpoint.
 - [ACI spec](spec/aci.md) — the protocol: trust model, artifacts, checks.
