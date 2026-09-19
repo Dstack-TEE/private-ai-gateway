@@ -53,6 +53,7 @@ permissions:
 env:
   CARGO_BUILD_JOBS: 2
   CARGO_TARGET_DIR: ${{ github.workspace }}/apps/desktop/src-tauri/target
+  PAP_RUST_CACHE_NAMESPACE: ubuntu-24.04
 
 concurrency:
   group: desktop-${{ github.event_name }}-${{ github.ref }}-${{ inputs.release_version || 'ci' }}
@@ -95,10 +96,10 @@ jobs:
             ${{ env.CARGO_TARGET_DIR }}/*/*/.fingerprint
             ${{ env.CARGO_TARGET_DIR }}/*/*/deps
             ${{ env.CARGO_TARGET_DIR }}/*/*/build
-          key: pap-rust-v1-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}
+          key: pap-rust-v1-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_RUST_CACHE_NAMESPACE }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}
           restore-keys: |
-            pap-rust-v1-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}-partial-
-            pap-rust-v1-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-
+            pap-rust-v1-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_RUST_CACHE_NAMESPACE }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}-partial-
+            pap-rust-v1-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_RUST_CACHE_NAMESPACE }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-
       - name: Install Linux desktop dependencies
         run: |
           sudo apt-get update
@@ -212,6 +213,7 @@ jobs:
       DESKTOP_RELEASE_VERSION: ${{ inputs.release_version }}
       PAP_BUILD_TARGET: ${{ matrix.target }}
       PAP_BUNDLE_DIR: ${{ github.workspace }}/apps/desktop/src-tauri/target/${{ matrix.bundle_dir }}
+      PAP_RUST_CACHE_NAMESPACE: ${{ matrix.os }}
       DESKTOP_RELEASE_CHANNEL: ${{ inputs.release_channel || 'beta' }}
       TAURI_UPDATER_PUBLIC_KEY: ${{ inputs.release_version && vars.TAURI_UPDATER_PUBLIC_KEY || '' }}
       TAURI_UPDATER_ENDPOINT: ${{ inputs.release_version && format('https://github.com/Dstack-TEE/private-ai-gateway/releases/download/desktop-updates-{0}/latest.json', inputs.release_channel || 'beta') || '' }}
