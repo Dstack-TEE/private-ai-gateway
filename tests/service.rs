@@ -303,19 +303,26 @@ async fn verified_upstream_binding_creates_attested_session() {
 }
 
 /// Chutes verifies its whole fleet under one nonce, so the raw evidence bundle
-/// changes every round even when an instance's own material does not. That
-/// bundle must stay out of the per-instance session: sealing it in mints a
-/// fresh session per instance per round, so the store grows without bound
-/// relative to the live set.
+/// changes every round even when an instance's own material does not. The
+/// bundle therefore stays out of the dedup fingerprint — sealing it in would
+/// mint a fresh session per instance per round, growing the store without
+/// bound — but the establishing round's evidence must persist in the
+/// document: an empty `evidence` breaks §8.2 deep audit, and relying parties
+/// (§9.2 check 2) reject the record, which made every Chutes-routed model
+/// fail receipt verification.
 #[tokio::test]
 async fn chutes_instance_session_is_stable_across_evidence_rounds() {
+    use base64::Engine as _;
     let (svc, _) = make_service(br#"{"id":"chat-xyz","model":"x"}"#);
     let chutes_event = |round: &str| UpstreamVerifiedEvent {
         provider_type: Some("chutes".to_string()),
         url_origin: Some("https://stub-upstream".to_string()),
         verifier_id: "private-ai-verifier/chutes/v1".to_string(),
+        // §8.2: the digest is over the decoded evidence bytes.
         evidence: Some(serde_json::json!({
-            "digest": private_ai_gateway::aci::digest::sha256_hex(round.as_bytes()),
+            "digest": private_ai_gateway::aci::digest::sha256_hex(
+                &base64::engine::general_purpose::STANDARD.decode(round).unwrap(),
+            ),
             "data": format!("data:application/json;base64,{}", round),
         })),
         channel_bindings: vec![ChannelBinding::E2eePublicKeySha256 {
@@ -361,8 +368,24 @@ async fn chutes_instance_session_is_stable_across_evidence_rounds() {
     let session = svc
         .get_attested_session(&session_id)
         .expect("Chutes session should be queryable");
-    assert!(session.document().evidence.digest.is_none());
-    assert!(session.document().evidence.data_uri.is_none());
+    // §8.2: the record carries the establishing round's evidence (digest +
+    // data) so a relying party can deep-audit it, while the session id stays
+    // stable across nonce-bound evidence rounds.
+    let evidence = &session.document().evidence;
+    assert_eq!(
+        evidence.digest.as_deref(),
+        Some(private_ai_gateway::aci::digest::sha256_hex(b"abc").as_str(),),
+        "the first round's evidence digest must persist in the document"
+    );
+    assert_eq!(
+        evidence.data_uri.as_deref(),
+        Some("data:application/json;base64,YWJj"),
+        "the first round's evidence bytes must persist in the document"
+    );
+    assert!(
+        evidence.digest_matches_data(),
+        "persisted evidence must satisfy the §8.2 digest check"
+    );
 }
 
 #[tokio::test]

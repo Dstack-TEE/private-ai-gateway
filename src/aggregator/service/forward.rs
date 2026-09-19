@@ -699,18 +699,27 @@ impl AciService {
                 Some(instance_id) => per_instance_session_claims(event, instance_id),
                 None => session_claims_for_event(event),
             };
-            // A per-instance (Chutes) binding excludes the shared, nonce-bound raw
-            // evidence so re-verifying the same instance is a no-op; a single
-            // channel keeps the event's evidence.
-            let evidence = if instance.is_some() {
-                EvidenceRef::default()
-            } else {
-                event
-                    .evidence
-                    .as_ref()
-                    .map(EvidenceRef::from_value)
-                    .unwrap_or_default()
-            };
+            // Every sealed session carries the verifier's evidence so a
+            // relying party can deep-audit it (§8.2, §9.2). Per-instance
+            // (Chutes) evidence is nonce-bound and rotates every verification
+            // round, so it is excluded from the dedup fingerprint — otherwise
+            // every request would mint a new session id. The document keeps
+            // the establishing round's evidence for the whole validity
+            // window; the enforceable channel binding, not the evidence
+            // freshness, is what each request is served over.
+            let evidence = event
+                .evidence
+                .as_ref()
+                .map(EvidenceRef::from_value)
+                .unwrap_or_default();
+            if evidence.digest.is_none() && evidence.data_uri.is_none() {
+                tracing::warn!(
+                    upstream = %event.upstream_name,
+                    model = %event.model_id,
+                    "verified upstream session carries no evidence bundle; the session \
+                     record will not survive a §9.2 evidence audit"
+                );
+            }
             let session_id = self.seal_attested_session(
                 event,
                 identity.clone(),
@@ -719,6 +728,7 @@ impl AciService {
                 evidence,
                 now,
                 expires_at,
+                instance.is_none(),
             )?;
             sealed.push(SealedSession {
                 instance_key: instance.map(str::to_string),
@@ -814,6 +824,12 @@ impl AciService {
     /// verified material has a live validity period. The store's channel
     /// fingerprint provides the dedup — the document bytes themselves change
     /// with every validity period, so the id cannot.
+    ///
+    /// `fingerprint_covers_evidence` is false for per-instance (Chutes)
+    /// bindings whose nonce-bound evidence rotates every verification round:
+    /// covering the digest would make every request mint a new session. The
+    /// sealed document still carries the establishing round's evidence, so
+    /// the record stays deep-auditable per §8.2 for its whole window.
     #[allow(clippy::too_many_arguments)]
     fn seal_attested_session(
         &self,
@@ -824,7 +840,9 @@ impl AciService {
         evidence: EvidenceRef,
         now: u64,
         expires_at: u64,
+        fingerprint_covers_evidence: bool,
     ) -> Result<String, ServiceError> {
+        let no_digest = None;
         let fingerprint = ChannelMaterial {
             upstream_name: &event.upstream_name,
             endpoint: &event.url_origin,
@@ -832,7 +850,11 @@ impl AciService {
             identity: &identity,
             channel_binding: &channel_bindings,
             claims: &claims,
-            evidence_digest: &evidence.digest,
+            evidence_digest: if fingerprint_covers_evidence {
+                &evidence.digest
+            } else {
+                &no_digest
+            },
         }
         .fingerprint()
         .map_err(|err| ServiceError::SessionStore(format!("channel fingerprint: {err}")))?;
