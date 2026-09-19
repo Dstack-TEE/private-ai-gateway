@@ -217,9 +217,8 @@ pub async fn prepare_update(
 #[cfg(target_os = "linux")]
 fn system_managed() -> bool {
     std::path::Path::new("/usr/share/private-ai-proxy/package-manager").is_file()
-        && std::env::current_exe().is_ok_and(|path| {
-            path == std::path::Path::new("/usr/bin/private-ai-proxy-desktop")
-        })
+        && std::env::current_exe()
+            .is_ok_and(|path| path == std::path::Path::new("/usr/bin/private-ai-proxy-desktop"))
 }
 
 #[cfg(not(target_os = "linux"))]
