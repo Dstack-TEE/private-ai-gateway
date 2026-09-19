@@ -52,7 +52,7 @@ import {
   saveProjectAciCloudConfig,
   toAciProviderConfig,
 } from "./src/config.ts";
-import { createApiKeyAuth } from "./src/auth.ts";
+import { createAccountOAuthAuth, createApiKeyAuth } from "./src/auth.ts";
 import { PROVIDER_VERSION } from "./src/constants.ts";
 import { DEFAULT_PROFILE, resolveProfile, type ProviderProfile } from "./src/profile.ts";
 import { mapAciModelToPi } from "./src/models.ts";
@@ -154,11 +154,19 @@ function toPiModels(
 function nativeAciProvider(state: AciRuntimeState): Provider<"openai-completions"> {
   const streams = getHostOpenAICompletionsApi();
   const fetch = providerFetch(state);
+  // Account login (device code / auth URL) is surfaced as Pi account sign-in
+  // (`auth.oauth`) so it shows up in the "Sign in with an account" login list.
+  const accountOAuth = state.accountAuth
+    ? createAccountOAuthAuth(state.profile, state.accountAuth)
+    : undefined;
   return createPiProvider({
     id: state.profile.providerId,
     name: state.profile.label,
     baseUrl: state.config.baseUrl,
-    auth: { apiKey: createApiKeyAuth(state.profile, state.accountAuth) },
+    auth: {
+      apiKey: createApiKeyAuth(state.profile, accountOAuth ? undefined : state.accountAuth),
+      ...(accountOAuth ? { oauth: accountOAuth } : {}),
+    },
     models: [],
     async fetchModels({ signal }) {
       return toPiModels(state, await refreshAciModels(state, signal));
