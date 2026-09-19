@@ -1,19 +1,20 @@
 # Private AI Proxy CLI
 
-`private-ai-proxy` manages the same per-user backend as the desktop app. It does not require
-an open window. Installations must keep `private-ai-proxy` (including the verifier), `private-ai-proxy-service`, and the
-credential helper together; see [distribution](cli-distribution.md).
-`pap` and `aci` are installed shortcuts to the same executable; all three names
-accept the same commands. `aci` is the protocol-focused alias, not a separate
-binary or compatibility implementation.
+`pap` is the preferred command for managing the same per-user backend as the
+desktop app; it does not require an open window. Installations keep the
+canonical `private-ai-proxy` executable (including the verifier),
+`private-ai-proxy-service`, and the credential helper together; see
+[distribution](cli-distribution.md). `private-ai-proxy` is the full-name alias
+and `aci` is the protocol-focused alias. All three names accept the same
+commands and run the same implementation.
 
 ## Discover Commands
 
-Start with `private-ai-proxy --help` and `<command> --help`. `private-ai-proxy schema` prints the command
+Start with `pap --help` and `<command> --help`. `pap schema` prints the command
 tree as JSON, derived from the same Clap definitions used for parsing. It is a
 discovery document, not an RPC or response JSON Schema.
 
-`private-ai-proxy completions bash` prints shell completion code without installing it or
+`pap completions bash` prints shell completion code without installing it or
 changing shell configuration. Other supported shells are listed in its help.
 
 ## ACI Commands
@@ -22,25 +23,25 @@ The same binary includes the ACI protocol commands:
 
 | Command | Purpose |
 | --- | --- |
-| `private-ai-proxy verify <url>` | Verify the service identity and attestation. |
-| `private-ai-proxy audit` | Audit saved ACI evidence offline; see `audit --help` for inputs. |
-| `private-ai-proxy sessions <url>` | Inspect and verify attested inference sessions. |
-| `private-ai-proxy send <url>` | Send an inference request using the ACI client. |
-| `private-ai-proxy serve <url>` | Run the local streaming proxy with post-delivery receipt audits. |
+| `pap verify <url>` | Verify the service identity and attestation. |
+| `pap audit` | Audit saved ACI evidence offline; see `audit --help` for inputs. |
+| `pap sessions <url>` | Inspect and verify attested inference sessions. |
+| `pap send <url>` | Send an inference request using the ACI client. |
+| `pap serve <url>` | Run the local streaming proxy with post-delivery receipt audits. |
 
-`pap` and `aci` accept these same commands. They are compiled from this package's
-ACI modules, not forwarded to another executable. `serve` is standalone;
+`private-ai-proxy` and `aci` accept these same commands. They are compiled from
+this package's ACI modules, not forwarded to another executable. `serve` is standalone;
 `start` below manages the persistent background service and saved profiles.
 
 ## Lifecycle
 
 ```sh
-private-ai-proxy service start
-private-ai-proxy profiles list
-private-ai-proxy start --profile work --timeout 90
-private-ai-proxy status
-private-ai-proxy stop
-private-ai-proxy service stop --yes
+pap service start
+pap profiles list
+pap start --profile work --timeout 90
+pap status
+pap stop
+pap service stop --yes
 ```
 
 `service start` starts the management backend; saved `connectOnLaunch` may also
@@ -55,7 +56,7 @@ restored from disk.
 
 ### Reset Settings
 
-`private-ai-proxy settings reset --yes` stops protection, disconnects managed agents, and
+`pap settings reset --yes` stops protection, disconnects managed agents, and
 restores backend preferences, the default Local API listener, and the production
 OS policy. Profiles, credentials, the local client key and usage history are kept.
 The same operation is available under Settings > Advanced in the desktop, which
@@ -77,12 +78,12 @@ states do not by themselves establish a verified inference session.
 ## Profiles And Credentials
 
 ```sh
-private-ai-proxy profiles show work
-private-ai-proxy profiles edit work --name "Work gateway"
-private-ai-proxy profiles edit work --require-production-os
-private-ai-proxy profiles verify work
-private-ai-proxy profiles export --output profiles.json
-private-ai-proxy profiles import profiles.json --yes
+pap profiles show work
+pap profiles edit work --name "Work gateway"
+pap profiles edit work --require-production-os
+pap profiles verify work
+pap profiles export --output profiles.json
+pap profiles import profiles.json --yes
 ```
 
 Adding, editing and verifying a profile use the backend's verification and
@@ -106,8 +107,8 @@ one JSON snapshot per line. Human-readable output is not a parsing contract.
 For reviewed agent changes, obtain a preview first:
 
 ```sh
-private-ai-proxy --json agents connect codex --model MODEL --dry-run
-private-ai-proxy --json --yes agents connect codex --model MODEL --revision REVISION
+pap --json agents connect codex --model MODEL --dry-run
+pap --json --yes agents connect codex --model MODEL --revision REVISION
 ```
 
 Use the returned revision with the same agent, direction and options. A changed

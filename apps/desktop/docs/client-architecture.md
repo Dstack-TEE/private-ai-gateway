@@ -29,16 +29,16 @@ its service-side ACI implementation; PAP owns its relying-party verification,
 audit, and local-proxy implementation. Neither Rust package imports the other;
 both depend on the neutral `aci-protocol` crate for wire types and deterministic
 encoding only. Verification policy and security decisions are not shared, and
-each project retains its own workspace and lockfile. The `aci` command remains
-an alias of the single `private-ai-proxy` CLI, not a separate executable or crate.
+each project retains its own workspace and lockfile. `pap` is the preferred
+shell command; the full `private-ai-proxy` name and protocol-focused `aci`
+alias invoke the same executable rather than separate binaries or crates.
 
-`private-ai-proxy verify/audit/sessions/send` do not initialize the managed backend or
-credential store. `private-ai-proxy serve` streams responses immediately and
-audits receipts afterward by default. Receipt checks never gate streaming.
-`private-ai-proxy --json serve`
+`pap verify/audit/sessions/send` do not initialize the managed backend or
+credential store. `pap serve` streams responses immediately and audits receipts
+afterward by default. Receipt checks never gate streaming. `pap --json serve`
 emits lifecycle JSON events.
 
-`private-ai-proxy start/stop` retain managed profiles, user-session continuity and reversible
+`pap start/stop` retain managed profiles, user-session continuity and reversible
 agent configuration. The backend's supervised verifier process now runs
 `private-ai-proxy serve`. Ownership-pipe and child-reaping
 behavior is preserved; a backend crash must not leave a verifier listening.
@@ -118,8 +118,8 @@ on an unattended machine; there is no plaintext fallback.
 The display name is Private AI Proxy, with by dstack TEE attribution.
 The application identifier is `org.dstack.private-ai-proxy`; storage and
 credential services use the new identity and local keys use `sk-pap-`.
-Old beta configuration is not migrated. Command registration installs `private-ai-proxy` and its `pap` shortcut,
-and refuses unrelated existing commands.
+Old beta configuration is not migrated. Command registration installs `pap`,
+`private-ai-proxy`, and `aci`, and refuses unrelated existing commands.
 
 Windows uses the official Tauri NSIS template with branded artwork and
 no legacy-installation branches. Linux packages use the Private AI Proxy name.

@@ -85,7 +85,7 @@ uv run python scripts/live_e2e/user_verify.py \
   --chat-id chatcmpl-... \
   --request-body request.json \
   --response-body response.json
-aci audit \
+pap audit \
   --report report.json \
   --receipt receipt.json \
   --nonce nonce-used-for-report \
@@ -281,7 +281,7 @@ For each provider and enabled request mode:
 
 The first runnable slice covers the non-streaming lifecycle and relying-party
 verification path. The verifier intentionally uses the Rust protocol code
-(`aci audit`) for ACI canonicalization, keyset binding, and receipt signature
+(`pap audit`) for ACI canonicalization, keyset binding, and receipt signature
 checks instead of reimplementing those rules in Python.
 
 ### 32 Embeddings
@@ -295,7 +295,7 @@ Capability-gated on `embeddings`. For each provider that lists it, the runner:
   the lookup id, since OpenAI embeddings responses carry no `id` field. The
   gateway's receipt endpoint accepts either `chat_id` or `receipt_id` as the
   path parameter.
-- Runs the same `aci audit` offline verification against the receipt +
+- Runs the same `pap audit` offline verification against the receipt +
   request + response bodies to confirm canonical request/forwarded/response
   hashes and the receipt signature.
 - Asserts `receipt.endpoint == "/v1/embeddings"` and that `upstream.verified`
@@ -458,7 +458,7 @@ Inputs:
 - Original request body, optional.
 - Response body or captured stream bytes, optional.
 
-Procedure (delegated to `aci audit`):
+Procedure (delegated to `pap audit`):
 
 1. Fetch `GET /v1/aci/attestation?nonce=<random>`.
 2. Verify the report binding chain (keyset bytes → digest → statement →
@@ -476,7 +476,7 @@ The final output should be a human-readable summary plus a machine-readable
 JSON result. The verifier should omit `source_provenance` when the gateway
 report omits it because the git-launcher pin is unavailable.
 
-The output is the `aci audit --json` transcript: a `checks` array (id,
+The output is the `pap audit --json` transcript: a `checks` array (id,
 section, status, detail) and a `verdict` object carrying `verified`, the
 pass/fail/skip counts, and the established `workload_keyset_digest`.
 
