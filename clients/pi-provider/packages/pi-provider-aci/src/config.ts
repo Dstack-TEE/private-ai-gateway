@@ -25,7 +25,7 @@ import {
   AciProviderConfigError,
   resolveAciProviderConfig,
   type AciProviderConfig,
-} from "@phala/aci-provider";
+} from "@phala/aci-provider/config";
 
 import { DEFAULT_PROFILE, type ProviderProfile } from "./profile.ts";
 

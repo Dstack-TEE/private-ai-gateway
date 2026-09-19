@@ -4,7 +4,7 @@ import {
   mapAciModel,
   type AciModel,
   type AciServerModel,
-} from "@phala/aci-provider";
+} from "@phala/aci-provider/models";
 
 import { toAciProviderConfig, type AciCloudConfig } from "./config.ts";
 

@@ -29,15 +29,13 @@ import {
   type Provider,
 } from "@earendil-works/pi-ai";
 import { type SettingItem, SettingsList, truncateToWidth } from "@earendil-works/pi-tui";
-import {
-  createAciProvider,
-  formatAciInspection,
-  inspectAciProvider,
-  type AccountApiKeyAuth,
-  type AciModel,
-  type AciInspectionRequest,
-  type AciProvider,
-  type AciProviderProfile,
+import type {
+  AccountApiKeyAuth,
+  AciModel,
+  AciInspectionRequest,
+  AciProvider,
+  AciProviderConfig,
+  AciProviderProfile,
 } from "@phala/aci-provider";
 import os from "node:os";
 import { isDeepStrictEqual } from "node:util";
@@ -340,6 +338,8 @@ async function runInspectionCommand(
     if (!state.provider) {
       throw new Error(state.connectionError ?? "no verified connection is available");
     }
+    const { inspectAciProvider, formatAciInspection } =
+      await import("@phala/aci-provider/inspection");
     const result = await inspectAciProvider(state.provider, request);
     ctx.ui.notify(formatAciInspection(result, { providerLabel: state.profile.label }), "info");
   } catch (error) {
@@ -385,13 +385,26 @@ export function createProvider({
       state.renderConnectionStatus?.();
       const projectTrusted = isAciProjectConfigApproved(ctx);
       applyEffectiveConfig(pi, state, ctx.cwd, projectTrusted);
-      try {
+      // Seed the catalog only when Pi has no stored copy: attestation +
+      // /v1/models costs seconds of network and quote-verification CPU, so
+      // steady-state launches stay lazy (catalog hydrates from Pi's
+      // models-store, /model picker and post-login refresh cover updates,
+      // first inference connects on demand via providerFetch). A missing
+      // catalog entry means first run — refresh once so headless
+      // `pi --model <provider>/<id> -p` can resolve models.
+      await ctx.modelRegistry.refresh({
+        providers: [state.profile.providerId],
+        allowNetwork: false,
+      });
+      const hasCatalog = ctx.modelRegistry
+        .getAll()
+        .some((model) => model.provider === state.profile.providerId);
+      if (!hasCatalog) {
         await ctx.modelRegistry.refresh({
           providers: [state.profile.providerId],
         });
-      } finally {
-        state.renderConnectionStatus?.();
       }
+      state.renderConnectionStatus?.();
     });
 
     pi.on("session_shutdown", async () => {
@@ -466,4 +479,13 @@ export { PROVIDER_VERSION };
 export { resolveProfile as getProviderProfile } from "./src/profile.ts";
 export { loadAciCloudConfig } from "./src/config.ts";
 export { discoverAciModels, mapAciModelToPi, mapAciServerModel } from "./src/models.ts";
-export { createAciProvider } from "@phala/aci-provider";
+
+/**
+ * Lazily load the heavyweight ACI provider implementation (pulls the
+ * attestation/verifier dependency chain). Kept async so importing this
+ * package stays cheap for hosts that never open a verified connection.
+ */
+export async function createAciProvider(config: AciProviderConfig): Promise<AciProvider> {
+  const { createAciProvider: create } = await import("@phala/aci-provider/provider");
+  return create(config);
+}
