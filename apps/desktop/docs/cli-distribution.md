@@ -1,11 +1,13 @@
 # Private AI Proxy CLI Distribution
 
-There is one user-facing CLI: `private-ai-proxy`, including all five ACI commands.
-`pap` and `aci` are shortcuts to that same executable, not separately compiled CLIs. The
+There is one user-facing CLI. `pap` is the preferred command,
+`private-ai-proxy` is its canonical executable and full-name alias, and `aci` is
+the protocol-focused alias. All three expose the same commands. The
 desktop bundle and standalone CLI distribution do not ship a separate `aci`.
 They contain the same three executables:
 
-- `private-ai-proxy`: user-facing CLI, backend client and integrated ACI verifier (`private-ai-proxy serve`).
+- `private-ai-proxy`: canonical CLI executable, backend client and integrated ACI
+  verifier (normally invoked as `pap serve`).
 - `private-ai-proxy-service`: persistent per-user backend.
 - `private-ai-proxy-helper`: local agent credential helper.
 
@@ -39,7 +41,7 @@ retrying after the app is moved. Removing the command there disables automatic
 registration until the user installs it again.
 
 With the backend running, CLI-only users can disable the same preference with
-`private-ai-proxy --yes settings set autoCliRegistration false` before `private-ai-proxy cli uninstall`.
+`pap --yes settings set autoCliRegistration false` before `pap cli uninstall`.
 
 The registration is idempotent and never replaces an unrelated command. To
 register manually without opening the app:
@@ -48,8 +50,9 @@ register manually without opening the app:
 "/Applications/Private AI Proxy.app/Contents/MacOS/private-ai-proxy" cli install
 ```
 
-The default command path is `~/.local/bin/private-ai-proxy`, with `pap` and `aci` beside it.
-All three commands resolve to the canonical executable. Registration does not edit shell startup files, so the user
+The preferred command path is `~/.local/bin/pap`; `private-ai-proxy` and `aci`
+are installed beside it. All three resolve to the canonical executable.
+Registration does not edit shell startup files, so the user
 must add `~/.local/bin` to PATH if needed. `--directory` accepts an existing,
 current-user-owned directory that is not writable by other users.
 `/usr/local/bin` on macOS is reserved for an already-authorized installer or
@@ -58,10 +61,11 @@ administrator context; `private-ai-proxy` never requests elevation itself.
 ## Standalone CLI
 
 Every platform publishes a portable archive containing the three sibling
-executables plus the `pap` and `aci` shortcuts and no desktop UI. Windows uses ZIP with
-`.cmd` forwarding scripts; macOS and Linux archives use tar.gz with symlinks.
+executables plus the `pap` and `aci` shortcuts and no desktop UI. Windows uses
+ZIP with `.cmd` forwarding scripts; macOS and Linux archives use tar.gz with
+symlinks.
 Extract each version into a fresh directory rather than overlaying older files.
-Run `private-ai-proxy cli install` from a stable extracted location when PATH registration
+Run `pap cli install` from a stable extracted location when PATH registration
 is wanted.
 
 Linux also publishes CLI-only DEB, RPM, and Arch Linux packages. They install the three real
@@ -70,7 +74,7 @@ executables under `/usr/libexec/private-ai-proxy` and a package-owned
 locates `private-ai-proxy-service`. Package lifecycle scripts reject an unrelated owner of
 `/usr/bin/private-ai-proxy` and refuse replacement or removal while an exact bundled backend,
 verifier, or helper executable is still running. They do not invoke a user backend as
-root. Run `private-ai-proxy --yes service stop` as the owning user before a manual package
+root. Run `pap --yes service stop` as the owning user before a manual package
 upgrade. The in-app updater pauses the user-owned backend before invoking the native
 installer and preserves an active session so protection can resume after fresh
 verification when the app restarts.

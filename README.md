@@ -21,7 +21,7 @@ Start here:
 - [Install Private AI Proxy](docs/private-ai-proxy-install.md) — desktop, npm,
   native CLI, and official install-script options.
 - [ACI quickstart](docs/quickstart.md) — verify a live deployment with the
-  `aci` CLI, then use it as a local OpenAI-compatible endpoint.
+  `pap` CLI, then use it as a local OpenAI-compatible endpoint.
 - [ACI spec](spec/aci.md) — the protocol: trust model, artifacts, checks.
 - [ACI client architecture](clients/architecture.md) — the framework-neutral
   client product, existing versus new components, release policy, and coding
@@ -291,10 +291,10 @@ uv run python scripts/live_e2e/user_verify.py \
 ```
 
 The script's `--chat-id` argument accepts either a chat id or a receipt id. To
-verify already captured artifacts, run the `aci` CLI offline:
+verify already captured artifacts, run the `pap` CLI offline:
 
 ```bash
-aci audit \
+pap audit \
   --report report.json \
   --receipt receipt.json \
   --nonce "$NONCE"

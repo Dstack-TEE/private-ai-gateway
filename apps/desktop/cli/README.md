@@ -2,9 +2,9 @@
 
 Command-line implementation of the
 [ACI relying-party protocol](https://github.com/Dstack-TEE/private-ai-gateway/blob/main/spec/aci.md).
-The packaged `private-ai-proxy` CLI
-(also available through the `pap` and `aci` aliases) is the sole executable
-that owns these commands.
+The installed command is normally `pap`. It invokes the packaged
+`private-ai-proxy` executable; the full name and the protocol-focused `aci`
+alias expose the same commands.
 
 ```bash
 cargo run --manifest-path cli/Cargo.toml --bin private-ai-proxy -- <command> --help

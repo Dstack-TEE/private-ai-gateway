@@ -13,8 +13,9 @@ The desktop product and the remote Private AI Gateway are independent projects:
 - They share only the neutral `aci-protocol` wire types and canonical encoding
   crate. Producer logic and relying-party verification remain independent.
 
-The user-facing command is `private-ai-proxy`. `pap` and `aci` are aliases to
-that same executable, not separate binaries or crates.
+The preferred user-facing command is `pap`. `private-ai-proxy` is the
+full-name alias and `aci` is the protocol-focused alias; all three run the same
+executable rather than separate binaries or crates.
 
 ## Documentation
 
@@ -51,7 +52,7 @@ the remote Private AI Gateway server.
 ```text
 coding agent
     -> Local API with an agent-scoped token
-    -> private-ai-proxy serve over a verified ACI channel
+    -> pap serve over a verified ACI channel
     -> confidential AI service
 ```
 
