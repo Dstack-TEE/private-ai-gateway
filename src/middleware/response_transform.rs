@@ -1254,7 +1254,7 @@ pub fn openai_chat_to_responses(response: Value, echo: &Value) -> Value {
                 };
                 output.push(custom_tool_call_item(call_id, name, &input, "completed"));
             } else {
-                let Some(arguments) = normalize_function_call_arguments(arguments) else {
+                let Some(arguments) = validated_function_call_arguments(arguments) else {
                     invalid_tool_arguments = true;
                     continue;
                 };
@@ -1433,18 +1433,18 @@ pub(super) fn custom_tool_input(arguments: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Normalize Chat function arguments for a Responses function-call item.
-/// Empty arguments mean an empty object; every other value must be a JSON
-/// object so a later Responses history replay remains valid.
-pub(super) fn normalize_function_call_arguments(arguments: &str) -> Option<String> {
-    if arguments.trim().is_empty() {
-        return Some("{}".to_string());
-    }
-    matches!(
-        serde_json::from_str::<Value>(arguments),
-        Ok(Value::Object(_))
-    )
-    .then(|| arguments.to_string())
+/// Parse Chat function arguments only when they are a JSON object, as required
+/// by both Responses function calls and Anthropic tool-use inputs.
+pub(super) fn parse_function_call_arguments(arguments: &str) -> Option<Value> {
+    serde_json::from_str::<Value>(arguments)
+        .ok()
+        .filter(Value::is_object)
+}
+
+/// Preserve valid Chat function arguments for a Responses function-call item.
+/// Missing or malformed arguments must not be fabricated as an empty object.
+pub(super) fn validated_function_call_arguments(arguments: &str) -> Option<String> {
+    parse_function_call_arguments(arguments).map(|_| arguments.to_string())
 }
 
 pub(super) fn invalid_tool_call_arguments_error() -> Value {
@@ -1566,9 +1566,7 @@ fn openai_to_anthropic_messages(response: Value) -> Result<Value, ResponseTransf
                 .and_then(|f| f.get("arguments"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            let input = serde_json::from_str::<Value>(arguments)
-                .ok()
-                .filter(Value::is_object);
+            let input = parse_function_call_arguments(arguments);
             let (Some(id), Some(name), Some(input)) = (id, name, input) else {
                 if truncated {
                     continue;
@@ -2519,6 +2517,21 @@ mod tests {
             truncated["content"],
             json!([{ "type": "text", "text": "" }])
         );
+    }
+
+    #[test]
+    fn function_call_arguments_must_be_json_objects() {
+        for arguments in ["{}", r#"{"x":1}"#, " { } "] {
+            assert!(parse_function_call_arguments(arguments).is_some());
+            assert_eq!(
+                validated_function_call_arguments(arguments).as_deref(),
+                Some(arguments)
+            );
+        }
+        for arguments in ["", " ", "null", "[]", "true", "{"] {
+            assert!(parse_function_call_arguments(arguments).is_none());
+            assert!(validated_function_call_arguments(arguments).is_none());
+        }
     }
 
     #[test]

@@ -25,9 +25,10 @@ use super::response_transform::{
     self, anthropic_usage, chat_cache_tokens, custom_tool_call_item, custom_tool_input,
     function_call_item, i64_field, invalid_finish_reason_error, invalid_tool_call_arguments_error,
     invalid_tool_call_identity_error, item_id, map_finish_reason, message_item,
-    normalize_function_call_arguments, normalize_reasoning_usage_value, now_millis, now_secs,
-    output_text_part, reasoning_item, reasoning_text, refusal_part, responses_object,
-    responses_terminal, responses_usage, transform_finish_reason, ResponseIdentity, ResponsesHead,
+    normalize_reasoning_usage_value, now_millis, now_secs, output_text_part,
+    parse_function_call_arguments, reasoning_item, reasoning_text, refusal_part, responses_object,
+    responses_terminal, responses_usage, transform_finish_reason,
+    validated_function_call_arguments, ResponseIdentity, ResponsesHead,
 };
 use super::sse::MAX_SSE_LINE_BYTES;
 use super::types::ProviderFormat;
@@ -284,6 +285,32 @@ fn optional_stream_string(value: Option<&Value>) -> Result<&str, ()> {
         Some(Value::String(value)) => Ok(value),
         Some(_) => Err(()),
     }
+}
+
+struct ChatToolDelta<'a> {
+    index: i64,
+    id: &'a str,
+    name: &'a str,
+    arguments: &'a str,
+}
+
+fn parse_chat_tool_delta(value: &Value) -> Result<ChatToolDelta<'_>, ()> {
+    let tool_call = value.as_object().ok_or(())?;
+    let index = tool_call.get("index").and_then(Value::as_i64).ok_or(())?;
+    if index < 0 {
+        return Err(());
+    }
+    let function = match tool_call.get("function") {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(function)) => Some(function),
+        Some(_) => return Err(()),
+    };
+    Ok(ChatToolDelta {
+        index,
+        id: optional_stream_string(tool_call.get("id"))?,
+        name: optional_stream_string(function.and_then(|value| value.get("name")))?,
+        arguments: optional_stream_string(function.and_then(|value| value.get("arguments")))?,
+    })
 }
 
 /// One SSE event reduced to the fields the transforms consume: the last
@@ -606,12 +633,7 @@ fn anthropic_stream_tail(state: &mut StreamState) -> Result<String, ()> {
             .message_calls
             .values()
             .filter(|call| call.content_index.is_some())
-            .any(|call| {
-                !matches!(
-                    serde_json::from_str::<Value>(&call.arguments),
-                    Ok(Value::Object(_))
-                )
-            })
+            .any(|call| parse_function_call_arguments(&call.arguments).is_none())
     {
         return Err(());
     }
@@ -710,37 +732,24 @@ fn flush_ready_message_calls(state: &mut StreamState) -> String {
 fn message_tool_deltas(tool_calls: &[Value], state: &mut StreamState) -> Result<String, ()> {
     let mut output = String::new();
     for tool_call in tool_calls {
-        let tool_call = tool_call.as_object().ok_or(())?;
-        let index = tool_call.get("index").and_then(Value::as_i64).ok_or(())?;
-        if index < 0 {
-            return Err(());
-        }
-        let id = optional_stream_string(tool_call.get("id"))?;
-        let function = match tool_call.get("function") {
-            None | Some(Value::Null) => None,
-            Some(Value::Object(function)) => Some(function),
-            Some(_) => return Err(()),
-        };
-        let name = optional_stream_string(function.and_then(|function| function.get("name")))?;
-        let arguments =
-            optional_stream_string(function.and_then(|function| function.get("arguments")))?;
+        let delta = parse_chat_tool_delta(tool_call)?;
 
         let was_started = {
-            let call = state.message_calls.entry(index).or_default();
-            set_tool_identity(&mut call.id, id)?;
-            set_tool_identity(&mut call.name, name)?;
-            if !arguments.is_empty() {
-                call.arguments.push_str(arguments);
+            let call = state.message_calls.entry(delta.index).or_default();
+            set_tool_identity(&mut call.id, delta.id)?;
+            set_tool_identity(&mut call.name, delta.name)?;
+            if !delta.arguments.is_empty() {
+                call.arguments.push_str(delta.arguments);
             }
             call.content_index
         };
-        if let Some(content_index) = was_started.filter(|_| !arguments.is_empty()) {
+        if let Some(content_index) = was_started.filter(|_| !delta.arguments.is_empty()) {
             output.push_str(&sse_event(
                 "content_block_delta",
                 &json!({
                     "type": "content_block_delta",
                     "index": content_index,
-                    "delta": { "type": "input_json_delta", "partial_json": arguments },
+                    "delta": { "type": "input_json_delta", "partial_json": delta.arguments },
                 }),
             ));
         }
@@ -1126,30 +1135,20 @@ fn responses_text_delta(kind: TextKind, delta: &str, state: &mut ResponsesStream
 fn responses_tool_deltas(tool_calls: &[Value], state: &mut ResponsesStream) -> Result<String, ()> {
     let mut output = String::new();
     for tool_call in tool_calls {
-        let index = tool_call.get("index").and_then(Value::as_i64).unwrap_or(0);
-        let call_id = tool_call.get("id").and_then(Value::as_str).unwrap_or("");
-        let function = tool_call.get("function");
-        let name = function
-            .and_then(|function| function.get("name"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let arguments = function
-            .and_then(|function| function.get("arguments"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
+        let delta = parse_chat_tool_delta(tool_call)?;
 
         let was_started = {
-            let call = state.calls.entry(index).or_default();
-            set_tool_identity(&mut call.call_id, call_id)?;
-            set_tool_identity(&mut call.chat_name, name)?;
-            if !arguments.is_empty() {
-                call.arguments.push_str(arguments);
+            let call = state.calls.entry(delta.index).or_default();
+            set_tool_identity(&mut call.call_id, delta.id)?;
+            set_tool_identity(&mut call.chat_name, delta.name)?;
+            if !delta.arguments.is_empty() {
+                call.arguments.push_str(delta.arguments);
             }
             call.output_index.is_some()
         };
 
-        if was_started && !arguments.is_empty() {
-            let call = state.calls.get(&index).expect("tool call exists");
+        if was_started && !delta.arguments.is_empty() {
+            let call = state.calls.get(&delta.index).expect("tool call exists");
             if call.kind == CallKind::Function {
                 if let Some(output_index) = call.output_index {
                     let item_id = call.item_id();
@@ -1159,7 +1158,7 @@ fn responses_tool_deltas(tool_calls: &[Value], state: &mut ResponsesStream) -> R
                         json!({
                             "item_id": item_id,
                             "output_index": output_index,
-                            "delta": arguments,
+                            "delta": delta.arguments,
                         }),
                     ));
                 }
@@ -1280,7 +1279,7 @@ fn close_responses_calls(state: &mut ResponsesStream) -> String {
             ));
             continue;
         }
-        let Some(arguments) = normalize_function_call_arguments(&call.arguments) else {
+        let Some(arguments) = validated_function_call_arguments(&call.arguments) else {
             state.invalid_tool_arguments = true;
             continue;
         };
@@ -2368,6 +2367,19 @@ mod tests {
                 accepted
             );
         }
+    }
+
+    #[tokio::test]
+    async fn responses_stream_requires_tool_call_index() {
+        let event = json!({ "choices": [{ "delta": { "tool_calls": [{
+            "id": "call_1",
+            "function": { "name": "lookup", "arguments": "{}" }
+        }] } }] });
+        let (_, error, _) = replay_responses_fixture(&json!({
+            "events": [format!("data: {event}")]
+        }))
+        .await;
+        assert!(error.is_some());
     }
 
     #[tokio::test]
