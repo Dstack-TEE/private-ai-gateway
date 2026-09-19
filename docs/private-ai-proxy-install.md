@@ -36,11 +36,17 @@ and removal for both the Formula and Cask installations.
 
 ## macOS and Linux install script
 
-Review and run the official installer:
+Run the official installer from the stable RedPill URL:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/Dstack-TEE/private-ai-gateway/main/scripts/install-private-ai-proxy.sh
-sh install-private-ai-proxy.sh
+curl -fsSL https://redpill.ai/private-ai-proxy/install.sh | sh
+```
+
+To review the script or pass options, download it first:
+
+```sh
+curl -fsSLO https://redpill.ai/private-ai-proxy/install.sh
+sh install.sh
 ```
 
 The script supports macOS and Linux on arm64 and x86_64. It installs without
@@ -62,13 +68,17 @@ versioned files and `$HOME/.local/bin` for commands.
 
 ## Windows install script
 
-Download the script so it can be reviewed before execution:
+Run the official installer from PowerShell:
 
 ```powershell
-Invoke-WebRequest `
-  https://raw.githubusercontent.com/Dstack-TEE/private-ai-gateway/main/scripts/install-private-ai-proxy.ps1 `
-  -OutFile install-private-ai-proxy.ps1
-powershell -ExecutionPolicy Bypass -File .\install-private-ai-proxy.ps1
+irm https://redpill.ai/private-ai-proxy/install.ps1 | iex
+```
+
+To review the script or pass parameters, download it first:
+
+```powershell
+Invoke-WebRequest https://redpill.ai/private-ai-proxy/install.ps1 -OutFile install.ps1
+powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 The script supports Windows x64 and ARM64. It verifies the release ZIP against
