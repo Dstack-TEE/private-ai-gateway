@@ -13,7 +13,7 @@ use crate::{
     usage::UsageQuery,
 };
 
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 pub const BUILD_VERSION: &str = match option_env!("PAP_BUILD_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
@@ -39,6 +39,13 @@ pub struct Request {
     pub command: Command,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ShutdownMode {
+    Quit,
+    UpdateRestart,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(
     tag = "method",
@@ -53,6 +60,7 @@ pub enum Command {
     Stop,
     Shutdown {
         instance_id: String,
+        mode: ShutdownMode,
     },
     Verify {
         profile: ConfidentialProfileInput,

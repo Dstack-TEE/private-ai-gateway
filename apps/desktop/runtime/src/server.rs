@@ -14,7 +14,9 @@ use tokio::{runtime::Handle, sync::Semaphore, task::JoinSet};
 use crate::{
     controller::DesktopRuntime,
     preferences,
-    protocol::{self, Command, Hello, Outcome, Preference, Request, Response, RpcError},
+    protocol::{
+        self, Command, Hello, Outcome, Preference, Request, Response, RpcError, ShutdownMode,
+    },
     transport::{Listener, Stream},
 };
 
@@ -60,15 +62,21 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
     let mut tasks = JoinSet::new();
     let handle = Handle::current();
     let startup = runtime.clone();
-    tasks.spawn_blocking(move || match preferences::load() {
-        Ok(saved) if saved.connect_on_launch => {
+    tasks.spawn_blocking(move || {
+        let connect_on_launch = match preferences::load() {
+            Ok(saved) => saved.connect_on_launch,
+            Err(error) => {
+                startup.report_error(error);
+                false
+            }
+        };
+        let resume_session = startup.state().is_ok_and(|state| state.reconnecting);
+        if connect_on_launch || resume_session {
             let result = startup.start_on_launch();
             if let Err(error) = result {
                 startup.report_error(error);
             }
         }
-        Err(error) => startup.report_error(error),
-        _ => {}
     });
     let signal = shutdown_signal();
     tokio::pin!(signal);
@@ -79,7 +87,7 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
                 let worker = runtime.clone();
                 let executor = handle.clone();
                 let gate = admission.clone();
-                let result = tokio::task::spawn_blocking(move || shutdown(&worker, &gate, &executor)).await.map_err(|_| "Shutdown task failed")?;
+                let result = tokio::task::spawn_blocking(move || shutdown(&worker, &gate, &executor, ShutdownMode::Quit)).await.map_err(|_| "Shutdown task failed")?;
                 match result {
                     Ok(()) => { stopping.store(true, Ordering::Release); break; },
                     Err(error) => runtime.report_error(error),
@@ -207,7 +215,7 @@ fn connection(
         }
         return Ok(());
     }
-    if let Command::Shutdown { instance_id } = &request.command {
+    if let Command::Shutdown { instance_id, mode } = &request.command {
         if instance_id != &hello.instance_id {
             return protocol::write(
                 reader.get_mut(),
@@ -220,7 +228,7 @@ fn connection(
                 },
             );
         }
-        let result = shutdown(&runtime, &admission, &handle)
+        let result = shutdown(&runtime, &admission, &handle, *mode)
             .map(|()| Value::Null)
             .map_err(|error| RpcError::operation(&error));
         if result.is_ok() {
@@ -290,6 +298,7 @@ fn shutdown(
     runtime: &Arc<DesktopRuntime>,
     admission: &Admission,
     handle: &Handle,
+    mode: ShutdownMode,
 ) -> Result<(), String> {
     if admission.draining.swap(true, Ordering::AcqRel) {
         return Err("Shutdown is already in progress".into());
@@ -299,7 +308,7 @@ fn shutdown(
             .mutations
             .write()
             .map_err(|_| "Management admission unavailable")?;
-        handle.block_on(runtime.shutdown())
+        handle.block_on(runtime.shutdown(mode))
     })();
     if result.is_err() {
         admission.draining.store(false, Ordering::Release);

@@ -71,8 +71,9 @@ locates `private-ai-proxy-service`. Package lifecycle scripts reject an unrelate
 `/usr/bin/private-ai-proxy` and refuse replacement or removal while an exact bundled backend,
 verifier, or helper executable is still running. They do not invoke a user backend as
 root. Run `private-ai-proxy --yes service stop` as the owning user before a manual package
-upgrade; the in-app updater performs that user-context stop before invoking the
-native installer.
+upgrade. The in-app updater pauses the user-owned backend before invoking the native
+installer and preserves an active session so protection can resume after fresh
+verification when the app restarts.
 
 CI extracts every portable archive and CLI-only native package, then runs the
 packaged `private-ai-proxy` with a private temporary app home and loopback port. The smoke

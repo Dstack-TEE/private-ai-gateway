@@ -1,4 +1,5 @@
 use super::*;
+use crate::protocol::ShutdownMode;
 
 impl DesktopRuntime {
     pub(super) fn configuration_change(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
@@ -101,7 +102,7 @@ impl DesktopRuntime {
             return Ok(());
         }
         let state = self.manager.snapshot()?;
-        if self.manager.is_running()? || state.reconnecting {
+        if self.manager.is_running()? {
             return Ok(());
         }
         self.recovery.cancel();
@@ -176,7 +177,7 @@ impl DesktopRuntime {
         result
     }
 
-    pub async fn shutdown(&self) -> Result<(), String> {
+    pub async fn shutdown(&self, mode: ShutdownMode) -> Result<(), String> {
         // Shutdown waits for a configuration transaction to commit or roll back.
         // Cancelling that future midway could split credential and config state.
         let _operation = self.lifecycle.lock().await;
@@ -184,7 +185,9 @@ impl DesktopRuntime {
             return Ok(());
         }
         self.recovery.cancel();
-        self.stop_inner()?;
+        let preserve_session =
+            mode == ShutdownMode::UpdateRestart && self.manager.snapshot()?.session_active;
+        self.stop_with_reconnect(preserve_session)?;
         self.endpoint.stop().await?;
         self.exiting.store(true, Ordering::Release);
         Ok(())

@@ -60,7 +60,7 @@ export function useUpdates(api: DesktopApi) {
       const latest = await refresh();
       if (latest.error) throw latest.error;
       if (!latest.data?.version) return;
-      if (!await api.confirm({ title: "Restart to update?", message: `Version ${latest.data.version} is ready. Protection will stop and connected agent configurations will be restored before the app restarts. In-flight requests may be interrupted.`, confirmLabel: "Restart to update" })) return;
+      if (!await api.confirm({ title: "Restart to update?", message: `Version ${latest.data.version} is ready. Protection will pause during the restart and resume only after fresh verification. In-flight requests may be interrupted.`, confirmLabel: "Restart to update" })) return;
       installAttempted = true;
       await api.restartToUpdate();
     } catch (failure) {
