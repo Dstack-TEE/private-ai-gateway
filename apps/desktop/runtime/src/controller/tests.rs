@@ -413,7 +413,9 @@ fn shutdown_blocks_later_configuration_changes() {
     let executor = tokio::runtime::Runtime::new().unwrap();
     let directory = tempfile::tempdir().unwrap();
     let runtime = test_runtime(&executor, directory.path());
-    executor.block_on(runtime.shutdown()).unwrap();
+    executor
+        .block_on(runtime.shutdown(crate::protocol::ShutdownMode::Quit))
+        .unwrap();
     let state = runtime.state().unwrap();
     assert_eq!(state.status, "stopped");
     assert_eq!(
@@ -431,6 +433,41 @@ fn shutdown_blocks_later_configuration_changes() {
             .unwrap_err(),
         AgentOperationError::Runtime(message) if message == "The app is closing"
     ));
+}
+
+#[test]
+fn update_restart_preserves_only_an_active_protection_session() {
+    for (mode, active, preserved) in [
+        (crate::protocol::ShutdownMode::Quit, true, false),
+        (crate::protocol::ShutdownMode::UpdateRestart, true, true),
+        (crate::protocol::ShutdownMode::UpdateRestart, false, false),
+    ] {
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(&executor, directory.path());
+        if active {
+            runtime
+                .usage
+                .save_active_session("update-session", 123)
+                .unwrap();
+            runtime.manager.restore_snapshot(GatewayState {
+                status: "verified".into(),
+                session_id: Some("update-session".into()),
+                session_active: true,
+                protected_since: Some(123),
+                ..Default::default()
+            });
+        }
+
+        executor.block_on(runtime.shutdown(mode)).unwrap();
+
+        let state = runtime.state().unwrap();
+        assert_eq!(state.status, "stopped");
+        assert_eq!(state.reconnecting, preserved);
+        assert_eq!(state.session_active, preserved);
+        assert_eq!(state.protected_since, preserved.then_some(123));
+        assert_eq!(runtime.usage.active_session().unwrap().is_some(), preserved);
+    }
 }
 
 #[test]

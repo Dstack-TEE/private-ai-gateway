@@ -14,7 +14,7 @@ use tokio::sync::watch;
 use crate::{
     contracts::*,
     preferences::Preferences,
-    protocol::{self, Command, Hello, Outcome, Preference, Request, Response},
+    protocol::{self, Command, Hello, Outcome, Preference, Request, Response, ShutdownMode},
     transport::Stream,
     usage::{UsagePage, UsageQuery},
 };
@@ -442,9 +442,13 @@ impl Client {
         })
     }
     pub fn shutdown(&self) -> Result<(), String> {
-        self.shutdown_owned(None)
+        self.shutdown_owned(None, ShutdownMode::Quit)
     }
-    fn shutdown_owned(&self, expected: Option<&std::path::Path>) -> Result<(), String> {
+    fn shutdown_owned(
+        &self,
+        expected: Option<&std::path::Path>,
+        mode: ShutdownMode,
+    ) -> Result<(), String> {
         let (mut reader, before) = open().map_err(connection_error)?;
         if let Some(expected) = expected {
             let actual = PathBuf::from(&before.executable)
@@ -471,6 +475,7 @@ impl Client {
                     id,
                     command: Command::Shutdown {
                         instance_id: before.instance_id.clone(),
+                        mode,
                     },
                 },
             )
@@ -497,19 +502,41 @@ impl Client {
         install: impl FnOnce() -> Result<(), String>,
     ) -> Result<(), String> {
         let data = desktop_gateway::agents::app_data_dir()?;
-        let _startup = desktop_gateway::lock::startup(&data)
+        let startup = desktop_gateway::lock::startup(&data)
             .map_err(|_| "Cannot secure update startup gate")?
             .ok_or("Another startup or update is in progress.")?;
         let expected = crate::launch::service_executable()?
             .canonicalize()
             .map_err(|_| "Cannot identify the installed backend")?;
-        if self.is_running()? {
-            self.shutdown_owned(Some(&expected))?;
+        let was_running = self.is_running()?;
+        if was_running {
+            self.shutdown_owned(Some(&expected), ShutdownMode::UpdateRestart)?;
         }
-        let _ownership = desktop_gateway::lock::instance(&data)
+        let ownership = desktop_gateway::lock::instance(&data)
             .map_err(|_| "Cannot secure update ownership")?
             .ok_or("Another backend started before the update. Stop it before retrying.")?;
-        install()
+        let result = install();
+        drop(ownership);
+        drop(startup);
+
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) if !was_running => Err(format!("{error} Retry the update.")),
+            Err(error) => match Self::ensure_service() {
+                Ok(()) => Err(format!(
+                    "{error} The background service restarted; retry the update."
+                )),
+                Err(restart_error) => {
+                    if let Ok(mut expected) = self.expected_shutdown.lock() {
+                        *expected = None;
+                    }
+                    self.report_disconnect(restart_error.clone());
+                    Err(format!(
+                        "{error} The background service could not restart: {restart_error}"
+                    ))
+                }
+            },
+        }
     }
 }
 

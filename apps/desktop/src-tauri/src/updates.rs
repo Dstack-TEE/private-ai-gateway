@@ -1,8 +1,12 @@
 use std::{sync::Arc, time::Duration};
 
-use desktop_runtime::{client::Client, preferences::UpdateChannel, protocol::Preference};
+use desktop_runtime::{
+    client::Client,
+    preferences::{self, UpdateChannel},
+    protocol::Preference,
+};
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 pub(crate) struct DownloadedUpdate {
@@ -67,18 +71,21 @@ fn configured_endpoint(app: &AppHandle) -> Result<String, String> {
         .ok_or_else(|| "Updates are not configured correctly for this build".to_string())
 }
 
-async fn update_channel(app: &AppHandle, client: &Arc<Client>) -> Result<UpdateChannel, String> {
-    let client = client.clone();
+async fn update_channel(app: &AppHandle) -> Result<UpdateChannel, String> {
     let default = if app.package_info().version.pre.is_empty() {
         UpdateChannel::Stable
     } else {
         UpdateChannel::Beta
     };
     crate::run_blocking(move || {
-        let saved = client
-            .preferences()
-            .map_err(|_| "Could not read update preferences")?;
-        Ok(saved.update_channel.unwrap_or(default))
+        let channel = match preferences::load() {
+            Ok(saved) => saved.update_channel.unwrap_or(default),
+            Err(error) => {
+                eprintln!("Could not read update preferences; using the build channel: {error}");
+                default
+            }
+        };
+        Ok(channel)
     })
     .await
 }
@@ -127,8 +134,7 @@ pub async fn prepare_update(
         .0
         .try_lock()
         .map_err(|_| "An update operation is already in progress")?;
-    let client = app.state::<Arc<Client>>().inner().clone();
-    let channel = update_channel(&app, &client).await?;
+    let channel = update_channel(&app).await?;
     let mut info = UpdateInfo {
         enabled,
         system_managed,
@@ -241,14 +247,16 @@ pub async fn restart_to_update(
     let client = client.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         client.install_update(|| {
-            download.update.install(download.bytes).map_err(|_| {
-                "Installation failed. Protection is stopped; check for updates to retry."
-                    .to_string()
-            })
+            download
+                .update
+                .install(download.bytes)
+                .map_err(|_| "Installation failed.".to_string())
         })
     })
     .await
     .map_err(|_| "The update task could not complete")??;
+    // The Windows updater exits and relaunches the process itself. macOS and
+    // Linux return after installation and restart here.
     app.restart();
 }
 
