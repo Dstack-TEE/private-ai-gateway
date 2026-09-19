@@ -12,7 +12,7 @@ import { ErrorAlert } from "../components/error-alert";
 import { Item, ItemActions, ItemContent, ItemTitle, ItemDescription } from "../components/ui/item";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
 import { SettingsSection, SettingsList, SettingsLink, SettingsToggle } from "../components/settings";
-import type { GatewayState, LaunchPreferences } from "../../shared/contracts";
+import type { DistributionCapabilities, GatewayState, LaunchPreferences } from "../../shared/contracts";
 import { desktopApi } from "../lib/environment";
 import { parentDirectory, serviceHost } from "../lib/format";
 import type { SettingsTarget } from "../components/navigation";
@@ -54,6 +54,7 @@ function CliRegistrationControl(): React.JSX.Element {
 
 export function SettingsView({
   updates,
+  distribution,
   state,
   busy,
   running,
@@ -68,6 +69,7 @@ export function SettingsView({
   onLaunchPreference,
 }: {
   updates: ReturnType<typeof useUpdates>;
+  distribution: DistributionCapabilities;
   state: GatewayState;
   busy: boolean;
   running: boolean;
@@ -102,8 +104,8 @@ export function SettingsView({
         <CollapsibleContent>
           <SettingsList>
           <SettingsToggle label="Allow development OS" checked={allowDevelopmentOs} developmentMode={allowDevelopmentOs} disabled={locked} onToggle={() => onPolicy(!allowDevelopmentOs)} />
-          <UpdateChannelControl updates={updates} />
-          <CliRegistrationControl />
+          {distribution.nativeUpdates && <UpdateChannelControl updates={updates} />}
+          {distribution.cliRegistration && <CliRegistrationControl />}
           <ExportDiagnostics api={desktopApi} onMessage={setDiagnosticMessage} />
           <SettingsLink title="Reset settings" disabled={locked} onClick={onResetSettings} />
           </SettingsList>

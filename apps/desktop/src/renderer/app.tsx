@@ -11,7 +11,7 @@ import { useUpdates } from "./updates";
 import type { AgentStatus, ConfidentialProfile, GatewayState, LaunchPreferences, RequestActivity, SurfaceErrorScope } from "../shared/contracts";
 import { PageHeader, Sidebar } from "./components/navigation";
 import type { SettingsTarget, View } from "./components/navigation";
-import { desktopApi } from "./lib/environment";
+import { desktopApi, distributionCapabilities } from "./lib/environment";
 import { INITIAL_STATE, protectionFlags, profileIsAvailable, unavailableState } from "./lib/protection";
 import { AgentsView } from "./features/agents";
 import { Overview } from "./features/overview";
@@ -24,7 +24,7 @@ const errorTitles: Record<SurfaceErrorScope, string> = {
 };
 
 export function App({ initialView = "overview" }: { initialView?: View }): React.JSX.Element {
-  const updates = useUpdates(desktopApi);
+  const updates = useUpdates(desktopApi, distributionCapabilities.nativeUpdates);
   const [view, setView] = useState<View>(initialView);
   const gateway = useGatewayState(desktopApi, INITIAL_STATE);
   const state = gateway.error ? unavailableState(gateway.error) : gateway.data ?? INITIAL_STATE;
@@ -37,7 +37,7 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
     if (!backendReady) return;
     // Prefetch shares page caches; failures are presented when the page is opened.
     void client.prefetchQuery(usagePageQuery());
-    void client.prefetchQuery(cliRegistrationQuery());
+    if (distributionCapabilities.cliRegistration) void client.prefetchQuery(cliRegistrationQuery());
   }, [client, backendReady]);
   const { data: launchPreferences } = useQuery({ queryKey: ["launch-preferences"], queryFn: () => desktopApi.getLaunchPreferences() });
   const [savingPreference, setSavingPreference] = useState(false);
@@ -66,7 +66,8 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
 
   const copyTimer = useRef<number | undefined>(undefined);
   const { busy, running, verified, endpointDown } = protectionFlags(state);
-  const { agents, pendingAgentChanges, loadAgents, applyAgent, problem: agentProblem } = useAgents(desktopApi, {
+  const { agents, accessStatus: agentAccessStatus, authorizing: authorizingAgents, controlsLocked: agentControlsLocked, pendingAgentChanges, loadAgents, requestAccess: requestAgentAccess, applyAgent, problem: agentProblem } = useAgents(desktopApi, {
+    requiresAuthorization: distributionCapabilities.sandboxHomeAccess,
     active: view === "agents", revision: state.catalog?.revision, verified, notify,
   });
   useEffect(() => desktopApi.onLaunchPreferencesChange((next) => {
@@ -87,14 +88,16 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
     try {
       const confirmed = await desktopApi.confirm({
         title: "Stop all services and quit?",
-        message: "This stops protection, restores managed agent configurations, shuts down the background service, and quits the app. In-flight requests may be interrupted.",
+        message: agentAccessStatus === "authorized"
+          ? "This stops protection, restores managed agent configurations, shuts down the background service, and quits the app. In-flight requests may be interrupted."
+          : "This stops protection, shuts down the background service, and quits the app. In-flight requests may be interrupted.",
         confirmLabel: "Stop All and Quit",
       });
       if (confirmed) await desktopApi.stopAllAndQuit();
     } catch (error) {
       reportSurfaceError("settings", error);
     }
-  }, [reportSurfaceError]);
+  }, [agentAccessStatus, reportSurfaceError]);
 
   useEffect(() => desktopApi.onStopAllRequest(() => { void requestStopAllAndQuit(); }), [requestStopAllAndQuit]);
 
@@ -232,7 +235,9 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
     try {
       confirmed = await desktopApi.confirm({
         title: "Reset settings?",
-        message: "Stop protection, disconnect all agents and restore their configurations, and reset appearance, notifications, startup preferences, development OS policy, update channel, Local API settings, and window size. Profiles, credentials, the local API key, and usage history are kept. This does not change system notification permission or uninstall the private-ai-proxy command.",
+        message: agentAccessStatus === "authorized"
+          ? "Stop protection, disconnect all agents and restore their configurations, and reset appearance, notifications, startup preferences, development OS policy, update channel, Local API settings, and window size. Profiles, credentials, the local API key, and usage history are kept. This does not change system notification permission or uninstall the private-ai-proxy command."
+          : "Stop protection and reset appearance, notifications, startup preferences, development OS policy, Local API settings, and window size. Profiles, credentials, the local API key, and usage history are kept. This does not change system notification permission.",
         confirmLabel: "Reset settings",
       });
     } catch (error) {
@@ -312,7 +317,11 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
             connectingBackend={connectingBackend}
             agentProblem={agentProblem}
             accountApi={desktopApi}
-            locked={locked}
+            topUpLinks={distributionCapabilities.topUpLinks}
+            agentAccessStatus={agentAccessStatus}
+            authorizingAgents={authorizingAgents}
+            onAuthorizeAgents={() => void requestAgentAccess()}
+            locked={locked || agentControlsLocked}
             clientKey={clientKey}
             clientKeyVisible={clientKeyVisible}
             copied={copied}
@@ -332,11 +341,14 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
         )}
         {view === "agents" && (
           <AgentsView
+            accessStatus={agentAccessStatus}
+            authorizing={authorizingAgents}
             pendingAgentChanges={pendingAgentChanges}
             agents={agents}
-            locked={locked}
+            locked={locked || agentControlsLocked}
             problem={agentProblem}
             onSelect={selectAgent}
+            onAuthorize={() => void requestAgentAccess()}
           />
         )}
         {view === "usage" && (
@@ -349,6 +361,7 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
         {view === "settings" && (
           <SettingsView
             updates={updates}
+            distribution={distributionCapabilities}
             state={state}
             busy={busy}
             running={running}

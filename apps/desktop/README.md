@@ -23,6 +23,9 @@ executable rather than separate binaries or crates.
 - [CLI](docs/cli.md)
 - [CLI distribution](docs/cli-distribution.md)
 - [Account login](docs/account-login.md)
+- [Distribution architecture](docs/distribution.md)
+- [Mac App Store preparation](docs/mac-app-store.md)
+- [Codex baseline and catalog refresh](docs/codex-catalog.md)
 - [ACI specification](../../spec/aci.md)
 
 ## Repository Layout
@@ -38,7 +41,7 @@ executable rather than separate binaries or crates.
 | `brand` | Source branding and icon assets |
 | `scripts` | Reproducible build, packaging, release, and endpoint-probe tooling |
 
-The packaged application contains three sibling executables:
+The direct-download application contains three sibling executables:
 
 - `private-ai-proxy`
 - `private-ai-proxy-service`
@@ -72,7 +75,7 @@ Requirements:
 
 - Node.js 22.19 or newer
 - npm 11
-- Rust toolchains required by the manifests
+- Current Rust stable toolchain (1.98 or newer)
 - Tauri platform dependencies for the host OS
 - Xcode 26 or newer when generating the adaptive macOS icon
 

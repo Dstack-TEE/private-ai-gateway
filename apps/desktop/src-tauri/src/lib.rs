@@ -1,6 +1,7 @@
 mod commands;
 
 mod autostart;
+mod distribution;
 mod menu;
 mod native_dialog;
 mod notifications;
@@ -92,10 +93,7 @@ fn refresh_preferences(app: &AppHandle, client: &Arc<Client>) {
         notifications::initialize(&app);
         let result = (|| {
             let preferences = client.preferences()?;
-            let launch = LaunchPreferences {
-                open_at_login: autostart::is_enabled(&app)?,
-                connect_on_launch: preferences.connect_on_launch,
-            };
+            let launch = load_launch_preferences(&app, &client)?;
             Ok::<_, String>((preferences.appearance, launch))
         })();
         match result {
@@ -248,9 +246,6 @@ fn configure_account_return(app: &tauri::App) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let show_on_launch =
-        !std::env::args_os().any(|argument| argument == std::ffi::OsStr::new(AUTOSTART_ARG));
-
     let app =
         tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if !args
@@ -260,11 +255,6 @@ pub fn run() {
                 tray::show_window(app);
             }
         }));
-    #[cfg(target_os = "macos")]
-    let app = app.plugin(tauri_plugin_autostart::init(
-        tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-        Some(vec![AUTOSTART_ARG]),
-    ));
     let app = app
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
@@ -339,14 +329,25 @@ pub fn run() {
             commands::gateway::list_agents,
             commands::gateway::preview_agent_connection,
             commands::gateway::apply_agent_connection,
+            commands::gateway::get_agent_access,
+            commands::gateway::request_agent_access,
             commands::settings::get_cli_registration,
             commands::settings::set_cli_registration,
             commands::desktop::stop_all_and_quit
         ])
         .setup(move |app| {
+            let show_on_launch = !autostart::launched_at_login();
+            #[cfg(feature = "mac-app-store")]
+            {
+                let data_dir = app.path().app_data_dir()?;
+                std::fs::create_dir_all(&data_dir)?;
+                std::env::set_var(desktop_gateway::agents::APP_DATA_OVERRIDE_ENV, &data_dir);
+            }
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             autostart::setup(app.handle())?;
-            if app.config().plugins.0.contains_key("updater") {
+            if distribution::CAPABILITIES.native_updates
+                && app.config().plugins.0.contains_key("updater")
+            {
                 app.handle()
                     .plugin(tauri_plugin_updater::Builder::new().build())?;
             }
@@ -358,9 +359,11 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             let registration_app = app.handle().clone();
             #[cfg(target_os = "macos")]
-            tauri::async_runtime::spawn(async move {
-                register_cli_on_startup(&registration_app).await;
-            });
+            if distribution::CAPABILITIES.cli_registration {
+                tauri::async_runtime::spawn(async move {
+                    register_cli_on_startup(&registration_app).await;
+                });
+            }
             notifications::initialize(app.handle());
 
             configure_account_return(app);
@@ -374,7 +377,9 @@ pub fn run() {
                 .iter()
                 .find(|window| window.label == "main")
                 .ok_or("Main window configuration is missing")?;
-            let window = tauri::WebviewWindowBuilder::from_config(app, config)?.build()?;
+            let window = tauri::WebviewWindowBuilder::from_config(app, config)?
+                .initialization_script(distribution::initialization_script())
+                .build()?;
             window.set_title(desktop_gateway::brand::PRODUCT_NAME)?;
             let window_for_events = window.clone();
             let app_for_events = app.handle().clone();
@@ -436,8 +441,19 @@ pub fn run() {
         .expect("error while building Tauri application");
 
     app.run(|_app, event| match event {
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
-        tauri::RunEvent::Exit => tray_theme::shutdown(_app),
+        #[cfg(any(feature = "mac-app-store", target_os = "windows", target_os = "linux"))]
+        tauri::RunEvent::Exit => {
+            #[cfg(feature = "mac-app-store")]
+            if let Some(client) = _app.try_state::<Arc<Client>>() {
+                if client.is_running().unwrap_or(false) {
+                    if let Err(error) = client.shutdown() {
+                        eprintln!("Cannot stop the App Store backend during exit: {error}");
+                    }
+                }
+            }
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            tray_theme::shutdown(_app);
+        }
         #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen { .. } => tray::show_window(_app),
         _ => {}

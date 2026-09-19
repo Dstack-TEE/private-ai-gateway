@@ -94,79 +94,6 @@ fn helper_relocation_requires_explicit_reconnect_without_scan_writes() {
     }
 }
 
-#[tokio::test]
-async fn metadata_timeout_releases_the_config_transaction() {
-    const CHILD_ENV: &str = "PAP_TEST_METADATA_TIMEOUT_CHILD";
-    if env::var_os(CHILD_ENV).is_some() {
-        std::thread::sleep(std::time::Duration::from_secs(30));
-        return;
-    }
-    let root = tempfile::tempdir().unwrap();
-    let mut command = Command::new(env::current_exe().unwrap());
-    command.args([
-        "--exact",
-        "agents::tests::discovery::metadata_timeout_releases_the_config_transaction",
-    ]);
-    command.env(CHILD_ENV, "1");
-    let started = std::time::Instant::now();
-    let error = lock::with_apply_lock(root.path(), || {
-        let error = bounded_command_output(command, std::time::Duration::from_secs(1)).unwrap_err();
-        Ok::<_, String>(error.kind())
-    })
-    .unwrap();
-    assert_eq!(error, io::ErrorKind::TimedOut);
-    assert!(started.elapsed() < std::time::Duration::from_secs(10));
-    lock::with_apply_lock(root.path(), || Ok::<_, String>(())).unwrap();
-}
-
-#[cfg(unix)]
-#[test]
-fn command_output_resolves_the_discovered_shebang_runtime() {
-    let root = tempfile::tempdir().unwrap();
-    let runtime = root.path().join("bin");
-    let incompatible_runtime = root.path().join("other-bin");
-    let executable = runtime.join("codex");
-    let node = runtime.join("node");
-    write_executable(&executable, "#!/usr/bin/env node\n");
-    write_executable(&node, "#!/bin/sh\nprintf bundled-catalog\n");
-    write_executable(&incompatible_runtime.join("node"), "#!/bin/sh\nexit 1\n");
-
-    let output = command_output(&executable, &[], &[incompatible_runtime, runtime]).unwrap();
-    assert!(output.status.success());
-    assert_eq!(output.stdout, b"bundled-catalog");
-}
-
-#[test]
-fn codex_metadata_errors_explain_export_failures_without_leaking_stderr() {
-    #[cfg(unix)]
-    use std::os::unix::process::ExitStatusExt;
-    #[cfg(windows)]
-    use std::os::windows::process::ExitStatusExt;
-    use std::process::{ExitStatus, Output};
-
-    #[cfg(unix)]
-    let status = ExitStatus::from_raw(2 << 8);
-    #[cfg(windows)]
-    let status = ExitStatus::from_raw(2);
-    let error = codex_metadata(Ok(Output {
-        status,
-        stdout: Vec::new(),
-        stderr: b"error: unrecognized subcommand 'models'; PRIVATE_DETAIL".to_vec(),
-    }))
-    .unwrap_err();
-    assert_eq!(error.code(), "codex_metadata_unavailable");
-    assert!(error.to_string().contains("Update Codex"));
-    assert!(!error.to_string().contains("PRIVATE_DETAIL"));
-    let error = codex_metadata(Err(io::Error::new(
-        io::ErrorKind::TimedOut,
-        "PRIVATE_DETAIL",
-    )))
-    .unwrap_err();
-    assert_eq!(error.code(), "codex_metadata_unavailable");
-    assert!(error.to_string().contains("timed out"));
-    assert!(!error.to_string().contains("PRIVATE_DETAIL"));
-}
-
 #[test]
 fn hermes_paths_follow_platform_overrides_and_isolate_test_home() {
     const CASE_ENV: &str = "PAP_TEST_HERMES_PATH_CASE";
@@ -295,6 +222,7 @@ fn hermes_windows_installed_command_round_trip() {
         let fields = fields(
             Agent::Hermes,
             &Inputs {
+                file_credentials: false,
                 endpoint: ENDPOINT,
                 helper_exe: executable,
                 token_path: &tokens.path("hermes"),
@@ -463,7 +391,12 @@ fn helper_command_quotes_hostile_paths_for_the_shell() {
         // Pi's Bash and cmd.exe fallback see only fixed switches and a
         // base64 word. Neither shell interprets the Windows helper path.
         let hostile = Path::new(r"C:\Users\O'Brien %USERPROFILE% ! &\helper.exe");
-        let provider = pi_provider(&catalog(), ENDPOINT, hostile).unwrap();
+        let provider = pi_provider(
+            &catalog(),
+            ENDPOINT,
+            &credential_helper_command(hostile, Agent::Pi).unwrap(),
+        )
+        .unwrap();
         let command = provider["apiKey"]
             .as_str()
             .unwrap()

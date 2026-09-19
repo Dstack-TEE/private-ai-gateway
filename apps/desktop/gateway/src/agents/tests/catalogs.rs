@@ -150,36 +150,61 @@ fn codex_and_opencode_use_official_custom_provider_configs() {
     let generated: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(sandbox.projector.codex_catalog_path()).unwrap())
             .unwrap();
-    assert_eq!(generated["models"][0]["slug"], "openai/gpt-oss-20b");
-    assert_eq!(generated["models"][0]["context_window"], 131072);
+    let baseline: serde_json::Value =
+        serde_json::from_str(include_str!("../../../resources/codex/models.json")).unwrap();
+    let models = generated["models"].as_array().unwrap();
+    let bundled = baseline["models"].as_array().unwrap();
+    assert_eq!(&models[..bundled.len()], bundled);
+    assert_eq!(models.len(), bundled.len() + 2);
+    assert!(models
+        .iter()
+        .all(|model| model.get("base_instructions").is_none()));
+    let custom = models
+        .iter()
+        .find(|model| model["slug"] == "openai/gpt-oss-20b")
+        .unwrap();
+    let unknown_limit = models
+        .iter()
+        .find(|model| model["slug"] == "phala/qwen")
+        .unwrap();
+    assert_eq!(custom["context_window"], 131072);
+    assert_eq!(custom["max_context_window"], 131072);
+    assert!(custom["auto_compact_token_limit"].is_null());
+    assert!(unknown_limit["context_window"].as_u64().unwrap() > 0);
+    assert!(custom["model_messages"]["instructions_template"]
+        .as_str()
+        .is_some_and(|text| !text.is_empty()));
+    assert_eq!(custom["support_verbosity"], false);
+    assert!(custom["default_verbosity"].is_null());
+    assert!(custom["tool_mode"].is_null());
+    assert!(custom["apply_patch_tool_type"].is_null());
+    assert!(custom["multi_agent_version"].is_null());
+    assert_eq!(custom["experimental_supported_tools"], json!([]));
+    assert_eq!(custom["web_search_tool_type"], "text");
+    assert_eq!(custom["shell_type"], "unified_exec");
+    assert_eq!(custom["use_responses_lite"], false);
+    assert_eq!(custom["prefer_websockets"], false);
+    assert_eq!(custom["supports_experimental_context"], false);
+
+    let config_before = fs::read(&path).unwrap();
+    let catalog_before = fs::read(sandbox.projector.codex_catalog_path()).unwrap();
+    let token_before = sandbox.projector.tokens.read("codex").unwrap();
+    apply_connect(&sandbox, Agent::Codex, &catalog, &options);
+    assert_eq!(fs::read(&path).unwrap(), config_before);
     assert_eq!(
-        generated["models"][1]["context_window"],
-        serde_json::Value::Null
+        fs::read(sandbox.projector.codex_catalog_path()).unwrap(),
+        catalog_before
     );
     assert_eq!(
-        generated["models"][0]["model_messages"]["instructions_template"],
-        "Complete official Codex instructions"
+        sandbox.projector.tokens.read("codex").unwrap(),
+        token_before
     );
+    fs::remove_file(sandbox.projector.codex_catalog_path()).unwrap();
+    apply_connect(&sandbox, Agent::Codex, &catalog, &options);
     assert_eq!(
-        generated["models"][0]["base_instructions"],
-        "Complete official Codex instructions"
+        fs::read(sandbox.projector.codex_catalog_path()).unwrap(),
+        catalog_before
     );
-    assert_eq!(generated["models"][0]["support_verbosity"], false);
-    assert_eq!(
-        generated["models"][0]["default_verbosity"],
-        serde_json::Value::Null
-    );
-    assert_eq!(generated["models"][0]["tool_mode"], serde_json::Value::Null);
-    assert_eq!(
-        generated["models"][0]["apply_patch_tool_type"],
-        serde_json::Value::Null
-    );
-    assert_eq!(
-        generated["models"][0]["multi_agent_version"],
-        serde_json::Value::Null
-    );
-    assert_eq!(generated["models"][0]["web_search_tool_type"], "text");
-    assert_eq!(generated["models"][0]["shell_type"], "unified_exec");
     disconnect(&sandbox, Agent::Codex);
     let restored = doc(&sandbox, Agent::Codex);
     for (key, value) in [
@@ -195,6 +220,14 @@ fn codex_and_opencode_use_official_custom_provider_configs() {
             Some(value),
         );
     }
+
+    apply_connect(&sandbox, Agent::Codex, &catalog, &options);
+    assert_eq!(fs::read(&path).unwrap(), config_before);
+    assert_eq!(
+        fs::read(sandbox.projector.codex_catalog_path()).unwrap(),
+        catalog_before
+    );
+    disconnect(&sandbox, Agent::Codex);
 
     let preview = sandbox
         .projector
@@ -229,6 +262,83 @@ fn codex_and_opencode_use_official_custom_provider_configs() {
         Some("http://127.0.0.1:4180/v1")
     );
     disconnect(&sandbox, Agent::OpenCode);
+}
+
+#[test]
+fn codex_overlay_preserves_native_templates_and_unique_slugs() {
+    let sandbox = sandbox("codex-native-overlay");
+    let catalog = Catalog::from_remote(&json!({"data": [
+        {"id": "gpt-5.4", "context_length": 32768,
+         "supported_features": ["reasoning", "verbosity"], "input_modalities": ["text", "image"]},
+        {"id": "openai/gpt-5.4", "context_length": 65536}
+    ]}), 1).unwrap();
+    let options = ConnectOptions {
+        default_model: Some("openai/gpt-5.4".into()),
+    };
+    apply_connect(&sandbox, Agent::Codex, &catalog, &options);
+    let config = doc(&sandbox, Agent::Codex);
+    assert_eq!(
+        config.get_str(&["model"]).as_deref(),
+        Some("openai/gpt-5.4")
+    );
+    let generated: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(config.get_str(&["model_catalog_json"]).unwrap()).unwrap(),
+    )
+    .unwrap();
+    let baseline: serde_json::Value =
+        serde_json::from_str(include_str!("../../../resources/codex/models.json")).unwrap();
+    let models = generated["models"].as_array().unwrap();
+    assert_eq!(
+        models.len(),
+        baseline["models"].as_array().unwrap().len() + 1
+    );
+    assert_eq!(
+        models
+            .iter()
+            .filter(|model| model["slug"] == "gpt-5.4")
+            .count(),
+        1
+    );
+    let native = models
+        .iter()
+        .find(|model| model["slug"] == "gpt-5.4")
+        .unwrap();
+    let alias = models
+        .iter()
+        .find(|model| model["slug"] == "openai/gpt-5.4")
+        .unwrap();
+    for original in baseline["models"].as_array().unwrap() {
+        let projected = models
+            .iter()
+            .find(|model| model["slug"] == original["slug"])
+            .unwrap();
+        if original["slug"] == "gpt-5.4" {
+            assert_eq!(projected["model_messages"], original["model_messages"]);
+            assert_eq!(alias["model_messages"], original["model_messages"]);
+            assert_eq!(
+                alias["apply_patch_tool_type"],
+                original["apply_patch_tool_type"]
+            );
+        } else {
+            assert_eq!(projected, original);
+        }
+    }
+    assert_eq!(native["context_window"], 32768);
+    assert_eq!(native["max_context_window"], 32768);
+    assert!(native["auto_compact_token_limit"].is_null());
+    assert_eq!(native["default_reasoning_level"], "medium");
+    assert_eq!(
+        native["supported_reasoning_levels"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(native["support_verbosity"], true);
+    assert_eq!(native["input_modalities"], json!(["text", "image"]));
+    assert_eq!(alias["context_window"], 65536);
+    assert_eq!(alias["use_responses_lite"], false);
+    assert_eq!(alias["prefer_websockets"], false);
 }
 
 #[test]

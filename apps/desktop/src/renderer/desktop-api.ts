@@ -6,9 +6,11 @@ import { confirm } from "@tauri-apps/plugin-dialog";
 
 import type {
   AgentPreview,
+  AgentAccessStatus,
   AgentStatus,
   ConnectOptions,
   DesktopApi,
+  DistributionCapabilities,
   GatewayState,
   LocalApiConfig,
   RequestActivity,
@@ -21,6 +23,7 @@ declare global {
   interface Window {
     __GATEWAY_INITIAL_STATE__?: GatewayState;
     __GATEWAY_INITIAL_APPEARANCE__?: "system" | "light" | "dark";
+    __PAP_DISTRIBUTION__?: DistributionCapabilities;
   }
 }
 
@@ -29,6 +32,10 @@ export const initialGatewayState = window.__GATEWAY_INITIAL_STATE__;
 delete window.__GATEWAY_INITIAL_STATE__;
 export const initialAppearance = window.__GATEWAY_INITIAL_APPEARANCE__;
 delete window.__GATEWAY_INITIAL_APPEARANCE__;
+const injectedDistribution = window.__PAP_DISTRIBUTION__;
+delete window.__PAP_DISTRIBUTION__;
+if (!injectedDistribution) throw new Error("Distribution capabilities were not initialized");
+export const distributionCapabilities = injectedDistribution;
 
 export const desktopApi: DesktopApi = {
   startBackendService: () => invoke("start_backend_service"),
@@ -151,6 +158,12 @@ export const desktopApi: DesktopApi = {
   },
   listAgents(): Promise<AgentStatus[]> {
     return invoke("list_agents");
+  },
+  getAgentAccess(): Promise<AgentAccessStatus> {
+    return invoke("get_agent_access");
+  },
+  requestAgentAccess(): Promise<AgentAccessStatus> {
+    return invoke("request_agent_access");
   },
   previewAgent(agentId: string, connect: boolean, options: ConnectOptions): Promise<AgentPreview> {
     return invoke("preview_agent_connection", { agentId, connect, options });

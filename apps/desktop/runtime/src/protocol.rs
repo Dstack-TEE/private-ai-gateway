@@ -346,7 +346,8 @@ mod tests {
             assert!(!public.message.contains("PRIVATE_OS_DETAIL"));
             assert!(!public.message.contains("sk-hidden"));
         }
-        let diagnostic = "Codex CLI does not support `codex debug models --bundled`. Update Codex before connecting.";
+        let diagnostic =
+            "The app-owned Codex model catalog is invalid. Reinstall Private AI Proxy.";
         assert_eq!(
             RpcError::from(AgentError::MetadataUnavailable(diagnostic.to_string())).message,
             diagnostic

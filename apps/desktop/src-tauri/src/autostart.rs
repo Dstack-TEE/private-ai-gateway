@@ -1,9 +1,3 @@
-#[cfg(target_os = "macos")]
-use tauri::AppHandle;
-
-#[cfg(target_os = "macos")]
-use tauri_plugin_autostart::ManagerExt;
-
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod platform {
     use std::path::Path;
@@ -181,19 +175,84 @@ mod platform {
 pub use platform::{is_enabled, set_enabled, setup};
 
 #[cfg(target_os = "macos")]
-pub fn is_enabled(app: &AppHandle) -> Result<bool, String> {
-    app.autolaunch()
-        .is_enabled()
-        .map_err(|error| error.to_string())
+mod platform {
+    use objc2_core_services::{kAEOpenApplication, keyAELaunchedAsLogInItem, keyAEPropData};
+    use objc2_foundation::NSAppleEventManager;
+    use objc2_service_management::{SMAppService, SMAppServiceStatus};
+    use tauri::AppHandle;
+
+    fn status() -> SMAppServiceStatus {
+        let service = unsafe { SMAppService::mainAppService() };
+        unsafe { service.status() }
+    }
+
+    pub fn is_enabled(_app: &AppHandle) -> Result<bool, String> {
+        match status() {
+            SMAppServiceStatus::Enabled => Ok(true),
+            SMAppServiceStatus::NotRegistered | SMAppServiceStatus::RequiresApproval => Ok(false),
+            SMAppServiceStatus::NotFound => {
+                Err("Open at Login is unavailable for this installation".to_string())
+            }
+            _ => Err("Open at Login returned an unknown system status".to_string()),
+        }
+    }
+
+    pub fn set_enabled(_app: &AppHandle, enabled: bool) -> Result<(), String> {
+        let service = unsafe { SMAppService::mainAppService() };
+        let current = unsafe { service.status() };
+        if enabled {
+            if current == SMAppServiceStatus::Enabled {
+                return Ok(());
+            }
+            if current == SMAppServiceStatus::RequiresApproval {
+                unsafe { SMAppService::openSystemSettingsLoginItems() };
+                return Err(
+                    "Approve Private AI Proxy in System Settings > General > Login Items"
+                        .to_string(),
+                );
+            }
+            unsafe { service.registerAndReturnError() }.map_err(|error| {
+                eprintln!(
+                    "Cannot register Open at Login: {}",
+                    error.localizedDescription()
+                );
+                "Open at Login could not be enabled".to_string()
+            })?;
+            if unsafe { service.status() } == SMAppServiceStatus::RequiresApproval {
+                unsafe { SMAppService::openSystemSettingsLoginItems() };
+                return Err(
+                    "Approve Private AI Proxy in System Settings > General > Login Items"
+                        .to_string(),
+                );
+            }
+        } else if current != SMAppServiceStatus::NotRegistered {
+            unsafe { service.unregisterAndReturnError() }.map_err(|error| {
+                eprintln!(
+                    "Cannot unregister Open at Login: {}",
+                    error.localizedDescription()
+                );
+                "Open at Login could not be disabled".to_string()
+            })?;
+        }
+        Ok(())
+    }
+
+    pub fn launched_at_login() -> bool {
+        let manager = NSAppleEventManager::sharedAppleEventManager();
+        let Some(event) = manager.currentAppleEvent() else {
+            return false;
+        };
+        event.eventID() == kAEOpenApplication
+            && event
+                .paramDescriptorForKeyword(keyAEPropData)
+                .is_some_and(|descriptor| descriptor.enumCodeValue() == keyAELaunchedAsLogInItem)
+    }
 }
 
 #[cfg(target_os = "macos")]
-pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), String> {
-    let manager = app.autolaunch();
-    if enabled {
-        manager.enable()
-    } else {
-        manager.disable()
-    }
-    .map_err(|error| error.to_string())
+pub use platform::{is_enabled, launched_at_login, set_enabled};
+
+#[cfg(not(target_os = "macos"))]
+pub fn launched_at_login() -> bool {
+    std::env::args_os().any(|argument| argument == std::ffi::OsStr::new(crate::AUTOSTART_ARG))
 }

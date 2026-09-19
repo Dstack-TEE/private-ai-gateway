@@ -2,17 +2,37 @@ use super::*;
 
 #[test]
 fn every_agent_switches_conservatively_and_reconnects_without_namespace_conflicts() {
-    for agent in Agent::ALL {
-        let mut sandbox = sandbox(&format!("conservative-{}", agent.id()));
-        if agent == Agent::OpenClaw {
-            sandbox.projector.helper_exe = sandbox
-                .projector
-                .data_dir
-                .join("helpers")
-                .join(helper_binary_name());
-        }
-        let config = agent.config_path(&sandbox.home, false);
-        let original = match agent {
+    for file_credentials in [false, true] {
+        for agent in Agent::ALL {
+            let mut sandbox = sandbox(&format!(
+                "conservative-{}-{file_credentials}{}",
+                agent.id(),
+                if file_credentials {
+                    "-space ' quote"
+                } else {
+                    ""
+                }
+            ));
+            if file_credentials {
+                sandbox.projector = Projector::at(
+                    sandbox.home.clone(),
+                    sandbox.projector.data_dir.clone(),
+                    sandbox.home.join("missing-helper"),
+                    ENDPOINT,
+                    false,
+                    sandbox.secrets.clone(),
+                )
+                .with_home_credentials();
+            }
+            if agent == Agent::OpenClaw && !file_credentials {
+                sandbox.projector.helper_exe = sandbox
+                    .projector
+                    .data_dir
+                    .join("helpers")
+                    .join(helper_binary_name());
+            }
+            let config = agent.config_path(&sandbox.home, false);
+            let original = match agent {
             Agent::Codex => "model_provider = 'original'\nmodel = 'native'\nmodel_catalog_json = 'native-catalog.json'\n",
             Agent::ClaudeCode => r#"{"env":{"ANTHROPIC_BASE_URL":"https://original.invalid","ANTHROPIC_MODEL":"native","ANTHROPIC_AUTH_TOKEN":"old-secret"},"model":"native"}"#,
             Agent::OpenCode => r#"{"model":"original/native","provider":{"original":{"name":"User provider"}}}"#,
@@ -21,8 +41,8 @@ fn every_agent_switches_conservatively_and_reconnects_without_namespace_conflict
             Agent::Pi => "{}",
             Agent::OhMyPi => "theme: dark\n",
         };
-        write(&config, original);
-        let defaults = match agent {
+            write(&config, original);
+            let defaults = match agent {
             Agent::Pi => Some((
                 config.with_file_name("settings.json"),
                 Format::Json,
@@ -35,117 +55,162 @@ fn every_agent_switches_conservatively_and_reconnects_without_namespace_conflict
             )),
             _ => None,
         };
-        if let Some((path, _, text)) = &defaults {
-            write(path, text);
-        }
-        let catalog = catalog();
-        let options = ConnectOptions::default();
-        let enable = |projector: &Projector| {
-            let preview = projector
-                .preview(agent, true, Some(&catalog), &options)
-                .unwrap();
-            projector
-                .apply(agent, true, &preview.revision, Some(&catalog), &options)
-                .unwrap()
-        };
-        assert!(enable(&sandbox.projector).authorized, "{}", agent.id());
-        let first_token = sandbox.projector.tokens.read(agent.id()).unwrap().unwrap();
-        let connected = fs::read_to_string(&config).unwrap();
-        if let Some((path, _, _)) = &defaults {
-            assert!(fs::read_to_string(path)
-                .unwrap()
-                .contains("private-ai-proxy"));
-        }
-        disconnect(&sandbox, agent);
-        assert!(sandbox.projector.tokens.read(agent.id()).unwrap().is_none());
-        let (statuses, tokens) = sandbox.projector.scan(Some(&catalog)).unwrap();
-        let status = statuses
-            .iter()
-            .find(|status| status.id == agent.id())
-            .unwrap();
-        assert!(!status.connected && !status.authorized);
-        assert!(tokens.agent_for(&first_token).is_none());
-        let mut restored = doc(&sandbox, agent);
-        match agent {
-            Agent::OpenCode => assert!(restored
-                .get_value(&["provider", "private-ai-proxy", "options", "apiKey"])
-                .is_none()),
-            Agent::Pi | Agent::OhMyPi => assert!(restored
-                .get_value(&["providers", "private-ai-proxy", "apiKey"])
-                .is_none()),
-            Agent::Hermes => assert_eq!(
-                restored
-                    .get_str(&["providers", "private-ai-proxy", "key_cmd"])
-                    .as_deref(),
-                Some("")
-            ),
-            Agent::OpenClaw => assert!(restored
-                .get_value(&["models", "providers", "private-ai-proxy", "apiKey"])
-                .is_none()),
-            _ => {}
-        }
-        let record = sandbox
-            .projector
-            .load_store()
-            .unwrap()
-            .get(agent.id())
-            .cloned();
-        if agent == Agent::ClaudeCode {
-            assert!(record.is_none());
-        } else {
-            let record = record.unwrap();
-            assert!(record.disconnected());
-            for field in &record.fields {
-                assert_eq!(restored.get_value(&refs(&field.path)), field.value);
+            if let Some((path, _, text)) = &defaults {
+                write(path, text);
             }
-            let roots: Vec<_> = record
-                .fields
+            let catalog = catalog();
+            let options = ConnectOptions::default();
+            let enable = |projector: &Projector| {
+                let preview = projector
+                    .preview(agent, true, Some(&catalog), &options)
+                    .unwrap();
+                projector
+                    .apply(agent, true, &preview.revision, Some(&catalog), &options)
+                    .unwrap()
+            };
+            assert!(enable(&sandbox.projector).authorized, "{}", agent.id());
+            let first_token = sandbox.projector.tokens.read(agent.id()).unwrap().unwrap();
+            let connected = fs::read_to_string(&config).unwrap();
+            if file_credentials {
+                let token_path = sandbox.projector.tokens.path(agent.id());
+                assert!(
+                    token_path.starts_with(sandbox.home.join(format!(".{APP_IDENTIFIER}-agents")))
+                );
+                assert!(!connected.contains("private-ai-proxy-helper"));
+                assert!(!connected.contains(&sandbox.projector.data_dir.display().to_string()));
+                assert!(!connected.contains("old-secret"));
+                assert!(!connected.contains(&first_token));
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    assert_eq!(
+                        fs::metadata(&token_path).unwrap().permissions().mode() & 0o777,
+                        0o600
+                    );
+                    // Exercise the exact POSIX credential command, including hostile
+                    // path characters, without any PAP executable or container access.
+                    let command = agent_credential_command(
+                        Path::new("missing-helper"),
+                        agent,
+                        Some(&token_path),
+                    )
+                    .unwrap();
+                    let output = Command::new("/bin/sh")
+                        .args(["-c", &command])
+                        .output()
+                        .unwrap();
+                    assert!(output.status.success());
+                    assert_eq!(String::from_utf8(output.stdout).unwrap(), first_token);
+                }
+                if agent == Agent::OpenClaw {
+                    let document: serde_json::Value = serde_json::from_str(&connected).unwrap();
+                    assert_eq!(
+                        document["secrets"]["providers"]["private-ai-proxy"]["mode"],
+                        "singleValue"
+                    );
+                    assert_eq!(
+                        document["models"]["providers"]["private-ai-proxy"]["apiKey"]["source"],
+                        "file"
+                    );
+                }
+            }
+            if let Some((path, _, _)) = &defaults {
+                assert!(fs::read_to_string(path)
+                    .unwrap()
+                    .contains("private-ai-proxy"));
+            }
+            disconnect(&sandbox, agent);
+            assert!(sandbox.projector.tokens.read(agent.id()).unwrap().is_none());
+            let (statuses, tokens) = sandbox.projector.scan(Some(&catalog)).unwrap();
+            let status = statuses
                 .iter()
-                .filter_map(|field| provider_namespace(&field.path).map(|path| path.to_vec()))
-                .collect();
-            for root in roots {
-                restored.remove(&refs(&root)).unwrap();
+                .find(|status| status.id == agent.id())
+                .unwrap();
+            assert!(!status.connected && !status.authorized);
+            assert!(tokens.agent_for(&first_token).is_none());
+            let mut restored = doc(&sandbox, agent);
+            match agent {
+                Agent::OpenCode => assert!(restored
+                    .get_value(&["provider", "private-ai-proxy", "options", "apiKey"])
+                    .is_none()),
+                Agent::Pi | Agent::OhMyPi => assert!(restored
+                    .get_value(&["providers", "private-ai-proxy", "apiKey"])
+                    .is_none()),
+                Agent::Hermes => assert_eq!(
+                    restored
+                        .get_str(&["providers", "private-ai-proxy", "key_cmd"])
+                        .as_deref(),
+                    Some("")
+                ),
+                Agent::OpenClaw => assert!(restored
+                    .get_value(&["models", "providers", "private-ai-proxy", "apiKey"])
+                    .is_none()),
+                _ => {}
             }
-        }
-        let mut before = ConfigDoc::parse(agent.format(), original).unwrap();
-        if agent == Agent::OpenClaw {
-            before
-                .set_value(
-                    &["models", "providers"],
-                    &ConfigValue::Json(serde_json::json!({})),
-                )
-                .unwrap();
-            before
-                .set_value(
-                    &["secrets", "providers"],
-                    &ConfigValue::Json(serde_json::json!({})),
-                )
-                .unwrap();
-        }
-        assert_eq!(
-            restored.get_value(&[]),
-            before.get_value(&[]),
-            "{}",
-            agent.id()
-        );
-        if let Some((path, format, original)) = &defaults {
-            let restored = ConfigDoc::parse(*format, &fs::read_to_string(path).unwrap()).unwrap();
+            let record = sandbox
+                .projector
+                .load_store()
+                .unwrap()
+                .get(agent.id())
+                .cloned();
+            if agent == Agent::ClaudeCode {
+                assert!(record.is_none());
+            } else {
+                let record = record.unwrap();
+                assert!(record.disconnected());
+                for field in &record.fields {
+                    assert_eq!(restored.get_value(&refs(&field.path)), field.value);
+                }
+                let roots: Vec<_> = record
+                    .fields
+                    .iter()
+                    .filter_map(|field| provider_namespace(&field.path).map(|path| path.to_vec()))
+                    .collect();
+                for root in roots {
+                    restored.remove(&refs(&root)).unwrap();
+                }
+            }
+            let mut before = ConfigDoc::parse(agent.format(), original).unwrap();
+            if agent == Agent::OpenClaw {
+                before
+                    .set_value(
+                        &["models", "providers"],
+                        &ConfigValue::Json(serde_json::json!({})),
+                    )
+                    .unwrap();
+                before
+                    .set_value(
+                        &["secrets", "providers"],
+                        &ConfigValue::Json(serde_json::json!({})),
+                    )
+                    .unwrap();
+            }
             assert_eq!(
                 restored.get_value(&[]),
-                ConfigDoc::parse(*format, original).unwrap().get_value(&[])
+                before.get_value(&[]),
+                "{}",
+                agent.id()
             );
+            if let Some((path, format, original)) = &defaults {
+                let restored =
+                    ConfigDoc::parse(*format, &fs::read_to_string(path).unwrap()).unwrap();
+                assert_eq!(
+                    restored.get_value(&[]),
+                    ConfigDoc::parse(*format, original).unwrap().get_value(&[])
+                );
+            }
+            let stopped_files = fs::read_to_string(&config).unwrap();
+            sandbox.projector.reconcile(Some(&catalog)).unwrap();
+            assert_eq!(fs::read_to_string(&config).unwrap(), stopped_files);
+            assert!(sandbox.projector.tokens.read(agent.id()).unwrap().is_none());
+            assert!(enable(&sandbox.projector).authorized);
+            assert_ne!(
+                sandbox.projector.tokens.read(agent.id()).unwrap().unwrap(),
+                first_token
+            );
+            assert_eq!(fs::read_to_string(&config).unwrap(), connected);
+            assert!(sandbox.projector.disconnect_all().unwrap().is_empty());
         }
-        let stopped_files = fs::read_to_string(&config).unwrap();
-        sandbox.projector.reconcile(Some(&catalog)).unwrap();
-        assert_eq!(fs::read_to_string(&config).unwrap(), stopped_files);
-        assert!(sandbox.projector.tokens.read(agent.id()).unwrap().is_none());
-        assert!(enable(&sandbox.projector).authorized);
-        assert_ne!(
-            sandbox.projector.tokens.read(agent.id()).unwrap().unwrap(),
-            first_token
-        );
-        assert_eq!(fs::read_to_string(&config).unwrap(), connected);
-        assert!(sandbox.projector.disconnect_all().unwrap().is_empty());
     }
 }
 
@@ -656,8 +721,11 @@ fn projections_and_codex_defaults_use_the_same_endpoint_filter() {
     let bundled: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(sandbox.projector.codex_catalog_path()).unwrap())
             .unwrap();
-    assert_eq!(bundled["models"].as_array().unwrap().len(), 1);
-    assert_eq!(bundled["models"][0]["slug"], "phala/qwen");
+    let models = bundled["models"].as_array().unwrap();
+    assert!(models.iter().any(|model| model["slug"] == "phala/qwen"));
+    assert!(!models
+        .iter()
+        .any(|model| model["slug"] == "openai/gpt-oss-20b"));
     let ConfigValue::Json(provider) = doc(&sandbox, Agent::Pi)
         .get_value(&["providers", "private-ai-proxy"])
         .unwrap()

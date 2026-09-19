@@ -25,6 +25,22 @@ async fn run() -> Result<(), String> {
         return Err("Verifier supervisor exited unsuccessfully".into());
     }
     Arguments::parse();
+    #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+    let agent_home_access = match desktop_runtime::agent_access::acquire() {
+        Ok(access) => access,
+        Err(error) => {
+            eprintln!("Private AI Proxy backend: {error}");
+            None
+        }
+    };
+    #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+    if let Some(access) = agent_home_access.as_ref() {
+        std::env::set_var(desktop_gateway::agents::HOME_OVERRIDE_ENV, access.home());
+    }
+    #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+    let agent_configuration = agent_home_access.is_some();
+    #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
+    let agent_configuration = true;
     let executable = std::env::current_exe().map_err(|_| "Cannot locate backend")?;
     let directory = executable
         .parent()
@@ -43,6 +59,7 @@ async fn run() -> Result<(), String> {
         launcher,
         helper_path: directory.join(name("private-ai-proxy-helper")),
         task_runtime: tokio::runtime::Handle::current(),
+        agent_configuration,
     };
     // Runtime initialization uses synchronous persistence APIs outside executor workers.
     let runtime = tokio::task::spawn_blocking(move || DesktopRuntime::launch(options))
@@ -60,5 +77,7 @@ async fn run() -> Result<(), String> {
     };
     let result = desktop_runtime::server::serve(runtime).await;
     drop(power_monitor);
+    #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+    drop(agent_home_access);
     result
 }

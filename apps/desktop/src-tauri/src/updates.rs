@@ -96,6 +96,10 @@ pub async fn set_update_channel(
     prepared: State<'_, PreparedUpdate>,
     client: State<'_, Arc<Client>>,
 ) -> Result<UpdateChannel, String> {
+    crate::distribution::require(
+        crate::distribution::CAPABILITIES.native_updates,
+        "Updates are managed by the App Store",
+    )?;
     let mut prepared = prepared
         .0
         .try_lock()
@@ -129,7 +133,9 @@ pub async fn prepare_update(
     prepared: State<'_, PreparedUpdate>,
 ) -> Result<UpdateInfo, String> {
     let system_managed = system_managed();
-    let enabled = app.config().plugins.0.contains_key("updater") && !system_managed;
+    let enabled = crate::distribution::CAPABILITIES.native_updates
+        && app.config().plugins.0.contains_key("updater")
+        && !system_managed;
     let mut prepared = prepared
         .0
         .try_lock()
@@ -238,6 +244,10 @@ pub async fn restart_to_update(
     prepared: State<'_, PreparedUpdate>,
     client: State<'_, Arc<Client>>,
 ) -> Result<(), String> {
+    crate::distribution::require(
+        crate::distribution::CAPABILITIES.native_updates,
+        "Updates are managed by the App Store",
+    )?;
     let mut prepared = prepared
         .0
         .try_lock()

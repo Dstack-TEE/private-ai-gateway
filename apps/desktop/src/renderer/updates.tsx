@@ -8,13 +8,13 @@ import { FieldLabel } from "./components/ui/field";
 import { Item, ItemContent, ItemTitle, ItemDescription, ItemActions } from "./components/ui/item";
 import { useErrorAlert } from "./lib/error-alert";
 
-export function useUpdates(api: DesktopApi) {
+export function useUpdates(api: DesktopApi, nativeUpdates: boolean) {
   const [operation, setBusy] = useState<"restarting" | "changing">();
   const mounted = useRef(false);
   const inFlight = useRef(false);
   const readUpdate = useCallback(() => api.prepareUpdate(), [api]);
   const client = useQueryClient();
-  const { data: snapshot, error: checkError, isFetching: checking, refetch } = useQuery<UpdateInfo>({ queryKey: ["app-update"], queryFn: readUpdate, enabled: !operation,
+  const { data: snapshot, error: checkError, isFetching: checking, refetch } = useQuery<UpdateInfo>({ queryKey: ["app-update"], queryFn: readUpdate, enabled: nativeUpdates && !operation,
     refetchInterval: (query) => query.state.error ? 60_000 : 6 * 60 * 60_000, staleTime: 15 * 60_000, retry: false,
   });
   const { data: installedVersion } = useQuery({ queryKey: ["app-version"], queryFn: () => api.getAppVersion(), staleTime: Infinity });
@@ -74,7 +74,7 @@ export function useUpdates(api: DesktopApi) {
     }
     if (retry && mounted.current) void refresh();
   };
-  return { info, currentVersion, busy, error, channel, changeChannel, restart };
+  return { info, currentVersion, busy, error, channel, nativeUpdates, changeChannel, restart };
 }
 
 export function UpdateChannelControl({ updates }: { updates: ReturnType<typeof useUpdates> }): React.JSX.Element {
@@ -95,6 +95,7 @@ export function UpdateChannelControl({ updates }: { updates: ReturnType<typeof u
 export function UpdateControl({ updates, productName }: { updates: ReturnType<typeof useUpdates>; productName: string }): React.JSX.Element {
   const { info, currentVersion, busy, error } = updates;
   const label = busy === "changing" ? "Saving update channel…" : busy === "restarting" ? "Restarting to update…" : busy === "checking" ? "Checking for updates…"
+    : !updates.nativeUpdates ? "Updates are provided by the App Store"
     : error ? "Update status unavailable" : (info?.systemManaged ? "Updates are managed by pacman"
       : info?.enabled === false ? "Automatic updates unavailable in this build"
       : info?.channelPublished === false ? "No releases published in this channel yet"

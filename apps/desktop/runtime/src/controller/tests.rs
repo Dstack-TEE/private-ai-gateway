@@ -26,6 +26,7 @@ fn launch_requires_instance_ownership_before_initialization() {
             launcher: Arc::new(NoSidecar),
             helper_path: app_data_dir().unwrap().join("helper"),
             task_runtime: executor.handle().clone(),
+            agent_configuration: true,
         });
         let error = result
             .err()
@@ -99,11 +100,12 @@ fn test_runtime(
         account_save: Mutex::new(None),
         balances: crate::balance_cache::BalanceCache::default(),
         endpoint: EndpointRuntime::new(executor.handle().clone()),
-        codex_sync: CodexCatalogSync::default(),
         agent_policy: Mutex::new(()),
         lifecycle: tokio::sync::Mutex::new(()),
         exiting: AtomicBool::new(false),
         helper_path: directory.join("helper"),
+        agent_configuration: true,
+        agent_access_status: || crate::agent_access::AgentAccessStatus::Authorized,
         recovery: crate::recovery::Recovery::default(),
         instance: None,
     })
@@ -559,7 +561,8 @@ fn recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them() {
         "claude"
     });
     std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
-    for path in [&cli, &runtime.helper_path] {
+    let codex_cli = cli.with_file_name(if cfg!(windows) { "codex.exe" } else { "codex" });
+    for path in [&cli, &codex_cli, &runtime.helper_path] {
         std::fs::write(path, "#!/bin/sh\n").unwrap();
         #[cfg(unix)]
         {
@@ -585,7 +588,15 @@ fn recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them() {
         .apply(agent, true, &preview.revision, Some(&catalog), &options)
         .unwrap();
     let projected = std::fs::read(&path).unwrap();
-    let files = TokenFiles::new(&directory);
+    let credential_directory = if cfg!(all(target_os = "macos", feature = "mac-app-store")) {
+        home.join(format!(
+            ".{}-agents",
+            desktop_gateway::brand::APP_IDENTIFIER
+        ))
+    } else {
+        directory.clone()
+    };
+    let files = TokenFiles::new(&credential_directory);
     let token = files.read(agent.id()).unwrap().unwrap();
     let verified = GatewayState {
         status: "verified".into(),
@@ -607,6 +618,35 @@ fn recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them() {
         .publish_agent_tokens(projector.scan(Some(&catalog)).unwrap().1)
         .unwrap();
     assert_eq!(runtime.proxy.tokens().agent_for(&token), Some(agent.id()));
+    let preview = runtime
+        .preview_agent("codex".into(), true, options.clone())
+        .unwrap();
+    runtime
+        .apply_agent("codex".into(), true, preview.revision, options)
+        .unwrap();
+    let codex_config = home.join(".codex/config.toml");
+    let config = std::fs::read_to_string(&codex_config).unwrap();
+    let doc = desktop_gateway::config_doc::ConfigDoc::parse(
+        desktop_gateway::config_doc::Format::Toml,
+        &config,
+    )
+    .unwrap();
+    let catalog_path = doc.get_str(&["model_catalog_json"]).unwrap();
+    let expected = std::fs::read(&catalog_path).unwrap();
+    let codex_token = files.read("codex").unwrap();
+    // The remote revision stays unchanged while the generated local file is lost or damaged.
+    for damaged in [None, Some(b"{".as_slice()), Some(b"\xff".as_slice())] {
+        match damaged {
+            None => std::fs::remove_file(&catalog_path).unwrap(),
+            Some(bytes) => std::fs::write(&catalog_path, bytes).unwrap(),
+        }
+        let statuses = runtime.list_agents().unwrap();
+        let codex = statuses.iter().find(|status| status.id == "codex").unwrap();
+        assert!(codex.authorized && codex.attention.is_none());
+        assert_eq!(std::fs::read(&catalog_path).unwrap(), expected);
+        assert_eq!(std::fs::read_to_string(&codex_config).unwrap(), config);
+        assert_eq!(files.read("codex").unwrap(), codex_token);
+    }
     runtime.recovery.available.store(false, Ordering::Release);
     runtime.recovery.request();
     runtime.recover_network().unwrap();
@@ -888,4 +928,49 @@ fn only_live_protection_allows_agent_projection() {
     state.api_key_saved = true;
     state.endpoint_error = Some("Listener unavailable".to_string());
     assert!(!state.is_protected());
+}
+
+#[test]
+fn inactive_agent_integrations_reject_configuration_and_withdraw_tokens() {
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    for enabled in [false, true] {
+        let mut runtime = test_runtime(&executor, directory.path());
+        let runtime = Arc::get_mut(&mut runtime).unwrap();
+        let local_token = runtime.credentials.token().unwrap();
+        let mut tokens = TokenSet::default();
+        tokens.insert("previous-agent-token".into(), "codex".into());
+        tokens.insert(local_token.clone(), LOCAL_TOOLS_AGENT.into());
+        runtime.proxy.set_tokens(tokens);
+        runtime.agent_configuration = enabled;
+        runtime.agent_access_status =
+            || crate::agent_access::AgentAccessStatus::ReauthorizationRequired;
+        assert!(runtime.list_agents().unwrap().is_empty());
+        runtime.reconcile_agents().unwrap();
+        runtime.reload_agent_tokens().unwrap();
+        assert!(runtime
+            .preview_agent("codex".into(), true, ConnectOptions::default())
+            .is_err());
+        assert!(runtime
+            .apply_agent(
+                "codex".into(),
+                true,
+                String::new(),
+                ConnectOptions::default()
+            )
+            .is_err());
+        assert!(runtime
+            .proxy
+            .tokens()
+            .agent_for("previous-agent-token")
+            .is_none());
+        assert_eq!(
+            runtime.proxy.tokens().agent_for(&local_token),
+            Some(LOCAL_TOOLS_AGENT)
+        );
+        let files = TokenFiles::new(directory.path());
+        for agent in Agent::ALL {
+            assert!(files.read(agent.id()).unwrap().is_none());
+        }
+    }
 }

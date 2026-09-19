@@ -126,20 +126,35 @@ pub(crate) async fn export_profiles(
     path: PathBuf,
 ) -> Result<(), String> {
     let runtime = runtime.inner().clone();
-    run_blocking(move || runtime.export_profiles(path)).await
+    run_blocking(move || {
+        let backup =
+            desktop_runtime::maintenance::ProfileBackup::from_profiles(&runtime.state()?.profiles);
+        desktop_runtime::maintenance::write_json(&path, &backup)
+    })
+    .await
 }
 
 #[tauri::command]
 pub(crate) async fn export_diagnostics(
+    app: AppHandle,
     runtime: State<'_, Arc<Client>>,
     path: PathBuf,
 ) -> Result<(), String> {
+    let version = app.package_info().version.to_string();
     let runtime = runtime.inner().clone();
-    run_blocking(move || runtime.export_diagnostics(path)).await
+    run_blocking(move || {
+        let diagnostics = desktop_runtime::maintenance::diagnostics(&runtime.state()?, &version);
+        desktop_runtime::maintenance::write_json(&path, &diagnostics)
+    })
+    .await
 }
 
 #[tauri::command]
 pub(crate) async fn get_cli_registration(app: AppHandle) -> Result<CliRegistration, String> {
+    distribution::require(
+        distribution::CAPABILITIES.cli_registration,
+        "Command registration is unavailable in this distribution",
+    )?;
     #[cfg(target_os = "macos")]
     register_cli_on_startup(&app).await;
     let registration = run_cli_command(&app, vec!["cli", "status", "--json"]).await?;
@@ -155,6 +170,10 @@ pub(crate) async fn set_cli_registration(
     app: AppHandle,
     installed: bool,
 ) -> Result<CliRegistration, String> {
+    distribution::require(
+        distribution::CAPABILITIES.cli_registration,
+        "Command registration is unavailable in this distribution",
+    )?;
     #[cfg(target_os = "macos")]
     register_cli_on_startup(&app).await;
     let startup = app.state::<CliStartup>();

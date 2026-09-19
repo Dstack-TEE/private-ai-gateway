@@ -3,6 +3,11 @@ import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { MACOS_TARGETS, UNIVERSAL_MACOS_TARGET } from "./build-config.mjs";
+import {
+  distribution,
+  MAC_APP_STORE_DISTRIBUTION,
+  MAC_APP_STORE_SIDECARS,
+} from "./distribution.mjs";
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const debug = process.argv.includes("--debug");
@@ -38,18 +43,26 @@ await mkdir(destinationDir, { recursive: true });
 // Executables embedded by the Tauri shell. The helper remains a console
 // process so credential commands work on Windows.
 const cliManifest = path.join(appRoot, "cli/Cargo.toml");
-const sidecars = [
-  { name: "private-ai-proxy", manifestPath: cliManifest },
-  { name: "private-ai-proxy-service", manifestPath: cliManifest },
+const appStore = distribution() === MAC_APP_STORE_DISTRIBUTION;
+const directSidecars = [
+  { name: "private-ai-proxy", manifestPath: cliManifest, appStoreFeatures: ["mac-app-store"] },
+  { name: "private-ai-proxy-service", manifestPath: cliManifest, appStoreFeatures: ["mac-app-store"] },
   {
     name: "private-ai-proxy-helper",
     manifestPath: path.join(appRoot, "gateway/Cargo.toml"),
+    appStoreFeatures: [],
   },
 ];
+const sidecars = appStore
+  ? directSidecars.filter((sidecar) => MAC_APP_STORE_SIDECARS.includes(sidecar.name))
+  : directSidecars;
 
 for (const sidecar of sidecars) {
   for (const target of targets) {
     const buildArgs = ["build", "--locked", "--manifest-path", sidecar.manifestPath, "--bin", sidecar.name];
+    if (appStore && sidecar.appStoreFeatures.length > 0) {
+      buildArgs.push("--features", sidecar.appStoreFeatures.join(","));
+    }
     if (explicitTarget) buildArgs.push("--target", target);
     if (!debug) buildArgs.push("--release");
     const build = spawnSync(cargo, buildArgs, { cwd: appRoot, env: buildEnv, stdio: "inherit" });

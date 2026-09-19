@@ -18,7 +18,7 @@ import { Sheet, SheetActions } from "../components/sheet";
 import { FormField } from "../components/settings";
 import { ChoiceSelect } from "../components/choice-select";
 import type { ConfidentialProfile, ConfidentialProfileInput, GatewayState, ServiceProvider } from "../../shared/contracts";
-import { desktopApi } from "../lib/environment";
+import { desktopApi, distributionCapabilities } from "../lib/environment";
 import { profileIsAvailable } from "../lib/protection";
 import { ServiceLogo } from "../components/brand";
 import { serviceHost } from "../lib/format";
@@ -391,7 +391,7 @@ export function ProfileEditorSheet({
             <TabsContent value="apiKey">
               <FormField id="profile-key" label={keyLabel} description={savedCredentialApplies ? "Leave blank to keep the saved key." : "Stored securely on this device."}>
                 <Input id="profile-key" type="password" value={apiKeyDraft} onChange={(event) => setApiKeyDraft(event.target.value)} placeholder={savedCredentialApplies ? "Replace the saved key" : `Paste your ${keyLabel}`} disabled={frozen || working} autoComplete="off" spellCheck={false} aria-describedby="profile-key-note" />
-                {draft.provider !== "custom" && <Button type="button" variant="link" size="sm" className="h-auto justify-start self-start p-0" disabled={working || frozen} onClick={() => {
+                {distributionCapabilities.accountPortalLinks && draft.provider !== "custom" && <Button type="button" variant="link" size="sm" className="h-auto justify-start self-start p-0" disabled={working || frozen} onClick={() => {
                   void desktopApi.openApiKeyPage(draft.provider).catch(reportError);
                 }}>Get API key<ExternalLink size={14} aria-hidden="true" /></Button>}
               </FormField>

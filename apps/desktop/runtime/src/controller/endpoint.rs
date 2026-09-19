@@ -161,7 +161,9 @@ impl DesktopRuntime {
         }
         self.recovery.cancel();
         self.stop_inner()?;
-        self.disconnect_all_agents_inner()?;
+        if self.agent_configuration_enabled() {
+            self.disconnect_all_agents_inner()?;
+        }
         let current = self.manager.local_api()?;
         let defaults = LocalApiConfig::default();
         let resolved = local_api::resolve(defaults.clone())?;
@@ -182,7 +184,6 @@ impl DesktopRuntime {
             false,
         );
         crate::preferences::reset()?;
-        self.codex_sync.reset()?;
         self.manager.snapshot()
     }
 }

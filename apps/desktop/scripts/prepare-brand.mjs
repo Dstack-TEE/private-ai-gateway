@@ -18,6 +18,7 @@
 // recorded hashes are checked before generated files are written.
 import { execFileSync } from "node:child_process";
 import { releaseChannel } from "./release-channel.mjs";
+import { distribution, MAC_APP_STORE_DISTRIBUTION, validateAppStoreBuildNumber } from "./distribution.mjs";
 import { createHash } from "node:crypto";
 import { copyFile, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -28,6 +29,7 @@ import bmp from "bmp-js";
 import sharp from "sharp";
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const buildDistribution = distribution();
 // Finder positions are icon centers. Keep the arrow and bundle configuration
 // on the same coordinates; Tauri's pinned DMG template uses 128px icons.
 const dmgLayout = {
@@ -228,10 +230,21 @@ ${rust("APP_IDENTIFIER", brand.bundle.identifier)}
 // from the Rust brand module.
 const releaseVersion = process.env.DESKTOP_RELEASE_VERSION?.trim();
 const release = releaseVersion ? releaseChannel(releaseVersion, process.env.DESKTOP_RELEASE_CHANNEL || "beta") : undefined;
+const appStoreBuildNumber = process.env.APPLE_APP_STORE_BUILD_NUMBER?.trim();
 const updaterKey = process.env.TAURI_UPDATER_PUBLIC_KEY?.trim();
 const updaterEndpoint = process.env.TAURI_UPDATER_ENDPOINT?.trim();
 const windowsCertificateThumbprint = process.env.WINDOWS_CERTIFICATE_THUMBPRINT?.trim();
 const nativeUpdater = Boolean(updaterKey);
+if (buildDistribution === MAC_APP_STORE_DISTRIBUTION && (updaterKey || updaterEndpoint)) {
+  throw new Error("Mac App Store builds cannot include the native updater");
+}
+if (buildDistribution === MAC_APP_STORE_DISTRIBUTION && release && release.channel !== "stable") {
+  throw new Error("Mac App Store releases must use a stable version");
+}
+if (buildDistribution !== MAC_APP_STORE_DISTRIBUTION && appStoreBuildNumber) {
+  throw new Error("APPLE_APP_STORE_BUILD_NUMBER is only valid for Mac App Store builds");
+}
+if (appStoreBuildNumber) validateAppStoreBuildNumber(appStoreBuildNumber);
 if (Boolean(updaterKey) !== Boolean(updaterEndpoint)) {
   throw new Error("Set both TAURI_UPDATER_PUBLIC_KEY and TAURI_UPDATER_ENDPOINT, or neither");
 }
@@ -270,6 +283,7 @@ await writeFile(
         homepage: brand.homepageUrl,
         linux: { rpm: { preInstallScript: "installer/rpm-pre-install.generated.sh" } },
         macOS: {
+          ...(appStoreBuildNumber ? { bundleVersion: appStoreBuildNumber } : {}),
           dmg: {
             background: "installer/brand-dmg-background.png",
             ...dmgLayout,

@@ -444,6 +444,15 @@ impl Client {
     pub fn shutdown(&self) -> Result<(), String> {
         self.shutdown_owned(None, ShutdownMode::Quit)
     }
+    pub fn restart_service(&self) -> Result<(), String> {
+        let expected = crate::launch::service_executable()?
+            .canonicalize()
+            .map_err(|_| "Cannot identify the installed backend")?;
+        if self.is_running()? {
+            self.shutdown_owned(Some(&expected), ShutdownMode::UpdateRestart)?;
+        }
+        Self::ensure_service()
+    }
     fn shutdown_owned(
         &self,
         expected: Option<&std::path::Path>,

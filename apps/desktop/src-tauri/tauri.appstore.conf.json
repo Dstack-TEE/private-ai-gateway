@@ -1,0 +1,22 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "build": {
+    "features": ["mac-app-store"]
+  },
+  "plugins": {
+    "updater": null
+  },
+  "bundle": {
+    "targets": ["app"],
+    "externalBin": [
+      "binaries/private-ai-proxy",
+      "binaries/private-ai-proxy-service"
+    ],
+    "createUpdaterArtifacts": false,
+    "macOS": {
+      "hardenedRuntime": false,
+      "infoPlist": "Info.appstore.plist",
+      "minimumSystemVersion": "13.0"
+    }
+  }
+}

@@ -9,6 +9,8 @@ import { useErrorAlert } from "../lib/error-alert";
 import { Item, ItemActions, ItemContent, ItemTitle } from "./ui/item";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 
+import { distributionCapabilities } from "../lib/environment";
+
 type Props = {
   api: Pick<DesktopApi, "getAccountBalance" | "openOrganization">;
   provider: ServiceProvider;
@@ -27,6 +29,7 @@ type BalanceQueryProps = BalanceIdentity & {
 type BalanceProps = BalanceIdentity & {
   api: Pick<DesktopApi, "getAccountBalance" | "openTopUp">;
   enabled: boolean;
+  topUpLinks: boolean;
 };
 
 function balanceCacheKey({ provider, target, credentialRef }: Pick<Props, "provider" | "target" | "credentialRef">) {
@@ -53,6 +56,9 @@ export function AccountBalanceValue(props: BalanceProps) {
   if (!balance) return null;
   const scopeSlug = props.provider === "phala" ? balance.scope.workspaceSlug : balance.scope.organizationSlug;
   const amount = currency(Number(balance.balanceUsd));
+  if (!props.topUpLinks) {
+    return <span className="text-sm font-medium tabular-nums" aria-label={`Current balance: ${amount}`} aria-busy={isFetching}>{amount}</span>;
+  }
   return <Button type="button" variant="outline" size="sm" className="tabular-nums" aria-label={`Current balance: ${amount}`} aria-busy={isFetching || opening}
     disabled={opening || !scopeSlug} onClick={() => openPage(() => props.api.openTopUp(props.provider, scopeSlug ?? undefined))}>{amount}</Button>;
 }
@@ -67,7 +73,7 @@ function AccountDetailsView({ api, provider, target, scope, credentialRef, image
   const { data: balance, isFetching: busy, refetch } = useAccountBalance({ api, provider, target, credentialRef });
   const { opening, openPage } = useAccountPage("Could not open account", refetch, disabled);
   const organizationSlug = balance?.scope.organizationSlug ?? scope?.organizationSlug;
-  const manage = provider === "redpill" && organizationSlug ? () => void openPage(() => api.openOrganization(organizationSlug)) : undefined;
+  const manage = distributionCapabilities.accountPortalLinks && provider === "redpill" && organizationSlug ? () => void openPage(() => api.openOrganization(organizationSlug)) : undefined;
   const displayScope = provider === "redpill" ? scope ?? balance?.scope : balance?.scope ?? scope;
   const owner = displayScope?.organization ?? displayScope?.workspace;
   const name = owner ?? "Account";

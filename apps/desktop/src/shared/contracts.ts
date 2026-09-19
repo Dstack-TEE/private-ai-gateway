@@ -325,6 +325,17 @@ export interface CliRegistration {
   startupError?: string;
 }
 
+export interface DistributionCapabilities {
+  channel: "direct" | "macAppStore";
+  nativeUpdates: boolean;
+  cliRegistration: boolean;
+  topUpLinks: boolean;
+  accountPortalLinks: boolean;
+  sandboxHomeAccess: boolean;
+}
+
+export type AgentAccessStatus = "authorized" | "authorizationRequired" | "reauthorizationRequired";
+
 export interface DesktopApi {
   startBackendService(): Promise<GatewayState>;
   showEditMenu(editable: boolean): Promise<void>;
@@ -398,6 +409,8 @@ export interface DesktopApi {
   queryUsage(query: UsageQuery): Promise<UsagePage>;
   getUsageRecord(recordId: string): Promise<RequestActivity>;
   listAgents(): Promise<AgentStatus[]>;
+  getAgentAccess(): Promise<AgentAccessStatus>;
+  requestAgentAccess(): Promise<AgentAccessStatus>;
   previewAgent(agentId: string, connect: boolean, options: ConnectOptions): Promise<AgentPreview>;
   applyAgent(
     agentId: string,

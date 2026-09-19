@@ -138,7 +138,6 @@ impl DesktopRuntime {
             .ok_or_else(|| "Add a credential to the active Confidential AI profile".to_string())?;
         self.proxy.set_api_key(Some(key));
         self.manager.set_api_key_saved(true);
-        self.codex_sync.reset()?;
         match self.manager.clone().start(config) {
             Ok(state) => Ok(state),
             Err(error) => {
@@ -170,9 +169,11 @@ impl DesktopRuntime {
         }
         self.proxy
             .set_tokens(with_client_token(TokenSet::default(), &self.credentials)?);
-        let failures = self.current_projector()?.reconcile(None)?;
-        if !failures.is_empty() {
-            return Err(agent_failures(failures));
+        if self.agent_configuration_enabled() {
+            let failures = self.current_projector()?.reconcile(None)?;
+            if !failures.is_empty() {
+                return Err(agent_failures(failures));
+            }
         }
         result
     }
@@ -187,9 +188,12 @@ impl DesktopRuntime {
         self.recovery.cancel();
         let preserve_session =
             mode == ShutdownMode::UpdateRestart && self.manager.snapshot()?.session_active;
-        self.stop_with_reconnect(preserve_session)?;
+        let restored = self.stop_with_reconnect(preserve_session);
+        if !cfg!(all(target_os = "macos", feature = "mac-app-store")) {
+            restored.as_ref().map_err(Clone::clone)?;
+        }
         self.endpoint.stop().await?;
         self.exiting.store(true, Ordering::Release);
-        Ok(())
+        restored.map(|_| ())
     }
 }

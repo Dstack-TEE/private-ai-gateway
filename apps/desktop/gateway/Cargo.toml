@@ -4,8 +4,7 @@ version = "0.1.0"
 description = "Desktop-owned local agent gateway: loopback proxy, catalog, secrets, and agent projections"
 license = "Apache-2.0"
 edition = "2021"
-# Highest MSRV in the locked graph (aes 0.9.3: 1.89; keyring 4.2: 1.88); CI checks this crate on 1.89.
-rust-version = "1.89"
+rust-version = "1.98"
 
 [lib]
 name = "desktop_gateway"
@@ -30,7 +29,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
 shlex = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "process", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 tokio-util = "0.7"
 toml_edit = "0.25"
 yaml-edit = { version = "0.3.1", default-features = false }
@@ -45,4 +44,4 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Secur
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
 tempfile = "3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }

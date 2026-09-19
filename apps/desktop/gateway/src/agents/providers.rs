@@ -2,12 +2,23 @@ use super::*;
 
 /// Everything a projection is computed from.
 pub(super) struct Inputs<'a> {
+    pub(super) file_credentials: bool,
     pub(super) endpoint: &'a str,
     pub(super) helper_exe: &'a Path,
     pub(super) token_path: &'a Path,
     pub(super) codex_catalog_path: &'a Path,
     pub(super) catalog: Option<&'a Catalog>,
     pub(super) options: &'a ConnectOptions,
+}
+
+impl Inputs<'_> {
+    pub(super) fn credential_command(&self, agent: Agent) -> Result<String, String> {
+        agent_credential_command(
+            self.helper_exe,
+            agent,
+            self.file_credentials.then_some(self.token_path),
+        )
+    }
 }
 
 /// The fields this app owns for the agent and the values a connection writes.
@@ -73,11 +84,19 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
                 ),
                 set(
                     &["model_providers", "private_ai_proxy", "auth", "command"],
-                    inputs.helper_exe.display().to_string(),
+                    if inputs.file_credentials {
+                        "/bin/cat".into()
+                    } else {
+                        inputs.helper_exe.display().to_string()
+                    },
                 ),
                 list(
                     &["model_providers", "private_ai_proxy", "auth", "args"],
-                    &["--agent-token", "codex"],
+                    &if inputs.file_credentials {
+                        vec![inputs.token_path.to_str().ok_or(AgentError::InvalidState)?]
+                    } else {
+                        vec!["--agent-token", "codex"]
+                    },
                 ),
                 number(
                     &["model_providers", "private_ai_proxy", "auth", "timeout_ms"],
@@ -114,7 +133,8 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
                 ),
                 set(
                     &["apiKeyHelper"],
-                    helper_command(inputs.helper_exe, "claude-code")
+                    inputs
+                        .credential_command(Agent::ClaudeCode)
                         .map_err(AgentError::ConfigurationConflict)?,
                 ),
                 absent(&["env", "ANTHROPIC_AUTH_TOKEN"]),
@@ -139,8 +159,14 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
         }
         Agent::Pi => vec![generated_catalog(
             &["providers", "private-ai-proxy"],
-            pi_provider(catalog, base, inputs.helper_exe)
-                .map_err(AgentError::ConfigurationConflict)?,
+            pi_provider(
+                catalog,
+                base,
+                &inputs
+                    .credential_command(Agent::Pi)
+                    .map_err(AgentError::ConfigurationConflict)?,
+            )
+            .map_err(AgentError::ConfigurationConflict)?,
             catalog.models.len(),
         )],
         Agent::Hermes => {
@@ -152,7 +178,8 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
                 boolean(&["providers", provider, "discover_models"], true),
                 set(
                     &["providers", provider, "key_cmd"],
-                    credential_helper_command(inputs.helper_exe, Agent::Hermes)
+                    inputs
+                        .credential_command(Agent::Hermes)
                         .map_err(AgentError::ConfigurationConflict)?,
                 ),
                 set(&["model", "provider"], format!("custom:{provider}")),
@@ -207,7 +234,7 @@ pub(super) fn opencode_provider(
 pub(super) fn pi_provider(
     catalog: &Catalog,
     base: &str,
-    helper_exe: &Path,
+    credential_command: &str,
 ) -> Result<serde_json::Value, String> {
     let models: Vec<serde_json::Value> = catalog
         .models
@@ -273,20 +300,21 @@ pub(super) fn pi_provider(
     Ok(serde_json::json!({
         "baseUrl": format!("{base}/v1"),
         "api": "openai-completions",
-        "apiKey": format!("!{}", credential_helper_command(helper_exe, Agent::Pi)?),
+        "apiKey": format!("!{credential_command}"),
         "models": models,
     }))
 }
 
-pub(super) fn codex_catalog(
-    catalog: &Catalog,
-    bundled: &serde_json::Value,
-) -> Result<serde_json::Value, String> {
+pub(super) fn codex_catalog(catalog: &Catalog) -> Result<serde_json::Value, String> {
+    let mut bundled: serde_json::Value =
+        serde_json::from_str(include_str!("../../resources/codex/models.json")).map_err(|_| {
+            "The app-owned Codex model catalog is invalid. Reinstall Private AI Proxy.".to_string()
+        })?;
     let bundled_models = bundled
         .get("models")
         .and_then(serde_json::Value::as_array)
         .filter(|models| !models.is_empty())
-        .ok_or_else(|| "Codex returned an empty bundled model catalog".to_string())?;
+        .ok_or_else(|| "The app-owned Codex model catalog is empty".to_string())?;
     let fallback = bundled_models
         .iter()
         .find(|model| {
@@ -313,23 +341,10 @@ pub(super) fn codex_catalog(
                         .is_some_and(|slug| slug == model.id() || slug == leaf)
                 });
             let template = matched_template.unwrap_or(fallback);
-            let has_instructions = template
-                .get("model_messages")
-                .and_then(|messages| messages.get("instructions_template"))
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|instructions| !instructions.trim().is_empty())
-                || template
-                    .get("base_instructions")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|instructions| !instructions.trim().is_empty());
-            if !has_instructions {
-                return Err("Codex returned model metadata without its built-in instructions"
-                    .to_string());
-            }
             let mut value = template
                 .as_object()
                 .cloned()
-                .ok_or_else(|| "Codex returned a malformed bundled model catalog".to_string())?;
+                .ok_or_else(|| "The app-owned Codex model catalog is malformed".to_string())?;
             let capabilities = model.string_array("supported_features");
             let reasoning = capabilities.iter().any(|value| value == "reasoning");
             let verbosity = capabilities.iter().any(|value| value == "verbosity");
@@ -337,7 +352,15 @@ pub(super) fn codex_catalog(
                 .string_array("input_modalities")
                 .iter()
                 .any(|value| value == "image");
-            let context = model.remote.context_length.map(serde_json::Value::from).unwrap_or_default();
+            // Keep the baseline's context defaults when the provider gives no limit.
+            // Clearing them would disable Codex's derived auto-compaction threshold.
+            if let Some(context) = model.remote.context_length {
+                let context = i64::try_from(context).ok().filter(|limit| *limit > 0)
+                    .ok_or_else(|| "The provider returned an invalid Codex context limit".to_string())?;
+                value.insert("context_window".to_string(), serde_json::Value::from(context));
+                value.insert("max_context_window".to_string(), serde_json::Value::from(context));
+            }
+            value.insert("auto_compact_token_limit".to_string(), serde_json::Value::Null);
             value.insert("slug".to_string(), serde_json::Value::String(model.id().to_string()));
             value.insert(
                 "display_name".to_string(),
@@ -375,6 +398,9 @@ pub(super) fn codex_catalog(
             value.insert("priority".to_string(), serde_json::Value::from(index + 1));
             value.insert("additional_speed_tiers".to_string(), serde_json::json!([]));
             value.insert("service_tiers".to_string(), serde_json::json!([]));
+            value.insert("default_service_tier".to_string(), serde_json::Value::Null);
+            value.insert("upgrade".to_string(), serde_json::Value::Null);
+            value.insert("availability_nux".to_string(), serde_json::Value::Null);
             value.insert("default_reasoning_summary".to_string(), serde_json::Value::String(if reasoning { "auto" } else { "none" }.to_string()));
             value.insert("support_verbosity".to_string(), serde_json::Value::Bool(verbosity));
             value.insert(
@@ -386,8 +412,6 @@ pub(super) fn codex_catalog(
                 },
             );
             value.insert("supports_image_detail_original".to_string(), serde_json::Value::Bool(image));
-            value.insert("context_window".to_string(), context.clone());
-            value.insert("max_context_window".to_string(), context);
             value.insert("comp_hash".to_string(), serde_json::Value::Null);
             value.insert(
                 "input_modalities".to_string(),
@@ -397,8 +421,16 @@ pub(super) fn codex_catalog(
                 "supports_search_tool".to_string(),
                 serde_json::Value::Bool(capabilities.iter().any(|value| value == "web_search")),
             );
+            // PAP provides streaming HTTP Responses, not Codex-specific transports.
             value.insert("use_responses_lite".to_string(), serde_json::Value::Bool(false));
+            value.insert("prefer_websockets".to_string(), serde_json::Value::Bool(false));
+            value.insert("supports_experimental_context".to_string(), serde_json::Value::Bool(false));
             if matched_template.is_none() {
+                value.insert("experimental_supported_tools".to_string(), serde_json::json!([]));
+                value.insert("multi_agent_reasoning_effort".to_string(), serde_json::Value::Null);
+                value.insert("auto_review_model_override".to_string(), serde_json::Value::Null);
+                value.insert("model_specialty".to_string(), serde_json::Value::Null);
+                value.insert("node_repl_auto_review_required".to_string(), serde_json::Value::Bool(false));
                 value.insert("tool_mode".to_string(), serde_json::Value::Null);
                 value.insert("apply_patch_tool_type".to_string(), serde_json::Value::Null);
                 value.insert("multi_agent_version".to_string(), serde_json::Value::Null);
@@ -414,5 +446,20 @@ pub(super) fn codex_catalog(
             Ok(serde_json::Value::Object(value))
         })
         .collect::<Result<Vec<_>, String>>()?;
-    Ok(serde_json::json!({ "models": models }))
+    // model_catalog_json replaces the entire upstream catalog. Preserve every
+    // bundled entry, overlay exact slugs once, and append provider-specific IDs.
+    let entries = bundled["models"]
+        .as_array_mut()
+        .ok_or_else(|| "The app-owned Codex model catalog is malformed".to_string())?;
+    for model in models {
+        if let Some(existing) = entries
+            .iter_mut()
+            .find(|entry| entry["slug"] == model["slug"])
+        {
+            *existing = model;
+        } else {
+            entries.push(model);
+        }
+    }
+    Ok(bundled)
 }

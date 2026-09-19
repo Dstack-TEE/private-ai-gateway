@@ -210,8 +210,8 @@ impl Agent {
             Agent::Codex => {
                 "Codex will use its official custom model provider with the Responses API, the \
                  selected model from the verified catalog, command-backed authentication, and \
-                 model metadata exported by the installed Codex version. Restart Codex after \
-                 applying."
+                 the app-owned model catalog. Only the Codex baseline pinned by this app is \
+                 supported; other versions are not checked or supported. Restart Codex after applying."
             }
             Agent::OpenCode => {
                 "OpenCode will use an app-owned provider catalog generated from the verified \
