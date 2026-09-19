@@ -29,6 +29,8 @@ export function validateReleaseRequest({ version = "", channel = "beta", platfor
   const notes = summary.trim();
   if (notes.length > 8000) throw new Error("Release summary must be 8000 characters or fewer");
   if (/^#{1,6}\s/m.test(notes)) throw new Error("Release summary must not contain Markdown headings");
+  if (publish && ref !== "refs/heads/main") throw new Error("Published releases must be built from main");
+  if (publish && platforms.trim() !== "all") throw new Error("Published releases must include every supported platform");
   if (release.channel === "stable") {
     if (ref !== "refs/heads/main") throw new Error("Stable releases must be built from main");
     if (platforms.trim() !== "all") throw new Error("Stable releases must include every supported platform");
