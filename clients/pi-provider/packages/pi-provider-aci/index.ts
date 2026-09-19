@@ -68,11 +68,20 @@ import {
   settingsTitle,
 } from "./src/settings-ui.ts";
 
+import {
+  auditCatalogModels,
+  unauditableModelMessage,
+  type ModelAuditStatus,
+} from "./src/model-audit.ts";
+
 interface AciRuntimeState extends AciConnectionState<AciProvider> {
   profile: ProviderProfile;
   config: AciCloudConfig;
   accountAuth: AccountApiKeyAuth | undefined;
   overrides?: AciCloudConfigPatch;
+  /** Registration-time per-model upstream audit (ACI §8.1), empty until the
+   * first audit completes; models absent from the map are not yet audited. */
+  modelAudit: Map<string, ModelAuditStatus>;
 }
 
 export interface CreatePiAciProviderOptions {
@@ -134,7 +143,24 @@ async function refreshAciModels(
       `${state.profile.logPrefix} model discovery blocked because no verified ACI connection is available: ${state.connectionError ?? "verification has not completed"}`,
     );
   }
-  return state.provider.discoverModels({ signal });
+  const models = await state.provider.discoverModels({ signal });
+  // Registration-time upstream audit (§8.1/§9.2): tag models whose upstream
+  // sessions cannot be deep-audited so selection warns and the stream guard
+  // blocks before the first prompt instead of mid-turn on a receipt failure.
+  // Fire-and-forget: audit latency must not stall registration, and a failed
+  // audit degrades to "unknown" rather than breaking the catalog.
+  auditCatalogModels({
+    baseUrl: state.config.baseUrl,
+    fetch: state.provider.fetch,
+    modelIds: models.map((model) => model.id),
+  })
+    .then((audit) => {
+      state.modelAudit = audit;
+    })
+    .catch(() => {
+      // auditCatalogModels never rejects; defensive only.
+    });
+  return models;
 }
 
 function toPiModels(
@@ -170,9 +196,18 @@ function nativeAciProvider(state: AciRuntimeState): Provider<"openai-completions
       return toPiModels(state, await refreshAciModels(state, signal));
     },
     api: {
-      stream: (model, context, options) => streams.stream(model, context, { ...options, fetch }),
-      streamSimple: (model, context, options) =>
-        streams.streamSimple(model, context, { ...options, fetch }),
+      stream: (model, context, options) => {
+        if (state.modelAudit.get(model.id) === "unauditable") {
+          throw new Error(unauditableModelMessage(state.profile.label, model.id));
+        }
+        return streams.stream(model, context, { ...options, fetch });
+      },
+      streamSimple: (model, context, options) => {
+        if (state.modelAudit.get(model.id) === "unauditable") {
+          throw new Error(unauditableModelMessage(state.profile.label, model.id));
+        }
+        return streams.streamSimple(model, context, { ...options, fetch });
+      },
     },
   });
 }
@@ -377,8 +412,16 @@ export function createProvider({
       connectionError: undefined,
       renderConnectionStatus: undefined,
       overrides,
+      modelAudit: new Map(),
     };
     registerAciProvider(pi, state);
+
+    pi.on("model_select", (event, ctx) => {
+      if (event.model.provider !== state.profile.providerId) return;
+      if (state.modelAudit.get(event.model.id) === "unauditable") {
+        ctx.ui.notify(unauditableModelMessage(state.profile.label, event.model.id), "warning");
+      }
+    });
 
     pi.on("session_start", async (_event, ctx) => {
       state.renderConnectionStatus = () => updateFooter(ctx, state);
