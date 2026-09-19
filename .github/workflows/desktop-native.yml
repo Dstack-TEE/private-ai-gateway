@@ -235,7 +235,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev gnome-keyring dbus-x11 rpm cpio xvfb x11-utils makepkg pacman-package-manager libarchive-tools zstd
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev gnome-keyring dbus-x11 binutils rpm cpio xvfb x11-utils makepkg pacman-package-manager libarchive-tools zstd
           # makepkg reads pacman's local database when generating .BUILDINFO.
           sudo pacman -T
       - name: Install desktop dependencies
@@ -381,6 +381,41 @@ jobs:
           arch "-$architecture" "$app_bundle/Contents/MacOS/private-ai-proxy" --version
           arch "-$architecture" "$app_bundle/Contents/MacOS/private-ai-proxy-service" --version
           arch "-$architecture" "$app_bundle/Contents/MacOS/private-ai-proxy-helper" --help
+
+      - name: Verify Linux glibc compatibility
+        if: runner.os == 'Linux'
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          baseline=2.35
+          packages=("$PAP_BUNDLE_DIR"/deb/*.deb)
+          test "${#packages[@]}" -eq 1
+          scratch="$(mktemp -d "$RUNNER_TEMP/glibc-baseline.XXXXXX")"
+          trap 'rm -rf "$scratch"' EXIT
+          dpkg-deb -x "${packages[0]}" "$scratch"
+          executables=(
+            "$scratch/usr/bin/private-ai-proxy-desktop"
+            "$scratch/usr/bin/private-ai-proxy"
+            "$scratch/usr/bin/private-ai-proxy-service"
+            "$scratch/usr/bin/private-ai-proxy-helper"
+          )
+          for executable in "${executables[@]}"; do
+            test -x "$executable"
+            highest="$(
+              readelf --version-info "$executable" |
+                grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' |
+                sed 's/^GLIBC_//' |
+                sort -Vu |
+                tail -n 1
+            )"
+            test -n "$highest"
+            if [[ "$(printf '%s\n' "$baseline" "$highest" | sort -V | tail -n 1)" != "$baseline" ]]; then
+              echo "$(basename "$executable") requires GLIBC_$highest; maximum supported version is GLIBC_$baseline" >&2
+              exit 1
+            fi
+            echo "$(basename "$executable"): GLIBC_$highest"
+          done
 
       - name: Package CLI-only distribution
         working-directory: apps/desktop
