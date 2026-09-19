@@ -100,18 +100,18 @@ function isOpenAICompletionsApi(api: unknown): api is OpenAICompletionsApi {
 }
 
 // Pi exposes compat stream factories at the root module for extensions while
-// managed installs intentionally omit Pi peer packages.
+// managed installs intentionally omit Pi peer packages. pi >= 0.80.8 removed
+// the root re-export in plain-Node resolution, so fall back to the lazy
+// factory wired to the ./api/* subpath (same implementation, loaded on first
+// use). Mirrors pi-provider-kimi-code's runtime detection.
 function getHostOpenAICompletionsApi(): OpenAICompletionsApi {
-  if (!("openAICompletionsApi" in piAi)) {
-    throw new Error("Pi does not provide the OpenAI Completions API");
-  }
-  const factory = piAi.openAICompletionsApi;
-  if (typeof factory !== "function") {
-    throw new Error("Pi provides an invalid OpenAI Completions API factory");
-  }
-  const api: unknown = factory();
+  const factory = (piAi as typeof piAi & { openAICompletionsApi?: unknown }).openAICompletionsApi;
+  const api: unknown =
+    typeof factory === "function"
+      ? factory()
+      : piAi.lazyApi(() => import("@earendil-works/pi-ai/api/openai-completions"));
   if (!isOpenAICompletionsApi(api)) {
-    throw new Error("Pi provides an invalid OpenAI Completions API");
+    throw new Error("Pi does not provide the OpenAI Completions API");
   }
   return api;
 }
