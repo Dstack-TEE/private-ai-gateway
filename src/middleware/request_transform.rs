@@ -201,6 +201,9 @@ pub fn transform_to_provider_request(
     endpoint: Endpoint,
     engine: Option<Engine>,
 ) -> Result<Value, TransformError> {
+    if format == ProviderFormat::Openai && endpoint == Endpoint::Messages {
+        validate_messages_chat_compatibility(params)?;
+    }
     let mut params = params.clone();
     inject_stream_options(&mut params);
     let config = select_config(format, endpoint, engine)?;
@@ -1053,6 +1056,97 @@ fn anthropic_complete_stop(params: &Value) -> Result<Option<Value>, TransformErr
 
 // ── Anthropic Messages → OpenAI Chat Completions transforms ──────────────────
 
+/// Reject Messages features whose behavior Chat Completions cannot preserve.
+/// This runs per candidate, so an Anthropic-native route can still receive the
+/// original request when an OpenAI bridge candidate cannot represent it.
+fn validate_messages_chat_compatibility(params: &Value) -> Result<(), TransformError> {
+    let object = params
+        .as_object()
+        .ok_or_else(|| TransformError::invalid_request("request body must be a JSON object"))?;
+    const SUPPORTED: &[&str] = &[
+        "model",
+        "messages",
+        "max_tokens",
+        "system",
+        "temperature",
+        "top_p",
+        "top_k",
+        "stream",
+        "stop_sequences",
+        "tools",
+        "tool_choice",
+        "metadata",
+        // Gateway routing metadata, consumed before the upstream request.
+        "provider",
+    ];
+    if let Some(key) = object.keys().find(|key| !SUPPORTED.contains(&key.as_str())) {
+        return Err(TransformError::invalid_request(format!(
+            "{key} requires an upstream that supports /v1/messages"
+        )));
+    }
+    Ok(())
+}
+
+fn object_with_only<'a>(
+    value: &'a Value,
+    allowed: &[&str],
+    context: &str,
+) -> Result<&'a Map<String, Value>, TransformError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| TransformError::invalid_request(format!("{context} must be an object")))?;
+    if let Some(key) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Err(TransformError::invalid_request(format!(
+            "{context}.{key} cannot be preserved through Chat Completions"
+        )));
+    }
+    Ok(object)
+}
+
+fn required_map_string<'a>(
+    object: &'a Map<String, Value>,
+    key: &str,
+    context: &str,
+) -> Result<&'a str, TransformError> {
+    object
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            TransformError::invalid_request(format!("{context} requires a non-empty {key}"))
+        })
+}
+
+fn push_openai_message(
+    messages: &mut Vec<Value>,
+    role: &str,
+    content: &mut Vec<Value>,
+    tool_calls: &mut Vec<Value>,
+) {
+    if content.is_empty() && tool_calls.is_empty() {
+        return;
+    }
+    let mut message = Map::new();
+    message.insert("role".into(), json!(role));
+    if content.len() == 1 && content[0].get("type").and_then(Value::as_str) == Some("text") {
+        message.insert(
+            "content".into(),
+            content[0].get("text").cloned().unwrap_or_else(|| json!("")),
+        );
+    } else if !content.is_empty() {
+        message.insert("content".into(), Value::Array(std::mem::take(content)));
+    }
+    if !tool_calls.is_empty() {
+        message.insert(
+            "tool_calls".into(),
+            Value::Array(std::mem::take(tool_calls)),
+        );
+        message.entry("content").or_insert_with(|| json!(""));
+    }
+    content.clear();
+    messages.push(Value::Object(message));
+}
+
 fn oai_transform_messages(params: &Value) -> Result<Option<Value>, TransformError> {
     let mut messages: Vec<Value> = Vec::new();
 
@@ -1062,157 +1156,267 @@ fn oai_transform_messages(params: &Value) -> Result<Option<Value>, TransformErro
                 messages.push(json!({ "role": "system", "content": s }));
             }
             Value::Array(blocks) => {
-                let text: Vec<&str> = blocks
+                let content = blocks
                     .iter()
-                    .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
-                    .filter_map(|b| b.get("text").and_then(Value::as_str))
-                    .collect();
-                let joined = text.join("\n");
-                if !joined.is_empty() {
-                    messages.push(json!({ "role": "system", "content": joined }));
+                    .map(|block| {
+                        let block = object_with_only(block, &["type", "text"], "system block")?;
+                        if block.get("type").and_then(Value::as_str) != Some("text") {
+                            return Err(TransformError::invalid_request(
+                                "only text system blocks can be served through Chat Completions",
+                            ));
+                        }
+                        let text = block.get("text").and_then(Value::as_str).ok_or_else(|| {
+                            TransformError::invalid_request("system text block requires text")
+                        })?;
+                        Ok(json!({ "type": "text", "text": text }))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if content.is_empty() {
+                    return Err(TransformError::invalid_request(
+                        "system content must not be empty",
+                    ));
                 }
+                messages.push(json!({ "role": "system", "content": content }));
             }
-            _ => {}
+            _ => {
+                return Err(TransformError::invalid_request(
+                    "system must be a string or an array of text blocks",
+                ))
+            }
         }
     }
 
-    let Some(anthropic_messages) = params.get("messages").and_then(Value::as_array) else {
-        return Ok(Some(Value::Array(messages)));
-    };
+    let anthropic_messages = params
+        .get("messages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| TransformError::invalid_request("messages must be an array"))?;
 
     for msg in anthropic_messages {
-        let role = msg.get("role").cloned().unwrap_or(Value::Null);
+        let message = object_with_only(msg, &["role", "content"], "message")?;
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .filter(|role| matches!(*role, "user" | "assistant"))
+            .ok_or_else(|| {
+                TransformError::invalid_request("message role must be user or assistant")
+            })?;
         match msg.get("content") {
             Some(Value::String(s)) => {
                 messages.push(json!({ "role": role, "content": s }));
             }
             Some(Value::Array(blocks)) => {
+                let initial_message_count = messages.len();
                 let mut content: Vec<Value> = Vec::new();
                 let mut tool_calls: Vec<Value> = Vec::new();
-                let mut tool_results: Vec<(Value, Option<Value>)> = Vec::new();
+                let mut saw_tool_use = false;
 
                 for block in blocks {
                     match block.get("type").and_then(Value::as_str) {
                         Some("text") => {
-                            if block.get("text").is_some() {
-                                content.push(json!({ "type": "text", "text": str_or_empty(block.get("text")) }));
+                            if role == "assistant" && saw_tool_use {
+                                return Err(TransformError::invalid_request(
+                                    "assistant text after tool_use requires native /v1/messages support",
+                                ));
                             }
+                            let block = object_with_only(block, &["type", "text"], "text block")?;
+                            let text =
+                                block.get("text").and_then(Value::as_str).ok_or_else(|| {
+                                    TransformError::invalid_request("text block requires text")
+                                })?;
+                            content.push(json!({ "type": "text", "text": text }));
                         }
                         Some("image") => {
-                            if let Some(source) = block.get("source").filter(|s| truthy(s)) {
-                                match source.get("type").and_then(Value::as_str) {
-                                    Some("base64") => {
-                                        let url = format!(
-                                            "data:{};base64,{}",
-                                            str_or_empty(source.get("media_type")),
-                                            str_or_empty(source.get("data"))
-                                        );
-                                        content.push(json!({ "type": "image_url", "image_url": { "url": url } }));
-                                    }
-                                    Some("url") => {
-                                        content.push(json!({
-                                            "type": "image_url",
-                                            "image_url": { "url": str_or_empty(source.get("url")) },
-                                        }));
-                                    }
-                                    _ => {}
+                            if role != "user" {
+                                return Err(TransformError::invalid_request(
+                                    "assistant image blocks require native /v1/messages support",
+                                ));
+                            }
+                            let block =
+                                object_with_only(block, &["type", "source"], "image block")?;
+                            let source = block.get("source").ok_or_else(|| {
+                                TransformError::invalid_request("image block requires source")
+                            })?;
+                            match source.get("type").and_then(Value::as_str) {
+                                Some("base64") => {
+                                    let source = object_with_only(
+                                        source,
+                                        &["type", "media_type", "data"],
+                                        "image source",
+                                    )?;
+                                    let media_type =
+                                        required_map_string(source, "media_type", "image source")?;
+                                    let data = required_map_string(source, "data", "image source")?;
+                                    let url = format!("data:{media_type};base64,{data}");
+                                    content.push(
+                                        json!({ "type": "image_url", "image_url": { "url": url } }),
+                                    );
+                                }
+                                Some("url") => {
+                                    let source =
+                                        object_with_only(source, &["type", "url"], "image source")?;
+                                    let url = required_map_string(source, "url", "image source")?;
+                                    content.push(json!({
+                                        "type": "image_url",
+                                        "image_url": { "url": url },
+                                    }));
+                                }
+                                _ => {
+                                    return Err(TransformError::invalid_request(
+                                        "image source requires native /v1/messages support",
+                                    ))
                                 }
                             }
                         }
                         Some("tool_use") => {
-                            if block.get("id").is_some() && block.get("name").is_some() {
-                                let input =
-                                    block.get("input").cloned().unwrap_or_else(|| json!({}));
-                                let arguments = serde_json::to_string(&input)
-                                    .unwrap_or_else(|_| "{}".to_string());
-                                tool_calls.push(json!({
-                                    "id": str_or_empty(block.get("id")),
-                                    "type": "function",
-                                    "function": { "name": str_or_empty(block.get("name")), "arguments": arguments },
-                                }));
-                            }
-                        }
-                        Some("tool_result") => {
-                            if block.get("tool_use_id").is_some() {
-                                let content_value = match block.get("content") {
-                                    Some(Value::String(s)) => Some(Value::String(s.clone())),
-                                    Some(v) => Some(Value::String(
-                                        serde_json::to_string(v).unwrap_or_default(),
-                                    )),
-                                    None => None,
-                                };
-                                tool_results.push((
-                                    json!(str_or_empty(block.get("tool_use_id"))),
-                                    content_value,
+                            if role != "assistant" {
+                                return Err(TransformError::invalid_request(
+                                    "tool_use blocks require an assistant message",
                                 ));
                             }
+                            let block = object_with_only(
+                                block,
+                                &["type", "id", "name", "input"],
+                                "tool_use block",
+                            )?;
+                            let id = required_map_string(block, "id", "tool_use block")?;
+                            let name = required_map_string(block, "name", "tool_use block")?;
+                            let input = block.get("input").ok_or_else(|| {
+                                TransformError::invalid_request("tool_use block requires input")
+                            })?;
+                            if !input.is_object() {
+                                return Err(TransformError::invalid_request(
+                                    "tool_use input must be a JSON object",
+                                ));
+                            }
+                            tool_calls.push(json!({
+                                "id": id,
+                                "type": "function",
+                                "function": { "name": name, "arguments": input.to_string() },
+                            }));
+                            saw_tool_use = true;
+                        }
+                        Some("tool_result") => {
+                            if role != "user" {
+                                return Err(TransformError::invalid_request(
+                                    "tool_result blocks require a user message",
+                                ));
+                            }
+                            let block = object_with_only(
+                                block,
+                                &["type", "tool_use_id", "content"],
+                                "tool_result block",
+                            )?;
+                            let tool_use_id =
+                                required_map_string(block, "tool_use_id", "tool_result block")?;
+                            let content_value = match block.get("content") {
+                                Some(Value::String(text)) => Value::String(text.clone()),
+                                None | Some(Value::Null) => json!(""),
+                                _ => {
+                                    return Err(TransformError::invalid_request(
+                                        "structured tool_result content requires native /v1/messages support",
+                                    ))
+                                }
+                            };
+                            push_openai_message(&mut messages, role, &mut content, &mut tool_calls);
+                            messages.push(json!({
+                                "role": "tool",
+                                "tool_call_id": tool_use_id,
+                                "content": content_value,
+                            }));
                         }
                         Some("document") => {
-                            if let Some(source) = block.get("source").filter(|s| truthy(s)) {
-                                match source.get("type").and_then(Value::as_str) {
-                                    Some("url") => {
-                                        content.push(json!({
-                                            "type": "file",
-                                            "file": {
-                                                "file_url": source.get("url").cloned().unwrap_or(Value::Null),
-                                                "mime_type": source.get("media_type").cloned().unwrap_or(Value::Null),
-                                            },
-                                        }));
-                                    }
-                                    Some("base64") | Some("text") => {
-                                        content.push(json!({
-                                            "type": "file",
-                                            "file": {
-                                                "file_data": source.get("data").cloned().unwrap_or(Value::Null),
-                                                "mime_type": source.get("media_type").cloned().unwrap_or(Value::Null),
-                                            },
-                                        }));
-                                    }
-                                    _ => {}
+                            if role != "user" {
+                                return Err(TransformError::invalid_request(
+                                    "assistant document blocks require native /v1/messages support",
+                                ));
+                            }
+                            let block =
+                                object_with_only(block, &["type", "source"], "document block")?;
+                            let source = block.get("source").ok_or_else(|| {
+                                TransformError::invalid_request("document block requires source")
+                            })?;
+                            match source.get("type").and_then(Value::as_str) {
+                                Some("url") => {
+                                    let source = object_with_only(
+                                        source,
+                                        &["type", "url"],
+                                        "document source",
+                                    )?;
+                                    let url =
+                                        required_map_string(source, "url", "document source")?;
+                                    content.push(json!({
+                                        "type": "file",
+                                        "file": { "file_url": url },
+                                    }));
+                                }
+                                Some("base64") => {
+                                    let source = object_with_only(
+                                        source,
+                                        &["type", "media_type", "data"],
+                                        "document source",
+                                    )?;
+                                    let media_type = required_map_string(
+                                        source,
+                                        "media_type",
+                                        "document source",
+                                    )?;
+                                    let data =
+                                        required_map_string(source, "data", "document source")?;
+                                    content.push(json!({
+                                        "type": "file",
+                                        "file": { "file_data": data, "mime_type": media_type },
+                                    }));
+                                }
+                                Some("text") => {
+                                    let source = object_with_only(
+                                        source,
+                                        &["type", "media_type", "data"],
+                                        "document source",
+                                    )?;
+                                    let data = source
+                                        .get("data")
+                                        .and_then(Value::as_str)
+                                        .ok_or_else(|| {
+                                            TransformError::invalid_request(
+                                                "document source requires data",
+                                            )
+                                        })?;
+                                    content.push(json!({
+                                        "type": "file",
+                                        "file": { "file_data": data, "mime_type": TXT_MIME },
+                                    }));
+                                }
+                                _ => {
+                                    return Err(TransformError::invalid_request(
+                                        "document source requires native /v1/messages support",
+                                    ))
                                 }
                             }
                         }
-                        _ => {}
-                    }
-                }
-
-                if !content.is_empty() || !tool_calls.is_empty() {
-                    let mut message = serde_json::Map::new();
-                    message.insert("role".into(), role.clone());
-                    if !content.is_empty() {
-                        if content.len() == 1
-                            && content[0].get("type").and_then(Value::as_str) == Some("text")
-                        {
-                            message.insert(
-                                "content".into(),
-                                content[0].get("text").cloned().unwrap_or_else(|| json!("")),
-                            );
-                        } else {
-                            message.insert("content".into(), Value::Array(content.clone()));
+                        Some(other) => {
+                            return Err(TransformError::invalid_request(format!(
+                                "content block type {other} requires native /v1/messages support"
+                            )))
+                        }
+                        None => {
+                            return Err(TransformError::invalid_request(
+                                "message content block requires a type",
+                            ))
                         }
                     }
-                    if !tool_calls.is_empty() {
-                        message.insert("tool_calls".into(), Value::Array(tool_calls.clone()));
-                        let has_content = message.get("content").map(truthy).unwrap_or(false);
-                        if !has_content {
-                            message.insert("content".into(), json!(""));
-                        }
-                    }
-                    messages.push(Value::Object(message));
                 }
-
-                for (tool_use_id, content_value) in tool_results {
-                    let mut tool_message = json!({ "role": "tool", "tool_call_id": tool_use_id });
-                    if let Some(content_value) = content_value {
-                        tool_message
-                            .as_object_mut()
-                            .unwrap()
-                            .insert("content".into(), content_value);
-                    }
-                    messages.push(tool_message);
+                push_openai_message(&mut messages, role, &mut content, &mut tool_calls);
+                if messages.len() == initial_message_count {
+                    return Err(TransformError::invalid_request(
+                        "message content must not be empty",
+                    ));
                 }
             }
-            _ => {}
+            _ => {
+                return Err(TransformError::invalid_request(
+                    "message content must be a string or an array",
+                ))
+            }
         }
     }
 
@@ -1220,92 +1424,134 @@ fn oai_transform_messages(params: &Value) -> Result<Option<Value>, TransformErro
 }
 
 fn oai_transform_tools(params: &Value) -> Result<Option<Value>, TransformError> {
-    let tools = match params.get("tools").and_then(Value::as_array) {
-        Some(tools) if !tools.is_empty() => tools,
-        _ => return Ok(None),
+    let tools = match params.get("tools") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::Array(tools)) if tools.is_empty() => return Ok(None),
+        Some(Value::Array(tools)) => tools,
+        Some(_) => return Err(TransformError::invalid_request("tools must be an array")),
     };
-    let out: Vec<Value> = tools
-        .iter()
-        .map(|tool| {
-            let has_type = tool.get("type").map(truthy).unwrap_or(false);
-            // A null `input_schema` is falsy in the source, so treat it like an
-            // absent schema rather than emitting `parameters: null`.
-            let input_schema = tool.get("input_schema");
-            let schema_present = input_schema.map(truthy).unwrap_or(false);
-            if has_type && !schema_present {
-                let tool_type = str_or_empty(tool.get("type"));
-                let name = tool
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or(tool_type);
-                let description = tool
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| format!("{tool_type} tool"));
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": name,
-                        "description": description,
-                        "parameters": { "type": "object", "properties": {}, "required": [] },
-                    },
-                })
-            } else {
-                let parameters = if schema_present {
-                    input_schema.unwrap().clone()
-                } else {
-                    json!({ "type": "object", "properties": {}, "required": [] })
+    let out =
+        tools
+            .iter()
+            .map(|tool| {
+                let tool = object_with_only(
+                    tool,
+                    &["type", "name", "description", "input_schema", "strict"],
+                    "tool",
+                )?;
+                match tool.get("type") {
+                    None | Some(Value::Null) => {}
+                    Some(Value::String(kind)) if kind == "custom" => {}
+                    _ => return Err(TransformError::invalid_request(
+                        "Anthropic server and built-in tools require native /v1/messages support",
+                    )),
+                }
+                let name = required_map_string(tool, "name", "tool")?;
+                let description = match tool.get("description") {
+                    None | Some(Value::Null) => "",
+                    Some(Value::String(description)) => description,
+                    Some(_) => {
+                        return Err(TransformError::invalid_request(
+                            "tool.description must be a string",
+                        ))
+                    }
                 };
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": tool.get("name").cloned().unwrap_or(Value::Null),
-                        "description": str_or_empty(tool.get("description")),
-                        "parameters": parameters,
-                    },
-                })
-            }
-        })
-        .collect();
+                let input_schema = tool
+                    .get("input_schema")
+                    .filter(|schema| schema.is_object())
+                    .ok_or_else(|| {
+                        TransformError::invalid_request("tool requires an input_schema object")
+                    })?;
+                let mut function = json!({
+                    "name": name,
+                    "description": description,
+                    "parameters": input_schema,
+                });
+                if let Some(strict) = tool.get("strict").filter(|strict| !strict.is_null()) {
+                    let strict = strict.as_bool().ok_or_else(|| {
+                        TransformError::invalid_request("tool.strict must be a boolean")
+                    })?;
+                    function["strict"] = json!(strict);
+                }
+                Ok(json!({ "type": "function", "function": function }))
+            })
+            .collect::<Result<Vec<_>, TransformError>>()?;
     Ok(Some(Value::Array(out)))
 }
 
 fn oai_transform_tool_choice(params: &Value) -> Result<Option<Value>, TransformError> {
-    let Some(tool_choice) = params.get("tool_choice").filter(|tc| truthy(tc)) else {
-        return Ok(None);
+    let tool_choice = match params.get("tool_choice") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(tool_choice) => tool_choice,
     };
-    Ok(match tool_choice.get("type").and_then(Value::as_str) {
+    let choice = object_with_only(
+        tool_choice,
+        &["type", "name", "disable_parallel_tool_use"],
+        "tool_choice",
+    )?;
+    Ok(match choice.get("type").and_then(Value::as_str) {
         Some("auto") => Some(json!("auto")),
         Some("any") => Some(json!("required")),
-        Some("tool") => match tool_choice
-            .get("name")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-        {
-            Some(name) => Some(json!({ "type": "function", "function": { "name": name } })),
-            None => Some(json!("required")),
-        },
-        _ => None,
+        Some("none") => Some(json!("none")),
+        Some("tool") => {
+            let name = required_map_string(choice, "name", "tool_choice")?;
+            Some(json!({ "type": "function", "function": { "name": name } }))
+        }
+        _ => {
+            return Err(TransformError::invalid_request(
+                "tool_choice requires type auto, any, none, or tool",
+            ))
+        }
     })
 }
 
+fn oai_parallel_tool_calls(params: &Value) -> Result<Option<Value>, TransformError> {
+    let disabled = params
+        .get("tool_choice")
+        .and_then(|choice| choice.get("disable_parallel_tool_use"));
+    match disabled {
+        Some(Value::Bool(true)) => Ok(Some(json!(false))),
+        Some(Value::Bool(false)) | None | Some(Value::Null) => Ok(None),
+        Some(_) => Err(TransformError::invalid_request(
+            "tool_choice.disable_parallel_tool_use must be a boolean",
+        )),
+    }
+}
+
 fn oai_transform_stop_sequences(params: &Value) -> Result<Option<Value>, TransformError> {
-    Ok(
-        match params.get("stop_sequences").and_then(Value::as_array) {
-            Some(arr) if !arr.is_empty() => Some(Value::Array(arr.clone())),
-            _ => None,
-        },
-    )
+    let sequences = match params.get("stop_sequences") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::Array(sequences)) if sequences.is_empty() => return Ok(None),
+        Some(Value::Array(sequences)) => sequences,
+        Some(_) => {
+            return Err(TransformError::invalid_request(
+                "stop_sequences must be an array",
+            ))
+        }
+    };
+    if sequences
+        .iter()
+        .any(|sequence| !sequence.as_str().is_some_and(|value| !value.is_empty()))
+    {
+        return Err(TransformError::invalid_request(
+            "stop_sequences entries must be non-empty strings",
+        ));
+    }
+    Ok(Some(Value::Array(sequences.clone())))
 }
 
 fn oai_user_from_metadata(params: &Value) -> Result<Option<Value>, TransformError> {
-    Ok(params
-        .get("metadata")
-        .and_then(|m| m.get("user_id"))
-        .cloned())
+    let metadata = match params.get("metadata") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(metadata) => object_with_only(metadata, &["user_id"], "metadata")?,
+    };
+    match metadata.get("user_id") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(user_id)) if !user_id.is_empty() => Ok(Some(json!(user_id))),
+        Some(_) => Err(TransformError::invalid_request(
+            "metadata.user_id must be a non-empty string",
+        )),
+    }
 }
 
 // ── Config tables ────────────────────────────────────────────────────────────
@@ -2299,6 +2545,10 @@ fn openai_to_anthropic_messages_config() -> ProviderConfig {
         p!("stop_sequences" => "stop", with_transform(oai_transform_stop_sequences)),
         p!("tools", with_transform(oai_transform_tools)),
         p!("tool_choice", with_transform(oai_transform_tool_choice)),
+        p!(
+            "tool_choice" => "parallel_tool_calls",
+            with_transform(oai_parallel_tool_calls)
+        ),
         p!("metadata" => "user", with_transform(oai_user_from_metadata)),
     ]
 }
@@ -2352,9 +2602,12 @@ fn anthropic_complete_config() -> ProviderConfig {
 
 fn anthropic_messages_config() -> ProviderConfig {
     let mut config = pass!(
+        "cache_control",
         "container",
+        "inference_geo",
         "mcp_servers",
         "metadata",
+        "output_config",
         "service_tier",
         "stop_sequences",
         "stream",
@@ -2564,6 +2817,109 @@ mod tests {
             "text": { "format": { "type": "text" } }
         });
         assert!(validate_responses_chat_compatibility(&compatible).is_ok());
+    }
+
+    #[test]
+    fn messages_bridge_is_lossless_or_skipped_per_candidate() {
+        let bridgeable = json!({
+            "model": "m",
+            "max_tokens": 64,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "call_1",
+                        "name": "lookup",
+                        "input": { "q": "x" }
+                    }]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "tool_result", "tool_use_id": "call_1", "content": "ok" },
+                        { "type": "text", "text": "continue" }
+                    ]
+                }
+            ],
+            "tools": [{
+                "name": "lookup",
+                "description": "Lookup",
+                "input_schema": { "type": "object" },
+                "strict": true
+            }],
+            "tool_choice": { "type": "none", "disable_parallel_tool_use": true },
+            "metadata": { "user_id": "user-1" }
+        });
+        let body = transform_to_provider_request(
+            ProviderFormat::Openai,
+            &bridgeable,
+            Endpoint::Messages,
+            None,
+        )
+        .unwrap();
+        assert_eq!(body["tool_choice"], "none");
+        assert_eq!(body["parallel_tool_calls"], false);
+        assert_eq!(body["tools"][0]["function"]["strict"], true);
+        assert_eq!(body["user"], "user-1");
+        assert_eq!(body["messages"][1]["role"], "tool");
+        assert_eq!(body["messages"][2]["content"], "continue");
+
+        for incompatible in [
+            json!({
+                "model": "m", "max_tokens": 8,
+                "messages": [{ "role": "assistant", "content": [{ "type": "thinking", "thinking": "x" }] }]
+            }),
+            json!({
+                "model": "m", "max_tokens": 8,
+                "messages": [{ "role": "user", "content": "hi" }],
+                "tools": [{ "type": "bash_20250124", "name": "bash", "input_schema": { "type": "object" } }]
+            }),
+            json!({
+                "model": "m", "max_tokens": 8,
+                "messages": [{ "role": "user", "content": "hi" }],
+                "metadata": { "user_id": "u", "extra": true }
+            }),
+            json!({
+                "model": "m", "max_tokens": 8,
+                "messages": [{ "role": "user", "content": "hi" }],
+                "tool_choice": { "type": "tool" }
+            }),
+        ] {
+            assert!(
+                transform_to_provider_request(
+                    ProviderFormat::Openai,
+                    &incompatible,
+                    Endpoint::Messages,
+                    None,
+                )
+                .is_err(),
+                "bridge accepted lossy request: {incompatible}"
+            );
+        }
+
+        let native_only = json!({
+            "model": "m",
+            "max_tokens": 8,
+            "messages": [{ "role": "user", "content": "hi" }],
+            "thinking": { "type": "enabled", "budget_tokens": 1024 },
+            "cache_control": { "type": "ephemeral" },
+            "inference_geo": "us",
+            "output_config": { "effort": "high" }
+        });
+        let candidates: Vec<RouteCandidate> = serde_json::from_value(json!([
+            { "routeId": "openai:m", "format": "openai" },
+            { "routeId": "anthropic:m", "format": "anthropic" }
+        ]))
+        .unwrap();
+        let bodies =
+            build_candidates(&native_only, Endpoint::Messages, &candidates, None, None).unwrap();
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0].0, "anthropic:m");
+        assert_eq!(bodies[0].1["thinking"], native_only["thinking"]);
+        assert_eq!(bodies[0].1["cache_control"], native_only["cache_control"]);
+        assert_eq!(bodies[0].1["inference_geo"], native_only["inference_geo"]);
+        assert_eq!(bodies[0].1["output_config"], native_only["output_config"]);
     }
 
     #[test]
