@@ -66,6 +66,8 @@ export const desktopPackages = desktopBuilds.flatMap(({ platform, arch, packages
   packages.map((entry) => ({ platform, arch, ...entry })),
 );
 
+export const linuxNativePackageSuffixes = [".deb", ".rpm", ".pkg.tar.zst"];
+
 export const desktopTargets = desktopPackages.flatMap((entry) => entry.targets);
 
 export function desktopBuildId({ platform, arch }) {

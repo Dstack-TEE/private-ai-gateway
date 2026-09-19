@@ -12,12 +12,13 @@
     "build:sidecars": "node scripts/bundle-sidecars.mjs",
     "build:sidecars:debug": "node scripts/bundle-sidecars.mjs --debug",
     "package:cli": "node scripts/package-cli.mjs",
+    "package:arch": "node scripts/package-arch.mjs",
     "check": "npm run prepare:brand && tsc --noEmit",
     "dev": "npm run prepare:brand && npm run build:sidecars:debug && tauri dev --config src-tauri/tauri.brand.conf.json",
     "dev:renderer": "npm run prepare:brand && vite --host 127.0.0.1 --port 1420",
     "dist": "node scripts/dist.mjs",
     "test:probe": "node --test scripts/probe-model-endpoints.test.mjs",
-    "test:release": "node --test scripts/create-update-manifest.test.mjs scripts/package-cli.test.mjs scripts/release-channel.test.mjs scripts/release-notes.test.mjs"
+    "test:release": "node --test scripts/create-update-manifest.test.mjs scripts/package-arch.test.mjs scripts/package-cli.test.mjs scripts/release-channel.test.mjs scripts/release-notes.test.mjs"
   },
   "engines": {
     "node": ">=22.19.0"

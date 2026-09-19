@@ -173,7 +173,7 @@ from earlier beta builds.
 ## Packaging And Releases
 
 The desktop workflow builds separate macOS arm64/x64 DMGs, Windows NSIS
-installers, and Linux DEB/RPM packages, plus portable CLI archives. AppImage is
+installers, and Linux DEB/RPM/Arch packages, plus portable CLI archives. AppImage is
 not supported because its transient mount is incompatible with a persistent
 per-user backend.
 

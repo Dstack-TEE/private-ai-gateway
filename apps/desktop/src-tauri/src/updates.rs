@@ -109,6 +109,7 @@ pub async fn set_update_channel(
 #[serde(rename_all = "camelCase")]
 pub struct UpdateInfo {
     enabled: bool,
+    system_managed: bool,
     current_version: String,
     channel: UpdateChannel,
     version: Option<String>,
@@ -120,7 +121,8 @@ pub async fn prepare_update(
     app: AppHandle,
     prepared: State<'_, PreparedUpdate>,
 ) -> Result<UpdateInfo, String> {
-    let enabled = app.config().plugins.0.contains_key("updater");
+    let system_managed = system_managed();
+    let enabled = app.config().plugins.0.contains_key("updater") && !system_managed;
     let mut prepared = prepared
         .0
         .try_lock()
@@ -129,6 +131,7 @@ pub async fn prepare_update(
     let channel = update_channel(&app, &client).await?;
     let mut info = UpdateInfo {
         enabled,
+        system_managed,
         current_version: app.package_info().version.to_string(),
         channel,
         version: None,
@@ -209,6 +212,19 @@ pub async fn prepare_update(
     });
     info.version = Some(version);
     Ok(info)
+}
+
+#[cfg(target_os = "linux")]
+fn system_managed() -> bool {
+    std::path::Path::new("/usr/share/private-ai-proxy/package-manager").is_file()
+        && std::env::current_exe().is_ok_and(|path| {
+            path == std::path::Path::new("/usr/bin/private-ai-proxy-desktop")
+        })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn system_managed() -> bool {
+    false
 }
 
 #[tauri::command]

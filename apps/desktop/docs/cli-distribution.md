@@ -20,7 +20,7 @@ lookup.
 | --- | --- | --- | --- |
 | Windows | NSIS | The three executables are siblings in the selected app directory | The installer calls `private-ai-proxy cli install`. It records ownership only when it inserts a current-user PATH entry. |
 | macOS | DMG app | `Private AI Proxy.app/Contents/MacOS` | The app registers the bundled CLI automatically on startup without elevation. |
-| Linux | DEB or RPM | `/usr/bin` | The package manager owns all three paths; no registration command is required. |
+| Linux | DEB, RPM, or Arch package | `/usr/bin` | The package manager owns all three paths; no registration command is required. |
 
 Windows install, upgrade, and uninstall hooks call `private-ai-proxy --yes service stop`
 before replacing or removing files. The installer holds the same `startup.lock`
@@ -64,7 +64,7 @@ Extract each version into a fresh directory rather than overlaying older files.
 Run `private-ai-proxy cli install` from a stable extracted location when PATH registration
 is wanted.
 
-Linux also publishes CLI-only DEB and RPM packages. They install the three real
+Linux also publishes CLI-only DEB, RPM, and Arch Linux packages. They install the three real
 executables under `/usr/libexec/private-ai-proxy` and a package-owned
 `/usr/bin/private-ai-proxy` symlink. This relies on `private-ai-proxy` canonicalizing itself before it
 locates `private-ai-proxy-service`. Package lifecycle scripts reject an unrelated owner of
@@ -117,6 +117,17 @@ stable executable lifetime for a backend that survives the UI process. Linux
 desktop DEB/RPM builds participate in the signed Tauri updater using the
 installer-specific `linux-x86_64-deb` and `linux-x86_64-rpm` manifest entries;
 the updater verifies the artifact and obtains user authorization for the native
-installer. CLI-only DEB/RPM packages continue to update through the system
-package manager. Existing AppImage installations cannot automatically change
-bundle type and require a manual migration to DEB or RPM.
+installer. Arch Linux desktop packages and CLI-only native packages are managed
+by pacman instead of the in-app updater. Existing AppImage installations cannot
+automatically change bundle type and require a manual migration to a native
+package.
+
+Arch packages use the standard `.pkg.tar.zst` format for x86_64 and aarch64.
+Install or upgrade a downloaded desktop package with:
+
+```bash
+sudo pacman -U ./private-ai-proxy-<version>-linux-<arch>.pkg.tar.zst
+```
+
+The lifecycle guard refuses replacement or removal while the per-user backend
+is running. Stop it as the signed-in user before upgrading manually.

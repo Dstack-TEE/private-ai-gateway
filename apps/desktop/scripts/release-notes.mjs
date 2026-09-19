@@ -2,7 +2,7 @@ import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { desktopBuilds, desktopBuildId } from "./release-artifacts.mjs";
+import { desktopBuilds, desktopBuildId, linuxNativePackageSuffixes } from "./release-artifacts.mjs";
 import { releaseChannel } from "./release-channel.mjs";
 
 const platformTitles = {
@@ -19,7 +19,7 @@ const platforms = desktopBuilds.map(({ platform, arch }) => {
   if (!title) throw new Error(`Missing release-note title for ${id}`);
   return { platform, arch, title };
 });
-const installerExtensions = [".dmg", ".exe", ".deb", ".rpm"];
+const installerExtensions = [".dmg", ".exe", ...linuxNativePackageSuffixes];
 const portableExtensions = [".zip", ".tar.gz"];
 
 export async function buildReleaseNotes(directory, repository, commit, summary = "") {
@@ -71,7 +71,7 @@ export async function buildReleaseNotes(directory, repository, commit, summary =
   for (const specification of platforms) {
     const prefix = `private-ai-proxy-cli-${release.version}-${specification.platform}-${specification.arch}`;
     const extensions = specification.platform === "linux"
-      ? [".tar.gz", ".deb", ".rpm"]
+      ? [".tar.gz", ...linuxNativePackageSuffixes]
       : portableExtensions;
     const archives = matchingFiles(files, prefix, extensions);
     if (archives.length > 0) {
@@ -101,7 +101,9 @@ function matchingFiles(files, prefix, extensions) {
 }
 
 function assetLink(name, link) {
-  const extension = name.endsWith(".tar.gz") ? "TAR.GZ" : path.extname(name).slice(1).toUpperCase();
+  const extension = name.endsWith(".pkg.tar.zst") ? "ARCH"
+    : name.endsWith(".tar.gz") ? "TAR.GZ"
+    : path.extname(name).slice(1).toUpperCase();
   return `[${extension}](${link(name)})`;
 }
 
