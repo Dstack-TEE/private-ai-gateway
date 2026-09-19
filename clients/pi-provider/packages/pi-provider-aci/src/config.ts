@@ -44,6 +44,19 @@ export interface AciModelsConfig {
   overrides?: Record<string, ModelCompatOverride>;
 }
 
+/**
+ * Receipt verification policy. "response" verifies every inference receipt
+ * before the turn can complete (fail-closed, the ACI default). "on-demand"
+ * still records receipts and keeps them auditable via /<provider>-receipt,
+ * but never blocks a response — an operator escape hatch, not a user
+ * comfort switch.
+ */
+export type ReceiptVerificationMode = "response" | "on-demand";
+
+export interface AciReceiptsConfig {
+  verification: ReceiptVerificationMode;
+}
+
 export interface AciCloudConfig {
   baseUrl: string;
   models: AciModelsConfig;
@@ -53,6 +66,7 @@ export interface AciCloudConfig {
     /** Attested upstream session ids accepted by the operator or brand. */
     acceptedSessionIds?: string[];
   };
+  receipts: AciReceiptsConfig;
 }
 
 export function toAciProviderConfig(config: AciCloudConfig): AciProviderConfig {
@@ -60,7 +74,12 @@ export function toAciProviderConfig(config: AciCloudConfig): AciProviderConfig {
     baseURL: config.baseUrl,
     models: config.models,
     trust: config.trust,
-    receipts: { verification: "response", historySize: 32 },
+    // Tolerate hand-built partial configs (public API consumers construct
+    // AciCloudConfig literals without the defaulted receipts field).
+    receipts: {
+      verification: config.receipts?.verification ?? "response",
+      historySize: 32,
+    },
   };
 }
 
@@ -71,6 +90,7 @@ export type AciCloudConfigPatch = {
     allowlist: unknown;
     overrides: unknown;
   }>;
+  receipts?: unknown;
   trust?: Partial<{
     acceptedComposeHashes: unknown;
     acceptedSessionIds: unknown;
@@ -105,6 +125,7 @@ export const DEFAULT_ACI_CLOUD_CONFIG: AciCloudConfig = {
     isTeeOnly: true,
   },
   trust: {},
+  receipts: { verification: "response" },
 };
 
 function defaultAciCloudConfig(providerProfile: ProviderProfile): AciCloudConfig {
@@ -183,10 +204,12 @@ function envConfigPatch(
   providerProfile: ProviderProfile,
 ): AciCloudConfigPatch {
   const input = aciProviderConfigInputFromEnv(providerProfile, env);
+  const verification = env[`${providerProfile.envPrefix}_RECEIPTS_VERIFICATION`];
   return {
     ...(input.baseURL !== undefined ? { baseUrl: input.baseURL } : {}),
     ...(input.models ? { models: input.models } : {}),
     ...(input.trust ? { trust: input.trust } : {}),
+    ...(verification !== undefined ? { receipts: { verification } } : {}),
   };
 }
 
@@ -258,11 +281,20 @@ export function validateAciCloudConfig(
   const config = requireRecord(raw, configPath, "");
   const models = requireRecord(config.models, configPath, "/models");
   const trust = requireRecord(config.trust, configPath, "/trust");
+  // Absent records fall through to the required-field loop below so the
+  // error names the missing pointer precisely (e.g. /baseUrl) instead of
+  // whichever requireRecord ran first.
+  const receipts =
+    config.receipts === undefined ? {} : requireRecord(config.receipts, configPath, "/receipts");
   for (const [record, field, pointer] of [
     [config, "baseUrl", "/baseUrl"],
     [models, "isTeeOnly", "/models/isTeeOnly"],
+    [receipts, "verification", "/receipts/verification"],
   ] as const) {
     if (!(field in record)) fail(configPath, pointer, "required field is missing");
+  }
+  if (receipts.verification !== "response" && receipts.verification !== "on-demand") {
+    fail(configPath, "/receipts/verification", 'expected "response" or "on-demand"');
   }
   try {
     const resolved = resolveAciProviderConfig(
@@ -289,6 +321,7 @@ export function validateAciCloudConfig(
         ...(resolved.models.allowlist ? { allowlist: [...resolved.models.allowlist] } : {}),
         ...(overrides ? { overrides } : {}),
       },
+      receipts: { verification: receipts.verification },
       trust: {
         ...(resolved.trust.acceptedComposeHashes
           ? { acceptedComposeHashes: [...resolved.trust.acceptedComposeHashes] }

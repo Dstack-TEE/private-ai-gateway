@@ -4,6 +4,11 @@ interface AciConnectionConfig {
     acceptedComposeHashes?: readonly string[];
     acceptedSessionIds?: readonly string[];
   };
+  /** Receipt verification mode is per-request policy read from the provider
+   * instance at construction, so it is part of the connection key: toggling
+   * it re-establishes the connection rather than leaving the live provider
+   * on its old setting. */
+  receipts?: { verification: string };
 }
 
 export interface ConnectableAciProvider {
@@ -31,6 +36,7 @@ function connectionConfig(config: AciConnectionConfig): string {
     baseUrl: config.baseUrl,
     acceptedComposeHashes: config.trust.acceptedComposeHashes,
     acceptedSessionIds: config.trust.acceptedSessionIds,
+    receiptsVerification: config.receipts?.verification,
   });
 }
 

@@ -290,6 +290,7 @@ async function openSettingsMenu(
     const refreshValues = () => {
       list.updateValue("scope", scope);
       list.updateValue("isTeeOnly", drafts[scope].models.isTeeOnly ? "true" : "false");
+      list.updateValue("receiptVerification", drafts[scope].receipts.verification);
     };
 
     const save = () => {
@@ -322,6 +323,12 @@ async function openSettingsMenu(
         save();
         return;
       }
+      if (id === "receiptVerification") {
+        drafts[scope].receipts.verification = newValue as "response" | "on-demand";
+        list.updateValue(id, newValue);
+        save();
+        return;
+      }
     };
 
     const scopeItem: SettingItem = {
@@ -342,6 +349,17 @@ async function openSettingsMenu(
         description: "Only register models served confidentially (is_tee === true)",
         currentValue: drafts[scope].models.isTeeOnly ? "true" : "false",
         values: ["true", "false"],
+      },
+      {
+        id: "receiptVerification",
+        label: "Receipt verification",
+        description:
+          "response: verify every response receipt and block the turn on " +
+          "failure (fail-closed, the ACI default). on-demand: record receipts " +
+          "and verify manually via the receipt command — responses are never " +
+          "blocked.",
+        currentValue: drafts[scope].receipts.verification,
+        values: ["response", "on-demand"],
       },
     ];
 
