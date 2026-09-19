@@ -73,6 +73,7 @@ import {
   unauditableModelMessage,
   type ModelAuditStatus,
 } from "./src/model-audit.ts";
+import { translateAciError, translateResponseErrors } from "./src/errors.ts";
 
 interface AciRuntimeState extends AciConnectionState<AciProvider> {
   profile: ProviderProfile;
@@ -126,10 +127,23 @@ function getHostOpenAICompletionsApi(): OpenAICompletionsApi {
 function providerFetch(state: AciRuntimeState): typeof globalThis.fetch {
   return async (input, init) => {
     await ensureAciConnection(state, () => createAciProvider(toAciProviderConfig(state.config)));
-    if (state.provider) return state.provider.fetch(input, init);
-    throw new Error(
-      `${state.profile.logPrefix} inference blocked because no verified ACI connection is available: ${state.connectionError ?? "verification has not completed"}`,
-    );
+    if (!state.provider) {
+      throw translateAciError(
+        new Error(
+          `${state.profile.logPrefix} inference blocked because no verified ACI connection is available: ${state.connectionError ?? "verification has not completed"}`,
+        ),
+        state.profile.providerId,
+      );
+    }
+    try {
+      const response = await state.provider.fetch(input, init);
+      // Receipt verification runs at end-of-stream inside the response body;
+      // wrap it so those failures surface as actionable messages, not raw
+      // auditor output mid-turn.
+      return translateResponseErrors(response, state.profile.providerId);
+    } catch (error) {
+      throw translateAciError(error, state.profile.providerId);
+    }
   };
 }
 
