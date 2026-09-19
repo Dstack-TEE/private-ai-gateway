@@ -831,4 +831,3 @@ jobs:
     uses: ./.github/workflows/desktop-update-feed.yml
     with:
       tag: desktop-v${{ inputs.release_version }}
-
