@@ -291,7 +291,12 @@ per-round fresh skeleton/path nodes ~4KB.
 
 ### 9.3 1-day retention comparison (production churn: 8,489 sessions/day)
 
-| Upstream class | sessions/day | Current/day | CAS/day |
+All figures are **logical payload**. The old store additionally base64-wrapped
+each record in its JSONL envelope (`payload_b64`), so its actual log volume
+was ≈1.33× the raw-document column (≈1.95GB/day logical), before filesystem
+block rounding:
+
+| Upstream class | sessions/day | Raw doc (old store served bytes) | CAS logical |
 |---|---|---|---|
 | phala ×13 | 5,213 | 1,402.0 MB | 68.5 MB |
 | near-ai | 446 | 51.8 MB | 4.7 MB |
@@ -299,8 +304,17 @@ per-round fresh skeleton/path nodes ~4KB.
 | tinfoil | 24 | 0.1 MB | 0.1 MB |
 | **Total** | **8,489** | **1.458 GB** | **77.8 MB** |
 
-**Steady-state store at 1-day retention: 1.46 GB current vs 78 MB CAS
-(+~1MB low-frequency chunks) — 18.8×.**
+Filesystem **allocated** bytes differ from logical payload at small-file
+granularity. Measured on a real `JsonlSessionStore` (4KiB blocks, reviewer's
+disk-usage harness): first phala store = 83,089B logical → 126,976B allocated
+across 14 new files; a subsequent round's increment = ~13.0KB logical →
+28,672B allocated across 5 new files (incl. the JSONL delta). Allocated runs
+≈1.5–2.2× logical for this file-size mix; a packfile layout would close most
+of that gap but is deliberately out of scope.
+
+**Steady-state store at 1-day retention: 1.46 GB raw-document logical
+current vs 78 MB CAS logical (+~1MB low-frequency chunks) — 18.8× logical;
+≈1.9GB vs ≈160–170MB in filesystem-allocated bytes at 4KiB granularity.**
 
 At a 1-day horizon, per-round fields dominate completely (all low-frequency
 fields together are ~1MB). The savings, in decreasing order of contribution:
