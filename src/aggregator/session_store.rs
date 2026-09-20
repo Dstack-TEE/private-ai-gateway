@@ -155,6 +155,12 @@ struct SessionEntry {
 struct EvidenceEntry {
     bytes: Vec<u8>,
     retention_until: u64,
+    /// The retention deadline actually persisted in the log. Invariant: an
+    /// entry in this map means the current log holds an evidence line with
+    /// this deadline. A cite carrying a later deadline must append a renewed
+    /// evidence line — otherwise a restart between the two deadlines skips
+    /// the stale line as lapsed and drops the live citing session with it.
+    written_retention_until: u64,
 }
 
 /// In-memory session index shared by both stores: id→entry plus a
@@ -176,13 +182,25 @@ struct SessionIndex {
 impl SessionIndex {
     /// Add or refresh a shared evidence bundle. Retention only ever moves
     /// forward: the bundle must outlive every session citing it.
-    fn insert_evidence(&mut self, digest: String, bytes: Vec<u8>, retention_until: u64) {
+    /// `written_retention_until` records the deadline persisted in the log
+    /// (pass 0 from callers that only bump the in-memory deadline).
+    fn insert_evidence(
+        &mut self,
+        digest: String,
+        bytes: Vec<u8>,
+        retention_until: u64,
+        written_retention_until: u64,
+    ) {
         self.evidence
             .entry(digest)
-            .and_modify(|e| e.retention_until = e.retention_until.max(retention_until))
+            .and_modify(|e| {
+                e.retention_until = e.retention_until.max(retention_until);
+                e.written_retention_until = e.written_retention_until.max(written_retention_until);
+            })
             .or_insert(EvidenceEntry {
                 bytes,
                 retention_until,
+                written_retention_until,
             });
     }
 
@@ -522,7 +540,12 @@ impl JsonlSessionStore {
                             );
                             continue;
                         }
-                        index.insert_evidence(record.digest, bytes, record.retention_until);
+                        index.insert_evidence(
+                            record.digest,
+                            bytes,
+                            record.retention_until,
+                            record.retention_until,
+                        );
                     }
                     RECORD_TYPE_SESSION => {
                         let Ok(record) = serde_json::from_slice::<SessionLogRecord>(trimmed) else {
@@ -562,6 +585,18 @@ impl JsonlSessionStore {
                             && !session.document().evidence.digest_matches_data()
                         {
                             continue;
+                        }
+                        // Restore the evidence deadline this record implies: a
+                        // cite with a later retention must keep its bundle in
+                        // the index, or the next compact would strip the
+                        // session while the bundle is gone.
+                        if record.evidence_data_prefix.is_some() {
+                            if let Some(digest) = session.document().evidence.digest.as_deref() {
+                                if let Some(ev) = index.evidence.get_mut(digest) {
+                                    ev.retention_until =
+                                        ev.retention_until.max(record.retention_until);
+                                }
+                            }
                         }
                         index.insert(record.fingerprint, session, record.retention_until);
                     }
@@ -615,6 +650,19 @@ impl JsonlSessionStore {
                     )
                 })
                 .collect();
+            let cited: HashSet<String> = sessions
+                .iter()
+                .filter_map(|(_, session, _, _)| {
+                    let ev = &session.document().evidence;
+                    (ev.digest.is_some() && ev.data_uri.is_some())
+                        .then(|| ev.digest.clone().unwrap())
+                })
+                .collect();
+            // Drop uncited bundles from the index as well as the file:
+            // leaving one in the index would tell a later `put_session` the
+            // log already carries it, and the stripped session written then
+            // would cite a digest no evidence record provides.
+            index.evidence.retain(|d, _| cited.contains(d));
             let evidence: Vec<(String, Vec<u8>, u64)> = index
                 .evidence
                 .iter()
@@ -623,6 +671,8 @@ impl JsonlSessionStore {
             (sessions, evidence)
         };
         live.sort_by_key(|(_, _, _, seq)| *seq);
+        let written_digests: HashSet<&str> =
+            live_evidence.iter().map(|(d, _, _)| d.as_str()).collect();
 
         let tmp = self.path.with_extension("jsonl.tmp");
         let kept = live.len();
@@ -630,20 +680,8 @@ impl JsonlSessionStore {
             let mut out = File::create(&tmp)?;
             let mut seq = 0u64;
             // Evidence lines first: replay is single-pass, and a session line
-            // whose digest has not been seen is skipped. Only bundles some
-            // live session actually cites are written.
-            let cited: HashSet<String> = live
-                .iter()
-                .filter_map(|(_, session, _, _)| {
-                    let ev = &session.document().evidence;
-                    (ev.digest.is_some() && ev.data_uri.is_some())
-                        .then(|| ev.digest.clone().unwrap())
-                })
-                .collect();
+            // whose digest has not been seen is skipped.
             for (digest, bytes, retention_until) in &live_evidence {
-                if !cited.contains(digest) {
-                    continue; // orphan evidence: its citer never landed or was evicted
-                }
                 let mut line = serde_json::to_string(&EvidenceLogRecord {
                     seq,
                     ts: now,
@@ -658,18 +696,22 @@ impl JsonlSessionStore {
                 seq = next_seq_after(seq)?;
             }
             for (fingerprint, session, retention_until, _) in live.iter() {
+                // Strip only when the bundle will actually be in the file — a
+                // citing session proves a reference exists, not that the
+                // bundle is available (a record replayed from a
+                // pre-externalization log carries its evidence inline and
+                // never entered the table). Anything else stays whole.
                 let (payload_b64, evidence_data_prefix) = match externalize_evidence(session)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
                 {
-                    // Only strip when the bundle will actually be in the file;
-                    // otherwise keep the document whole (defensive: the index
-                    // invariant says the digest is always present).
                     StoredSession::Stripped {
                         payload,
                         data_prefix,
                         digest,
                         ..
-                    } if cited.contains(&digest) => (BASE64.encode(payload), Some(data_prefix)),
+                    } if written_digests.contains(digest.as_str()) => {
+                        (BASE64.encode(payload), Some(data_prefix))
+                    }
                     _ => (BASE64.encode(session.bytes()), None),
                 };
                 let mut line = serde_json::to_string(&SessionLogRecord {
@@ -697,6 +739,16 @@ impl JsonlSessionStore {
         std::fs::rename(&tmp, &self.path)?;
 
         w.file = new_file;
+        // The rename is durable: record what the log now holds. Updating
+        // `written_retention_until` only after the swap keeps the invariant
+        // (index entry ⇒ the current log carries a line with that deadline)
+        // intact across a failed compaction.
+        let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
+        for (digest, _, retention_until) in &live_evidence {
+            if let Some(e) = index.evidence.get_mut(digest) {
+                e.written_retention_until = e.written_retention_until.max(*retention_until);
+            }
+        }
         Ok(kept)
     }
 }
@@ -721,27 +773,46 @@ impl SessionStore for JsonlSessionStore {
         // replay is single-pass, and a session line whose digest has not been
         // seen is skipped. Crashing between the two leaves an orphan evidence
         // record, which is harmless (evicted when its retention lapses).
+        //
+        // A known digest still needs a new line when this cite's retention
+        // outlives the deadline persisted in the log: the in-memory deadline
+        // alone would leave a window where a restart skips the stale line as
+        // lapsed and drops the live citing session with it.
         if let StoredSession::Stripped {
             digest,
             evidence_bytes,
             ..
         } = &stored
         {
-            if !index.evidence.contains_key(digest) {
+            let persisted = index
+                .evidence
+                .get(digest)
+                .map(|e| e.retention_until)
+                .unwrap_or(0)
+                .max(retention_until);
+            let needs_line = match index.evidence.get(digest) {
+                None => true,
+                Some(e) => persisted > e.written_retention_until,
+            };
+            if needs_line {
                 let evidence_line = serde_json::to_string(&EvidenceLogRecord {
                     seq: w.next_seq,
                     ts: now,
                     record_type: RECORD_TYPE_EVIDENCE.to_string(),
                     digest: digest.clone(),
-                    retention_until,
+                    retention_until: persisted,
                     payload_b64: BASE64.encode(evidence_bytes),
                 })
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 w.next_seq = next_seq_after(w.next_seq)?;
                 w.file.write_all(evidence_line.as_bytes())?;
                 w.file.write_all(b"\n")?;
+                index.insert_evidence(digest.clone(), evidence_bytes.clone(), persisted, persisted);
+            } else {
+                // Bump the in-memory deadline only; the log's line still
+                // covers this cite (persisted <= written_retention_until).
+                index.insert_evidence(digest.clone(), evidence_bytes.clone(), retention_until, 0);
             }
-            index.insert_evidence(digest.clone(), evidence_bytes.clone(), retention_until);
         }
 
         let seq = w.next_seq;
