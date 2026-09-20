@@ -9,8 +9,6 @@ mod platform {
     use std::path::Path;
 
     use auto_launch::{AutoLaunch, AutoLaunchBuilder};
-    #[cfg(target_os = "windows")]
-    use auto_launch_windows as auto_launch;
     use tauri::{AppHandle, Manager};
 
     pub struct ManagerState(AutoLaunch);
@@ -284,14 +282,14 @@ mod platform {
 
     #[cfg(not(feature = "mac-app-store"))]
     impl LegacyBackend<'_> {
-        fn registration(&self) -> Result<auto_launch_legacy::AutoLaunch, String> {
+        fn registration(&self) -> Result<auto_launch::AutoLaunch, String> {
             // Match tauri-plugin-autostart 2.5.1's LaunchAgent builder exactly:
             // package_info.name is the label/plist basename; the path is the canonical executable.
             // Reuse its auto-launch 0.5.0 implementation, never enable the legacy backend.
             let executable = std::env::current_exe()
                 .and_then(|path| path.canonicalize())
                 .map_err(|_| "Cannot locate the previous login registration".to_string())?;
-            Ok(auto_launch_legacy::AutoLaunch::new(
+            Ok(auto_launch::AutoLaunch::new(
                 self.0.package_info().name.as_str(),
                 &executable.display().to_string(),
                 true,
