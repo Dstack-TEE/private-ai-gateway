@@ -481,6 +481,12 @@ impl JsonlSessionStore {
                         else {
                             continue;
                         };
+                        // The id authorizes GC deletions under docs/; a
+                        // tampered log must not be able to smuggle a path
+                        // outside it (adversarial replay).
+                        if !super::session_cas::is_bare_hex64(&record.id) {
+                            continue;
+                        }
                         if record.retention_until <= now {
                             continue;
                         }
@@ -518,7 +524,7 @@ impl JsonlSessionStore {
                             continue;
                         }
                         let id = session.session_id().to_string();
-                        write_file_if_absent(&docs_dir.join(&id), session.bytes())?;
+                        atomic_publish(&docs_dir.join(&id), session.bytes())?;
                         index.insert(
                             record.fingerprint.clone(),
                             id,
@@ -547,6 +553,44 @@ impl JsonlSessionStore {
         })
     }
 
+    /// Publish one chunk. An existing file under a content-addressed name
+    /// must hold byte-identical payload; anything else (partial-write residue
+    /// from a crashed publish, foreign content) is an error, never silently
+    /// accepted — an acknowledged put must never reference truncated content.
+    fn write_chunk(&self, digest: &str, payload: &[u8]) -> io::Result<()> {
+        let path = self.chunks_dir.join(digest);
+        if path.exists() {
+            return match std::fs::read(&path) {
+                Ok(existing) if existing == payload => Ok(()),
+                _ => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("chunk {digest} exists with different content"),
+                )),
+            };
+        }
+        atomic_publish(&path, payload)
+    }
+
+    /// Determine whether an existing doc file is a valid representation of
+    /// the session `id`, returning its format (`whole` vs CAS skeleton).
+    /// Both encodings are legitimate for the same content-addressed id.
+    fn verify_doc_format(&self, path: &Path, id: &str) -> io::Result<Option<bool>> {
+        let bytes = std::fs::read(path)?;
+        if let Ok(session) = AttestedSession::from_bytes(bytes.clone()) {
+            if session.session_id() == id {
+                return Ok(Some(true));
+            }
+        }
+        if let Some(rebuilt) = unpack(&bytes, false, &mut |digest| self.read_chunk(digest)) {
+            if let Ok(session) = AttestedSession::from_bytes(rebuilt) {
+                if session.session_id() == id {
+                    return Ok(Some(false));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Read a chunk payload by digest.
     fn read_chunk(&self, digest: &str) -> Option<Vec<u8>> {
         // A digest is 64 lowercase hex; refuse anything else as a path.
@@ -569,6 +613,16 @@ impl JsonlSessionStore {
         let session = AttestedSession::from_bytes(bytes).ok()?;
         if session.session_id() != id {
             return None; // rebuilt bytes do not hash to the cited id
+        }
+        // The log record is an unhashed side index: expiry and upstream name
+        // must match the sealed document or a tampered record could revive an
+        // expired session or mislabel its origin. retention_until is a local,
+        // store-side deadline (never part of the protocol document) and is
+        // legitimately index-owned.
+        if session.document().expires_at != entry.expires_at
+            || session.document().upstream_name != entry.upstream_name
+        {
+            return None;
         }
         if !session.document().evidence.digest_matches_data() {
             return None;
@@ -659,39 +713,53 @@ impl JsonlSessionStore {
 
         // Reference collection is transitive: a skeleton references subtree
         // chunks ("s:<digest>") whose payloads may reference further chunks.
-        // Walk to the fixpoint or the sweep would delete chunks a live
-        // skeleton needs through one indirection.
+        // ANY failure reading, parsing, or expanding a live record aborts the
+        // whole chunk sweep: sweeping with an incomplete mark set would
+        // permanently delete chunks a live session needs. Conservative leaks
+        // heal at the next compaction; destroyed evidence does not.
         let mut referenced: HashSet<String> = HashSet::new();
         let mut subtree_worklist: Vec<String> = Vec::new();
+        let mut mark_ok = true;
         for (_, id, entry) in live {
             if entry.whole {
                 continue; // whole docs reference no chunks
             }
             let Ok(skeleton) = std::fs::read(self.docs_dir.join(id)) else {
-                continue;
+                mark_ok = false;
+                break;
             };
             let Ok(value) = serde_json::from_slice::<serde_json::Value>(&skeleton) else {
-                continue;
+                mark_ok = false;
+                break;
             };
             collect_chunk_refs(&value, &mut referenced, &mut subtree_worklist);
         }
         let mut expanded: HashSet<String> = HashSet::new();
-        while let Some(digest) = subtree_worklist.pop() {
+        while mark_ok {
+            let Some(digest) = subtree_worklist.pop() else {
+                break;
+            };
             if !expanded.insert(digest.clone()) {
                 continue;
             }
             let Some(payload) = self.read_chunk(&digest) else {
-                continue; // missing chunk: keep it referenced regardless
+                mark_ok = false;
+                break;
             };
             let Ok(value) = serde_json::from_slice::<serde_json::Value>(&payload) else {
-                continue;
+                mark_ok = false;
+                break;
             };
             collect_chunk_refs(&value, &mut referenced, &mut subtree_worklist);
+        }
+        if !mark_ok {
+            tracing::warn!("session chunk GC aborted: a live skeleton could not be marked");
+            return;
         }
         if let Ok(entries) = std::fs::read_dir(&self.chunks_dir) {
             for entry in entries.flatten() {
                 if let Some(name) = entry.file_name().to_str() {
-                    if !referenced.contains(name) {
+                    if is_temp_file(name) || !referenced.contains(name) {
                         let _ = std::fs::remove_file(entry.path());
                     }
                 }
@@ -740,15 +808,31 @@ fn collect_chunk_refs(
     }
 }
 
-/// Write `bytes` to `path` unless the file already exists (doc and chunk
-/// files are immutable and content-addressed, so an existing file is by
-/// construction the same content).
-fn write_file_if_absent(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    match OpenOptions::new().create_new(true).write(true).open(path) {
-        Ok(mut file) => file.write_all(bytes),
-        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Ok(()),
-        Err(err) => Err(err),
+/// Publish an immutable file atomically: write a temp sibling, sync it, then
+/// rename over the target. A crash mid-publish can only leave an orphan temp
+/// file (swept by compaction), never a truncated target that a retry would
+/// mistake for a completed write. The single-writer lock makes the
+/// check-and-publish race-free across processes, and the writer mutex within
+/// this one.
+fn atomic_publish(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    {
+        let mut file = File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
     }
+    if let Err(err) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// True when `name` looks like a crashed publish's temp file (`*.tmp<pid>`).
+fn is_temp_file(name: &str) -> bool {
+    name.rsplit_once('.').is_some_and(|(_, ext)| {
+        ext.len() > 3 && ext.starts_with("tmp") && ext[3..].bytes().all(|b| b.is_ascii_digit())
+    })
 }
 
 impl SessionStore for JsonlSessionStore {
@@ -775,16 +859,35 @@ impl SessionStore for JsonlSessionStore {
         // only leave orphans (swept by the next compaction), never a record
         // pointing at missing content.
         let id = session.session_id().to_string();
-        let (doc_bytes, whole) = match pack(session.bytes()) {
+        let (doc_bytes, packed_whole) = match pack(session.bytes()) {
             Packed::Whole(bytes) => (bytes, true),
             Packed::Cas { skeleton, chunks } => {
                 for (digest, payload) in &chunks {
-                    write_file_if_absent(&self.chunks_dir.join(digest), payload)?;
+                    self.write_chunk(digest, payload)?;
                 }
                 (skeleton, false)
             }
         };
-        write_file_if_absent(&self.docs_dir.join(&id), &doc_bytes)?;
+        // The same session may already live here in another representation
+        // (e.g. a legacy Whole adoption): keep the existing file when it
+        // materializes to the same id, and adopt its format for the record.
+        // A file that does not represent this session (partial-write residue,
+        // foreign content) fails the put instead of being acknowledged.
+        let doc_path = self.docs_dir.join(&id);
+        let whole = if doc_path.exists() {
+            match self.verify_doc_format(&doc_path, &id)? {
+                Some(existing_whole) => existing_whole,
+                None => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("existing doc file for {id} does not represent that session"),
+                    ));
+                }
+            }
+        } else {
+            atomic_publish(&doc_path, &doc_bytes)?;
+            packed_whole
+        };
 
         let mut line = serde_json::to_string(&SessionLogRecordV2 {
             seq,
