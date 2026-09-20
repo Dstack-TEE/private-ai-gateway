@@ -273,23 +273,45 @@ fn chunk_ref(payload: Vec<u8>, tag: u8, chunks: &mut Vec<(String, Vec<u8>)>) -> 
 // Rebuild
 // ---------------------------------------------------------------------------
 
+/// Parse and resolve one `"<tag>:<digest>"` chunk reference. Every step is
+/// bounds- and shape-checked: a malformed reference (empty, single-byte,
+/// Unicode, wrong tag, non-hex digest) yields `None`, so `pack`'s self-check
+/// falls back to `Whole` instead of panicking on unfamiliar producer content.
+fn rebuild_reference(
+    reference: &str,
+    chunk: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
+) -> Option<Value> {
+    let tag = reference.get(..2)?;
+    let digest = reference.get(2..)?;
+    if !is_bare_hex64(digest) {
+        return None;
+    }
+    let payload = chunk(digest)?;
+    Some(match tag {
+        "h:" => Value::String(hex::encode(payload)),
+        "b:" => Value::String(BASE64.encode(payload)),
+        "r:" => Value::String(String::from_utf8(payload).ok()?),
+        "s:" => {
+            let node: Value = serde_json::from_slice(&payload).ok()?;
+            return rebuild(&node, chunk);
+        }
+        _ => return None,
+    })
+}
+
+/// A bare 64-char lowercase-hex id/digest, as produced by content addressing.
+pub(crate) fn is_bare_hex64(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+
 fn rebuild(value: &Value, chunk: &mut dyn FnMut(&str) -> Option<Vec<u8>>) -> Option<Value> {
     match value {
         Value::Object(map) => {
             if map.len() == 1 {
                 if let Some(reference) = map.get("$r").and_then(Value::as_str) {
-                    let (tag, digest) = reference.split_at(2); // "h:<digest>"
-                    let payload = chunk(digest)?;
-                    return Some(match tag.as_bytes() {
-                        b"h:" => Value::String(hex::encode(payload)),
-                        b"b:" => Value::String(BASE64.encode(payload)),
-                        b"r:" => Value::String(String::from_utf8(payload).ok()?),
-                        b"s:" => {
-                            let node: Value = serde_json::from_slice(&payload).ok()?;
-                            return rebuild(&node, chunk);
-                        }
-                        _ => return None,
-                    });
+                    return rebuild_reference(reference, chunk);
                 }
                 if let Some(node) = map.get("$j") {
                     let mut s = String::new();
