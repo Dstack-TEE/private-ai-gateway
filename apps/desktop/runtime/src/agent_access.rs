@@ -21,10 +21,13 @@ mod mac_app_store {
         io::Write,
         os::unix::{ffi::OsStrExt, fs::PermissionsExt},
         path::{Path, PathBuf},
+        sync::{Mutex, OnceLock},
     };
 
     const BOOKMARK_FILE: &str = "agent-home.bookmark";
     const MAX_BOOKMARK_BYTES: u64 = 1024 * 1024;
+
+    static ACTIVE_ACCESS: OnceLock<Mutex<Option<AgentHomeAccess>>> = OnceLock::new();
 
     pub struct AgentHomeAccess {
         url: Retained<NSURL>,
@@ -41,6 +44,18 @@ mod mac_app_store {
         fn drop(&mut self) {
             unsafe { self.url.stopAccessingSecurityScopedResource() };
         }
+    }
+
+    fn active_access() -> &'static Mutex<Option<AgentHomeAccess>> {
+        ACTIVE_ACCESS.get_or_init(|| Mutex::new(None))
+    }
+
+    fn retain(access: Option<AgentHomeAccess>) -> bool {
+        let Ok(mut active) = active_access().lock() else {
+            return false;
+        };
+        *active = access;
+        true
     }
 
     pub fn expected_home() -> Result<PathBuf, String> {
@@ -75,15 +90,31 @@ mod mac_app_store {
     pub fn status() -> AgentAccessStatus {
         let path = match bookmark_path() {
             Ok(path) => path,
-            Err(_) => return AgentAccessStatus::ReauthorizationRequired,
+            Err(_) => {
+                retain(None);
+                return AgentAccessStatus::ReauthorizationRequired;
+            }
         };
         if !path.exists() {
+            retain(None);
             return AgentAccessStatus::AuthorizationRequired;
         }
         match acquire() {
-            Ok(Some(_)) => AgentAccessStatus::Authorized,
-            Ok(None) => AgentAccessStatus::AuthorizationRequired,
-            Err(_) => AgentAccessStatus::ReauthorizationRequired,
+            Ok(Some(access)) => {
+                if retain(Some(access)) {
+                    AgentAccessStatus::Authorized
+                } else {
+                    AgentAccessStatus::ReauthorizationRequired
+                }
+            }
+            Ok(None) => {
+                retain(None);
+                AgentAccessStatus::AuthorizationRequired
+            }
+            Err(_) => {
+                retain(None);
+                AgentAccessStatus::ReauthorizationRequired
+            }
         }
     }
 

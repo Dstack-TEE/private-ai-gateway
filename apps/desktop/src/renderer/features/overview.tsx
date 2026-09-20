@@ -102,6 +102,16 @@ export function Overview({
   const protectedNow = isProtected(state);
   const localAvailable = isProtected(state) && Boolean(state.proxyUrl) && !state.endpointError;
   const recent = protectedNow || state.sessionActive || state.reconnecting ? state.activity.slice(0, 10) : [];
+  const agentDetectionLabel = agentAccessStatus === "authorized"
+    ? undefined
+    : authorizingAgents
+      ? "Waiting for access"
+      : agentAccessStatus
+        ? "Access required"
+        : "Checking access";
+  const previewAgents = agentAccessStatus === "authorized"
+    ? agents.filter((agent) => agent.installed).slice(0, 3)
+    : agents.slice(0, 3);
   return (
     <div className="overview-page max-w-240 min-h-full mx-auto flex flex-col @container/overview @max-[600px]/overview:[&_.overview-grid_>_.overview-module:nth-child(n)]:col-auto @max-[600px]/overview:[&_.overview-grid_>_.overview-module:nth-child(n)]:row-auto">
       <div className="overview-top grid *:min-h-36 grid-cols-2 gap-4 items-stretch [&_.status-surface.status-compact]:min-w-0 @max-[600px]/overview:grid-cols-1">
@@ -140,15 +150,15 @@ export function Overview({
             </Button>
           : <Button variant="outline" size="sm" className="min-w-20" onClick={onAgents}>View all</Button>}>
           <div className="preview-list [&_>_:last-child]:border-b-0 overview-agent-list [--agent-row-height:calc(2rem_+_1.25rem_+_2px)] grid grid-rows-[repeat(3,_minmax(var(--agent-row-height),_auto))] gap-3 [&_>_.empty-state]:row-span-full">
-            {agentAccessStatus !== "authorized" ? <EmptyState text={authorizingAgents ? "Enabling Agent Integrations…" : agentAccessStatus ? "Enable Agent Integrations to detect agents" : "Checking Agent Integrations…"} />
-              : !agents.some((agent) => agent.installed) ? <EmptyState text={agentProblem ? "Agent detection unavailable" : "No installed agents found"} />
-              : agents.filter((agent) => agent.installed).slice(0, 3).map((agent) => (
+            {agentAccessStatus === "authorized" && !agents.some((agent) => agent.installed) ? <EmptyState text={agentProblem ? "Agent detection unavailable" : "No installed agents found"} />
+              : previewAgents.map((agent) => (
               <AgentRow
                 pendingConnection={pendingAgentChanges[agent.id]}
                 key={agent.id}
                 agent={agent}
                 compact
-                disabled={locked || authorizingAgents}
+                detectionLabel={agentDetectionLabel}
+                disabled={locked || authorizingAgents || Boolean(agentDetectionLabel)}
                 onSelect={(connect) => onSelect(agent, connect)}
               />
             ))}

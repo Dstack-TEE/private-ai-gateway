@@ -1,6 +1,6 @@
 import React from "react";
 import { useErrorAlert } from "../lib/error-alert";
-import { ExternalLink } from "lucide-react";
+import { ExternalLink, FolderLock, LoaderCircle } from "lucide-react";
 import claudeCodeIcon from "@lobehub/icons-static-svg/icons/claudecode-color.svg";
 import codexIcon from "@lobehub/icons-static-svg/icons/codex-color.svg";
 import hermesIcon from "@lobehub/icons-static-svg/icons/hermesagent.svg";
@@ -17,7 +17,9 @@ import { Separator } from "../components/ui/separator";
 import { SwitchControl } from "../components/controls";
 import type { AgentAccessStatus, AgentStatus } from "../../shared/contracts";
 import { EmptyState } from "../components/detail";
+import { Alert, AlertDescription } from "../components/ui/alert";
 import { desktopApi } from "../lib/environment";
+import { supportedAgentStatuses } from "../lib/agent-integrations";
 import { cn } from "../lib/utils";
 
 const AGENT_ICONS: Record<string, string> = {
@@ -62,12 +64,29 @@ export function AgentsView({
   onAuthorize(): void;
 }): React.JSX.Element {
   const connected = agents.filter((agent) => agent.installed && agent.connected).length;
+  const listedAgents = agents.length > 0 ? agents : supportedAgentStatuses();
+  const detectionLabel = accessStatus === "authorized"
+    ? undefined
+    : authorizing
+      ? "Waiting for access"
+      : accessStatus
+        ? "Access required"
+        : "Checking access";
   return (
     <div className="page-body max-w-230 min-h-full mt-0 mr-auto mb-0 ml-auto">
+      <AgentAccessNotice status={accessStatus} busy={authorizing} onAuthorize={onAuthorize} />
       <section className="group mt-5 [&:first-child]:mt-0" aria-labelledby="agents-title">
-        <h2 className="group-title mx-0.5 mb-2 flex min-h-5 items-center gap-2 text-sm font-semibold" id="agents-title">{accessStatus === "authorized" ? "Installed" : "Agent Integrations"} <span className="ml-auto truncate text-xs font-normal text-muted-foreground">{accessStatus === "authorized" ? `${connected} connected` : ""}</span></h2>
+        <h2 className="group-title mx-0.5 mb-2 flex min-h-5 items-center gap-2 text-sm font-semibold" id="agents-title">{accessStatus === "authorized" ? "Installed" : "Agents"} <span className="ml-auto truncate text-xs font-normal text-muted-foreground">{accessStatus === "authorized" ? `${connected} connected` : ""}</span></h2>
         <div className="inset min-w-0 bg-card border border-border rounded-2xl overflow-hidden">
-          {accessStatus !== "authorized" ? <AgentAccessPrompt status={accessStatus} busy={authorizing} onAuthorize={onAuthorize} />
+          {accessStatus !== "authorized" ? listedAgents.map((agent) => (
+            <AgentRow
+              key={agent.id}
+              agent={agent}
+              detectionLabel={detectionLabel}
+              disabled
+              onSelect={() => undefined}
+            />
+          ))
             : !agents.some((agent) => agent.installed) ? <EmptyState text={problem ? "Agent detection unavailable" : "No installed agents found"} />
             : agents.filter((agent) => agent.installed).map((agent) => (
             <AgentRow
@@ -90,36 +109,43 @@ export function AgentsView({
   );
 }
 
-export function AgentAccessPrompt({ status, busy, onAuthorize }: {
+function AgentAccessNotice({ status, busy, onAuthorize }: {
   status?: AgentAccessStatus;
   busy: boolean;
   onAuthorize(): void;
 }): React.JSX.Element {
-  if (!status) return <EmptyState text="Checking Agent access…" />;
+  if (status === "authorized") return <></>;
   const again = status === "reauthorizationRequired";
-  return <div className="grid min-h-28 place-items-center gap-2 p-4 text-center">
-    <p className="max-w-92 text-xs text-muted-foreground">Allow access to Agent configuration folders in Home to detect installed agents and configure those you choose to connect, using revocable local proxy tokens. Workspace contents are not read.</p>
-    <Button type="button" variant="outline" size="sm" disabled={busy} onClick={onAuthorize}>
-      {busy ? "Waiting for Home folder…" : again ? "Re-enable Agent Integrations" : "Enable Agent Integrations"}
-    </Button>
-  </div>;
+  return <Alert role="status" className="mb-5 rounded-xl border-border bg-muted/35 px-3.5 py-2.5">
+    <FolderLock size={16} aria-hidden="true" />
+    <AlertDescription className="col-start-2 flex flex-wrap items-center justify-between gap-3 text-xs leading-5">
+      <span className="min-w-0 flex-1"><strong className="font-medium text-foreground">Home access required.</strong> Allow it to detect installed agents and manage the connections you choose. Workspace files are not read.</span>
+      <Button type="button" variant="outline" size="sm" className="shrink-0" disabled={!status || busy} aria-busy={busy} onClick={onAuthorize}>
+        {busy ? <><LoaderCircle size={14} className="animate-spin" aria-hidden="true" />Waiting…</> : again ? "Re-enable" : "Enable"}
+      </Button>
+    </AlertDescription>
+  </Alert>;
 }
 
 export function AgentRow({
   pendingConnection,
   agent,
   disabled,
+  detectionLabel,
   compact = false,
   onSelect,
 }: {
   pendingConnection?: boolean;
   agent: AgentStatus;
   disabled: boolean;
+  detectionLabel?: string;
   compact?: boolean;
   onSelect(connect: boolean): void;
 }): React.JSX.Element {
   const name = agent.name;
-  const presence: { label: string; tone: Tone } = pendingConnection !== undefined
+  const presence: { label: string; tone: Tone } = detectionLabel
+    ? { label: detectionLabel, tone: "neutral" }
+    : pendingConnection !== undefined
     ? { label: pendingConnection ? "Connecting…" : "Disconnecting…", tone: "neutral" }
     : !agent.installed
     ? { label: "Not installed", tone: "neutral" }
@@ -139,18 +165,18 @@ export function AgentRow({
       <ItemContent className="min-w-0">
         <ItemTitle className="row-title-line max-w-full flex items-center flex-wrap gap-y-1 gap-x-2">
           <span className="row-title">{name}</span>
-          {note && pendingConnection === undefined
+          {note && pendingConnection === undefined && !detectionLabel
             ? <AgentAttention name={name} message={note} authorized={agent.authorized} action={!disabled ? agent.repairAction : undefined} onRepair={() => onSelect(agent.repairAction === "reconnect")} />
             : <StateLabel tone={presence.tone} text={presence.label} />}
         </ItemTitle>
       </ItemContent>
       <ItemActions>
-      {agent.installed ? <SwitchControl
+      {agent.installed || detectionLabel ? <SwitchControl
         checked={disconnecting}
         aria-busy={pendingConnection !== undefined}
-        disabled={disabled || !actionable}
+        disabled={disabled || Boolean(detectionLabel) || !actionable}
         label={`${disconnecting ? "Disconnect" : "Connect"} ${name}`}
-        onToggle={() => { if (!disabled && actionable) onSelect(!disconnecting); }}
+        onToggle={() => { if (!disabled && !detectionLabel && actionable) onSelect(!disconnecting); }}
       /> : <AgentWebsite agent={agent} />}
       </ItemActions>
     </Item>{!compact && <Separator className="last:hidden" />}</>

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { QueryClient, QueryObserver } from "@tanstack/react-query";
-import { agentIntegrationsLocked, createAgentAccessAction, readAgentIntegrations } from "../src/renderer/lib/agent-integrations.ts";
+import { agentIntegrationsLocked, createAgentAccessAction, readAgentIntegrations, supportedAgentStatuses } from "../src/renderer/lib/agent-integrations.ts";
 
 function fixture(status, enabledStatus = status) {
   const calls = [];
@@ -16,7 +16,7 @@ function fixture(status, enabledStatus = status) {
 
 test("inactive integrations never scan or request a panel during refresh", async () => {
   const { api, calls } = fixture("authorizationRequired");
-  assert.deepEqual(await readAgentIntegrations(api, true), { accessStatus: "authorizationRequired", agents: [] });
+  assert.deepEqual(await readAgentIntegrations(api, true), { accessStatus: "authorizationRequired", agents: supportedAgentStatuses() });
   assert.deepEqual(calls, ["restore"]);
 });
 
@@ -28,7 +28,7 @@ test("explicit Enable continues with detection and does not connect an Agent", a
 
 test("cancel leaves integrations inactive without a scan or connection side effects", async () => {
   const { api, calls } = fixture("authorizationRequired");
-  assert.deepEqual(await readAgentIntegrations(api, true, true), { accessStatus: "authorizationRequired", agents: [] });
+  assert.deepEqual(await readAgentIntegrations(api, true, true), { accessStatus: "authorizationRequired", agents: supportedAgentStatuses() });
   assert.deepEqual(calls, ["enable"]);
 });
 
@@ -41,7 +41,7 @@ test("restorable access scans silently on every refresh", async () => {
 
 test("unrecoverable access clears detection without requesting a panel", async () => {
   const { api, calls } = fixture("reauthorizationRequired");
-  assert.deepEqual(await readAgentIntegrations(api, true), { accessStatus: "reauthorizationRequired", agents: [] });
+  assert.deepEqual(await readAgentIntegrations(api, true), { accessStatus: "reauthorizationRequired", agents: supportedAgentStatuses() });
   assert.deepEqual(calls, ["restore"]);
 });
 
@@ -50,7 +50,7 @@ test("permission loss during a scan returns to inactive without a global failure
   const { api, calls } = fixture("authorized");
   api.getAgentAccess = async () => ++checks === 1 ? "authorized" : "reauthorizationRequired";
   api.listAgents = async () => { throw new Error("Access lost"); };
-  assert.deepEqual(await readAgentIntegrations(api, true), { accessStatus: "reauthorizationRequired", agents: [] });
+  assert.deepEqual(await readAgentIntegrations(api, true), { accessStatus: "reauthorizationRequired", agents: supportedAgentStatuses() });
   assert.deepEqual(calls, []);
 });
 

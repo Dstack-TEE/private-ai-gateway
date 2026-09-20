@@ -95,6 +95,14 @@ peer UID in both directions. Endpoint paths are shortened for Unix socket limits
 Only an instance-lock owner may reclaim a stale socket, and only the socket inode
 owned by a listener is removed when it closes.
 
+The MAS service keeps its management socket in the short `pap-ipc` directory at
+the root of its own App Container. It does not fall back to `/private/tmp`, which
+is outside the sandbox's writable container boundary.
+
+The service also resolves the persisted Home bookmark before Agent work and holds
+the resulting security-scoped access for that work; a status check never grants
+only a temporary scope that is dropped before the scan.
+
 Windows uses a protected current-user DACL, rejects remote clients, protects the
 first pipe instance, and verifies both peer process token SIDs. Read/write
 operations use overlapped I/O with timeout cancellation and completion draining.

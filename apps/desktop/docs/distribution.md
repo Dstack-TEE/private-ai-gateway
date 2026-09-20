@@ -40,6 +40,9 @@ both pages are disabled while integrations are inactive or Enable is pending;
 the connection handler enforces the same gate. After activation, Overview shows
 **View all** to open the Agents page.
 
+Before activation, the Agents page still shows the supported Agent catalog with
+an **Access required** state; it does not claim that any Agent is installed.
+
 Enable opens the native directory picker directly, initially at the real Home
 from the OS user account. It accepts directories only, and both selection and
 bookmark restoration compare canonical paths with the current user's actual
@@ -51,8 +54,8 @@ token issuance, or error alert. No intermediate webview dialog is created.
 
 After selection, MAS stores a security-scoped bookmark in the app container,
 restarts its owned backend to acquire the scope, and immediately scans and shows
-installed Agents. Enable does not connect an Agent. Connect/Disconnect remain
-independent configuration operations and never open the Home picker.
+the actual installed Agents. Enable does not connect an Agent. Connect/Disconnect
+remain independent configuration operations and never open the Home picker.
 
 On subsequent launches and refreshes, a valid bookmark restores access silently;
 a stale but recoverable bookmark is refreshed and persisted while scoped access
@@ -60,7 +63,8 @@ is active. Unrecoverable access returns the module to its inactive state with
 **Re-enable Agent Integrations**, without a background panel. The backend stops
 scanning and withdraws in-memory Agent token authority. Existing owned files and
 recovery records remain for restoration after reauthorization; inaccessible Home
-is not modified. Security-scoped access is balanced through RAII.
+is not modified. The backend retains the resolved security scope for the entire
+period in which it scans or updates Agent files, and releases it through RAII.
 
 Disconnect preserves app-level Home authorization. Existing **Reset settings**
 stops protection and restores/disconnects managed Agents when access is available;
@@ -87,6 +91,9 @@ retryable. File removal alone is not the entire revocation mechanism.
 MAS bundles only the verifier and service. Both are children of the sandboxed
 application and inherit its sandbox. The credential helper remains Direct-only;
 MAS neither copies it to the container nor installs it in Home/shared paths.
+The private management socket uses the short `pap-ipc/backend.sock` path at the
+root of the App Container so the Unix socket length limit is respected; it never
+uses `/private/tmp`.
 
 ## Removed duplication and retained boundaries
 

@@ -1,5 +1,6 @@
 use std::{
-    env, fs, io,
+    env,
+    fs, io,
     io::{Read, Write},
     os::unix::{
         ffi::OsStrExt,
@@ -11,12 +12,17 @@ use std::{
     time::Duration,
 };
 
+#[cfg(any(test, all(target_os = "macos", feature = "mac-app-store")))]
+use std::ffi::OsStr;
+
 use desktop_gateway::{lock::InstanceLock, tokens};
 use socket2::{Domain, SockAddr, Socket, Type};
 
 use super::endpoint_hash;
 
 const SOCKET_FILE: &str = "backend.sock";
+#[cfg(any(test, all(target_os = "macos", feature = "mac-app-store")))]
+const MAS_RUNTIME_DIR: &str = "pap-ipc";
 
 #[derive(Debug)]
 pub struct Listener {
@@ -161,18 +167,32 @@ impl Write for Stream {
 
 pub(super) fn endpoint_path(data_dir: &Path) -> io::Result<PathBuf> {
     let hash = endpoint_hash(data_dir.as_os_str().as_bytes());
-    // The MAS sidecar inherits the app sandbox, but distribution-signed child
-    // processes cannot bind a Unix socket under the app container. Keep the
-    // management endpoint in the per-process temporary runtime directory;
-    // agent data and credentials remain in the app container.
-    let use_data_dir = env::var_os(desktop_gateway::agents::HOME_OVERRIDE_ENV).is_some()
+    if env::var_os(desktop_gateway::agents::HOME_OVERRIDE_ENV).is_some()
         || (env::var_os(desktop_gateway::agents::APP_DATA_OVERRIDE_ENV).is_some()
-            && !cfg!(all(target_os = "macos", feature = "mac-app-store")));
-    if use_data_dir {
+            && !cfg!(all(target_os = "macos", feature = "mac-app-store")))
+    {
         let endpoint = data_dir.join("runtime").join(SOCKET_FILE);
         if socket_path_fits(&endpoint) {
             return Ok(endpoint);
         }
+    }
+
+    #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+    if env::var_os(desktop_gateway::agents::APP_DATA_OVERRIDE_ENV).is_some() {
+        let base = app_container_runtime_base(data_dir).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the MAS app container runtime directory is unavailable",
+            )
+        })?;
+        let endpoint = base.join(MAS_RUNTIME_DIR).join(SOCKET_FILE);
+        if socket_path_fits(&endpoint) {
+            return Ok(endpoint);
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the MAS app container runtime path is too long for Unix IPC",
+        ));
     }
 
     #[cfg(target_os = "linux")]
@@ -207,6 +227,20 @@ pub(super) fn endpoint_path(data_dir: &Path) -> io::Result<PathBuf> {
         io::ErrorKind::PermissionDenied,
         "no safe per-user runtime location is available for local IPC",
     ))
+}
+
+#[cfg(any(test, all(target_os = "macos", feature = "mac-app-store")))]
+fn app_container_runtime_base(data_dir: &Path) -> Option<PathBuf> {
+    let application_support = data_dir.parent()?;
+    if application_support.file_name()? != OsStr::new("Application Support") {
+        return None;
+    }
+    let library = application_support.parent()?;
+    if library.file_name()? != OsStr::new("Library") {
+        return None;
+    }
+    let container_data = library.parent()?;
+    (container_data.file_name()? == OsStr::new("Data")).then(|| container_data.to_path_buf())
 }
 
 fn runtime_endpoint(base: &Path, hash: u64) -> PathBuf {
@@ -518,5 +552,24 @@ mod tests {
         let error = Stream::connect_at(endpoint).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         drop(raw_listener);
+    }
+
+    #[test]
+    fn app_container_runtime_base_shortens_mas_application_support_path() {
+        let data_dir = Path::new(
+            "/Users/test/Library/Containers/org.dstack.private-ai-proxy/Data/Library/Application Support/org.dstack.private-ai-proxy",
+        );
+        let base = app_container_runtime_base(data_dir).unwrap();
+        let endpoint = base.join(MAS_RUNTIME_DIR).join(SOCKET_FILE);
+        assert_eq!(
+            base,
+            Path::new("/Users/test/Library/Containers/org.dstack.private-ai-proxy/Data")
+        );
+        assert!(socket_path_fits(&endpoint));
+    }
+
+    #[test]
+    fn app_container_runtime_base_rejects_non_container_paths() {
+        assert!(app_container_runtime_base(Path::new("/tmp/app-data")).is_none());
     }
 }
