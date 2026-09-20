@@ -1,5 +1,7 @@
 mod commands;
 
+#[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+mod app_data;
 mod autostart;
 mod distribution;
 mod menu;
@@ -9,6 +11,7 @@ mod tray;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 mod tray_theme;
 mod updates;
+mod window_state;
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -337,10 +340,10 @@ pub fn run() {
             let show_on_launch = !autostart::launched_at_login();
             #[cfg(all(target_os = "macos", not(feature = "mac-app-store")))]
             autostart::migrate_legacy(app.handle());
-            #[cfg(feature = "mac-app-store")]
+            #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
             {
                 let data_dir = app.path().app_data_dir()?;
-                std::fs::create_dir_all(&data_dir)?;
+                app_data::prepare(&data_dir)?;
                 std::env::set_var(desktop_gateway::agents::APP_DATA_OVERRIDE_ENV, &data_dir);
             }
             #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -380,6 +383,7 @@ pub fn run() {
             let window = tauri::WebviewWindowBuilder::from_config(app, config)?
                 .initialization_script(distribution::initialization_script())
                 .build()?;
+            window_state::migrate_legacy_default(app, &window, config.width, config.height)?;
             window.set_title(desktop_gateway::brand::PRODUCT_NAME)?;
             let window_for_events = window.clone();
             let app_for_events = app.handle().clone();

@@ -78,7 +78,7 @@ impl Client {
             Err(error) if absent(&error) => {}
             Err(error) => return Err(connection_error(error)),
         }
-        let mut child = crate::launch::spawn_background()?;
+        let mut child = crate::launch::spawn_background(&data)?;
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             match open() {
@@ -96,11 +96,12 @@ impl Client {
                     return Err(connection_error(error));
                 }
             }
-            // A competing starter can win the lock but still be initializing.
-            // Wait for its handshake even when our own child has already exited.
-            let _ = child
+            if let Some(status) = child
                 .try_wait()
-                .map_err(|_| "Cannot inspect backend startup")?;
+                .map_err(|_| "Cannot inspect backend startup")?
+            {
+                return Err(format!("Backend exited during startup ({status})"));
+            }
             if Instant::now() >= deadline {
                 // Never kill an unrelated winner or retry a mutation after an ambiguous timeout.
                 let _ = child.kill();
@@ -117,7 +118,10 @@ impl Client {
             Ok(state) => {
                 client.states.send_replace(state);
             }
-            Err(error) => client.report_disconnect(error),
+            Err(error) => {
+                eprintln!("Cannot start the PAP backend: {error}");
+                client.report_disconnect(error);
+            }
         }
         let weak = Arc::downgrade(&client);
         handle.spawn_blocking(move || loop {

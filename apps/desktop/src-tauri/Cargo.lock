@@ -3731,6 +3731,7 @@ dependencies = [
  "block2",
  "futures-util",
  "if-addrs",
+ "libc",
  "objc2",
  "objc2-app-kit",
  "objc2-core-services",

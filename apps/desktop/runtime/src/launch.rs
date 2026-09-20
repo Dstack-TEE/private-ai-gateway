@@ -2,7 +2,7 @@
 
 use std::{
     io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
@@ -15,7 +15,7 @@ pub fn service_executable() -> Result<PathBuf, String> {
     sibling_executable(SERVICE_BINARY)
 }
 
-pub fn spawn_background() -> Result<Child, String> {
+pub fn spawn_background(data_dir: &Path) -> Result<Child, String> {
     let executable = service_executable()?;
     let working_directory = executable
         .parent()
@@ -23,13 +23,24 @@ pub fn spawn_background() -> Result<Child, String> {
     let mut command = Command::new(&executable);
     command
         .current_dir(working_directory)
+        .env(desktop_gateway::agents::APP_DATA_OVERRIDE_ENV, data_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(service_stderr());
     configure_background_command(&mut command);
     command
         .spawn()
         .map_err(|error| format!("Cannot start PAP service: {error}"))
+}
+
+#[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+fn service_stderr() -> Stdio {
+    Stdio::inherit()
+}
+
+#[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
+fn service_stderr() -> Stdio {
+    Stdio::null()
 }
 
 /// Wait until the operating system reports that `pid` has exited. This never

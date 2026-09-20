@@ -141,15 +141,15 @@ pub(crate) async fn request_agent_access(
         let home = desktop_runtime::agent_access::expected_home()?;
         let (send, receive) = tokio::sync::oneshot::channel();
         window
-        .dialog()
-        .file()
-        .set_parent(&window)
-        .set_title("Enable Agent Integrations: choose Home to detect and configure selected Agents with revocable local proxy tokens. Workspace contents are not read.")
-        .set_directory(&home)
-        .set_can_create_directories(false)
-        .pick_folder(move |selection| {
-            let _ = send.send(selection);
-        });
+            .dialog()
+            .file()
+            .set_parent(&window)
+            .set_title("Choose Home Folder")
+            .set_directory(&home)
+            .set_can_create_directories(false)
+            .pick_folder(move |selection| {
+                let _ = send.send(selection);
+            });
         let Some(selection) = receive
             .await
             .map_err(|_| "The Home folder picker could not complete".to_string())?
