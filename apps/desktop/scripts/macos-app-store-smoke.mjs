@@ -1,19 +1,14 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn } from "node:child_process";
-import { access, lstat, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-const [appBundle, cli] = process.argv
-  .slice(2)
-  .map((value) => value && path.resolve(value));
+const appBundle = process.argv[2] && path.resolve(process.argv[2]);
 assert.equal(process.platform, "darwin");
-assert.ok(
-  appBundle && cli,
-  "Supply the signed app bundle and unsigned CLI paths",
-);
+assert.ok(appBundle, "Supply the signed app bundle path");
 
 const exec = promisify(execFile);
 const info = JSON.parse(
@@ -29,119 +24,178 @@ const info = JSON.parse(
     { encoding: "utf8" },
   ),
 );
-const bundleIdentifier = info.CFBundleIdentifier;
-const executable = path.join(
-  appBundle,
-  "Contents/MacOS",
-  info.CFBundleExecutable,
+const executableDirectory = path.join(appBundle, "Contents/MacOS");
+const appExecutable = path.join(executableDirectory, info.CFBundleExecutable);
+const serviceExecutable = path.join(
+  executableDirectory,
+  "private-ai-proxy-service",
 );
-assert.match(bundleIdentifier, /^[A-Za-z0-9.-]+$/);
-await access(executable);
-await access(cli);
-
-const dataDirectories = [
-  path.join(
-    os.homedir(),
-    "Library/Containers",
-    bundleIdentifier,
-    "Data/Library/Application Support",
-    bundleIdentifier,
-  ),
-  path.join(os.homedir(), "Library/Application Support", bundleIdentifier),
-];
-
-async function exists(target) {
-  try {
-    await lstat(target);
-    return true;
-  } catch (error) {
-    if (error?.code === "ENOENT") return false;
-    throw error;
-  }
-}
-
-for (const directory of dataDirectories) {
-  assert.equal(
-    await exists(directory),
-    false,
-    `App Store smoke requires a clean runner: ${directory}`,
-  );
-}
+await access(appExecutable);
+await access(serviceExecutable);
 
 const delay = (milliseconds) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
-let diagnostic = "";
-const app = spawn(executable, [], { stdio: ["ignore", "pipe", "pipe"] });
-for (const stream of [app.stdout, app.stderr]) {
+
+function processRows(stdout) {
+  return stdout
+    .split("\n")
+    .map((line) => line.match(/^\s*(\d+)\s+(\d+)\s+(.+)$/))
+    .filter(Boolean)
+    .map((match) => ({
+      pid: Number(match[1]),
+      parentPid: Number(match[2]),
+      command: match[3],
+    }));
+}
+
+function runsExecutable(process, executable) {
+  return (
+    process.command === executable ||
+    process.command.startsWith(`${executable} `)
+  );
+}
+
+async function runningProcesses() {
+  const { stdout } = await exec("ps", ["-axo", "pid=,ppid=,command="], {
+    timeout: 2_000,
+    maxBuffer: 4 * 1024 * 1024,
+  });
+  return processRows(stdout);
+}
+
+async function backendIsReady(pid) {
+  try {
+    const { stdout } = await exec(
+      "/usr/sbin/lsof",
+      ["-n", "-P", "-a", "-p", String(pid), "-U", "-Fn"],
+      { timeout: 2_000, maxBuffer: 1024 * 1024 },
+    );
+    return stdout
+      .split("\n")
+      .some((line) => /\/backend\.sock(?:\s|$)/.test(line));
+  } catch {
+    return false;
+  }
+}
+
+async function stop(pid, signal = "SIGTERM") {
+  if (!pid) return;
+  try {
+    process.kill(pid, signal);
+  } catch (error) {
+    if (error?.code !== "ESRCH") throw error;
+  }
+}
+
+async function diagnostic(log, launcherOutput) {
+  const appOutput = await readFile(log, "utf8").catch(() => "");
+  return `${launcherOutput}${appOutput}`.trim().slice(-16_384);
+}
+
+const existing = await runningProcesses();
+assert.equal(
+  existing.some(
+    (process) =>
+      runsExecutable(process, appExecutable) ||
+      runsExecutable(process, serviceExecutable),
+  ),
+  false,
+  "App Store smoke requires no existing processes from this app bundle",
+);
+
+const scratch = await mkdtemp(path.join(os.tmpdir(), "pap-mas-smoke-"));
+const log = path.join(scratch, "app.log");
+let launcherOutput = "";
+let appPid;
+let servicePid;
+let ownerExitPassed = false;
+const launcher = spawn(
+  "open",
+  [
+    "-F",
+    "-W",
+    "-g",
+    "-n",
+    "--stderr",
+    log,
+    appBundle,
+  ],
+  { stdio: ["ignore", "pipe", "pipe"] },
+);
+for (const stream of [launcher.stdout, launcher.stderr]) {
   stream.on("data", (bytes) => {
-    diagnostic = (diagnostic + bytes.toString()).slice(-16_384);
+    launcherOutput = (launcherOutput + bytes.toString()).slice(-16_384);
   });
 }
 
-async function status(dataDirectory) {
-  try {
-    const { stdout } = await exec(cli, ["status", "--json"], {
-      env: { ...process.env, PRIVATE_AI_PROXY_DATA_DIR: dataDirectory },
-      timeout: 1_000,
-      maxBuffer: 1_048_576,
-    });
-    return JSON.parse(stdout);
-  } catch {
-    return undefined;
-  }
-}
-
-async function stopApp() {
-  if (app.exitCode !== null || app.signalCode !== null) return;
-  const exited = new Promise((resolve) => app.once("exit", () => resolve(true)));
-  app.kill("SIGTERM");
-  if (!(await Promise.race([exited, delay(5_000).then(() => false)]))) {
-    app.kill("SIGKILL");
-    await exited;
-  }
-}
-
-let activeDataDirectory;
 try {
   const readyDeadline = Date.now() + 30_000;
-  while (Date.now() < readyDeadline && !activeDataDirectory) {
-    assert.equal(
-      app.exitCode,
-      null,
-      `Signed App Store app exited before backend readiness. ${diagnostic}`,
+  while (Date.now() < readyDeadline && !servicePid) {
+    assert.ok(
+      launcher.exitCode === null && launcher.signalCode === null,
+      `Launch Services exited before backend readiness. ${await diagnostic(log, launcherOutput)}`,
     );
-    for (const directory of dataDirectories) {
-      if ((await status(directory))?.backend) {
-        activeDataDirectory = directory;
-        break;
-      }
+    const processes = await runningProcesses();
+    const app = processes.find((process) =>
+      runsExecutable(process, appExecutable),
+    );
+    appPid = app?.pid;
+    const service = appPid
+      ? processes.find(
+          (process) =>
+            process.parentPid === appPid &&
+            runsExecutable(process, serviceExecutable),
+        )
+      : undefined;
+    if (service && (await backendIsReady(service.pid))) {
+      servicePid = service.pid;
+      break;
     }
-    if (!activeDataDirectory) await delay(100);
+    await delay(250);
   }
   assert.ok(
-    activeDataDirectory,
-    `Signed App Store backend readiness timed out. ${diagnostic}`,
+    servicePid,
+    `Signed App Store backend readiness timed out. ${await diagnostic(log, launcherOutput)}`,
   );
-  await stopApp();
+
+  await stop(appPid);
   const exitDeadline = Date.now() + 10_000;
   while (Date.now() < exitDeadline) {
-    if (!(await status(activeDataDirectory))?.backend) {
+    const processes = await runningProcesses();
+    const appRunning = processes.some((process) => process.pid === appPid);
+    const serviceRunning = processes.some(
+      (process) => process.pid === servicePid,
+    );
+    if (!appRunning && !serviceRunning) {
       console.log(
         "Signed App Store launch, backend readiness, and owner-exit cleanup passed",
       );
-      activeDataDirectory = undefined;
+      ownerExitPassed = true;
       break;
     }
-    await delay(100);
+    await delay(250);
   }
-  assert.equal(
-    activeDataDirectory,
-    undefined,
-    "Sandboxed backend outlived its owning App Store app",
+  assert.ok(
+    ownerExitPassed,
+    "Signed App Store app or its sandboxed backend did not exit cleanly",
   );
 } finally {
-  await stopApp();
-  for (const directory of dataDirectories) {
-    await rm(directory, { recursive: true, force: true });
+  const remaining = await runningProcesses().catch(() => []);
+  for (const process of remaining) {
+    if (
+      runsExecutable(process, appExecutable) ||
+      runsExecutable(process, serviceExecutable)
+    ) {
+      await stop(process.pid, "SIGKILL");
+    }
   }
+  await new Promise((resolve) => {
+    if (launcher.exitCode !== null || launcher.signalCode !== null) {
+      resolve();
+      return;
+    }
+    launcher.once("exit", resolve);
+    launcher.kill("SIGTERM");
+  });
+  await rm(scratch, { recursive: true, force: true });
 }
