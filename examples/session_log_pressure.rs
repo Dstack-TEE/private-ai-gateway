@@ -311,7 +311,7 @@ fn fleet_event(
         provider_claims: Some(serde_json::json!({
             "trust_boundary": "model_instance",
             "chute_id": "chute-sim",
-            "gpu_verified": round % 2 == 0,
+            "gpu_verified": round.is_multiple_of(2),
             "verified_instance_ids": (0..instances).map(|i| format!("instance-{i}")).collect::<Vec<_>>(),
             "instance_tcb_statuses": (0..instances)
                 .map(|i| {
@@ -455,7 +455,7 @@ fn main() {
 
         // Material churn: at each hour boundary flip `churn_per_hour`
         // instances (round-robin), forcing a reseal of exactly those.
-        if args.churn_per_hour > 0 && round > 0 && (t - start_secs) % 3600 == 0 {
+        if args.churn_per_hour > 0 && round > 0 && (t - start_secs).is_multiple_of(3600) {
             let hour = (t - start_secs) / 3600;
             for j in 0..args.churn_per_hour {
                 let idx = ((hour as usize * args.churn_per_hour) + j) % args.instances;
