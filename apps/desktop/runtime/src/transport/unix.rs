@@ -54,15 +54,38 @@ impl Listener {
         let dir = endpoint.parent().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "IPC endpoint has no parent")
         })?;
-        ensure_private_dir(dir)?;
-        remove_stale_socket(&endpoint)?;
+        ensure_private_dir(dir).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("cannot prepare IPC runtime directory {}: {error}", dir.display()),
+            )
+        })?;
+        remove_stale_socket(&endpoint).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("cannot clean IPC endpoint {}: {error}", endpoint.display()),
+            )
+        })?;
 
-        let inner = UnixListener::bind(&endpoint)?;
+        let inner = UnixListener::bind(&endpoint).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("cannot bind IPC endpoint {}: {error}", endpoint.display()),
+            )
+        })?;
         if let Err(error) = fs::set_permissions(&endpoint, fs::Permissions::from_mode(0o600)) {
             let _ = fs::remove_file(&endpoint);
-            return Err(error);
+            return Err(io::Error::new(
+                error.kind(),
+                format!("cannot secure IPC endpoint {}: {error}", endpoint.display()),
+            ));
         }
-        let socket_identity = FileIdentity::read(&endpoint)?;
+        let socket_identity = FileIdentity::read(&endpoint).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("cannot inspect IPC endpoint {}: {error}", endpoint.display()),
+            )
+        })?;
         Ok(Self {
             inner,
             endpoint,
@@ -132,9 +155,14 @@ impl Write for Stream {
 
 pub(super) fn endpoint_path(data_dir: &Path) -> io::Result<PathBuf> {
     let hash = endpoint_hash(data_dir.as_os_str().as_bytes());
-    if env::var_os(desktop_gateway::agents::HOME_OVERRIDE_ENV).is_some()
-        || env::var_os(desktop_gateway::agents::APP_DATA_OVERRIDE_ENV).is_some()
-    {
+    // The MAS sidecar inherits the app sandbox, but distribution-signed child
+    // processes cannot bind a Unix socket under the app container. Keep the
+    // management endpoint in the per-process temporary runtime directory;
+    // agent data and credentials remain in the app container.
+    let use_data_dir = env::var_os(desktop_gateway::agents::HOME_OVERRIDE_ENV).is_some()
+        || (env::var_os(desktop_gateway::agents::APP_DATA_OVERRIDE_ENV).is_some()
+            && !cfg!(all(target_os = "macos", feature = "mac-app-store")));
+    if use_data_dir {
         let endpoint = data_dir.join("runtime").join(SOCKET_FILE);
         if socket_path_fits(&endpoint) {
             return Ok(endpoint);

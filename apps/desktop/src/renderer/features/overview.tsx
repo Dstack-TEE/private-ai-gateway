@@ -133,7 +133,7 @@ export function Overview({
             onToggleKey={onToggleClientKey}
           />
         </OverviewModule>
-        <OverviewModule title="Agents" description="Use private AI in your agents." action={agentAccessStatus !== "authorized" || authorizingAgents
+        <OverviewModule stretch={false} title="Agents" description="Use private AI in your agents." action={agentAccessStatus !== "authorized" || authorizingAgents
           ? <Button type="button" variant="outline" size="sm" className="relative min-w-20" disabled={!agentAccessStatus || authorizingAgents} aria-busy={authorizingAgents} aria-label="Enable" onClick={onAuthorizeAgents}>
               <span className={authorizingAgents ? "invisible" : undefined}>Enable</span>
               {authorizingAgents && <LoaderCircle aria-hidden="true" className="absolute animate-spin" />}
@@ -260,6 +260,7 @@ function OverviewModule({
   action,
   onAction,
   scrollable = false,
+  stretch = true,
   children,
 }: React.PropsWithChildren<{
   title: string;
@@ -269,9 +270,10 @@ function OverviewModule({
   action?: React.ReactNode;
   onAction?(): void;
   scrollable?: boolean;
+  stretch?: boolean;
 }>): React.JSX.Element {
   return (
-    <Card size="sm" className="overview-module min-h-0 min-w-0 flex h-full flex-col [&_.agent-config]:hidden">
+    <Card size="sm" className={cn("overview-module min-h-0 min-w-0 flex flex-col [&_.agent-config]:hidden", stretch ? "h-full" : "h-auto self-start")}>
       <CardHeader className="flex-none items-center">
         <CardTitle className="overview-module-title flex items-center flex-wrap gap-2"><h2 className="text-base font-medium">{title}</h2>{titleAdornment}{status}</CardTitle>
         {description && <CardDescription>{description}</CardDescription>}
