@@ -650,23 +650,33 @@ impl JsonlSessionStore {
                     )
                 })
                 .collect();
-            let cited: HashSet<String> = sessions
-                .iter()
-                .filter_map(|(_, session, _, _)| {
-                    let ev = &session.document().evidence;
-                    (ev.digest.is_some() && ev.data_uri.is_some())
-                        .then(|| ev.digest.clone().unwrap())
-                })
-                .collect();
+            // The persisted deadline of a bundle must cover every session
+            // about to be stripped to it — including legacy inline records
+            // that never entered the table. Writing the bundle under the
+            // table's (shorter) deadline and stripping a longer-lived citer
+            // would drop that citer on the next restart.
+            let mut citer_max: HashMap<String, u64> = HashMap::new();
+            for (_, session, retention_until, _) in &sessions {
+                let ev = &session.document().evidence;
+                if let (Some(digest), Some(_)) = (&ev.digest, &ev.data_uri) {
+                    citer_max
+                        .entry(digest.clone())
+                        .and_modify(|r| *r = (*r).max(*retention_until))
+                        .or_insert(*retention_until);
+                }
+            }
             // Drop uncited bundles from the index as well as the file:
             // leaving one in the index would tell a later `put_session` the
             // log already carries it, and the stripped session written then
             // would cite a digest no evidence record provides.
-            index.evidence.retain(|d, _| cited.contains(d));
+            index.evidence.retain(|d, _| citer_max.contains_key(d));
             let evidence: Vec<(String, Vec<u8>, u64)> = index
                 .evidence
                 .iter()
-                .map(|(d, e)| (d.clone(), e.bytes.clone(), e.retention_until))
+                .map(|(d, e)| {
+                    let persisted = e.retention_until.max(citer_max[d]);
+                    (d.clone(), e.bytes.clone(), persisted)
+                })
                 .collect();
             (sessions, evidence)
         };
@@ -746,6 +756,7 @@ impl JsonlSessionStore {
         let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
         for (digest, _, retention_until) in &live_evidence {
             if let Some(e) = index.evidence.get_mut(digest) {
+                e.retention_until = e.retention_until.max(*retention_until);
                 e.written_retention_until = e.written_retention_until.max(*retention_until);
             }
         }
