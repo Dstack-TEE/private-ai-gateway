@@ -57,7 +57,10 @@ impl Listener {
         ensure_private_dir(dir).map_err(|error| {
             io::Error::new(
                 error.kind(),
-                format!("cannot prepare IPC runtime directory {}: {error}", dir.display()),
+                format!(
+                    "cannot prepare IPC runtime directory {}: {error}",
+                    dir.display()
+                ),
             )
         })?;
         remove_stale_socket(&endpoint).map_err(|error| {
@@ -83,7 +86,10 @@ impl Listener {
         let socket_identity = FileIdentity::read(&endpoint).map_err(|error| {
             io::Error::new(
                 error.kind(),
-                format!("cannot inspect IPC endpoint {}: {error}", endpoint.display()),
+                format!(
+                    "cannot inspect IPC endpoint {}: {error}",
+                    endpoint.display()
+                ),
             )
         })?;
         Ok(Self {
