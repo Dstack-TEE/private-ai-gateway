@@ -8,6 +8,22 @@ import { MAC_APP_STORE_SIDECARS, validateAppStoreBuildNumber } from "./distribut
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
+export function appStoreRuntimeEntitlements() {
+  return {
+    main: {
+      "com.apple.security.app-sandbox": true,
+      "com.apple.security.network.client": true,
+      "com.apple.security.network.server": true,
+      "com.apple.security.files.user-selected.read-write": true,
+      "com.apple.security.files.bookmarks.app-scope": true,
+    },
+    child: {
+      "com.apple.security.app-sandbox": true,
+      "com.apple.security.inherit": true,
+    },
+  };
+}
+
 export function appStoreEntitlements(profile, bundleIdentifier) {
   const entitlements = profile?.Entitlements;
   const appIdentifier = entitlements?.["com.apple.application-identifier"];
@@ -35,21 +51,15 @@ export function appStoreEntitlements(profile, bundleIdentifier) {
   if (!profile.TeamIdentifier?.includes(teamIdentifier)) {
     throw new Error("Provisioning profile team identifiers do not match");
   }
+  const runtime = appStoreRuntimeEntitlements();
   return {
     main: {
-      "com.apple.security.app-sandbox": true,
-      "com.apple.security.network.client": true,
-      "com.apple.security.network.server": true,
-      "com.apple.security.files.user-selected.read-write": true,
-      "com.apple.security.files.bookmarks.app-scope": true,
+      ...runtime.main,
       "com.apple.application-identifier": appIdentifier,
       "com.apple.developer.team-identifier": teamIdentifier,
       "keychain-access-groups": [appIdentifier],
     },
-    child: {
-      "com.apple.security.app-sandbox": true,
-      "com.apple.security.inherit": true,
-    },
+    child: runtime.child,
   };
 }
 
