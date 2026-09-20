@@ -1,6 +1,5 @@
 use std::{
-    env,
-    fs, io,
+    env, fs, io,
     io::{Read, Write},
     os::unix::{
         ffi::OsStrExt,
