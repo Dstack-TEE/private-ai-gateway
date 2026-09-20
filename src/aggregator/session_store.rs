@@ -180,10 +180,6 @@ struct SessionIndex {
 }
 
 impl SessionIndex {
-    /// Add or refresh a shared evidence bundle. Retention only ever moves
-    /// forward: the bundle must outlive every session citing it.
-    /// `written_retention_until` records the deadline persisted in the log
-    /// (pass 0 from callers that only bump the in-memory deadline).
     /// Add or refresh a shared evidence bundle at a persisted deadline.
     /// Retention only ever moves forward: the bundle must outlive every
     /// session citing it. `retention_until` is the deadline just written to

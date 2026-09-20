@@ -3,11 +3,12 @@
 
 Answers, from a production log file alone:
 
-* how big the real verifier evidence bundles are (per record, decoded);
+* how big the real verifier evidence bundles are (per record, decoded) —
+  both shared `evidence` records and inline `evidence.data` in sessions;
 * how many records each channel fingerprint has accumulated (a count far
   above the number of validity windows since startup means the dedup
   fingerprint is committing to per-round material — the #142 regression);
-* append rate over time (bytes and records per hour);
+* append rate over time (bytes and records per hour, all record types);
 * the largest records.
 
 Usage: python3 scripts/session_log_stats.py /path/to/sessions.jsonl
@@ -27,41 +28,45 @@ def data_uri_bytes(uri: str) -> int:
     return len(uri)
 
 
-def main(path: str) -> None:
-    total_lines = 0
-    total_bytes = 0
-    per_fingerprint = Counter()
-    per_hour_records = Counter()
-    per_hour_bytes = Counter()
-    evidence_sizes = []
-    largest = []
-
+def analyze(path: str) -> dict:
+    """Parse the log and return raw counters (see `main` for the report)."""
+    stats = {
+        "records": 0,
+        "bytes": 0,
+        "per_fingerprint": Counter(),  # session records only
+        "per_hour_records": Counter(),  # all record types
+        "per_hour_bytes": Counter(),
+        "evidence_sizes": [],
+        "largest": [],
+    }
     with open(path, "rb") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
-            total_lines += 1
-            total_bytes += len(line)
+            stats["records"] += 1
+            stats["bytes"] += len(line)
             try:
                 rec = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            # Hourly append rate covers every record type — evidence records
+            # carry the bulk of the bytes in the externalized format, so
+            # skipping them would underreport growth exactly where it matters.
+            hour = rec.get("ts", 0) // 3600 * 3600
+            stats["per_hour_records"][hour] += 1
+            stats["per_hour_bytes"][hour] += len(line)
             if rec.get("type") == "evidence":
                 # Shared bundle, stored once per digest: raw bytes, base64.
                 try:
-                    ev_bytes = len(base64.b64decode(rec["payload_b64"]))
+                    stats["evidence_sizes"].append(len(base64.b64decode(rec["payload_b64"])))
                 except Exception:
-                    ev_bytes = 0
-                evidence_sizes.append(ev_bytes)
+                    pass
                 continue
             if rec.get("type") != "session":
                 continue
             fp = rec.get("fingerprint", "?")
-            per_fingerprint[fp] += 1
-            hour = rec.get("ts", 0) // 3600 * 3600
-            per_hour_records[hour] += 1
-            per_hour_bytes[hour] += len(line)
+            stats["per_fingerprint"][fp] += 1
             try:
                 doc = json.loads(base64.b64decode(rec["payload_b64"]))
             except Exception:
@@ -69,14 +74,21 @@ def main(path: str) -> None:
             ev = doc.get("evidence") or {}
             ev_bytes = data_uri_bytes(ev.get("data", "")) if ev.get("data") else 0
             if ev_bytes:
-                evidence_sizes.append(ev_bytes)
-            largest.append((len(line), ev_bytes, doc.get("established_at", 0), fp))
+                stats["evidence_sizes"].append(ev_bytes)
+            stats["largest"].append((len(line), ev_bytes, doc.get("established_at", 0), fp))
+    return stats
 
-    print(f"records:            {total_lines}")
+
+def main(path: str) -> None:
+    stats = analyze(path)
+    total_bytes = stats["bytes"]
+    evidence_sizes = sorted(stats["evidence_sizes"])
+    per_fingerprint = stats["per_fingerprint"]
+
+    print(f"records:            {stats['records']}")
     print(f"file bytes:         {total_bytes / 2**20:.2f} MiB")
 
     if evidence_sizes:
-        evidence_sizes.sort()
         n = len(evidence_sizes)
         print(
             "evidence bundle:    min {:.1f} KiB / median {:.1f} KiB / max {:.1f} KiB".format(
@@ -103,14 +115,14 @@ def main(path: str) -> None:
             print(f"  {fp[:24]}…  {per_fingerprint[fp]} records")
 
     print("\nappends per hour (ts buckets):")
-    for hour in sorted(per_hour_records):
+    for hour in sorted(stats["per_hour_records"]):
         print(
-            f"  {hour}: {per_hour_records[hour]:>6} records, "
-            f"{per_hour_bytes[hour] / 2**20:>8.2f} MiB"
+            f"  {hour}: {stats['per_hour_records'][hour]:>6} records, "
+            f"{stats['per_hour_bytes'][hour] / 2**20:>8.2f} MiB"
         )
 
     print("\nlargest records:")
-    for size, ev_bytes, established, fp in sorted(largest, reverse=True)[:5]:
+    for size, ev_bytes, established, fp in sorted(stats["largest"], reverse=True)[:5]:
         print(
             f"  {size / 2**20:>7.2f} MiB (evidence {ev_bytes / 1024:.0f} KiB) "
             f"established {established} fp {fp[:16]}…"
