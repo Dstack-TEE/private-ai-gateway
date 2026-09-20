@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { copyFile, mkdir, mkdtemp, readFile, readdir, open, rm, lstat, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, open, rm, lstat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -133,6 +133,12 @@ async function writePlist(file, value) {
   run("plutil", ["-convert", "xml1", file]);
 }
 
+export async function embedProvisioningProfile(profile, app) {
+  const destination = path.join(app, "Contents/embedded.provisionprofile");
+  await copyFile(profile, destination);
+  await chmod(destination, 0o644);
+}
+
 async function main() {
   if (process.platform !== "darwin") throw new Error("Mac App Store packages must be built on macOS");
   const options = argumentsFrom(process.argv.slice(2));
@@ -150,7 +156,7 @@ async function main() {
     await writePlist(mainEntitlements, entitlements.main);
     await writePlist(childEntitlements, entitlements.child);
 
-    await copyFile(options.profile, path.join(options.app, "Contents/embedded.provisionprofile"));
+    await embedProvisioningProfile(options.profile, options.app);
     const executableDirectory = path.join(options.app, "Contents/MacOS");
     const infoPlist = path.join(options.app, "Contents/Info.plist");
     const info = JSON.parse(run("plutil", ["-convert", "json", "-o", "-", infoPlist], { capture: true }));
