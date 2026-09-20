@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn } from "node:child_process";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -34,7 +34,7 @@ for (const name of MAC_APP_STORE_SIDECARS) {
   await access(path.join(sourceExecutableDirectory, name));
 }
 
-const scratch = await mkdtemp(path.join(os.tmpdir(), "pap-mas-smoke-"));
+const scratch = await realpath(await mkdtemp(path.join(os.tmpdir(), "pap-mas-smoke-")));
 const smokeBundle = path.join(scratch, bundleName);
 const executableDirectory = path.join(smokeBundle, "Contents/MacOS");
 const appExecutable = path.join(executableDirectory, info.CFBundleExecutable);
