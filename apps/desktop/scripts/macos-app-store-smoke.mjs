@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn } from "node:child_process";
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, lstat, mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -24,14 +24,24 @@ const info = JSON.parse(
     { encoding: "utf8" },
   ),
 );
-const executableDirectory = path.join(appBundle, "Contents/MacOS");
+const bundleName = path.basename(appBundle);
+assert.match(bundleName, /^[A-Za-z0-9 ._-]+\.app$/);
+const installedBundle = path.join("/Applications", bundleName);
+assert.notEqual(
+  appBundle,
+  installedBundle,
+  "Supply the build output; the smoke test owns its installed copy",
+);
+const sourceExecutableDirectory = path.join(appBundle, "Contents/MacOS");
+await access(path.join(sourceExecutableDirectory, info.CFBundleExecutable));
+await access(path.join(sourceExecutableDirectory, "private-ai-proxy-service"));
+
+const executableDirectory = path.join(installedBundle, "Contents/MacOS");
 const appExecutable = path.join(executableDirectory, info.CFBundleExecutable);
 const serviceExecutable = path.join(
   executableDirectory,
   "private-ai-proxy-service",
 );
-await access(appExecutable);
-await access(serviceExecutable);
 
 const delay = (milliseconds) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -92,6 +102,16 @@ async function diagnostic(log, launcherOutput) {
   return `${launcherOutput}${appOutput}`.trim().slice(-16_384);
 }
 
+async function exists(target) {
+  try {
+    await lstat(target);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 const existing = await runningProcesses();
 assert.equal(
   existing.some(
@@ -102,6 +122,11 @@ assert.equal(
   false,
   "App Store smoke requires no existing processes from this app bundle",
 );
+assert.equal(
+  await exists(installedBundle),
+  false,
+  `App Store smoke refuses to replace ${installedBundle}`,
+);
 
 const scratch = await mkdtemp(path.join(os.tmpdir(), "pap-mas-smoke-"));
 const log = path.join(scratch, "app.log");
@@ -109,26 +134,37 @@ let launcherOutput = "";
 let appPid;
 let servicePid;
 let ownerExitPassed = false;
-const launcher = spawn(
-  "open",
-  [
-    "-F",
-    "-W",
-    "-g",
-    "-n",
-    "--stderr",
-    log,
-    appBundle,
-  ],
-  { stdio: ["ignore", "pipe", "pipe"] },
-);
-for (const stream of [launcher.stdout, launcher.stderr]) {
-  stream.on("data", (bytes) => {
-    launcherOutput = (launcherOutput + bytes.toString()).slice(-16_384);
-  });
-}
+let launcher;
 
 try {
+  await exec("/usr/bin/ditto", [appBundle, installedBundle], {
+    timeout: 30_000,
+    maxBuffer: 1024 * 1024,
+  });
+  await exec(
+    "/usr/bin/codesign",
+    ["--verify", "--deep", "--strict", "--verbose=2", installedBundle],
+    { timeout: 30_000, maxBuffer: 1024 * 1024 },
+  );
+  launcher = spawn(
+    "open",
+    [
+      "-F",
+      "-W",
+      "-g",
+      "-n",
+      "--stderr",
+      log,
+      installedBundle,
+    ],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  for (const stream of [launcher.stdout, launcher.stderr]) {
+    stream.on("data", (bytes) => {
+      launcherOutput = (launcherOutput + bytes.toString()).slice(-16_384);
+    });
+  }
+
   const readyDeadline = Date.now() + 30_000;
   while (Date.now() < readyDeadline && !servicePid) {
     assert.ok(
@@ -189,13 +225,16 @@ try {
       await stop(process.pid, "SIGKILL");
     }
   }
-  await new Promise((resolve) => {
-    if (launcher.exitCode !== null || launcher.signalCode !== null) {
-      resolve();
-      return;
-    }
-    launcher.once("exit", resolve);
-    launcher.kill("SIGTERM");
-  });
+  if (launcher) {
+    await new Promise((resolve) => {
+      if (launcher.exitCode !== null || launcher.signalCode !== null) {
+        resolve();
+        return;
+      }
+      launcher.once("exit", resolve);
+      launcher.kill("SIGTERM");
+    });
+  }
+  await rm(installedBundle, { recursive: true, force: true });
   await rm(scratch, { recursive: true, force: true });
 }
