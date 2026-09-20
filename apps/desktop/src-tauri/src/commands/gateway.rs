@@ -8,7 +8,7 @@ pub(crate) async fn get_gateway_state(
     client: State<'_, Arc<Client>>,
 ) -> Result<GatewayState, String> {
     let client = client.inner().clone();
-    run_blocking(move || client.state()).await
+    run_blocking(move || client.state_or_cached()).await
 }
 
 #[tauri::command]

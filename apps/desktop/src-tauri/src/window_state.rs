@@ -4,7 +4,7 @@ use serde::Deserialize;
 use tauri::{Manager, WebviewWindow};
 
 const LEGACY_DEFAULT_WIDTH: u32 = 1052;
-const LEGACY_DEFAULT_HEIGHT: u32 = 840;
+const LEGACY_DEFAULT_HEIGHTS: [u32; 2] = [720, 840];
 const DISPLAY_SCALE_FACTORS: [f64; 8] = [1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0];
 
 #[derive(Deserialize)]
@@ -49,7 +49,9 @@ fn saved_size_is_legacy_default(width: u32, height: u32, maximized: bool) -> boo
     }
     DISPLAY_SCALE_FACTORS.iter().any(|scale| {
         width == (f64::from(LEGACY_DEFAULT_WIDTH) * scale).round() as u32
-            && height == (f64::from(LEGACY_DEFAULT_HEIGHT) * scale).round() as u32
+            && LEGACY_DEFAULT_HEIGHTS
+                .iter()
+                .any(|legacy_height| height == (f64::from(*legacy_height) * scale).round() as u32)
     })
 }
 
@@ -62,7 +64,7 @@ mod tests {
         assert!(saved_size_is_legacy_default(1052, 840, false));
         assert!(saved_size_is_legacy_default(2104, 1680, false));
         assert!(!saved_size_is_legacy_default(1368, 1092, false));
-        assert!(!saved_size_is_legacy_default(1052, 720, false));
+        assert!(saved_size_is_legacy_default(1052, 720, false));
         assert!(!saved_size_is_legacy_default(1052, 840, true));
     }
 }

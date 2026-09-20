@@ -64,7 +64,7 @@ impl Client {
         let deadline = Instant::now() + Duration::from_secs(15);
         let _startup = loop {
             if let Some(lock) = desktop_gateway::lock::startup(&data)
-                .map_err(|_| "Cannot acquire backend startup lock")?
+                .map_err(|error| format!("Cannot acquire backend startup lock: {error}"))?
             {
                 break lock;
             }
@@ -98,15 +98,27 @@ impl Client {
             }
             if let Some(status) = child
                 .try_wait()
-                .map_err(|_| "Cannot inspect backend startup")?
+                .map_err(|error| format!("Cannot inspect backend startup: {error}"))?
             {
-                return Err(format!("Backend exited during startup ({status})"));
+                let diagnostic = child.startup_diagnostic();
+                return Err(match diagnostic {
+                    Some(diagnostic) => {
+                        format!("Backend exited during startup ({status}): {diagnostic}")
+                    }
+                    None => format!("Backend exited during startup ({status})"),
+                });
             }
             if Instant::now() >= deadline {
                 // Never kill an unrelated winner or retry a mutation after an ambiguous timeout.
+                let diagnostic = child.diagnostic_snapshot();
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("Backend readiness timed out. Run private-ai-proxy doctor.".into());
+                return Err(match diagnostic {
+                    Some(diagnostic) => format!(
+                        "Backend readiness timed out: {diagnostic}. Run private-ai-proxy doctor."
+                    ),
+                    None => "Backend readiness timed out. Run private-ai-proxy doctor.".into(),
+                });
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -156,6 +168,9 @@ impl Client {
             .and_then(|value| value.clone());
         // Only a shutdown initiated by this client for this exact instance is expected.
         if expected.is_some() && expected == state.backend_instance {
+            return;
+        }
+        if state.backend_connected == Some(false) && state.error.is_some() {
             return;
         }
         state.status = "error".into();
@@ -221,6 +236,19 @@ impl Client {
     }
     pub fn state(&self) -> Result<GatewayState, String> {
         self.request(Command::State)
+    }
+    pub fn state_or_cached(&self) -> Result<GatewayState, String> {
+        match self.state() {
+            Ok(state) => Ok(state),
+            Err(error) => {
+                let cached = self.cached_state();
+                if cached.backend_connected == Some(false) {
+                    Ok(cached)
+                } else {
+                    Err(error)
+                }
+            }
+        }
     }
     pub fn start(&self, config: StartGatewayConfig) -> Result<GatewayState, String> {
         self.request(Command::Start(config))
@@ -649,6 +677,7 @@ mod tests {
         let client = super::Client::attach(runtime.handle().clone()).unwrap();
         assert_eq!(client.cached_state().backend_connected, Some(false));
         assert!(client.cached_state().error.is_some());
+        assert!(client.state_or_cached().unwrap().error.is_some());
         drop(client);
         runtime.shutdown_timeout(std::time::Duration::from_secs(3));
     }
