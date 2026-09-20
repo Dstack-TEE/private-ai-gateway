@@ -1023,6 +1023,99 @@ mod tests {
 
     /// The filter is a scheduling change, not a policy one: `now = 0` keeps
     /// everything, so a caller that does not care still replays the whole log.
+    /// The #145 failure mode at scale: a log dominated by lapsed records
+    /// must not load them into the index — startup memory is proportional
+    /// to the live set, not to everything appended since the last
+    /// compaction. Deterministic (index size, not wall time): the lapsed
+    /// payloads are fully valid, so only the retention check keeps them out.
+    #[test]
+    fn replay_skips_a_log_full_of_lapsed_sessions() {
+        let path = temp_path();
+        let lapsed = session("https://lapsed", 0, 1_000);
+        let live = session("https://live", 0, 9_000);
+        let lapsed_payload = BASE64.encode(lapsed.bytes());
+        {
+            let mut out = String::new();
+            for i in 0..20_000u64 {
+                out.push_str(&format!(
+                    "{{\"seq\":{i},\"ts\":0,\"type\":\"session\",\"fingerprint\":\"fp-{i}\",\"retention_until\":1000,\"payload_b64\":\"{lapsed_payload}\"}}\n"
+                ));
+            }
+            out.push_str(&format!(
+                "{{\"seq\":20000,\"ts\":0,\"type\":\"session\",\"fingerprint\":\"fp-live\",\"retention_until\":9000,\"payload_b64\":\"{}\"}}\n",
+                BASE64.encode(live.bytes())
+            ));
+            std::fs::write(&path, out).unwrap();
+        }
+
+        let reopened = JsonlSessionStore::open(&path, 5_000).unwrap();
+        let index = reopened.index.lock().unwrap();
+        assert_eq!(index.by_id.len(), 1, "only the live record is resident");
+        assert!(index.by_fingerprint.contains_key("fp-live"));
+        drop(index);
+        assert_eq!(
+            reopened
+                .get_session(live.session_id(), 5_000)
+                .map(|s| s.bytes().to_vec()),
+            Some(live.bytes().to_vec())
+        );
+        drop(reopened);
+        cleanup(&path);
+    }
+
+    /// Same bound for shared evidence records: lapsed bundles never enter
+    /// the evidence table. The lapsed lines carry valid, hash-matching
+    /// payloads, so only the retention check keeps them out.
+    #[test]
+    fn replay_skips_a_log_full_of_lapsed_evidence() {
+        let path = temp_path();
+        let bundle: Vec<u8> = (0..2_000u32).map(|i| (i % 251) as u8).collect();
+        let live = session_with_evidence("https://live", 0, 9_000, &bundle);
+        {
+            let store = open_store(&path);
+            store
+                .put_session("fp-live", live.clone(), 9_000, 0)
+                .unwrap();
+        }
+        // Append 10k valid but lapsed evidence records behind the live pair.
+        let mut out = String::new();
+        for i in 0..10_000u64 {
+            let bytes = i.to_le_bytes();
+            out.push_str(&format!(
+                "{{\"seq\":{},\"ts\":0,\"type\":\"evidence\",\"digest\":\"{}\",\"retention_until\":1000,\"payload_b64\":\"{}\"}}\n",
+                20_001 + i,
+                crate::aci::digest::sha256_hex(&bytes),
+                BASE64.encode(bytes)
+            ));
+        }
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(out.as_bytes()).unwrap();
+        drop(file);
+
+        let reopened = JsonlSessionStore::open(&path, 5_000).unwrap();
+        let index = reopened.index.lock().unwrap();
+        assert_eq!(
+            index.evidence.len(),
+            1,
+            "only the cited live bundle is resident"
+        );
+        assert_eq!(index.by_id.len(), 1);
+        drop(index);
+        assert_eq!(
+            reopened
+                .get_session(live.session_id(), 5_000)
+                .map(|s| s.bytes().to_vec()),
+            Some(live.bytes().to_vec()),
+            "the citing session rebuilds from the surviving evidence record"
+        );
+        drop(reopened);
+        cleanup(&path);
+    }
+
     #[test]
     fn replay_keeps_everything_when_nothing_has_lapsed() {
         let path = temp_path();
