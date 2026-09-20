@@ -16,7 +16,7 @@ Usage: python3 scripts/session_log_stats.py /path/to/sessions.jsonl
 import base64
 import json
 import sys
-from collections import Counter, defaultdict
+from collections import Counter
 
 
 def data_uri_bytes(uri: str) -> int:
@@ -47,6 +47,16 @@ def main(path: str) -> None:
                 rec = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if rec.get("type") == "evidence":
+                # Shared bundle, stored once per digest: raw bytes, base64.
+                try:
+                    ev_bytes = len(base64.b64decode(rec["payload_b64"]))
+                except Exception:
+                    ev_bytes = 0
+                evidence_sizes.append(ev_bytes)
+                continue
+            if rec.get("type") != "session":
+                continue
             fp = rec.get("fingerprint", "?")
             per_fingerprint[fp] += 1
             hour = rec.get("ts", 0) // 3600 * 3600
@@ -58,7 +68,8 @@ def main(path: str) -> None:
                 continue
             ev = doc.get("evidence") or {}
             ev_bytes = data_uri_bytes(ev.get("data", "")) if ev.get("data") else 0
-            evidence_sizes.append(ev_bytes)
+            if ev_bytes:
+                evidence_sizes.append(ev_bytes)
             largest.append((len(line), ev_bytes, doc.get("established_at", 0), fp))
 
     print(f"records:            {total_lines}")

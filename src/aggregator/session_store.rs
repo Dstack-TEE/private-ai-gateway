@@ -184,23 +184,21 @@ impl SessionIndex {
     /// forward: the bundle must outlive every session citing it.
     /// `written_retention_until` records the deadline persisted in the log
     /// (pass 0 from callers that only bump the in-memory deadline).
-    fn insert_evidence(
-        &mut self,
-        digest: String,
-        bytes: Vec<u8>,
-        retention_until: u64,
-        written_retention_until: u64,
-    ) {
+    /// Add or refresh a shared evidence bundle at a persisted deadline.
+    /// Retention only ever moves forward: the bundle must outlive every
+    /// session citing it. `retention_until` is the deadline just written to
+    /// the log, so both the in-memory and the persisted deadline take it.
+    fn insert_evidence(&mut self, digest: String, bytes: Vec<u8>, retention_until: u64) {
         self.evidence
             .entry(digest)
             .and_modify(|e| {
                 e.retention_until = e.retention_until.max(retention_until);
-                e.written_retention_until = e.written_retention_until.max(written_retention_until);
+                e.written_retention_until = e.written_retention_until.max(retention_until);
             })
             .or_insert(EvidenceEntry {
                 bytes,
                 retention_until,
-                written_retention_until,
+                written_retention_until: retention_until,
             });
     }
 
@@ -540,12 +538,7 @@ impl JsonlSessionStore {
                             );
                             continue;
                         }
-                        index.insert_evidence(
-                            record.digest,
-                            bytes,
-                            record.retention_until,
-                            record.retention_until,
-                        );
+                        index.insert_evidence(record.digest, bytes, record.retention_until);
                     }
                     RECORD_TYPE_SESSION => {
                         let Ok(record) = serde_json::from_slice::<SessionLogRecord>(trimmed) else {
@@ -818,12 +811,11 @@ impl SessionStore for JsonlSessionStore {
                 w.next_seq = next_seq_after(w.next_seq)?;
                 w.file.write_all(evidence_line.as_bytes())?;
                 w.file.write_all(b"\n")?;
-                index.insert_evidence(digest.clone(), evidence_bytes.clone(), persisted, persisted);
-            } else {
-                // Bump the in-memory deadline only; the log's line still
-                // covers this cite (persisted <= written_retention_until).
-                index.insert_evidence(digest.clone(), evidence_bytes.clone(), retention_until, 0);
+                index.insert_evidence(digest.clone(), evidence_bytes.clone(), persisted);
             }
+            // No else: `needs_line == false` means the persisted deadline
+            // already covers this cite (persisted <= written <= in-memory
+            // retention), so a table update would change nothing.
         }
 
         let seq = w.next_seq;
