@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { QueryClient, QueryObserver } from "@tanstack/react-query";
-import { agentIntegrationsLocked, createAgentAccessAction, readAgentIntegrations, supportedAgentStatuses } from "../src/renderer/lib/agent-integrations.ts";
+import { agentIntegrationsLocked, completeAgentStatuses, createAgentAccessAction, readAgentIntegrations, supportedAgentStatuses } from "../src/renderer/lib/agent-integrations.ts";
 
 function fixture(status, enabledStatus = status) {
   const calls = [];
@@ -141,4 +141,11 @@ test("connection gate covers missing access, revoked access, and the whole pendi
   }
   assert.equal(agentIntegrationsLocked("authorized", true), true);
   assert.equal(agentIntegrationsLocked("authorized", false), false);
+});
+
+test("partial detection still exposes every supported agent", () => {
+  const listed = completeAgentStatuses([{ ...supportedAgentStatuses()[0], installed: true }]);
+  assert.deepEqual(listed.map((agent) => agent.id), supportedAgentStatuses().map((agent) => agent.id));
+  assert.equal(listed[0].installed, true);
+  assert.equal(listed.at(-1)?.installed, false);
 });

@@ -224,6 +224,29 @@ impl Projector {
         ))
     }
 
+    /// Build a projector against an explicitly authorized Home directory.
+    /// Sandboxed macOS processes must not derive the user's real Home from
+    /// `HOME`, which resolves to the app container.
+    pub fn new_for_home(
+        home: PathBuf,
+        data_dir: PathBuf,
+        helper_exe: PathBuf,
+        endpoint: &str,
+        secrets: Arc<dyn SecretStore>,
+    ) -> Result<Self, String> {
+        if !home.is_absolute() {
+            return Err("The authorized Home directory must be absolute".to_string());
+        }
+        Ok(Self::at(
+            home,
+            data_dir,
+            helper_exe,
+            endpoint,
+            false,
+            secrets,
+        ))
+    }
+
     fn at(
         home: PathBuf,
         data_dir: PathBuf,

@@ -37,7 +37,22 @@ impl DesktopRuntime {
     }
 
     pub(super) fn projector(&self, endpoint: &str) -> Result<Projector, String> {
-        let projector = Projector::new(self.helper_path.clone(), endpoint, self.secrets.clone())?;
+        let projector = {
+            #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+            {
+                Projector::new_for_home(
+                    crate::agent_access::authorized_home()?,
+                    app_data_dir()?,
+                    self.helper_path.clone(),
+                    endpoint,
+                    self.secrets.clone(),
+                )?
+            }
+            #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
+            {
+                Projector::new(self.helper_path.clone(), endpoint, self.secrets.clone())?
+            }
+        };
         Ok(
             if cfg!(all(target_os = "macos", feature = "mac-app-store")) {
                 projector.with_home_credentials()

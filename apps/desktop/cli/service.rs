@@ -34,10 +34,6 @@ async fn run() -> Result<(), String> {
         }
     };
     #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
-    if let Some(access) = agent_home_access.as_ref() {
-        std::env::set_var(desktop_gateway::agents::HOME_OVERRIDE_ENV, access.home());
-    }
-    #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
     let agent_configuration = agent_home_access.is_some();
     #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
     let agent_configuration = true;

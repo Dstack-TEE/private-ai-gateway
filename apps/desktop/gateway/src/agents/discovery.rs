@@ -68,9 +68,10 @@ pub(super) fn cli_paths(home: &Path, tool_env: bool) -> Vec<PathBuf> {
         home.join(".volta/bin"),
         home.join("Library/pnpm"),
         home.join(".bun/bin"),
-        PathBuf::from("/opt/homebrew/bin"),
-        PathBuf::from("/usr/local/bin"),
     ]);
+    if tool_env {
+        paths.extend([PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin")]);
+    }
     if cfg!(windows) {
         let app_data = tool_env
             .then(|| env::var_os("APPDATA"))

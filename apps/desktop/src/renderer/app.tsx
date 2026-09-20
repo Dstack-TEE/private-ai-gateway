@@ -268,7 +268,11 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
   };
   const openSettings = (target: SettingsTarget) => {
     if (target === "confidential") {
-      showProfiles(false);
+      if (state.profiles.length === 0) {
+        void desktopApi.openNativeDialog("setup-profile").catch((error: unknown) => reportSurfaceError("profiles", error));
+      } else {
+        showProfiles(false);
+      }
       return;
     }
     const scope: SurfaceErrorScope = view === "settings" ? "settings" : target === "privacy" ? "protection" : target === "local-api" || target === "local-api-example" ? "local-api" : "settings";

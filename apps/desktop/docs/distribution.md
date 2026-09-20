@@ -54,7 +54,12 @@ token issuance, or error alert. No intermediate webview dialog is created.
 
 After selection, MAS stores a security-scoped bookmark in the app container,
 restarts its owned backend to acquire the scope, and immediately scans and shows
-the actual installed Agents. Enable does not connect an Agent. Connect/Disconnect
+the actual installed Agents. Detection derives each Agent's configuration path
+from that authorized Home and checks for the Agent's official executable in the
+user-owned install directories. A configuration folder alone is not treated as
+an installation. MAS cannot inspect arbitrary paths outside the selected Home,
+so a CLI installed only in a system-wide location is not reported as installed
+by the sandboxed build. Enable does not connect an Agent. Connect/Disconnect
 remain independent configuration operations and never open the Home picker.
 
 On subsequent launches and refreshes, a valid bookmark restores access silently;

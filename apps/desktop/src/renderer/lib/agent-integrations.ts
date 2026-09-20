@@ -27,6 +27,15 @@ export function supportedAgentStatuses(): AgentStatus[] {
   }));
 }
 
+/** Keep the supported catalog visible even when detection returns a partial list. */
+export function completeAgentStatuses(agents: AgentStatus[]): AgentStatus[] {
+  const detected = new Map(agents.map((agent) => [agent.id, agent]));
+  const supported = supportedAgentStatuses();
+  const listed = supported.map((agent) => detected.get(agent.id) ?? agent);
+  const additional = agents.filter((agent) => !supported.some((entry) => entry.id === agent.id));
+  return [...listed, ...additional];
+}
+
 /** Only an explicit Enable action may request access; all refreshes are silent. */
 export async function readAgentIntegrations(api: AccessApi, requiresAuthorization: boolean, enable = false): Promise<AgentIntegrations> {
   const accessStatus = requiresAuthorization
