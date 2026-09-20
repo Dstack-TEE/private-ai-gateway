@@ -74,7 +74,18 @@ item.
    records with empty evidence (it rejects only evidence whose `data` does
    not hash to `digest`), so a Chutes verifier that stops emitting the
    bundle degrades to the pre-fix state with a warning in the logs rather
-   than a hard failure.
+   than a hard failure — but the degradation is bounded: when a later round
+   supplies a complete bundle (`digest` plus decodable `data` hashing to
+   it), the channel reseals exactly once under the same fingerprint —
+   whether the superseded record was empty or carried a partial/invalid
+   bundle. The superseded record stays resolvable by id until its
+   retention lapses (receipts already citing it still resolve it, though
+   their §9.2 evidence check against that record still fails — the
+   reseal does not retro-repair them), new citations resolve to the
+   evidence-bearing record, and later rounds dedupe as before — so
+   upgrading a log written before evidence was persisted converges
+   within one round instead of after the old session's validity window
+   lapses.
 5. **Streaming upstream errors carry no receipt.** A streaming request whose
    upstream answers non-200 is returned as a buffered error without a
    receipt (inherited dstack-vllm-proxy behavior,

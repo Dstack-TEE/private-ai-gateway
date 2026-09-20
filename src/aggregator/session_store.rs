@@ -91,6 +91,13 @@ struct SessionEntry {
     session: AttestedSession,
     fingerprint: String,
     retention_until: u64,
+    /// Insertion order within this index. Several retained records can share
+    /// a fingerprint (an evidence upgrade reseals a channel under the same
+    /// fingerprint while the superseded record stays resolvable by id); the
+    /// *latest* inserted one is the channel's current session, so `compact`
+    /// writes records in this order and replay — inserting in file order —
+    /// rebuilds the same fingerprint mapping.
+    seq: u64,
 }
 
 /// In-memory session index shared by both stores: id→entry plus a
@@ -101,17 +108,23 @@ struct SessionIndex {
     by_id: HashMap<String, SessionEntry>,
     by_fingerprint: HashMap<String, String>,
     by_retention: BTreeMap<u64, HashSet<String>>,
+    /// Monotonic insertion counter behind every entry's `seq`. It never
+    /// wraps in practice; saturating keeps the order total even if it did.
+    next_seq: u64,
 }
 
 impl SessionIndex {
     fn insert(&mut self, fingerprint: String, session: AttestedSession, retention_until: u64) {
         let id = session.session_id().to_string();
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.saturating_add(1);
         if let Some(prev) = self.by_id.insert(
             id.clone(),
             SessionEntry {
                 session,
                 fingerprint: fingerprint.clone(),
                 retention_until,
+                seq,
             },
         ) {
             if prev.retention_until != retention_until {
@@ -122,6 +135,8 @@ impl SessionIndex {
             .entry(retention_until)
             .or_default()
             .insert(id.clone());
+        // Last insert wins, so with several retained records under one
+        // fingerprint the latest-sealed session is the current one.
         self.by_fingerprint.insert(fingerprint, id);
     }
 
@@ -357,6 +372,12 @@ impl JsonlSessionStore {
     /// retention deadline (which the hot path extends in the index without
     /// appending). Returns the number of records kept.
     ///
+    /// Records are written in index insertion order, so when several retained
+    /// records share a fingerprint (an evidence upgrade reseals a channel while
+    /// the superseded record stays resolvable by id), replay's last-insert-wins
+    /// mapping resolves the fingerprint to the same — latest — session as the
+    /// live index did.
+    ///
     /// Records are written and synced to a temp file before an atomic rename.
     /// The replacement append handle is opened before the rename, so a
     /// successful swap never leaves the writer pointing at the old, unlinked
@@ -367,20 +388,28 @@ impl JsonlSessionStore {
         // can never deadlock against each other.
         let mut w = self.writer.lock().unwrap_or_else(|p| p.into_inner());
 
-        let live: Vec<(String, AttestedSession, u64)> = {
+        let mut live: Vec<(String, AttestedSession, u64, u64)> = {
             let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
             index.evict_lapsed(now);
             index
                 .by_id
                 .values()
-                .map(|e| (e.fingerprint.clone(), e.session.clone(), e.retention_until))
+                .map(|e| {
+                    (
+                        e.fingerprint.clone(),
+                        e.session.clone(),
+                        e.retention_until,
+                        e.seq,
+                    )
+                })
                 .collect()
         };
+        live.sort_by_key(|(_, _, _, seq)| *seq);
 
         let tmp = self.path.with_extension("jsonl.tmp");
         {
             let mut out = File::create(&tmp)?;
-            for (seq, (fingerprint, session, retention_until)) in live.iter().enumerate() {
+            for (seq, (fingerprint, session, retention_until, _)) in live.iter().enumerate() {
                 let mut line = serde_json::to_string(&SessionLogRecord {
                     seq: seq as u64,
                     ts: now,
@@ -779,6 +808,119 @@ mod tests {
 
         let reopened = open_store(&path);
         assert_eq!(reopened.get_session(live.session_id(), now), Some(live));
+        drop(reopened);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn compact_preserves_insertion_order_for_a_shared_fingerprint() {
+        // An evidence upgrade reseals a channel under the SAME fingerprint
+        // while the superseded record stays resolvable by id, so two live
+        // records can share a fingerprint. Compaction must keep resolving the
+        // fingerprint to the latest-sealed session after a restart, not to
+        // whichever record `HashMap` iteration happened to write last.
+        //
+        // The re-put below makes the failure deterministic: it refreshes
+        // whichever record the index's `by_id` iteration yields FIRST, so
+        // that record is simultaneously the latest insertion (the current
+        // one) and first in iteration order (a same-key re-insert does not
+        // move a `HashMap` entry). Without insertion-order sorting,
+        // compaction writes it first and replay's last-insert-wins hands the
+        // fingerprint to the other record — every run, not just when the
+        // iteration order happens to be unlucky.
+        let path = temp_path();
+        let first = session("https://x", 1_000, 9_000);
+        let second = session("https://x", 2_000, 9_000);
+        let store = open_store(&path);
+        store
+            .put_session("fp-shared", first.clone(), 9_000, 1_000)
+            .unwrap();
+        store
+            .put_session("fp-shared", second.clone(), 9_000, 2_000)
+            .unwrap();
+        let iteration_first = {
+            let index = store.index.lock().unwrap();
+            index
+                .by_id
+                .values()
+                .next()
+                .expect("two entries are resident")
+                .session
+                .clone()
+        };
+        // Re-put that record: same id, same fingerprint, but now the latest
+        // insertion — and still first in `by_id` iteration order.
+        store
+            .put_session("fp-shared", iteration_first.clone(), 9_000, 3_000)
+            .unwrap();
+        assert_eq!(
+            store
+                .current_session("fp-shared", 9_000, 3_000)
+                .map(|s| s.session_id().to_string()),
+            Some(iteration_first.session_id().to_string()),
+            "the latest insertion is the fingerprint's current session"
+        );
+        assert_eq!(store.compact(3_000).unwrap(), 2);
+        drop(store); // release the advisory lock before reopening
+
+        let reopened = open_store(&path);
+        assert_eq!(
+            reopened
+                .current_session("fp-shared", 9_000, 3_000)
+                .map(|s| s.session_id().to_string()),
+            Some(iteration_first.session_id().to_string()),
+            "replay must resolve the shared fingerprint to the latest-sealed record"
+        );
+        // Both records stay resolvable by id for retention.
+        assert!(reopened.get_session(first.session_id(), 3_000).is_some());
+        assert!(reopened.get_session(second.session_id(), 3_000).is_some());
+
+        drop(reopened);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn compact_append_compact_replay_keeps_the_latest_session_current() {
+        // Compaction renumbers the log, but the index's insertion order must
+        // survive compact → append → compact → replay: a record sealed AFTER a
+        // compaction (whose file seq was renumbered from zero) still wins the
+        // fingerprint against records that predate it, and the log sequence
+        // continues from the compacted file.
+        let path = temp_path();
+        let superseded = session("https://x", 1_000, 9_000);
+        let resealed = session("https://x", 2_000, 9_000);
+        {
+            let store = open_store(&path);
+            store
+                .put_session("fp", superseded.clone(), 9_000, 1_000)
+                .unwrap();
+            assert_eq!(store.compact(1_500).unwrap(), 1);
+            // The reseal lands after the log was renumbered.
+            assert_eq!(
+                store
+                    .put_session("fp", resealed.clone(), 9_000, 2_000)
+                    .unwrap(),
+                1,
+                "the log sequence continues from the compacted file"
+            );
+            assert_eq!(store.compact(2_500).unwrap(), 2);
+        }
+
+        let reopened = open_store(&path);
+        assert_eq!(
+            reopened
+                .current_session("fp", 9_000, 2_500)
+                .map(|s| s.session_id().to_string()),
+            Some(resealed.session_id().to_string()),
+            "the post-compaction reseal stays current after another compaction \
+             and replay"
+        );
+        assert!(reopened
+            .get_session(superseded.session_id(), 2_500)
+            .is_some());
+        let third = session("https://y", 3_000, 9_000);
+        assert_eq!(reopened.put_session("fp2", third, 9_000, 3_000).unwrap(), 2);
+
         drop(reopened);
         cleanup(&path);
     }
