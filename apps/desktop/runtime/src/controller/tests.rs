@@ -106,9 +106,16 @@ fn test_runtime(
         helper_path: directory.join("helper"),
         agent_configuration: true,
         agent_access_status: || crate::agent_access::AgentAccessStatus::Authorized,
+        agent_home: Some(test_authorized_home),
         recovery: crate::recovery::Recovery::default(),
         instance: None,
     })
+}
+
+fn test_authorized_home() -> Result<std::path::PathBuf, String> {
+    std::env::var_os(desktop_gateway::agents::HOME_OVERRIDE_ENV)
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| "Test Home is unavailable".to_string())
 }
 
 #[test]
