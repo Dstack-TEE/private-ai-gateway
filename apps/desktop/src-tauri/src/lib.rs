@@ -110,8 +110,6 @@ fn refresh_preferences(app: &AppHandle, client: &Arc<Client>) {
     });
 }
 
-const AUTOSTART_ARG: &str = "--autostart";
-
 fn apply_appearance(app: &AppHandle, appearance: Appearance) {
     app.set_theme(match appearance {
         Appearance::System => None,
@@ -337,6 +335,8 @@ pub fn run() {
         ])
         .setup(move |app| {
             let show_on_launch = !autostart::launched_at_login();
+            #[cfg(all(target_os = "macos", not(feature = "mac-app-store")))]
+            autostart::migrate_legacy(app.handle());
             #[cfg(feature = "mac-app-store")]
             {
                 let data_dir = app.path().app_data_dir()?;

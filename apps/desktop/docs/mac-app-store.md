@@ -36,19 +36,22 @@ production packaging, retaining `universal-apple-darwin`. It does not use
 `macos-latest` or Xcode 27 preview. The runner's GA default is Xcode 26.6 as of
 2026-09-19; record the actual Xcode version in the build log.
 
-Configure the protected `mac-app-store` environment with real values:
+Configure the protected `mac-app-store` environment using the step-scoped
+`Validate App Store signing settings` and `Validate App Store Connect upload
+settings` mappings in the [workflow](../../../.github/workflows/desktop-mac-app-store.yml).
+Those mappings are the required-setting contract: application and installer
+certificate/password pairs, the application provisioning profile, signing
+identities, and (only with upload enabled) the three ASC API credentials. No
+separate installer provisioning profile is used by productbuild.
 
-- Secrets `MAC_APP_STORE_APPLICATION_CERTIFICATE`,
-  `MAC_APP_STORE_APPLICATION_CERTIFICATE_PASSWORD`,
-  `MAC_APP_STORE_INSTALLER_CERTIFICATE`,
-  `MAC_APP_STORE_INSTALLER_CERTIFICATE_PASSWORD`, and
-  `MAC_APP_STORE_PROVISIONING_PROFILE` (certificate/profile payloads are base64).
-- Variables `MAC_APP_STORE_APPLICATION_IDENTITY` and
-  `MAC_APP_STORE_INSTALLER_IDENTITY` matching those certificates.
-- For upload: `APPLE_API_KEY`, `APPLE_API_PRIVATE_KEY`, `APPLE_API_ISSUER`.
-- An ASC app record and explicit App ID for `org.dstack.private-ai-proxy`, the
-  correct team, contracts, tax/banking status where applicable, and a valid
-  **Mac App Store Connect distribution** provisioning profile.
+Both preflights run before checkout, dependency installation and compilation.
+They reject missing/blank values and malformed base64 or ASC identifier/key
+formats without printing values. Actual certificate/profile validity is checked
+by import and packaging. Certificate secrets are scoped to preflight/import;
+upload secrets are scoped to preflight/upload preparation and delivery. Cleanup
+runs with `always()`, including failed preflight runs. Keep the ASC app record,
+explicit App ID `org.dstack.private-ai-proxy`, team, agreements and applicable
+tax/banking details ready; preflight does not verify external account state.
 
 Use a stable marketing version and an increasing CFBundleVersion (1–9999,
 optionally two further components 0–99). ASC must confirm uniqueness/ordering;
@@ -113,7 +116,8 @@ References: [SDK requirements](https://developer.apple.com/support/third-party-S
   arm64/x86_64 slices. Test both architectures; Linux checks cannot prove this.
 - Confirm macOS 13+ login registration requires a user toggle, approval-required
   status opens System Settings, disabling unregisters, and login opens quietly.
-  Check an upgrade from the old Direct LaunchAgent implementation for duplicates.
+  Check a Direct upgrade preserves an existing LaunchAgent choice, migrates once,
+  stays quiet on failure/pending approval, and clears both registrations on Disable.
 - Follow the linked activation flow from both Overview and Agents: their Enable
   buttons share the same action and query. Before Enable, no picker or Home scan
   occurs and Agent connection toggles are disabled. Cancellation stays inactive;
@@ -159,7 +163,9 @@ and script changes. Use `npm run test:agents` for a focused rerun.
 Agent contract tests cover both credential modes, missing helper, quoted Home
 paths, restoration, revocation and rotation. Package tests validate manifest/profile
 and updater/executable policy, including real plist Date/Data decoding; they do
-not validate signatures.
+not validate signatures. Workflow contract tests execute the actual preflight
+scripts with synthetic settings, including missing/invalid signing and upload
+credentials. macOS CI checks Direct migration code as well as the MAS feature.
 Agent Integrations tests exercise inactive refresh, explicit Enable, cancellation,
 silent restoration, access loss, shared query publication, request serialization,
 connection gates and non-MAS behavior. Runtime access tests check that inactive

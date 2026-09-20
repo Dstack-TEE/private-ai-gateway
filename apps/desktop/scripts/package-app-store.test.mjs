@@ -4,6 +4,8 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
+import { load } from "js-yaml";
 import { appStoreEntitlements, readProvisioningProfile, validateAppStoreManifest } from "./package-app-store.mjs";
 import { MAC_APP_STORE_SIDECARS } from "./distribution.mjs";
 
@@ -96,4 +98,48 @@ test("MAS config disables updater packaging and external credential helpers", as
   assert.deepEqual(config.bundle.targets, ["app"]);
   assert.deepEqual(config.build.features, ["mac-app-store"]);
   assert(!MAC_APP_STORE_SIDECARS.includes("private-ai-proxy-helper"));
+});
+
+test("workflow rejects incomplete signing/upload settings before checkout without leaking values", { skip: process.platform === "win32" }, async () => {
+  const workflow = load(await readFile(path.join(appRoot, "../../.github/workflows/desktop-mac-app-store.yml"), "utf8"));
+  const steps = workflow.jobs.package.steps;
+  const [signing, upload, checkout] = steps;
+  assert.match(checkout.uses, /^actions\/checkout@/);
+  assert.equal(upload.if, "inputs.upload");
+  const imported = steps.find((step) => step.name === "Import App Store signing material");
+  assert.deepEqual(imported.env, signing.env);
+  const consumedSettings = new Set([...imported.run.matchAll(/(?:process\.env\.|\$)(MAC_APP_STORE_[A-Z_]+)/g)].map((match) => match[1]));
+  assert.deepEqual(Object.keys(signing.env).sort(), [...consumedSettings].sort());
+  assert.equal(steps.at(-1).if, "always()");
+  const settings = Object.fromEntries(Object.keys(signing.env).map((name) => [name, name.endsWith("_PASSWORD") ? "fixture-password" : "AQID"]));
+  Object.assign(settings, {
+    APPLE_APPLICATION_IDENTITY: "Apple Distribution: Fixture",
+    APPLE_INSTALLER_IDENTITY: "3rd Party Mac Developer Installer: Fixture",
+  });
+  const run = (step, env) => spawnSync("bash", ["-e", "-c", step.run], {
+    // Only synthetic settings enter these processes; never inherit developer credentials.
+    env: { PATH: process.env.PATH, ...env }, encoding: "utf8",
+  });
+  assert.equal(run(signing, settings).status, 0); // upload=false needs no ASC credentials.
+  const asc = {
+    APPLE_API_KEY: "ABCDEFGHIJ",
+    APPLE_API_ISSUER: "12345678-1234-1234-1234-123456789abc",
+    APPLE_API_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\nAQID\n-----END PRIVATE KEY-----\n",
+  };
+  assert.deepEqual(Object.keys(upload.env).sort(), Object.keys(asc).sort());
+  assert.equal(run(upload, asc).status, 0);
+  for (const [step, complete] of [[signing, settings], [upload, asc]]) {
+    for (const name of Object.keys(complete)) {
+      const failed = run(step, { ...complete, [name]: "  " });
+      assert.notEqual(failed.status, 0, name);
+      assert.match(failed.stderr, new RegExp(name));
+      for (const secret of Object.values(complete)) assert(!`${failed.stdout}${failed.stderr}`.includes(secret));
+    }
+  }
+  assert.notEqual(run(signing, { ...settings, MAC_APP_STORE_PROVISIONING_PROFILE: "not base64!" }).status, 0);
+  for (const name of Object.keys(asc)) assert.notEqual(run(upload, { ...asc, [name]: "invalid" }).status, 0);
+  // Certificate payloads/passwords and the upload private key are scoped to their consumers.
+  for (const step of steps.filter((step) => step.name?.includes("Build") || step.uses?.startsWith("actions/checkout"))) {
+    assert(!JSON.stringify(step.env ?? {}).includes("secrets."));
+  }
 });

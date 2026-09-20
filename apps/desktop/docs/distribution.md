@@ -90,11 +90,23 @@ MAS neither copies it to the container nor installs it in Home/shared paths.
 
 ## Removed duplication and retained boundaries
 
-The macOS Direct LaunchAgent plugin and dependency are removed. Startup only
-reads login-item status; registration occurs through the user's toggle. Existing
-legacy LaunchAgents are not silently migrated or enabled: upgrade testing must
-check for old registrations and instruct affected users to disable them before
-re-enabling Open at Login.
+The macOS Direct LaunchAgent plugin is removed. A one-time Direct-only upgrade
+bridge reuses its pinned `auto-launch` 0.5.0 public query/disable implementation.
+The verified tauri-plugin-autostart 2.5.1 contract uses `app.package_info().name`
+for both label and `~/Library/LaunchAgents/{name}.plist`, with the canonical
+executable followed by `--autostart` in ProgramArguments. No path is guessed.
+
+An existing registration preserves the user's prior Enable choice: startup
+registers SMAppService silently and removes the legacy entry only after the new
+service reports Enabled. Failure or pending approval retains the old entry and
+retries on the next launch without opening Settings or a global error. The UI
+continues to reflect the retained registration. Explicit Disable attempts both
+native unregister and legacy removal, reporting failure rather than a false
+success. Legacy `--autostart` launches remain quiet during this transition.
+Successful removal makes later launches a no-op; the bridge and argument support
+can be removed when upgrades from plugin-based releases are no longer supported.
+MAS and non-macOS production builds exclude the bridge entirely. New login-item
+registration otherwise occurs only through the user's toggle.
 
 Updater initialization and native commands check the same policy as the renderer;
 MAS has no background feed checks. The MAS overlay also removes updater config
