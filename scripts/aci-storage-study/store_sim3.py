@@ -132,7 +132,13 @@ def run(files, label):
         cost = len(enc(skel, "jcs").encode()) + st.new_bytes - before
         l0 += len(raw); cas_total += cost
         if i > 0: marg.append(cost)
-        if enc(st.rebuild(skel), "jcs").encode() == raw: ok += 1
+        # Hard invariant: a roundtrip mismatch fails the run. Silently
+        # counting a lower match rate would let corrupted rebuilds
+        # contribute "savings" to the report.
+        assert (
+            enc(st.rebuild(skel), "jcs").encode() == raw
+        ), f"{label}: rebuilt bytes diverge from the input document"
+        ok += 1
     n = len(docs)
     m = sum(marg)/len(marg) if marg else cas_total/n
     print(f"--- {label}: {n} sessions")
