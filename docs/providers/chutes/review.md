@@ -157,7 +157,9 @@ Tracking criteria 13–14 of [audit-criteria.md](../audit-criteria.md):
 - **Platform/OS provenance** (guest OS, kernel + cmdline, firmware/TEE module →
   reviewed reproducible build): **TODO** — `MR_TD`/RTMRs are not pinned to a reviewed
   reproducible OS/firmware build.
-- **TCB status / freshness**: done — the bridge requires `UpToDate`.
+- **TCB status / freshness**: done — recorded, not gated. The bridge surfaces the
+  per-instance and fleet `tcb_status`, and the session layer refutes `tcb_up_to_date`
+  for any non-`UpToDate` status instead of failing the instance.
 
 ## Open Questions
 

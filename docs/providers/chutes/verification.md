@@ -20,8 +20,8 @@ For each E2EE instance Chutes returns, `chutes_verify_instance` does, in order:
    `report_data[0:32] == expected`. This is the anti-tamper binding.
 3. **Reject debug mode.** `chutes_debug_enabled` checks the TD attributes debug bit.
 4. **Verify the quote.** `dcap_qvl.get_collateral_and_verify(quote)` performs real Intel
-   DCAP verification (fetches collateral, checks the signature chain). The status must
-   be `UpToDate`.
+   DCAP verification (fetches collateral, checks the signature chain). The TCB status is
+   **recorded, not gated** (see below).
 5. **Match the measurement profile.** The quote measurements must match a reviewed
    public profile (`chutes_measurement_name` against the provider reference).
 6. **Verify the GPU.** `chutes_verify_gpu` POSTs the GPU evidence to NVIDIA NRAS over
@@ -43,7 +43,16 @@ to the attested enclave. The emitted binding is
 - Wrong nonce → `report_data[0:32] != SHA256(nonce ‖ e2e_pubkey)` →
   `Chutes E2EE key binding does not match report_data`.
 - Wrong/forged E2EE key → same binding mismatch.
-- `OutOfDate`/`SWHardeningNeeded` TCB → rejected (only `UpToDate` accepted).
+
+## What a stale TCB does
+
+TCB freshness is **recorded, not gated**: a quote signature/collateral chain that
+verifies with a non-`UpToDate` TCB (e.g. `OutOfDate`, `SWHardeningNeeded`) does not
+fail the instance. The status is surfaced per instance (`instance_tcb_statuses`) and
+as a fleet-level `tcb_status` in `provider_claims`, so the session layer refutes the
+tri-state `tcb_up_to_date` claim for the session instead of the verifier rejecting the
+instance. Hard gates remain: quote signature + collateral chain, `report_data` binding,
+debug-mode bit, and measurement-profile match.
 
 ## Transport enforcement
 
