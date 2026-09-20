@@ -591,13 +591,21 @@ impl JsonlSessionStore {
         Ok(None)
     }
 
-    /// Read a chunk payload by digest.
+    /// Read a chunk payload by digest, verifying the content-addressing
+    /// invariant: the file's bytes must hash to its own name. This one check
+    /// makes tampered or misplaced chunks unreadable, and makes reference
+    /// cycles (a chunk whose payload references itself) cryptographically
+    /// unreachable — sha256 has no feasible fixed point — so rebuild's depth
+    /// bound only ever fires on corrupted input.
     fn read_chunk(&self, digest: &str) -> Option<Vec<u8>> {
-        // A digest is 64 lowercase hex; refuse anything else as a path.
-        if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if !super::session_cas::is_bare_hex64(digest) {
             return None;
         }
-        std::fs::read(self.chunks_dir.join(digest)).ok()
+        let payload = std::fs::read(self.chunks_dir.join(digest)).ok()?;
+        if crate::aci::digest::sha256_bare_hex(&payload) != digest {
+            return None;
+        }
+        Some(payload)
     }
 
     /// Rebuild a session from its doc file + chunks, verifying every link of
@@ -828,6 +836,11 @@ fn atomic_publish(path: &Path, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// fsync a directory so entries published inside it survive a power loss.
+fn sync_dir(path: &Path) -> io::Result<()> {
+    File::open(path)?.sync_all()
+}
+
 /// True when `name` looks like a crashed publish's temp file (`*.tmp<pid>`).
 fn is_temp_file(name: &str) -> bool {
     name.rsplit_once('.').is_some_and(|(_, ext)| {
@@ -888,6 +901,12 @@ impl SessionStore for JsonlSessionStore {
             atomic_publish(&doc_path, &doc_bytes)?;
             packed_whole
         };
+        // fsync the containing directories so the publishes survive a power
+        // loss, not just a process crash: without this, a host reboot could
+        // lose the new directory entries while the log record appended below
+        // survives — and the record would then reference missing content.
+        sync_dir(&self.chunks_dir)?;
+        sync_dir(&self.docs_dir)?;
 
         let mut line = serde_json::to_string(&SessionLogRecordV2 {
             seq,
@@ -1523,6 +1542,54 @@ mod tests {
             super::super::session_cas::Packed::Cas { .. } => panic!("must be Whole"),
         }
         cleanup(&path);
+    }
+
+    /// F7 regression: a tampered store planting a self-referencing chunk graph
+    /// (chunk "aaaa…" whose payload is {"$r":"s:aaaa…"}, with the live doc
+    /// skeleton pointed at it) must fail closed — `None`, no panic, no stack
+    /// overflow. The content-hash check in `read_chunk` rejects the chunk
+    /// (its bytes do not hash to their own name), which is also what makes
+    /// cycles cryptographically unreachable.
+    #[test]
+    fn cyclic_chunk_graph_fails_closed_without_overflow() {
+        let path = temp_path();
+        let session = fixture_session("phala-direct-a.json");
+        let id = session.session_id().to_string();
+        {
+            let store = open_store(&path);
+            store.put_session("fp", session, 9_000, 1_000).unwrap();
+        }
+        let digest = "a".repeat(64);
+        let marker = format!("{{\"$r\":\"s:{digest}\"}}");
+        std::fs::write(chunks_dir_for(&path).join(&digest), marker.as_bytes()).unwrap();
+        std::fs::write(docs_dir_for(&path).join(&id), marker.as_bytes()).unwrap();
+
+        let store = open_store(&path);
+        assert_eq!(store.get_session(&id, 2_000), None);
+        drop(store);
+        cleanup(&path);
+        let _ = std::fs::remove_dir_all(docs_dir_for(&path));
+        let _ = std::fs::remove_dir_all(chunks_dir_for(&path));
+    }
+
+    /// A malformed marker skeleton ({"$r":""}) on disk is corruption, not a
+    /// panic: materialize returns None.
+    #[test]
+    fn malformed_marker_skeleton_is_none_not_panic() {
+        let path = temp_path();
+        let session = fixture_session("tinfoil.json");
+        let id = session.session_id().to_string();
+        {
+            let store = open_store(&path);
+            store.put_session("fp", session, 9_000, 1_000).unwrap();
+        }
+        std::fs::write(docs_dir_for(&path).join(&id), r#"{"$r":""}"#).unwrap();
+        let store = open_store(&path);
+        assert_eq!(store.get_session(&id, 2_000), None);
+        drop(store);
+        cleanup(&path);
+        let _ = std::fs::remove_dir_all(docs_dir_for(&path));
+        let _ = std::fs::remove_dir_all(chunks_dir_for(&path));
     }
 
     /// A legacy (pre-CAS, full-bytes) record replays into a served session:
