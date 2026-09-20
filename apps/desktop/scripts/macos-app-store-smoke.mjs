@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn } from "node:child_process";
-import { access, lstat, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { MAC_APP_STORE_SIDECARS } from "./distribution.mjs";
+import { appStoreRuntimeEntitlements } from "./package-app-store.mjs";
 
 const appBundle = process.argv[2] && path.resolve(process.argv[2]);
 assert.equal(process.platform, "darwin");
-assert.ok(appBundle, "Supply the signed app bundle path");
+assert.ok(appBundle, "Supply the unsigned App Store app bundle path");
 
 const exec = promisify(execFile);
 const info = JSON.parse(
@@ -26,17 +28,15 @@ const info = JSON.parse(
 );
 const bundleName = path.basename(appBundle);
 assert.match(bundleName, /^[A-Za-z0-9 ._-]+\.app$/);
-const installedBundle = path.join("/Applications", bundleName);
-assert.notEqual(
-  appBundle,
-  installedBundle,
-  "Supply the build output; the smoke test owns its installed copy",
-);
 const sourceExecutableDirectory = path.join(appBundle, "Contents/MacOS");
 await access(path.join(sourceExecutableDirectory, info.CFBundleExecutable));
-await access(path.join(sourceExecutableDirectory, "private-ai-proxy-service"));
+for (const name of MAC_APP_STORE_SIDECARS) {
+  await access(path.join(sourceExecutableDirectory, name));
+}
 
-const executableDirectory = path.join(installedBundle, "Contents/MacOS");
+const scratch = await mkdtemp(path.join(os.tmpdir(), "pap-mas-smoke-"));
+const smokeBundle = path.join(scratch, bundleName);
+const executableDirectory = path.join(smokeBundle, "Contents/MacOS");
 const appExecutable = path.join(executableDirectory, info.CFBundleExecutable);
 const serviceExecutable = path.join(
   executableDirectory,
@@ -102,33 +102,11 @@ async function diagnostic(log, launcherOutput) {
   return `${launcherOutput}${appOutput}`.trim().slice(-16_384);
 }
 
-async function exists(target) {
-  try {
-    await lstat(target);
-    return true;
-  } catch (error) {
-    if (error?.code === "ENOENT") return false;
-    throw error;
-  }
+async function writePlist(file, value) {
+  await writeFile(file, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  await exec("plutil", ["-convert", "xml1", file], { timeout: 2_000 });
 }
 
-const existing = await runningProcesses();
-assert.equal(
-  existing.some(
-    (process) =>
-      runsExecutable(process, appExecutable) ||
-      runsExecutable(process, serviceExecutable),
-  ),
-  false,
-  "App Store smoke requires no existing processes from this app bundle",
-);
-assert.equal(
-  await exists(installedBundle),
-  false,
-  `App Store smoke refuses to replace ${installedBundle}`,
-);
-
-const scratch = await mkdtemp(path.join(os.tmpdir(), "pap-mas-smoke-"));
 const log = path.join(scratch, "app.log");
 let launcherOutput = "";
 let appPid;
@@ -137,14 +115,43 @@ let ownerExitPassed = false;
 let launcher;
 
 try {
-  await exec("/usr/bin/ditto", [appBundle, installedBundle], {
+  await exec("/usr/bin/ditto", [appBundle, smokeBundle], {
     timeout: 30_000,
     maxBuffer: 1024 * 1024,
   });
+  // Distribution-signed MAS apps cannot launch before App Store processing.
+  // Exercise the same binaries with only the unrestricted sandbox entitlements.
+  const entitlements = appStoreRuntimeEntitlements();
+  const mainEntitlements = path.join(scratch, "main.entitlements");
+  const childEntitlements = path.join(scratch, "child.entitlements");
+  await writePlist(mainEntitlements, entitlements.main);
+  await writePlist(childEntitlements, entitlements.child);
+  for (const name of MAC_APP_STORE_SIDECARS) {
+    await exec(
+      "/usr/bin/codesign",
+      ["--force", "--sign", "-", "--entitlements", childEntitlements, path.join(executableDirectory, name)],
+      { timeout: 30_000, maxBuffer: 1024 * 1024 },
+    );
+  }
   await exec(
     "/usr/bin/codesign",
-    ["--verify", "--deep", "--strict", "--verbose=2", installedBundle],
+    ["--force", "--sign", "-", "--entitlements", mainEntitlements, smokeBundle],
     { timeout: 30_000, maxBuffer: 1024 * 1024 },
+  );
+  await exec(
+    "/usr/bin/codesign",
+    ["--verify", "--deep", "--strict", "--verbose=2", smokeBundle],
+    { timeout: 30_000, maxBuffer: 1024 * 1024 },
+  );
+  const existing = await runningProcesses();
+  assert.equal(
+    existing.some(
+      (process) =>
+        runsExecutable(process, appExecutable) ||
+        runsExecutable(process, serviceExecutable),
+    ),
+    false,
+    "App Store smoke requires no existing processes from its temporary app bundle",
   );
   launcher = spawn(
     "open",
@@ -155,7 +162,7 @@ try {
       "-n",
       "--stderr",
       log,
-      installedBundle,
+      smokeBundle,
     ],
     { stdio: ["ignore", "pipe", "pipe"] },
   );
@@ -191,7 +198,7 @@ try {
   }
   assert.ok(
     servicePid,
-    `Signed App Store backend readiness timed out. ${await diagnostic(log, launcherOutput)}`,
+    `App Store runtime backend readiness timed out. ${await diagnostic(log, launcherOutput)}`,
   );
 
   await stop(appPid);
@@ -204,7 +211,7 @@ try {
     );
     if (!appRunning && !serviceRunning) {
       console.log(
-        "Signed App Store launch, backend readiness, and owner-exit cleanup passed",
+        "App Store runtime launch, backend readiness, and owner-exit cleanup passed",
       );
       ownerExitPassed = true;
       break;
@@ -213,7 +220,7 @@ try {
   }
   assert.ok(
     ownerExitPassed,
-    "Signed App Store app or its sandboxed backend did not exit cleanly",
+    "App Store runtime app or its sandboxed backend did not exit cleanly",
   );
 } finally {
   const remaining = await runningProcesses().catch(() => []);
@@ -235,6 +242,5 @@ try {
       launcher.kill("SIGTERM");
     });
   }
-  await rm(installedBundle, { recursive: true, force: true });
   await rm(scratch, { recursive: true, force: true });
 }

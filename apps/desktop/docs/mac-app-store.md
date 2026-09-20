@@ -71,6 +71,15 @@ App Sandbox, network client/server, user-selected read/write, app-scoped bookmar
 and profile-derived identity/Keychain entitlements. Children receive only sandbox
 and inherit entitlements. No temporary sandbox exception is used.
 
+Apple does not allow a Mac App Store distribution-signed app to launch before
+App Store processing. The workflow therefore smoke-tests a temporary ad-hoc
+signed copy of the same Universal MAS binaries with the shared runtime sandbox
+entitlements, then signs the untouched build output for distribution. The smoke
+copy omits profile-authorized identity and Keychain groups; the packaging script
+validates those separately on the final app, and `altool --validate-app` validates
+the final pkg before upload. Do not attempt to make the distribution package
+locally runnable or weaken its signature to satisfy CI.
+
 The workflow uploads a reviewable pkg artifact by default. Explicit upload is
 restricted to main and performs App Store validation before delivery. This task
 does not run that workflow or upload anything.
@@ -112,8 +121,10 @@ References: [SDK requirements](https://developer.apple.com/support/third-party-S
 
 ## Signed Mac and TestFlight gates
 
-- Install the signed pkg and verify all signatures, profile, entitlements and
-  arm64/x86_64 slices. Test both architectures; Linux checks cannot prove this.
+- Verify the submitted pkg signatures, profile, entitlements and arm64/x86_64
+  slices. Test both architectures through a development-signed build or
+  TestFlight; a Mac App Store distribution-signed app cannot run directly before
+  App Store processing.
 - Confirm macOS 13+ login registration requires a user toggle, approval-required
   status opens System Settings, disabling unregisters, and login opens quietly.
   Check a Direct upgrade preserves an existing LaunchAgent choice, migrates once,

@@ -236,22 +236,28 @@ jobs:
           } >> "$GITHUB_ENV"
       - name: Build unsigned Universal app
         working-directory: apps/desktop
-        run: npm run dist:app-store -- --bundles app
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run dist:app-store -- --bundles app
+          app_bundle="$(find src-tauri/target/universal-apple-darwin/release/bundle/macos -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -n "$app_bundle"
+          echo "APPLE_APP_STORE_APP=$PWD/$app_bundle" >> "$GITHUB_ENV"
+      - name: Smoke test App Store runtime
+        working-directory: apps/desktop
+        run: node scripts/macos-app-store-smoke.mjs "$APPLE_APP_STORE_APP"
       - name: Sign and package for App Store Connect
         working-directory: apps/desktop
         shell: bash
         run: |
           set -euo pipefail
-          app_bundle="$(find src-tauri/target/universal-apple-darwin/release/bundle/macos -maxdepth 1 -type d -name '*.app' -print -quit)"
-          test -n "$app_bundle"
           package="release/private-ai-proxy-${DESKTOP_RELEASE_VERSION}-mac-app-store.pkg"
           node scripts/package-app-store.mjs \
-            --app "$app_bundle" \
+            --app "$APPLE_APP_STORE_APP" \
             --profile "$APPLE_APP_STORE_PROFILE" \
             --application-identity "$APPLE_APPLICATION_IDENTITY" \
             --installer-identity "$APPLE_INSTALLER_IDENTITY" \
             --output "$package"
-          echo "APPLE_APP_STORE_APP=$app_bundle" >> "$GITHUB_ENV"
           echo "APPLE_APP_STORE_PACKAGE=$PWD/$package" >> "$GITHUB_ENV"
       - name: Upload package artifact
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
@@ -260,9 +266,6 @@ jobs:
           path: apps/desktop/release/*-mac-app-store.pkg
           if-no-files-found: error
           retention-days: 14
-      - name: Smoke test signed App Store app
-        working-directory: apps/desktop
-        run: node scripts/macos-app-store-smoke.mjs "$APPLE_APP_STORE_APP"
       - name: Prepare App Store Connect key
         if: inputs.upload
         shell: bash

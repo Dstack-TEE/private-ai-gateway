@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { load } from "js-yaml";
-import { appStoreEntitlements, embedProvisioningProfile, readProvisioningProfile, validateAppStoreManifest } from "./package-app-store.mjs";
+import { appStoreEntitlements, appStoreRuntimeEntitlements, embedProvisioningProfile, readProvisioningProfile, validateAppStoreManifest } from "./package-app-store.mjs";
 import { MAC_APP_STORE_SIDECARS } from "./distribution.mjs";
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -57,14 +57,15 @@ const profile = {
 };
 
 test("derives separate main and child App Sandbox entitlements", () => {
+  const runtime = appStoreRuntimeEntitlements();
   const result = appStoreEntitlements(profile, "org.dstack.private-ai-proxy");
-  assert.equal(result.main["com.apple.security.network.server"], true);
-  assert.equal(result.main["com.apple.security.files.bookmarks.app-scope"], true);
+  assert.deepEqual(
+    Object.fromEntries(Object.keys(runtime.main).map((key) => [key, result.main[key]])),
+    runtime.main,
+  );
+  assert(!("keychain-access-groups" in runtime.main));
   assert.deepEqual(result.main["keychain-access-groups"], ["TEAM123.org.dstack.private-ai-proxy"]);
-  assert.deepEqual(result.child, {
-    "com.apple.security.app-sandbox": true,
-    "com.apple.security.inherit": true,
-  });
+  assert.deepEqual(result.child, runtime.child);
 });
 
 test("rejects profiles for another application or development", () => {
