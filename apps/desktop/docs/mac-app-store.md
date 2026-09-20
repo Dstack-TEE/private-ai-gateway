@@ -44,6 +44,22 @@ certificate/password pairs, the application provisioning profile, signing
 identities, and (only with upload enabled) the three ASC API credentials. No
 separate installer provisioning profile is used by productbuild.
 
+On the Mac that exported the certificates, configure the environment without
+printing secret values or copying base64 manually:
+
+```sh
+./scripts/configure-app-store-secrets.sh \
+  /path/to/application.p12 \
+  /path/to/installer.p12 \
+  /path/to/profile.provisionprofile
+```
+
+The script reads the certificate identities, prompts privately for both `.p12`
+passwords, validates that the profile is decodable, shows the non-secret values
+for confirmation, and uploads the two environment variables and five signing
+secrets with `gh`. Add `--api-key`, `--api-issuer`, and `--api-private-key`
+together when the environment should also support App Store Connect upload.
+
 Both preflights run before checkout, dependency installation and compilation.
 They reject missing/blank values and malformed base64 or ASC identifier/key
 formats without printing values. Actual certificate/profile validity is checked

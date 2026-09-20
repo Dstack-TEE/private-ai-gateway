@@ -75,6 +75,7 @@ jobs:
       - name: Verify renderer and packaging contracts
         working-directory: apps/desktop
         run: |
+          bash -n scripts/configure-app-store-secrets.sh
           npm run check
           npm run test:release
       - name: Verify Direct macOS upgrade
