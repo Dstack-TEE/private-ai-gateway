@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Desktop App",
+  "productName": "Private AI Proxy",
   "version": "0.1.0",
-  "identifier": "com.invalid.desktop-app",
+  "identifier": "org.dstack.private-ai-proxy",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://127.0.0.1:1420",
@@ -15,8 +15,9 @@
       {
         "label": "main",
         "create": false,
+        "title": "Private AI Proxy",
         "width": 1052,
-        "height": 720,
+        "height": 840,
         "minWidth": 720,
         "minHeight": 600,
         "resizable": true,
@@ -41,7 +42,7 @@
     "active": true,
     "targets": ["app", "dmg"],
     "category": "DeveloperTool",
-    "shortDescription": "Desktop application",
+    "shortDescription": "Private AI Proxy desktop application",
     "externalBin": [
       "binaries/private-ai-proxy",
       "binaries/private-ai-proxy-service",

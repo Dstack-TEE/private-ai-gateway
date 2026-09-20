@@ -1,21 +1,63 @@
 //! Explicit, platform-native launch of the persistent PAP service.
 
 use std::{
-    io,
+    io::{self, Read},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
+    sync::{Arc, Mutex},
+    thread::JoinHandle,
     time::{Duration, Instant},
 };
 
 use crate::process::sibling_executable;
 
 const SERVICE_BINARY: &str = "private-ai-proxy-service";
+const MAX_STARTUP_DIAGNOSTICS: usize = 16 * 1024;
+
+pub struct BackgroundService {
+    child: Child,
+    stderr_reader: Option<JoinHandle<()>>,
+    diagnostics: Arc<Mutex<Vec<u8>>>,
+}
+
+impl BackgroundService {
+    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.child.try_wait()
+    }
+
+    pub fn kill(&mut self) -> io::Result<()> {
+        self.child.kill()
+    }
+
+    pub fn wait(&mut self) -> io::Result<ExitStatus> {
+        self.child.wait()
+    }
+
+    pub fn startup_diagnostic(&mut self) -> Option<String> {
+        if let Some(reader) = self.stderr_reader.take() {
+            let _ = reader.join();
+        }
+        self.diagnostic_snapshot()
+    }
+
+    pub fn diagnostic_snapshot(&self) -> Option<String> {
+        let diagnostics = self.diagnostics.lock().ok()?;
+        diagnostics
+            .split(|byte| *byte == b'\n' || *byte == b'\r')
+            .filter_map(|line| {
+                let line = String::from_utf8_lossy(line).trim().to_string();
+                (!line.is_empty()).then_some(line)
+            })
+            .next_back()
+            .map(|line| line.chars().take(2_048).collect())
+    }
+}
 
 pub fn service_executable() -> Result<PathBuf, String> {
     sibling_executable(SERVICE_BINARY)
 }
 
-pub fn spawn_background(data_dir: &Path) -> Result<Child, String> {
+pub fn spawn_background(data_dir: &Path) -> Result<BackgroundService, String> {
     let executable = service_executable()?;
     let working_directory = executable
         .parent()
@@ -26,21 +68,42 @@ pub fn spawn_background(data_dir: &Path) -> Result<Child, String> {
         .env(desktop_gateway::agents::APP_DATA_OVERRIDE_ENV, data_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(service_stderr());
+        .stderr(Stdio::piped());
     configure_background_command(&mut command);
-    command
+    let mut child = command
         .spawn()
-        .map_err(|error| format!("Cannot start PAP service: {error}"))
+        .map_err(|error| format!("Cannot start PAP service: {error}"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or("Cannot capture PAP service startup diagnostics")?;
+    let diagnostics = Arc::new(Mutex::new(Vec::new()));
+    let captured = diagnostics.clone();
+    let stderr_reader = std::thread::spawn(move || capture_stderr(stderr, captured));
+    Ok(BackgroundService {
+        child,
+        stderr_reader: Some(stderr_reader),
+        diagnostics,
+    })
 }
 
-#[cfg(all(target_os = "macos", feature = "mac-app-store"))]
-fn service_stderr() -> Stdio {
-    Stdio::inherit()
-}
-
-#[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
-fn service_stderr() -> Stdio {
-    Stdio::null()
+fn capture_stderr(mut stderr: impl Read, diagnostics: Arc<Mutex<Vec<u8>>>) {
+    let mut buffer = [0_u8; 4 * 1024];
+    loop {
+        let read = match stderr.read(&mut buffer) {
+            Ok(0) => return,
+            Ok(read) => read,
+            Err(_) => return,
+        };
+        let Ok(mut captured) = diagnostics.lock() else {
+            return;
+        };
+        captured.extend_from_slice(&buffer[..read]);
+        if captured.len() > MAX_STARTUP_DIAGNOSTICS {
+            let excess = captured.len() - MAX_STARTUP_DIAGNOSTICS;
+            captured.drain(..excess);
+        }
+    }
 }
 
 /// Wait until the operating system reports that `pid` has exited. This never

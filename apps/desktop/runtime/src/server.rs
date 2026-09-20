@@ -31,10 +31,10 @@ struct Admission {
 
 pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
     let listener = Listener::bind(runtime.instance_lock()?)
-        .map_err(|_| "Cannot bind the private management endpoint")?;
+        .map_err(|error| format!("Cannot bind the private management endpoint: {error}"))?;
     listener
         .set_nonblocking(true)
-        .map_err(|_| "Cannot configure the management endpoint")?;
+        .map_err(|error| format!("Cannot configure the management endpoint: {error}"))?;
     let executable = std::env::current_exe().map_err(|_| "Cannot locate backend executable")?;
     let hello = Hello {
         protocol_version: protocol::VERSION,
@@ -139,7 +139,7 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
                         | std::io::ErrorKind::BrokenPipe
                         | std::io::ErrorKind::UnexpectedEof
                 ) => {}
-            Err(_) => return Err("The management listener failed".into()),
+            Err(error) => return Err(format!("The management listener failed: {error}")),
         }
         while tasks.try_join_next().is_some() {}
     }
