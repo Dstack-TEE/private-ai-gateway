@@ -1,16 +1,27 @@
 //! Persistence for attested sessions.
 //!
 //! [`SessionStore`] is the registry behind the audit endpoints. The durable
-//! implementation, [`JsonlSessionStore`], is an append-only log of one record
-//! per line, replayed into an in-memory index on open:
+//! implementation, [`JsonlSessionStore`], stores each session in field-level
+//! content-addressed form (see [`super::session_cas`] and
+//! docs/aci-session-storage-study.md):
+//!
+//! * `<log>.docs/<session-id>` — the **skeleton**: the document with large
+//!   strings and subtrees replaced by chunk references (or, in the `whole`
+//!   fallback, the untouched document bytes);
+//! * `<log>.chunks/<sha256>` — immutable **chunks**, written at most once
+//!   and shared across sessions, upstreams, and rounds;
+//! * the JSONL log itself — one small index record per session:
 //!
 //! ```text
-//! {"seq":0,"ts":1700000000,"type":"session","fingerprint":"…","retention_until":1700003600,"payload_b64":"…"}
+//! {"seq":0,"ts":1700000000,"type":"session2","fingerprint":"…","id":"…","upstream_name":"…","expires_at":…,"retention_until":…,"whole":false}
 //! ```
 //!
-//! `payload_b64` carries the sealed document bytes (JCS form, whose hash is
-//! the session id), so replay reproduces identical records; the id is always
-//! recomputed from those bytes, never trusted from disk.
+//! Rebuilt bytes re-hash to the session id and `evidence.data` re-hashes to
+//! `evidence.digest`; both are verified on every read, so a tampered or
+//! corrupted store only ever resolves to a different id than any receipt
+//! cites. Packing self-checks byte-exactness and degrades to `whole`
+//! (unpacked bytes) on any unfamiliar shape, so an upstream format change
+//! can cost dedup but never correctness.
 //!
 //! Two deadlines govern a record:
 //!
@@ -35,11 +46,15 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 
 use super::session::AttestedSession;
+use super::session_cas::{pack, unpack, Packed};
 
-/// Record type tag for a session line.
+/// Record type tag for a legacy (full-bytes) session line, kept for replay
+/// of logs written before field-level CAS storage.
 const RECORD_TYPE_SESSION: &str = "session";
+/// Record type tag for a CAS index record.
+const RECORD_TYPE_SESSION_V2: &str = "session2";
 
-/// One line in the append-only session log.
+/// One line in the legacy append-only session log (pre-CAS format).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionLogRecord {
     seq: u64,
@@ -49,6 +64,23 @@ struct SessionLogRecord {
     fingerprint: String,
     retention_until: u64,
     payload_b64: String,
+}
+
+/// One line in the CAS session log: the index record. The document bytes
+/// live in `<log>.docs/<id>` (skeleton or whole) and its chunks in
+/// `<log>.chunks/<digest>`; this record is only the replayable index.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SessionLogRecordV2 {
+    seq: u64,
+    ts: u64,
+    #[serde(rename = "type")]
+    record_type: String,
+    fingerprint: String,
+    id: String,
+    upstream_name: String,
+    expires_at: u64,
+    retention_until: u64,
+    whole: bool,
 }
 
 /// The session registry behind the audit endpoints.
@@ -89,7 +121,6 @@ pub trait SessionStore: Send + Sync {
 
 struct SessionEntry {
     session: AttestedSession,
-    fingerprint: String,
     retention_until: u64,
 }
 
@@ -110,7 +141,6 @@ impl SessionIndex {
             id.clone(),
             SessionEntry {
                 session,
-                fingerprint: fingerprint.clone(),
                 retention_until,
             },
         ) {
@@ -118,6 +148,7 @@ impl SessionIndex {
                 self.drop_retention_hint(&id, prev.retention_until);
             }
         }
+
         self.by_retention
             .entry(retention_until)
             .or_default()
@@ -140,16 +171,10 @@ impl SessionIndex {
             if retention_until > now {
                 break;
             }
-            let (_, ids) = self
-                .by_retention
-                .pop_first()
-                .expect("first_key_value just returned a bucket");
+            let (_, ids) = self.by_retention.pop_first().expect("bucket exists");
             for id in ids {
-                if let Some(entry) = self.by_id.remove(&id) {
-                    if self.by_fingerprint.get(&entry.fingerprint) == Some(&id) {
-                        self.by_fingerprint.remove(&entry.fingerprint);
-                    }
-                }
+                self.by_id.remove(&id);
+                self.by_fingerprint.retain(|_, v| v != &id);
             }
         }
     }
@@ -165,24 +190,25 @@ impl SessionIndex {
         retention_until: u64,
         now: u64,
     ) -> Option<AttestedSession> {
-        self.evict_lapsed(now);
         let id = self.by_fingerprint.get(fingerprint)?.clone();
         let entry = self.by_id.get_mut(&id)?;
         if now >= entry.session.document().expires_at {
             return None; // validity lapsed; record stays for retention only
         }
-        if retention_until > entry.retention_until {
-            let old = entry.retention_until;
-            entry.retention_until = retention_until;
-            let session = entry.session.clone();
-            self.drop_retention_hint(&id, old);
-            self.by_retention
-                .entry(retention_until)
-                .or_default()
-                .insert(id);
+        let session = entry.session.clone();
+        let old = entry.retention_until;
+        if retention_until <= old {
             return Some(session);
         }
-        Some(entry.session.clone())
+        entry.retention_until = retention_until;
+        // `entry` is not used past this point, so the index-wide updates below
+        // no longer conflict with its borrow.
+        self.drop_retention_hint(&id, old);
+        self.by_retention
+            .entry(retention_until)
+            .or_default()
+            .insert(id);
+        Some(session)
     }
 
     fn list(&self, upstream_name: Option<&str>, now: u64) -> Vec<AttestedSession> {
@@ -190,7 +216,9 @@ impl SessionIndex {
             .by_id
             .values()
             .filter(|e| now < e.session.document().expires_at)
-            .filter(|e| upstream_name.is_none_or(|p| e.session.document().upstream_name == p))
+            .filter(|e| {
+                upstream_name.is_none_or(|n| n == e.session.document().upstream_name.as_str())
+            })
             .map(|e| e.session.clone())
             .collect();
         sort_sessions_newest_first(&mut out);
@@ -198,7 +226,9 @@ impl SessionIndex {
     }
 }
 
-/// Stable presentation order for a session listing: newest first, then by id.
+/// Order a merged multi-upstream listing the same way the single-channel
+/// path does: newest `established_at` first, ties by session id ascending
+/// (deterministic for tests and for clients diffing list responses).
 pub(crate) fn sort_sessions_newest_first(sessions: &mut [AttestedSession]) {
     sessions.sort_by(|a, b| {
         b.document()
@@ -208,26 +238,139 @@ pub(crate) fn sort_sessions_newest_first(sessions: &mut [AttestedSession]) {
     });
 }
 
-/// Append-only JSONL-backed [`SessionStore`]. The append log and the in-memory
-/// index sit behind separate locks, so a read never waits on a write.
+/// The metadata a CAS store keeps resident per session. The document itself
+/// (skeleton or whole bytes) stays on disk and is read through on demand —
+/// with a 30-day retention horizon the resident set would otherwise be the
+/// full store.
+#[derive(Debug, Clone)]
+struct CasEntry {
+    fingerprint: String,
+    upstream_name: String,
+    expires_at: u64,
+    retention_until: u64,
+    whole: bool,
+}
+
+/// Metadata-only index for the CAS store: id→entry plus fingerprint→current
+/// and retention-deadline hints, mirroring [`SessionIndex`].
+#[derive(Default)]
+struct CasIndex {
+    by_id: HashMap<String, CasEntry>,
+    by_fingerprint: HashMap<String, String>,
+    by_retention: BTreeMap<u64, HashSet<String>>,
+}
+
+impl CasIndex {
+    fn insert(&mut self, fingerprint: String, id: String, entry: CasEntry) {
+        let retention_until = entry.retention_until;
+        if let Some(prev) = self.by_id.insert(id.clone(), entry) {
+            if prev.retention_until != retention_until {
+                self.drop_retention_hint(&id, prev.retention_until);
+            }
+        }
+        self.by_retention
+            .entry(retention_until)
+            .or_default()
+            .insert(id.clone());
+        self.by_fingerprint.insert(fingerprint, id);
+    }
+
+    fn drop_retention_hint(&mut self, id: &str, retention_until: u64) {
+        if let Some(ids) = self.by_retention.get_mut(&retention_until) {
+            ids.remove(id);
+            if ids.is_empty() {
+                self.by_retention.remove(&retention_until);
+            }
+        }
+    }
+
+    /// Pop every bucket whose retention deadline is at or before `now`;
+    /// returns the evicted ids so the caller can delete their doc files.
+    fn evict_lapsed(&mut self, now: u64) -> Vec<String> {
+        let mut evicted = Vec::new();
+        while let Some((&retention_until, _)) = self.by_retention.first_key_value() {
+            if retention_until > now {
+                break;
+            }
+            let (_, ids) = self.by_retention.pop_first().expect("bucket exists");
+            for id in ids {
+                if self.by_id.remove(&id).is_some() {
+                    evicted.push(id.clone());
+                }
+                self.by_fingerprint.retain(|_, v| v != &id);
+            }
+        }
+        evicted
+    }
+
+    fn get(&mut self, session_id: &str, now: u64) -> Option<CasEntry> {
+        self.evict_lapsed(now);
+        self.by_id.get(session_id).cloned()
+    }
+
+    fn current(
+        &mut self,
+        fingerprint: &str,
+        retention_until: u64,
+        now: u64,
+    ) -> Option<(String, CasEntry)> {
+        let id = self.by_fingerprint.get(fingerprint)?.clone();
+        let entry = self.by_id.get_mut(&id)?;
+        if now >= entry.expires_at {
+            return None; // validity lapsed; record stays for retention only
+        }
+        let snapshot = entry.clone();
+        let old = entry.retention_until;
+        if retention_until <= old {
+            return Some((id, snapshot));
+        }
+        entry.retention_until = retention_until;
+        // `entry` is not used past this point, so the index-wide updates below
+        // no longer conflict with its borrow.
+        self.drop_retention_hint(&id, old);
+        self.by_retention
+            .entry(retention_until)
+            .or_default()
+            .insert(id.clone());
+        Some((id, snapshot))
+    }
+
+    fn list(&self, upstream_name: Option<&str>, now: u64) -> Vec<(String, CasEntry)> {
+        let mut out: Vec<(String, CasEntry)> = self
+            .by_id
+            .iter()
+            .filter(|(_, e)| now < e.expires_at)
+            .filter(|(_, e)| upstream_name.is_none_or(|n| n == e.upstream_name.as_str()))
+            .map(|(id, e)| (id.clone(), e.clone()))
+            .collect();
+        out.sort_by(|a, b| {
+            b.1.expires_at
+                .cmp(&a.1.expires_at)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        out
+    }
+}
+
+/// Persistence for attested sessions.
 ///
-/// The hot path appends a line only when a *new* session is sealed; a repeat
-/// request extends the current session's retention in the index without
-/// writing (see [`SessionStore::current_session`]).
-/// [`JsonlSessionStore::compact`] then rewrites the file from the live index,
-/// dropping lapsed records and persisting the extended retention deadlines.
+/// [`JsonlSessionStore`] keeps the session registry durable: an append-only
+/// index log replayed on open, with documents and chunks as immutable
+/// content-addressed files beside it (see the module docs).
 ///
 /// Single-writer is enforced with an advisory lock on a *separate* lock file
 /// (`<log>.lock`) that is never renamed, held for the whole lifetime of the
-/// store. The data log itself is rename-swapped by compaction, so a lock on the
-/// log inode would migrate off the path during the swap and let a racing opener
-/// slip in; the lock file has no such window.
+/// store. The data log itself is rename-swapped by compaction, so a lock on
+/// the log inode would migrate off the path during the swap and let a racing
+/// opener slip in; the lock file has no such window.
 pub struct JsonlSessionStore {
     path: PathBuf,
+    docs_dir: PathBuf,
+    chunks_dir: PathBuf,
     /// Held for its side effect: the advisory lock lives as long as this handle.
     _lock_file: File,
     writer: Mutex<LogWriter>,
-    index: Mutex<SessionIndex>,
+    index: Mutex<CasIndex>,
 }
 
 struct LogWriter {
@@ -239,14 +382,14 @@ struct LogWriter {
 /// [`JsonlSessionStore`]). The returned handle must be held for the writer's
 /// lifetime; the lock releases when it is dropped, including on crash.
 fn acquire_exclusive_lock(lock_path: &Path) -> io::Result<File> {
-    let file = OpenOptions::new()
+    let lock_file = OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
         .truncate(false) // the lock file carries no content; never truncate it
         .open(lock_path)?;
-    match file.try_lock() {
-        Ok(()) => Ok(file),
+    match lock_file.try_lock() {
+        Ok(()) => Ok(lock_file),
         Err(TryLockError::WouldBlock) => Err(io::Error::new(
             io::ErrorKind::WouldBlock,
             format!(
@@ -264,6 +407,16 @@ fn lock_path_for(path: &Path) -> PathBuf {
     path.with_extension("jsonl.lock")
 }
 
+/// The doc-file directory beside the log (`<log>.docs/`).
+fn docs_dir_for(path: &Path) -> PathBuf {
+    path.with_extension("docs")
+}
+
+/// The chunk-file directory beside the log (`<log>.chunks/`).
+fn chunks_dir_for(path: &Path) -> PathBuf {
+    path.with_extension("chunks")
+}
+
 impl JsonlSessionStore {
     /// Open (creating if absent) the log at `path`, replaying existing records
     /// into the in-memory index. Malformed lines are skipped so a partially
@@ -277,18 +430,20 @@ impl JsonlSessionStore {
     /// them. They would be evicted by the first `compact` anyway, so this only
     /// changes when the work happens — but it decides whether startup is
     /// proportional to the *live* set or to everything appended since the last
-    /// compaction, which for a busy log is the difference between booting and
-    /// exhausting memory before serving a request. Taken as a parameter rather
-    /// than read from the clock so the store stays deterministic, like
-    /// `compact`.
+    /// compaction.
     pub fn open(path: impl AsRef<Path>, now: u64) -> io::Result<Self> {
         let path: PathBuf = path.as_ref().to_path_buf();
+        let docs_dir = docs_dir_for(&path);
+        let chunks_dir = chunks_dir_for(&path);
 
         // Single-writer lock first, before we read or write the log.
         let lock_file = acquire_exclusive_lock(&lock_path_for(&path))?;
 
+        std::fs::create_dir_all(&docs_dir)?;
+        std::fs::create_dir_all(&chunks_dir)?;
+
         let mut next_seq = 0u64;
-        let mut index = SessionIndex::default();
+        let mut index = CasIndex::default();
         let replay_file = match File::open(&path) {
             Ok(file) => Some(file),
             Err(err) if err.kind() == io::ErrorKind::NotFound => None,
@@ -310,52 +465,122 @@ impl JsonlSessionStore {
                 if trimmed.is_empty() {
                     continue;
                 }
-                let Ok(record) = serde_json::from_slice::<SessionLogRecord>(trimmed) else {
+                let Ok(record) = serde_json::from_slice::<serde_json::Value>(trimmed) else {
                     continue; // malformed line; compaction will drop it
                 };
-                let Some(seq_after) = record.seq.checked_add(1) else {
+                let Some(seq) = record.get("seq").and_then(serde_json::Value::as_u64) else {
+                    continue;
+                };
+                let Some(seq_after) = seq.checked_add(1) else {
                     continue; // corrupt seq at u64::MAX; skip rather than overflow
                 };
                 next_seq = next_seq.max(seq_after);
-                if record.record_type != RECORD_TYPE_SESSION {
-                    continue;
+                match record.get("type").and_then(serde_json::Value::as_str) {
+                    Some(RECORD_TYPE_SESSION_V2) => {
+                        let Ok(record) = serde_json::from_value::<SessionLogRecordV2>(record)
+                        else {
+                            continue;
+                        };
+                        if record.retention_until <= now {
+                            continue;
+                        }
+                        index.insert(
+                            record.fingerprint.clone(),
+                            record.id.clone(),
+                            CasEntry {
+                                fingerprint: record.fingerprint,
+                                upstream_name: record.upstream_name,
+                                expires_at: record.expires_at,
+                                retention_until: record.retention_until,
+                                whole: record.whole,
+                            },
+                        );
+                    }
+                    Some(RECORD_TYPE_SESSION) => {
+                        // Legacy full-bytes record: adopt the document as a
+                        // `whole` doc file (no re-packing at replay) and index
+                        // it. The id is recomputed from the exact persisted
+                        // bytes, so a tampered payload simply resolves to a
+                        // different id than any receipt cites.
+                        let Ok(record) = serde_json::from_value::<SessionLogRecord>(record) else {
+                            continue;
+                        };
+                        if record.retention_until <= now {
+                            continue;
+                        }
+                        let Ok(bytes) = BASE64.decode(record.payload_b64.as_bytes()) else {
+                            continue;
+                        };
+                        let Ok(session) = AttestedSession::from_bytes(bytes) else {
+                            continue;
+                        };
+                        if !session.document().evidence.digest_matches_data() {
+                            continue;
+                        }
+                        let id = session.session_id().to_string();
+                        write_file_if_absent(&docs_dir.join(&id), session.bytes())?;
+                        index.insert(
+                            record.fingerprint.clone(),
+                            id,
+                            CasEntry {
+                                fingerprint: record.fingerprint,
+                                upstream_name: session.document().upstream_name.clone(),
+                                expires_at: session.document().expires_at,
+                                retention_until: record.retention_until,
+                                whole: true,
+                            },
+                        );
+                    }
+                    _ => continue, // unknown record type; skip
                 }
-                // Ahead of the decode: a lapsed record costs a base64 decode, a
-                // parse and a digest hash before eviction would drop it.
-                if record.retention_until <= now {
-                    continue;
-                }
-                let Ok(bytes) = BASE64.decode(record.payload_b64.as_bytes()) else {
-                    continue;
-                };
-                // The id is recomputed from the exact persisted bytes
-                // (`AttestedSession::from_bytes`), so a tampered payload simply
-                // resolves to a different id than any receipt cites. The
-                // evidence `data`, however, must still hash to its in-document
-                // `digest` (§8.2) — refuse to serve a swapped payload.
-                let Ok(session) = AttestedSession::from_bytes(bytes) else {
-                    continue;
-                };
-                if !session.document().evidence.digest_matches_data() {
-                    continue;
-                }
-                index.insert(record.fingerprint, session, record.retention_until);
             }
         }
 
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
         Ok(Self {
             path,
+            docs_dir,
+            chunks_dir,
             _lock_file: lock_file,
             writer: Mutex::new(LogWriter { file, next_seq }),
             index: Mutex::new(index),
         })
     }
 
+    /// Read a chunk payload by digest.
+    fn read_chunk(&self, digest: &str) -> Option<Vec<u8>> {
+        // A digest is 64 lowercase hex; refuse anything else as a path.
+        if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        std::fs::read(self.chunks_dir.join(digest)).ok()
+    }
+
+    /// Rebuild a session from its doc file + chunks, verifying every link of
+    /// the hash chain: rebuilt bytes must re-hash to the requested id, and
+    /// `evidence.data` must hash to its in-document `digest` (§8.2).
+    fn materialize(&self, id: &str, entry: &CasEntry) -> Option<AttestedSession> {
+        let skeleton = std::fs::read(self.docs_dir.join(id)).ok()?;
+        let bytes = if entry.whole {
+            skeleton
+        } else {
+            unpack(&skeleton, false, &mut |digest| self.read_chunk(digest))?
+        };
+        let session = AttestedSession::from_bytes(bytes).ok()?;
+        if session.session_id() != id {
+            return None; // rebuilt bytes do not hash to the cited id
+        }
+        if !session.document().evidence.digest_matches_data() {
+            return None;
+        }
+        Some(session)
+    }
+
     /// Rewrite the log from the retained (non-lapsed) index: drop lapsed
     /// records, collapse duplicates, and persist each record's current
     /// retention deadline (which the hot path extends in the index without
-    /// appending). Returns the number of records kept.
+    /// appending). Then garbage-collect the doc and chunk files the retained
+    /// set no longer references. Returns the number of records kept.
     ///
     /// Records are written and synced to a temp file before an atomic rename.
     /// The replacement append handle is opened before the rename, so a
@@ -367,27 +592,31 @@ impl JsonlSessionStore {
         // can never deadlock against each other.
         let mut w = self.writer.lock().unwrap_or_else(|p| p.into_inner());
 
-        let live: Vec<(String, AttestedSession, u64)> = {
+        let (live, evicted): (Vec<(String, String, CasEntry)>, Vec<String>) = {
             let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
-            index.evict_lapsed(now);
-            index
+            let evicted = index.evict_lapsed(now);
+            let live = index
                 .by_id
-                .values()
-                .map(|e| (e.fingerprint.clone(), e.session.clone(), e.retention_until))
-                .collect()
+                .iter()
+                .map(|(id, e)| (e.fingerprint.clone(), id.clone(), e.clone()))
+                .collect();
+            (live, evicted)
         };
 
         let tmp = self.path.with_extension("jsonl.tmp");
         {
             let mut out = File::create(&tmp)?;
-            for (seq, (fingerprint, session, retention_until)) in live.iter().enumerate() {
-                let mut line = serde_json::to_string(&SessionLogRecord {
+            for (seq, (fingerprint, id, entry)) in live.iter().enumerate() {
+                let mut line = serde_json::to_string(&SessionLogRecordV2 {
                     seq: seq as u64,
                     ts: now,
-                    record_type: RECORD_TYPE_SESSION.to_string(),
+                    record_type: RECORD_TYPE_SESSION_V2.to_string(),
                     fingerprint: fingerprint.clone(),
-                    retention_until: *retention_until,
-                    payload_b64: BASE64.encode(session.bytes()),
+                    id: id.clone(),
+                    upstream_name: entry.upstream_name.clone(),
+                    expires_at: entry.expires_at,
+                    retention_until: entry.retention_until,
+                    whole: entry.whole,
                 })
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 line.push('\n');
@@ -397,14 +626,128 @@ impl JsonlSessionStore {
         }
 
         // Open the replacement append handle before the rename, so the only
-        // fallible step left is the rename — the writer is never left pointing at
-        // the stale inode.
+        // fallible step left is the rename — the writer is never left pointing
+        // at the stale inode.
         let new_file = OpenOptions::new().append(true).open(&tmp)?;
         std::fs::rename(&tmp, &self.path)?;
 
         w.file = new_file;
         w.next_seq = live.len() as u64;
+
+        // Best-effort GC: doc files of evicted (or never-indexed) sessions,
+        // then chunks no live skeleton still references. Failures only leak
+        // disk until the next compaction; correctness never depends on them.
+        self.gc_files(&live, &evicted);
         Ok(live.len())
+    }
+
+    /// Delete doc files that are not live and chunks no live doc references.
+    fn gc_files(&self, live: &[(String, String, CasEntry)], evicted: &[String]) {
+        let live_ids: HashSet<&str> = live.iter().map(|(_, id, _)| id.as_str()).collect();
+        for id in evicted {
+            let _ = std::fs::remove_file(self.docs_dir.join(id));
+        }
+        if let Ok(entries) = std::fs::read_dir(&self.docs_dir) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if !live_ids.contains(name) {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
+
+        // Reference collection is transitive: a skeleton references subtree
+        // chunks ("s:<digest>") whose payloads may reference further chunks.
+        // Walk to the fixpoint or the sweep would delete chunks a live
+        // skeleton needs through one indirection.
+        let mut referenced: HashSet<String> = HashSet::new();
+        let mut subtree_worklist: Vec<String> = Vec::new();
+        for (_, id, entry) in live {
+            if entry.whole {
+                continue; // whole docs reference no chunks
+            }
+            let Ok(skeleton) = std::fs::read(self.docs_dir.join(id)) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&skeleton) else {
+                continue;
+            };
+            collect_chunk_refs(&value, &mut referenced, &mut subtree_worklist);
+        }
+        let mut expanded: HashSet<String> = HashSet::new();
+        while let Some(digest) = subtree_worklist.pop() {
+            if !expanded.insert(digest.clone()) {
+                continue;
+            }
+            let Some(payload) = self.read_chunk(&digest) else {
+                continue; // missing chunk: keep it referenced regardless
+            };
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&payload) else {
+                continue;
+            };
+            collect_chunk_refs(&value, &mut referenced, &mut subtree_worklist);
+        }
+        if let Ok(entries) = std::fs::read_dir(&self.chunks_dir) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if !referenced.contains(name) {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Collect every chunk digest referenced by a packed skeleton (or by a
+/// subtree-chunk payload, which uses the same marker vocabulary). Subtree
+/// references (`s:<digest>`) are additionally pushed onto `subtrees` so the
+/// caller can expand them transitively.
+fn collect_chunk_refs(
+    value: &serde_json::Value,
+    out: &mut HashSet<String>,
+    subtrees: &mut Vec<String>,
+) {
+    let mut note = |reference: &str| {
+        if let Some(digest) = reference.get(2..) {
+            out.insert(digest.to_string());
+            if reference.starts_with("s:") {
+                subtrees.push(digest.to_string());
+            }
+        }
+    };
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(reference) = map.get("$r").and_then(serde_json::Value::as_str) {
+                note(reference);
+            }
+            if map.contains_key("$db") {
+                if let Some(reference) = map.get("r").and_then(serde_json::Value::as_str) {
+                    note(reference);
+                }
+            }
+            for v in map.values() {
+                collect_chunk_refs(v, out, subtrees);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for v in items {
+                collect_chunk_refs(v, out, subtrees);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Write `bytes` to `path` unless the file already exists (doc and chunk
+/// files are immutable and content-addressed, so an existing file is by
+/// construction the same content).
+fn write_file_if_absent(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    match OpenOptions::new().create_new(true).write(true).open(path) {
+        Ok(mut file) => file.write_all(bytes),
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(err) => Err(err),
     }
 }
 
@@ -427,13 +770,32 @@ impl SessionStore for JsonlSessionStore {
                 "session log sequence number overflowed u64::MAX",
             ));
         };
-        let mut line = serde_json::to_string(&SessionLogRecord {
+
+        // Chunks first, then the doc file, then the index record: a crash can
+        // only leave orphans (swept by the next compaction), never a record
+        // pointing at missing content.
+        let id = session.session_id().to_string();
+        let (doc_bytes, whole) = match pack(session.bytes()) {
+            Packed::Whole(bytes) => (bytes, true),
+            Packed::Cas { skeleton, chunks } => {
+                for (digest, payload) in &chunks {
+                    write_file_if_absent(&self.chunks_dir.join(digest), payload)?;
+                }
+                (skeleton, false)
+            }
+        };
+        write_file_if_absent(&self.docs_dir.join(&id), &doc_bytes)?;
+
+        let mut line = serde_json::to_string(&SessionLogRecordV2 {
             seq,
             ts: now,
-            record_type: RECORD_TYPE_SESSION.to_string(),
+            record_type: RECORD_TYPE_SESSION_V2.to_string(),
             fingerprint: fingerprint.to_string(),
+            id: id.clone(),
+            upstream_name: session.document().upstream_name.clone(),
+            expires_at: session.document().expires_at,
             retention_until,
-            payload_b64: BASE64.encode(session.bytes()),
+            whole,
         })
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         line.push('\n');
@@ -443,20 +805,36 @@ impl SessionStore for JsonlSessionStore {
         w.file.write_all(line.as_bytes())?;
         w.next_seq = next_seq;
         // Update the index under the writer lock so the log and index advance
-        // together: `compact` rewrites the log *from* the index, so an index that
-        // lagged a completed append could drop an on-disk record. Reads still
-        // don't wait on the file write — only on this brief index update.
+        // together: `compact` rewrites the log *from* the index, so an index
+        // that lagged a completed append could drop an on-disk record. Reads
+        // still don't wait on the file write — only on this brief index update.
         let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
-        index.insert(fingerprint.to_string(), session, retention_until);
-        index.evict_lapsed(now);
+        index.insert(
+            fingerprint.to_string(),
+            id,
+            CasEntry {
+                fingerprint: fingerprint.to_string(),
+                upstream_name: session.document().upstream_name.clone(),
+                expires_at: session.document().expires_at,
+                retention_until,
+                whole,
+            },
+        );
+        let evicted = index.evict_lapsed(now);
+        drop(index);
+        for id in evicted {
+            let _ = std::fs::remove_file(self.docs_dir.join(id));
+        }
         Ok(seq)
     }
 
     fn get_session(&self, session_id: &str, now: u64) -> Option<AttestedSession> {
-        self.index
+        let entry = self
+            .index
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .get(session_id, now)
+            .get(session_id, now)?;
+        self.materialize(session_id, &entry)
     }
 
     fn current_session(
@@ -465,17 +843,26 @@ impl SessionStore for JsonlSessionStore {
         retention_until: u64,
         now: u64,
     ) -> Option<AttestedSession> {
-        self.index
+        let (id, entry) = self
+            .index
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .current(fingerprint, retention_until, now)
+            .current(fingerprint, retention_until, now)?;
+        self.materialize(&id, &entry)
     }
 
     fn list_sessions(&self, upstream_name: Option<&str>, now: u64) -> Vec<AttestedSession> {
-        self.index
+        let metas = self
+            .index
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .list(upstream_name, now)
+            .list(upstream_name, now);
+        let mut out: Vec<AttestedSession> = metas
+            .iter()
+            .filter_map(|(id, entry)| self.materialize(id, entry))
+            .collect();
+        sort_sessions_newest_first(&mut out);
+        out
     }
 }
 
@@ -887,5 +1274,181 @@ mod tests {
 
         drop(store);
         cleanup(&path);
+    }
+
+    // ------------------------------------------------------------------
+    // Field-CAS storage (real production documents)
+    // ------------------------------------------------------------------
+
+    fn fixture_session(name: &str) -> AttestedSession {
+        let path = format!(
+            "{}/tests/fixtures/sessions/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let bytes = std::fs::read(path).expect("fixture readable");
+        AttestedSession::from_bytes(bytes).expect("fixture is a sealed session")
+    }
+
+    fn count_dir_files(dir: &Path) -> usize {
+        std::fs::read_dir(dir).map(|d| d.count()).unwrap_or(0)
+    }
+
+    /// A real 269KB production document persists as skeleton + shared chunks
+    /// and serves back byte-exact — the session id a receipt cites still
+    /// recomputes from the served bytes.
+    #[test]
+    fn real_document_persists_via_cas_and_serves_byte_exact() {
+        let path = temp_path();
+        let session = fixture_session("phala-direct-a.json");
+        let id = session.session_id().to_string();
+        let raw = session.bytes().to_vec();
+        {
+            let store = open_store(&path);
+            store.put_session("fp", session, 9_000, 1_000).unwrap();
+
+            // The doc file holds a small skeleton, not the 269KB document.
+            let skeleton = std::fs::read(docs_dir_for(&path).join(&id)).unwrap();
+            assert!(
+                skeleton.len() < raw.len() / 4,
+                "skeleton {} should be far below raw {}",
+                skeleton.len(),
+                raw.len()
+            );
+            assert!(
+                count_dir_files(&chunks_dir_for(&path)) > 0,
+                "chunks written"
+            );
+
+            let served = store.get_session(&id, 2_000).expect("serves by id");
+            assert_eq!(served.bytes(), raw.as_slice(), "byte-exact after CAS");
+        }
+        // And after a replay (chunks + doc read back from disk only).
+        let store = open_store(&path);
+        let served = store.get_session(&id, 2_000).expect("serves after replay");
+        assert_eq!(served.bytes(), raw.as_slice());
+        drop(store);
+        cleanup(&path);
+        let _ = std::fs::remove_dir_all(docs_dir_for(&path));
+        let _ = std::fs::remove_dir_all(chunks_dir_for(&path));
+    }
+
+    /// Two consecutive verification rounds of one upstream: the second put
+    /// writes only the fresh chunks (quote / GPU evidence), reusing the rest.
+    #[test]
+    fn consecutive_rounds_share_chunks_on_disk() {
+        let path = temp_path();
+        let a = fixture_session("phala-direct-a.json");
+        let b = fixture_session("phala-direct-b.json");
+        let store = open_store(&path);
+        store.put_session("fp-a", a, 9_000, 1_000).unwrap();
+        let chunks_after_a = count_dir_files(&chunks_dir_for(&path));
+        let size_after_a: u64 = std::fs::read_dir(chunks_dir_for(&path))
+            .unwrap()
+            .map(|e| e.unwrap().metadata().unwrap().len())
+            .sum();
+        store.put_session("fp-b", b, 9_000, 1_100).unwrap();
+        let new_bytes: u64 = std::fs::read_dir(chunks_dir_for(&path))
+            .unwrap()
+            .map(|e| e.unwrap().metadata().unwrap().len())
+            .sum::<u64>()
+            - size_after_a;
+        assert!(
+            new_bytes < 32 * 1024,
+            "second round adds {new_bytes} bytes of chunks (measured ~9KB)"
+        );
+        assert!(count_dir_files(&chunks_dir_for(&path)) > chunks_after_a);
+        drop(store);
+        cleanup(&path);
+        let _ = std::fs::remove_dir_all(docs_dir_for(&path));
+        let _ = std::fs::remove_dir_all(chunks_dir_for(&path));
+    }
+
+    /// Compaction sweeps chunk files that no live skeleton still references.
+    #[test]
+    fn compact_garbage_collects_unreferenced_chunks() {
+        let path = temp_path();
+        let live = fixture_session("phala-direct-a.json");
+        let gone = fixture_session("near-ai-a.json");
+        let gone_id = gone.session_id().to_string();
+        {
+            let store = open_store(&path);
+            store
+                .put_session("fp-live", live.clone(), 9_000, 1_000)
+                .unwrap();
+            store.put_session("fp-gone", gone, 2_000, 1_000).unwrap();
+            let chunks_before = count_dir_files(&chunks_dir_for(&path));
+            assert!(chunks_before > 0);
+
+            store.compact(5_000).unwrap(); // past fp-gone retention
+            assert!(store.get_session(&gone_id, 5_000).is_none());
+            assert!(!docs_dir_for(&path).join(&gone_id).exists());
+            let chunks_after = count_dir_files(&chunks_dir_for(&path));
+            assert!(
+                chunks_after < chunks_before,
+                "near-ai chunks swept: {chunks_before} -> {chunks_after}"
+            );
+            // The live session still serves byte-exact after the sweep.
+            let served = store.get_session(live.session_id(), 5_000).unwrap();
+            assert_eq!(served.bytes(), live.bytes());
+        }
+        let store = open_store(&path);
+        let served = store.get_session(live.session_id(), 5_000).unwrap();
+        assert_eq!(served.bytes(), live.bytes());
+        drop(store);
+        cleanup(&path);
+        let _ = std::fs::remove_dir_all(docs_dir_for(&path));
+        let _ = std::fs::remove_dir_all(chunks_dir_for(&path));
+    }
+
+    /// The Whole fallback: a document packing cannot reproduce is stored
+    /// untouched and served byte-exact, no chunks involved.
+    #[test]
+    fn whole_fallback_roundtrips_without_chunks() {
+        let path = temp_path();
+        // Pretty-printed (non-JCS) bytes: pack() falls back to Whole.
+        let raw = b"{\n  \"api_version\": \"aci/1\"\n}\n".to_vec();
+        // Store through the pack/unpack path directly via a sealed session is
+        // not possible here (seal produces JCS), so exercise the store-adjacent
+        // helpers: pack -> Whole, unpack(whole=true) is the identity.
+        match super::super::session_cas::pack(&raw) {
+            super::super::session_cas::Packed::Whole(bytes) => {
+                assert_eq!(
+                    super::super::session_cas::unpack(&bytes, true, &mut |_| None).unwrap(),
+                    raw
+                );
+            }
+            super::super::session_cas::Packed::Cas { .. } => panic!("must be Whole"),
+        }
+        cleanup(&path);
+    }
+
+    /// A legacy (pre-CAS, full-bytes) record replays into a served session:
+    /// the migration path for logs written before field-CAS storage.
+    #[test]
+    fn legacy_full_bytes_record_replays_and_serves() {
+        let path = temp_path();
+        let s = session("https://legacy.example.net", 1_000, 9_000);
+        let id = s.session_id().to_string();
+        let legacy = SessionLogRecord {
+            seq: 0,
+            ts: 1_000,
+            record_type: RECORD_TYPE_SESSION.to_string(),
+            fingerprint: "fp-legacy".to_string(),
+            retention_until: 9_000,
+            payload_b64: BASE64.encode(s.bytes()),
+        };
+        std::fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&legacy).unwrap()),
+        )
+        .unwrap();
+
+        let store = open_store(&path);
+        let served = store.get_session(&id, 2_000).expect("legacy record serves");
+        assert_eq!(served.bytes(), s.bytes());
+        drop(store);
+        cleanup(&path);
+        let _ = std::fs::remove_dir_all(docs_dir_for(&path));
+        let _ = std::fs::remove_dir_all(chunks_dir_for(&path));
     }
 }
