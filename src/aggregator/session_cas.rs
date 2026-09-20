@@ -280,6 +280,7 @@ fn chunk_ref(payload: Vec<u8>, tag: u8, chunks: &mut Vec<(String, Vec<u8>)>) -> 
 fn rebuild_reference(
     reference: &str,
     chunk: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
+    depth: usize,
 ) -> Option<Value> {
     let tag = reference.get(..2)?;
     let digest = reference.get(2..)?;
@@ -293,7 +294,7 @@ fn rebuild_reference(
         "r:" => Value::String(String::from_utf8(payload).ok()?),
         "s:" => {
             let node: Value = serde_json::from_slice(&payload).ok()?;
-            return rebuild(&node, chunk);
+            return rebuild_at(&node, chunk, depth + 1);
         }
         _ => return None,
     })
@@ -306,21 +307,40 @@ pub(crate) fn is_bare_hex64(s: &str) -> bool {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
+/// Recursion ceiling while rebuilding a packed document. Legitimate pack
+/// output nests a handful of levels (document -> data URI -> evidence ->
+/// subtree chunks); a graph deeper than this is adversarial — fail closed
+/// instead of exhausting the stack. Content-addressed chunks additionally
+/// make true cycles cryptographically unreachable (see the store's
+/// `read_chunk`), so this bound only ever fires on corrupted input.
+const MAX_REBUILD_DEPTH: usize = 64;
+
 fn rebuild(value: &Value, chunk: &mut dyn FnMut(&str) -> Option<Vec<u8>>) -> Option<Value> {
+    rebuild_at(value, chunk, 0)
+}
+
+fn rebuild_at(
+    value: &Value,
+    chunk: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
+    depth: usize,
+) -> Option<Value> {
+    if depth > MAX_REBUILD_DEPTH {
+        return None;
+    }
     match value {
         Value::Object(map) => {
             if map.len() == 1 {
                 if let Some(reference) = map.get("$r").and_then(Value::as_str) {
-                    return rebuild_reference(reference, chunk);
+                    return rebuild_reference(reference, chunk, depth);
                 }
                 if let Some(node) = map.get("$j") {
                     let mut s = String::new();
-                    write_value(&rebuild(node, chunk)?, false, false, &mut s);
+                    write_value(&rebuild_at(node, chunk, depth + 1)?, false, false, &mut s);
                     return Some(Value::String(s));
                 }
                 if let Some(node) = map.get("$ja") {
                     let mut s = String::new();
-                    write_value(&rebuild(node, chunk)?, false, true, &mut s);
+                    write_value(&rebuild_at(node, chunk, depth + 1)?, false, true, &mut s);
                     return Some(Value::String(s));
                 }
             }
@@ -330,7 +350,7 @@ fn rebuild(value: &Value, chunk: &mut dyn FnMut(&str) -> Option<Vec<u8>>) -> Opt
                         (map.get(tag).and_then(Value::as_str), map.get("v"))
                     {
                         let mut s = String::new();
-                        write_value(&rebuild(node, chunk)?, false, ascii, &mut s);
+                        write_value(&rebuild_at(node, chunk, depth + 1)?, false, ascii, &mut s);
                         return Some(Value::String(format!(
                             "data:{ct};base64,{}",
                             BASE64.encode(s.as_bytes())
@@ -578,6 +598,43 @@ mod tests {
         };
         let packed = pack(&bytes);
         assert_eq!(unpack_with_chunks(&packed), bytes);
+    }
+
+    /// A self-referencing chunk graph fails closed instead of recursing
+    /// forever: the store's hash check makes such a file unusable, and the
+    /// rebuild depth bound caps any residual recursion at parse level too.
+    #[test]
+    fn cyclic_reference_fails_closed() {
+        let digest = "ab".repeat(32);
+        let skeleton = format!(r#"{{"$r":"s:{digest}"}}"#);
+        let mut cyclic = |_: &str| Some(skeleton.clone().into_bytes());
+        assert!(unpack(skeleton.as_bytes(), false, &mut cyclic).is_none());
+    }
+
+    /// Rebuild recursion is depth-bounded: a payload chain nested deeper
+    /// than MAX_REBUILD_DEPTH fails closed rather than overflowing the stack.
+    #[test]
+    fn rebuild_is_depth_bounded() {
+        let mut chunks: Vec<(String, Vec<u8>)> = Vec::new();
+        // Build a valid chain of subtree chunks, each referencing the next.
+        let mut inner = Value::String("bottom".to_string());
+        for _ in 0..(MAX_REBUILD_DEPTH + 8) {
+            let canon = {
+                let mut s = String::new();
+                write_value(&inner, false, false, &mut s);
+                s.into_bytes()
+            };
+            let digest = hex::encode(Sha256::digest(&canon));
+            chunks.push((digest.clone(), canon));
+            inner = Value::Object(serde_json::Map::from_iter([(
+                "$r".to_string(),
+                Value::String(format!("s:{digest}")),
+            )]));
+        }
+        let mut skeleton = String::new();
+        write_value(&inner, true, false, &mut skeleton);
+        let mut by_digest = |d: &str| chunks.iter().find(|(k, _)| k == d).map(|(_, v)| v.clone());
+        assert!(unpack(skeleton.as_bytes(), false, &mut by_digest).is_none());
     }
 
     /// unpack refuses a skeleton whose chunk is missing rather than serving
