@@ -16,7 +16,7 @@
         "label": "main",
         "create": false,
         "width": 1052,
-        "height": 840,
+        "height": 720,
         "minWidth": 720,
         "minHeight": 600,
         "resizable": true,

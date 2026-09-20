@@ -77,6 +77,7 @@ jobs:
         run: |
           npm run check
           npm run test:release
+          node --check scripts/macos-app-store-smoke.mjs
       - name: Verify Direct macOS upgrade
         working-directory: apps/desktop
         run: |
@@ -250,6 +251,7 @@ jobs:
             --application-identity "$APPLE_APPLICATION_IDENTITY" \
             --installer-identity "$APPLE_INSTALLER_IDENTITY" \
             --output "$package"
+          echo "APPLE_APP_STORE_APP=$app_bundle" >> "$GITHUB_ENV"
           echo "APPLE_APP_STORE_PACKAGE=$PWD/$package" >> "$GITHUB_ENV"
       - name: Upload package artifact
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
@@ -258,6 +260,12 @@ jobs:
           path: apps/desktop/release/*-mac-app-store.pkg
           if-no-files-found: error
           retention-days: 14
+      - name: Smoke test signed App Store app
+        working-directory: apps/desktop
+        run: |
+          node scripts/macos-app-store-smoke.mjs \
+            "$APPLE_APP_STORE_APP" \
+            "$PWD/src-tauri/binaries/private-ai-proxy-universal-apple-darwin"
       - name: Prepare App Store Connect key
         if: inputs.upload
         shell: bash
