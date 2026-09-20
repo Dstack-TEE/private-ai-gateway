@@ -1,4 +1,6 @@
-//! Reviewer-only synthetic fault injection; no production implementation changes.
+//! Adversarial fault-injection tests for the field-CAS session store:
+//! marker collisions, partial writes, path traversal, GC fault handling,
+//! side-index tampering, and hostile producer JSON.
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use private_ai_gateway::aggregator::{
     session::{AttestedSession, EvidenceRef, SessionClaims, SessionDocument},
@@ -98,14 +100,22 @@ fn partial_chunk_cannot_be_acknowledged_as_success() {
     };
     fs::write(p.with_extension("chunks").join(&chunks[0].0), b"partial").unwrap();
     let result = st.put_session("fp", s.clone(), 9000, 100);
-    if result.is_ok() {
-        assert_eq!(
-            st.get_session(s.session_id(), 100)
-                .map(|v| v.bytes().to_vec()),
-            Some(s.bytes().to_vec()),
-            "acknowledged an unreadable session"
-        );
-    }
+    // A partial pre-existing chunk must fail the put with InvalidData...
+    let err = result.expect_err("acknowledged a put whose chunks are partial-write residue");
+    assert_eq!(
+        err.kind(),
+        std::io::ErrorKind::InvalidData,
+        "wrong error kind: {err}"
+    );
+    // ...without advancing the log or the index.
+    assert!(
+        std::fs::read_to_string(&p).unwrap().trim().is_empty(),
+        "log record appended despite failed put"
+    );
+    assert!(
+        st.get_session(s.session_id(), 100).is_none(),
+        "index advanced despite failed put"
+    );
 }
 
 // Invariant: malformed replay ids cannot authorize deletion outside docs/.
