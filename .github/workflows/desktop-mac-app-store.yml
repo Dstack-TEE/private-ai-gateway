@@ -262,10 +262,7 @@ jobs:
           retention-days: 14
       - name: Smoke test signed App Store app
         working-directory: apps/desktop
-        run: |
-          node scripts/macos-app-store-smoke.mjs \
-            "$APPLE_APP_STORE_APP" \
-            "$PWD/src-tauri/binaries/private-ai-proxy-universal-apple-darwin"
+        run: node scripts/macos-app-store-smoke.mjs "$APPLE_APP_STORE_APP"
       - name: Prepare App Store Connect key
         if: inputs.upload
         shell: bash
