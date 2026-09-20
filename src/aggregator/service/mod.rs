@@ -50,6 +50,7 @@ mod wire;
 pub use clock::{Clock, FixedClock, SystemClock};
 pub use config::{
     validate_source_provenance, AciServiceConfig, ReceiptOwner, DEFAULT_KEYSET_NOT_AFTER_SECONDS,
+    DEFAULT_SESSION_RETENTION_SECONDS,
 };
 pub use errors::{E2eeError, ServiceError, UpstreamVerificationError};
 pub use receipt_store::{InMemoryReceiptStore, ReceiptStore};

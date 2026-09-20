@@ -35,7 +35,7 @@ use private_ai_gateway::aci::upstream::{
 use private_ai_gateway::aci::verifier::DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS;
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, Clock, InMemoryReceiptStore, SystemClock, UpstreamVerifier,
-    DEFAULT_KEYSET_NOT_AFTER_SECONDS,
+    DEFAULT_KEYSET_NOT_AFTER_SECONDS, DEFAULT_SESSION_RETENTION_SECONDS,
 };
 use private_ai_gateway::aggregator::session_store::JsonlSessionStore;
 use private_ai_gateway::aggregator::upstream_config::{
@@ -492,6 +492,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         },
         receipt_ttl_seconds: 3600,
+        session_retention_seconds: DEFAULT_SESSION_RETENTION_SECONDS,
         allow_test_keys: false,
         tls_public_keys,
     };
