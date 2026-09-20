@@ -27,6 +27,8 @@
     "allow-list-agents",
     "allow-preview-agent-connection",
     "allow-apply-agent-connection",
+    "allow-get-agent-access",
+    "allow-request-agent-access",
     "allow-get-cli-registration",
     "allow-set-cli-registration",
     "allow-stop-all-and-quit",

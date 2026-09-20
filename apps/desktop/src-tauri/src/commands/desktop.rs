@@ -170,6 +170,10 @@ pub(crate) async fn open_api_key_page(
     app: AppHandle,
     provider: desktop_runtime::contracts::ServiceProvider,
 ) -> Result<(), String> {
+    distribution::require(
+        distribution::CAPABILITIES.account_portal_links,
+        "Account portal links are unavailable in this distribution",
+    )?;
     let url = match provider {
         desktop_runtime::contracts::ServiceProvider::Phala => "https://cloud.phala.com/dashboard",
         desktop_runtime::contracts::ServiceProvider::Redpill => "https://www.redpill.ai/dashboard",

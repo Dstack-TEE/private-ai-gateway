@@ -74,6 +74,10 @@ pub(crate) async fn open_top_up(
     provider: desktop_runtime::contracts::ServiceProvider,
     scope_slug: Option<String>,
 ) -> Result<(), String> {
+    distribution::require(
+        distribution::CAPABILITIES.top_up_links,
+        "Top-up links are unavailable in this distribution",
+    )?;
     let url = desktop_runtime::account_login::top_up_url(&provider, scope_slug.as_deref())?;
     open_account_url(app, url).await
 }
@@ -83,6 +87,10 @@ pub(crate) async fn open_organization(
     app: AppHandle,
     organization_slug: String,
 ) -> Result<(), String> {
+    distribution::require(
+        distribution::CAPABILITIES.account_portal_links,
+        "Account portal links are unavailable in this distribution",
+    )?;
     let url = desktop_runtime::account_login::organization_url(Some(&organization_slug))?;
     open_account_url(app, url).await
 }

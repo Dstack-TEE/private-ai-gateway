@@ -73,10 +73,6 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
-      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
-        with:
-          toolchain: '1.89'
-          components: rustfmt, clippy
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         id: rust
         with:
@@ -130,18 +126,23 @@ jobs:
         working-directory: apps/desktop
         run: |
           cargo fmt --package private-ai-proxy -- --check
-          cargo +1.89 fmt --package private-ai-proxy-gateway -- --check
-          cargo +1.89 fmt --package private-ai-proxy-runtime -- --check
-          cargo +1.89 fmt --manifest-path src-tauri/Cargo.toml -- --check
+          cargo fmt --package private-ai-proxy-gateway -- --check
+          cargo fmt --package private-ai-proxy-runtime -- --check
+          cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
           cargo clippy --locked --all-targets --package private-ai-proxy -- -D warnings
-          cargo +1.89 clippy --locked --all-targets --package private-ai-proxy-gateway -- -D warnings
-          cargo +1.89 clippy --locked --all-targets --package private-ai-proxy-runtime -- -D warnings
-          cargo +1.89 clippy --locked --all-targets --manifest-path src-tauri/Cargo.toml -- -D warnings
+          cargo clippy --locked --all-targets --package private-ai-proxy-gateway -- -D warnings
+          cargo clippy --locked --all-targets --package private-ai-proxy-runtime -- -D warnings
+          cargo clippy --locked --all-targets --manifest-path src-tauri/Cargo.toml -- -D warnings
           cargo test --locked --package private-ai-proxy
-          cargo +1.89 test --locked --package private-ai-proxy-gateway
-          cargo +1.89 test --locked --package private-ai-proxy-runtime
-          cargo +1.89 test --locked --manifest-path src-tauri/Cargo.toml
-          cargo +1.89 test --locked --manifest-path ../../crates/aci-protocol/Cargo.toml
+          cargo test --locked --package private-ai-proxy-gateway
+          cargo test --locked --package private-ai-proxy-runtime
+          cargo test --locked --manifest-path src-tauri/Cargo.toml
+          app_store_config="$(cat src-tauri/tauri.appstore.conf.json)"
+          cargo clippy --locked --all-targets --package private-ai-proxy-runtime --features mac-app-store -- -D warnings
+          cargo test --locked --package private-ai-proxy-runtime --features mac-app-store
+          TAURI_CONFIG="$app_store_config" cargo clippy --locked --all-targets --manifest-path src-tauri/Cargo.toml --features mac-app-store -- -D warnings
+          TAURI_CONFIG="$app_store_config" cargo test --locked --manifest-path src-tauri/Cargo.toml --features mac-app-store
+          cargo test --locked --manifest-path ../../crates/aci-protocol/Cargo.toml
       - &save-rust-cache
         name: Save Rust dependencies
         if: always() && !cancelled() && steps.rust-cache.outputs.cache-primary-key != '' && steps.rust-cache.outputs.cache-hit != 'true'

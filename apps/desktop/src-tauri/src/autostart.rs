@@ -1,16 +1,14 @@
-#[cfg(target_os = "macos")]
-use tauri::AppHandle;
+#[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
+const AUTOSTART_ARG: &str = "--autostart";
 
-#[cfg(target_os = "macos")]
-use tauri_plugin_autostart::ManagerExt;
+#[cfg(any(test, all(target_os = "macos", not(feature = "mac-app-store"))))]
+mod migration;
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod platform {
     use std::path::Path;
 
     use auto_launch::{AutoLaunch, AutoLaunchBuilder};
-    #[cfg(target_os = "windows")]
-    use auto_launch_windows as auto_launch;
     use tauri::{AppHandle, Manager};
 
     pub struct ManagerState(AutoLaunch);
@@ -56,7 +54,7 @@ mod platform {
         builder
             .set_app_name(app_name)
             .set_app_path(&launch_path(executable)?)
-            .set_args(&[crate::AUTOSTART_ARG]);
+            .set_args(&[super::AUTOSTART_ARG]);
         #[cfg(target_os = "linux")]
         builder.set_linux_launch_mode(auto_launch::LinuxLaunchMode::XdgAutostart);
         builder.build()
@@ -181,19 +179,160 @@ mod platform {
 pub use platform::{is_enabled, set_enabled, setup};
 
 #[cfg(target_os = "macos")]
-pub fn is_enabled(app: &AppHandle) -> Result<bool, String> {
-    app.autolaunch()
-        .is_enabled()
-        .map_err(|error| error.to_string())
+mod platform {
+    use objc2_core_services::{kAEOpenApplication, keyAELaunchedAsLogInItem, keyAEPropData};
+    use objc2_foundation::NSAppleEventManager;
+    use objc2_service_management::{SMAppService, SMAppServiceStatus};
+    use tauri::AppHandle;
+
+    fn status() -> SMAppServiceStatus {
+        let service = unsafe { SMAppService::mainAppService() };
+        unsafe { service.status() }
+    }
+
+    pub fn is_enabled(_app: &AppHandle) -> Result<bool, String> {
+        #[cfg(not(feature = "mac-app-store"))]
+        if LegacyBackend(_app).legacy_enabled()? {
+            return Ok(true);
+        }
+        match status() {
+            SMAppServiceStatus::Enabled => Ok(true),
+            SMAppServiceStatus::NotRegistered | SMAppServiceStatus::RequiresApproval => Ok(false),
+            SMAppServiceStatus::NotFound => {
+                Err("Open at Login is unavailable for this installation".to_string())
+            }
+            _ => Err("Open at Login returned an unknown system status".to_string()),
+        }
+    }
+
+    pub fn set_enabled(_app: &AppHandle, enabled: bool) -> Result<(), String> {
+        #[cfg(not(feature = "mac-app-store"))]
+        if !enabled {
+            return super::migration::disable(&LegacyBackend(_app));
+        }
+        set_native_enabled(enabled, true)?;
+        #[cfg(not(feature = "mac-app-store"))]
+        LegacyBackend(_app).remove_legacy()?;
+        Ok(())
+    }
+
+    fn approval_required(interactive: bool) -> String {
+        if interactive {
+            unsafe { SMAppService::openSystemSettingsLoginItems() };
+        }
+        "Approve Private AI Proxy in System Settings > General > Login Items".to_string()
+    }
+
+    fn set_native_enabled(enabled: bool, interactive: bool) -> Result<(), String> {
+        let service = unsafe { SMAppService::mainAppService() };
+        let current = unsafe { service.status() };
+        if enabled {
+            if current == SMAppServiceStatus::Enabled {
+                return Ok(());
+            }
+            if current == SMAppServiceStatus::RequiresApproval {
+                return Err(approval_required(interactive));
+            }
+            unsafe { service.registerAndReturnError() }.map_err(|error| {
+                eprintln!(
+                    "Cannot register Open at Login: {}",
+                    error.localizedDescription()
+                );
+                "Open at Login could not be enabled".to_string()
+            })?;
+            if unsafe { service.status() } == SMAppServiceStatus::RequiresApproval {
+                return Err(approval_required(interactive));
+            }
+            if unsafe { service.status() } != SMAppServiceStatus::Enabled {
+                return Err("Open at Login could not be enabled".to_string());
+            }
+        } else if current != SMAppServiceStatus::NotRegistered {
+            unsafe { service.unregisterAndReturnError() }.map_err(|error| {
+                eprintln!(
+                    "Cannot unregister Open at Login: {}",
+                    error.localizedDescription()
+                );
+                "Open at Login could not be disabled".to_string()
+            })?;
+        }
+        Ok(())
+    }
+
+    pub fn launched_at_login() -> bool {
+        // Keep legacy launches quiet until the one-time migration removes their registration.
+        #[cfg(not(feature = "mac-app-store"))]
+        if std::env::args_os().any(|arg| arg == super::AUTOSTART_ARG) {
+            return true;
+        }
+        let manager = NSAppleEventManager::sharedAppleEventManager();
+        let Some(event) = manager.currentAppleEvent() else {
+            return false;
+        };
+        event.eventID() == kAEOpenApplication
+            && event
+                .paramDescriptorForKeyword(keyAEPropData)
+                .is_some_and(|descriptor| descriptor.enumCodeValue() == keyAELaunchedAsLogInItem)
+    }
+
+    #[cfg(not(feature = "mac-app-store"))]
+    use super::migration::Backend;
+
+    #[cfg(not(feature = "mac-app-store"))]
+    struct LegacyBackend<'a>(&'a AppHandle);
+
+    #[cfg(not(feature = "mac-app-store"))]
+    impl LegacyBackend<'_> {
+        fn registration(&self) -> Result<auto_launch::AutoLaunch, String> {
+            // Match tauri-plugin-autostart 2.5.1's LaunchAgent builder exactly:
+            // package_info.name is the label/plist basename; the path is the canonical executable.
+            // Reuse its auto-launch 0.5.0 implementation, never enable the legacy backend.
+            let executable = std::env::current_exe()
+                .and_then(|path| path.canonicalize())
+                .map_err(|_| "Cannot locate the previous login registration".to_string())?;
+            Ok(auto_launch::AutoLaunch::new(
+                self.0.package_info().name.as_str(),
+                &executable.display().to_string(),
+                true,
+                &[super::AUTOSTART_ARG],
+            ))
+        }
+    }
+
+    #[cfg(not(feature = "mac-app-store"))]
+    impl Backend for LegacyBackend<'_> {
+        fn legacy_enabled(&self) -> Result<bool, String> {
+            self.registration()?
+                .is_enabled()
+                .map_err(|_| "Cannot read the previous login registration".into())
+        }
+
+        fn set_native_enabled(&self, enabled: bool) -> Result<(), String> {
+            set_native_enabled(enabled, false)
+        }
+
+        fn remove_legacy(&self) -> Result<(), String> {
+            self.registration()?
+                .disable()
+                .map_err(|_| "Cannot remove the previous login registration".into())
+        }
+    }
+
+    #[cfg(not(feature = "mac-app-store"))]
+    pub fn migrate_legacy(app: &AppHandle) {
+        if let Err(error) = super::migration::migrate(&LegacyBackend(app)) {
+            // Retain the old registration and retry on next launch; startup stays usable and silent.
+            eprintln!("Open at Login migration deferred: {error}");
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
-pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), String> {
-    let manager = app.autolaunch();
-    if enabled {
-        manager.enable()
-    } else {
-        manager.disable()
-    }
-    .map_err(|error| error.to_string())
+pub use platform::{is_enabled, launched_at_login, set_enabled};
+
+#[cfg(all(target_os = "macos", not(feature = "mac-app-store")))]
+pub use platform::migrate_legacy;
+
+#[cfg(not(target_os = "macos"))]
+pub fn launched_at_login() -> bool {
+    std::env::args_os().any(|argument| argument == std::ffi::OsStr::new(AUTOSTART_ARG))
 }

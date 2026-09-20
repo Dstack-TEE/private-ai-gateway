@@ -106,26 +106,71 @@ pub(super) fn credential_helper_command(exe: &Path, agent: Agent) -> Result<Stri
     ))
 }
 
-pub(super) fn stale_helper(agent: Agent, record: &Connection, exe: &Path) -> bool {
+pub(super) fn agent_credential_command(
+    exe: &Path,
+    agent: Agent,
+    token_path: Option<&Path>,
+) -> Result<String, String> {
+    if let Some(path) = token_path {
+        let path = path
+            .to_str()
+            .filter(|path| Path::new(path).is_absolute())
+            .ok_or("The Agent token path must be absolute Unicode")?;
+        let quoted = shlex::try_quote(path).map_err(|_| "The Agent token path cannot be quoted")?;
+        return Ok(format!("/bin/cat {quoted}"));
+    }
+    if agent == Agent::ClaudeCode {
+        helper_command(exe, agent.id())
+    } else {
+        credential_helper_command(exe, agent)
+    }
+}
+
+pub(super) fn stale_helper(
+    agent: Agent,
+    record: &Connection,
+    exe: &Path,
+    token_path: Option<&Path>,
+) -> bool {
+    if agent == Agent::Codex {
+        let expected_args = if let Some(path) = token_path {
+            vec![path.display().to_string()]
+        } else {
+            vec!["--agent-token".into(), "codex".into()]
+        };
+        if record.fields.iter().any(|field| {
+            field.path == owned(&["model_providers", "private_ai_proxy", "auth", "args"])
+                && field.value != Some(ConfigValue::List(expected_args.clone()))
+        }) {
+            return true;
+        }
+    }
     let (path, expected) = match agent {
         Agent::Codex => (
             &["model_providers", "private_ai_proxy", "auth", "command"][..],
-            exe.to_str().map(str::to_string),
+            if token_path.is_some() {
+                Some("/bin/cat".into())
+            } else {
+                exe.to_str().map(str::to_string)
+            },
         ),
-        Agent::ClaudeCode => (&["apiKeyHelper"][..], helper_command(exe, agent.id()).ok()),
+        Agent::ClaudeCode => (
+            &["apiKeyHelper"][..],
+            agent_credential_command(exe, agent, token_path).ok(),
+        ),
         Agent::Pi => (
             &["providers", "private-ai-proxy"][..],
-            credential_helper_command(exe, agent)
+            agent_credential_command(exe, agent, token_path)
                 .ok()
                 .map(|command| format!("!{command}")),
         ),
         Agent::Hermes => (
             &["providers", "private-ai-proxy", "key_cmd"][..],
-            credential_helper_command(exe, agent).ok(),
+            agent_credential_command(exe, agent, token_path).ok(),
         ),
         Agent::OpenCode => return false,
         Agent::OpenClaw => return false, // Validated with the token path by Projector.
-        Agent::OhMyPi => return oh_my_pi::stale_helper(record, exe),
+        Agent::OhMyPi => return oh_my_pi::stale_helper(record, exe, token_path),
     };
     // Only inspect the helper-bearing field we recorded, not provider metadata.
     record.fields.iter().any(|field| {

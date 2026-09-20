@@ -51,6 +51,8 @@ fn main() {
         "list_agents",
         "preview_agent_connection",
         "apply_agent_connection",
+        "get_agent_access",
+        "request_agent_access",
         "get_cli_registration",
         "set_cli_registration",
         "stop_all_and_quit",

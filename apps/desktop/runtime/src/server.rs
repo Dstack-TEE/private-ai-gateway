@@ -78,10 +78,26 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
             }
         }
     });
+    let owner = owner_exited();
+    tokio::pin!(owner);
     let signal = shutdown_signal();
     tokio::pin!(signal);
     while !stopping.load(Ordering::Acquire) {
         tokio::select! {
+            _ = &mut owner => {
+                // A sandboxed service belongs to its GUI parent. Restoration
+                // errors remain retryable on next launch, never keep it alive.
+                let worker = runtime.clone();
+                let executor = handle.clone();
+                let gate = admission.clone();
+                match tokio::task::spawn_blocking(move || shutdown(&worker, &gate, &executor, ShutdownMode::Quit)).await {
+                    Ok(Ok(())) => {},
+                    Ok(Err(error)) => runtime.report_error(error),
+                    Err(error) => eprintln!("Cannot finish backend shutdown: {error}"),
+                }
+                stopping.store(true, Ordering::Release);
+                break;
+            }
             result = &mut signal => {
                 result?;
                 let worker = runtime.clone();
@@ -131,6 +147,20 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
     // Idle clients have bounded read deadlines; watch clients observe stopping.
     while tasks.join_next().await.is_some() {}
     Ok(())
+}
+
+async fn owner_exited() {
+    #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+    {
+        // A direct child is reparented to launchd when its owner exits, even
+        // after a crash. No PID lookup, polling of unrelated processes or IPC
+        // endpoint exposed to external agents is needed.
+        while unsafe { libc::getppid() } != 1 {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+    #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
+    std::future::pending::<()>().await;
 }
 
 async fn shutdown_signal() -> Result<(), String> {

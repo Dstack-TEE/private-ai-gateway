@@ -52,7 +52,9 @@ impl Projector {
     /// Connecting references the bundled helper; an installation without it
     /// cannot issue agent credentials.
     pub(super) fn require_helper(&self) -> Result<(), AgentError> {
-        if executable_metadata(&self.helper_exe).is_some_and(|metadata| metadata.len() > 0) {
+        if self.file_credentials
+            || executable_metadata(&self.helper_exe).is_some_and(|metadata| metadata.len() > 0)
+        {
             Ok(())
         } else {
             Err(AgentError::HelperUnavailable)
@@ -94,8 +96,12 @@ impl Projector {
         if agent == Agent::OpenClaw {
             openclaw::validate_host(&self.home, self.tool_env)
                 .map_err(AgentError::ConfigurationConflict)?;
-            openclaw::validate_helper(&self.helper_exe, &self.tokens.path(agent.id()))
-                .map_err(|_| AgentError::HelperUnavailable)?;
+            if self.file_credentials {
+                Ok(())
+            } else {
+                openclaw::validate_helper(&self.helper_exe, &self.tokens.path(agent.id()))
+            }
+            .map_err(|_| AgentError::HelperUnavailable)?;
             openclaw::validate_config(doc, prior).map_err(AgentError::ConfigurationConflict)?;
             openclaw::validate_selection(doc, options)
                 .map_err(AgentError::ConfigurationConflict)?;
@@ -104,6 +110,7 @@ impl Projector {
         self.validate_native_config(agent, doc, prior, &options, catalog)?;
         let codex_catalog_path = self.codex_catalog_path();
         let inputs = Inputs {
+            file_credentials: self.file_credentials,
             endpoint: &self.endpoint,
             helper_exe: &self.helper_exe,
             token_path: &self.tokens.path(agent.id()),
@@ -364,7 +371,11 @@ impl Projector {
         }
         if agent == Agent::OpenClaw && (installed || record.is_some()) {
             let valid = openclaw::validate_host(&self.home, self.tool_env).and_then(|()| {
-                openclaw::validate_helper(&self.helper_exe, &self.tokens.path(agent.id()))
+                if self.file_credentials {
+                    Ok(())
+                } else {
+                    openclaw::validate_helper(&self.helper_exe, &self.tokens.path(agent.id()))
+                }
             });
             if let Err(attention) = valid {
                 status.attention = Some(attention);
@@ -457,7 +468,13 @@ impl Projector {
                 "This agent's access is revoked; retry Disconnect to restore its config"
                     .to_string(),
             );
-        } else if stale_helper(agent, record, &self.helper_exe) {
+        } else if stale_helper(
+            agent,
+            record,
+            &self.helper_exe,
+            self.file_credentials
+                .then_some(self.tokens.path(agent.id()).as_path()),
+        ) {
             status.repair_action = Some(AgentRepairAction::Reconnect);
             status.connected = false;
             status.authorized = false;
@@ -504,8 +521,12 @@ impl Projector {
                 .as_ref()
                 .ok_or_else(|| "OpenClaw config is unavailable".to_string())
                 .and_then(|doc| openclaw::validate_config(doc, Some(record)));
-            let stale =
-                openclaw::stale_helper(record, &self.helper_exe, &self.tokens.path(agent.id()));
+            let stale = openclaw::stale_credentials(
+                record,
+                &self.helper_exe,
+                &self.tokens.path(agent.id()),
+                self.file_credentials,
+            );
             if result.is_err() || stale {
                 status.connected = false;
                 status.authorized = false;

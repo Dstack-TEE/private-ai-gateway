@@ -41,7 +41,7 @@ pub fn wait_for_exit(pid: u32, timeout: Duration) -> Result<(), String> {
     wait_for_exit_native(pid, timeout)
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(all(target_os = "macos", feature = "mac-app-store"))))]
 fn configure_background_command(command: &mut Command) {
     use std::{io, os::unix::process::CommandExt};
 
@@ -68,7 +68,10 @@ fn configure_background_command(command: &mut Command) {
     command.creation_flags(CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
 }
 
-#[cfg(not(any(unix, windows)))]
+#[cfg(any(
+    all(target_os = "macos", feature = "mac-app-store"),
+    not(any(unix, windows))
+))]
 fn configure_background_command(_: &mut Command) {}
 
 #[cfg(target_os = "linux")]

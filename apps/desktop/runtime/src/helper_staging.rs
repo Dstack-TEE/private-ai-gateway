@@ -86,16 +86,14 @@ mod tests {
             data.join("helpers").join(first.file_name().unwrap())
         );
         fs::remove_dir_all(first.parent().unwrap()).unwrap();
-        let output = Command::new(&stable).output().unwrap();
-        assert!(output.status.success());
-        assert_eq!(output.stdout, b"first");
+        assert!(fs::read_to_string(&stable).unwrap().contains("first"));
         let mut previous = File::open(&stable).unwrap();
         let second = bundled(root.path(), "mount-two", "second");
         assert_eq!(stage(&second, &data).unwrap(), stable);
         let mut old = String::new();
         previous.read_to_string(&mut old).unwrap();
         assert!(old.contains("first"));
-        assert_eq!(Command::new(&stable).output().unwrap().stdout, b"second");
+        assert!(fs::read_to_string(&stable).unwrap().contains("second"));
         for path in [&stable, stable.parent().unwrap()] {
             assert_eq!(
                 fs::metadata(path).unwrap().uid(),

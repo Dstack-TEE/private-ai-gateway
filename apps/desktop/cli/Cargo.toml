@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Private AI Proxy command-line client and user backend"
 license = "Apache-2.0"
 edition = "2021"
-rust-version = "1.91"
+rust-version = "1.98"
 
 [features]
 default = ["managed-client"]
@@ -16,6 +16,7 @@ managed-client = [
     "dep:desktop-runtime",
     "dep:tokio-util",
 ]
+mac-app-store = ["desktop-runtime/mac-app-store"]
 
 [lib]
 name = "private_ai_proxy"

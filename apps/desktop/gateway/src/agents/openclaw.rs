@@ -84,30 +84,41 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
             row
         })
         .collect();
-    let command = helper_path(inputs.helper_exe, inputs.token_path)?;
-    let command = command
-        .to_str()
-        .ok_or("OpenClaw requires a UTF-8 helper path")?;
-    validate_command_text(command)?;
+    let (reference, provider) = if inputs.file_credentials {
+        (
+            json!({"source": "file", "provider": PROVIDER, "id": "value"}),
+            file_provider(inputs.token_path),
+        )
+    } else {
+        let command = helper_path(inputs.helper_exe, inputs.token_path)?;
+        let command = command
+            .to_str()
+            .ok_or("OpenClaw requires a UTF-8 helper path")?;
+        validate_command_text(command)?;
+        (
+            json!({"source": "exec", "provider": PROVIDER, "id": "openclaw"}),
+            json!({
+                "source": "exec", "command": command,
+                "args": ["--agent-token", "openclaw"], "jsonOnly": false,
+                "env": helper_env(inputs.token_path)?,
+            }),
+        )
+    };
     let mut result = vec![
         generated_catalog(
             PROVIDER_PATH,
             json!({
                 "baseUrl": format!("{}/v1", inputs.endpoint.trim_end_matches('/')),
                 "api": "openai-completions",
-                "apiKey": {"source": "exec", "provider": PROVIDER, "id": "openclaw"},
+                "apiKey": reference,
                 "models": models,
             }),
             catalog.models.len(),
         ),
         Field {
             path: owned(SECRET_PATH),
-            value: Some(ConfigValue::Json(json!({
-                "source": "exec", "command": command,
-                "args": ["--agent-token", "openclaw"], "jsonOnly": false,
-                "env": helper_env(inputs.token_path)?,
-            }))),
-            preview: Some("Native-host OpenClaw token helper".into()),
+            value: Some(ConfigValue::Json(provider)),
+            preview: Some("Native-host OpenClaw local token".into()),
         },
     ];
     if let Some(id) = selected {
@@ -173,11 +184,16 @@ fn validate_references(value: &Value) -> Result<(), String> {
             }
             if object.get("provider").and_then(Value::as_str) == Some(PROVIDER)
                 && object.contains_key("source")
-                && (object.get("source").and_then(Value::as_str) != Some("exec")
-                    || object.get("id").and_then(Value::as_str) != Some("openclaw"))
+                && !matches!(
+                    (
+                        object.get("source").and_then(Value::as_str),
+                        object.get("id").and_then(Value::as_str)
+                    ),
+                    (Some("exec"), Some("openclaw")) | (Some("file"), Some("value"))
+                )
             {
                 return Err(
-                    "The OpenClaw token helper supports only its single openclaw exec SecretRef"
+                    "The OpenClaw token provider supports only its single local token SecretRef"
                         .into(),
                 );
             }
@@ -439,6 +455,26 @@ fn same_content(source: &Path, staged: &Path) -> io::Result<bool> {
     Ok(source.read(&mut left[..1])? == 0 && staged.read(&mut right[..1])? == 0)
 }
 
+// Verified against the pinned OpenClaw secrets/resolve.ts singleValue contract.
+fn file_provider(token_path: &Path) -> Value {
+    json!({"source": "file", "path": token_path, "mode": "singleValue"})
+}
+
+pub(super) fn stale_credentials(
+    record: &Connection,
+    source: &Path,
+    token_path: &Path,
+    file_credentials: bool,
+) -> bool {
+    if file_credentials {
+        return !record.fields.iter().any(|field| {
+            field.path == owned(SECRET_PATH)
+                && field.value == Some(ConfigValue::Json(file_provider(token_path)))
+        });
+    }
+    stale_helper(record, source, token_path)
+}
+
 pub(super) fn stale_helper(record: &Connection, source: &Path, token_path: &Path) -> bool {
     let Ok(command) = helper_path(source, token_path) else {
         return true;
@@ -553,6 +589,7 @@ mod tests {
     fn projection(root: &Path, options: &ConnectOptions) -> Vec<Field> {
         fs::create_dir_all(data_dir(&token_path(root)).unwrap()).unwrap();
         fields(&Inputs {
+            file_credentials: false,
             endpoint: "http://127.0.0.1:4180",
             helper_exe: &root.join(helper_binary_name()),
             token_path: &token_path(root),

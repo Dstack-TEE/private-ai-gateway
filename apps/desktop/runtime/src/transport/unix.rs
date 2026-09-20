@@ -132,7 +132,9 @@ impl Write for Stream {
 
 pub(super) fn endpoint_path(data_dir: &Path) -> io::Result<PathBuf> {
     let hash = endpoint_hash(data_dir.as_os_str().as_bytes());
-    if env::var_os(desktop_gateway::agents::HOME_OVERRIDE_ENV).is_some() {
+    if env::var_os(desktop_gateway::agents::HOME_OVERRIDE_ENV).is_some()
+        || env::var_os(desktop_gateway::agents::APP_DATA_OVERRIDE_ENV).is_some()
+    {
         let endpoint = data_dir.join("runtime").join(SOCKET_FILE);
         if socket_path_fits(&endpoint) {
             return Ok(endpoint);

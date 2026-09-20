@@ -156,15 +156,15 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
         json!({
             "baseUrl":format!("{}/v1", inputs.endpoint.trim_end_matches('/')),
             "api":"openai-completions", "auth":"apiKey",
-            "apiKey":format!("!{}", credential_helper_command(inputs.helper_exe, Agent::OhMyPi)?),
+            "apiKey":format!("!{}", inputs.credential_command(Agent::OhMyPi)?),
             "models":models,
         }),
         catalog.models.len(),
     )])
 }
 
-pub(super) fn stale_helper(record: &Connection, helper: &Path) -> bool {
-    let expected = credential_helper_command(helper, Agent::OhMyPi)
+pub(super) fn stale_helper(record: &Connection, helper: &Path, token_path: Option<&Path>) -> bool {
+    let expected = agent_credential_command(helper, Agent::OhMyPi, token_path)
         .ok()
         .map(|command| format!("!{command}"));
     record

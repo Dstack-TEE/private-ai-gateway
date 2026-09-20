@@ -1,0 +1,296 @@
+name: Desktop Mac App Store
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/desktop-mac-app-store.yml'
+      - 'apps/desktop/**'
+      - 'crates/aci-protocol/**'
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/desktop-mac-app-store.yml'
+      - 'apps/desktop/**'
+      - 'crates/aci-protocol/**'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Mac App Store marketing version (for example 0.1.2)'
+        required: true
+        type: string
+      build_number:
+        description: 'Increasing CFBundleVersion (for example 123 or 123.1)'
+        required: true
+        type: string
+      upload:
+        description: 'Upload the signed package to App Store Connect'
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  CARGO_BUILD_JOBS: 2
+  CARGO_TARGET_DIR: ${{ github.workspace }}/apps/desktop/src-tauri/target
+
+concurrency:
+  group: desktop-mac-app-store-${{ github.ref }}-${{ inputs.build_number || 'verify' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+jobs:
+  verify:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ env.CARGO_TARGET_DIR }}/*/.fingerprint
+            ${{ env.CARGO_TARGET_DIR }}/*/deps
+            ${{ env.CARGO_TARGET_DIR }}/*/build
+          key: pap-mas-verify-${{ runner.os }}-${{ hashFiles('apps/desktop/package-lock.json', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}
+          restore-keys: pap-mas-verify-${{ runner.os }}-
+      - name: Install desktop dependencies
+        working-directory: apps/desktop
+        run: |
+          xcodebuild -version
+          npm ci
+      - name: Verify renderer and packaging contracts
+        working-directory: apps/desktop
+        run: |
+          npm run check
+          npm run test:release
+      - name: Verify Direct macOS upgrade
+        working-directory: apps/desktop
+        run: |
+          npm run build:sidecars:debug
+          cargo clippy --locked --all-targets --manifest-path src-tauri/Cargo.toml -- -D warnings
+          cargo test --locked --manifest-path src-tauri/Cargo.toml autostart
+      - name: Stage Tauri sidecars
+        working-directory: apps/desktop
+        env:
+          PAP_DISTRIBUTION: mac-app-store
+        run: npm run build:sidecars:debug
+      - name: Verify App Store sources
+        working-directory: apps/desktop
+        run: |
+          cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+          cargo clippy --locked --all-targets --package private-ai-proxy-runtime --features mac-app-store -- -D warnings
+          cargo test --locked --package private-ai-proxy-runtime --features mac-app-store
+          export TAURI_CONFIG="$(cat src-tauri/tauri.appstore.conf.json)"
+          cargo clippy --locked --all-targets --manifest-path src-tauri/Cargo.toml --features mac-app-store -- -D warnings
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --features mac-app-store
+
+  package:
+    if: github.event_name == 'workflow_dispatch'
+    needs: verify
+    runs-on: macos-26
+    timeout-minutes: 120
+    environment: mac-app-store
+    env:
+      APPLE_APP_STORE_BUILD_NUMBER: ${{ inputs.build_number }}
+      DESKTOP_RELEASE_CHANNEL: stable
+      DESKTOP_RELEASE_VERSION: ${{ inputs.version }}
+      UPLOAD_APP_STORE: ${{ inputs.upload }}
+      APPLE_APPLICATION_IDENTITY: ${{ vars.MAC_APP_STORE_APPLICATION_IDENTITY }}
+      APPLE_INSTALLER_IDENTITY: ${{ vars.MAC_APP_STORE_INSTALLER_IDENTITY }}
+    steps:
+      # These step-scoped mappings are the signing configuration contract.
+      # Reuse them only for import; builds never receive certificate secrets.
+      - name: Validate App Store signing settings
+        shell: bash
+        env: &app-store-signing
+          MAC_APP_STORE_APPLICATION_CERTIFICATE: ${{ secrets.MAC_APP_STORE_APPLICATION_CERTIFICATE }}
+          MAC_APP_STORE_APPLICATION_CERTIFICATE_PASSWORD: ${{ secrets.MAC_APP_STORE_APPLICATION_CERTIFICATE_PASSWORD }}
+          MAC_APP_STORE_INSTALLER_CERTIFICATE: ${{ secrets.MAC_APP_STORE_INSTALLER_CERTIFICATE }}
+          MAC_APP_STORE_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.MAC_APP_STORE_INSTALLER_CERTIFICATE_PASSWORD }}
+          MAC_APP_STORE_PROVISIONING_PROFILE: ${{ secrets.MAC_APP_STORE_PROVISIONING_PROFILE }}
+        run: |
+          python3 - <<'PYTHON'
+          import base64, binascii, os
+          names = sorted(name for name in os.environ if name.startswith("MAC_APP_STORE_"))
+          names += ["APPLE_APPLICATION_IDENTITY", "APPLE_INSTALLER_IDENTITY"]
+          for name in names:
+              value = os.environ.get(name, "")
+              if not value.strip():
+                  raise SystemExit(f"Missing Mac App Store setting: {name}")
+              if name.endswith(("_CERTIFICATE", "_PROFILE")):
+                  try:
+                      payload = base64.b64decode("".join(value.split()), validate=True)
+                  except (ValueError, binascii.Error):
+                      raise SystemExit(f"Invalid base64 Mac App Store setting: {name}") from None
+                  if not payload:
+                      raise SystemExit(f"Empty Mac App Store payload: {name}")
+          PYTHON
+      - name: Validate App Store Connect upload settings
+        if: inputs.upload
+        shell: bash
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          python3 - <<'PYTHON'
+          import os, re
+          for name in sorted(name for name in os.environ if name.startswith("APPLE_API_")):
+              value = os.environ[name]
+              if not value.strip():
+                  raise SystemExit(f"Missing App Store Connect setting: {name}")
+              pattern = {
+                  "APPLE_API_KEY": r"[A-Z0-9]{10}",
+                  "APPLE_API_ISSUER": r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}",
+                  "APPLE_API_PRIVATE_KEY": r"-----BEGIN PRIVATE KEY-----\s+[A-Za-z0-9+/=\s]+-----END PRIVATE KEY-----\s*",
+              }[name]
+              if not re.fullmatch(pattern, value):
+                  raise SystemExit(f"Invalid App Store Connect setting: {name}")
+          PYTHON
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ env.CARGO_TARGET_DIR }}/*/.fingerprint
+            ${{ env.CARGO_TARGET_DIR }}/*/deps
+            ${{ env.CARGO_TARGET_DIR }}/*/build
+            ${{ env.CARGO_TARGET_DIR }}/*/*/.fingerprint
+            ${{ env.CARGO_TARGET_DIR }}/*/*/deps
+            ${{ env.CARGO_TARGET_DIR }}/*/*/build
+          key: pap-mas-package-${{ runner.os }}-${{ hashFiles('apps/desktop/package-lock.json', 'apps/desktop/Cargo.lock', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}
+          restore-keys: pap-mas-package-${{ runner.os }}-
+      - name: Install build targets and dependencies
+        working-directory: apps/desktop
+        run: |
+          xcodebuild -version
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          npm ci
+      - name: Validate release request
+        working-directory: apps/desktop
+        run: |
+          node --input-type=module -e '
+            import semver from "semver";
+            import { validateAppStoreBuildNumber } from "./scripts/distribution.mjs";
+            const version = process.env.DESKTOP_RELEASE_VERSION;
+            if (!semver.valid(version) || semver.prerelease(version) !== null) throw new Error("version must be a stable semantic version");
+            validateAppStoreBuildNumber(process.env.APPLE_APP_STORE_BUILD_NUMBER);
+            if (process.env.UPLOAD_APP_STORE === "true" && process.env.GITHUB_REF !== "refs/heads/main") throw new Error("App Store uploads must run from main");
+          '
+      - name: Import App Store signing material
+        shell: bash
+        env: *app-store-signing
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/private-ai-proxy-app-store.keychain-db"
+          keychain_password="$(uuidgen)$(uuidgen)"
+          echo "::add-mask::$keychain_password"
+          echo "APPLE_APP_STORE_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+          application_p12="$RUNNER_TEMP/application.p12"
+          installer_p12="$RUNNER_TEMP/installer.p12"
+          profile="$RUNNER_TEMP/private-ai-proxy.provisionprofile"
+          APPLICATION_P12="$application_p12" INSTALLER_P12="$installer_p12" PROFILE_PATH="$profile" node --input-type=module -e '
+            import { writeFileSync } from "node:fs";
+            writeFileSync(process.env.APPLICATION_P12, Buffer.from(process.env.MAC_APP_STORE_APPLICATION_CERTIFICATE, "base64"), { mode: 0o600 });
+            writeFileSync(process.env.INSTALLER_P12, Buffer.from(process.env.MAC_APP_STORE_INSTALLER_CERTIFICATE, "base64"), { mode: 0o600 });
+            writeFileSync(process.env.PROFILE_PATH, Buffer.from(process.env.MAC_APP_STORE_PROVISIONING_PROFILE, "base64"), { mode: 0o600 });
+          '
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$application_p12" -k "$keychain" -P "$MAC_APP_STORE_APPLICATION_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security import "$installer_p12" -k "$keychain" -P "$MAC_APP_STORE_INSTALLER_CERTIFICATE_PASSWORD" -T /usr/bin/productbuild -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain"
+          security find-identity -v "$keychain" | grep -F -- "$APPLE_APPLICATION_IDENTITY"
+          security find-certificate -a -c "$APPLE_INSTALLER_IDENTITY" "$keychain" >/dev/null
+          {
+            echo "APPLE_APP_STORE_KEYCHAIN=$keychain"
+            echo "APPLE_APP_STORE_PROFILE=$profile"
+          } >> "$GITHUB_ENV"
+      - name: Build unsigned Universal app
+        working-directory: apps/desktop
+        run: npm run dist:app-store -- --bundles app
+      - name: Sign and package for App Store Connect
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_bundle="$(find src-tauri/target/universal-apple-darwin/release/bundle/macos -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -n "$app_bundle"
+          package="release/private-ai-proxy-${DESKTOP_RELEASE_VERSION}-mac-app-store.pkg"
+          node scripts/package-app-store.mjs \
+            --app "$app_bundle" \
+            --profile "$APPLE_APP_STORE_PROFILE" \
+            --application-identity "$APPLE_APPLICATION_IDENTITY" \
+            --installer-identity "$APPLE_INSTALLER_IDENTITY" \
+            --output "$package"
+          echo "APPLE_APP_STORE_PACKAGE=$PWD/$package" >> "$GITHUB_ENV"
+      - name: Upload package artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: private-ai-proxy-${{ inputs.version }}-${{ inputs.build_number }}-mac-app-store
+          path: apps/desktop/release/*-mac-app-store.pkg
+          if-no-files-found: error
+          retention-days: 14
+      - name: Prepare App Store Connect key
+        if: inputs.upload
+        shell: bash
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          key_root="$RUNNER_TEMP/app-store-connect"
+          key_directory="$key_root/private_keys"
+          key_path="$key_directory/AuthKey_${APPLE_API_KEY}.p8"
+          umask 077
+          mkdir -p "$key_directory"
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$key_path"
+          echo "APPLE_API_KEY_ROOT=$key_root" >> "$GITHUB_ENV"
+      - name: Upload to App Store Connect
+        if: inputs.upload
+        shell: bash
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          set -euo pipefail
+          cd "$APPLE_API_KEY_ROOT"
+          xcrun altool --validate-app --type macos --file "$APPLE_APP_STORE_PACKAGE" --apiKey "$APPLE_API_KEY" --apiIssuer "$APPLE_API_ISSUER"
+          xcrun altool --upload-app --type macos --file "$APPLE_APP_STORE_PACKAGE" --apiKey "$APPLE_API_KEY" --apiIssuer "$APPLE_API_ISSUER"
+      - name: Remove signing material
+        if: always()
+        shell: bash
+        run: |
+          keychain="$RUNNER_TEMP/private-ai-proxy-app-store.keychain-db"
+          cleanup_status=0
+          if [[ -f "$keychain" ]]; then security delete-keychain "$keychain" || cleanup_status=$?; fi
+          rm -f "$RUNNER_TEMP/application.p12" "$RUNNER_TEMP/installer.p12" "$RUNNER_TEMP/private-ai-proxy.provisionprofile"
+          rm -rf "$RUNNER_TEMP/app-store-connect"
+          exit "$cleanup_status"

@@ -39,6 +39,7 @@ pub struct RuntimeOptions {
     pub launcher: Arc<dyn SidecarLauncher>,
     pub helper_path: PathBuf,
     pub task_runtime: Handle,
+    pub agent_configuration: bool,
 }
 
 pub struct DesktopRuntime {
@@ -56,12 +57,13 @@ pub struct DesktopRuntime {
     secrets: Arc<dyn SecretStore>,
     credentials: ClientCredentials,
     endpoint: EndpointRuntime,
-    codex_sync: CodexCatalogSync,
     agent_policy: Mutex<()>,
     lifecycle: tokio::sync::Mutex<()>,
     exiting: AtomicBool,
     recovery: crate::recovery::Recovery,
     helper_path: PathBuf,
+    agent_configuration: bool,
+    agent_access_status: fn() -> crate::agent_access::AgentAccessStatus,
     instance: Option<lock::InstanceLock>,
 }
 
@@ -180,58 +182,6 @@ impl EndpointRuntime {
     }
 }
 
-#[derive(Clone)]
-struct CodexCatalogSyncAttempt {
-    revision: String,
-    error: Option<String>,
-}
-
-#[derive(Default)]
-struct CodexCatalogSync(Mutex<Option<CodexCatalogSyncAttempt>>);
-
-impl CodexCatalogSync {
-    fn reset(&self) -> Result<(), String> {
-        *self
-            .0
-            .lock()
-            .map_err(|_| "The Codex model metadata state is unavailable".to_string())? = None;
-        Ok(())
-    }
-
-    fn remember_success(&self, revision: &str) -> Result<(), String> {
-        *self
-            .0
-            .lock()
-            .map_err(|_| "The Codex model metadata state is unavailable".to_string())? =
-            Some(CodexCatalogSyncAttempt {
-                revision: revision.to_string(),
-                error: None,
-            });
-        Ok(())
-    }
-
-    fn refresh_error(&self, projector: &Projector, catalog: &Catalog) -> Option<String> {
-        let mut previous = match self.0.lock() {
-            Ok(previous) => previous,
-            Err(_) => return Some("The Codex model metadata state is unavailable".to_string()),
-        };
-        if let Some(attempt) = previous.as_ref() {
-            if attempt.revision == catalog.revision {
-                return attempt.error.clone();
-            }
-        }
-        let error = projector
-            .sync_codex_catalog(catalog)
-            .err()
-            .map(|error| error.to_string());
-        *previous = Some(CodexCatalogSyncAttempt {
-            revision: catalog.revision.clone(),
-            error: error.clone(),
-        });
-        error
-    }
-}
-
 impl DesktopRuntime {
     pub fn launch(options: RuntimeOptions) -> Result<Arc<Self>, String> {
         if !options.helper_path.is_absolute() {
@@ -242,10 +192,14 @@ impl DesktopRuntime {
         let instance = lock::instance(&data_dir)
             .map_err(|error| format!("Cannot take the instance lock: {error}"))?
             .ok_or_else(|| "Another Private AI Proxy instance is already running".to_string())?;
-        #[cfg(unix)]
-        if let Err(error) = crate::helper_staging::stage(&options.helper_path, &data_dir) {
-            // OpenClaw independently rejects an unavailable or mismatched staged copy.
-            eprintln!("Cannot stage the credential helper: {error}");
+        let agent_configuration = options.agent_configuration;
+        let helper_path = options.helper_path;
+        #[cfg(all(unix, not(all(target_os = "macos", feature = "mac-app-store"))))]
+        if agent_configuration {
+            if let Err(error) = crate::helper_staging::stage(&helper_path, &data_dir) {
+                // OpenClaw independently rejects an unavailable or mismatched staged copy.
+                eprintln!("Cannot stage the credential helper: {error}");
+            }
         }
         let secrets: Arc<dyn SecretStore> = Arc::new(KeyringStore);
         let (mut settings, mut settings_error) = match service_config::load() {
@@ -327,12 +281,13 @@ impl DesktopRuntime {
             account_save: Mutex::new(None),
             balances: crate::balance_cache::BalanceCache::default(),
             endpoint: EndpointRuntime::new(task_runtime.clone()),
-            codex_sync: CodexCatalogSync::default(),
             agent_policy: Mutex::new(()),
             lifecycle: tokio::sync::Mutex::new(()),
             exiting: AtomicBool::new(false),
             recovery: crate::recovery::Recovery::default(),
-            helper_path: options.helper_path,
+            helper_path,
+            agent_configuration,
+            agent_access_status: crate::agent_access::status,
             instance: Some(instance),
         });
 

@@ -25,8 +25,26 @@ impl From<&str> for AgentOperationError {
 }
 
 impl DesktopRuntime {
+    fn require_agent_access(&self) -> Result<(), String> {
+        self.agent_configuration_enabled()
+            .then_some(())
+            .ok_or_else(|| "Agent Home access is required".to_string())
+    }
+
+    pub(super) fn agent_configuration_enabled(&self) -> bool {
+        self.agent_configuration
+            && (self.agent_access_status)() == crate::agent_access::AgentAccessStatus::Authorized
+    }
+
     pub(super) fn projector(&self, endpoint: &str) -> Result<Projector, String> {
-        Projector::new(self.helper_path.clone(), endpoint, self.secrets.clone())
+        let projector = Projector::new(self.helper_path.clone(), endpoint, self.secrets.clone())?;
+        Ok(
+            if cfg!(all(target_os = "macos", feature = "mac-app-store")) {
+                projector.with_home_credentials()
+            } else {
+                projector
+            },
+        )
     }
 
     pub(super) fn current_projector(&self) -> Result<Projector, String> {
@@ -48,6 +66,11 @@ impl DesktopRuntime {
     }
 
     pub(super) fn reload_agent_tokens(&self) -> Result<(), String> {
+        if !self.agent_configuration_enabled() {
+            self.proxy
+                .set_tokens(with_client_token(TokenSet::default(), &self.credentials)?);
+            return Ok(());
+        }
         let projector = self.current_projector()?;
         projector.initialize_store()?;
         if !crate::recovery::connection_intended(&self.manager.snapshot()?) {
@@ -91,12 +114,18 @@ impl DesktopRuntime {
     }
 
     pub async fn refresh_catalog(self: &Arc<Self>) -> Result<GatewayState, String> {
-        let state = self.manager.clone().refresh_catalog().await?;
-        self.codex_sync.reset()?;
-        Ok(state)
+        self.manager.clone().refresh_catalog().await
     }
 
     pub fn list_agents(&self) -> Result<Vec<AgentStatus>, String> {
+        if !self.agent_configuration_enabled() {
+            let _guard = self
+                .agent_policy
+                .lock()
+                .map_err(|_| "Agent state unavailable")?;
+            self.publish_agent_tokens(TokenSet::default())?;
+            return Ok(Vec::new());
+        }
         if let Err(error) = self.reconcile_agents() {
             if self.state()?.error.as_deref() != Some(&error) {
                 self.report_error(error);
@@ -125,7 +154,7 @@ impl DesktopRuntime {
                 .iter_mut()
                 .find(|status| status.id == Agent::Codex.id() && status.authorized)
             {
-                if let Some(error) = self.codex_sync.refresh_error(&projector, catalog) {
+                if let Err(error) = projector.sync_codex_catalog(catalog) {
                     let refresh = format!(
                         "Codex model metadata could not be refreshed: {error}. Disconnect remains available"
                     );
@@ -146,6 +175,7 @@ impl DesktopRuntime {
         connect: bool,
         options: ConnectOptions,
     ) -> Result<AgentPreview, AgentOperationError> {
+        self.require_agent_access()?;
         let agent = Agent::from_id(&agent_id)?;
         let catalog = self.connection_catalog(agent, connect)?;
         Ok(self
@@ -160,6 +190,7 @@ impl DesktopRuntime {
         revision: String,
         options: ConnectOptions,
     ) -> Result<AgentStatus, AgentOperationError> {
+        self.require_agent_access()?;
         let _operation = self.configuration_change()?;
         let _guard = self
             .agent_policy
@@ -179,16 +210,12 @@ impl DesktopRuntime {
                 .set_tokens(self.proxy.tokens().without(agent.id()));
         }
         let mut status = projector.apply(agent, connect, &revision, catalog.as_ref(), &options)?;
-        if agent == Agent::Codex && connect {
-            if let Some(catalog) = catalog.as_ref() {
-                self.codex_sync.remember_success(&catalog.revision)?;
-            }
-        }
         status.authorized &= self.publish_agent_tokens(projector.scan(None)?.1)?;
         Ok(status)
     }
 
     pub fn disconnect_all_agents(&self) -> Result<Vec<AgentStatus>, String> {
+        self.require_agent_access()?;
         let _operation = self.configuration_change()?;
         self.disconnect_all_agents_inner()
     }
@@ -221,6 +248,14 @@ impl DesktopRuntime {
     }
 
     pub(super) fn reconcile_agents(&self) -> Result<(), String> {
+        if !self.agent_configuration_enabled() {
+            let _guard = self
+                .agent_policy
+                .lock()
+                .map_err(|_| "Agent state unavailable")?;
+            self.publish_agent_tokens(TokenSet::default())?;
+            return Ok(());
+        }
         if self.instance.is_none() {
             return Ok(());
         }

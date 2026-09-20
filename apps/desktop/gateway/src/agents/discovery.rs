@@ -158,134 +158,6 @@ pub(super) fn executable_metadata(path: &Path) -> Option<fs::Metadata> {
     Some(metadata)
 }
 
-pub(super) fn command_output(
-    executable: &Path,
-    args: &[&str],
-    search_paths: &[PathBuf],
-) -> io::Result<std::process::Output> {
-    let mut command;
-    #[cfg(windows)]
-    if executable
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
-        })
-    {
-        command = Command::new("cmd");
-        command.arg("/C").arg(executable).args(args);
-    } else {
-        command = Command::new(executable);
-        command.args(args);
-    }
-    #[cfg(not(windows))]
-    {
-        command = Command::new(executable);
-        command.args(args);
-    }
-    command.env("PATH", command_path(executable, search_paths)?);
-    bounded_command_output(command, std::time::Duration::from_secs(15))
-}
-
-pub(super) fn bounded_command_output(
-    command: Command,
-    timeout: std::time::Duration,
-) -> io::Result<std::process::Output> {
-    // Agent transactions are synchronous and may run inside a Tokio worker.
-    // A dedicated thread keeps the bounded I/O runtime out of the caller's runtime.
-    std::thread::Builder::new()
-        .name("agent-metadata".to_string())
-        .spawn(move || {
-            use std::process::Stdio;
-            use tokio::io::{AsyncRead, AsyncReadExt};
-
-            async fn read_pipe(pipe: impl AsyncRead + Unpin, limit: usize) -> io::Result<Vec<u8>> {
-                let mut bytes = Vec::new();
-                pipe.take(limit as u64 + 1).read_to_end(&mut bytes).await?;
-                if bytes.len() > limit {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, "Model metadata output exceeds limit"));
-                }
-                Ok(bytes)
-            }
-
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?
-                .block_on(async move {
-                    let mut child = tokio::process::Command::from(command)
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::piped())
-                        .kill_on_drop(true)
-                        .spawn()?;
-                    let stdout = child.stdout.take().ok_or_else(|| io::Error::other("Missing stdout pipe"))?;
-                    let stderr = child.stderr.take().ok_or_else(|| io::Error::other("Missing stderr pipe"))?;
-                    let result = tokio::time::timeout(timeout, async {
-                        tokio::try_join!(child.wait(), read_pipe(stdout, 8 * 1024 * 1024), read_pipe(stderr, 64 * 1024))
-                    }).await;
-                    match result {
-                        Ok(Ok((status, stdout, stderr))) => Ok(std::process::Output { status, stdout, stderr }),
-                        result => {
-                            // Preserve the primary I/O failure even if the child exited while
-                            // its bounded pipes were being drained.
-                            let _ = child.start_kill();
-                            let _ = child.wait().await;
-                            match result {
-                                Ok(Err(error)) => Err(error),
-                                _ => Err(io::Error::new(io::ErrorKind::TimedOut, "Codex model metadata export timed out; check the Codex installation and retry")),
-                            }
-                        }
-                    }
-                })
-        })?
-        .join()
-        .map_err(|_| io::Error::other("Model metadata worker failed"))?
-}
-
-pub(super) fn command_path(executable: &Path, search_paths: &[PathBuf]) -> io::Result<OsString> {
-    // npm launchers should resolve the runtime from their own installation first.
-    let mut paths: Vec<PathBuf> = executable
-        .parent()
-        .map(Path::to_path_buf)
-        .into_iter()
-        .collect();
-    let inherited: Vec<PathBuf> = env::var_os("PATH")
-        .map(|paths| env::split_paths(&paths).collect())
-        .unwrap_or_default();
-    for path in search_paths.iter().chain(&inherited) {
-        if !paths.contains(path) {
-            paths.push(path.clone());
-        }
-    }
-    env::join_paths(paths).map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
-}
-
-pub(super) fn codex_metadata(
-    output: io::Result<std::process::Output>,
-) -> Result<serde_json::Value, AgentError> {
-    let output = output.map_err(|error| AgentError::MetadataUnavailable(match error.kind() {
-        io::ErrorKind::TimedOut => "Codex model metadata export timed out. Run `codex debug models --bundled` in Terminal to check the installation, then retry.".to_string(),
-        io::ErrorKind::InvalidData => "Codex returned invalid or oversized model metadata output. Check or reinstall the Codex installation, then retry.".to_string(),
-        io::ErrorKind::PermissionDenied => "Codex could not start because execution permission was denied. Check the Codex installation, then retry.".to_string(),
-        _ => "Codex could not start to export model metadata. Check that Codex and its runtime are installed, then retry.".to_string(),
-    }))?;
-    if !output.status.success() {
-        // Inspect known CLI diagnostics without returning arbitrary stderr to clients.
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("unrecognized subcommand")
-            || stderr.contains("unexpected argument '--bundled'")
-        {
-            return Err(AgentError::MetadataUnavailable("Codex CLI does not support `codex debug models --bundled`. Update Codex before connecting.".to_string()));
-        }
-        return Err(AgentError::MetadataUnavailable(format!(
-            "Codex exited with {} while exporting model metadata. Run `codex debug models --bundled` in Terminal to see the cause, then retry.",
-            output.status
-        )));
-    }
-    serde_json::from_slice(&output.stdout)
-        .map_err(|_| AgentError::MetadataUnavailable("Codex returned malformed bundled model metadata. Update or reinstall Codex, then retry.".to_string()))
-}
-
 pub(super) fn env_path(name: &str) -> Option<PathBuf> {
     env::var_os(name)
         .filter(|value| !value.is_empty())
@@ -306,6 +178,13 @@ pub(super) fn home_dir() -> Result<PathBuf, String> {
 /// resolved the same way by the desktop shell and the
 /// bundled helper.
 pub fn app_data_dir() -> Result<PathBuf, String> {
+    if let Some(path) = env_path(APP_DATA_OVERRIDE_ENV) {
+        return if path.is_absolute() {
+            Ok(path)
+        } else {
+            Err("The app data override must be an absolute path".to_string())
+        };
+    }
     if let Some(home) = env_path(HOME_OVERRIDE_ENV) {
         return Ok(home.join(".private-ai-proxy"));
     }
@@ -323,56 +202,16 @@ pub fn app_data_dir() -> Result<PathBuf, String> {
 }
 
 impl Projector {
-    /// Keep Codex's startup metadata in sync with the verified service
-    /// catalog. The installed Codex binary supplies its exact catalog schema
-    /// and complete built-in instructions; only public model metadata from
-    /// the verified service is overlaid. No credentials are written here.
+    /// Project the app-owned Codex baseline and verified provider metadata.
+    /// Both distributions embed the same catalog; no host executable is involved.
     pub fn sync_codex_catalog(&self, catalog: &Catalog) -> Result<(), AgentError> {
-        let bundled = self.codex_bundled_catalog()?;
-        let metadata = codex_catalog(catalog, &bundled).map_err(AgentError::MetadataUnavailable)?;
+        let metadata = codex_catalog(catalog).map_err(AgentError::MetadataUnavailable)?;
         let text = serde_json::to_string_pretty(&metadata).map_err(|_| AgentError::Internal)?;
         tokens::create_private_dir(&self.data_dir).map_err(|_| AgentError::ConfigurationWrite)?;
-        if fs::read_to_string(self.codex_catalog_path()).is_ok_and(|current| current == text) {
+        let path = self.codex_catalog_path();
+        if fs::read_to_string(&path).is_ok_and(|current| current == text) {
             return Ok(());
         }
-        write_atomic(&self.codex_catalog_path(), &text, None)
-            .map_err(|_| AgentError::ConfigurationWrite)
-    }
-
-    #[cfg(not(test))]
-    pub(super) fn codex_bundled_catalog(&self) -> Result<serde_json::Value, AgentError> {
-        let search_paths = cli_paths(&self.home, self.tool_env);
-        let executable = find_cli_in_paths(Agent::Codex, &search_paths).ok_or_else(|| {
-            AgentError::MetadataUnavailable(
-                "Codex CLI was not found; install or update Codex before connecting".to_string(),
-            )
-        })?;
-        codex_metadata(command_output(
-            &executable,
-            &["debug", "models", "--bundled"],
-            &search_paths,
-        ))
-    }
-
-    #[cfg(test)]
-    pub(super) fn codex_bundled_catalog(&self) -> Result<serde_json::Value, AgentError> {
-        Ok(serde_json::json!({
-            "models": [{
-                "slug": "gpt-test",
-                "display_name": "GPT Test",
-                "description": "Bundled test model",
-                "model_messages": { "instructions_template": "Complete official Codex instructions" },
-                "base_instructions": "Complete official Codex instructions",
-                "supported_in_api": true,
-                "visibility": "list",
-                "shell_type": "unified_exec",
-                "tool_mode": "code_mode_only",
-                "apply_patch_tool_type": "freeform",
-                "multi_agent_version": "v2",
-                "web_search_tool_type": "text_and_image",
-                "truncation_policy": { "mode": "tokens", "limit": 10_000 },
-                "input_modalities": ["text"]
-            }]
-        }))
+        write_atomic(&path, &text, None).map_err(|_| AgentError::ConfigurationWrite)
     }
 }

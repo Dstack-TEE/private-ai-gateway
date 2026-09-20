@@ -1,5 +1,5 @@
 import React, { memo } from "react";
-import { ChevronDown, CircleHelp, Info, Plus, RefreshCw, Settings } from "lucide-react";
+import { ChevronDown, CircleHelp, Info, LoaderCircle, Plus, RefreshCw, Settings } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { StateLabel } from "../components/state-label";
 import { Hint } from "../components/hint";
@@ -8,7 +8,7 @@ import { Badge } from "../components/ui/badge";
 import { Card, CardHeader, CardTitle, CardDescription, CardAction, CardContent } from "../components/ui/card";
 import { Separator } from "../components/ui/separator";
 import { IconButton } from "../components/controls";
-import type { AgentStatus, DesktopApi, GatewayState, RequestActivity, UsageSummary } from "../../shared/contracts";
+import type { AgentAccessStatus, AgentStatus, DesktopApi, GatewayState, RequestActivity, UsageSummary } from "../../shared/contracts";
 import { isProtected, presentation } from "../lib/protection";
 import { LocalApiPanel } from "./local-api";
 import { EmptyState } from "../components/detail";
@@ -46,6 +46,10 @@ export function Overview({
   connectingBackend,
   agentProblem,
   accountApi,
+  topUpLinks,
+  agentAccessStatus,
+  authorizingAgents,
+  onAuthorizeAgents,
   locked,
   clientKey,
   clientKeyVisible,
@@ -74,6 +78,10 @@ export function Overview({
   connectingBackend: boolean;
   agentProblem?: string;
   accountApi: Pick<DesktopApi, "getAccountBalance" | "openTopUp">;
+  topUpLinks: boolean;
+  agentAccessStatus?: AgentAccessStatus;
+  authorizingAgents: boolean;
+  onAuthorizeAgents(): void;
   locked: boolean;
   clientKey: string;
   clientKeyVisible: boolean;
@@ -106,6 +114,7 @@ export function Overview({
         backendDisconnected={backendDisconnected}
         connectingBackend={connectingBackend}
         accountApi={accountApi}
+        topUpLinks={topUpLinks}
         onToggle={onToggle}
         onStartBackend={onStartBackend}
         onSettings={onSettings}
@@ -124,16 +133,22 @@ export function Overview({
             onToggleKey={onToggleClientKey}
           />
         </OverviewModule>
-        <OverviewModule title="Agents" description="Use private AI in your agents." action="View all" onAction={onAgents}>
+        <OverviewModule title="Agents" description="Use private AI in your agents." action={agentAccessStatus !== "authorized" || authorizingAgents
+          ? <Button type="button" variant="outline" size="sm" className="relative min-w-20" disabled={!agentAccessStatus || authorizingAgents} aria-busy={authorizingAgents} aria-label="Enable" onClick={onAuthorizeAgents}>
+              <span className={authorizingAgents ? "invisible" : undefined}>Enable</span>
+              {authorizingAgents && <LoaderCircle aria-hidden="true" className="absolute animate-spin" />}
+            </Button>
+          : <Button variant="outline" size="sm" className="min-w-20" onClick={onAgents}>View all</Button>}>
           <div className="preview-list [&_>_:last-child]:border-b-0 overview-agent-list [--agent-row-height:calc(2rem_+_1.25rem_+_2px)] grid grid-rows-[repeat(3,_minmax(var(--agent-row-height),_auto))] gap-3 [&_>_.empty-state]:row-span-full">
-            {!agents.some((agent) => agent.installed) && <EmptyState text={agentProblem ? "Agent detection unavailable" : "No installed agents found"} />}
-            {agents.filter((agent) => agent.installed).slice(0, 3).map((agent) => (
+            {agentAccessStatus !== "authorized" ? <EmptyState text={authorizingAgents ? "Enabling Agent Integrations…" : agentAccessStatus ? "Enable Agent Integrations to detect agents" : "Checking Agent Integrations…"} />
+              : !agents.some((agent) => agent.installed) ? <EmptyState text={agentProblem ? "Agent detection unavailable" : "No installed agents found"} />
+              : agents.filter((agent) => agent.installed).slice(0, 3).map((agent) => (
               <AgentRow
                 pendingConnection={pendingAgentChanges[agent.id]}
                 key={agent.id}
                 agent={agent}
                 compact
-                disabled={locked}
+                disabled={locked || authorizingAgents}
                 onSelect={(connect) => onSelect(agent, connect)}
               />
             ))}
@@ -169,6 +184,7 @@ function StatusSurface({
   backendDisconnected,
   connectingBackend,
   accountApi,
+  topUpLinks,
   onToggle,
   onStartBackend,
   onSettings,
@@ -182,6 +198,7 @@ function StatusSurface({
   backendDisconnected: boolean;
   connectingBackend: boolean;
   accountApi: Pick<DesktopApi, "getAccountBalance" | "openTopUp">;
+  topUpLinks: boolean;
   onToggle(): void;
   onStartBackend(): void;
   onSettings(): void;
@@ -207,7 +224,7 @@ function StatusSurface({
           <span>{activeProfile?.name ?? "Set up"}</span>
           {activeProfile && <ChevronDown aria-hidden="true" />}
         </Button>
-        {activeProfile?.auth.kind === "oauth" && <AccountBalanceValue api={accountApi} provider={activeProfile.provider} target={{ kind: "profile", profileId: activeProfile.id }} credentialRef={activeProfile.credentialRef} enabled={protectedNow} />}
+        {activeProfile?.auth.kind === "oauth" && <AccountBalanceValue api={accountApi} provider={activeProfile.provider} target={{ kind: "profile", profileId: activeProfile.id }} credentialRef={activeProfile.credentialRef} enabled={protectedNow} topUpLinks={topUpLinks} />}
         <IconButton size="icon-sm" label="Privacy verification" aria-haspopup="dialog" onClick={onPrivacy}><Info aria-hidden="true" /></IconButton>
         </>}
         </div>

@@ -4,6 +4,7 @@
 //! autostart integration. This crate owns product state and policy.
 
 pub mod account_login;
+pub mod agent_access;
 mod balance_cache;
 pub mod cli;
 pub mod cli_install;
@@ -12,7 +13,7 @@ pub mod contracts;
 pub mod controller;
 mod endpoint_inventory;
 pub mod gateway;
-#[cfg(unix)]
+#[cfg(all(unix, not(all(target_os = "macos", feature = "mac-app-store"))))]
 mod helper_staging;
 pub mod launch;
 pub mod local_api;

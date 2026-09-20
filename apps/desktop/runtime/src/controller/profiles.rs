@@ -118,7 +118,6 @@ impl DesktopRuntime {
         }
         let previous = self.manager.snapshot()?;
 
-        self.codex_sync.reset()?;
         if verify {
             self.proxy.set_api_key(Some(candidate_key.clone()));
             let started = match self

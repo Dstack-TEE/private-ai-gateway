@@ -4,7 +4,11 @@ version = "0.1.0"
 description = "Platform-neutral state and persistence for Private AI Proxy"
 license = "Apache-2.0"
 edition = "2021"
-rust-version = "1.89"
+rust-version = "1.98"
+
+[features]
+default = []
+mac-app-store = ["dep:objc2", "dep:objc2-foundation"]
 
 [lib]
 name = "desktop_runtime"
@@ -34,6 +38,10 @@ netwatcher = "0.8"
 libc = "0.2"
 socket2 = "0.6"
 rustix = { version = "1", features = ["process"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", optional = true }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSError", "NSString", "NSURL"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 futures-util = "0.3"

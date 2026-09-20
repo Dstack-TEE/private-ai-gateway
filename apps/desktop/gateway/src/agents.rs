@@ -28,13 +28,12 @@ pub use registry::{
 
 use std::{
     collections::BTreeMap,
-    env,
-    ffi::OsString,
-    fs, io,
+    env, fs, io,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
+#[cfg(test)]
 use std::process::Command;
 
 mod oh_my_pi;
@@ -56,6 +55,8 @@ use crate::{
 
 /// Test-only override for the home directory (and the app data directory).
 pub const HOME_OVERRIDE_ENV: &str = "PRIVATE_AI_PROXY_HOME";
+/// Exact app-data override used by sandboxed desktop distributions.
+pub const APP_DATA_OVERRIDE_ENV: &str = "PRIVATE_AI_PROXY_DATA_DIR";
 pub use crate::brand::APP_IDENTIFIER;
 const STORE_FILE: &str = "agent-connections.json";
 const CODEX_CATALOG_FILE: &str = "codex-model-catalog.json";
@@ -199,6 +200,7 @@ pub struct Projector {
     helper_exe: PathBuf,
     endpoint: String,
     tool_env: bool,
+    file_credentials: bool,
     tokens: TokenFiles,
     secrets: Arc<dyn SecretStore>,
 }
@@ -237,7 +239,24 @@ impl Projector {
             helper_exe,
             endpoint: endpoint.to_string(),
             tool_env,
+            file_credentials: false,
             secrets,
+        }
+    }
+
+    /// Expose only revocable local-proxy tokens and public model metadata in
+    /// the user-authorized Home. Private state and provider secrets stay put.
+    pub fn with_home_credentials(mut self) -> Self {
+        self.file_credentials = true;
+        self.tokens = TokenFiles::new(&self.credential_directory());
+        self
+    }
+
+    fn credential_directory(&self) -> PathBuf {
+        if self.file_credentials {
+            self.home.join(format!(".{APP_IDENTIFIER}-agents"))
+        } else {
+            self.data_dir.clone()
         }
     }
 
@@ -246,7 +265,7 @@ impl Projector {
     }
 
     fn codex_catalog_path(&self) -> PathBuf {
-        self.data_dir.join(CODEX_CATALOG_FILE)
+        self.credential_directory().join(CODEX_CATALOG_FILE)
     }
 
     /// One scan: every agent's status and the token set those statuses
@@ -365,6 +384,30 @@ impl Projector {
     /// `O_NOFOLLOW` descriptors. Called only under the apply lock (startup
     /// and transactions); reads never change permissions.
     fn maintain_store_permissions(&self) -> Result<(), String> {
+        if self.file_credentials {
+            // Never follow a redirected credential directory into shared storage.
+            for path in [
+                self.credential_directory(),
+                self.credential_directory().join("agent-tokens"),
+            ] {
+                tokens::create_private_dir(&path)
+                    .map_err(|_| "Cannot create Agent credential directory")?;
+                let metadata = fs::symlink_metadata(&path)
+                    .map_err(|_| "Cannot inspect Agent credential directory")?;
+                if !metadata.is_dir() {
+                    return Err("Agent credential directory must not be a symlink".into());
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+                    if metadata.uid() != unsafe { libc::getuid() }
+                        || metadata.permissions().mode() & 0o077 != 0
+                    {
+                        return Err("Agent credential directory must be private and owned by the current user".into());
+                    }
+                }
+            }
+        }
         tokens::tighten_private(&self.store_path())
             .map_err(|error| format!("Cannot secure the agent connection record: {error}"))?;
         self.tokens.maintain(&Agent::ALL.map(Agent::id))

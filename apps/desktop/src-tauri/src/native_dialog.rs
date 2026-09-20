@@ -44,6 +44,13 @@ const DIALOG_LABELS: [&str; 7] = [
     USAGE_PROOF_LABEL,
 ];
 
+#[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+pub(crate) fn has_active_dialog(app: &AppHandle) -> bool {
+    DIALOG_LABELS
+        .into_iter()
+        .any(|label| active_window(app, label).is_some())
+}
+
 struct DialogSpec {
     label: &'static str,
     title: &'static str,
@@ -61,6 +68,10 @@ pub fn open(
     record_id: Option<&str>,
     profile_id: Option<&str>,
 ) -> Result<(), String> {
+    #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+    let Ok(_agent_access_request) = crate::commands::gateway::AGENT_ACCESS_REQUEST.try_lock() else {
+        return Ok(());
+    };
     if profile_id.is_some_and(|id| id.len() > 128 || id.chars().any(char::is_control)) {
         return Err("Invalid profile identifier".to_string());
     }
@@ -221,7 +232,8 @@ pub fn open(
     let mut builder =
         WebviewWindowBuilder::new(app, spec.label, WebviewUrl::App(spec.query.into()))
             .initialization_script(format!(
-                "window.__GATEWAY_INITIAL_STATE__ = {initial_state};window.__GATEWAY_INITIAL_APPEARANCE__ = {initial_appearance};"
+                "window.__GATEWAY_INITIAL_STATE__ = {initial_state};window.__GATEWAY_INITIAL_APPEARANCE__ = {initial_appearance};{}",
+                crate::distribution::initialization_script()
             ))
             .background_color(if theme == tauri::Theme::Dark { tauri::webview::Color(10, 10, 10, 255) } else { tauri::webview::Color(255, 255, 255, 255) })
             .title(spec.title)

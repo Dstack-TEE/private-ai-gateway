@@ -1,5 +1,8 @@
 use crate::*;
 
+#[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+pub(crate) static AGENT_ACCESS_REQUEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tauri::command]
 pub(crate) async fn get_gateway_state(
     client: State<'_, Arc<Client>>,
@@ -109,4 +112,64 @@ pub(crate) async fn apply_agent_connection(
 ) -> Result<AgentStatus, String> {
     let client = client.inner().clone();
     run_blocking(move || client.apply_agent(agent_id, connect, revision, options)).await
+}
+
+#[tauri::command]
+pub(crate) async fn get_agent_access(
+) -> Result<desktop_runtime::agent_access::AgentAccessStatus, String> {
+    run_blocking(|| Ok(desktop_runtime::agent_access::status())).await
+}
+
+#[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+#[tauri::command]
+pub(crate) async fn request_agent_access(
+    window: tauri::WebviewWindow,
+    client: State<'_, Arc<Client>>,
+) -> Result<desktop_runtime::agent_access::AgentAccessStatus, String> {
+    use tauri::Emitter;
+    use tauri_plugin_dialog::DialogExt;
+
+    // Serialize explicit requests across windows; never stack native panels.
+    let Ok(_request) = AGENT_ACCESS_REQUEST.try_lock() else {
+        return get_agent_access().await;
+    };
+    let status = get_agent_access().await?;
+    if window.label() != "main" || crate::native_dialog::has_active_dialog(window.app_handle()) {
+        return Ok(status);
+    }
+    if status != desktop_runtime::agent_access::AgentAccessStatus::Authorized {
+        let home = desktop_runtime::agent_access::expected_home()?;
+        let (send, receive) = tokio::sync::oneshot::channel();
+        window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title("Enable Agent Integrations: choose Home to detect and configure selected Agents with revocable local proxy tokens. Workspace contents are not read.")
+        .set_directory(&home)
+        .set_can_create_directories(false)
+        .pick_folder(move |selection| {
+            let _ = send.send(selection);
+        });
+        let Some(selection) = receive
+            .await
+            .map_err(|_| "The Home folder picker could not complete".to_string())?
+        else {
+            return run_blocking(|| Ok(desktop_runtime::agent_access::status())).await;
+        };
+        let path = selection
+            .into_path()
+            .map_err(|_| "The selected Home folder is invalid".to_string())?;
+        run_blocking(move || desktop_runtime::agent_access::authorize(&path)).await?;
+    }
+    let client = client.inner().clone();
+    run_blocking(move || client.restart_service()).await?;
+    let _ = window.emit("gateway://agents-changed", ());
+    run_blocking(|| Ok(desktop_runtime::agent_access::status())).await
+}
+
+#[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
+#[tauri::command]
+pub(crate) async fn request_agent_access(
+) -> Result<desktop_runtime::agent_access::AgentAccessStatus, String> {
+    get_agent_access().await
 }
