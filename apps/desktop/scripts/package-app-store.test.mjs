@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { load } from "js-yaml";
-import { appStoreEntitlements, readProvisioningProfile, validateAppStoreManifest } from "./package-app-store.mjs";
+import { appStoreEntitlements, embedProvisioningProfile, readProvisioningProfile, validateAppStoreManifest } from "./package-app-store.mjs";
 import { MAC_APP_STORE_SIDECARS } from "./distribution.mjs";
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -26,6 +26,20 @@ test("reads a real plist Date without attempting to JSON-encode certificate Data
       TeamIdentifier: ["TEAM123"],
       Entitlements: { "get-task-allow": false },
     });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("embeds a provisioning profile readable by non-root users", { skip: process.platform === "win32" }, async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "pap-embedded-profile-test-"));
+  try {
+    const profile = path.join(directory, "source.provisionprofile");
+    const app = path.join(directory, "Private AI Proxy.app");
+    await mkdir(path.join(app, "Contents"), { recursive: true });
+    await writeFile(profile, "fixture", { mode: 0o600 });
+    await embedProvisioningProfile(profile, app);
+    assert.equal((await stat(path.join(app, "Contents/embedded.provisionprofile"))).mode & 0o777, 0o644);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
