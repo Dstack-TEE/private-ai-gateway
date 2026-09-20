@@ -86,6 +86,18 @@ item.
    upgrading a log written before evidence was persisted converges
    within one round instead of after the old session's validity window
    lapses.
+
+   Storage format: the JSONL store externalizes a complete, canonical
+   §8.2 bundle into a shared `evidence` record keyed by digest (session
+   records keep the digest and the data-URI prefix, and rebuild the exact
+   served bytes on replay). Measured on a real-shape simulation (14
+   instances, the public `/servers/tee/measurements` body plus per-instance
+   quotes): steady-state log 29.1 MiB → 1.6 MiB (18×); the savings factor
+   grows ~linearly with fleet size (the bundle is stored once per
+   generation instead of once per instance per generation). Cross-round
+   delta compression was measured and rejected: consecutive bundles share
+   only ~30% (quotes are re-signed every round), so the complexity buys
+   almost nothing over the shared record.
 5. **Streaming upstream errors carry no receipt.** A streaming request whose
    upstream answers non-200 is returned as a buffered error without a
    receipt (inherited dstack-vllm-proxy behavior,

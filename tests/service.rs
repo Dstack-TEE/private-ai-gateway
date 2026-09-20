@@ -428,11 +428,16 @@ fn chutes_log_path(label: &str) -> std::path::PathBuf {
     path
 }
 
-fn count_log_lines(path: &std::path::Path) -> usize {
+/// Count log records of one type. `"session"` records are bounded to one
+/// per instance per validity window; `"evidence"` records to one per
+/// distinct evidence bundle (a round's fleet-wide bundle is shared by every
+/// instance it establishes).
+fn count_log_records(path: &std::path::Path, record_type: &str) -> usize {
+    let needle = format!("\"type\":\"{record_type}\"");
     std::fs::read_to_string(path)
         .unwrap()
         .lines()
-        .filter(|line| !line.trim().is_empty())
+        .filter(|line| line.contains(&needle))
         .count()
 }
 
@@ -509,7 +514,8 @@ async fn chutes_instance_session_reseals_once_when_evidence_becomes_available() 
         );
         old_id
     };
-    assert_eq!(count_log_lines(&path), 1);
+    assert_eq!(count_log_records(&path, "session"), 1);
+    assert_eq!(count_log_records(&path, "evidence"), 0);
 
     // Restarted on the same log, a round supplying a valid bundle must not
     // keep citing the empty-evidence record: it fails every §9.2 deep audit.
@@ -549,7 +555,12 @@ async fn chutes_instance_session_reseals_once_when_evidence_becomes_available() 
 
     // One reseal per fingerprint, not one per round: later evidence rounds
     // dedupe onto the resealed session without growing the log.
-    assert_eq!(count_log_lines(&path), 2);
+    assert_eq!(count_log_records(&path, "session"), 2);
+    assert_eq!(
+        count_log_records(&path, "evidence"),
+        1,
+        "the bundle is stored once, not per session"
+    );
     let bytes_after_reseal = std::fs::metadata(&path).unwrap().len();
     for round in 0..8 {
         let round = format!("round-{round}");
@@ -558,10 +569,11 @@ async fn chutes_instance_session_reseals_once_when_evidence_becomes_available() 
         ))));
     }
     assert_eq!(
-        count_log_lines(&path),
+        count_log_records(&path, "session"),
         2,
         "evidence rounds after the reseal must not append"
     );
+    assert_eq!(count_log_records(&path, "evidence"), 1);
     assert_eq!(std::fs::metadata(&path).unwrap().len(), bytes_after_reseal);
 
     // Replay after another restart keeps the evidence-bearing session current.
@@ -587,7 +599,7 @@ async fn chutes_instance_session_reseals_once_when_evidence_becomes_available() 
         "replay must resolve the fingerprint to the evidence-bearing record"
     );
     assert_eq!(
-        count_log_lines(&path),
+        count_log_records(&path, "session"),
         2,
         "a replayed evidence round must not append"
     );
@@ -810,9 +822,14 @@ async fn chutes_fleet_log_stays_bounded_across_instances_and_evidence_rounds() {
         },
     );
     assert_eq!(
-        count_log_lines(&path),
+        count_log_records(&path, "session"),
         2,
         "one record per instance, not per binding set or evidence bundle"
+    );
+    assert_eq!(
+        count_log_records(&path, "evidence"),
+        1,
+        "the shared fleet bundle is stored once, not per instance"
     );
     let bytes_after_round_1 = std::fs::metadata(&path).unwrap().len();
     let id_1 = current_id_with_evidence(&svc, "instance-1", &round_1)
@@ -836,10 +853,11 @@ async fn chutes_fleet_log_stays_bounded_across_instances_and_evidence_rounds() {
         );
     }
     assert_eq!(
-        count_log_lines(&path),
+        count_log_records(&path, "session"),
         2,
         "evidence rounds and fleet-aggregate churn must not append"
     );
+    assert_eq!(count_log_records(&path, "evidence"), 1);
     assert_eq!(std::fs::metadata(&path).unwrap().len(), bytes_after_round_1);
     assert_eq!(
         current_id_with_evidence(&svc, "instance-1", &round_1).as_deref(),
@@ -865,7 +883,12 @@ async fn chutes_fleet_log_stays_bounded_across_instances_and_evidence_rounds() {
             with_third_instance: false,
         },
     );
-    assert_eq!(count_log_lines(&path), 3, "exactly one rebuild is appended");
+    assert_eq!(
+        count_log_records(&path, "session"),
+        3,
+        "exactly one rebuild is appended"
+    );
+    assert_eq!(count_log_records(&path, "evidence"), 2);
     assert_eq!(
         current_id_with_evidence(&svc, "instance-1", &round_1).as_deref(),
         Some(id_1.as_str()),
@@ -888,7 +911,12 @@ async fn chutes_fleet_log_stays_bounded_across_instances_and_evidence_rounds() {
             with_third_instance: false,
         },
     );
-    assert_eq!(count_log_lines(&path), 4, "exactly one rebuild is appended");
+    assert_eq!(
+        count_log_records(&path, "session"),
+        4,
+        "exactly one rebuild is appended"
+    );
+    assert_eq!(count_log_records(&path, "evidence"), 3);
     assert_eq!(
         current_id_with_evidence(&svc, "instance-2", &tcb_round).as_deref(),
         Some(id_2b.as_str()),
@@ -911,7 +939,12 @@ async fn chutes_fleet_log_stays_bounded_across_instances_and_evidence_rounds() {
             with_third_instance: false,
         },
     );
-    assert_eq!(count_log_lines(&path), 5, "exactly one rebuild is appended");
+    assert_eq!(
+        count_log_records(&path, "session"),
+        5,
+        "exactly one rebuild is appended"
+    );
+    assert_eq!(count_log_records(&path, "evidence"), 4);
     assert_eq!(
         current_id_with_evidence(&svc, "instance-1", &gpu_round).as_deref(),
         Some(id_1b.as_str()),
@@ -935,10 +968,11 @@ async fn chutes_fleet_log_stays_bounded_across_instances_and_evidence_rounds() {
         },
     );
     assert_eq!(
-        count_log_lines(&path),
+        count_log_records(&path, "session"),
         6,
         "only the joining instance's record is appended; nobody is rebuilt"
     );
+    assert_eq!(count_log_records(&path, "evidence"), 5);
     assert_eq!(
         current_id_with_evidence(&svc, "instance-1", &gpu_round).as_deref(),
         Some(id_1b.as_str())
@@ -1001,10 +1035,11 @@ async fn chutes_fleet_log_stays_bounded_across_instances_and_evidence_rounds() {
         },
     );
     assert_eq!(
-        count_log_lines(&path),
+        count_log_records(&path, "session"),
         6,
         "a replayed round must dedupe onto the persisted per-instance sessions"
     );
+    assert_eq!(count_log_records(&path, "evidence"), 5);
     assert_eq!(
         current_id_with_evidence(&svc, "instance-1", &gpu_round).as_deref(),
         Some(id_1b.as_str()),
