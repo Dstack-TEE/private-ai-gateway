@@ -4,19 +4,42 @@ import type { AgentAccessStatus, AgentStatus, DesktopApi } from "../../shared/co
 export type AgentIntegrations = { accessStatus: AgentAccessStatus; agents: AgentStatus[] };
 type AccessApi = Pick<DesktopApi, "getAgentAccess" | "requestAgentAccess" | "listAgents">;
 
+// Keep the pre-authorization catalog available without touching Home.
+const SUPPORTED_AGENTS = [
+  ["claude-code", "Claude Code"],
+  ["codex", "Codex"],
+  ["hermes", "Hermes Agent"],
+  ["pi", "Pi"],
+  ["oh-my-pi", "Oh My Pi"],
+  ["opencode", "OpenCode"],
+  ["openclaw", "OpenClaw"],
+] as const;
+
+export function supportedAgentStatuses(): AgentStatus[] {
+  return SUPPORTED_AGENTS.map(([id, name]) => ({
+    id,
+    name,
+    configPath: "",
+    installed: false,
+    connected: false,
+    recorded: false,
+    authorized: false,
+  }));
+}
+
 /** Only an explicit Enable action may request access; all refreshes are silent. */
 export async function readAgentIntegrations(api: AccessApi, requiresAuthorization: boolean, enable = false): Promise<AgentIntegrations> {
   const accessStatus = requiresAuthorization
     ? await (enable ? api.requestAgentAccess() : api.getAgentAccess())
     : "authorized";
-  if (accessStatus !== "authorized") return { accessStatus, agents: [] };
+  if (accessStatus !== "authorized") return { accessStatus, agents: supportedAgentStatuses() };
   try {
     return { accessStatus, agents: await api.listAgents() };
   } catch (error) {
     // Permission can disappear between the check and the scan.
     if (requiresAuthorization) {
       const current = await api.getAgentAccess();
-      if (current !== "authorized") return { accessStatus: current, agents: [] };
+      if (current !== "authorized") return { accessStatus: current, agents: supportedAgentStatuses() };
     }
     throw error;
   }

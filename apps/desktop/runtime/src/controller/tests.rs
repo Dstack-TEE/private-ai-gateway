@@ -493,29 +493,7 @@ fn finished_local_listener_can_restart_at_the_same_address() {
                 config,
             )
             .unwrap();
-        runtime
-            .endpoint
-            .task
-            .lock()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .abort();
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while !runtime
-                .endpoint
-                .task
-                .lock()
-                .unwrap()
-                .as_ref()
-                .unwrap()
-                .is_finished()
-            {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        runtime.endpoint.stop().await.unwrap();
         runtime.restore_endpoint(resolved.clone()).unwrap();
         assert!(std::net::TcpListener::bind(resolved.bind).is_err());
         assert!(runtime.restore_endpoint(resolved.clone()).is_err());

@@ -132,7 +132,8 @@ References: [SDK requirements](https://developer.apple.com/support/third-party-S
 - Follow the linked activation flow from both Overview and Agents: their Enable
   buttons share the same action and query. Before Enable, no picker or Home scan
   occurs and Agent connection toggles are disabled. Cancellation stays inactive;
-  successful Enable immediately shows installed Agents without connecting them.
+  the supported Agent catalog remains visible before Enable; successful Enable
+  replaces its states with actual installed Agents without connecting them.
   Keep toggles disabled until the scan completes. Test wrong folders, symlinked
   Home, relaunch,
   recoverable stale bookmarks, revoked permission and moved Home. Verify no
