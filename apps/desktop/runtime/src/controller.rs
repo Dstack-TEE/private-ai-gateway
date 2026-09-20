@@ -196,7 +196,8 @@ impl DesktopRuntime {
         let agent_configuration = options.agent_configuration;
         let helper_path = options.helper_path;
         #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
-        let agent_home = Some(crate::agent_access::authorized_home);
+        let agent_home =
+            Some(crate::agent_access::authorized_home as fn() -> Result<PathBuf, String>);
         #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
         let agent_home = None;
         #[cfg(all(unix, not(all(target_os = "macos", feature = "mac-app-store"))))]
