@@ -264,6 +264,9 @@ fn common_home_cli_layouts_and_symlinks_are_detected() {
         (Agent::OhMyPi, "Library/pnpm"),
         (Agent::OpenCode, ".opencode/bin"),
         (Agent::OpenClaw, ".volta/bin"),
+        (Agent::ClaudeCode, ".local/share/mise/shims"),
+        (Agent::Codex, ".asdf/shims"),
+        (Agent::Pi, ".rtx/shims"),
     ];
 
     for (agent, layout) in layouts {
@@ -287,6 +290,15 @@ fn common_home_cli_layouts_and_symlinks_are_detected() {
     }
 
     assert!(cli_paths(&home, false).contains(&home.join(".bun/bin")));
+    for directory in [
+        ".local/share/mise/shims",
+        ".mise/shims",
+        ".asdf/shims",
+        ".local/share/rtx/shims",
+        ".rtx/shims",
+    ] {
+        assert!(cli_paths(&home, false).contains(&home.join(directory)));
+    }
 
     let nvm_home = root.path().join("nvm-home");
     let nvm = nvm_home

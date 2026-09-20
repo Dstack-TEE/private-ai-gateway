@@ -68,6 +68,11 @@ pub(super) fn cli_paths(home: &Path, tool_env: bool) -> Vec<PathBuf> {
         home.join(".volta/bin"),
         home.join("Library/pnpm"),
         home.join(".bun/bin"),
+        home.join(".local/share/mise/shims"),
+        home.join(".mise/shims"),
+        home.join(".asdf/shims"),
+        home.join(".local/share/rtx/shims"),
+        home.join(".rtx/shims"),
     ]);
     if tool_env {
         paths.extend([PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin")]);
