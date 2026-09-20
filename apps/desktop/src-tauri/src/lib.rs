@@ -26,7 +26,10 @@ use desktop_runtime::{
     protocol::Preference,
     usage::{UsagePage, UsageQuery},
 };
-use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+use tauri::{
+    webview::{PageLoadEvent, WebviewWindowBuilder},
+    AppHandle, Emitter, Manager, State, WindowEvent,
+};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_shell::ShellExt;
@@ -380,8 +383,13 @@ pub fn run() {
                 .iter()
                 .find(|window| window.label == "main")
                 .ok_or("Main window configuration is missing")?;
-            let window = tauri::WebviewWindowBuilder::from_config(app, config)?
+            let window = WebviewWindowBuilder::from_config(app, config)?
                 .initialization_script(distribution::initialization_script())
+                .on_page_load(|window, payload| {
+                    if matches!(payload.event(), PageLoadEvent::Finished) {
+                        tray::main_window_ready(&window).ok();
+                    }
+                })
                 .build()?;
             window_state::migrate_legacy_default(app, &window, config.width, config.height)?;
             window.set_title(desktop_gateway::brand::PRODUCT_NAME)?;
