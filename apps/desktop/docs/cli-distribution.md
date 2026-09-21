@@ -90,8 +90,11 @@ not configure a provider or access credentials.
 `Desktop stable release` is the coordinated stable production entry. It validates
 the request once, uploads the matching Mac App Store build, then calls `Desktop
 Tauri` for all Direct targets from the same commit and version. The Direct worker
-publishes the GitHub release, updater feed and npm packages as one dependency
-chain; it does not dispatch another workflow through the GitHub CLI.
+publishes the GitHub release and updater feed, then dispatches the dedicated npm
+publisher at the immutable release tag and waits for its result. npm validates
+the top-level workflow filename for trusted publishing, so this keeps the single
+configured OIDC publisher without storing a write token or duplicating packaging
+logic.
 
 `Desktop Tauri` remains the reusable Direct release worker and the focused beta,
 package-smoke and recovery entry point. Supplying `release_version` enables updater

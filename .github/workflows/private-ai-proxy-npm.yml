@@ -1,17 +1,8 @@
 name: Private AI Proxy npm packages
 
+run-name: Private AI Proxy npm ${{ inputs.release_tag }}${{ inputs.request_id != '' && format(' [{0}]', inputs.request_id) || '' }}
+
 on:
-  workflow_call:
-    inputs:
-      release_tag:
-        description: Published desktop release tag to package
-        required: true
-        type: string
-      publish:
-        description: Publish the verified tarballs to npm
-        required: false
-        default: false
-        type: boolean
   workflow_dispatch:
     inputs:
       release_tag:
@@ -23,6 +14,11 @@ on:
         required: true
         default: false
         type: boolean
+      request_id:
+        description: Optional orchestration identifier
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -58,8 +54,8 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
-          if [[ "$PUBLISH" == true && "$GITHUB_REF" != refs/heads/main ]]; then
-            echo "npm publication must run from main" >&2
+          if [[ "$PUBLISH" == true && "$GITHUB_REF" != refs/heads/main && "$GITHUB_REF" != "refs/tags/$RELEASE_TAG" ]]; then
+            echo "npm publication must run from main or the matching release tag" >&2
             exit 1
           fi
           metadata="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,tagName)"

@@ -11,7 +11,7 @@ async function readWorkflow(name) {
   return load(await readFile(path.join(repositoryRoot, ".github/workflows", name), "utf8"));
 }
 
-test("stable desktop releases use one same-revision reusable workflow graph", async () => {
+test("stable desktop releases use one same-revision workflow graph", async () => {
   const [release, direct, appStore, updateFeed, npm] = await Promise.all([
     readWorkflow("desktop-release.yml"),
     readWorkflow("desktop-native.yml"),
@@ -33,18 +33,24 @@ test("stable desktop releases use one same-revision reusable workflow graph", as
   assert.equal(release.jobs.direct.with.release_channel, "stable");
   assert.equal(release.jobs.direct.with.release_summary, "${{ inputs.release_summary }}");
   assert.equal(release.jobs.direct.with.publish_release, true);
+  assert.equal(release.jobs.direct.permissions.actions, "write");
   assert.equal(release.jobs.direct.permissions.contents, "write");
-  assert.equal(release.jobs.direct.permissions["id-token"], "write");
+  assert.equal(release.jobs.direct.permissions["id-token"], undefined);
   assert.equal(release.jobs.direct.secrets, "inherit");
 
   assert.equal(direct.on.workflow_call.inputs.release_version.type, "string");
   assert.equal(appStore.on.workflow_call.inputs.version.type, "string");
   assert.equal(direct.jobs["update-feed"].uses, "./.github/workflows/desktop-update-feed.yml");
-  assert.equal(direct.jobs["publish-npm"].uses, "./.github/workflows/private-ai-proxy-npm.yml");
   assert.equal(direct.jobs["publish-npm"].needs, "update-feed");
-  assert.equal(direct.jobs["publish-npm"].secrets, "inherit");
+  assert.equal(direct.jobs["publish-npm"].permissions.actions, "write");
+  assert.equal(direct.jobs["publish-npm"].permissions.contents, "read");
+  assert.match(direct.jobs["publish-npm"].steps[0].run, /gh workflow run "\$workflow"/);
+  assert.match(direct.jobs["publish-npm"].steps[0].run, /--ref "\$RELEASE_TAG"/);
+  assert.match(direct.jobs["publish-npm"].steps[0].run, /gh run watch "\$run_id"/);
   assert.equal(updateFeed.on.workflow_call.inputs.tag.type, "string");
-  assert.equal(npm.on.workflow_call.inputs.release_tag.type, "string");
+  assert.equal(npm.on.workflow_call, undefined);
+  assert.equal(npm.on.workflow_dispatch.inputs.release_tag.type, "string");
+  assert.equal(npm.on.workflow_dispatch.inputs.request_id.type, "string");
   assert.equal(updateFeed.on.release, undefined);
   assert.equal(npm.on.release, undefined);
 });
