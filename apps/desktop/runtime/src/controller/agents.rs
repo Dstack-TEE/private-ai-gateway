@@ -41,9 +41,7 @@ impl DesktopRuntime {
             #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
             {
                 Projector::new_for_home(
-                    (self
-                        .agent_home
-                        .ok_or_else(|| "Agent Home access is unavailable".to_string())?)()?,
+                    (self.agent_home)()?,
                     app_data_dir()?,
                     self.helper_path.clone(),
                     endpoint,

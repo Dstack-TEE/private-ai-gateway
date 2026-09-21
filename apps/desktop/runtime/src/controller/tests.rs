@@ -106,7 +106,7 @@ fn test_runtime(
         helper_path: directory.join("helper"),
         agent_configuration: true,
         agent_access_status: || crate::agent_access::AgentAccessStatus::Authorized,
-        agent_home: Some(test_authorized_home),
+        agent_home: test_authorized_home,
         recovery: crate::recovery::Recovery::default(),
         instance: None,
     })

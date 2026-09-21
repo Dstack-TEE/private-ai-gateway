@@ -64,7 +64,7 @@ pub struct DesktopRuntime {
     helper_path: PathBuf,
     agent_configuration: bool,
     agent_access_status: fn() -> crate::agent_access::AgentAccessStatus,
-    agent_home: Option<fn() -> Result<PathBuf, String>>,
+    agent_home: fn() -> Result<PathBuf, String>,
     instance: Option<lock::InstanceLock>,
 }
 
@@ -195,11 +195,6 @@ impl DesktopRuntime {
             .ok_or_else(|| "Another Private AI Proxy instance is already running".to_string())?;
         let agent_configuration = options.agent_configuration;
         let helper_path = options.helper_path;
-        #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
-        let agent_home =
-            Some(crate::agent_access::authorized_home as fn() -> Result<PathBuf, String>);
-        #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
-        let agent_home = None;
         #[cfg(all(unix, not(all(target_os = "macos", feature = "mac-app-store"))))]
         if agent_configuration {
             if let Err(error) = crate::helper_staging::stage(&helper_path, &data_dir) {
@@ -294,7 +289,7 @@ impl DesktopRuntime {
             helper_path,
             agent_configuration,
             agent_access_status: crate::agent_access::status,
-            agent_home,
+            agent_home: crate::agent_access::authorized_home,
             instance: Some(instance),
         });
 

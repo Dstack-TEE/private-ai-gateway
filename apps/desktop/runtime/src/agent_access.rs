@@ -271,7 +271,13 @@ pub fn acquire() -> Result<Option<AgentHomeAccess>, String> {
     mac_app_store::acquire()
 }
 
-#[cfg(all(target_os = "macos", feature = "mac-app-store"))]
 pub fn authorized_home() -> Result<std::path::PathBuf, String> {
-    mac_app_store::authorized_home()
+    #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+    {
+        return mac_app_store::authorized_home();
+    }
+    #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
+    {
+        Err("Agent Home access is unavailable on this distribution".to_string())
+    }
 }
