@@ -148,7 +148,10 @@ fn hermes_paths_follow_platform_overrides_and_isolate_test_home() {
                 .join("path-bin")
                 .join(if cfg!(windows) { "codex.exe" } else { "codex" });
             assert!(projector.tool_env);
-            assert_eq!(find_cli(Agent::Codex, &projector.home, true), Some(executable));
+            assert_eq!(
+                find_cli(Agent::Codex, &projector.home, true),
+                Some(executable)
+            );
         }
         if cfg!(windows) {
             let executable = expected.join("bin").join("hermes.exe");
@@ -225,11 +228,9 @@ fn explicit_home_projector_scans_the_authorized_home() {
     let data_dir = root.path().join("app-data");
     let helper = root.path().join(helper_binary_name());
     write_executable(&helper, "#!/bin/sh\n");
-    let codex = home.join(".local/bin").join(if cfg!(windows) {
-        "codex.exe"
-    } else {
-        "codex"
-    });
+    let codex = home
+        .join(".local/bin")
+        .join(if cfg!(windows) { "codex.exe" } else { "codex" });
     write_executable(&codex, "#!/bin/sh\n");
 
     let projector = Projector::new_for_home(
@@ -286,7 +287,12 @@ fn common_home_cli_layouts_and_symlinks_are_detected() {
         }
         #[cfg(windows)]
         write_executable(&command, "launcher");
-        assert_eq!(find_cli(agent, &home, false), Some(command), "{}", agent.id());
+        assert_eq!(
+            find_cli(agent, &home, false),
+            Some(command),
+            "{}",
+            agent.id()
+        );
     }
 
     assert!(cli_paths(&home, false).contains(&home.join(".bun/bin")));

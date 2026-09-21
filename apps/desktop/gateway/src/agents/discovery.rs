@@ -75,7 +75,10 @@ pub(super) fn cli_paths(home: &Path, tool_env: bool) -> Vec<PathBuf> {
         home.join(".rtx/shims"),
     ]);
     if tool_env {
-        paths.extend([PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin")]);
+        paths.extend([
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/usr/local/bin"),
+        ]);
     }
     if cfg!(windows) {
         let app_data = tool_env
