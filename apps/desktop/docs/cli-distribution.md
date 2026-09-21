@@ -87,10 +87,17 @@ not configure a provider or access credentials.
 
 ## Release Contract
 
-`Desktop Tauri` uses one versioned release path. Supplying `release_version`
-enables updater signing, macOS Developer ID signing and notarization, and the
-protected `desktop-release` environment. A run without a release version creates
-test packages only; `package_only` cannot be combined with a version.
+`Desktop stable release` is the coordinated stable production entry. It validates
+the request once, uploads the matching Mac App Store build, then calls `Desktop
+Tauri` for all Direct targets from the same commit and version. The Direct worker
+publishes the GitHub release, updater feed and npm packages as one dependency
+chain; it does not dispatch another workflow through the GitHub CLI.
+
+`Desktop Tauri` remains the reusable Direct release worker and the focused beta,
+package-smoke and recovery entry point. Supplying `release_version` enables updater
+signing, macOS Developer ID signing and notarization, and the protected
+`desktop-release` environment. A run without a release version creates test
+packages only; `package_only` cannot be combined with a version.
 
 - Tags are `desktop-v<semver>` and titles are `Private AI Proxy v<semver>`.
 - Beta versions use `x.y.z-beta.n`; stable versions use `x.y.z`.

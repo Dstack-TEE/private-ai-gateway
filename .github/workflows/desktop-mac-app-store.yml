@@ -1,9 +1,25 @@
 name: Desktop Mac App Store
 
 on:
+  workflow_call:
+    inputs:
+      version:
+        description: Mac App Store marketing version
+        required: true
+        type: string
+      build_number:
+        description: Increasing CFBundleVersion
+        required: true
+        type: string
+      upload:
+        description: Upload the signed package to App Store Connect
+        required: false
+        default: false
+        type: boolean
   pull_request:
     paths:
       - '.github/workflows/desktop-mac-app-store.yml'
+      - '.github/workflows/desktop-release.yml'
       - 'apps/desktop/**'
       - 'crates/aci-protocol/**'
   push:
@@ -11,6 +27,7 @@ on:
       - main
     paths:
       - '.github/workflows/desktop-mac-app-store.yml'
+      - '.github/workflows/desktop-release.yml'
       - 'apps/desktop/**'
       - 'crates/aci-protocol/**'
   workflow_dispatch:
@@ -100,7 +117,7 @@ jobs:
           cargo test --locked --manifest-path src-tauri/Cargo.toml --features mac-app-store
 
   package:
-    if: github.event_name == 'workflow_dispatch'
+    if: inputs.version != ''
     needs: verify
     runs-on: macos-26
     timeout-minutes: 120

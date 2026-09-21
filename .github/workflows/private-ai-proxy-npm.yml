@@ -1,8 +1,17 @@
 name: Private AI Proxy npm packages
 
 on:
-  release:
-    types: [published]
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Published desktop release tag to package
+        required: true
+        type: string
+      publish:
+        description: Publish the verified tarballs to npm
+        required: false
+        default: false
+        type: boolean
   workflow_dispatch:
     inputs:
       release_tag:
@@ -19,12 +28,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: private-ai-proxy-npm-${{ inputs.release_tag || github.event.release.tag_name }}
+  group: private-ai-proxy-npm-${{ inputs.release_tag }}
   cancel-in-progress: false
 
 jobs:
   package:
-    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'desktop-v') }}
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     outputs:
@@ -46,12 +54,12 @@ jobs:
         name: Validate release
         env:
           GH_TOKEN: ${{ github.token }}
-          PUBLISH: ${{ github.event_name == 'release' || inputs.publish }}
-          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
+          PUBLISH: ${{ inputs.publish }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
-          if [[ "$PUBLISH" == true && "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" != refs/heads/main ]]; then
-            echo "Manual npm publication must run from main" >&2
+          if [[ "$PUBLISH" == true && "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "npm publication must run from main" >&2
             exit 1
           fi
           metadata="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,tagName)"
@@ -79,7 +87,7 @@ jobs:
       - name: Download and verify CLI release assets
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
           VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
@@ -226,7 +234,7 @@ jobs:
           path: npm-packages/*.tgz
 
   publish:
-    if: ${{ github.event_name == 'release' || inputs.publish }}
+    if: inputs.publish
     needs: package
     runs-on: ubuntu-24.04
     timeout-minutes: 10

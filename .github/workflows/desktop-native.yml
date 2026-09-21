@@ -1,6 +1,37 @@
 name: Desktop Tauri
 
 on:
+  workflow_call:
+    inputs:
+      release_version:
+        description: Optional update version matching the channel
+        required: false
+        type: string
+      release_channel:
+        description: Update channel
+        required: false
+        default: beta
+        type: string
+      release_summary:
+        description: Markdown bullets or paragraphs for What's changed
+        required: false
+        default: ''
+        type: string
+      release_platforms:
+        description: Comma-separated package targets, or all
+        required: false
+        default: all
+        type: string
+      publish_release:
+        description: Publish the signed version and advance the desktop update channel
+        required: false
+        default: false
+        type: boolean
+      package_only:
+        description: Skip full verification for a non-release package smoke build
+        required: false
+        default: false
+        type: boolean
   workflow_dispatch:
     inputs:
       release_version:
@@ -37,6 +68,9 @@ on:
   pull_request:
     paths:
       - '.github/workflows/desktop-native.yml'
+      - '.github/workflows/desktop-release.yml'
+      - '.github/workflows/desktop-update-feed.yml'
+      - '.github/workflows/private-ai-proxy-npm.yml'
       - 'apps/desktop/**'
       - 'crates/aci-protocol/**'
   push:
@@ -44,6 +78,9 @@ on:
       - main
     paths:
       - '.github/workflows/desktop-native.yml'
+      - '.github/workflows/desktop-release.yml'
+      - '.github/workflows/desktop-update-feed.yml'
+      - '.github/workflows/private-ai-proxy-npm.yml'
       - 'apps/desktop/**'
       - 'crates/aci-protocol/**'
 
@@ -912,18 +949,11 @@ jobs:
   publish-npm:
     if: inputs.publish_release && inputs.release_version != ''
     needs: update-feed
-    runs-on: ubuntu-24.04
     permissions:
-      actions: write
       contents: read
-    steps:
-      - name: Start npm publication
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: desktop-v${{ inputs.release_version }}
-        run: |
-          gh workflow run private-ai-proxy-npm.yml \
-            --repo "$GITHUB_REPOSITORY" \
-            --ref main \
-            -f release_tag="$RELEASE_TAG" \
-            -f publish=true
+      id-token: write
+    uses: ./.github/workflows/private-ai-proxy-npm.yml
+    with:
+      release_tag: desktop-v${{ inputs.release_version }}
+      publish: true
+    secrets: inherit

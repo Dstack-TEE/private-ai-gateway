@@ -40,10 +40,16 @@ on a reader-app entitlement.
 
 ## Build and signing prerequisites
 
-The `Desktop Mac App Store` workflow pins **macos-26** for verification and
-production packaging, retaining `universal-apple-darwin`. It does not use
-`macos-latest` or Xcode 27 preview. The runner's GA default is Xcode 26.6 as of
-2026-09-19; record the actual Xcode version in the build log.
+Stable production releases start from `Desktop stable release`. Its preflight
+validates the shared marketing version, increasing App Store build number, release
+summary and `main` ref, then calls `Desktop Mac App Store` before the Direct release.
+Both are same-repository reusable workflows resolved at the caller commit, so the
+MAS and Direct artifacts cannot drift to different source revisions.
+
+The `Desktop Mac App Store` worker pins **macos-26** for verification and production
+packaging, retaining `universal-apple-darwin`. It does not use `macos-latest` or
+Xcode 27 preview. The runner's GA default is Xcode 26.6 as of 2026-09-19; record
+the actual Xcode version in the build log.
 
 Configure the protected `mac-app-store` environment using the step-scoped
 `Validate App Store signing settings` and `Validate App Store Connect upload
@@ -89,9 +95,11 @@ validates those separately on the final app, and `altool --validate-app` validat
 the final pkg before upload. Do not attempt to make the distribution package
 locally runnable or weaken its signature to satisfy CI.
 
-The workflow uploads a reviewable pkg artifact by default. Explicit upload is
-restricted to main and performs App Store validation before delivery. This task
-does not run that workflow or upload anything.
+The worker uploads a reviewable pkg artifact by default. Explicit upload is
+restricted to main and performs App Store validation before delivery. The
+coordinated workflow always requests upload and waits for it to succeed before
+publishing Direct. Running repository checks does not invoke either release path
+or upload anything.
 
 ## Privacy and export compliance
 

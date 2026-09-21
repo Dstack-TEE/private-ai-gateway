@@ -1,0 +1,50 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { load } from "js-yaml";
+
+const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+
+async function readWorkflow(name) {
+  return load(await readFile(path.join(repositoryRoot, ".github/workflows", name), "utf8"));
+}
+
+test("stable desktop releases use one same-revision reusable workflow graph", async () => {
+  const [release, direct, appStore, updateFeed, npm] = await Promise.all([
+    readWorkflow("desktop-release.yml"),
+    readWorkflow("desktop-native.yml"),
+    readWorkflow("desktop-mac-app-store.yml"),
+    readWorkflow("desktop-update-feed.yml"),
+    readWorkflow("private-ai-proxy-npm.yml"),
+  ]);
+
+  assert.equal(release.jobs["mac-app-store"].uses, "./.github/workflows/desktop-mac-app-store.yml");
+  assert.equal(release.jobs["mac-app-store"].needs, "preflight");
+  assert.equal(release.jobs["mac-app-store"].with.version, "${{ inputs.version }}");
+  assert.equal(release.jobs["mac-app-store"].with.build_number, "${{ inputs.app_store_build_number }}");
+  assert.equal(release.jobs["mac-app-store"].with.upload, true);
+  assert.equal(release.jobs["mac-app-store"].secrets, "inherit");
+
+  assert.equal(release.jobs.direct.uses, "./.github/workflows/desktop-native.yml");
+  assert.equal(release.jobs.direct.needs, "mac-app-store");
+  assert.equal(release.jobs.direct.with.release_version, "${{ inputs.version }}");
+  assert.equal(release.jobs.direct.with.release_channel, "stable");
+  assert.equal(release.jobs.direct.with.release_summary, "${{ inputs.release_summary }}");
+  assert.equal(release.jobs.direct.with.publish_release, true);
+  assert.equal(release.jobs.direct.permissions.contents, "write");
+  assert.equal(release.jobs.direct.permissions["id-token"], "write");
+  assert.equal(release.jobs.direct.secrets, "inherit");
+
+  assert.equal(direct.on.workflow_call.inputs.release_version.type, "string");
+  assert.equal(appStore.on.workflow_call.inputs.version.type, "string");
+  assert.equal(direct.jobs["update-feed"].uses, "./.github/workflows/desktop-update-feed.yml");
+  assert.equal(direct.jobs["publish-npm"].uses, "./.github/workflows/private-ai-proxy-npm.yml");
+  assert.equal(direct.jobs["publish-npm"].needs, "update-feed");
+  assert.equal(direct.jobs["publish-npm"].secrets, "inherit");
+  assert.equal(updateFeed.on.workflow_call.inputs.tag.type, "string");
+  assert.equal(npm.on.workflow_call.inputs.release_tag.type, "string");
+  assert.equal(updateFeed.on.release, undefined);
+  assert.equal(npm.on.release, undefined);
+});
