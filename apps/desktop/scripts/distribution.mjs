@@ -37,3 +37,11 @@ export function validateAppStoreBuildNumber(value) {
   }
   return value;
 }
+
+export function runtimeBuildVersion(env = process.env) {
+  const explicit = env.PAP_BUILD_VERSION?.trim();
+  if (explicit) return explicit;
+  const release = env.DESKTOP_RELEASE_VERSION?.trim();
+  const build = env.APPLE_APP_STORE_BUILD_NUMBER?.trim();
+  return release && build ? `${release}+${build}` : release;
+}

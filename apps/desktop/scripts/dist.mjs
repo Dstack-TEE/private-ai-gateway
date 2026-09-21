@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { MAC_APP_STORE_DISTRIBUTION, takeDistributionArgument } from "./distribution.mjs";
+import { MAC_APP_STORE_DISTRIBUTION, runtimeBuildVersion, takeDistributionArgument } from "./distribution.mjs";
 import { UNIVERSAL_MACOS_TARGET } from "./build-config.mjs";
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -26,9 +26,11 @@ if (appStore && (process.env.TAURI_UPDATER_PUBLIC_KEY?.trim() || process.env.TAU
   throw new Error("Mac App Store builds cannot include the native updater");
 }
 const buildTarget = appStore ? UNIVERSAL_MACOS_TARGET : requestedTarget;
+const buildVersion = runtimeBuildVersion();
 const env = {
   ...process.env,
   PAP_DISTRIBUTION: selected.distribution,
+  ...(buildVersion ? { PAP_BUILD_VERSION: buildVersion } : {}),
   ...(buildTarget ? { PAP_BUILD_TARGET: buildTarget } : {}),
 };
 const run = (script, arguments_ = []) => execFileSync(process.execPath, [script, ...arguments_], { cwd: appRoot, env, stdio: "inherit" });

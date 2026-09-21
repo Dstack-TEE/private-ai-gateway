@@ -99,7 +99,7 @@ export function AgentsView({
           ))}
         </div>
       </section>
-      {accessStatus === "authorized" && agents.some((agent) => !agent.installed) && <section className="group mt-5 [&:first-child]:mt-0" aria-labelledby="not-installed-title">
+      {accessStatus === "authorized" && !problem && agents.some((agent) => !agent.installed) && <section className="group mt-5 [&:first-child]:mt-0" aria-labelledby="not-installed-title">
         <h2 className="group-title mx-0.5 mb-2 flex min-h-5 items-center gap-2 text-sm font-semibold" id="not-installed-title">Not installed</h2>
         <div className="inset min-w-0 bg-card border border-border rounded-2xl overflow-hidden">{agents.filter((agent) => !agent.installed).map((agent) => (
           <AgentRow key={agent.id} agent={agent} disabled={locked} onSelect={() => undefined} />
