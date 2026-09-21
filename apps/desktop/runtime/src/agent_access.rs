@@ -179,6 +179,18 @@ mod mac_app_store {
         Ok(Some(access))
     }
 
+    pub fn authorized_home() -> Result<PathBuf, String> {
+        if status() != AgentAccessStatus::Authorized {
+            return Err("Agent Home access is required".to_string());
+        }
+        active_access()
+            .lock()
+            .map_err(|_| "Agent Home access state is unavailable".to_string())?
+            .as_ref()
+            .map(|access| access.home().to_path_buf())
+            .ok_or_else(|| "Agent Home access is unavailable".to_string())
+    }
+
     fn bookmark_path() -> Result<PathBuf, String> {
         Ok(desktop_gateway::agents::app_data_dir()?.join(BOOKMARK_FILE))
     }
@@ -257,4 +269,15 @@ pub fn authorize(path: &std::path::Path) -> Result<AgentAccessStatus, String> {
 #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
 pub fn acquire() -> Result<Option<AgentHomeAccess>, String> {
     mac_app_store::acquire()
+}
+
+pub fn authorized_home() -> Result<std::path::PathBuf, String> {
+    #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+    {
+        mac_app_store::authorized_home()
+    }
+    #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
+    {
+        Err("Agent Home access is unavailable on this distribution".to_string())
+    }
 }

@@ -143,6 +143,16 @@ fn hermes_paths_follow_platform_overrides_and_isolate_test_home() {
                     .starts_with(&home));
             }
         }
+        if case == "path" {
+            let executable = PathBuf::from(env::var_os("PAP_TEST_HERMES_PATH_ROOT").unwrap())
+                .join("path-bin")
+                .join(if cfg!(windows) { "codex.exe" } else { "codex" });
+            assert!(projector.tool_env);
+            assert_eq!(
+                find_cli(Agent::Codex, &projector.home, true),
+                Some(executable)
+            );
+        }
         if cfg!(windows) {
             let executable = expected.join("bin").join("hermes.exe");
             write(&executable, "launcher fixture");
@@ -162,6 +172,7 @@ fn hermes_paths_follow_platform_overrides_and_isolate_test_home() {
         "override",
         "isolated",
         "native-home",
+        "path",
     ] {
         let mut command = Command::new(env::current_exe().unwrap());
         command
@@ -192,12 +203,166 @@ fn hermes_paths_follow_platform_overrides_and_isolate_test_home() {
                 .env(HOME_OVERRIDE_ENV, root.path().join("isolated"))
                 .env("CODEX_HOME", root.path().join("outside-codex"));
         }
+        if case == "path" {
+            let path = root.path().join("path-bin");
+            fs::create_dir_all(&path).unwrap();
+            write_executable(
+                &path.join(if cfg!(windows) { "codex.exe" } else { "codex" }),
+                "launcher",
+            );
+            command.env("PATH", &path);
+        }
         if cfg!(windows) && case == "native-home" {
             command.env("HOME", root.path().join("git-home"));
         }
         let output = command.output().unwrap();
         assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
         assert!(output.status.success(), "{case}: {output:?}");
+    }
+}
+
+#[test]
+fn explicit_home_projector_scans_the_authorized_home() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("authorized-home");
+    let data_dir = root.path().join("app-data");
+    let helper = root.path().join(helper_binary_name());
+    write_executable(&helper, "#!/bin/sh\n");
+    let codex = home
+        .join(".local/bin")
+        .join(if cfg!(windows) { "codex.exe" } else { "codex" });
+    write_executable(&codex, "#!/bin/sh\n");
+
+    let projector = Projector::new_for_home(
+        home.clone(),
+        data_dir,
+        helper,
+        ENDPOINT,
+        Arc::new(MemoryStore::default()),
+    )
+    .unwrap();
+    let statuses = projector.scan(None).unwrap().0;
+    let codex_status = statuses.iter().find(|status| status.id == "codex").unwrap();
+
+    assert!(codex_status.installed);
+    assert_eq!(
+        codex_status.config_path,
+        home.join(".codex/config.toml").display().to_string()
+    );
+    assert!(!cli_paths(&home, false).contains(&PathBuf::from("/opt/homebrew/bin")));
+    assert!(!cli_paths(&home, false).contains(&PathBuf::from("/usr/local/bin")));
+}
+
+#[test]
+fn common_home_cli_layouts_and_symlinks_are_detected() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let layouts = [
+        (Agent::Codex, ".local/bin"),
+        (Agent::ClaudeCode, ".local/share/pnpm"),
+        (Agent::Hermes, ".cargo/bin"),
+        (Agent::Pi, ".npm-global/bin"),
+        (Agent::OhMyPi, "Library/pnpm"),
+        (Agent::OpenCode, ".opencode/bin"),
+        (Agent::OpenClaw, ".volta/bin"),
+    ];
+
+    for (agent, layout) in layouts {
+        let name = agent.cli_names()[0];
+        let command = home.join(layout).join(if cfg!(windows) {
+            format!("{name}.exe")
+        } else {
+            name.to_string()
+        });
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let target = command.with_extension("real");
+            write_executable(&target, "#!/bin/sh\n");
+            fs::create_dir_all(command.parent().unwrap()).unwrap();
+            symlink(&target, &command).unwrap();
+        }
+        #[cfg(windows)]
+        write_executable(&command, "launcher");
+        assert_eq!(
+            find_cli(agent, &home, false),
+            Some(command),
+            "{}",
+            agent.id()
+        );
+    }
+
+    for (agent, layout) in [
+        (Agent::ClaudeCode, ".local/share/mise/shims"),
+        (Agent::Codex, ".asdf/shims"),
+        (Agent::Pi, ".rtx/shims"),
+    ] {
+        let directory = home.join(layout);
+        let command = directory.join(if cfg!(windows) {
+            format!("{}.exe", agent.cli_names()[0])
+        } else {
+            agent.cli_names()[0].to_string()
+        });
+        write_executable(&command, "launcher");
+        assert_eq!(
+            find_cli_in_paths(agent, &[directory]),
+            Some(command),
+            "{}",
+            agent.id()
+        );
+    }
+
+    assert!(cli_paths(&home, false).contains(&home.join(".bun/bin")));
+    for directory in [
+        ".local/share/mise/shims",
+        ".mise/shims",
+        ".asdf/shims",
+        ".local/share/rtx/shims",
+        ".rtx/shims",
+    ] {
+        assert!(cli_paths(&home, false).contains(&home.join(directory)));
+    }
+
+    let nvm_home = root.path().join("nvm-home");
+    let nvm = nvm_home
+        .join(".nvm/versions/node/v22.19.0/bin")
+        .join(if cfg!(windows) { "codex.exe" } else { "codex" });
+    write_executable(&nvm, "launcher");
+    assert_eq!(find_cli(Agent::Codex, &nvm_home, false), Some(nvm));
+
+    let fnm_home = root.path().join("fnm-home");
+    let fnm = fnm_home
+        .join(".local/share/fnm/node-versions/v22.19.0/installation/bin")
+        .join(if cfg!(windows) { "pi.exe" } else { "pi" });
+    write_executable(&fnm, "launcher");
+    assert_eq!(find_cli(Agent::Pi, &fnm_home, false), Some(fnm));
+
+    for (agent, layout) in [
+        (Agent::Codex, ".local/share/mise/installs/node"),
+        (Agent::ClaudeCode, ".mise/installs/node"),
+        (Agent::Pi, ".asdf/installs/nodejs"),
+        (Agent::OpenCode, ".local/share/rtx/installs/node"),
+        (Agent::Hermes, ".rtx/installs/node"),
+    ] {
+        let install_root = root.path().join(layout);
+        let command = install_root.join("v22.19.0/bin").join(if cfg!(windows) {
+            format!("{}.exe", agent.cli_names()[0])
+        } else {
+            agent.cli_names()[0].to_string()
+        });
+        write_executable(&command, "launcher");
+        assert_eq!(find_cli(agent, root.path(), false), Some(command));
+    }
+
+    #[cfg(windows)]
+    for extension in ["cmd", "bat"] {
+        let directory = root.path().join(extension);
+        let command = directory.join(format!("claude.{extension}"));
+        write_executable(&command, "launcher");
+        assert_eq!(
+            find_cli_in_paths(Agent::ClaudeCode, &[directory]),
+            Some(command)
+        );
     }
 }
 

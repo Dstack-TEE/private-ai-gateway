@@ -106,9 +106,18 @@ fn test_runtime(
         helper_path: directory.join("helper"),
         agent_configuration: true,
         agent_access_status: || crate::agent_access::AgentAccessStatus::Authorized,
+        #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+        agent_home: test_authorized_home,
         recovery: crate::recovery::Recovery::default(),
         instance: None,
     })
+}
+
+#[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+fn test_authorized_home() -> Result<std::path::PathBuf, String> {
+    std::env::var_os(desktop_gateway::agents::HOME_OVERRIDE_ENV)
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| "Test Home is unavailable".to_string())
 }
 
 #[test]

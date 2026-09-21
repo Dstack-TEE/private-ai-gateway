@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { AgentStatus, DesktopApi } from "../../shared/contracts";
 import { errorMessage } from "../lib/error-message";
-import { agentIntegrationsLocked, createAgentAccessAction, readAgentIntegrations, supportedAgentStatuses, type AgentIntegrations } from "../lib/agent-integrations";
+import { agentIntegrationsLocked, completeAgentStatuses, createAgentAccessAction, readAgentIntegrations, type AgentIntegrations } from "../lib/agent-integrations";
 import { showErrorAlert } from "../lib/error-alert";
 
 type Options = {
@@ -26,7 +26,7 @@ export function useAgents(api: DesktopApi, { requiresAuthorization, active, revi
   });
   const accessStatus = requiresAuthorization ? data?.accessStatus : "authorized";
   const controlsLocked = agentIntegrationsLocked(accessStatus, authorizing);
-  const agents = data?.agents ?? (requiresAuthorization ? supportedAgentStatuses() : []);
+  const agents = completeAgentStatuses(data?.agents ?? []);
   const [pendingAgentChanges, setPendingAgentChanges] = useState<Record<string, boolean>>({});
   const agentOperations = useRef(new Set<string>());
   const agentIntents = useRef(new Map<string, boolean>());

@@ -68,9 +68,18 @@ pub(super) fn cli_paths(home: &Path, tool_env: bool) -> Vec<PathBuf> {
         home.join(".volta/bin"),
         home.join("Library/pnpm"),
         home.join(".bun/bin"),
-        PathBuf::from("/opt/homebrew/bin"),
-        PathBuf::from("/usr/local/bin"),
+        home.join(".local/share/mise/shims"),
+        home.join(".mise/shims"),
+        home.join(".asdf/shims"),
+        home.join(".local/share/rtx/shims"),
+        home.join(".rtx/shims"),
     ]);
+    if tool_env {
+        paths.extend([
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/usr/local/bin"),
+        ]);
+    }
     if cfg!(windows) {
         let app_data = tool_env
             .then(|| env::var_os("APPDATA"))
@@ -86,6 +95,26 @@ pub(super) fn cli_paths(home: &Path, tool_env: bool) -> Vec<PathBuf> {
     paths.extend(versioned_runtime_bins(
         &home.join(".local/share/fnm/node-versions"),
         &["installation", "bin"],
+    ));
+    paths.extend(versioned_runtime_bins(
+        &home.join(".local/share/mise/installs/node"),
+        &["bin"],
+    ));
+    paths.extend(versioned_runtime_bins(
+        &home.join(".mise/installs/node"),
+        &["bin"],
+    ));
+    paths.extend(versioned_runtime_bins(
+        &home.join(".asdf/installs/nodejs"),
+        &["bin"],
+    ));
+    paths.extend(versioned_runtime_bins(
+        &home.join(".local/share/rtx/installs/node"),
+        &["bin"],
+    ));
+    paths.extend(versioned_runtime_bins(
+        &home.join(".rtx/installs/node"),
+        &["bin"],
     ));
     paths
 }
