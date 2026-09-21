@@ -265,9 +265,6 @@ fn common_home_cli_layouts_and_symlinks_are_detected() {
         (Agent::OhMyPi, "Library/pnpm"),
         (Agent::OpenCode, ".opencode/bin"),
         (Agent::OpenClaw, ".volta/bin"),
-        (Agent::ClaudeCode, ".local/share/mise/shims"),
-        (Agent::Codex, ".asdf/shims"),
-        (Agent::Pi, ".rtx/shims"),
     ];
 
     for (agent, layout) in layouts {
@@ -289,6 +286,26 @@ fn common_home_cli_layouts_and_symlinks_are_detected() {
         write_executable(&command, "launcher");
         assert_eq!(
             find_cli(agent, &home, false),
+            Some(command),
+            "{}",
+            agent.id()
+        );
+    }
+
+    for (agent, layout) in [
+        (Agent::ClaudeCode, ".local/share/mise/shims"),
+        (Agent::Codex, ".asdf/shims"),
+        (Agent::Pi, ".rtx/shims"),
+    ] {
+        let directory = home.join(layout);
+        let command = directory.join(if cfg!(windows) {
+            format!("{}.exe", agent.cli_names()[0])
+        } else {
+            agent.cli_names()[0].to_string()
+        });
+        write_executable(&command, "launcher");
+        assert_eq!(
+            find_cli_in_paths(agent, &[directory]),
             Some(command),
             "{}",
             agent.id()
