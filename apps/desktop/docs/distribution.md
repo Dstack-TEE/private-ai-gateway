@@ -57,7 +57,8 @@ restarts its owned backend to acquire the scope, and immediately scans and shows
 the actual installed Agents. Detection derives each Agent's configuration path
 from that authorized Home and checks for the Agent's official executable in the
 user-owned install directories, including common package-manager and version-manager
-shim directories. A configuration folder alone is not treated as an installation.
+shim and managed Node install directories. A configuration folder alone is not treated
+as an installation.
 MAS cannot inspect arbitrary paths outside the selected Home,
 so a CLI installed only in a system-wide location is not reported as installed
 by the sandboxed build. Enable does not connect an Agent. Connect/Disconnect

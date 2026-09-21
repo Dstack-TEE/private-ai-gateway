@@ -93,6 +93,26 @@ pub(super) fn cli_paths(home: &Path, tool_env: bool) -> Vec<PathBuf> {
         &home.join(".local/share/fnm/node-versions"),
         &["installation", "bin"],
     ));
+    paths.extend(versioned_runtime_bins(
+        &home.join(".local/share/mise/installs/node"),
+        &["bin"],
+    ));
+    paths.extend(versioned_runtime_bins(
+        &home.join(".mise/installs/node"),
+        &["bin"],
+    ));
+    paths.extend(versioned_runtime_bins(
+        &home.join(".asdf/installs/nodejs"),
+        &["bin"],
+    ));
+    paths.extend(versioned_runtime_bins(
+        &home.join(".local/share/rtx/installs/node"),
+        &["bin"],
+    ));
+    paths.extend(versioned_runtime_bins(
+        &home.join(".rtx/installs/node"),
+        &["bin"],
+    ));
     paths
 }
 

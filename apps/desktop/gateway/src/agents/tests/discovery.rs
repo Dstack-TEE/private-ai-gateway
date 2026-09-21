@@ -314,6 +314,23 @@ fn common_home_cli_layouts_and_symlinks_are_detected() {
     write_executable(&fnm, "launcher");
     assert_eq!(find_cli(Agent::Pi, &fnm_home, false), Some(fnm));
 
+    for (agent, layout) in [
+        (Agent::Codex, ".local/share/mise/installs/node"),
+        (Agent::ClaudeCode, ".mise/installs/node"),
+        (Agent::Pi, ".asdf/installs/nodejs"),
+        (Agent::OpenCode, ".local/share/rtx/installs/node"),
+        (Agent::Hermes, ".rtx/installs/node"),
+    ] {
+        let install_root = root.path().join(layout);
+        let command = install_root.join("v22.19.0/bin").join(if cfg!(windows) {
+            format!("{}.exe", agent.cli_names()[0])
+        } else {
+            agent.cli_names()[0].to_string()
+        });
+        write_executable(&command, "launcher");
+        assert_eq!(find_cli(agent, root.path(), false), Some(command));
+    }
+
     #[cfg(windows)]
     for extension in ["cmd", "bat"] {
         let directory = root.path().join(extension);
