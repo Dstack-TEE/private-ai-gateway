@@ -533,11 +533,16 @@ fn recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them() {
     let executor = tokio::runtime::Runtime::new().unwrap();
     let directory = app_data_dir().unwrap();
     std::fs::create_dir_all(&directory).unwrap();
-    let mut runtime = test_runtime(&executor, &directory);
-    Arc::get_mut(&mut runtime).unwrap().instance = lock::instance(&directory).unwrap();
     let home = std::path::PathBuf::from(
         std::env::var_os(desktop_gateway::agents::HOME_OVERRIDE_ENV).unwrap(),
     );
+    let mut runtime = test_runtime(&executor, &directory);
+    let runtime_options = Arc::get_mut(&mut runtime).unwrap();
+    runtime_options.instance = lock::instance(&directory).unwrap();
+    #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+    {
+        runtime_options.agent_home = Some(home.clone());
+    }
     let cli = home.join(".local/bin").join(if cfg!(windows) {
         "claude.exe"
     } else {
