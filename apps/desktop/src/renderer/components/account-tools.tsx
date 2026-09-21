@@ -53,7 +53,7 @@ export function AccountBalanceValue(props: BalanceProps) {
   const { data: balance, isFetching, refetch } = useAccountBalance(props);
   const { opening, openPage } = useAccountPage("Could not open billing", refetch);
   if (!balance) return null;
-  return <BillingBalanceButton balance={balance} provider={props.provider} busy={isFetching || opening}
+  return <BillingBalanceButton balance={balance} provider={props.provider} busy={isFetching || opening} disabled={opening}
     onOpen={(scopeSlug) => openPage(() => props.api.openTopUp(props.provider, scopeSlug))} />;
 }
 
@@ -78,7 +78,7 @@ function AccountDetailsView({ api, provider, target, scope, credentialRef, image
         <ItemTitle className="line-clamp-none wrap-anywhere">{name}</ItemTitle>
       </ItemContent>
       <ItemActions>
-        {balance && <BillingBalanceButton balance={balance} provider={provider} busy={busy || opening} disabled={disabled}
+        {balance && <BillingBalanceButton balance={balance} provider={provider} busy={busy || opening} disabled={disabled || opening}
           onOpen={(scopeSlug) => openPage(() => api.openTopUp(provider, scopeSlug))} />}
         <AccountActions disabled={disabled || opening} onManage={manage} onSignIn={onSignIn} />
       </ItemActions>
@@ -98,7 +98,7 @@ function BillingBalanceButton({ balance, provider, busy, disabled = false, onOpe
   const canOpen = balance.canTopUp && Boolean(scopeSlug);
   return <Button type="button" variant="outline" size="sm" className="tabular-nums"
     aria-label={canOpen ? `Current balance: ${amount}. Open billing` : `Current balance: ${amount}`}
-    aria-busy={busy} disabled={disabled || busy || !canOpen}
+    aria-busy={busy} disabled={disabled || !canOpen}
     title={balance.grantedUsd != null && Number(balance.grantedUsd) > 0 ? `${currency(Number(balance.grantedUsd))} promo credits` : undefined}
     onClick={() => { if (scopeSlug) onOpen(scopeSlug); }}>{amount}</Button>;
 }

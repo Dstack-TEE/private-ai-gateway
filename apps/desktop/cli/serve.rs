@@ -9,6 +9,7 @@
 //! No bodies are logged.
 
 use std::collections::VecDeque;
+use std::future::Future;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,6 +25,7 @@ use desktop_runtime::sidecar_protocol::{
     IdentityEvent as SidecarIdentityEvent, RequestCompleteEvent as SidecarRequestEvent, ServeEvent,
     ServiceCapabilities as SidecarCapabilities, SourceProvenance as SidecarProvenance,
 };
+use futures_util::StreamExt;
 use private_ai_proxy::aci::types::{
     AttestationReport, PROVIDER_ACI_SESSION_IDS, PROVIDER_ACI_VERIFIED,
 };
@@ -31,10 +33,10 @@ use serde_json::{json, Value};
 
 use crate::args::ServeArgs;
 use crate::checks::{
-    fetch_live_session, parse_receipt_document, run_response_checks, BodyDigest,
+    parse_receipt_document, run_response_checks, session_id_from_receipt, BodyDigest,
     EstablishedIdentity, RequiredClaim, UpstreamContext,
 };
-use crate::client::AciClient;
+use crate::client::{AciClient, HttpResult};
 use crate::sessions::audit_current_sessions;
 use crate::transcript::{Status, Transcript};
 use crate::verify::{verify_service, ServiceVerification};
@@ -782,7 +784,26 @@ async fn proxy_inference(
             }
         }
     };
-    let stream = tee(upstream, hook);
+    // Own the upstream body in a bounded producer task. If an Agent stops
+    // reading after its protocol-level terminal event, the receiver closes;
+    // the producer then drains without buffering so the full wire digest and
+    // receipt audit still complete. While the Agent is connected, the bounded
+    // channel preserves normal backpressure.
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+    tokio::spawn(async move {
+        let mut stream = Box::pin(tee(upstream, hook));
+        let mut downstream_open = true;
+        while let Some(item) = stream.next().await {
+            if downstream_open && sender.send(item).await.is_err() {
+                downstream_open = false;
+            }
+        }
+    });
+    let stream = async_stream::stream! {
+        while let Some(item) = receiver.recv().await {
+            yield item;
+        }
+    };
     builder
         .body(Body::from_stream(stream))
         .unwrap_or_else(|_| internal_error())
@@ -991,19 +1012,11 @@ async fn verify_exchange(
                 .to_string(),
         );
     }
-    let receipt_resp = state
-        .client
-        .fetch_receipt(&state.base_url, &exchange.receipt_id, bearer)
-        .await
-        .map_err(|e| format!("fetch failed: {e}"))?;
-    if !(200..300).contains(&receipt_resp.status) {
-        return Err(format!("fetch returned HTTP {}", receipt_resp.status));
-    }
+    let receipt_resp = fetch_receipt_for_audit(state, &exchange.receipt_id, bearer).await?;
     let receipt = receipt_resp.json().and_then(parse_receipt_document)?;
 
     let mut transcript = Transcript::default();
-    let (session_resp, no_session_reason) =
-        fetch_live_session(&state.client, &state.base_url, &receipt).await;
+    let (session_resp, no_session_reason) = fetch_session_for_audit(state, &receipt).await;
     let session_bytes = session_resp.map(|resp| resp.body);
     run_response_checks(
         &mut transcript,
@@ -1040,6 +1053,83 @@ async fn verify_exchange(
         ));
     }
     Ok((transcript, detail))
+}
+
+const AUDIT_RETRY_DELAYS_MS: [u64; 4] = [100, 250, 500, 1_000];
+
+fn transient_audit_status(status: u16) -> bool {
+    status == 404 || status == 429 || (500..600).contains(&status)
+}
+
+enum AuditFetchError {
+    Status(u16),
+    Transport(String),
+}
+
+async fn fetch_audit_artifact<F, Fut>(mut fetch: F) -> Result<HttpResult, AuditFetchError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<HttpResult, String>>,
+{
+    let mut delays = AUDIT_RETRY_DELAYS_MS.into_iter();
+    loop {
+        match fetch().await {
+            Ok(response) if (200..300).contains(&response.status) => return Ok(response),
+            Ok(response) if transient_audit_status(response.status) => {
+                let Some(delay_ms) = delays.next() else {
+                    return Err(AuditFetchError::Status(response.status));
+                };
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+            Ok(response) => return Err(AuditFetchError::Status(response.status)),
+            Err(error) => {
+                let Some(delay_ms) = delays.next() else {
+                    return Err(AuditFetchError::Transport(error));
+                };
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+        }
+    }
+}
+
+async fn fetch_receipt_for_audit(
+    state: &ProxyState,
+    receipt_id: &str,
+    bearer: Option<&str>,
+) -> Result<HttpResult, String> {
+    match fetch_audit_artifact(|| {
+        state
+            .client
+            .fetch_receipt(&state.base_url, receipt_id, bearer)
+    })
+    .await
+    {
+        Ok(response) => Ok(response),
+        Err(AuditFetchError::Status(status)) => Err(format!("fetch returned HTTP {status}")),
+        Err(AuditFetchError::Transport(error)) => Err(format!("fetch failed: {error}")),
+    }
+}
+
+async fn fetch_session_for_audit(
+    state: &ProxyState,
+    receipt: &Value,
+) -> (Option<HttpResult>, String) {
+    let Some(session_id) = session_id_from_receipt(receipt) else {
+        return (
+            None,
+            "receipt's upstream.verified carries no session_id".to_string(),
+        );
+    };
+    match fetch_audit_artifact(|| state.client.fetch_session(&state.base_url, &session_id)).await {
+        Ok(response) => (Some(response), String::new()),
+        Err(AuditFetchError::Status(status)) => (
+            None,
+            format!("session {session_id} fetch returned HTTP {status}"),
+        ),
+        Err(AuditFetchError::Transport(error)) => {
+            (None, format!("session {session_id} fetch failed: {error}"))
+        }
+    }
 }
 
 fn json_response(status: StatusCode, body: Value) -> Response {
@@ -1668,6 +1758,71 @@ mod tests {
         assert!(outcome.detail.contains("canceled by the client"));
     }
 
+    #[tokio::test]
+    async fn transient_receipt_and_session_fetches_are_retried() {
+        let receipt_calls = Arc::new(AtomicUsize::new(0));
+        let session_calls = Arc::new(AtomicUsize::new(0));
+        let upstream = Router::new()
+            .route(
+                "/v1/aci/receipts/:id",
+                get({
+                    let calls = receipt_calls.clone();
+                    move || {
+                        let calls = calls.clone();
+                        async move {
+                            if calls.fetch_add(1, Ordering::SeqCst) < 2 {
+                                return text_response(StatusCode::NOT_FOUND, "not ready");
+                            }
+                            json_response(StatusCode::OK, vector_receipt_envelope())
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/aci/sessions/:id",
+                get({
+                    let calls = session_calls.clone();
+                    move || {
+                        let calls = calls.clone();
+                        async move {
+                            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                                return text_response(StatusCode::SERVICE_UNAVAILABLE, "not ready");
+                            }
+                            Response::builder()
+                                .header("content-type", "application/json")
+                                .body(Body::from(vector_session_bytes()))
+                                .unwrap()
+                        }
+                    }
+                }),
+            );
+        let base = spawn_server(upstream).await;
+        let (tx, _outcomes) = mpsc::unbounded_channel();
+        let state = state_over(base, tx);
+        let exchange = RecordedExchange {
+            receipt_id: "rcpt-0001".to_string(),
+            path: "/v1/chat/completions".to_string(),
+            status: 200,
+            streamed: true,
+            request: BodyDigest::of(REQUEST_BODY),
+            response: BodyDigest::of(RESPONSE_BODY),
+            delivery: ResponseDelivery::Complete,
+            pinned_sessions: Vec::new(),
+            at: crate::checks::now_secs(),
+            verified: None,
+            tag: None,
+            local_policy_applied: false,
+        };
+
+        let (transcript, _) = verify_exchange(&state, &state.snapshot(), &exchange, None)
+            .await
+            .unwrap();
+
+        assert!(transcript.verified());
+        assert_eq!(receipt_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(session_calls.load(Ordering::SeqCst), 2);
+    }
+
     #[test]
     fn apply_constraints_tightens_plaintext_body() {
         // Plain body: the member is added.
@@ -2084,6 +2239,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn client_drop_does_not_cancel_background_receipt_audit() {
+        let split = RESPONSE_BODY.len() / 2;
+        let finish_stream = Arc::new(tokio::sync::Notify::new());
+        let upstream = Router::new()
+            .route("/v1/chat/completions", post({
+                let finish = finish_stream.clone();
+                move || {
+                    let finish = finish.clone();
+                    async move {
+                        let body = Body::from_stream(async_stream::stream! {
+                            yield Ok::<_, std::io::Error>(Bytes::from_static(&RESPONSE_BODY[..split]));
+                            finish.notified().await;
+                            yield Ok::<_, std::io::Error>(Bytes::from_static(&RESPONSE_BODY[split..]));
+                        });
+                        Response::builder()
+                            .header("content-type", "text/event-stream")
+                            .header("x-receipt-id", "rcpt-0001")
+                            .body(body)
+                            .unwrap()
+                    }
+                }
+            }))
+            .route(
+                "/v1/aci/receipts/:id",
+                get(|| async { json_response(StatusCode::OK, vector_receipt_envelope()) }),
+            )
+            .route("/v1/aci/sessions/:id", get(|| async {
+                ([(("content-type"), "application/json")], vector_session_bytes())
+            }));
+        let (tx, mut outcomes) = mpsc::unbounded_channel();
+        let state = state_over(spawn_server(upstream).await, tx);
+        let proxy = spawn_server(build_proxy_router(state)).await;
+        let response = reqwest::Client::new()
+            .post(format!("{proxy}/v1/chat/completions"))
+            .body(REQUEST_BODY.to_vec())
+            .send()
+            .await
+            .unwrap();
+        let mut body = response.bytes_stream();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), body.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.as_ref(), &RESPONSE_BODY[..split]);
+        drop(body);
+
+        finish_stream.notify_one();
+        let pending = tokio::time::timeout(std::time::Duration::from_secs(2), outcomes.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.verified, None);
+        let audited = tokio::time::timeout(std::time::Duration::from_secs(5), outcomes.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(audited.verified, Some(true));
+    }
+
+    #[tokio::test]
     async fn streaming_audit_does_not_gate_delivery_on_receipt_success() {
         use futures_util::StreamExt;
         for mode in ["valid", "tampered", "unavailable"] {
@@ -2119,9 +2335,12 @@ mod tests {
                         let started = started.clone();
                         let finish = finish.clone();
                         async move {
-                            started.notify_one(); finish.notified().await;
-                            if mode != "unavailable" { json_response(StatusCode::OK, vector_receipt_envelope()) }
-                            else { text_response(StatusCode::SERVICE_UNAVAILABLE, "unavailable") }
+                            started.notify_one();
+                            if mode == "unavailable" {
+                                return text_response(StatusCode::SERVICE_UNAVAILABLE, "unavailable");
+                            }
+                            finish.notified().await;
+                            json_response(StatusCode::OK, vector_receipt_envelope())
                         }
                     }
                 }))
