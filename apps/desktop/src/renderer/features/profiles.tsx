@@ -85,6 +85,7 @@ function ProfileListSheet({
   const reportError = useErrorAlert("Profile action failed", openError);
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   const activeProfileAvailable = profileIsAvailable(activeProfile, state);
+  const activeConnection = activeProfile && connectionRequirement(activeProfile);
 
   const activate = async (profileId: string): Promise<boolean> => {
     if (profileId === state.activeProfileId) return true;
@@ -113,14 +114,14 @@ function ProfileListSheet({
       {!activeProfileAvailable && (
         <p className="banner sheet-banner profile-availability mt-2.5 flex items-start gap-1.75 rounded-lg bg-[var(--warning-bg)] px-3 py-2.25 text-warning wrap-anywhere">
           <TriangleAlert size={15} aria-hidden="true" />
-          {activeProfile ? `Sign in or add an API key for “${activeProfile.name}” to start protection.` : "Add a profile to start protection."}
+          {activeProfile ? `${activeConnection} for “${activeProfile.name}” to start protection.` : "Add a profile to start protection."}
         </p>
       )}
       <div className="profile-list min-h-0 mt-3.5 flex-auto overflow-auto bg-card border border-border rounded-2xl" role="list" aria-label="AI service profiles">
         {state.profiles.map((profile) => {
           const active = profile.id === state.activeProfileId;
           const working = profile.id === workingProfileId;
-          const status = profileIsAvailable(profile, state) ? "Ready" : "Sign in or add an API key";
+          const status = profileIsAvailable(profile, state) ? "Ready" : connectionRequirement(profile);
           return (
             <div className={`profile-list-row min-w-0 grid grid-cols-[minmax(0,_1fr)_52px] items-center border-b border-b-border [&.is-active]:bg-muted [&.is-active_.profile-select]:bg-transparent last:border-b-0 [&_>_button:last-child]:justify-self-center ${active ? " is-active" : ""}`} role="listitem" key={profile.id}>
               <ActionItem
@@ -150,6 +151,11 @@ function ProfileListSheet({
       </SheetActions>
     </Sheet>
   );
+}
+
+function connectionRequirement(profile: Pick<ConfidentialProfile, "provider">): string {
+  if (profile.provider === "custom") return "Add an API key";
+  return `Connect ${serviceProviderOption(profile.provider)?.name ?? "account"} or add an API key`;
 }
 
 export function ProfileEditorSheet({
@@ -209,6 +215,7 @@ export function ProfileEditorSheet({
     } catch (error) { reportError(error); }
   };
   const selectedPreset = serviceProviderPreset(draft.provider);
+  const selectedProviderName = serviceProviderOption(draft.provider)?.name;
   const keyLabel = selectedPreset?.keyLabel ?? "API key";
   const draftUrl = draft.remoteUrl.trim().replace(/\/$/, "");
   const profileChanged = !profile
@@ -347,7 +354,7 @@ export function ProfileEditorSheet({
           {draft.provider === "custom" && <FormField id="profile-endpoint" label="Service endpoint" description={<>Requires ACI support. <Button type="button" variant="link" className="h-auto p-0 text-xs align-baseline" onClick={() => { void desktopApi.openAboutLink("aci").catch(reportError); }}>About ACI<ExternalLink size={12} aria-hidden="true" /></Button></>}><Input id="profile-endpoint" aria-describedby="profile-endpoint-note" value={draft.remoteUrl} onChange={(event) => setDraft((current) => ({ ...current, remoteUrl: event.target.value }))} disabled={frozen || working} spellCheck={false} /></FormField>}
           <Tabs value={draft.provider === "custom" ? "apiKey" : authMethod} className="gap-4"
             onValueChange={(next) => { if (next === "account" || next === "apiKey") void chooseAuthMethod(next); }}>
-            {draft.provider !== "custom" && <TabsList aria-label="Sign-in method" className="w-full">
+            {draft.provider !== "custom" && <TabsList aria-label="Connection method" className="w-full">
               <TabsTrigger value="account" disabled={working || frozen}>Account</TabsTrigger>
               <TabsTrigger value="apiKey" disabled={working || frozen}>API key</TabsTrigger>
             </TabsList>}
@@ -357,8 +364,8 @@ export function ProfileEditorSheet({
                   <div className="flex items-center justify-between gap-3" role="status" aria-live="polite">
                   <div className="space-y-1 text-sm"><p>Continue in your browser</p>{login.userCode && <p className="font-mono text-muted-foreground">{login.userCode}</p>}</div>
                   <div className="flex items-center gap-1">
-                    <IconButton size="icon-sm" label="Copy sign-in link" onClick={() => void desktopApi.copyText(login.url).catch(reportError)}><Copy aria-hidden /></IconButton>
-                    <Button type="button" variant="ghost" size="sm" disabled={account.working} onClick={() => void account.cancel()}>Cancel Sign-in</Button>
+                    <IconButton size="icon-sm" label="Copy connection link" onClick={() => void desktopApi.copyText(login.url).catch(reportError)}><Copy aria-hidden /></IconButton>
+                    <Button type="button" variant="ghost" size="sm" disabled={account.working} onClick={() => void account.cancel()}>Cancel</Button>
                   </div>
                   </div>
                   {draft.provider === "redpill" && <details>
@@ -385,7 +392,7 @@ export function ProfileEditorSheet({
                     ]} disabled={working || frozen || !workspaces?.length} onChange={(value) => setSelectedWorkspaceId(Number(value))} />
                     {!authorized && <ErrorAlert title="Could not load account workspaces" error={workspaceError} />}
                   </FormField>}
-                </> : <Button type="button" variant="default" size="lg" className="w-full [&_.service-logo]:size-4" disabled={working || frozen || !draft.name.trim()} onClick={() => void signIn()}><ServiceLogo url={draft.remoteUrl} />Sign in with {selectedPreset?.name}</Button>}
+                </> : <Button type="button" variant="default" size="lg" className="w-full [&_.service-logo]:size-4" disabled={working || frozen || !draft.name.trim()} onClick={() => void signIn()}><ServiceLogo url={draft.remoteUrl} />Connect {selectedProviderName}</Button>}
               </FieldGroup>
             </TabsContent>
             <TabsContent value="apiKey">

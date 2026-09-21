@@ -161,6 +161,7 @@ pub(crate) async fn request_agent_access(
             .map_err(|_| "The selected Home folder is invalid".to_string())?;
         run_blocking(move || desktop_runtime::agent_access::authorize(&path)).await?;
     }
+    run_blocking(desktop_runtime::agent_access::prepare_for_service).await?;
     let client = client.inner().clone();
     run_blocking(move || client.restart_service()).await?;
     let _ = window.emit("gateway://agents-changed", ());

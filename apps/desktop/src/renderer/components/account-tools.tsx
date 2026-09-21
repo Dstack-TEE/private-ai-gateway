@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeftRight, Ellipsis, ExternalLink } from "lucide-react";
-import type { AccountBalanceTarget, AccountImages, AccountScope, DesktopApi, ServiceProvider } from "../../shared/contracts";
+import type { AccountBalance, AccountBalanceTarget, AccountImages, AccountScope, DesktopApi, ServiceProvider } from "../../shared/contracts";
 import { useQuery } from "@tanstack/react-query";
 import { currency } from "../lib/usage-presentation";
 import { Avatar, AvatarFallback, AvatarImage } from "./ui/avatar";
@@ -12,7 +12,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { distributionCapabilities } from "../lib/environment";
 
 type Props = {
-  api: Pick<DesktopApi, "getAccountBalance" | "openOrganization">;
+  api: Pick<DesktopApi, "getAccountBalance" | "openOrganization" | "openTopUp">;
   provider: ServiceProvider;
   target: AccountBalanceTarget;
   scope?: AccountScope;
@@ -29,7 +29,6 @@ type BalanceQueryProps = BalanceIdentity & {
 type BalanceProps = BalanceIdentity & {
   api: Pick<DesktopApi, "getAccountBalance" | "openTopUp">;
   enabled: boolean;
-  topUpLinks: boolean;
 };
 
 function balanceCacheKey({ provider, target, credentialRef }: Pick<Props, "provider" | "target" | "credentialRef">) {
@@ -54,13 +53,8 @@ export function AccountBalanceValue(props: BalanceProps) {
   const { data: balance, isFetching, refetch } = useAccountBalance(props);
   const { opening, openPage } = useAccountPage("Could not open billing", refetch);
   if (!balance) return null;
-  const scopeSlug = props.provider === "phala" ? balance.scope.workspaceSlug : balance.scope.organizationSlug;
-  const amount = currency(Number(balance.balanceUsd));
-  if (!props.topUpLinks) {
-    return <span className="text-sm font-medium tabular-nums" aria-label={`Current balance: ${amount}`} aria-busy={isFetching}>{amount}</span>;
-  }
-  return <Button type="button" variant="outline" size="sm" className="tabular-nums" aria-label={`Current balance: ${amount}`} aria-busy={isFetching || opening}
-    disabled={opening || !scopeSlug} onClick={() => openPage(() => props.api.openTopUp(props.provider, scopeSlug ?? undefined))}>{amount}</Button>;
+  return <BillingBalanceButton balance={balance} provider={props.provider} busy={isFetching || opening}
+    onOpen={(scopeSlug) => openPage(() => props.api.openTopUp(props.provider, scopeSlug))} />;
 }
 
 /** Changing account or credential must never display the previous account's balance. */
@@ -84,14 +78,29 @@ function AccountDetailsView({ api, provider, target, scope, credentialRef, image
         <ItemTitle className="line-clamp-none wrap-anywhere">{name}</ItemTitle>
       </ItemContent>
       <ItemActions>
-        {balance && <span className="text-sm font-medium tabular-nums" aria-label="Balance in USD" role="status" aria-live="polite" aria-busy={busy}
-          title={balance.grantedUsd != null && Number(balance.grantedUsd) > 0 ? `${currency(Number(balance.grantedUsd))} promo credits` : undefined}>
-          {currency(Number(balance.balanceUsd))}
-        </span>}
+        {balance && <BillingBalanceButton balance={balance} provider={provider} busy={busy || opening} disabled={disabled}
+          onOpen={(scopeSlug) => openPage(() => api.openTopUp(provider, scopeSlug))} />}
         <AccountActions disabled={disabled || opening} onManage={manage} onSignIn={onSignIn} />
       </ItemActions>
     </Item>
   </div>;
+}
+
+function BillingBalanceButton({ balance, provider, busy, disabled = false, onOpen }: {
+  balance: AccountBalance;
+  provider: ServiceProvider;
+  busy: boolean;
+  disabled?: boolean;
+  onOpen(scopeSlug: string): void;
+}) {
+  const scopeSlug = provider === "phala" ? balance.scope.workspaceSlug : balance.scope.organizationSlug;
+  const amount = currency(Number(balance.balanceUsd));
+  const canOpen = balance.canTopUp && Boolean(scopeSlug);
+  return <Button type="button" variant="outline" size="sm" className="tabular-nums"
+    aria-label={canOpen ? `Current balance: ${amount}. Open billing` : `Current balance: ${amount}`}
+    aria-busy={busy} disabled={disabled || busy || !canOpen}
+    title={balance.grantedUsd != null && Number(balance.grantedUsd) > 0 ? `${currency(Number(balance.grantedUsd))} promo credits` : undefined}
+    onClick={() => { if (scopeSlug) onOpen(scopeSlug); }}>{amount}</Button>;
 }
 
 function useAccountPage(title: string, refetch: () => Promise<unknown>, disabled = false) {

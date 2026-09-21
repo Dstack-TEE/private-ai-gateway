@@ -6,7 +6,7 @@ pub(super) fn client() -> Result<Client, String> {
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(35))
         .build()
-        .map_err(|_| "Cannot initialize account login".into())
+        .map_err(|_| "Cannot initialize account connection".into())
 }
 
 pub(super) async fn request_json(
@@ -52,25 +52,25 @@ pub(super) fn protocol_error(data: &Value) -> Option<&str> {
 
 pub(super) fn account_error(status: StatusCode, data: &Value) -> String {
     if let Some(message) = match protocol_error(data) {
-        Some("org_required") => Some("Select an organization on the sign-in page and try again."),
+        Some("org_required") => Some("Select an organization on the connection page and try again."),
         Some("keys_permission_required" | "organization_permission_required") => Some("Your organization must grant key-management permission before you can connect."),
         Some("rate_limited") => Some("Balance refresh is temporarily limited. Try again in a minute."),
         Some("balance_unavailable") => Some("Balance is temporarily unavailable. Try refreshing later."),
         Some("billing_permission_required") => Some("Your account does not have permission to view this balance."),
         Some("account_mapping_conflict") => Some("Account setup conflicts with an existing account. Contact RedPill support."),
-        Some("account_setup_unavailable" | "account_service_unavailable" | "organization_unavailable" | "authorization_unavailable") => Some("Account setup is temporarily unavailable. Retry signing in."),
+        Some("account_setup_unavailable" | "account_service_unavailable" | "organization_unavailable" | "authorization_unavailable") => Some("Account setup is temporarily unavailable. Retry connecting."),
         Some("device_disabled") => Some("This device key was disabled. Manage it in RedPill Keys before reconnecting."),
         Some("device_migration_required" | "device_credential_mismatch") => Some("This device credential needs repair in RedPill Keys."),
-        Some("invalid_authorization" | "invalid_identity" | "credentials_required" | "device_unavailable") => Some("Your authorization is no longer valid. Sign in again."),
+        Some("invalid_authorization" | "invalid_identity" | "credentials_required" | "device_unavailable") => Some("Your authorization is no longer valid. Reconnect the account."),
         Some("key_store_unavailable") => Some("The credential service is unavailable. Retry saving; your previous credential is unchanged."),
         Some("account_unavailable") => Some("This account is unavailable. Contact your organization administrator."),
-        Some("not_available") => Some("Account login is not enabled on this service."),
+        Some("not_available") => Some("Account connection is not enabled on this service."),
         _ => None,
     } { return format!("Account: {message}"); }
 
     match protocol_error(data) {
         Some("access_denied") => "Account: Authorization was declined.".into(),
-        Some("expired_token") => "Account: Authorization expired; sign in again.".into(),
+        Some("expired_token") => "Account: Authorization expired; reconnect the account.".into(),
         _ => format!(
             "Account: Service rejected the request (HTTP {}). Retry or contact support.",
             status.as_u16()

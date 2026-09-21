@@ -25,6 +25,7 @@ mod mac_app_store {
     };
 
     const BOOKMARK_FILE: &str = "agent-home.bookmark";
+    const SERVICE_BOOKMARK_FILE: &str = "agent-home.service-bookmark";
     const MAX_BOOKMARK_BYTES: u64 = 1024 * 1024;
 
     static ACTIVE_ACCESS: OnceLock<Mutex<Option<AgentHomeAccess>>> = OnceLock::new();
@@ -99,7 +100,7 @@ mod mac_app_store {
             retain(None);
             return AgentAccessStatus::AuthorizationRequired;
         }
-        match acquire() {
+        match acquire_app() {
             Ok(Some(access)) => {
                 if retain(Some(access)) {
                     AgentAccessStatus::Authorized
@@ -128,29 +129,49 @@ mod mac_app_store {
         if selected != expected {
             return Err("Select your Home folder, not one of its subfolders".to_string());
         }
-        save_bookmark(&selected)?;
+        save_app_bookmark(&selected)?;
         Ok(AgentAccessStatus::Authorized)
     }
 
-    pub fn acquire() -> Result<Option<AgentHomeAccess>, String> {
-        let path = bookmark_path()?;
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err("Agent Home access could not be loaded".to_string()),
+    fn acquire_app() -> Result<Option<AgentHomeAccess>, String> {
+        let Some(bytes) = read_bookmark(&bookmark_path()?)? else {
+            return Ok(None);
         };
-        if bytes.is_empty() || bytes.len() as u64 > MAX_BOOKMARK_BYTES {
-            return Err("Agent Home access is invalid".to_string());
+        let (access, stale) = resolve_bookmark(
+            &bytes,
+            NSURLBookmarkResolutionOptions::WithSecurityScope
+                | NSURLBookmarkResolutionOptions::WithoutUI,
+            true,
+        )?;
+        if stale {
+            persist_app_bookmark(&access.url)?;
         }
-        let bookmark = NSData::with_bytes(&bytes);
+        Ok(Some(access))
+    }
+
+    pub fn acquire_for_service() -> Result<Option<AgentHomeAccess>, String> {
+        let service_path = service_bookmark_path()?;
+        let Some(bytes) = read_bookmark(&service_path)? else {
+            if bookmark_path()?.exists() {
+                return Err("Agent Home access was not prepared for the backend".to_string());
+            }
+            return Ok(None);
+        };
+        let (access, _) =
+            resolve_bookmark(&bytes, NSURLBookmarkResolutionOptions::WithoutUI, false)?;
+        Ok(Some(access))
+    }
+
+    fn resolve_bookmark(
+        bytes: &[u8],
+        options: NSURLBookmarkResolutionOptions,
+        start_explicitly: bool,
+    ) -> Result<(AgentHomeAccess, bool), String> {
+        let bookmark = NSData::with_bytes(bytes);
         let mut stale = Bool::NO;
         let url = unsafe {
             NSURL::URLByResolvingBookmarkData_options_relativeToURL_bookmarkDataIsStale_error(
-                &bookmark,
-                NSURLBookmarkResolutionOptions::WithSecurityScope
-                    | NSURLBookmarkResolutionOptions::WithoutUI,
-                None,
-                &mut stale,
+                &bookmark, options, None, &mut stale,
             )
         }
         .map_err(|_| "Agent Home access is no longer valid".to_string())?;
@@ -161,7 +182,7 @@ mod mac_app_store {
             .path()
             .map(|path| PathBuf::from(path.to_string()))
             .ok_or_else(|| "Agent Home access is invalid".to_string())?;
-        if !unsafe { url.startAccessingSecurityScopedResource() } {
+        if start_explicitly && !unsafe { url.startAccessingSecurityScopedResource() } {
             return Err("Agent Home access is no longer valid".to_string());
         }
         let access = AgentHomeAccess { url, home };
@@ -173,37 +194,42 @@ mod mac_app_store {
                 "Agent Home access does not point to the current user's Home folder".into(),
             );
         }
-        if stale.as_bool() {
-            persist_bookmark(&access.url)?;
-        }
-        Ok(Some(access))
+        Ok((access, stale.as_bool()))
     }
 
-    pub fn authorized_home() -> Result<PathBuf, String> {
-        if status() != AgentAccessStatus::Authorized {
-            return Err("Agent Home access is required".to_string());
+    pub fn prepare_for_service() -> Result<(), String> {
+        let access = match acquire_app() {
+            Ok(Some(access)) => access,
+            Ok(None) => return clear_service_bookmark(),
+            Err(error) => {
+                let _ = clear_service_bookmark();
+                return Err(error);
+            }
+        };
+        if let Err(error) = persist_service_bookmark(&access.url) {
+            let _ = clear_service_bookmark();
+            return Err(error);
         }
-        active_access()
-            .lock()
-            .map_err(|_| "Agent Home access state is unavailable".to_string())?
-            .as_ref()
-            .map(|access| access.home().to_path_buf())
-            .ok_or_else(|| "Agent Home access is unavailable".to_string())
+        Ok(())
     }
 
     fn bookmark_path() -> Result<PathBuf, String> {
         Ok(desktop_gateway::agents::app_data_dir()?.join(BOOKMARK_FILE))
     }
 
-    fn save_bookmark(home: &Path) -> Result<(), String> {
+    fn service_bookmark_path() -> Result<PathBuf, String> {
+        Ok(desktop_gateway::agents::app_data_dir()?.join(SERVICE_BOOKMARK_FILE))
+    }
+
+    fn save_app_bookmark(home: &Path) -> Result<(), String> {
         let home = home
             .to_str()
             .ok_or_else(|| "The Home folder path is not valid Unicode".to_string())?;
         let url = NSURL::fileURLWithPath_isDirectory(&NSString::from_str(home), true);
-        persist_bookmark(&url)
+        persist_app_bookmark(&url)
     }
 
-    fn persist_bookmark(url: &NSURL) -> Result<(), String> {
+    fn persist_app_bookmark(url: &NSURL) -> Result<(), String> {
         let bookmark = url
             .bookmarkDataWithOptions_includingResourceValuesForKeys_relativeToURL_error(
                 NSURLBookmarkCreationOptions::WithSecurityScope,
@@ -212,6 +238,42 @@ mod mac_app_store {
             )
             .map_err(|_| "Agent Home access could not be saved".to_string())?;
         write_private(&bookmark_path()?, &bookmark.to_vec())
+    }
+
+    fn persist_service_bookmark(url: &NSURL) -> Result<(), String> {
+        // A bookmark created without security-scope options carries an
+        // ephemeral sandbox extension that another process can resolve. The
+        // app regenerates it from its persistent app-scoped bookmark before
+        // every backend launch because the shared extension does not survive
+        // indefinitely across system restarts.
+        let bookmark = url
+            .bookmarkDataWithOptions_includingResourceValuesForKeys_relativeToURL_error(
+                NSURLBookmarkCreationOptions::empty(),
+                None,
+                None,
+            )
+            .map_err(|_| "Agent Home access could not be shared with the backend".to_string())?;
+        write_private(&service_bookmark_path()?, &bookmark.to_vec())
+    }
+
+    fn read_bookmark(path: &Path) -> Result<Option<Vec<u8>>, String> {
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err("Agent Home access could not be loaded".to_string()),
+        };
+        if bytes.is_empty() || bytes.len() as u64 > MAX_BOOKMARK_BYTES {
+            return Err("Agent Home access is invalid".to_string());
+        }
+        Ok(Some(bytes))
+    }
+
+    fn clear_service_bookmark() -> Result<(), String> {
+        match fs::remove_file(service_bookmark_path()?) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err("Agent Home backend access could not be cleared".to_string()),
+        }
     }
 
     fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -267,17 +329,11 @@ pub fn authorize(path: &std::path::Path) -> Result<AgentAccessStatus, String> {
 }
 
 #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
-pub fn acquire() -> Result<Option<AgentHomeAccess>, String> {
-    mac_app_store::acquire()
+pub fn acquire_for_service() -> Result<Option<AgentHomeAccess>, String> {
+    mac_app_store::acquire_for_service()
 }
 
-pub fn authorized_home() -> Result<std::path::PathBuf, String> {
-    #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
-    {
-        mac_app_store::authorized_home()
-    }
-    #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
-    {
-        Err("Agent Home access is unavailable on this distribution".to_string())
-    }
+#[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+pub fn prepare_for_service() -> Result<(), String> {
+    mac_app_store::prepare_for_service()
 }

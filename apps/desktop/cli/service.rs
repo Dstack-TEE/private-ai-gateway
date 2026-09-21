@@ -26,17 +26,25 @@ async fn run() -> Result<(), String> {
     }
     Arguments::parse();
     #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
-    let agent_home_access = match desktop_runtime::agent_access::acquire() {
-        Ok(access) => access,
+    let service_access = desktop_runtime::agent_access::acquire_for_service();
+    #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+    let (agent_home_access, agent_access_error) = match service_access {
+        Ok(access) => (access, None),
         Err(error) => {
             eprintln!("Private AI Proxy backend: {error}");
-            None
+            (None, Some(error))
         }
     };
     #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
     let agent_configuration = agent_home_access.is_some();
+    #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+    let agent_home = agent_home_access
+        .as_ref()
+        .map(|access| access.home().to_path_buf());
     #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
     let agent_configuration = true;
+    #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
+    let agent_access_error = None;
     let executable = std::env::current_exe().map_err(|_| "Cannot locate backend")?;
     let directory = executable
         .parent()
@@ -56,6 +64,9 @@ async fn run() -> Result<(), String> {
         helper_path: directory.join(name("private-ai-proxy-helper")),
         task_runtime: tokio::runtime::Handle::current(),
         agent_configuration,
+        agent_access_error,
+        #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+        agent_home,
     };
     // Runtime initialization uses synchronous persistence APIs outside executor workers.
     let runtime = tokio::task::spawn_blocking(move || DesktopRuntime::launch(options))

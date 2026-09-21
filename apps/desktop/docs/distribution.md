@@ -19,13 +19,13 @@ Gateway server. Build and submission instructions live in [Mac App Store](mac-ap
 | App update | Tauri signed background updater | App Store | Channel requirement |
 | CLI registration | Available | Disabled | No shared-location code installation in MAS |
 | OAuth, manual key entry, account balance | Available | Available | Shared |
-| Top Up | Available | Hidden and native command denied | Free companion review policy |
+| Provider billing from balance | Available | Available when the provider returns `canTopUp` and a scoped account slug | Shared external cloud-account action |
 | Account / Get API key web portals | Available | Hidden and native commands denied pending neutral destinations | Free companion review policy |
 | Backend after GUI exit | Existing persistent service | Stops on GUI exit, including parent loss | MAS lifecycle requirement |
 | Packaging | Platform packages and updater artifacts | Universal app and signed pkg, provisioning profile | Channel requirement |
 
 Capabilities describe only channel policy: `nativeUpdates`, `cliRegistration`,
-`topUpLinks`, `accountPortalLinks`, and `sandboxHomeAccess`. Autostart backend,
+`accountPortalLinks`, and `sandboxHomeAccess`. Autostart backend,
 helper paths, and signing mechanics are not capabilities. Platform/feature guards
 remain at native API and process boundaries, not throughout product components.
 
@@ -52,9 +52,11 @@ with revocable local proxy tokens; workspace contents are not read. Cancel
 leaves the module inactive and retryable, without a scan, Agent configuration,
 token issuance, or error alert. No intermediate webview dialog is created.
 
-After selection, MAS stores a security-scoped bookmark in the app container,
-restarts its owned backend to acquire the scope, and immediately scans and shows
-the actual installed Agents. Detection derives each Agent's configuration path
+After selection, MAS stores a persistent app-scoped security bookmark in the app
+container. Before every backend launch or restart, the app resolves that bookmark
+and creates a fresh process-shareable bookmark for its owned backend. The backend
+resolves the shared bookmark, retains that access for its lifetime, and immediately
+scans and shows the actual installed Agents. Detection derives each Agent's configuration path
 from that authorized Home and checks for the Agent's official executable in the
 user-owned install directories, including common package-manager and version-manager
 shim and managed Node install directories. A configuration folder alone is not treated
@@ -64,9 +66,12 @@ so a CLI installed only in a system-wide location is not reported as installed
 by the sandboxed build. Enable does not connect an Agent. Connect/Disconnect
 remain independent configuration operations and never open the Home picker.
 
-On subsequent launches and refreshes, a valid bookmark restores access silently;
-a stale but recoverable bookmark is refreshed and persisted while scoped access
-is active. Unrecoverable access returns the module to its inactive state with
+On subsequent launches and refreshes, the persistent app bookmark restores access
+silently; a stale but recoverable bookmark is refreshed while scoped access is
+active. The process-shareable bookmark is regenerated before each backend start
+because its implicit sandbox extension is not a durable replacement for the
+app-scoped bookmark. Unrecoverable access clears the backend bookmark and returns
+the module to its inactive state with
 **Re-enable Agent Integrations**, without a background panel. The backend stops
 scanning and withdraws in-memory Agent token authority. Existing owned files and
 recovery records remain for restoration after reauthorization; inaccessible Home
@@ -124,8 +129,10 @@ registration otherwise occurs only through the user's toggle.
 
 Updater initialization and native commands check the same policy as the renderer;
 MAS has no background feed checks. The MAS overlay also removes updater config
-and artifacts. Shared account presentation keeps balance visible without a
-purchase action. MAS does not invent an alternative billing-neutral URL.
+and artifacts. Shared account presentation renders balance as a button when the
+provider explicitly permits top-up and returns a validated account scope; it opens
+that provider's external billing page in the system browser. General account and
+API-key portals remain channel-gated because they are broader, unverified surfaces.
 
 The app-owned [Codex catalog](codex-catalog.md) replaces runtime CLI probing in
 both distributions. Its existing pinned baseline and refresh workflow are reused.

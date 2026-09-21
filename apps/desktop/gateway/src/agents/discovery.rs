@@ -203,6 +203,21 @@ pub(super) fn home_dir() -> Result<PathBuf, String> {
         .ok_or_else(|| "Cannot determine the home directory".to_string())
 }
 
+pub(super) fn validate_authorized_home(home: &Path) -> Result<(), String> {
+    let metadata = fs::metadata(home).map_err(|_| {
+        "Agent Home access is not available to the backend. Re-enable Agent integrations and try again."
+            .to_string()
+    })?;
+    if !metadata.is_dir() {
+        return Err("The authorized Agent Home path is not a directory".to_string());
+    }
+    fs::read_dir(home).map_err(|_| {
+        "Agent Home access is not available to the backend. Re-enable Agent integrations and try again."
+            .to_string()
+    })?;
+    Ok(())
+}
+
 /// The per-user app data directory (tokens, connection record, locks),
 /// resolved the same way by the desktop shell and the
 /// bundled helper.

@@ -329,7 +329,6 @@ export interface DistributionCapabilities {
   channel: "direct" | "macAppStore";
   nativeUpdates: boolean;
   cliRegistration: boolean;
-  topUpLinks: boolean;
   accountPortalLinks: boolean;
   sandboxHomeAccess: boolean;
 }

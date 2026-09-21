@@ -26,6 +26,11 @@ impl From<&str> for AgentOperationError {
 
 impl DesktopRuntime {
     fn require_agent_access(&self) -> Result<(), String> {
+        if let Some(error) = &self.agent_access_error {
+            return Err(format!(
+                "Agent Home access is unavailable to the backend: {error}"
+            ));
+        }
         self.agent_configuration_enabled()
             .then_some(())
             .ok_or_else(|| "Agent Home access is required".to_string())
@@ -33,7 +38,6 @@ impl DesktopRuntime {
 
     pub(super) fn agent_configuration_enabled(&self) -> bool {
         self.agent_configuration
-            && (self.agent_access_status)() == crate::agent_access::AgentAccessStatus::Authorized
     }
 
     pub(super) fn projector(&self, endpoint: &str) -> Result<Projector, String> {
@@ -41,7 +45,9 @@ impl DesktopRuntime {
             #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
             {
                 Projector::new_for_home(
-                    (self.agent_home)()?,
+                    self.agent_home
+                        .clone()
+                        .ok_or("Agent Home access is unavailable to the backend")?,
                     app_data_dir()?,
                     self.helper_path.clone(),
                     endpoint,
@@ -133,13 +139,17 @@ impl DesktopRuntime {
     }
 
     pub fn list_agents(&self) -> Result<Vec<AgentStatus>, String> {
+        if let Some(error) = &self.agent_access_error {
+            let _guard = self
+                .agent_policy
+                .lock()
+                .map_err(|_| "Agent state unavailable")?;
+            self.publish_agent_tokens(TokenSet::default())?;
+            return Err(format!(
+                "Agent detection cannot access the authorized Home folder: {error}. Re-enable Agent integrations and try again."
+            ));
+        }
         if !self.agent_configuration_enabled() {
-            if self.agent_configuration
-                && (self.agent_access_status)()
-                    == crate::agent_access::AgentAccessStatus::Authorized
-            {
-                return Err("Agent Home access is authorized but unavailable to the backend. Re-enable Agent integrations and try again.".into());
-            }
             let _guard = self
                 .agent_policy
                 .lock()

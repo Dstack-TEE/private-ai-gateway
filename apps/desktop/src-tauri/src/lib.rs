@@ -348,6 +348,9 @@ pub fn run() {
                 let data_dir = app.path().app_data_dir()?;
                 app_data::prepare(&data_dir)?;
                 std::env::set_var(desktop_gateway::agents::APP_DATA_OVERRIDE_ENV, &data_dir);
+                if let Err(error) = desktop_runtime::agent_access::prepare_for_service() {
+                    eprintln!("Cannot prepare Agent Home access for the backend: {error}");
+                }
             }
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             autostart::setup(app.handle())?;

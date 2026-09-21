@@ -101,7 +101,7 @@ impl Authorization {
                         _ => None,
                     };
                     if saved != workspace_id {
-                        return Err("Sign in again to change workspace".into());
+                        return Err("Reconnect RedPill to change workspace".into());
                     }
                 }
                 Ok(key.clone())
@@ -209,10 +209,10 @@ impl PendingLogin {
 
     fn validate(&self, id: &str) -> Result<(), String> {
         if self.presentation.id != id {
-            return Err("Account login is no longer active".into());
+            return Err("Account connection is no longer active".into());
         }
         if self.deadline <= Instant::now() {
-            return Err("Account authorization expired; sign in again".into());
+            return Err("Account authorization expired; reconnect the account".into());
         }
         Ok(())
     }
@@ -225,7 +225,7 @@ impl PendingLogin {
             self.state = match task.await {
                 Ok(Ok(authorization)) => LoginState::Authorized(Box::new(authorization)),
                 Ok(Err(error)) => LoginState::Failed(error),
-                Err(_) => LoginState::Failed("Account login stopped".into()),
+                Err(_) => LoginState::Failed("Account connection stopped".into()),
             };
         }
         match &mut self.state {
@@ -255,9 +255,9 @@ impl PendingLogin {
             || candidate.provider != self.profile.provider
             || candidate.remote_url != self.profile.remote_url
         {
-            return Err("Sign in again for the selected provider".into());
+            return Err("Reconnect the selected provider".into());
         }
-        let authorization = self.resolve().await?.ok_or("Finish signing in first")?;
+        let authorization = self.resolve().await?.ok_or("Finish connecting first")?;
         let credential = authorization.issue(profile, workspace_id).await?;
         // Save retries reuse this authorization’s issued key.
         *authorization = Authorization::Inference(credential.clone());
@@ -273,7 +273,7 @@ impl PendingLogin {
         let secret = self
             .resolve()
             .await?
-            .ok_or("Finish signing in first")?
+            .ok_or("Finish connecting first")?
             .balance_secret()
             .to_owned();
         Ok((provider, secret))
@@ -381,7 +381,7 @@ pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<Pendi
                     phala(client, device, interval),
                 )
                 .await
-                .map_err(|_| "Authorization expired; sign in again".to_string())?
+                .map_err(|_| "Authorization expired; reconnect the account".to_string())?
                 .map(Authorization::Inference)
             });
             (url, Some(code), worker, None)
@@ -390,9 +390,9 @@ pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<Pendi
             let discovery =
                 response(client.get(format!("{ISSUER}/.well-known/openid-configuration"))).await?;
             validate_discovery(&discovery)?;
-            let listener = TcpListener::bind("127.0.0.1:4181")
-                .await
-                .map_err(|_| "Login port 4181 is in use; close the other login and retry")?;
+            let listener = TcpListener::bind("127.0.0.1:4181").await.map_err(|_| {
+                "Connection callback port 4181 is in use; close the other connection and retry"
+            })?;
             let verifier = random_secret();
             let state = random_secret();
             let mut url = trusted_url(&string(&discovery, "authorization_endpoint")?, ISSUER)?;
@@ -429,12 +429,12 @@ pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<Pendi
                     ),
                 )
                 .await
-                .map_err(|_| "Authorization expired; sign in again".to_string())?
+                .map_err(|_| "Authorization expired; reconnect the account".to_string())?
             });
             (url.to_string(), None, worker, Some(callback))
         }
         ServiceProvider::Custom => {
-            return Err("Account login is only available for Phala and RedPill".into())
+            return Err("Account connection is only available for Phala and RedPill".into())
         }
     };
     let mut pending = PendingLogin::new(LoginPresentation { id, url, user_code }, profile, worker);

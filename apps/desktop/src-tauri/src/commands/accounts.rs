@@ -24,7 +24,7 @@ pub(crate) async fn begin_account_login(
     let login = client.begin_account_login(profile).await?;
     if app.opener().open_url(&login.url, None::<&str>).is_err() {
         // Keep the authorization available for the copy-link/manual callback path.
-        eprintln!("Cannot open sign-in browser; use the manual sign-in link");
+        eprintln!("Cannot open the account connection page; use the manual connection link");
     }
     Ok(login)
 }
@@ -74,10 +74,6 @@ pub(crate) async fn open_top_up(
     provider: desktop_runtime::contracts::ServiceProvider,
     scope_slug: Option<String>,
 ) -> Result<(), String> {
-    distribution::require(
-        distribution::CAPABILITIES.top_up_links,
-        "Top-up links are unavailable in this distribution",
-    )?;
     let url = desktop_runtime::account_login::top_up_url(&provider, scope_slug.as_deref())?;
     open_account_url(app, url).await
 }

@@ -67,7 +67,7 @@ export function useAccountLogin(api: LoginApi, onError: (error: unknown) => void
 
   const complete = useCallback((callbackUrl: string) => perform(async () => {
     const current = session.current;
-    if (!current) throw new Error("Account login is no longer active");
+    if (!current) throw new Error("Account connection is no longer active");
     await api.completeAccountLogin(current.id, callbackUrl);
   }), [api, perform]);
 
