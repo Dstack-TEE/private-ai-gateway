@@ -40,12 +40,14 @@ revision with the same marketing version.
 
 The MAS package is signed, validated and uploaded first. Only after that succeeds
 does the Direct workflow build all six targets, publish the GitHub release, advance
-the updater feed and publish the matching npm packages. A MAS failure therefore
-cannot leave a newly public Direct release; a later Direct failure can leave only
-an uploaded, unsubmitted App Store build. The child workflows retain their focused
-verification and recovery entry points, but coordinated stable publication uses
-the top-level workflow. Windows Authenticode remains optional and does not block
-the coordinated release.
+the updater feed and dispatch the dedicated npm publisher at the immutable release
+tag. The parent waits for that workflow so npm remains part of the coordinated
+result while using the exact workflow identity authorized for OIDC trusted
+publishing. A MAS failure therefore cannot leave a newly public Direct release; a
+later Direct failure can leave only an uploaded, unsubmitted App Store build. The
+child workflows retain their focused verification and recovery entry points, but
+coordinated stable publication uses the top-level workflow. Windows Authenticode
+remains optional and does not block the coordinated release.
 
 ## Agent access and credentials
 

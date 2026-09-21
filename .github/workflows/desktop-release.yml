@@ -77,8 +77,8 @@ jobs:
   direct:
     needs: mac-app-store
     permissions:
+      actions: write
       contents: write
-      id-token: write
     uses: ./.github/workflows/desktop-native.yml
     with:
       release_version: ${{ inputs.version }}

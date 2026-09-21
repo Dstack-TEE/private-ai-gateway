@@ -949,11 +949,45 @@ jobs:
   publish-npm:
     if: inputs.publish_release && inputs.release_version != ''
     needs: update-feed
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     permissions:
+      actions: write
       contents: read
-      id-token: write
-    uses: ./.github/workflows/private-ai-proxy-npm.yml
-    with:
-      release_tag: desktop-v${{ inputs.release_version }}
-      publish: true
-    secrets: inherit
+    steps:
+      - name: Dispatch trusted npm publisher
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: desktop-v${{ inputs.release_version }}
+        run: |
+          set -euo pipefail
+          workflow=private-ai-proxy-npm.yml
+          request_id="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"
+          gh workflow run "$workflow" \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$RELEASE_TAG" \
+            -f release_tag="$RELEASE_TAG" \
+            -f publish=true \
+            -f request_id="$request_id"
+
+          run_id=
+          for _ in {1..30}; do
+            runs="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow "$workflow" \
+              --event workflow_dispatch \
+              --limit 20 \
+              --json databaseId,displayTitle,headSha)"
+            run_id="$(jq -r \
+              --arg title "[$request_id]" \
+              --arg sha "$GITHUB_SHA" \
+              '[.[] | select(.headSha == $sha and (.displayTitle | endswith($title)))][0].databaseId // empty' \
+              <<<"$runs")"
+            [[ -n "$run_id" ]] && break
+            sleep 2
+          done
+          if [[ -z "$run_id" ]]; then
+            echo "Timed out locating the dispatched npm workflow" >&2
+            exit 1
+          fi
+          gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status
