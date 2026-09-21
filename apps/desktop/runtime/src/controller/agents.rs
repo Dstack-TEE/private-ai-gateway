@@ -134,6 +134,12 @@ impl DesktopRuntime {
 
     pub fn list_agents(&self) -> Result<Vec<AgentStatus>, String> {
         if !self.agent_configuration_enabled() {
+            if self.agent_configuration
+                && (self.agent_access_status)()
+                    == crate::agent_access::AgentAccessStatus::Authorized
+            {
+                return Err("Agent Home access is authorized but unavailable to the backend. Re-enable Agent integrations and try again.".into());
+            }
             let _guard = self
                 .agent_policy
                 .lock()

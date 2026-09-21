@@ -7,6 +7,7 @@ import {
   shouldAdvance,
   validateReleaseRequest,
 } from "./release-channel.mjs";
+import { runtimeBuildVersion } from "./distribution.mjs";
 
 test("channels require canonical matching versions and release metadata", () => {
   assert.equal(releaseChannel("0.2.0-beta.1").feedTag, "desktop-updates-beta");
@@ -18,6 +19,12 @@ test("channels require canonical matching versions and release metadata", () => 
   assert.throws(() => publishedRelease("desktop-v0.2.0", true));
   assert.equal(publishedRelease("desktop-v0.2.0-beta.1", true).channel, "beta");
   assert.equal(releaseTitle("0.2.0", "stable"), "Private AI Proxy v0.2.0");
+});
+
+test("runtime build identity distinguishes App Store builds without changing the marketing version", () => {
+  assert.equal(runtimeBuildVersion({ DESKTOP_RELEASE_VERSION: "0.1.4", APPLE_APP_STORE_BUILD_NUMBER: "11" }), "0.1.4+11");
+  assert.equal(runtimeBuildVersion({ DESKTOP_RELEASE_VERSION: "0.1.4" }), "0.1.4");
+  assert.equal(runtimeBuildVersion({ PAP_BUILD_VERSION: "local-build", DESKTOP_RELEASE_VERSION: "0.1.4", APPLE_APP_STORE_BUILD_NUMBER: "11" }), "local-build");
 });
 
 test("stable release requests come from main and cover every platform", () => {

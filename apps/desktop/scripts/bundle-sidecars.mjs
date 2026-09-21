@@ -7,6 +7,7 @@ import {
   distribution,
   MAC_APP_STORE_DISTRIBUTION,
   MAC_APP_STORE_SIDECARS,
+  runtimeBuildVersion,
 } from "./distribution.mjs";
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -16,11 +17,11 @@ const cargo = process.env.CARGO ?? "cargo";
 const rustc = process.env.RUSTC ?? "rustc";
 const cargoDirectory = path.dirname(cargo);
 const pathValue = process.env.PATH ?? "";
-const releaseVersion = process.env.DESKTOP_RELEASE_VERSION?.trim();
+const buildVersion = runtimeBuildVersion();
 const buildEnv = {
   ...process.env,
   ...(path.isAbsolute(cargo) ? { PATH: `${cargoDirectory}${path.delimiter}${pathValue}` } : {}),
-  ...(releaseVersion ? { PAP_BUILD_VERSION: releaseVersion } : {}),
+  ...(buildVersion ? { PAP_BUILD_VERSION: buildVersion } : {}),
 };
 const rustcOutput = execFileSync(rustc, ["-vV"], {
   cwd: appRoot,

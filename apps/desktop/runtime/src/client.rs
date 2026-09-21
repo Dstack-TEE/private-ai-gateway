@@ -43,7 +43,7 @@ impl Client {
     }
 
     pub fn hello(&self) -> Result<Hello, String> {
-        open().map(|(_, hello)| hello).map_err(connection_error)
+        open_current().map(|(_, hello)| hello).map_err(connection_error)
     }
 
     pub fn is_running(&self) -> Result<bool, String> {
@@ -55,10 +55,10 @@ impl Client {
     }
 
     pub fn ensure_service() -> Result<(), String> {
-        match open() {
-            Ok(_) => return Ok(()),
-            Err(error) if absent(&error) => {}
-            Err(error) => return Err(connection_error(error)),
+        if let Ok((_, hello)) = open() {
+            if hello.version == protocol::BUILD_VERSION {
+                return Ok(());
+            }
         }
         let data = desktop_gateway::agents::app_data_dir()?;
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -74,7 +74,16 @@ impl Client {
             std::thread::sleep(Duration::from_millis(50));
         };
         match open() {
-            Ok(_) => return Ok(()),
+            Ok((_, hello)) if hello.version == protocol::BUILD_VERSION => return Ok(()),
+            Ok((_, hello)) => {
+                let expected = crate::launch::service_executable()?
+                    .canonicalize()
+                    .map_err(|_| "Cannot identify the installed backend")?;
+                if !executable_matches(&hello.executable, &expected)? {
+                    return Err("The running backend belongs to another installation. Update it through its owning package manager.".into());
+                }
+                Client::new().shutdown_owned(Some(&expected), ShutdownMode::UpdateRestart)?;
+            }
             Err(error) if absent(&error) => {}
             Err(error) => return Err(connection_error(error)),
         }
@@ -82,11 +91,16 @@ impl Client {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             match open() {
-                Ok(_) => {
+                Ok((_, hello)) if hello.version == protocol::BUILD_VERSION => {
                     std::thread::spawn(move || {
                         let _ = child.wait();
                     });
                     return Ok(());
+                }
+                Ok(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("The bundled backend started with a different build. Reinstall the app and try again.".into());
                 }
                 Err(error) if absent(&error) => {}
                 Err(error) => {
@@ -184,7 +198,7 @@ impl Client {
     }
 
     pub fn watch_connection(mut receive: impl FnMut(GatewayState) -> bool) -> Result<(), String> {
-        let (mut reader, hello) = open().map_err(connection_error)?;
+        let (mut reader, hello) = open_current().map_err(connection_error)?;
         reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_secs(10)))
@@ -209,7 +223,7 @@ impl Client {
     }
 
     pub fn request<T: DeserializeOwned>(&self, command: Command) -> Result<T, String> {
-        let (mut reader, _) = open().map_err(connection_error)?;
+        let (mut reader, _) = open_current().map_err(connection_error)?;
         reader
             .get_mut()
             .set_read_timeout(Some(REQUEST_TIMEOUT))
@@ -492,10 +506,7 @@ impl Client {
     ) -> Result<(), String> {
         let (mut reader, before) = open().map_err(connection_error)?;
         if let Some(expected) = expected {
-            let actual = PathBuf::from(&before.executable)
-                .canonicalize()
-                .map_err(|_| "Cannot identify the running backend")?;
-            if actual != expected {
+            if !executable_matches(&before.executable, expected)? {
                 return Err("The running backend belongs to another installation. Update it through its owning package manager.".into());
             }
         }
@@ -602,6 +613,28 @@ fn open() -> io::Result<(BufReader<Stream>, Hello)> {
         ));
     }
     Ok((reader, hello))
+}
+
+fn open_current() -> io::Result<(BufReader<Stream>, Hello)> {
+    let result = open()?;
+    if result.1.version != protocol::BUILD_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Incompatible Private AI Proxy backend build; update the client and backend together",
+        ));
+    }
+    Ok(result)
+}
+
+fn executable_matches(actual: &str, expected: &std::path::Path) -> Result<bool, String> {
+    let actual = PathBuf::from(actual);
+    if actual == expected {
+        return Ok(true);
+    }
+    actual
+        .canonicalize()
+        .map(|path| path == expected)
+        .map_err(|_| "Cannot identify the running backend".to_string())
 }
 
 fn decode<T: DeserializeOwned>(reader: &mut BufReader<Stream>, id: u64) -> Result<T, String> {
