@@ -29,6 +29,24 @@ Capabilities describe only channel policy: `nativeUpdates`, `cliRegistration`,
 helper paths, and signing mechanics are not capabilities. Platform/feature guards
 remain at native API and process boundaries, not throughout product components.
 
+## Release orchestration
+
+`Desktop stable release` is the standard production entry for a coordinated
+desktop release. It validates the stable version, App Store build number, release
+summary and `main` ref before any signing work. It then calls the MAS and Direct
+workflows through same-repository reusable workflow references. GitHub resolves
+those references at the caller commit, so both distributions build the same source
+revision with the same marketing version.
+
+The MAS package is signed, validated and uploaded first. Only after that succeeds
+does the Direct workflow build all six targets, publish the GitHub release, advance
+the updater feed and publish the matching npm packages. A MAS failure therefore
+cannot leave a newly public Direct release; a later Direct failure can leave only
+an uploaded, unsubmitted App Store build. The child workflows retain their focused
+verification and recovery entry points, but coordinated stable publication uses
+the top-level workflow. Windows Authenticode remains optional and does not block
+the coordinated release.
+
 ## Agent access and credentials
 
 MAS exposes **Agent Integrations** as an explicitly enabled, app-level module.

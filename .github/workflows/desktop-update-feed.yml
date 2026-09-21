@@ -6,24 +6,27 @@ on:
       tag:
         required: true
         type: string
-  release:
-    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published desktop release tag to promote
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: desktop-update-feed-${{ contains(inputs.tag || github.event.release.tag_name, '-beta.') && 'beta' || 'stable' }}
+  group: desktop-update-feed-${{ contains(inputs.tag, '-beta.') && 'beta' || 'stable' }}
   cancel-in-progress: false
 
 jobs:
   publish:
-    if: inputs.tag != '' || startsWith(github.event.release.tag_name, 'desktop-v')
     environment: desktop-release
     runs-on: ubuntu-24.04
     env:
       GH_REPO: ${{ github.repository }}
-      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+      TAG: ${{ inputs.tag }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
