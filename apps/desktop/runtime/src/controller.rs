@@ -64,6 +64,7 @@ pub struct DesktopRuntime {
     helper_path: PathBuf,
     agent_configuration: bool,
     agent_access_status: fn() -> crate::agent_access::AgentAccessStatus,
+    #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
     agent_home: fn() -> Result<PathBuf, String>,
     instance: Option<lock::InstanceLock>,
 }
@@ -289,6 +290,7 @@ impl DesktopRuntime {
             helper_path,
             agent_configuration,
             agent_access_status: crate::agent_access::status,
+            #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
             agent_home: crate::agent_access::authorized_home,
             instance: Some(instance),
         });
