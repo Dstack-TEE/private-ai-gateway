@@ -232,6 +232,12 @@ pub(super) fn provider_namespace(path: &[String]) -> Option<&[String]> {
 }
 
 pub(super) fn retain_provider_field(field: &OwnedField, fields: &[OwnedField]) -> bool {
+    if field.path == owned(&["model_providers", "private_ai_proxy", "name"]) {
+        return !matches!(
+            &field.previous,
+            Some(Previous::Plain(ConfigValue::Str(name))) if !name.trim().is_empty()
+        );
+    }
     provider_namespace(&field.path).is_some_and(|prefix| {
         !fields
             .iter()

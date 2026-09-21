@@ -312,8 +312,43 @@ impl Projector {
         lock::with_apply_lock(&self.data_dir, || {
             self.maintain_store_permissions()?;
             let _ = self.load_store()?;
+            self.repair_codex_provider_name()?;
             Ok(())
         })
+    }
+
+    /// Codex validates every custom provider at startup, including inactive
+    /// definitions left by an older connection. Repair only this app's
+    /// provider id and only when its required display name is invalid.
+    fn repair_codex_provider_name(&self) -> Result<(), String> {
+        let path = Agent::Codex.config_path(&self.home, self.tool_env);
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("Cannot read the Codex config: {error}")),
+        };
+        let mut doc = match ConfigDoc::parse(Format::Toml, &text) {
+            Ok(doc) => doc,
+            // The normal agent status reports malformed TOML without trying
+            // to rewrite a document that cannot be preserved safely.
+            Err(_) => return Ok(()),
+        };
+        let provider = &["model_providers", "private_ai_proxy"];
+        let name = &["model_providers", "private_ai_proxy", "name"];
+        if !doc.is_table(provider)
+            || doc
+                .get_str(name)
+                .is_some_and(|name| !name.trim().is_empty())
+        {
+            return Ok(());
+        }
+        doc.set_str(name, PRODUCT_NAME)
+            .map_err(|_| "Cannot repair the Codex provider name".to_string())?;
+        let repaired = doc
+            .render()
+            .map_err(|_| "Cannot render the repaired Codex config".to_string())?;
+        write_atomic(&path, &repaired, Some(Some(&text)))
+            .map_err(|error| format!("Cannot repair the Codex provider name: {error}"))
     }
 
     /// The exact edits `apply` would make, computed on a scratch copy, plus a
