@@ -274,7 +274,7 @@ pub fn acquire() -> Result<Option<AgentHomeAccess>, String> {
 pub fn authorized_home() -> Result<std::path::PathBuf, String> {
     #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
     {
-        return mac_app_store::authorized_home();
+        mac_app_store::authorized_home()
     }
     #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
     {
