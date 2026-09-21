@@ -207,6 +207,12 @@ fn codex_and_opencode_use_official_custom_provider_configs() {
     );
     disconnect(&sandbox, Agent::Codex);
     let restored = doc(&sandbox, Agent::Codex);
+    assert_eq!(
+        restored
+            .get_str(&["model_providers", "private_ai_proxy", "name"])
+            .as_deref(),
+        Some(PRODUCT_NAME)
+    );
     for (key, value) in [
         ("env_key", ConfigValue::Str("OLD_KEY".into())),
         (
@@ -262,6 +268,49 @@ fn codex_and_opencode_use_official_custom_provider_configs() {
         Some("http://127.0.0.1:4180/v1")
     );
     disconnect(&sandbox, Agent::OpenCode);
+}
+
+#[test]
+fn startup_repairs_only_invalid_codex_provider_name() {
+    let sandbox = sandbox("codex-provider-name");
+    let path = Agent::Codex.config_path(&sandbox.home, false);
+    write(
+        &path,
+        "# keep this comment\n[model_providers.private_ai_proxy]\nbase_url = 'https://example.com/v1'\n",
+    );
+
+    sandbox.projector.initialize_store().unwrap();
+    let repaired = fs::read_to_string(&path).unwrap();
+    assert!(repaired.contains("# keep this comment"));
+    let config = doc(&sandbox, Agent::Codex);
+    assert_eq!(
+        config
+            .get_str(&["model_providers", "private_ai_proxy", "name"])
+            .as_deref(),
+        Some(PRODUCT_NAME)
+    );
+    assert_eq!(
+        config
+            .get_str(&["model_providers", "private_ai_proxy", "base_url"])
+            .as_deref(),
+        Some("https://example.com/v1")
+    );
+
+    let mut config = config;
+    config
+        .set_str(
+            &["model_providers", "private_ai_proxy", "name"],
+            "Existing Name",
+        )
+        .unwrap();
+    write(&path, &config.render().unwrap());
+    sandbox.projector.initialize_store().unwrap();
+    assert_eq!(
+        doc(&sandbox, Agent::Codex)
+            .get_str(&["model_providers", "private_ai_proxy", "name"])
+            .as_deref(),
+        Some("Existing Name")
+    );
 }
 
 #[test]
