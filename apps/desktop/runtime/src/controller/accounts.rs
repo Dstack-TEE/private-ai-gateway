@@ -52,7 +52,7 @@ impl DesktopRuntime {
             .lock()
             .await
             .as_mut()
-            .ok_or("Account login is no longer active")?
+            .ok_or("Account connection is no longer active")?
             .poll(&id)
             .await
     }
@@ -139,7 +139,7 @@ impl DesktopRuntime {
         let mut slot = self.account_login.lock().await;
         let credential = slot
             .as_mut()
-            .ok_or("Account login is no longer active")?
+            .ok_or("Account connection is no longer active")?
             .credential(&id, &profile, workspace_id)
             .await?;
         let saved = self
@@ -167,7 +167,7 @@ impl DesktopRuntime {
             .lock()
             .await
             .as_ref()
-            .ok_or("Account login is no longer active")?
+            .ok_or("Account connection is no longer active")?
             .complete_callback(&id, &callback_url)
             .await
     }
@@ -186,7 +186,7 @@ impl DesktopRuntime {
         if profile.provider != ServiceProvider::Redpill
             || !matches!(profile.auth, ProfileAuth::OAuth { .. })
         {
-            return Err("Sign in with RedPill to select a workspace".into());
+            return Err("Connect RedPill to select a workspace".into());
         }
         let entry = service_config::profile_credential_entry(profile)?;
         let key = self
@@ -210,7 +210,7 @@ impl DesktopRuntime {
                             .lock()
                             .await
                             .as_mut()
-                            .ok_or("Account login is no longer active")?
+                            .ok_or("Account connection is no longer active")?
                             .balance_credential(&id)
                             .await?;
                         crate::account_login::account_balance(&provider, &secret).await
@@ -225,7 +225,7 @@ impl DesktopRuntime {
                     .find(|p| p.id == profile_id)
                     .ok_or("Profile not found")?;
                 if !matches!(profile.auth, ProfileAuth::OAuth { .. }) || !profile.credential_saved {
-                    return Err("Sign in with an account to view its balance".into());
+                    return Err("Connect the account to view its balance".into());
                 }
                 let entry = service_config::profile_credential_entry(profile)?;
                 self.balances

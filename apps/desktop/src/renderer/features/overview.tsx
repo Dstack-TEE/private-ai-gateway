@@ -46,7 +46,6 @@ export function Overview({
   connectingBackend,
   agentProblem,
   accountApi,
-  topUpLinks,
   agentAccessStatus,
   authorizingAgents,
   onAuthorizeAgents,
@@ -78,7 +77,6 @@ export function Overview({
   connectingBackend: boolean;
   agentProblem?: string;
   accountApi: Pick<DesktopApi, "getAccountBalance" | "openTopUp">;
-  topUpLinks: boolean;
   agentAccessStatus?: AgentAccessStatus;
   authorizingAgents: boolean;
   onAuthorizeAgents(): void;
@@ -124,7 +122,6 @@ export function Overview({
         backendDisconnected={backendDisconnected}
         connectingBackend={connectingBackend}
         accountApi={accountApi}
-        topUpLinks={topUpLinks}
         onToggle={onToggle}
         onStartBackend={onStartBackend}
         onSettings={onSettings}
@@ -194,7 +191,6 @@ function StatusSurface({
   backendDisconnected,
   connectingBackend,
   accountApi,
-  topUpLinks,
   onToggle,
   onStartBackend,
   onSettings,
@@ -208,7 +204,6 @@ function StatusSurface({
   backendDisconnected: boolean;
   connectingBackend: boolean;
   accountApi: Pick<DesktopApi, "getAccountBalance" | "openTopUp">;
-  topUpLinks: boolean;
   onToggle(): void;
   onStartBackend(): void;
   onSettings(): void;
@@ -234,7 +229,7 @@ function StatusSurface({
           <span>{activeProfile?.name ?? "Set up"}</span>
           {activeProfile && <ChevronDown aria-hidden="true" />}
         </Button>
-        {activeProfile?.auth.kind === "oauth" && <AccountBalanceValue api={accountApi} provider={activeProfile.provider} target={{ kind: "profile", profileId: activeProfile.id }} credentialRef={activeProfile.credentialRef} enabled={protectedNow} topUpLinks={topUpLinks} />}
+        {activeProfile?.auth.kind === "oauth" && <AccountBalanceValue api={accountApi} provider={activeProfile.provider} target={{ kind: "profile", profileId: activeProfile.id }} credentialRef={activeProfile.credentialRef} enabled={protectedNow} />}
         <IconButton size="icon-sm" label="Privacy verification" aria-haspopup="dialog" onClick={onPrivacy}><Info aria-hidden="true" /></IconButton>
         </>}
         </div>

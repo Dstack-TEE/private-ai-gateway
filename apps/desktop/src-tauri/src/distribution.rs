@@ -15,7 +15,6 @@ pub(crate) struct DistributionCapabilities {
     pub channel: DistributionChannel,
     pub native_updates: bool,
     pub cli_registration: bool,
-    pub top_up_links: bool,
     pub account_portal_links: bool,
     pub sandbox_home_access: bool,
 }
@@ -25,7 +24,6 @@ pub(crate) const CAPABILITIES: DistributionCapabilities = DistributionCapabiliti
     channel: DistributionChannel::MacAppStore,
     native_updates: false,
     cli_registration: false,
-    top_up_links: false,
     account_portal_links: false,
     sandbox_home_access: cfg!(target_os = "macos"),
 };
@@ -35,7 +33,6 @@ pub(crate) const CAPABILITIES: DistributionCapabilities = DistributionCapabiliti
     channel: DistributionChannel::Direct,
     native_updates: true,
     cli_registration: true,
-    top_up_links: true,
     account_portal_links: true,
     sandbox_home_access: false,
 };
@@ -70,7 +67,6 @@ mod tests {
                 "channel": if app_store { "macAppStore" } else { "direct" },
                 "nativeUpdates": !app_store,
                 "cliRegistration": !app_store,
-                "topUpLinks": !app_store,
                 "accountPortalLinks": !app_store,
                 "sandboxHomeAccess": app_store && cfg!(target_os = "macos"),
             })

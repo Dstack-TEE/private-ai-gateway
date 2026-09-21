@@ -237,6 +237,7 @@ impl Projector {
         if !home.is_absolute() {
             return Err("The authorized Home directory must be absolute".to_string());
         }
+        validate_authorized_home(&home)?;
         Ok(Self::at(
             home, data_dir, helper_exe, endpoint, false, secrets,
         ))

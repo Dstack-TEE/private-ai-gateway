@@ -27,6 +27,9 @@ fn launch_requires_instance_ownership_before_initialization() {
             helper_path: app_data_dir().unwrap().join("helper"),
             task_runtime: executor.handle().clone(),
             agent_configuration: true,
+            agent_access_error: None,
+            #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+            agent_home: Some(app_data_dir().unwrap()),
         });
         let error = result
             .err()
@@ -105,9 +108,9 @@ fn test_runtime(
         exiting: AtomicBool::new(false),
         helper_path: directory.join("helper"),
         agent_configuration: true,
-        agent_access_status: || crate::agent_access::AgentAccessStatus::Authorized,
+        agent_access_error: None,
         #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
-        agent_home: test_authorized_home,
+        agent_home: Some(test_authorized_home().unwrap()),
         recovery: crate::recovery::Recovery::default(),
         instance: None,
     })
@@ -195,7 +198,7 @@ fn completed_authorization_is_staged_until_explicit_save_and_bound_to_its_provid
                 .save_account_login("login-test".into(), different_provider, true, None)
                 .await
                 .unwrap_err(),
-            "Sign in again for the selected provider"
+            "Reconnect the selected provider"
         );
         // A different editor must not replace the active authorization.
         let other = ConfidentialProfileInput {
@@ -224,7 +227,7 @@ fn completed_authorization_is_staged_until_explicit_save_and_bound_to_its_provid
         };
         assert_eq!(
             runtime.begin_account_login(reopened).await.err().unwrap(),
-            "Account login is only available for Phala and RedPill"
+            "Account connection is only available for Phala and RedPill"
         );
         assert!(runtime.state().unwrap().profiles.is_empty());
         assert!(runtime.account_login.lock().await.is_none());
@@ -921,43 +924,61 @@ fn only_live_protection_allows_agent_projection() {
 fn inactive_agent_integrations_reject_configuration_and_withdraw_tokens() {
     let executor = tokio::runtime::Runtime::new().unwrap();
     let directory = tempfile::tempdir().unwrap();
-    for enabled in [false, true] {
-        let mut runtime = test_runtime(&executor, directory.path());
-        let runtime = Arc::get_mut(&mut runtime).unwrap();
-        let local_token = runtime.credentials.token().unwrap();
-        let mut tokens = TokenSet::default();
-        tokens.insert("previous-agent-token".into(), "codex".into());
-        tokens.insert(local_token.clone(), LOCAL_TOOLS_AGENT.into());
-        runtime.proxy.set_tokens(tokens);
-        runtime.agent_configuration = enabled;
-        runtime.agent_access_status =
-            || crate::agent_access::AgentAccessStatus::ReauthorizationRequired;
-        assert!(runtime.list_agents().unwrap().is_empty());
-        runtime.reconcile_agents().unwrap();
-        runtime.reload_agent_tokens().unwrap();
-        assert!(runtime
-            .preview_agent("codex".into(), true, ConnectOptions::default())
-            .is_err());
-        assert!(runtime
-            .apply_agent(
-                "codex".into(),
-                true,
-                String::new(),
-                ConnectOptions::default()
-            )
-            .is_err());
-        assert!(runtime
-            .proxy
-            .tokens()
-            .agent_for("previous-agent-token")
-            .is_none());
-        assert_eq!(
-            runtime.proxy.tokens().agent_for(&local_token),
-            Some(LOCAL_TOOLS_AGENT)
-        );
-        let files = TokenFiles::new(directory.path());
-        for agent in Agent::ALL {
-            assert!(files.read(agent.id()).unwrap().is_none());
-        }
+    let mut runtime = test_runtime(&executor, directory.path());
+    let runtime = Arc::get_mut(&mut runtime).unwrap();
+    let local_token = runtime.credentials.token().unwrap();
+    let mut tokens = TokenSet::default();
+    tokens.insert("previous-agent-token".into(), "codex".into());
+    tokens.insert(local_token.clone(), LOCAL_TOOLS_AGENT.into());
+    runtime.proxy.set_tokens(tokens);
+    runtime.agent_configuration = false;
+    assert!(runtime.list_agents().unwrap().is_empty());
+    runtime.reconcile_agents().unwrap();
+    runtime.reload_agent_tokens().unwrap();
+    assert!(runtime
+        .preview_agent("codex".into(), true, ConnectOptions::default())
+        .is_err());
+    assert!(runtime
+        .apply_agent(
+            "codex".into(),
+            true,
+            String::new(),
+            ConnectOptions::default()
+        )
+        .is_err());
+    assert!(runtime
+        .proxy
+        .tokens()
+        .agent_for("previous-agent-token")
+        .is_none());
+    assert_eq!(
+        runtime.proxy.tokens().agent_for(&local_token),
+        Some(LOCAL_TOOLS_AGENT)
+    );
+    let files = TokenFiles::new(directory.path());
+    for agent in Agent::ALL {
+        assert!(files.read(agent.id()).unwrap().is_none());
     }
+
+    let mut runtime = test_runtime(&executor, directory.path());
+    let runtime = Arc::get_mut(&mut runtime).unwrap();
+    let local_token = runtime.credentials.token().unwrap();
+    let mut tokens = TokenSet::default();
+    tokens.insert("previous-agent-token".into(), "codex".into());
+    tokens.insert(local_token.clone(), LOCAL_TOOLS_AGENT.into());
+    runtime.proxy.set_tokens(tokens);
+    runtime.agent_access_error = Some("bookmark cannot be resolved".into());
+
+    let error = runtime.list_agents().unwrap_err();
+    assert!(error.contains("bookmark cannot be resolved"));
+    assert!(error.contains("Re-enable Agent integrations"));
+    assert!(runtime
+        .proxy
+        .tokens()
+        .agent_for("previous-agent-token")
+        .is_none());
+    assert_eq!(
+        runtime.proxy.tokens().agent_for(&local_token),
+        Some(LOCAL_TOOLS_AGENT)
+    );
 }

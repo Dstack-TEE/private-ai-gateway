@@ -8,7 +8,8 @@ pub async fn account_details(key: &str) -> Result<AccountLoginDetails, String> {
     )
     .await?;
     redpill_details(&account).map_err(|_| {
-        "Account: Could not refresh account details. Try again or sign in again.".to_string()
+        "Account: Could not refresh account details. Try again or reconnect the account."
+            .to_string()
     })
 }
 
@@ -123,5 +124,5 @@ pub(super) fn validated_scope_slug(slug: Option<&str>) -> Result<&str, String> {
                         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
             })
     })
-    .ok_or("Refresh account details or sign in again to open billing.".into())
+    .ok_or("Refresh account details or reconnect the account to open billing.".into())
 }

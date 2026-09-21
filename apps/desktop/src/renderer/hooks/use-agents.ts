@@ -26,7 +26,7 @@ export function useAgents(api: DesktopApi, { requiresAuthorization, active, revi
   });
   const accessStatus = requiresAuthorization ? data?.accessStatus : "authorized";
   const controlsLocked = agentIntegrationsLocked(accessStatus, authorizing);
-  const agents = agentsError ? [] : completeAgentStatuses(data?.agents ?? []);
+  const agents = completeAgentStatuses(data?.agents ?? []);
   const [pendingAgentChanges, setPendingAgentChanges] = useState<Record<string, boolean>>({});
   const agentOperations = useRef(new Set<string>());
   const agentIntents = useRef(new Map<string, boolean>());

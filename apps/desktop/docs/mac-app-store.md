@@ -5,29 +5,38 @@ credential design and the [Agent Integrations activation flow](distribution.md#a
 
 ## Review decision
 
-PAP is a consumer AI/SaaS application, not a reader app. The current MAS design
-pursues the free companion route under Guideline 3.1.3(f): users sign in to an
-existing service or enter an existing API key. There is no IAP implementation.
-Do not claim the multiplatform exception in 3.1.3(b) permits selling digital
-services elsewhere without offering the same items through IAP.
+PAP is a free local proxy client that connects to independent Phala and RedPill
+cloud accounts. It does not sell or unlock app features. The balance button may
+open the selected provider's external billing page in the system browser, but
+only when that provider returns `canTopUp` and a validated account scope. The
+same account and credits can be used by other clients and the CLI.
 
-MAS hides and rejects Top Up and the current general account portals:
+This release must not claim the free-companion exception in Guideline 3.1.3(f),
+because that exception expressly excludes calls to action for outside purchase.
+Guideline 3.1.1(a) currently permits external purchase buttons and links without
+an entitlement in United States storefront apps. Therefore the first MAS release
+must remain available only in the United States while provider billing is linked.
+Before adding another storefront, either remove the billing action there or
+complete the applicable StoreKit entitlement and regional compliance review.
+There is no IAP implementation.
+
+MAS exposes only the narrow provider-billing action and continues to block the
+current general account portals:
 
 | Entry | Current destination | MAS decision |
 | --- | --- | --- |
-| Phala Top Up | `https://cloud.phala.com/{workspace}/billing` | Blocked |
-| RedPill Top Up | `https://redpill.ai/{organization}/credits` | Blocked |
+| Phala billing | `https://cloud.phala.com/{workspace}/billing` | Available from an actionable balance |
+| RedPill billing | `https://redpill.ai/{organization}/credits` | Available from an actionable balance |
 | Get API key | `https://cloud.phala.com/dashboard`, `https://www.redpill.ai/dashboard` | Blocked: general dashboards are not verified purchase-free |
 | Manage account | `https://redpill.ai/{organization}` | Blocked: organization portal is not verified purchase-free |
 
-Login, account switching, manual key entry and read-only balance remain. Neutral
-account/security/key-management links may return only after their actual signed-in
-pages and redirects have been audited. No Top Up, Buy credits, Upgrade, Pricing,
-or other external purchase CTA may appear in the MAS flow, including OAuth pages
-and reviewer-visible metadata. Verify hosted login pages before submission; they
-are outside this repository's control. If the free companion route does not fit
-the final business model, resolve that with App Review/product owners before
-shipping; do not silently add StoreKit or rely on a reader-app entitlement.
+Account connection, account switching and manual key entry remain. Neutral
+account/security/key-management links may return only after their actual connected
+pages and redirects have been audited. Reviewer notes must identify Phala and
+RedPill as external cloud infrastructure providers and describe exactly where the
+balance button goes. Verify hosted connection and billing pages before submission;
+they are outside this repository's control. Do not silently add StoreKit or rely
+on a reader-app entitlement.
 
 ## Build and signing prerequisites
 
@@ -135,8 +144,8 @@ References: [SDK requirements](https://developer.apple.com/support/third-party-S
   the supported Agent catalog remains visible before Enable; successful Enable
   replaces its states with actual installed Agents without connecting them.
   Keep toggles disabled until the scan completes. Test wrong folders, symlinked
-  Home, relaunch,
-  recoverable stale bookmarks, revoked permission and moved Home. Verify no
+  Home, relaunch and system reboot, recoverable stale app bookmarks, regeneration
+  of the backend bookmark, revoked permission and moved Home. Verify no
   duplicate/blank sheets when native dialogs are already open. Check the inherited
   service can resolve access under its actual signature and every start has a
   matching stop; failed restoration must withdraw Agent token authority without
@@ -147,8 +156,9 @@ References: [SDK requirements](https://developer.apple.com/support/third-party-S
 - Quit and crash the GUI with protection active. Verify service, supervisor and
   verifier exit, local ports close, and no external Agent restarts the backend.
   Disabling protection must withdraw authority and restore owned configuration.
-- Verify OAuth callback/Keychain behavior, balance display, purchase-free login
-  pages, and absence of purchase/account-portal actions and updater network calls.
+- Verify OAuth callback/Keychain behavior, balance-button eligibility, external
+  browser routing to the correct scoped provider account, blocked general account
+  portals, and absence of updater network calls.
 - Upload to TestFlight, complete beta review as required, and repeat against the
   downloaded App Store-signed artifact. Supply reviewer credentials and precise
   instructions explaining Home access and the local proxy token model.
@@ -156,7 +166,8 @@ References: [SDK requirements](https://developer.apple.com/support/third-party-S
 ## Submit and rollback
 
 Complete screenshots, support/privacy URLs, age rating, content rights, pricing
-(free companion), privacy answers, export compliance, and reviewer notes in ASC.
+(free), United States-only storefront availability, privacy answers, export
+compliance, and reviewer notes in ASC.
 Release only after the signed/TestFlight gates pass. Keep the prior release and
 its source/version provenance. Stop phased release or remove availability in ASC
 if needed; ship a corrected higher build through App Store review. Never activate

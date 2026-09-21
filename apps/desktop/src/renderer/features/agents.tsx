@@ -1,6 +1,6 @@
 import React from "react";
 import { useErrorAlert } from "../lib/error-alert";
-import { ExternalLink, FolderLock, LoaderCircle } from "lucide-react";
+import { ExternalLink, FolderLock, LoaderCircle, TriangleAlert } from "lucide-react";
 import claudeCodeIcon from "@lobehub/icons-static-svg/icons/claudecode-color.svg";
 import codexIcon from "@lobehub/icons-static-svg/icons/codex-color.svg";
 import hermesIcon from "@lobehub/icons-static-svg/icons/hermesagent.svg";
@@ -53,6 +53,7 @@ export function AgentsView({
   problem,
   onSelect,
   onAuthorize,
+  onRetry,
 }: {
   accessStatus?: AgentAccessStatus;
   authorizing: boolean;
@@ -62,6 +63,7 @@ export function AgentsView({
   problem?: string;
   onSelect(agent: AgentStatus, connect: boolean): void;
   onAuthorize(): void;
+  onRetry(): void;
 }): React.JSX.Element {
   const connected = agents.filter((agent) => agent.installed && agent.connected).length;
   const listedAgents = agents.length > 0 ? agents : supportedAgentStatuses();
@@ -75,8 +77,9 @@ export function AgentsView({
   return (
     <div className="page-body max-w-230 min-h-full mt-0 mr-auto mb-0 ml-auto">
       <AgentAccessNotice status={accessStatus} busy={authorizing} onAuthorize={onAuthorize} />
+      {accessStatus === "authorized" && problem && <AgentDetectionNotice busy={authorizing} onRetry={onRetry} />}
       <section className="group mt-5 [&:first-child]:mt-0" aria-labelledby="agents-title">
-        <h2 className="group-title mx-0.5 mb-2 flex min-h-5 items-center gap-2 text-sm font-semibold" id="agents-title">{accessStatus === "authorized" ? "Installed" : "Agents"} <span className="ml-auto truncate text-xs font-normal text-muted-foreground">{accessStatus === "authorized" ? `${connected} connected` : ""}</span></h2>
+        <h2 className="group-title mx-0.5 mb-2 flex min-h-5 items-center gap-2 text-sm font-semibold" id="agents-title">{accessStatus === "authorized" && !problem ? "Installed" : "Agents"} <span className="ml-auto truncate text-xs font-normal text-muted-foreground">{accessStatus === "authorized" && !problem ? `${connected} connected` : ""}</span></h2>
         <div className="inset min-w-0 bg-card border border-border rounded-2xl overflow-hidden">
           {accessStatus !== "authorized" ? listedAgents.map((agent) => (
             <AgentRow
@@ -87,7 +90,10 @@ export function AgentsView({
               onSelect={() => undefined}
             />
           ))
-            : !agents.some((agent) => agent.installed) ? <EmptyState text={problem ? "Agent detection unavailable" : "No installed agents found"} />
+            : problem ? listedAgents.map((agent) => (
+              <AgentRow key={agent.id} agent={agent} detectionLabel="Detection unavailable" disabled onSelect={() => undefined} />
+            ))
+            : !agents.some((agent) => agent.installed) ? <EmptyState text="No installed agents found" />
             : agents.filter((agent) => agent.installed).map((agent) => (
             <AgentRow
               pendingConnection={pendingAgentChanges[agent.id]}
@@ -107,6 +113,18 @@ export function AgentsView({
       </section>}
     </div>
   );
+}
+
+function AgentDetectionNotice({ busy, onRetry }: { busy: boolean; onRetry(): void }): React.JSX.Element {
+  return <Alert role="status" className="mb-5 rounded-xl border-border bg-muted/35 px-3.5 py-2.5">
+    <TriangleAlert size={16} aria-hidden="true" />
+    <AlertDescription className="col-start-2 flex flex-wrap items-center justify-between gap-3 text-xs leading-5">
+      <span className="min-w-0 flex-1"><strong className="font-medium text-foreground">Agent detection unavailable.</strong> Home access could not be used by the backend.</span>
+      <Button type="button" variant="outline" size="sm" className="shrink-0" disabled={busy} aria-busy={busy} onClick={onRetry}>
+        {busy ? <><LoaderCircle size={14} className="animate-spin" aria-hidden="true" />Retrying…</> : "Retry"}
+      </Button>
+    </AlertDescription>
+  </Alert>;
 }
 
 function AgentAccessNotice({ status, busy, onAuthorize }: {

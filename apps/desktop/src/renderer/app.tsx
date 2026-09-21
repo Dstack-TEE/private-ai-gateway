@@ -321,7 +321,6 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
             connectingBackend={connectingBackend}
             agentProblem={agentProblem}
             accountApi={desktopApi}
-            topUpLinks={distributionCapabilities.topUpLinks}
             agentAccessStatus={agentAccessStatus}
             authorizingAgents={authorizingAgents}
             onAuthorizeAgents={() => void requestAgentAccess()}
@@ -353,6 +352,7 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
             problem={agentProblem}
             onSelect={selectAgent}
             onAuthorize={() => void requestAgentAccess()}
+            onRetry={() => void requestAgentAccess()}
           />
         )}
         {view === "usage" && (

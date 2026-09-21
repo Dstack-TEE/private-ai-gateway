@@ -116,7 +116,7 @@ pub(super) fn validate_discovery(data: &Value) -> Result<(), String> {
             .and_then(Value::as_array)
             .is_some_and(|v| v.iter().any(|v| v == required))
         {
-            return Err("The account service does not support secure desktop login".into());
+            return Err("The account service does not support secure desktop connection".into());
         }
     }
     if data.get("issuer").and_then(Value::as_str) != Some(ISSUER) {
@@ -209,7 +209,7 @@ pub(super) fn callback_page(accepted: bool) -> String {
             if accepted {
                 "Authorization received"
             } else {
-                "Sign-in could not complete"
+                "Account connection could not complete"
             },
         )
         .replace(
