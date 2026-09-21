@@ -43,7 +43,9 @@ impl Client {
     }
 
     pub fn hello(&self) -> Result<Hello, String> {
-        open_current().map(|(_, hello)| hello).map_err(connection_error)
+        open_current()
+            .map(|(_, hello)| hello)
+            .map_err(connection_error)
     }
 
     pub fn is_running(&self) -> Result<bool, String> {
