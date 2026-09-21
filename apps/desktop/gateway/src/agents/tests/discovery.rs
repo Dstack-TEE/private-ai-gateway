@@ -246,8 +246,8 @@ fn explicit_home_projector_scans_the_authorized_home() {
 
     assert!(codex_status.installed);
     assert_eq!(
-        codex_status.config_path,
-        home.join(".codex/config.toml").display().to_string()
+        PathBuf::from(&codex_status.config_path),
+        home.join(".codex").join("config.toml")
     );
     assert!(!cli_paths(&home, false).contains(&PathBuf::from("/opt/homebrew/bin")));
     assert!(!cli_paths(&home, false).contains(&PathBuf::from("/usr/local/bin")));
