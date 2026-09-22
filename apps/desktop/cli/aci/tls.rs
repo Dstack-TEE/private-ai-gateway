@@ -69,6 +69,23 @@ impl SpkiObservations {
             .insert(host.to_ascii_lowercase(), spki_sha256.to_ascii_lowercase());
     }
 
+    /// True when a TLS handshake to `host` currently enforces a pin.
+    pub fn is_pinned(&self, host: &str) -> bool {
+        self.pins
+            .lock()
+            .expect("SPKI pin map poisoned")
+            .contains_key(&host.to_ascii_lowercase())
+    }
+
+    /// The SPKI sha256 (hex) currently enforced for `host`, if any.
+    pub fn pinned_spki(&self, host: &str) -> Option<String> {
+        self.pins
+            .lock()
+            .expect("SPKI pin map poisoned")
+            .get(&host.to_ascii_lowercase())
+            .cloned()
+    }
+
     /// Enforce any pin registered for `host`, then record the SPKI observed.
     /// A rejected handshake records nothing: the observation map feeds
     /// transcripts, which must never report a key that was refused.

@@ -111,6 +111,18 @@ impl AciClient {
         self.observations.pin(host, spki_sha256);
     }
 
+    /// True when a TLS handshake to `host` currently enforces a pin: the
+    /// stale-pin self-heal in `aci serve` keys off this so an unpinned
+    /// forward (plain HTTP harness, `--allow-unverified`) never retries.
+    pub fn is_pinned(&self, host: &str) -> bool {
+        self.observations.is_pinned(host)
+    }
+
+    /// The SPKI sha256 (hex) currently enforced for `host`, if any.
+    pub fn pinned_spki(&self, host: &str) -> Option<String> {
+        self.observations.pinned_spki(host)
+    }
+
     /// A request builder on the pinned/recording transport. The local proxy
     /// (`private-ai-proxy serve`) uses it to forward arbitrary methods and paths upstream so
     /// every hop still enforces the attested SPKI pin.

@@ -6,6 +6,12 @@
 //! E2EE request headers, and forwards accepted traffic over the SPKI-pinned
 //! channel. Receipt auditing never delays response delivery.
 //! Only digests and verdicts are retained after the request; bodies never go to disk.
+//!
+//! A keyset rotation normally surfaces through the X-ACI-Keyset-Digest
+//! header on a response (§3.4); when the TLS key itself rotates, the
+//! handshake aborts before any bytes flow and the send fails in the connect
+//! phase — the proxy recognizes that as a stale pin, re-verifies the
+//! service (fresh nonce, full §9.1 checks), re-pins, and retries once.
 //! No bodies are logged.
 
 use std::collections::VecDeque;
@@ -281,6 +287,12 @@ impl ProxyState {
     /// When blocked by a keyset change, re-verify the service once and, on
     /// success, re-pin the TLS key and adopt the new identity. Returns `Ok`
     /// when forwarding may proceed.
+    ///
+    /// The same path heals a stale TLS pin: when the service rotated its
+    /// attested TLS key, the handshake fails closed against the old pin
+    /// before any bytes flow, so no response ever carries the rotation
+    /// header the gate needs. `self.blocked` is therefore set by the caller
+    /// and this is the single funnel through which trust is re-established.
     async fn ensure_unblocked(self: &Arc<Self>) -> Result<(), String> {
         if !self.blocked.load(Ordering::SeqCst) {
             return Ok(());
@@ -304,6 +316,7 @@ impl ProxyState {
         if !verification.transcript.verified() {
             return Err("service re-verification did not reach VERIFIED".to_string());
         }
+        let stale_pin = self.client.pinned_spki(&self.host);
         if let Some(spki) = &verification.observed_spki {
             self.client.pin(&self.host, spki);
         }
@@ -331,7 +344,13 @@ impl ProxyState {
         };
         self.blocked.store(false, Ordering::SeqCst);
         (self.event_sink)(identity_event);
-        diagnostic!("private-ai-proxy serve: re-verified after keyset change; resuming forwards");
+        match (&stale_pin, &verification.observed_spki) {
+            (Some(stale), Some(current)) if stale != current => diagnostic!(
+                "private-ai-proxy serve: re-verified after keyset change; TLS pin {stale} -> {current}; \
+                 resuming forwards"
+            ),
+            _ => diagnostic!("private-ai-proxy serve: re-verified after keyset change; resuming forwards"),
+        }
         Ok(())
     }
 }
@@ -736,7 +755,7 @@ async fn proxy_passthrough(
     context: Option<ForwardContext>,
 ) -> Response {
     let path = uri.path().to_string();
-    let delivery = state.delivery_token();
+    let mut delivery = state.delivery_token();
     let url = join_url(&state.base_url, &uri);
     let mut req = forward_headers(state.client.request(method.clone(), &url), &headers);
     if !body.is_empty() {
@@ -745,6 +764,37 @@ async fn proxy_passthrough(
     let mut resp = match race_delivery(&delivery, req.send()).await {
         None => return delivery_revoked_response(&path),
         Some(Ok(resp)) => resp,
+        // Same stale-TLS-pin heal as the inference path (see the comment
+        // there): a connect failure against a pinned host can never reach
+        // the rotation gate, so treat it as a stale pin, re-verify, re-pin,
+        // and retry once. The builder is consumed by the failed send, so the
+        // retry rebuilds it from the same method/url/headers/body, and the
+        // heal revoked the delivery gate when it replaced the identity, so
+        // the retry and its streamed body race against a fresh token.
+        Some(Err(e)) if e.is_connect() && state.client.is_pinned(&state.host) => {
+            state.blocked.store(true, Ordering::SeqCst);
+            match state.ensure_unblocked().await {
+                Ok(()) => {
+                    delivery = state.delivery_token();
+                    let mut retry =
+                        forward_headers(state.client.request(method.clone(), &url), &headers);
+                    if !body.is_empty() {
+                        retry = retry.body(body.to_vec());
+                    }
+                    match race_delivery(&delivery, retry.send()).await {
+                        None => return delivery_revoked_response(&path),
+                        Some(Ok(retried)) => retried,
+                        Some(Err(e)) => return send_error(&state, method, path, e, context),
+                    }
+                }
+                Err(reason) => {
+                    diagnostic!(
+                        "!! {method} {path} -> 502 stale TLS pin; re-verify failed: {reason}"
+                    );
+                    return text_response(StatusCode::BAD_GATEWAY, "upstream connection failed\n");
+                }
+            }
+        }
         Some(Err(e)) => return send_error(&state, method, path, e, context),
     };
     let status = resp.status().as_u16();
@@ -809,8 +859,8 @@ async fn proxy_inference(
         );
     }
 
-    let trusted = state.snapshot();
-    let delivery = state.delivery_token();
+    let mut trusted = state.snapshot();
+    let mut delivery = state.delivery_token();
     let url = join_url(&state.base_url, &uri);
     let active_pins = state.active_pins();
     // A policy-derived set is refreshed only when it actually constrained this
@@ -842,9 +892,41 @@ async fn proxy_inference(
             resume.notified().await;
         }
     }
+    // A send failure in the connect phase is the signature of a rotated TLS
+    // key: the handshake fails closed against the stale pin before any bytes
+    // flow, so no response ever carries the X-ACI-Keyset-Digest the §3.4
+    // rotation gate reads. Treat the pin as stale, funnel through the same
+    // re-verify as a keyset rotation (fresh nonce, full §9.1 checks, compose
+    // and OS policies re-applied; a changed key is only ever adopted through
+    // a VERIFIED report), then retry once. A failure the re-verify does not
+    // clear — DNS, refused port, self-signed key, TEE regression — keeps the
+    // 502 the operator saw before; verification failures never adopt a key.
+    // The heal revoked the delivery gate when it replaced the identity, so
+    // the retry, its streamed body and its receipt audit all run under the
+    // freshly verified identity and a fresh delivery token.
     let mut resp = match race_delivery(&delivery, send(request_body.clone())).await {
         None => return delivery_revoked_response(&path),
         Some(Ok(resp)) => resp,
+        Some(Err(e)) if e.is_connect() && state.client.is_pinned(&state.host) => {
+            state.blocked.store(true, Ordering::SeqCst);
+            match state.ensure_unblocked().await {
+                Ok(()) => {
+                    trusted = state.snapshot();
+                    delivery = state.delivery_token();
+                    match race_delivery(&delivery, send(request_body.clone())).await {
+                        None => return delivery_revoked_response(&path),
+                        Some(Ok(retried)) => retried,
+                        Some(Err(e)) => {
+                            return send_error(&state, Method::POST, path, e, context.clone())
+                        }
+                    }
+                }
+                Err(reason) => {
+                    diagnostic!("!! POST {path} -> 502 stale TLS pin; re-verify failed: {reason}");
+                    return text_response(StatusCode::BAD_GATEWAY, "upstream connection failed\n");
+                }
+            }
+        }
         Some(Err(e)) => return send_error(&state, Method::POST, path, e, context.clone()),
     };
     // A 412 refusal against a policy-derived pin set means the sessions
@@ -2445,6 +2527,102 @@ mod tests {
         );
         // The refreshed set replaced the stale pin.
         assert_eq!(*state.policy_pins.lock().unwrap(), vec![current_id]);
+    }
+
+    /// Stale-TLS-pin self-heal against the live service: a bogus pin on the
+    /// real host makes every forward abort in the connect phase — the exact
+    /// production failure when the service rotates its attested TLS key
+    /// (handshake fails closed, no response bytes, the §3.4 rotation header
+    /// never arrives). The proxy must treat the connect failure as a stale
+    /// pin, re-verify (fresh nonce, full §9.1 checks incl. DCAP quote to the
+    /// vendor root), re-pin, and retry once — not wedge in 502 until an
+    /// operator restarts it.
+    /// Run with: cargo test --bin aci -- --ignored stale_pin
+    #[tokio::test]
+    #[ignore]
+    async fn stale_pin_heals_against_live_service() {
+        let base = "https://inference.phala.com";
+        let host = host_of(base).unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let state = state_over(base.to_string(), tx);
+        // A stale pin, as if the service's TLS key rotated after startup.
+        state.client.pin(&host, &"00".repeat(32));
+
+        let proxy = spawn_server(build_proxy_router(state.clone())).await;
+        let resp = reqwest::Client::new()
+            .get(format!("{proxy}/v1/models"))
+            .send()
+            .await
+            .unwrap();
+        // The stale pin healed instead of surfacing as a 502.
+        assert_eq!(resp.status().as_u16(), 200);
+        // The heal pinned the currently observed key, clearing the stale one.
+        let observed = state.client.observed_spki(&host).expect("observed");
+        let pinned = state.client.pinned_spki(&host).expect("re-pinned");
+        assert_eq!(observed, pinned);
+        assert_ne!(pinned, "00".repeat(32));
+    }
+
+    /// A connect failure on a host with NO registered pin keeps the 502:
+    /// nothing pins the channel, so there is no stale pin to heal. (The
+    /// harness builds states over plain-HTTP bases, so nothing is pinned
+    /// by construction; a dead port supplies the connect error.)
+    #[tokio::test]
+    async fn a_connect_failure_without_a_pin_keeps_the_502() {
+        // Nothing listens here; connection refused is a connect error too.
+        let base = "http://127.0.0.1:9";
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let state = state_over(base.to_string(), tx);
+        assert!(!state.client.is_pinned(&state.host));
+
+        let proxy = spawn_server(build_proxy_router(state)).await;
+        let resp = reqwest::Client::new()
+            .post(format!("{proxy}/v1/chat/completions"))
+            .header("content-type", "application/json")
+            .body(REQUEST_BODY.to_vec())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 502);
+        assert!(resp
+            .text()
+            .await
+            .unwrap()
+            .contains("upstream connection failed"));
+    }
+
+    /// The heal never widens trust: a connect failure against a pinned host
+    /// whose re-verification cannot reach VERIFIED keeps the stale pin and
+    /// keeps failing closed — no key is adopted on a failed verify.
+    #[tokio::test]
+    async fn a_connect_failure_on_a_pinned_unverifiable_host_fails_closed() {
+        // A dead port with a stale pin registered: the first send fails in
+        // the connect phase, the re-verify fetch cannot even complete a
+        // handshake, and the stale pin must survive untouched.
+        let base = "http://127.0.0.1:9";
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let state = state_over(base.to_string(), tx);
+        let stale = "00".repeat(32);
+        state.client.pin(&state.host, &stale);
+        assert!(state.client.is_pinned(&state.host));
+
+        let proxy = spawn_server(build_proxy_router(state.clone())).await;
+        let resp = reqwest::Client::new()
+            .get(format!("{proxy}/v1/models"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 502);
+        assert!(resp
+            .text()
+            .await
+            .unwrap()
+            .contains("upstream connection failed"));
+        // Fail-closed: the heal did not adopt any new key.
+        assert_eq!(
+            state.client.pinned_spki(&state.host).as_deref(),
+            Some(stale.as_str())
+        );
     }
 
     async fn spawn_server(app: Router) -> String {
