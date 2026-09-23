@@ -610,16 +610,25 @@ jobs:
               throw 'private-ai-proxy reported an unexpected registered command path'
             }
             # Replay the in-app updater's passive installer over a running backend.
+            # Launch the service directly: CI runner jobs forbid the CLI's detached breakaway spawn.
+            function Start-Backend {
+              Start-Process -FilePath "$installDir/private-ai-proxy-service.exe" -WindowStyle Hidden | Out-Null
+              for ($attempt = 0; $attempt -lt 60; $attempt++) {
+                $status = (& "$installDir/private-ai-proxy.exe" --json service status | ConvertFrom-Json)
+                if ($status.backend) { return $status.backend }
+                Start-Sleep -Milliseconds 500
+              }
+              throw 'The installed backend did not start'
+            }
             $env:PRIVATE_AI_PROXY_HOME = Join-Path $env:RUNNER_TEMP 'pap-update-home'
             try {
               New-Item -ItemType Directory -Force $env:PRIVATE_AI_PROXY_HOME | Out-Null
-              & "$installDir/private-ai-proxy.exe" --json service start | Out-Null
-              if ($LASTEXITCODE -ne 0) { throw 'The installed backend did not start' }
+              Start-Backend | Out-Null
               Run-Installer $installers[0].FullName "/P /UPDATE /D=$installDir"
               $stopped = (& "$installDir/private-ai-proxy.exe" --json service status | ConvertFrom-Json)
               if ($LASTEXITCODE -ne 0 -or $stopped.status -ne 'not_running') { throw 'The update installer left the previous backend running' }
-              $restarted = (& "$installDir/private-ai-proxy.exe" --json service start | ConvertFrom-Json)
-              if ($LASTEXITCODE -ne 0 -or !$restarted.executable.EndsWith('Tauri Installed Check\private-ai-proxy-service.exe', [StringComparison]::OrdinalIgnoreCase)) {
+              $restarted = Start-Backend
+              if (!$restarted.executable.EndsWith('Tauri Installed Check\private-ai-proxy-service.exe', [StringComparison]::OrdinalIgnoreCase)) {
                 throw "The updated backend restarted from $($restarted.executable)"
               }
               $registration = (& "$installDir/private-ai-proxy.exe" --json cli status | ConvertFrom-Json)
