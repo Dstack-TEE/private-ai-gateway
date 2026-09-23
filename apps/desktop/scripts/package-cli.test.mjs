@@ -49,7 +49,8 @@ test("stages the three sibling CLI executables and portable alias and Linux pack
     assert.equal(await readFile(path.join(windows, "pap.cmd"), "utf8"), '@echo off\r\n"%~dp0private-ai-proxy.exe" %*\r\n');
     assert.equal(await readFile(path.join(windows, "aci.cmd"), "utf8"), '@echo off\r\n"%~dp0private-ai-proxy.exe" %*\r\n');
 
-    await stageLinuxPackageRoot(portable, packageRoot);
+    await stageLinuxPackageRoot(portable, packageRoot, "deb");
+    assert.equal(await readFile(path.join(packageRoot, "usr/share/private-ai-proxy/package-manager"), "utf8"), "deb\n");
     assert.equal(await readlink(path.join(packageRoot, "usr/bin/private-ai-proxy")), "../libexec/private-ai-proxy/private-ai-proxy");
     assert.equal(await readlink(path.join(packageRoot, "usr/bin/pap")), "../libexec/private-ai-proxy/private-ai-proxy");
     assert.ok((await lstat(path.join(packageRoot, "usr/bin/pap"))).isSymbolicLink());

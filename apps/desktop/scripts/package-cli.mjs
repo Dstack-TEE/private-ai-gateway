@@ -79,7 +79,17 @@ export async function stagePortable({ sourceDir, targetTriple, platform, destina
   }
 }
 
-export async function stageLinuxPackageRoot(portableDirectory, packageRoot) {
+// Names the package manager that owns a Linux install, so update notices can
+// print its upgrade command (see runtime/src/updates.rs).
+export const packageManagerMarker = "usr/share/private-ai-proxy/package-manager";
+
+export async function writePackageManagerMarker(packageRoot, packageManager) {
+  const marker = path.join(packageRoot, packageManagerMarker);
+  await mkdir(path.dirname(marker), { recursive: true });
+  await writeFile(marker, `${packageManager}\n`);
+}
+
+export async function stageLinuxPackageRoot(portableDirectory, packageRoot, packageManager) {
   const libexec = path.join(packageRoot, "usr/libexec/private-ai-proxy");
   const bin = path.join(packageRoot, "usr/bin");
   await mkdir(libexec, { recursive: true });
@@ -92,6 +102,7 @@ export async function stageLinuxPackageRoot(portableDirectory, packageRoot) {
   for (const name of ["private-ai-proxy", ...aliases]) {
     await symlink("../libexec/private-ai-proxy/private-ai-proxy", path.join(bin, name));
   }
+  await writePackageManagerMarker(packageRoot, packageManager);
 }
 
 async function main() {
@@ -119,7 +130,7 @@ async function main() {
 
     if (options.platform === "linux") {
       const packageRoot = path.join(scratch, "package-root");
-      await stageLinuxPackageRoot(portable, packageRoot);
+      await stageLinuxPackageRoot(portable, packageRoot, "deb");
       artifacts.push(await createDeb(options, packageRoot));
       artifacts.push(await createRpm(options, scratch, portable));
     }
@@ -222,7 +233,7 @@ async function createRpm(options, scratch, portable) {
   const spec = path.join(specs, "private-ai-proxy-cli.spec");
   await writeFile(
     spec,
-    `Name: private-ai-proxy-cli\nVersion: ${rpmVersion}\nRelease: ${rpmRelease}\nSummary: Private AI Proxy command line client and user backend\nLicense: Apache-2.0\nURL: https://github.com/Dstack-TEE/private-ai-gateway\nBuildArch: ${architecture}\nAutoReqProv: no\n\n%description\nPrivate AI Proxy CLI, user-owned backend, verifier, and credential helper.\n\n%install\nrm -rf %{buildroot}\nmkdir -p %{buildroot}/usr/libexec/private-ai-proxy %{buildroot}/usr/bin\ninstall -m 0755 %{_sourcedir}/private-ai-proxy-service %{buildroot}/usr/libexec/private-ai-proxy/private-ai-proxy-service\ninstall -m 0755 %{_sourcedir}/private-ai-proxy %{buildroot}/usr/libexec/private-ai-proxy/private-ai-proxy\ninstall -m 0755 %{_sourcedir}/private-ai-proxy-helper %{buildroot}/usr/libexec/private-ai-proxy/private-ai-proxy-helper\nln -s ../libexec/private-ai-proxy/private-ai-proxy %{buildroot}/usr/bin/private-ai-proxy\nln -s private-ai-proxy %{buildroot}/usr/bin/pap\nln -s private-ai-proxy %{buildroot}/usr/bin/aci\n\n%pre\n${preInstall}\n\n%preun\n${preRemove}\n\n%files\n/usr/bin/private-ai-proxy\n/usr/bin/pap\n/usr/bin/aci\n/usr/libexec/private-ai-proxy/private-ai-proxy\n/usr/libexec/private-ai-proxy/private-ai-proxy-service\n/usr/libexec/private-ai-proxy/private-ai-proxy-helper\n`,
+    `Name: private-ai-proxy-cli\nVersion: ${rpmVersion}\nRelease: ${rpmRelease}\nSummary: Private AI Proxy command line client and user backend\nLicense: Apache-2.0\nURL: https://github.com/Dstack-TEE/private-ai-gateway\nBuildArch: ${architecture}\nAutoReqProv: no\n\n%description\nPrivate AI Proxy CLI, user-owned backend, verifier, and credential helper.\n\n%install\nrm -rf %{buildroot}\nmkdir -p %{buildroot}/usr/libexec/private-ai-proxy %{buildroot}/usr/bin\ninstall -m 0755 %{_sourcedir}/private-ai-proxy-service %{buildroot}/usr/libexec/private-ai-proxy/private-ai-proxy-service\ninstall -m 0755 %{_sourcedir}/private-ai-proxy %{buildroot}/usr/libexec/private-ai-proxy/private-ai-proxy\ninstall -m 0755 %{_sourcedir}/private-ai-proxy-helper %{buildroot}/usr/libexec/private-ai-proxy/private-ai-proxy-helper\nln -s ../libexec/private-ai-proxy/private-ai-proxy %{buildroot}/usr/bin/private-ai-proxy\nln -s private-ai-proxy %{buildroot}/usr/bin/pap\nln -s private-ai-proxy %{buildroot}/usr/bin/aci\nmkdir -p %{buildroot}/usr/share/private-ai-proxy\nprintf 'rpm\\n' > %{buildroot}/${packageManagerMarker}\n\n%pre\n${preInstall}\n\n%preun\n${preRemove}\n\n%files\n/usr/bin/private-ai-proxy\n/usr/bin/pap\n/usr/bin/aci\n/usr/libexec/private-ai-proxy/private-ai-proxy\n/usr/libexec/private-ai-proxy/private-ai-proxy-service\n/usr/libexec/private-ai-proxy/private-ai-proxy-helper\n%dir /usr/share/private-ai-proxy\n/${packageManagerMarker}\n`,
   );
   execFileSync("rpmbuild", ["-bb", "--define", `_topdir ${topDir}`, "--target", architecture, spec], {
     stdio: "inherit",

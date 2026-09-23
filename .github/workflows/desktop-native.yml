@@ -136,7 +136,7 @@ jobs:
       - name: Install Linux desktop dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev gnome-keyring dbus-x11 libsecret-tools
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev gnome-keyring dbus-x11 libsecret-tools rpm cpio
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci
@@ -383,6 +383,16 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.release_version && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
         run: npm run dist -- --bundles ${{ matrix.bundles }}
 
+      # Tauri writes SemVer prereleases verbatim, which dpkg and rpm order after
+      # the stable release. Rewrite them to native forms and re-sign them.
+      - name: Normalize Linux package versions
+        if: runner.os == 'Linux'
+        working-directory: apps/desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.release_version && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.release_version && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+        run: node scripts/normalize-linux-packages.mjs "$PAP_BUNDLE_DIR" "${DESKTOP_RELEASE_VERSION:-0.1.0}"
+
       - name: Verify Windows Authenticode signatures
         if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE_THUMBPRINT != ''
         working-directory: apps/desktop
@@ -599,6 +609,25 @@ jobs:
             if ([IO.Path]::GetFullPath($registration.commandPath) -ne [IO.Path]::GetFullPath("$installDir/private-ai-proxy.exe")) {
               throw 'private-ai-proxy reported an unexpected registered command path'
             }
+            # Replay the in-app updater's passive installer over a running backend.
+            $env:PRIVATE_AI_PROXY_HOME = Join-Path $env:RUNNER_TEMP 'pap-update-home'
+            try {
+              New-Item -ItemType Directory -Force $env:PRIVATE_AI_PROXY_HOME | Out-Null
+              & "$installDir/private-ai-proxy.exe" --json service start | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw 'The installed backend did not start' }
+              Run-Installer $installers[0].FullName "/P /UPDATE /D=$installDir"
+              $stopped = (& "$installDir/private-ai-proxy.exe" --json service status | ConvertFrom-Json)
+              if ($LASTEXITCODE -ne 0 -or $stopped.status -ne 'not_running') { throw 'The update installer left the previous backend running' }
+              $restarted = (& "$installDir/private-ai-proxy.exe" --json service start | ConvertFrom-Json)
+              if ($LASTEXITCODE -ne 0 -or !$restarted.executable.EndsWith('Tauri Installed Check\private-ai-proxy-service.exe', [StringComparison]::OrdinalIgnoreCase)) {
+                throw "The updated backend restarted from $($restarted.executable)"
+              }
+              $registration = (& "$installDir/private-ai-proxy.exe" --json cli status | ConvertFrom-Json)
+              if ($LASTEXITCODE -ne 0 -or !$registration.installed) { throw 'The update installer removed the private-ai-proxy PATH registration' }
+            } finally {
+              & "$installDir/private-ai-proxy.exe" --yes service stop | Out-Null
+              Remove-Item Env:PRIVATE_AI_PROXY_HOME
+            }
             $env:PAP_TEST_HELPER_PATH = "$installDir/private-ai-proxy-helper.exe"
             cargo test --release --locked --package private-ai-proxy-gateway --lib -- --ignored hermes_windows_installed_command_round_trip
             if ($LASTEXITCODE -ne 0) { throw 'Hermes credential command failed' }
@@ -641,7 +670,12 @@ jobs:
             return "$status"
           }
           trap cleanup EXIT
-          sudo apt-get install -y "${packages[0]}"
+          # Replay the in-app updater's transaction over the published stable package.
+          stable_url="$(curl -fsSL https://github.com/Dstack-TEE/private-ai-gateway/releases/download/desktop-updates-stable/latest.json | jq -er --arg target "linux-$(uname -m)-deb" '.platforms[$target].url')"
+          curl -fsSL -o "$scratch/stable.deb" "$stable_url"
+          sudo apt-get install -y "$scratch/stable.deb"
+          sudo dpkg -i "${packages[0]}"
+          test "$(dpkg-query -W -f='${Version}' "$package")" = "$(dpkg-deb -f "${packages[0]}" Version)"
           node scripts/packaged-sidecars-smoke.mjs /usr/bin
           export TAURI_CHECK_KEYRING_HOME="$scratch"
           export XDG_RUNTIME_DIR="$scratch/runtime"

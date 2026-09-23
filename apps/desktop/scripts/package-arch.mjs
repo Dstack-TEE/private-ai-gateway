@@ -5,7 +5,7 @@ import { copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { releaseVersionParts, writeChecksum } from "./package-cli.mjs";
+import { releaseVersionParts, writeChecksum, writePackageManagerMarker } from "./package-cli.mjs";
 import { artifactName } from "./release-artifacts.mjs";
 
 const packages = {
@@ -51,9 +51,8 @@ export function archPackageMetadata(kind, version, arch) {
   return {
     ...definition,
     version: versions.arch,
-    // Tauri writes the SemVer string unchanged into the desktop DEB; only the
-    // CLI DEB built by package-cli.mjs uses the Debian `~` prerelease form.
-    sourceVersion: kind === "desktop" ? version : versions.deb,
+    // Both source DEBs use the Debian `~` prerelease form (see normalize-linux-packages.mjs).
+    sourceVersion: versions.deb,
     arch: arch === "x64" ? "x86_64" : "aarch64",
   };
 }
@@ -136,11 +135,8 @@ async function main() {
     await mkdir(root);
     await mkdir(build);
     execFileSync("dpkg-deb", ["-x", options.source, root], { stdio: "inherit" });
-    if (options.kind === "desktop") {
-      const marker = path.join(root, "usr/share/private-ai-proxy/package-manager");
-      await mkdir(path.dirname(marker), { recursive: true });
-      await writeFile(marker, "pacman\n");
-    }
+    // pacman owns the result: the desktop disables in-app updates and both kinds print pacman upgrade steps.
+    await writePackageManagerMarker(root, "pacman");
 
     const payload = path.join(build, "payload.tar");
     execFileSync("tar", ["-c", "-f", payload, "-C", root, "."], { stdio: "inherit" });
