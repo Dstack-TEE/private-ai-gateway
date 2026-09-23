@@ -131,6 +131,13 @@ accept a new release:
 
 A release that is not in the registry fails closed.
 
+The registry ships with the gateway, so accepting a release takes a gateway
+redeploy. The provider published two releases on 2026-09-23 alone. Without
+notice before rollout, a provider release makes this upstream fail
+verification until the registry catches up. Deployments that use it as a
+fallback should not rely on it until the provider commits to publishing
+releases before rolling them out (audit criterion 7).
+
 ## RTMR3 and the operator key
 
 A non-zero RTMR3 means the c8s operator key was armed at boot. The provider's
