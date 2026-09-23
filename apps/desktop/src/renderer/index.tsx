@@ -6,12 +6,12 @@ import { AppearanceProvider } from "./components/appearance";
 import { NotificationsProvider } from "./components/notifications";
 import { installNativeInteractions } from "./lib/native-interactions";
 import { DialogCloseProvider } from "./components/dialog-close";
-import { desktopApi, query } from "./lib/environment";
+import { desktopApi, query, web } from "./lib/environment";
 import { NativeWindowContent } from "./windows/native";
 import { App } from "./app";
 
 function WindowContent({ reset }: { reset: boolean }): React.JSX.Element {
-  return query.has("native-dialog") ? <NativeWindowContent /> : <NotificationsProvider api={desktopApi}><App initialView={reset ? "settings" : "overview"} /></NotificationsProvider>;
+  return query.has("native-dialog") ? <NativeWindowContent /> : <NotificationsProvider api={desktopApi}><App initialView={reset ? "settings" : "overview"} />{web && <NativeWindowContent />}</NotificationsProvider>;
 }
 
 export function Renderer(): React.JSX.Element {

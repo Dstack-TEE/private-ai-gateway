@@ -21,6 +21,7 @@ import { cn } from "../lib/utils";
 export function LocalApiPanel({
   proxyUrl,
   clientKey,
+  clientKeyAvailable = Boolean(clientKey),
   clientKeyVisible,
   copied,
   onCopy,
@@ -28,6 +29,7 @@ export function LocalApiPanel({
 }: {
   proxyUrl?: string;
   clientKey: string;
+  clientKeyAvailable?: boolean;
   clientKeyVisible: boolean;
   copied?: string;
   onCopy(label: string, value: string): Promise<void>;
@@ -47,7 +49,7 @@ export function LocalApiPanel({
         copied={copied}
         onCopy={onCopy}
       >
-        <IconButton className="row-action relative z-2 ml-auto" label={clientKeyVisible ? "Hide client key" : "Reveal client key"} disabled={!clientKey} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}</IconButton>
+        <IconButton className="row-action relative z-2 ml-auto" label={clientKeyVisible ? "Hide client key" : "Reveal client key"} disabled={!clientKeyAvailable} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}</IconButton>
       </CopyRow>
     </div>
   );

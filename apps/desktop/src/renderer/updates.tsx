@@ -92,10 +92,10 @@ export function UpdateChannelControl({ updates }: { updates: ReturnType<typeof u
   </Item>;
 }
 
-export function UpdateControl({ updates, productName }: { updates: ReturnType<typeof useUpdates>; productName: string }): React.JSX.Element {
+export function UpdateControl({ updates, productName, managedLabel }: { updates: ReturnType<typeof useUpdates>; productName: string; managedLabel?: string }): React.JSX.Element {
   const { info, currentVersion, busy, error } = updates;
   const label = busy === "changing" ? "Saving update channel…" : busy === "restarting" ? "Restarting to update…" : busy === "checking" ? "Checking for updates…"
-    : !updates.nativeUpdates ? "Updates are provided by the App Store"
+    : !updates.nativeUpdates ? managedLabel ?? "Updates are provided by the App Store"
     : error ? "Update status unavailable" : (info?.systemManaged ? "Updates are managed by pacman"
       : info?.enabled === false ? "Automatic updates unavailable in this build"
       : info?.channelPublished === false ? "No releases published in this channel yet"

@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { confirm } from "@tauri-apps/plugin-dialog";
+import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 
 import type {
   AgentPreview,
@@ -68,6 +68,18 @@ export const desktopApi: DesktopApi = {
   },
   listListenAddresses: () => invoke("list_listen_addresses"),
   getNotificationSettings: () => invoke("get_notification_settings"),
+  selectProfileBackup: async () => {
+    const path = await open({ title: "Import Profile Configurations", multiple: false, filters: [{ name: "JSON", extensions: ["json"] }] });
+    return path ? invoke("read_profile_backup", { path }) : null;
+  },
+  saveProfileExport: async () => {
+    const path = await save({ title: "Export Profiles to a New File (No Keys)", defaultPath: "private-ai-proxy-profiles.json", filters: [{ name: "JSON", extensions: ["json"] }] });
+    if (path) await invoke("export_profiles", { path });
+  },
+  saveDiagnosticsExport: async () => {
+    const path = await save({ title: "Export Redacted Diagnostics to a New File", defaultPath: "private-ai-proxy-diagnostics.json", filters: [{ name: "JSON", extensions: ["json"] }] });
+    if (path) await invoke("export_diagnostics", { path });
+  },
   readProfileBackup: (path) => invoke("read_profile_backup", { path }),
   importProfiles: (backup) => invoke("import_profiles", { backup }),
   exportProfiles: (path) => invoke("export_profiles", { path }),

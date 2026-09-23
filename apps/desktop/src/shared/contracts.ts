@@ -326,11 +326,14 @@ export interface CliRegistration {
 }
 
 export interface DistributionCapabilities {
-  channel: "direct" | "macAppStore";
+  channel: "direct" | "macAppStore" | "web";
   nativeUpdates: boolean;
   cliRegistration: boolean;
   accountPortalLinks: boolean;
   sandboxHomeAccess: boolean;
+  nativeDialogs: boolean;
+  launchAtLogin: boolean;
+  notifications: boolean;
 }
 
 export type AgentAccessStatus = "authorized" | "authorizationRequired" | "reauthorizationRequired";
@@ -358,6 +361,9 @@ export interface DesktopApi {
   saveLocalApiConfig(config: LocalApiConfig): Promise<GatewayState>;
   listListenAddresses(): Promise<{ address: string; name: string }[]>;
   getNotificationSettings(): Promise<NotificationConfiguration>;
+  selectProfileBackup(): Promise<ProfileBackup | null>;
+  saveProfileExport(): Promise<void>;
+  saveDiagnosticsExport(): Promise<void>;
   readProfileBackup(path: string): Promise<ProfileBackup>;
   importProfiles(backup: ProfileBackup): Promise<{ imported: number; skipped: number }>;
   exportProfiles(path: string): Promise<void>;

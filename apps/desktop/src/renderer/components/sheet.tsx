@@ -3,6 +3,7 @@ import { cn } from "../lib/utils";
 import { Button } from "./ui/button";
 import { Separator } from "./ui/separator";
 import { useDialogClose } from "./dialog-close";
+import { web } from "../lib/environment";
 
 type SheetProps = PropsWithChildren<{
   title: string;
@@ -66,5 +67,5 @@ export function DismissSheetAction({ onClose }: { onClose(): void }): React.JSX.
 }
 
 export function NativeDialogHost({ className, ...props }: React.ComponentProps<"main">) {
-  return <main className={cn("native-dialog-host w-full h-full overflow-hidden bg-background [&_.sheet]:fixed [&_.sheet]:inset-0 [&_.sheet]:size-full [&_.sheet]:max-w-none [&_.sheet]:max-h-none [&_.sheet]:p-5 [&_.sheet]:transform-none [&_.sheet]:translate-none [&_.sheet]:bg-background [&_.sheet]:border-0 [&_.sheet]:rounded-none [&_.sheet]:shadow-none [&_.sheet::backdrop]:bg-transparent [&_.sheet[open]]:flex [&_.sheet[open]]:flex-col [&_.sheet[open]]:overflow-hidden [&_.privacy-content]:min-h-0 [&_.privacy-content]:flex-auto [&_.privacy-content]:overflow-auto [&_.sheet_form]:min-h-0 [&_.sheet_form]:flex-auto [&_.sheet_form]:flex [&_.sheet_form]:flex-col [&_.sheet-scroll]:min-h-0 [&_.sheet-scroll]:flex-auto [&_.sheet-scroll]:overflow-auto [&_.sheet-footer]:flex-none [&_.usage-evidence-sheet_.proof-card]:min-h-0 [&_.usage-evidence-sheet_.proof-card]:flex-auto [&_.usage-evidence-sheet_.proof-card]:overflow-auto [&_.usage-evidence-sheet_.proof-card]:pb-3 [&_.privacy-content]:pb-3", className)} {...props} />;
+  return <main className={cn(web ? "contents" : "native-dialog-host w-full h-full overflow-hidden bg-background [&_.sheet]:fixed [&_.sheet]:inset-0 [&_.sheet]:size-full [&_.sheet]:max-w-none [&_.sheet]:max-h-none [&_.sheet]:p-5 [&_.sheet]:transform-none [&_.sheet]:translate-none [&_.sheet]:bg-background [&_.sheet]:border-0 [&_.sheet]:rounded-none [&_.sheet]:shadow-none [&_.sheet::backdrop]:bg-transparent [&_.sheet[open]]:flex [&_.sheet[open]]:flex-col [&_.sheet[open]]:overflow-hidden [&_.privacy-content]:min-h-0 [&_.privacy-content]:flex-auto [&_.privacy-content]:overflow-auto [&_.sheet_form]:min-h-0 [&_.sheet_form]:flex-auto [&_.sheet_form]:flex [&_.sheet_form]:flex-col [&_.sheet-scroll]:min-h-0 [&_.sheet-scroll]:flex-auto [&_.sheet-scroll]:overflow-auto [&_.sheet-footer]:flex-none [&_.usage-evidence-sheet_.proof-card]:min-h-0 [&_.usage-evidence-sheet_.proof-card]:flex-auto [&_.usage-evidence-sheet_.proof-card]:overflow-auto [&_.usage-evidence-sheet_.proof-card]:pb-3 [&_.privacy-content]:pb-3", className)} {...props} />;
 }
