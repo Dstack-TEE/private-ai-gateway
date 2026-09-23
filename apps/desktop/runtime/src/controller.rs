@@ -196,7 +196,10 @@ impl DesktopRuntime {
         let data_dir = app_data_dir()?;
         let instance = lock::instance(&data_dir)
             .map_err(|error| format!("Cannot take the instance lock: {error}"))?
-            .ok_or_else(|| "Another Private AI Proxy instance is already running".to_string())?;
+            .ok_or_else(|| {
+                "Another Private AI Proxy instance is already running. Stop the existing private-ai-proxy-service process before retrying."
+                    .to_string()
+            })?;
         let agent_configuration = options.agent_configuration;
         let agent_access_error = options.agent_access_error;
         #[cfg(all(target_os = "macos", feature = "mac-app-store"))]

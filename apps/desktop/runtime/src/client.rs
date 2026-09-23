@@ -89,7 +89,7 @@ impl Client {
             Err(error) if absent(&error) => {}
             Err(error) => return Err(connection_error(error)),
         }
-        let mut child = crate::launch::spawn_background(&data)?;
+        let mut child = crate::launch::spawn_background()?;
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             match open() {

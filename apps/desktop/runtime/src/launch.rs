@@ -2,7 +2,7 @@
 
 use std::{
     io::{self, Read},
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Child, Command, ExitStatus, Stdio},
     sync::{Arc, Mutex},
     thread::JoinHandle,
@@ -57,7 +57,7 @@ pub fn service_executable() -> Result<PathBuf, String> {
     sibling_executable(SERVICE_BINARY)
 }
 
-pub fn spawn_background(data_dir: &Path) -> Result<BackgroundService, String> {
+pub fn spawn_background() -> Result<BackgroundService, String> {
     let executable = service_executable()?;
     let working_directory = executable
         .parent()
@@ -68,15 +68,8 @@ pub fn spawn_background(data_dir: &Path) -> Result<BackgroundService, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    // Native clients and services must independently resolve the same runtime
-    // socket under XDG_RUNTIME_DIR. Preserve an explicit sandbox override, but
-    // do not create one only in the child process because that changes its IPC
-    // endpoint and makes the parent wait on a different socket.
-    apply_data_override(
-        &mut command,
-        data_dir,
-        std::env::var_os(desktop_gateway::agents::APP_DATA_OVERRIDE_ENV),
-    );
+    // Inherit runtime-selection variables unchanged. A child-only data override
+    // would move its socket away from the parent's Linux or macOS endpoint.
     configure_background_command(&mut command);
     let mut child = command
         .spawn()
@@ -93,16 +86,6 @@ pub fn spawn_background(data_dir: &Path) -> Result<BackgroundService, String> {
         stderr_reader: Some(stderr_reader),
         diagnostics,
     })
-}
-
-fn apply_data_override(
-    command: &mut Command,
-    data_dir: &Path,
-    configured: Option<std::ffi::OsString>,
-) {
-    if configured.is_some() {
-        command.env(desktop_gateway::agents::APP_DATA_OVERRIDE_ENV, data_dir);
-    }
 }
 
 fn capture_stderr(mut stderr: impl Read, diagnostics: Arc<Mutex<Vec<u8>>>) {
@@ -417,31 +400,74 @@ fn exit_timeout(pid: u32, timeout: Duration) -> String {
 mod tests {
     use super::*;
 
-    fn data_override(command: &Command) -> Option<Option<&std::ffi::OsStr>> {
-        command
-            .get_envs()
-            .find(|(key, _)| *key == desktop_gateway::agents::APP_DATA_OVERRIDE_ENV)
-            .map(|(_, value)| value)
+    const ENDPOINT_FIXTURE_ROLE: &str = "PAP_TEST_ENDPOINT_FIXTURE_ROLE";
+    const ENDPOINT_FIXTURE_OUTPUT: &str = "PAP_TEST_ENDPOINT_FIXTURE_OUTPUT";
+    const ENDPOINT_FIXTURE_TEST: &str = "launch::tests::endpoint_resolution_fixture";
+
+    #[test]
+    fn parent_and_child_resolve_the_same_backend_endpoint() {
+        for configured in [false, true] {
+            let fixture = tempfile::tempdir().unwrap();
+            let runtime = fixture.path().join("runtime");
+            std::fs::create_dir(&runtime).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            let output = fixture.path().join("endpoint");
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--ignored", "--exact", ENDPOINT_FIXTURE_TEST, "--nocapture"])
+                .env(ENDPOINT_FIXTURE_ROLE, "parent")
+                .env(ENDPOINT_FIXTURE_OUTPUT, &output)
+                .env_remove(desktop_gateway::agents::HOME_OVERRIDE_ENV);
+            if configured {
+                command
+                    .env(
+                        desktop_gateway::agents::APP_DATA_OVERRIDE_ENV,
+                        fixture.path().join("data"),
+                    )
+                    .env("XDG_RUNTIME_DIR", &runtime);
+            } else {
+                command
+                    .env_remove(desktop_gateway::agents::APP_DATA_OVERRIDE_ENV)
+                    .env_remove("XDG_RUNTIME_DIR");
+            }
+            let result = command.output().unwrap();
+            assert!(
+                result.status.success(),
+                "configured={configured}\n{}\n{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
     }
 
     #[test]
-    fn native_launch_does_not_create_a_child_only_data_override() {
-        let mut command = Command::new("private-ai-proxy-service");
-        apply_data_override(&mut command, Path::new("/tmp/pap-data"), None);
-        assert_eq!(data_override(&command), None);
-    }
-
-    #[test]
-    fn sandbox_launch_preserves_the_resolved_data_override() {
-        let mut command = Command::new("private-ai-proxy-service");
-        apply_data_override(
-            &mut command,
-            Path::new("/tmp/pap-data"),
-            Some("/sandbox/data".into()),
-        );
-        assert_eq!(
-            data_override(&command),
-            Some(Some(std::ffi::OsStr::new("/tmp/pap-data")))
-        );
+    #[ignore = "subprocess fixture for endpoint inheritance"]
+    fn endpoint_resolution_fixture() {
+        match std::env::var(ENDPOINT_FIXTURE_ROLE).as_deref() {
+            Ok("parent") => {
+                let parent = crate::transport::endpoint_path().unwrap();
+                let result = Command::new(std::env::current_exe().unwrap())
+                    .args(["--ignored", "--exact", ENDPOINT_FIXTURE_TEST, "--nocapture"])
+                    .env(ENDPOINT_FIXTURE_ROLE, "child")
+                    .output()
+                    .unwrap();
+                assert!(result.status.success());
+                let output = std::env::var_os(ENDPOINT_FIXTURE_OUTPUT).unwrap();
+                assert_eq!(
+                    std::fs::read_to_string(output).unwrap(),
+                    parent.to_string_lossy()
+                );
+            }
+            Ok("child") => {
+                let endpoint = crate::transport::endpoint_path().unwrap();
+                let output = std::env::var_os(ENDPOINT_FIXTURE_OUTPUT).unwrap();
+                std::fs::write(output, endpoint.to_string_lossy().as_bytes()).unwrap();
+            }
+            _ => {}
+        }
     }
 }
