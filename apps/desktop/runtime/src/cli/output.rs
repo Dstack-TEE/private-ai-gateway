@@ -3,8 +3,6 @@ use serde_json::Value;
 
 pub(super) fn render(action: &Action, value: &Value) -> String {
     match action {
-        #[cfg(feature = "web-ui")]
-        Action::Ui { .. } => String::new(),
         Action::Status { .. }
         | Action::Start { .. }
         | Action::Stop
@@ -17,7 +15,21 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
         Action::Service {
             command: Service::Stop,
         } => "Backend stopped.".into(),
-        Action::App { command: App::Open } => "Desktop app opened.".into(),
+        Action::App {
+            command: App::Open { .. },
+        } => match value["url"].as_str() {
+            Some(url) => format!(
+                "Web UI sign-in link (works once, expires in {}s):\n{}{}",
+                text(&value["expiresInSeconds"]),
+                safe(url),
+                if value["browserOpened"] == true {
+                    "\nOpened in your browser."
+                } else {
+                    ""
+                }
+            ),
+            None => "Desktop app opened.".into(),
+        },
         Action::Profiles {
             command: Profiles::List,
         } => list(
@@ -197,6 +209,17 @@ fn status(value: &Value) -> String {
         }
     } else if let Some(endpoint) = state["proxyUrl"].as_str() {
         lines.push(format!("Local API: {}", safe(endpoint)));
+    }
+    let web_ui = &state["webUi"];
+    if web_ui["enabled"] == true {
+        lines.push(format!(
+            "Web UI: {}",
+            match (web_ui["url"].as_str(), web_ui["error"].as_str()) {
+                (Some(url), _) => safe(url),
+                (None, Some(error)) => format!("Not listening ({})", safe(error)),
+                (None, None) => "Not listening".into(),
+            }
+        ));
     }
     if let Some(required) = state["config"]["requireProductionOs"].as_bool() {
         lines.push(format!(

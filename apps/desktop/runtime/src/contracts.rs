@@ -387,6 +387,21 @@ pub struct GatewayState {
     /// verified session before forwarding.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog: Option<CatalogSummary>,
+    #[serde(default)]
+    pub web_ui: WebUiStatus,
+}
+
+/// Listener state of the service-hosted web UI. Never carries login codes or tokens.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebUiStatus {
+    pub enabled: bool,
+    pub port: u16,
+    /// Present only while the listener is bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 impl GatewayState {
@@ -435,6 +450,7 @@ impl Default for GatewayState {
             local_api: LocalApiConfig::default(),
             api_key_saved: false,
             catalog: None,
+            web_ui: WebUiStatus::default(),
         }
     }
 }

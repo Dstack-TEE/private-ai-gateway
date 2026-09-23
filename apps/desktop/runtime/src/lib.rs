@@ -29,6 +29,7 @@ pub mod service_config;
 pub mod transport;
 pub mod ui_api;
 pub mod usage;
+pub mod web_ui;
 
 /// Write a best-effort backend diagnostic without letting a detached stderr
 /// pipe turn an otherwise recoverable request error into a process panic.

@@ -2,7 +2,8 @@
 use serde_json::Value;
 use std::{
     fs,
-    net::TcpListener,
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
     path::PathBuf,
     process::{Child, Command, Output, Stdio},
     time::{Duration, Instant},
@@ -44,6 +45,8 @@ fn command_discovery_is_detailed_and_machine_readable() {
         "connectOnLaunch",
         "allowNetworkAccess",
         "clientHost",
+        "webUi",
+        "webUiPort",
     ] {
         assert!(settings.contains(key), "missing settings key {key}");
     }
@@ -254,6 +257,91 @@ impl Drop for Backend {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+#[test]
+fn web_ui_is_opt_in_and_login_links_work_once() {
+    let backend = Backend::start();
+    assert_eq!(
+        backend.run(&["status"])["gateway"]["webUi"]["enabled"],
+        false
+    );
+    let refused = backend
+        .command(&["app", "open", "--web", "--non-interactive"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("pap settings set webUi true"));
+
+    let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = occupied.local_addr().unwrap().port().to_string();
+    backend.run(&["settings", "set", "webUiPort", &port, "--yes"]);
+    // --yes enables the web UI through the same setting; the bind conflict stays in state.
+    let failed = backend.web(&["app", "open", "--web", "--yes", "--json"]);
+    assert!(!failed.status.success());
+    let status = &backend.run(&["settings", "show"])["webUi"];
+    assert_eq!(status["enabled"], true);
+    let error = status["error"].as_str().unwrap();
+    if error.contains("assets are not built") {
+        // Development builds without `npm run build:web` report this instead of serving.
+        return;
+    }
+    assert_eq!(error, format!("Port {port} is already in use on 127.0.0.1"));
+    drop(occupied);
+
+    let state = backend.run(&["settings", "set", "webUi", "true", "--yes"]);
+    assert_eq!(state["webUi"]["url"], format!("http://127.0.0.1:{port}"));
+    let login = backend.web(&["app", "open", "--web", "--json"]);
+    assert_success(&login);
+    let login: Value = serde_json::from_slice(&login.stdout).unwrap();
+    let url = login["url"].as_str().unwrap();
+    let code = url
+        .strip_prefix(&format!("http://127.0.0.1:{port}/#code="))
+        .unwrap();
+    let body = serde_json::json!({ "code": code }).to_string();
+    let (status, session) = http(&port, "POST", "/api/session", None, &body);
+    assert_eq!(status, 200);
+    let token = session["token"].as_str().unwrap().to_string();
+    assert_eq!(http(&port, "POST", "/api/session", None, &body).0, 401);
+    assert_eq!(
+        http(&port, "GET", "/api/bootstrap", Some(&token), "").0,
+        200
+    );
+    assert_eq!(http(&port, "GET", "/api/bootstrap", None, "").0, 401);
+
+    backend.run(&["settings", "set", "webUi", "false", "--yes"]);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+        assert!(Instant::now() < deadline, "the web UI listener stayed open");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+impl Backend {
+    /// Runs as a remote shell so no browser is launched.
+    fn web(&self, args: &[&str]) -> Output {
+        self.command(args)
+            .env("SSH_CONNECTION", "test")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    }
+}
+fn http(port: &str, method: &str, path: &str, token: Option<&str>, body: &str) -> (u16, Value) {
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
+    let authorization = token
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\n{authorization}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    let status = response[9..12].parse().unwrap();
+    let body = response.split_once("\r\n\r\n").unwrap().1;
+    (status, serde_json::from_str(body).unwrap_or(Value::Null))
 }
 fn assert_success(output: &Output) {
     assert!(

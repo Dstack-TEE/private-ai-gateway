@@ -67,6 +67,21 @@ pub(crate) async fn save_local_api_config(
 }
 
 #[tauri::command]
+pub(crate) async fn save_web_ui(
+    window: tauri::WebviewWindow,
+    client: State<'_, Arc<Client>>,
+    config: desktop_runtime::preferences::WebUiConfig,
+) -> Result<Value, String> {
+    crate::ui_api::invoke(
+        window,
+        client,
+        Method::SaveWebUi,
+        json!({ "config": config }),
+    )
+    .await
+}
+
+#[tauri::command]
 pub(crate) async fn list_listen_addresses(
     window: tauri::WebviewWindow,
     client: State<'_, Arc<Client>>,

@@ -47,6 +47,7 @@ fn main() {
         "get_client_key",
         "rotate_client_key",
         "save_local_api_config",
+        "save_web_ui",
         "list_listen_addresses",
         "list_agents",
         "preview_agent_connection",

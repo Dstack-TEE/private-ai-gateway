@@ -69,7 +69,7 @@ pub fn open(
     profile_id: Option<&str>,
 ) -> Result<(), String> {
     #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
-    let Ok(_agent_access_request) = crate::commands::gateway::AGENT_ACCESS_REQUEST.try_lock() else {
+    let Ok(_agent_access_request) = crate::ui_api::AGENT_ACCESS_REQUEST.try_lock() else {
         return Ok(());
     };
     if profile_id.is_some_and(|id| id.len() > 128 || id.chars().any(char::is_control)) {

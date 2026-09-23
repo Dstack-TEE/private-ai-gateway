@@ -279,6 +279,7 @@ pub fn run() {
             commands::gateway::get_client_key,
             commands::gateway::rotate_client_key,
             commands::gateway::save_local_api_config,
+            commands::gateway::save_web_ui,
             commands::gateway::list_listen_addresses,
             commands::gateway::list_agents,
             commands::gateway::preview_agent_connection,
@@ -356,7 +357,7 @@ pub fn run() {
                     let client = client_for_events.clone();
                     tauri::async_runtime::spawn(async move {
                         if let Err(error) =
-                            desktop_runtime::ui_api::refresh_preferences(client, &host).await
+                            desktop_runtime::ui_api::refresh_preferences(&client, &host).await
                         {
                             desktop_runtime::diagnostic(format_args!(
                                 "Cannot refresh desktop preferences: {}",

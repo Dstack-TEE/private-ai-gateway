@@ -5,7 +5,8 @@ use desktop_runtime::{
     client::Client,
     contracts::{AgentStatus, GatewayState},
     preferences::{Appearance, NotificationPreferences},
-    ui_api::{self as shared, Event, Host, Method},
+    protocol::Command,
+    ui_api::{self as shared, Backend, Event, Host, Method},
 };
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
@@ -16,7 +17,7 @@ use crate::native_dialog;
 use crate::{apply_appearance, autostart, notifications, run_blocking, tray, updates};
 
 #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
-static AGENT_ACCESS_REQUEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(crate) static AGENT_ACCESS_REQUEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Clone)]
 pub(crate) struct TauriHost {
@@ -93,15 +94,16 @@ impl Host for TauriHost {
         notifications::set_cached_preferences(self.app(), preferences)
     }
 
-    async fn reset_settings(&self, client: Arc<Client>) -> Result<GatewayState, String> {
+    async fn reset_settings(&self, backend: &impl Backend) -> Result<GatewayState, String> {
         let prepared = self.app().state::<updates::PreparedUpdate>();
         let mut prepared = prepared
             .0
             .try_lock()
             .map_err(|_| "An update operation is in progress")?;
         let worker_app = self.app().clone();
+        let reset = shared::call::<GatewayState>(backend, Command::ResetSettings).await;
         let result = run_blocking(move || {
-            let state = client.reset_settings()?;
+            let state = reset?;
             tray::set_open_at_login(&worker_app, false)?;
             if let (Some(window), Some(defaults)) = (
                 worker_app.get_webview_window("main"),
@@ -132,11 +134,12 @@ impl Host for TauriHost {
         })
     }
 
-    async fn request_agent_access(&self, client: Arc<Client>) -> Result<Value, String> {
+    async fn request_agent_access(&self) -> Result<Value, String> {
         let window = self
             .window
             .clone()
             .ok_or_else(|| "Home access requires the main window".to_string())?;
+        let client = self.app().state::<Arc<Client>>().inner().clone();
         request_agent_access(window, client).await?;
         serde_json::to_value(desktop_runtime::agent_access::status())
             .map_err(|_| "Management response failed".to_string())
@@ -149,8 +152,7 @@ pub(crate) async fn invoke(
     method: Method,
     params: Value,
 ) -> Result<Value, String> {
-    let client = client.inner().clone();
-    shared::invoke(client, TauriHost::new(window), method, params)
+    shared::invoke(client.inner(), &TauriHost::new(window), method, params)
         .await
         .map_err(shared::Error::message)
 }

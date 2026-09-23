@@ -1,20 +1,22 @@
 //! Shared renderer-facing management API used by the Tauri and Web transports.
 
-use std::sync::Arc;
+use std::{future::Future, sync::Arc, time::Duration};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{
+    account_login::LoginPresentation,
     agent_access,
     client::Client,
     contracts::{
-        AccountBalanceTarget, AgentStatus, ConfidentialProfileInput, ConnectOptions, GatewayState,
-        LocalApiConfig, ServiceProvider, StartGatewayConfig,
+        AccountBalanceTarget, AccountSaveResult, AgentStatus, ConfidentialProfileInput,
+        ConnectOptions, GatewayState, LocalApiConfig, RequestActivity, ServiceProvider,
+        StartGatewayConfig,
     },
     maintenance::ProfileBackup,
-    preferences::{Appearance, NotificationPreferences},
-    protocol::{Preference, RpcError},
+    preferences::{Appearance, NotificationPreferences, Preferences, WebUiConfig},
+    protocol::{Command, Preference, RpcError},
     usage::UsageQuery,
 };
 
@@ -59,6 +61,7 @@ methods! {
     GetClientKey => "getClientKey",
     RotateClientKey => "rotateClientKey",
     SaveLocalApiConfig => "saveLocalApiConfig",
+    SaveWebUi => "saveWebUi",
     ListListenAddresses => "listListenAddresses",
     ImportProfiles => "importProfiles",
     ExportProfilesContent => "exportProfilesContent",
@@ -182,7 +185,46 @@ pub struct ListenAddress {
     pub name: String,
 }
 
-#[allow(async_fn_in_trait)]
+/// Executes protocol commands. The desktop shell reaches the service over the
+/// authenticated IPC endpoint; the service-hosted web UI calls the same
+/// admission and dispatch path in process.
+pub trait Backend: Clone + Send + Sync + 'static {
+    fn execute(&self, command: Command) -> impl Future<Output = Result<Value, String>> + Send;
+
+    fn ensure_running(&self) -> impl Future<Output = Result<(), String>> + Send {
+        async { Ok(()) }
+    }
+
+    /// The last known state when the backend cannot be reached.
+    fn disconnected_state(&self) -> Option<GatewayState> {
+        None
+    }
+}
+
+impl Backend for Arc<Client> {
+    async fn execute(&self, command: Command) -> Result<Value, String> {
+        let client = self.clone();
+        blocking(move || client.request(command)).await
+    }
+
+    async fn ensure_running(&self) -> Result<(), String> {
+        blocking(Client::ensure_service).await
+    }
+
+    fn disconnected_state(&self) -> Option<GatewayState> {
+        let cached = self.cached_state();
+        (cached.backend_connected == Some(false)).then_some(cached)
+    }
+}
+
+pub async fn call<T: DeserializeOwned>(
+    backend: &impl Backend,
+    command: Command,
+) -> Result<T, String> {
+    serde_json::from_value(backend.execute(command).await?)
+        .map_err(|_| "Management response failed".to_string())
+}
+
 pub trait Host: Clone + Send + Sync + 'static {
     fn emit(&self, _event: Event) -> Result<(), String> {
         Ok(())
@@ -192,10 +234,12 @@ pub trait Host: Clone + Send + Sync + 'static {
         Ok(())
     }
 
+    /// May block; callers run it on the blocking pool.
     fn open_at_login(&self) -> Result<bool, String> {
         Ok(false)
     }
 
+    /// May block; callers run it on the blocking pool.
     fn set_open_at_login(&self, _enabled: bool) -> Result<(), String> {
         Err("Open at Login is unavailable in this interface".into())
     }
@@ -204,15 +248,17 @@ pub trait Host: Clone + Send + Sync + 'static {
 
     fn sync_agents(&self, _agents: &[AgentStatus]) {}
 
-    async fn notification_configuration(
+    fn notification_configuration(
         &self,
         preferences: NotificationPreferences,
-    ) -> Result<Value, String> {
-        Ok(json!({
-            "preferences": preferences,
-            "permission": "unsupported",
-            "alertsEnabled": false
-        }))
+    ) -> impl Future<Output = Result<Value, String>> + Send {
+        async move {
+            Ok(json!({
+                "preferences": preferences,
+                "permission": "unsupported",
+                "alertsEnabled": false
+            }))
+        }
     }
 
     fn notification_preferences_saved(
@@ -222,297 +268,280 @@ pub trait Host: Clone + Send + Sync + 'static {
         Ok(())
     }
 
-    async fn reset_settings(&self, client: Arc<Client>) -> Result<GatewayState, String> {
-        blocking(move || client.reset_settings()).await
+    fn reset_settings(
+        &self,
+        backend: &impl Backend,
+    ) -> impl Future<Output = Result<GatewayState, String>> + Send {
+        call(backend, Command::ResetSettings)
     }
 
-    async fn request_agent_access(&self, _client: Arc<Client>) -> Result<Value, String> {
-        value(agent_access::status())
+    fn request_agent_access(&self) -> impl Future<Output = Result<Value, String>> + Send {
+        async { value(agent_access::status()) }
     }
 }
 
-pub async fn invoke<H: Host>(
-    client: Arc<Client>,
-    host: H,
+pub async fn invoke(
+    backend: &impl Backend,
+    host: &impl Host,
     method: Method,
     input: Value,
 ) -> Result<Value, Error> {
-    match method {
+    let command = match method {
         Method::StartBackendService => {
-            blocking_value(move || {
-                Client::ensure_service()?;
-                client.state()
-            })
-            .await
+            backend.ensure_running().await?;
+            Command::State
         }
-        Method::GetState => blocking_value(move || client.state_or_cached()).await,
-        Method::Start => {
-            let input: StartParams = params(input)?;
-            blocking_value(move || client.start(input.config)).await
+        Method::GetState => {
+            return match backend.execute(Command::State).await {
+                Ok(state) => Ok(state),
+                Err(error) => match backend.disconnected_state() {
+                    Some(cached) => Ok(value(cached)?),
+                    None => Err(error.into()),
+                },
+            };
         }
-        Method::Stop => blocking_value(move || client.stop()).await,
-        Method::ActivateProfile => {
-            let input: ProfileIdParams = params(input)?;
-            blocking_value(move || client.activate_profile(input.profile_id)).await
-        }
-        Method::DeleteProfile => {
-            let input: ProfileIdParams = params(input)?;
-            blocking_value(move || client.delete_profile(input.profile_id)).await
-        }
+        Method::Start => Command::Start(params::<StartParams>(input)?.config),
+        Method::Stop => Command::Stop,
+        Method::ActivateProfile => Command::ActivateProfile {
+            profile_id: params::<ProfileIdParams>(input)?.profile_id,
+        },
+        Method::DeleteProfile => Command::DeleteProfile {
+            profile_id: params::<ProfileIdParams>(input)?.profile_id,
+        },
         Method::SaveConfiguration => {
             let input: SaveConfigurationParams = params(input)?;
-            result_value(
-                client
-                    .save_configuration(input.profile, input.require_production_os, input.key)
-                    .await,
-            )
+            Command::SaveConfiguration {
+                profile: input.profile,
+                require_production_os: input.require_production_os,
+                key: input.key,
+            }
         }
         Method::CompleteAccountLogin => {
             let input: CompleteLoginParams = params(input)?;
-            result_value(
-                client
-                    .complete_account_login(input.id, input.callback_url)
-                    .await,
-            )
+            Command::CompleteAccountLogin {
+                id: input.id,
+                callback_url: input.callback_url,
+            }
         }
         Method::BeginAccountLogin => {
-            let input: BeginLoginParams = params(input)?;
-            let login = client
-                .begin_account_login(input.profile)
-                .await
-                .map_err(Error::Operation)?;
+            let profile = params::<BeginLoginParams>(input)?.profile;
+            let login: LoginPresentation =
+                call(backend, Command::BeginAccountLogin { profile }).await?;
             host.present_account_login(&login.url);
-            value(login).map_err(Error::Operation)
+            return Ok(value(login)?);
         }
-        Method::PollAccountLogin => {
-            let input: LoginIdParams = params(input)?;
-            result_value(client.poll_account_login(input.id).await)
-        }
+        Method::PollAccountLogin => Command::PollAccountLogin {
+            id: params::<LoginIdParams>(input)?.id,
+        },
         Method::SaveAccountLogin => {
             let input: SaveLoginParams = params(input)?;
-            result_value(
-                client
-                    .save_account_login(
-                        input.id,
-                        input.profile,
-                        input.require_production_os,
-                        input.workspace_id,
-                    )
-                    .await,
-            )
+            return Ok(value(save_account_login(backend, input).await?)?);
         }
-        Method::GetAccountDetails => {
-            let input: ProfileIdParams = params(input)?;
-            result_value(client.account_details(input.profile_id).await)
-        }
-        Method::GetAccountBalance => {
-            let input: BalanceParams = params(input)?;
-            result_value(client.account_balance(input.target).await)
-        }
+        Method::GetAccountDetails => Command::AccountDetails {
+            profile_id: params::<ProfileIdParams>(input)?.profile_id,
+        },
+        Method::GetAccountBalance => Command::AccountBalance {
+            target: params::<BalanceParams>(input)?.target,
+        },
         Method::GetOrganizationUrl => {
             let input: OrganizationParams = params(input)?;
-            result_value(crate::account_login::organization_url(Some(
+            return Ok(value(crate::account_login::organization_url(Some(
                 &input.organization_slug,
-            )))
+            ))?)?);
         }
         Method::GetTopUpUrl => {
             let input: TopUpParams = params(input)?;
-            result_value(crate::account_login::top_up_url(
+            return Ok(value(crate::account_login::top_up_url(
                 &input.provider,
                 input.scope_slug.as_deref(),
-            ))
+            )?)?);
         }
-        Method::CancelAccountLogin => {
-            let input: LoginIdParams = params(input)?;
-            result_value(client.cancel_account_login(input.id).await)
-        }
-        Method::GetClientKey => blocking_value(move || client.client_key()).await,
-        Method::RotateClientKey => blocking_value(move || client.rotate_client_key()).await,
+        Method::CancelAccountLogin => Command::CancelAccountLogin {
+            id: params::<LoginIdParams>(input)?.id,
+        },
+        Method::GetClientKey => Command::ClientKey,
+        Method::RotateClientKey => Command::RotateClientKey,
         Method::SaveLocalApiConfig => {
-            let input: LocalApiParams = params(input)?;
-            result_value(client.save_local_api_config(input.config).await)
+            Command::SaveLocalApi(params::<LocalApiParams>(input)?.config)
         }
-        Method::ListListenAddresses => blocking_value(list_listen_addresses).await,
-        Method::ImportProfiles => {
-            let input: ImportParams = params(input)?;
-            blocking_value(move || client.import_profiles(input.backup)).await
-        }
-        Method::ExportProfilesContent => {
-            blocking_value(move || client.export_profiles_content()).await
-        }
-        Method::ExportDiagnosticsContent => {
-            blocking_value(move || client.export_diagnostics_content()).await
-        }
-        Method::QueryUsage => {
-            let input: UsageParams = params(input)?;
-            blocking_value(move || client.query_usage(input.query)).await
-        }
+        Method::SaveWebUi => Command::SaveWebUi(params::<WebUiParams>(input)?.config),
+        Method::ListListenAddresses => return Ok(value(blocking(list_listen_addresses).await?)?),
+        Method::ImportProfiles => Command::ImportProfiles(params::<ImportParams>(input)?.backup),
+        Method::ExportProfilesContent => Command::ExportProfilesContent,
+        Method::ExportDiagnosticsContent => Command::ExportDiagnosticsContent,
+        Method::QueryUsage => Command::Usage(params::<UsageParams>(input)?.query),
         Method::GetUsageRecord => {
-            let input: UsageRecordParams = params(input)?;
-            blocking_value(move || {
-                client
-                    .usage_record(&input.record_id)?
-                    .ok_or_else(|| "Usage record not found".to_string())
-            })
-            .await
+            let record_id = params::<UsageRecordParams>(input)?.record_id;
+            let record: Option<RequestActivity> =
+                call(backend, Command::UsageRecord { record_id }).await?;
+            return Ok(value(
+                record.ok_or_else(|| "Usage record not found".to_string())?,
+            )?);
         }
         Method::ListAgents => {
-            let agents: Vec<AgentStatus> = blocking(move || client.list_agents())
-                .await
-                .map_err(Error::Operation)?;
+            let agents: Vec<AgentStatus> = call(backend, Command::Agents).await?;
             host.sync_agents(&agents);
-            value(agents).map_err(Error::Operation)
+            return Ok(value(agents)?);
         }
-        Method::GetAgentAccess => value(agent_access::status()).map_err(Error::Operation),
-        Method::RequestAgentAccess => host
-            .request_agent_access(client)
-            .await
-            .map_err(Error::Operation),
+        Method::GetAgentAccess => return Ok(value(agent_access::status())?),
+        Method::RequestAgentAccess => return Ok(host.request_agent_access().await?),
         Method::PreviewAgent => {
             let input: AgentChangeParams = params(input)?;
-            blocking_value(move || {
-                client.preview_agent(input.agent_id, input.connect, input.options)
-            })
-            .await
+            Command::PreviewAgent {
+                agent_id: input.agent_id,
+                connect: input.connect,
+                options: input.options,
+            }
         }
         Method::ApplyAgent => {
             let input: AgentChangeParams = params(input)?;
-            let revision = input.revision.ok_or(Error::InvalidRequest)?;
-            blocking_value(move || {
-                client.apply_agent(input.agent_id, input.connect, revision, input.options)
-            })
-            .await
+            Command::ApplyAgent {
+                agent_id: input.agent_id,
+                connect: input.connect,
+                revision: input.revision.ok_or(Error::InvalidRequest)?,
+                options: input.options,
+            }
         }
-        Method::GetAppearance => blocking_value(move || Ok(client.preferences()?.appearance)).await,
+        Method::GetAppearance => {
+            return Ok(value(preferences(backend).await?.appearance)?);
+        }
         Method::SetAppearance => {
-            let input: AppearanceParams = params(input)?;
-            let appearance = input.appearance;
-            blocking(move || {
-                client.set_preference(Preference::Appearance(appearance))?;
-                Ok(())
-            })
-            .await
-            .map_err(Error::Operation)?;
-            host.apply_appearance(appearance)
-                .map_err(Error::Operation)?;
-            host.emit(Event::serialized(APPEARANCE_EVENT, &appearance).map_err(Error::Operation)?)
-                .map_err(Error::Operation)?;
-            value(()).map_err(Error::Operation)
+            let appearance = params::<AppearanceParams>(input)?.appearance;
+            set_preference(backend, Preference::Appearance(appearance)).await?;
+            host.apply_appearance(appearance)?;
+            host.emit(Event::serialized(APPEARANCE_EVENT, &appearance)?)
+                .map_err(|_| "Could not sync appearance".to_string())?;
+            return Ok(Value::Null);
         }
-        Method::GetLaunchPreferences => launch_preferences(client, &host).await,
+        Method::GetLaunchPreferences => {
+            return Ok(value(launch_preferences(backend, host).await?)?);
+        }
         Method::SetLaunchPreference => {
             let input: LaunchPreferenceParams = params(input)?;
             match input.name.as_str() {
-                "openAtLogin" => host
-                    .set_open_at_login(input.enabled)
-                    .map_err(Error::Operation)?,
-                "connectOnLaunch" => {
-                    let writer = client.clone();
-                    blocking(move || {
-                        writer.set_preference(Preference::ConnectOnLaunch(input.enabled))?;
-                        Ok(())
-                    })
-                    .await
-                    .map_err(Error::Operation)?;
+                "openAtLogin" => {
+                    let host = host.clone();
+                    blocking(move || host.set_open_at_login(input.enabled)).await?;
                 }
-                _ => return Err(Error::InvalidRequest),
+                "connectOnLaunch" => {
+                    set_preference(backend, Preference::ConnectOnLaunch(input.enabled)).await?;
+                }
+                _ => return Err("Unknown startup preference".to_string().into()),
             }
-            let preferences = launch_preferences_value(&client, &host).await?;
-            host.emit(
-                Event::serialized(LAUNCH_PREFERENCES_EVENT, &preferences)
-                    .map_err(Error::Operation)?,
-            )
-            .map_err(Error::Operation)?;
-            value(preferences).map_err(Error::Operation)
+            let preferences = launch_preferences(backend, host).await?;
+            if let Ok(event) = Event::serialized(LAUNCH_PREFERENCES_EVENT, &preferences) {
+                let _ = host.emit(event);
+            }
+            return Ok(value(preferences)?);
         }
         Method::GetNotificationSettings => {
-            let preferences = blocking(move || Ok(client.preferences()?.notifications))
-                .await
-                .map_err(Error::Operation)?;
-            host.notification_configuration(preferences)
-                .await
-                .map_err(Error::Operation)
+            let preferences = preferences(backend).await?.notifications;
+            return Ok(host.notification_configuration(preferences).await?);
         }
         Method::SaveNotificationSettings => {
-            let input: NotificationsParams = params(input)?;
-            let preferences = input.config;
-            blocking(move || {
-                client.set_preference(Preference::Notifications(preferences))?;
-                Ok(())
-            })
-            .await
-            .map_err(Error::Operation)?;
-            host.notification_preferences_saved(preferences)
-                .map_err(Error::Operation)?;
-            value(()).map_err(Error::Operation)
+            let preferences = params::<NotificationsParams>(input)?.config;
+            set_preference(backend, Preference::Notifications(preferences)).await?;
+            host.notification_preferences_saved(preferences)?;
+            return Ok(Value::Null);
         }
         Method::ResetSettings => {
-            let result = host.reset_settings(client.clone()).await;
+            let result = host.reset_settings(backend).await;
             // A partial reset may still have changed preferences.
-            if let Err(error) = refresh_preferences(client, &host).await {
+            if let Err(error) = refresh_preferences(backend, host).await {
                 crate::diagnostic(format_args!(
                     "Cannot refresh preferences after reset: {}",
                     error.message()
                 ));
             }
-            let state = result.map_err(Error::Operation)?;
-            host.emit(Event::new(SETTINGS_RESET_EVENT, Value::Null))
-                .map_err(Error::Operation)?;
-            value(state).map_err(Error::Operation)
+            let state = result?;
+            host.emit(Event::new(SETTINGS_RESET_EVENT, Value::Null))?;
+            return Ok(value(state)?);
         }
+    };
+    Ok(backend.execute(command).await?)
+}
+
+/// Save can outlive one request; poll its operation until it settles.
+async fn save_account_login(
+    backend: &impl Backend,
+    input: SaveLoginParams,
+) -> Result<GatewayState, String> {
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let result = |operation_id: String| Command::AccountSaveResult { operation_id };
+    let initial = call::<AccountSaveResult>(
+        backend,
+        Command::SaveAccountLogin {
+            operation_id: operation_id.clone(),
+            id: input.id,
+            profile: input.profile,
+            require_production_os: input.require_production_os,
+            workspace_id: input.workspace_id,
+        },
+    )
+    .await;
+    let mut outcome = match initial {
+        Ok(outcome) => outcome,
+        Err(_) => call(backend, result(operation_id.clone())).await?,
+    };
+    loop {
+        match outcome {
+            AccountSaveResult::Complete { state } => return Ok(*state),
+            AccountSaveResult::Failed { error } => return Err(error),
+            AccountSaveResult::Running => tokio::time::sleep(Duration::from_millis(500)).await,
+        }
+        outcome = call(backend, result(operation_id.clone())).await.map_err(|_| {
+            "Account: Save outcome is not yet confirmed. Reconnect to the backend and check the profile before retrying.".to_string()
+        })?;
     }
 }
 
-pub async fn refresh_preferences<H: Host>(client: Arc<Client>, host: &H) -> Result<(), Error> {
-    if client.cached_state().backend_connected == Some(false) {
+async fn preferences(backend: &impl Backend) -> Result<Preferences, String> {
+    call(backend, Command::Preferences).await
+}
+
+async fn set_preference(backend: &impl Backend, change: Preference) -> Result<(), String> {
+    call::<Preferences>(backend, Command::SetPreference(change))
+        .await
+        .map(|_| ())
+}
+
+/// Appearance and startup preference events for a (re)connected interface.
+pub async fn preference_events(
+    backend: &impl Backend,
+    host: &impl Host,
+) -> Result<(Preferences, Vec<Event>), String> {
+    let preferences = preferences(backend).await?;
+    let launch = launch_preferences(backend, host).await?;
+    let events = vec![
+        Event::serialized(APPEARANCE_EVENT, &preferences.appearance)?,
+        Event::serialized(LAUNCH_PREFERENCES_EVENT, &launch)?,
+    ];
+    Ok((preferences, events))
+}
+
+pub async fn refresh_preferences(backend: &impl Backend, host: &impl Host) -> Result<(), Error> {
+    if backend.disconnected_state().is_some() {
         return Ok(());
     }
-    let preferences = blocking({
-        let client = client.clone();
-        move || client.preferences()
-    })
-    .await
-    .map_err(Error::Operation)?;
-    let launch = launch_preferences_value(&client, host).await?;
-    host.notification_preferences_saved(preferences.notifications)
-        .map_err(Error::Operation)?;
-    host.apply_appearance(preferences.appearance)
-        .map_err(Error::Operation)?;
-    host.emit(
-        Event::serialized(APPEARANCE_EVENT, &preferences.appearance).map_err(Error::Operation)?,
-    )
-    .map_err(Error::Operation)?;
-    host.emit(Event::serialized(LAUNCH_PREFERENCES_EVENT, &launch).map_err(Error::Operation)?)
-        .map_err(Error::Operation)
+    let (preferences, events) = preference_events(backend, host).await?;
+    host.notification_preferences_saved(preferences.notifications)?;
+    host.apply_appearance(preferences.appearance)?;
+    for event in events {
+        let _ = host.emit(event);
+    }
+    Ok(())
 }
 
-async fn launch_preferences<H: Host>(client: Arc<Client>, host: &H) -> Result<Value, Error> {
-    let preferences = launch_preferences_value(&client, host).await?;
-    value(preferences).map_err(Error::Operation)
-}
-
-async fn launch_preferences_value<H: Host>(
-    client: &Arc<Client>,
-    host: &H,
-) -> Result<LaunchPreferences, Error> {
-    let open_at_login = host.open_at_login().map_err(Error::Operation)?;
-    let client = client.clone();
-    let connect_on_launch = blocking(move || Ok(client.preferences()?.connect_on_launch))
-        .await
-        .map_err(Error::Operation)?;
+pub async fn launch_preferences(
+    backend: &impl Backend,
+    host: &impl Host,
+) -> Result<LaunchPreferences, String> {
+    let reader = host.clone();
+    let open_at_login = blocking(move || reader.open_at_login()).await?;
     Ok(LaunchPreferences {
         open_at_login,
-        connect_on_launch,
+        connect_on_launch: preferences(backend).await?.connect_on_launch,
     })
-}
-
-async fn blocking_value<T, F>(operation: F) -> Result<Value, Error>
-where
-    T: Serialize + Send + 'static,
-    F: FnOnce() -> Result<T, String> + Send + 'static,
-{
-    let result = blocking(operation).await.map_err(Error::Operation)?;
-    value(result).map_err(Error::Operation)
 }
 
 pub async fn blocking<T, F>(operation: F) -> Result<T, String>
@@ -523,12 +552,6 @@ where
     tokio::task::spawn_blocking(operation)
         .await
         .map_err(|_| "The background operation could not complete. Please try again.".to_string())?
-}
-
-fn result_value<T: Serialize>(result: Result<T, String>) -> Result<Value, Error> {
-    result
-        .map_err(Error::Operation)
-        .and_then(|result| value(result).map_err(Error::Operation))
 }
 
 fn value<T: Serialize>(value: T) -> Result<Value, String> {
@@ -647,6 +670,12 @@ struct TopUpParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LocalApiParams {
     config: LocalApiConfig,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WebUiParams {
+    config: WebUiConfig,
 }
 
 #[derive(Deserialize)]

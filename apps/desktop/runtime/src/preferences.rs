@@ -36,6 +36,25 @@ pub struct Preferences {
     pub update_channel: Option<UpdateChannel>,
     #[serde(default)]
     pub appearance: Appearance,
+    #[serde(default)]
+    pub web_ui: WebUiConfig,
+}
+
+/// The service-hosted browser UI. It is off until the user enables it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct WebUiConfig {
+    pub enabled: bool,
+    pub port: u16,
+}
+
+impl Default for WebUiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: crate::web_ui::DEFAULT_PORT,
+        }
+    }
 }
 
 pub fn load() -> Result<Preferences, String> {

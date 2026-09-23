@@ -19,6 +19,7 @@ pub(crate) struct DistributionCapabilities {
     pub sandbox_home_access: bool,
     pub launch_at_login: bool,
     pub notifications: bool,
+    pub web_ui: bool,
 }
 
 #[cfg(feature = "mac-app-store")]
@@ -30,6 +31,7 @@ pub(crate) const CAPABILITIES: DistributionCapabilities = DistributionCapabiliti
     sandbox_home_access: cfg!(target_os = "macos"),
     launch_at_login: true,
     notifications: true,
+    web_ui: false,
 };
 
 #[cfg(not(feature = "mac-app-store"))]
@@ -41,6 +43,7 @@ pub(crate) const CAPABILITIES: DistributionCapabilities = DistributionCapabiliti
     sandbox_home_access: false,
     launch_at_login: true,
     notifications: true,
+    web_ui: true,
 };
 
 pub(crate) fn initialization_script() -> String {
@@ -77,6 +80,7 @@ mod tests {
                 "sandboxHomeAccess": app_store && cfg!(target_os = "macos"),
                 "launchAtLogin": true,
                 "notifications": true,
+                "webUi": !app_store,
             })
         );
         assert_eq!(

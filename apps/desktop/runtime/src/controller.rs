@@ -5,6 +5,7 @@ mod credentials;
 mod endpoint;
 mod lifecycle;
 mod profiles;
+mod web_ui;
 
 use std::{
     path::PathBuf,
@@ -70,6 +71,8 @@ pub struct DesktopRuntime {
     #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
     agent_home: Option<PathBuf>,
     instance: Option<lock::InstanceLock>,
+    web_ui: crate::web_ui::WebUi,
+    admission: Arc<crate::server::Admission>,
 }
 
 struct SavedConfiguration<'a> {
@@ -302,6 +305,8 @@ impl DesktopRuntime {
             #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
             agent_home,
             instance: Some(instance),
+            web_ui: crate::web_ui::WebUi::new(task_runtime.clone()),
+            admission: Arc::default(),
         });
 
         match (listener, launch_error) {
@@ -331,6 +336,10 @@ impl DesktopRuntime {
             manager.report_error(error);
         }
         if runtime.instance.is_some() {
+            match crate::preferences::load() {
+                Ok(saved) => runtime.apply_web_ui(saved.web_ui),
+                Err(error) => runtime.report_error(error),
+            }
             runtime.initialize_startup_tokens();
             if let Err(error) = runtime.recovery.start() {
                 runtime.report_error(error);

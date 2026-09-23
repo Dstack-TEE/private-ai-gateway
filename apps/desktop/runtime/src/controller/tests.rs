@@ -109,6 +109,8 @@ fn test_runtime(
         agent_home: Some(directory.to_path_buf()),
         recovery: crate::recovery::Recovery::default(),
         instance: None,
+        web_ui: crate::web_ui::WebUi::new(executor.handle().clone()),
+        admission: Arc::default(),
     })
 }
 

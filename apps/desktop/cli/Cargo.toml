@@ -7,8 +7,10 @@ edition = "2021"
 rust-version = "1.98"
 
 [features]
-default = []
+default = ["web-ui"]
 mac-app-store = ["desktop-runtime/mac-app-store"]
+# The service-hosted browser UI; App Store builds disable default features to omit it.
+web-ui = ["desktop-runtime/web-ui"]
 
 [lib]
 name = "private_ai_proxy"
@@ -31,7 +33,7 @@ bytes = "1"
 clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
 dcap-qvl = { version = "0.6.3", default-features = false, features = ["std", "report", "rustcrypto"] }
 desktop-gateway = { package = "private-ai-proxy-gateway", path = "../gateway" }
-desktop-runtime = { package = "private-ai-proxy-runtime", path = "../runtime", features = ["web-ui"] }
+desktop-runtime = { package = "private-ai-proxy-runtime", path = "../runtime" }
 ed25519-dalek = "2"
 futures-util = "0.3"
 hex = "0.4"

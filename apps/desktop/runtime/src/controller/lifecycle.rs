@@ -193,6 +193,7 @@ impl DesktopRuntime {
             restored.as_ref().map_err(Clone::clone)?;
         }
         self.endpoint.stop().await?;
+        self.web_ui.stop();
         self.exiting.store(true, Ordering::Release);
         restored.map(|_| ())
     }

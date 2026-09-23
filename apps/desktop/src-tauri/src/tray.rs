@@ -313,8 +313,8 @@ fn sync_autostart(app: &AppHandle) {
         let client = app.state::<std::sync::Arc<Client>>().inner().clone();
         let host = crate::ui_api::TauriHost::from_app(app.clone());
         let result = desktop_runtime::ui_api::invoke(
-            client,
-            host,
+            &client,
+            &host,
             desktop_runtime::ui_api::Method::SetLaunchPreference,
             serde_json::json!({ "name": "openAtLogin", "enabled": checked }),
         )
@@ -327,6 +327,15 @@ fn sync_autostart(app: &AppHandle) {
                 crate::SurfaceErrorScope::Settings,
                 format!("Open at Login could not be changed: {}", error.message()),
             );
+            // Keep open windows in sync with the preference that actually applies.
+            if let Ok(preferences) =
+                desktop_runtime::ui_api::launch_preferences(&client, &host).await
+            {
+                let _ = app.emit(
+                    desktop_runtime::ui_api::LAUNCH_PREFERENCES_EVENT,
+                    preferences,
+                );
+            }
         }
     });
 }

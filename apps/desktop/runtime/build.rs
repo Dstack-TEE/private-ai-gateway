@@ -5,11 +5,12 @@ fn main() {
         return;
     }
     let root = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"));
-    let index = root.join("web-dist/index.html");
     println!("cargo:rerun-if-changed={}", root.join("web-dist").display());
-    if !index.is_file() {
-        panic!(
-            "Private AI Proxy web assets are missing. Run `npm run build:web` in apps/desktop before Cargo builds."
+    // Development builds may skip the renderer; enabling the web UI then reports it in state.
+    // Release packaging builds the bundle first and asserts it exists.
+    if !root.join("web-dist/index.html").is_file() {
+        println!(
+            "cargo:warning=Web UI assets are not built; run `npm run build:web` in apps/desktop to include them."
         );
     }
 }
