@@ -1,15 +1,14 @@
 //! The loopback application proxy on the stable local HTTP endpoint. It admits
 //! only requests that carry an issued agent token for that agent's paths,
 //! forwards only while a verified session (identity + catalog, one generation
-//! and epoch) is published, and swaps the agent token for the RedPill key on
-//! the way to the sidecar. It relays: method, path, query, body, status, and
-//! stream reach the sidecar and come back unchanged; nothing is converted.
+//! and epoch) is published, and swaps the agent token for the provider key on
+//! the way to the in-process verifier. It relays method, path, query, body,
+//! status, and stream unchanged.
 //! Request bodies are buffered (bounded, with a read timeout) only so the
 //! `model` can be checked against the verified catalog; responses stream
 //! through. Credentials and the session are re-validated after the body is
-//! read, right before anything leaves the process. The proxy adds one
-//! attribution header the sidecar copies into its receipt event and strips
-//! before forwarding.
+//! read, right before anything leaves the process. Request attribution is
+//! passed directly to the verifier and never appears on an HTTP hop.
 
 mod routes;
 #[cfg(test)]
@@ -20,7 +19,9 @@ use usage::*;
 
 use std::{
     collections::HashSet,
+    future::Future,
     net::SocketAddr,
+    pin::Pin,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, PoisonError, RwLock, RwLockReadGuard,
@@ -31,12 +32,12 @@ use std::{
 use axum::{
     body::{to_bytes, Body, Bytes},
     extract::{RawQuery, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Request, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -50,20 +51,18 @@ use crate::{
     tokens::{agent_allows, TokenSet},
 };
 
-/// Request bodies are buffered up to this size; the sidecar applies the same
+/// Request bodies are buffered up to this size; the verifier applies the same
 /// limit. Responses stream.
 pub const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_IN_FLIGHT: usize = 64;
 const BODY_READ_TIMEOUT: Duration = Duration::from_secs(60);
-const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// Idle stream timeout. Receipt auditing does not hold response delivery.
-const UPSTREAM_READ_TIMEOUT: Duration = Duration::from_secs(660);
+#[cfg(not(test))]
+const VERIFIER_CALL_TIMEOUT: Duration = Duration::from_secs(660);
+#[cfg(test)]
+const VERIFIER_CALL_TIMEOUT: Duration = Duration::from_millis(100);
 // Match the gateway's SSE limit: Responses terminal events repeat the full output.
 const MAX_USAGE_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SSE_LINE_BYTES: usize = MAX_USAGE_CAPTURE_BYTES;
-/// Attribution (the agent id) added on the way to the sidecar, which copies
-/// it into the receipt event and strips it before forwarding.
-pub const TAG_HEADER: &str = "x-aci-tag";
 const HOP_BY_HOP: [&str; 9] = [
     "connection",
     "proxy-connection",
@@ -76,25 +75,50 @@ const HOP_BY_HOP: [&str; 9] = [
     "upgrade",
 ];
 
-/// The verified sidecar session the proxy may forward to. Identity, catalog,
-/// generation (per sidecar start) and epoch (per identity/catalog read) are
+/// The verified in-process session the proxy may forward to. Identity, catalog,
+/// generation (per verifier start) and epoch (per identity/catalog read) are
 /// published together; anything from another generation or epoch is stale.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct Session {
     pub generation: u64,
     pub epoch: u64,
     pub session_id: Option<String>,
-    pub base_url: Option<String>,
+    pub service: Option<Arc<dyn VerifiedService>>,
     pub verified: bool,
     pub catalog: Option<Catalog>,
 }
 
+/// Stable attribution carried directly into the verifier and its asynchronous
+/// receipt audit. This replaces the private `x-aci-tag` wire protocol.
+#[derive(Clone, Debug)]
+pub struct ForwardContext {
+    pub generation: u64,
+    pub request_id: String,
+    pub session_id: String,
+    pub agent: String,
+    pub model: Option<String>,
+    pub at: u64,
+}
+
+pub type VerifiedResponse = Pin<Box<dyn Future<Output = Response> + Send + 'static>>;
+
+/// An already-attested forwarding service. Implementations must retain the
+/// verifier's TLS pinning, policy and receipt-audit behavior.
+pub trait VerifiedService: Send + Sync {
+    fn call(
+        self: Arc<Self>,
+        request: Request<Body>,
+        context: Option<ForwardContext>,
+    ) -> VerifiedResponse;
+}
+
 /// One stage of a request observed by the local proxy. Forwarded requests can
-/// emit an initial response event and a final usage event before the sidecar's
-/// receipt verdict is merged by the desktop backend.
+/// emit an initial response event and a final usage event before the verifier's
+/// receipt verdict is merged through the same event stream.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyEvent {
+    pub generation: u64,
     pub request_id: String,
     pub session_id: String,
     pub agent: Option<String>,
@@ -133,7 +157,6 @@ pub struct ProxyState {
     /// cancels this token, so a request that already passed its final checks
     /// but has not started sending is stopped instead of delivered.
     gate: RwLock<CancellationToken>,
-    client: reqwest::Client,
     events: mpsc::Sender<ProxyEvent>,
     in_flight: Arc<Semaphore>,
     #[cfg(test)]
@@ -144,19 +167,11 @@ impl ProxyState {
     /// `events` is bounded; when it is full, low-value rejection events are
     /// dropped rather than blocking a request.
     pub fn new(events: mpsc::Sender<ProxyEvent>) -> Result<Arc<Self>, String> {
-        let client = reqwest::Client::builder()
-            // Only the owned loopback sidecar may receive these requests.
-            .no_proxy()
-            .connect_timeout(UPSTREAM_CONNECT_TIMEOUT)
-            .read_timeout(UPSTREAM_READ_TIMEOUT)
-            .build()
-            .map_err(|_| "Cannot initialize the local gateway HTTP client".to_string())?;
         Ok(Arc::new(Self {
             session: RwLock::new(Session::default()),
             credentials: RwLock::new(Credentials::default()),
             credential_epoch: AtomicU64::new(1),
             gate: RwLock::new(CancellationToken::new()),
-            client,
             events,
             in_flight: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
             #[cfg(test)]
@@ -180,7 +195,7 @@ impl ProxyState {
         let revoke = current.generation != session.generation
             || current.epoch != session.epoch
             || current.session_id != session.session_id
-            || current.base_url != session.base_url
+            || current.service.is_some() != session.service.is_some()
             || current.verified != session.verified
             || current.catalog.is_some() != session.catalog.is_some();
         *current = session;
@@ -219,11 +234,11 @@ impl ProxyState {
         read(&self.credentials).tokens.clone()
     }
 
-    /// Read the model list through the sidecar of `generation`; the caller
+    /// Read the model list through the verifier of `generation`; the caller
     /// publishes it under `epoch`. A result for another generation or a newer
     /// epoch is refused here so it can never be published stale.
     pub async fn fetch_catalog(&self, generation: u64, epoch: u64) -> Result<Catalog, String> {
-        let base_url = {
+        let service = {
             let session = read(&self.session);
             if session.generation != generation || session.epoch != epoch {
                 return Err(
@@ -231,29 +246,32 @@ impl ProxyState {
                 );
             }
             session
-                .base_url
+                .service
                 .clone()
                 .ok_or_else(|| "The gateway is not running".to_string())?
         };
-        let mut request = self
-            .client
-            .get(format!("{base_url}/v1/models"))
-            .timeout(Duration::from_secs(30));
+        let mut request = Request::builder().method("GET").uri("/v1/models");
         if let Some(key) = read(&self.credentials).api_key.as_deref() {
-            request = request.bearer_auth(key);
+            request = request.header(header::AUTHORIZATION, format!("Bearer {key}"));
         }
-        let response = request.send().await.map_err(|_| {
-            "The verified gateway did not answer the model list request".to_string()
-        })?;
-        if !response.status().is_success() {
-            return Err(format!(
-                "The model list request failed with HTTP {}",
-                response.status().as_u16()
-            ));
-        }
-        let body: Value = response
-            .json()
-            .await
+        let request = request
+            .body(Body::empty())
+            .map_err(|_| "Cannot build the model list request".to_string())?;
+        let bytes = tokio::time::timeout(Duration::from_secs(30), async {
+            let response = service.clone().call(request, None).await;
+            if !response.status().is_success() {
+                return Err(format!(
+                    "The model list request failed with HTTP {}",
+                    response.status().as_u16()
+                ));
+            }
+            to_bytes(response.into_body(), MAX_BODY_BYTES)
+                .await
+                .map_err(|_| "The model list could not be read".to_string())
+        })
+        .await
+        .map_err(|_| "The verified gateway did not answer the model list request".to_string())??;
+        let body: Value = serde_json::from_slice(&bytes)
             .map_err(|_| "The model list is not valid JSON".to_string())?;
         let catalog = Catalog::from_remote(&body, now_secs())?;
         let session = read(&self.session);
@@ -266,15 +284,15 @@ impl ProxyState {
     /// The verified session, or the rejection to send instead.
     fn verified_session(&self) -> Result<Lease, Rejection> {
         let session = read(&self.session);
-        match (&session.base_url, session.verified, &session.catalog) {
-            (Some(base_url), true, Some(_)) => Ok(Lease {
+        match (&session.service, session.verified, &session.catalog) {
+            (Some(service), true, Some(_)) => Ok(Lease {
                 generation: session.generation,
                 epoch: session.epoch,
                 session_id: session
                     .session_id
                     .clone()
                     .unwrap_or_else(|| "unscoped".to_string()),
-                base_url: base_url.clone(),
+                service: service.clone(),
             }),
             _ => Err(Rejection::new(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -359,6 +377,10 @@ impl ProxyState {
     fn emit(&self, event: ProxyEvent) {
         let _ = self.events.try_send(event);
     }
+
+    pub fn event_sender(&self) -> mpsc::Sender<ProxyEvent> {
+        self.events.clone()
+    }
 }
 
 /// Permission to forward one request through a specific verified session.
@@ -366,7 +388,7 @@ struct Lease {
     generation: u64,
     epoch: u64,
     session_id: String,
-    base_url: String,
+    service: Arc<dyn VerifiedService>,
 }
 
 /// Who a request was admitted as, and under which credential epoch.
@@ -499,7 +521,8 @@ async fn relay(
     }
     forward(
         state,
-        &lease.base_url,
+        lease.service,
+        lease.generation,
         &lease.session_id,
         &key,
         &agent,
@@ -557,7 +580,8 @@ fn check_catalog(
 #[allow(clippy::too_many_arguments)]
 async fn forward(
     state: Arc<ProxyState>,
-    base_url: &str,
+    service: Arc<dyn VerifiedService>,
+    generation: u64,
     session_id: &str,
     key: &str,
     agent: &str,
@@ -572,26 +596,51 @@ async fn forward(
     let request_id = new_id();
     let dropped = hop_by_hop_names(headers);
     let target = match query {
-        Some(query) => format!("{base_url}{path}?{query}"),
-        None => format!("{base_url}{path}"),
+        Some(query) => format!("{path}?{query}"),
+        None => path.to_string(),
     };
-    let mut request = state.client.post(target);
+    let mut request = Request::builder().method("POST").uri(target);
     for (name, value) in headers {
         let name = name.as_str();
         if !dropped.contains(name)
             && !matches!(
                 name,
-                "host" | "content-length" | "authorization" | "x-api-key"
+                "host" | "content-length" | "authorization" | "x-api-key" | "x-aci-tag"
             )
-            && name != TAG_HEADER
         {
-            request = request.header(name, value.as_bytes());
+            request = request.header(name, value);
         }
     }
-    let request = request
-        .header(header::AUTHORIZATION.as_str(), format!("Bearer {key}"))
-        .header(TAG_HEADER, format_tag(&request_id, session_id, agent))
-        .body(body);
+    let request = match request
+        .header(header::AUTHORIZATION, format!("Bearer {key}"))
+        .body(Body::from(body))
+    {
+        Ok(request) => request,
+        Err(_) => {
+            let rejection = Rejection::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                "The request path or headers are invalid",
+            );
+            return reject(
+                &state,
+                Some(agent.to_string()),
+                "POST",
+                path,
+                model,
+                surface,
+                rejection,
+            );
+        }
+    };
+    let context = ForwardContext {
+        generation,
+        request_id: request_id.clone(),
+        session_id: session_id.to_string(),
+        agent: agent.to_string(),
+        model: model.clone(),
+        at: now_secs(),
+    };
     if delivery.is_cancelled() {
         let rejection = Rejection::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -609,13 +658,21 @@ async fn forward(
             rejection,
         );
     }
-    // Once request.send() is polled, bytes may have reached the sidecar even
+    // Once the verifier call is polled, bytes may have reached the remote service even
     // if revocation, timeout, or a connection failure prevents a response.
     // Those failures must never be described as a local rejection.
+    let call = async move {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            service.clone().call(request, Some(context))
+        })) {
+            Ok(future) => std::panic::AssertUnwindSafe(future).catch_unwind().await,
+            Err(panic) => Err(panic),
+        }
+    };
     let sent = tokio::select! {
         biased;
         _ = delivery.cancelled() => None,
-        result = request.send() => Some(result),
+        result = tokio::time::timeout(VERIFIER_CALL_TIMEOUT, call) => Some(result),
     };
     let Some(sent) = sent else {
         let rejection = Rejection::new(
@@ -625,27 +682,29 @@ async fn forward(
              its delivery could not be confirmed",
         );
         return reject_after_send(
-            &state, request_id, session_id, agent, path, model, surface, rejection,
+            &state, generation, request_id, session_id, agent, path, model, surface, rejection,
         );
     };
     let upstream = match sent {
-        Ok(upstream) => upstream,
-        Err(error) => {
-            let rejection = if error.is_timeout() {
-                Rejection::new(
-                    StatusCode::GATEWAY_TIMEOUT,
-                    "upstream_timeout",
-                    "The verified gateway did not respond in time",
-                )
-            } else {
-                Rejection::new(
-                    StatusCode::BAD_GATEWAY,
-                    "upstream_unreachable",
-                    "The verified gateway did not respond",
-                )
-            };
+        Ok(Ok(response)) => response,
+        Ok(Err(_)) => {
+            let rejection = Rejection::new(
+                StatusCode::BAD_GATEWAY,
+                "upstream_unreachable",
+                "The verified upstream handler failed before returning a response",
+            );
             return reject_after_send(
-                &state, request_id, session_id, agent, path, model, surface, rejection,
+                &state, generation, request_id, session_id, agent, path, model, surface, rejection,
+            );
+        }
+        Err(_) => {
+            let rejection = Rejection::new(
+                StatusCode::GATEWAY_TIMEOUT,
+                "upstream_timeout",
+                "The verified upstream did not return a response in time",
+            );
+            return reject_after_send(
+                &state, generation, request_id, session_id, agent, path, model, surface, rejection,
             );
         }
     };
@@ -662,6 +721,7 @@ async fn forward(
         .filter(|value| !value.is_empty())
         .map(str::to_string);
     state.emit(ProxyEvent {
+        generation,
         request_id: request_id.clone(),
         session_id: session_id.to_string(),
         agent: Some(agent.to_string()),
@@ -690,7 +750,7 @@ async fn forward(
             builder = builder.header(name.as_str(), value.as_bytes());
         }
     }
-    let mut stream = upstream.bytes_stream();
+    let mut stream = upstream.into_body().into_data_stream();
     let event_state = state.clone();
     let event_request_id = request_id;
     let event_session_id = session_id.to_string();
@@ -703,6 +763,7 @@ async fn forward(
             capture: Some(UsageCapture::new(streamed)),
             state: event_state,
             event: ProxyEvent {
+                generation,
                 request_id: event_request_id,
                 session_id: event_session_id,
                 agent: Some(event_agent),
@@ -787,12 +848,12 @@ fn reject(
     surface: Surface,
     rejection: Rejection,
 ) -> Response {
-    let session_id = state
-        .session()
-        .session_id
-        .unwrap_or_else(|| "unscoped".to_string());
+    let session = state.session();
+    let generation = session.generation;
+    let session_id = session.session_id.unwrap_or_else(|| "unscoped".to_string());
     reject_with_context(
         state,
+        generation,
         new_id(),
         session_id,
         agent,
@@ -808,6 +869,7 @@ fn reject(
 #[allow(clippy::too_many_arguments)]
 fn reject_after_send(
     state: &ProxyState,
+    generation: u64,
     request_id: String,
     session_id: &str,
     agent: &str,
@@ -818,6 +880,7 @@ fn reject_after_send(
 ) -> Response {
     reject_with_context(
         state,
+        generation,
         request_id,
         session_id.to_string(),
         Some(agent.to_string()),
@@ -833,6 +896,7 @@ fn reject_after_send(
 #[allow(clippy::too_many_arguments)]
 fn reject_with_context(
     state: &ProxyState,
+    generation: u64,
     request_id: String,
     session_id: String,
     agent: Option<String>,
@@ -844,6 +908,7 @@ fn reject_with_context(
     left_device: bool,
 ) -> Response {
     state.emit(ProxyEvent {
+        generation,
         request_id,
         session_id,
         agent,
@@ -923,10 +988,6 @@ fn new_id() -> String {
     let mut bytes = [0u8; 16];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn format_tag(request_id: &str, session_id: &str, agent: &str) -> String {
-    format!("pap:{request_id}:{session_id}:{agent}")
 }
 
 fn now_secs() -> u64 {

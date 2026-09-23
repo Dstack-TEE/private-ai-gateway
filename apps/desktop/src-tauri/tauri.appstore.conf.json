@@ -9,7 +9,6 @@
   "bundle": {
     "targets": ["app"],
     "externalBin": [
-      "binaries/private-ai-proxy",
       "binaries/private-ai-proxy-service"
     ],
     "createUpdaterArtifacts": false,

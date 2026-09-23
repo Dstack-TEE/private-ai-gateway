@@ -1,4 +1,4 @@
-//! The verified remote catalog (`GET /v1/models` through the ACI sidecar) is
+//! The verified remote catalog (`GET /v1/models` through the ACI verifier) is
 //! the only source of model truth. Entries are validated and preserved as the
 //! service lists them; nothing is added or inferred.
 

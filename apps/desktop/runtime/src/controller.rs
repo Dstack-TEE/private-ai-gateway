@@ -29,14 +29,14 @@ use crate::{
         AgentPreview, AgentStatus, ConfidentialProfileInput, ConnectOptions, GatewayState,
         LocalApiConfig, RequestActivity, ServiceProvider, StartGatewayConfig,
     },
-    gateway::{GatewayManager, SidecarLauncher},
+    gateway::{GatewayManager, VerifierLauncher},
     local_api::{self, ResolvedLocalApi},
     service_config,
     usage::{UsagePage, UsageQuery, UsageStore},
 };
 
 pub struct RuntimeOptions {
-    pub launcher: Arc<dyn SidecarLauncher>,
+    pub launcher: Arc<dyn VerifierLauncher>,
     pub helper_path: PathBuf,
     pub task_runtime: Handle,
     pub agent_configuration: bool,
@@ -209,7 +209,7 @@ impl DesktopRuntime {
         if agent_configuration {
             if let Err(error) = crate::helper_staging::stage(&helper_path, &data_dir) {
                 // OpenClaw independently rejects an unavailable or mismatched staged copy.
-                eprintln!("Cannot stage the credential helper: {error}");
+                crate::diagnostic(format_args!("Cannot stage the credential helper: {error}"));
             }
         }
         let secrets: Arc<dyn SecretStore> = Arc::new(KeyringStore);

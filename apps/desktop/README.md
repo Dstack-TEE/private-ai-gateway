@@ -55,7 +55,7 @@ the remote Private AI Gateway server.
 ```text
 coding agent
     -> Local API with an agent-scoped token
-    -> pap serve over a verified ACI channel
+    -> in-process verifier over a verified ACI channel
     -> confidential AI service
 ```
 

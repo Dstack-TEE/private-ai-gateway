@@ -1,19 +1,15 @@
 use super::*;
 use crate::contracts::{GatewayState, UsageSummary};
 
-struct NoSidecar;
-impl SidecarLauncher for NoSidecar {
+struct NoVerifier;
+impl VerifierLauncher for NoVerifier {
     fn spawn(
         &self,
-        _: Vec<String>,
-    ) -> Result<
-        (
-            tokio::sync::mpsc::Receiver<crate::gateway::SidecarEvent>,
-            Box<dyn crate::gateway::SidecarChild>,
-        ),
-        String,
-    > {
-        Err("No sidecar in this listener test".to_string())
+        _: crate::gateway::VerifierConfig,
+        _: crate::gateway::VerifierEventSink,
+        _: tokio::sync::mpsc::Sender<ProxyEvent>,
+    ) -> Result<Box<dyn crate::gateway::VerifierTask>, String> {
+        Err("No verifier in this listener test".to_string())
     }
 }
 
@@ -23,7 +19,7 @@ fn launch_requires_instance_ownership_before_initialization() {
     if let Ok(case) = std::env::var(CASE_ENV) {
         let executor = tokio::runtime::Runtime::new().unwrap();
         let result = DesktopRuntime::launch(RuntimeOptions {
-            launcher: Arc::new(NoSidecar),
+            launcher: Arc::new(NoVerifier),
             helper_path: app_data_dir().unwrap().join("helper"),
             task_runtime: executor.handle().clone(),
             agent_configuration: true,
@@ -89,7 +85,7 @@ fn test_runtime(
     let manager = Arc::new(GatewayManager::new(
         proxy.clone(),
         usage.clone(),
-        Arc::new(NoSidecar),
+        Arc::new(NoVerifier),
         executor.handle().clone(),
         GatewayState::default(),
     ));

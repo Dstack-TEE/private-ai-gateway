@@ -1,5 +1,55 @@
 use super::*;
 
+struct HttpService {
+    base_url: String,
+    client: reqwest::Client,
+}
+
+impl VerifiedService for HttpService {
+    fn call(
+        self: Arc<Self>,
+        request: Request<Body>,
+        _context: Option<ForwardContext>,
+    ) -> VerifiedResponse {
+        Box::pin(async move {
+            let (parts, body) = request.into_parts();
+            let bytes = to_bytes(body, MAX_BODY_BYTES).await.unwrap();
+            let mut upstream = self
+                .client
+                .request(parts.method, format!("{}{}", self.base_url, parts.uri));
+            for (name, value) in &parts.headers {
+                upstream = upstream.header(name, value);
+            }
+            match upstream.body(bytes).send().await {
+                Ok(response) => {
+                    let status = response.status();
+                    let headers = response.headers().clone();
+                    let mut builder = Response::builder().status(status);
+                    for (name, value) in headers {
+                        if let Some(name) = name {
+                            builder = builder.header(name, value);
+                        }
+                    }
+                    builder
+                        .body(Body::from_stream(response.bytes_stream()))
+                        .unwrap()
+                }
+                Err(_) => Response::builder()
+                    .status(StatusCode::BAD_GATEWAY)
+                    .body(Body::empty())
+                    .unwrap(),
+            }
+        })
+    }
+}
+
+fn http_service(base_url: &str) -> Arc<dyn VerifiedService> {
+    Arc::new(HttpService {
+        base_url: base_url.to_string(),
+        client: reqwest::Client::builder().no_proxy().build().unwrap(),
+    })
+}
+
 async fn spawn(router: Router) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -24,8 +74,8 @@ async fn mock_sidecar() -> String {
             Json(json!({
                 "authorization": header("authorization"),
                 "x-api-key": header("x-api-key"),
-                "tag": header(TAG_HEADER),
                 "anthropic-beta": header("anthropic-beta"),
+                "x-aci-tag": header("x-aci-tag"),
                 "proxy-connection": header("proxy-connection"),
                 "body": String::from_utf8_lossy(&body),
             })),
@@ -57,56 +107,6 @@ fn tokens() -> TokenSet {
     set.insert("claude-token".to_string(), "claude-code".to_string());
     set.insert("opencode-token".to_string(), "opencode".to_string());
     set
-}
-
-#[test]
-fn sidecar_requests_ignore_proxy_environment() {
-    const CHILD: &str = "PAP_TEST_PROXY_ENV_CHILD";
-    if std::env::var_os(CHILD).is_none() {
-        // Isolate proxy variables from the other concurrently running tests.
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "proxy::tests::sidecar_requests_ignore_proxy_environment",
-                "--nocapture",
-            ])
-            .env(CHILD, "1")
-            .env("HTTP_PROXY", "http://127.0.0.1:1")
-            .env("http_proxy", "http://127.0.0.1:1")
-            .env("ALL_PROXY", "http://127.0.0.1:1")
-            .env("all_proxy", "http://127.0.0.1:1")
-            .env("NO_PROXY", "")
-            .env("no_proxy", "")
-            .status()
-            .unwrap();
-        assert!(status.success());
-        return;
-    }
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(async {
-            let (state, _events) = state();
-            let sidecar = mock_sidecar().await;
-            assert!(reqwest::Client::builder()
-                .timeout(Duration::from_secs(1))
-                .build()
-                .unwrap()
-                .get(format!("{sidecar}/v1/models"))
-                .send()
-                .await
-                .is_err());
-            verified(&state, &sidecar, 1, 1).await;
-            let response = state
-                .client
-                .post(format!("{sidecar}/v1/responses"))
-                .json(&json!({ "model": "openai/gpt-oss-20b", "input": "fixture" }))
-                .send()
-                .await
-                .unwrap();
-            assert!(response.status().is_success());
-        });
 }
 
 #[tokio::test]
@@ -159,7 +159,7 @@ async fn verified(state: &ProxyState, sidecar: &str, generation: u64, epoch: u64
         generation,
         epoch,
         session_id: Some("test-session".to_string()),
-        base_url: Some(sidecar.to_string()),
+        service: Some(http_service(sidecar)),
         verified: false,
         catalog: None,
     });
@@ -168,7 +168,7 @@ async fn verified(state: &ProxyState, sidecar: &str, generation: u64, epoch: u64
         generation,
         epoch,
         session_id: Some("test-session".to_string()),
-        base_url: Some(sidecar.to_string()),
+        service: Some(http_service(sidecar)),
         verified: true,
         catalog: Some(catalog),
     });
@@ -278,7 +278,7 @@ async fn requests_fail_closed_until_a_verified_session_with_a_catalog_and_key() 
         generation: 1,
         epoch: 1,
         session_id: Some("test-session".to_string()),
-        base_url: Some(sidecar.clone()),
+        service: Some(http_service(&sidecar)),
         verified: true,
         catalog: None,
     });
@@ -300,7 +300,7 @@ async fn requests_fail_closed_until_a_verified_session_with_a_catalog_and_key() 
         generation: 1,
         epoch: 2,
         session_id: Some("test-session".to_string()),
-        base_url: Some(sidecar.clone()),
+        service: Some(http_service(&sidecar)),
         verified: false,
         catalog: None,
     });
@@ -348,6 +348,7 @@ async fn verified_catalog_models_are_forwarded_with_the_real_key() {
         .post(format!("{proxy}/v1/chat/completions"))
         .bearer_auth("opencode-token")
         .header("anthropic-beta", "keep-me")
+        .header("x-aci-tag", "client-controlled")
         .header("proxy-connection", "keep-alive")
         .json(&json!({ "model": "openai/gpt-oss-20b", "messages": [] }))
         .send()
@@ -358,13 +359,8 @@ async fn verified_catalog_models_are_forwarded_with_the_real_key() {
     let echo: Value = forwarded.json().await.unwrap();
     assert_eq!(echo["authorization"], json!("Bearer sk-real"));
     assert_eq!(echo["x-api-key"], json!(""));
-    let tag = echo["tag"].as_str().unwrap();
-    let parts: Vec<_> = tag.split(':').collect();
-    assert_eq!(parts.len(), 4);
-    assert_eq!(parts[0], "pap");
-    assert_eq!(parts[2], "test-session");
-    assert_eq!(parts[3], "opencode");
     assert_eq!(echo["anthropic-beta"], json!("keep-me"));
+    assert_eq!(echo["x-aci-tag"], json!(""));
     assert_eq!(echo["proxy-connection"], json!(""));
 
     let counted = client
@@ -376,9 +372,7 @@ async fn verified_catalog_models_are_forwarded_with_the_real_key() {
         .unwrap();
     assert_eq!(counted.status().as_u16(), 200);
     let echo: Value = counted.json().await.unwrap();
-    let tag = echo["tag"].as_str().unwrap();
-    assert!(tag.starts_with("pap:"));
-    assert!(tag.ends_with(":test-session:claude-code"));
+    assert_eq!(echo["authorization"], json!("Bearer sk-real"));
 }
 
 #[tokio::test]
@@ -393,7 +387,7 @@ async fn send_failures_are_not_reported_as_local_rejections() {
     let unavailable_url = format!("http://{}", unavailable.local_addr().unwrap());
     drop(unavailable);
     state.publish(Session {
-        base_url: Some(unavailable_url),
+        service: Some(http_service(&unavailable_url)),
         ..state.session()
     });
 
@@ -413,6 +407,74 @@ async fn send_failures_are_not_reported_as_local_rejections() {
     assert_eq!(event.model.as_deref(), Some("openai/gpt-oss-20b"));
 }
 
+struct PanicService;
+
+impl VerifiedService for PanicService {
+    fn call(
+        self: Arc<Self>,
+        _request: Request<Body>,
+        _context: Option<ForwardContext>,
+    ) -> VerifiedResponse {
+        panic!("synthetic verifier panic")
+    }
+}
+
+struct HangingService;
+
+impl VerifiedService for HangingService {
+    fn call(
+        self: Arc<Self>,
+        _request: Request<Body>,
+        _context: Option<ForwardContext>,
+    ) -> VerifiedResponse {
+        Box::pin(std::future::pending())
+    }
+}
+
+async fn verifier_failure(service: Arc<dyn VerifiedService>) -> (Response, ProxyEvent) {
+    let (state, mut events) = state();
+    let response = forward(
+        state,
+        service,
+        7,
+        "test-session",
+        "test-key",
+        "codex",
+        Surface::Responses,
+        "/v1/responses",
+        None,
+        &HeaderMap::new(),
+        Bytes::new(),
+        Some("test-model".into()),
+        CancellationToken::new(),
+    )
+    .await;
+    (response, events.recv().await.unwrap())
+}
+
+#[tokio::test]
+async fn verifier_panic_returns_502_and_records_activity() {
+    let (response, event) = verifier_failure(Arc::new(PanicService)).await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(body["error"]["code"], "upstream_unreachable");
+    assert_eq!(event.status, 502);
+    assert!(event.left_device);
+    assert_eq!(event.generation, 7);
+}
+
+#[tokio::test]
+async fn verifier_hang_returns_504_and_records_activity() {
+    let (response, event) = verifier_failure(Arc::new(HangingService)).await;
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(body["error"]["code"], "upstream_timeout");
+    assert_eq!(event.status, 504);
+    assert!(event.left_device);
+}
+
 /// The proxy relays: for every inference path the sidecar sees the same
 /// method, path, query, and body bytes the agent sent, and the agent gets
 /// the sidecar's status, content type, and streamed bytes back unchanged.
@@ -422,18 +484,13 @@ async fn every_path_is_relayed_without_rewriting_request_or_response() {
     state.set_tokens(tokens());
     let echo = |method: axum::http::Method,
                 uri: axum::http::Uri,
-                headers: HeaderMap,
+                _headers: HeaderMap,
                 body: Bytes| async move {
-        let tag = headers
-            .get(TAG_HEADER)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("")
-            .to_string();
         let body = String::from_utf8_lossy(&body);
         (
             StatusCode::ACCEPTED,
             [(header::CONTENT_TYPE, "text/event-stream")],
-            format!("event: echo\ndata: {method} {uri} {tag}\n\ndata: {body}\n\n"),
+            format!("event: echo\ndata: {method} {uri}\n\ndata: {body}\n\n"),
         )
     };
     let sidecar = spawn(
@@ -455,10 +512,10 @@ async fn every_path_is_relayed_without_rewriting_request_or_response() {
     // proxy only reads `model`.
     let body =
         r#"{"stream": true, "model":"openai/gpt-oss-20b", "input": [{"x": 1}], "extra": null}"#;
-    for (path, token, agent) in [
-        ("/v1/chat/completions", "opencode-token", "opencode"),
-        ("/v1/messages", "claude-token", "claude-code"),
-        ("/v1/responses", "codex-token", "codex"),
+    for (path, token) in [
+        ("/v1/chat/completions", "opencode-token"),
+        ("/v1/messages", "claude-token"),
+        ("/v1/responses", "codex-token"),
     ] {
         let response = client
             .post(format!("{proxy}{path}?beta=true&v=2"))
@@ -476,13 +533,11 @@ async fn every_path_is_relayed_without_rewriting_request_or_response() {
         );
         let text = response.text().await.unwrap();
         assert!(
-            text.starts_with(&format!(
-                "event: echo\ndata: POST {path}?beta=true&v=2 pap:"
-            )),
+            text.starts_with(&format!("event: echo\ndata: POST {path}?beta=true&v=2")),
             "{path}: {text}"
         );
         assert!(
-            text.contains(&format!(":test-session:{agent}\n\ndata: {body}\n\n")),
+            text.contains(&format!("\n\ndata: {body}\n\n")),
             "{path}: {text}"
         );
     }
@@ -594,7 +649,8 @@ async fn usage_is_recorded_when_the_consumer_stops_before_eof() {
     .await;
     let response = forward(
         state,
-        &sidecar,
+        http_service(&sidecar),
+        1,
         "test-session",
         "test-key",
         "codex",
@@ -628,14 +684,6 @@ async fn usage_is_recorded_when_the_consumer_stops_before_eof() {
     assert_eq!(recorded.input_tokens, Some(123));
     assert_eq!(recorded.output_tokens, Some(45));
     assert!(recorded.verified.is_none());
-}
-
-#[test]
-fn attribution_tag_contains_request_session_and_agent() {
-    assert_eq!(
-        format_tag("request-1", "session-2", "pi"),
-        "pap:request-1:session-2:pi"
-    );
 }
 
 /// A token revoked (or a key removed) while the body is still arriving

@@ -1,8 +1,20 @@
+// The service compiles the shared verifier modules but does not call their
+// standalone CLI entry points.
+#![allow(dead_code)]
+
+mod args;
+mod capture;
+mod checks;
+mod client;
+mod serve;
+mod sessions;
+#[cfg(test)]
+mod spec_fixtures;
+mod transcript;
+mod verify;
+
 use clap::Parser;
-use desktop_runtime::{
-    controller::{DesktopRuntime, RuntimeOptions},
-    process::TokioSidecarLauncher,
-};
+use desktop_runtime::controller::{DesktopRuntime, RuntimeOptions};
 use std::sync::Arc;
 
 #[derive(Parser)]
@@ -12,18 +24,12 @@ struct Arguments {}
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
-        eprintln!("Private AI Proxy backend: {error}");
+        desktop_runtime::diagnostic(format_args!("Private AI Proxy backend: {error}"));
         std::process::exit(1);
     }
 }
 
 async fn run() -> Result<(), String> {
-    if let Some(status) = desktop_runtime::process::run_sidecar_supervisor_if_requested()? {
-        if status.success() {
-            return Ok(());
-        }
-        return Err("Verifier supervisor exited unsuccessfully".into());
-    }
     Arguments::parse();
     #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
     let service_access = desktop_runtime::agent_access::acquire_for_service();
@@ -31,7 +37,7 @@ async fn run() -> Result<(), String> {
     let (agent_home_access, agent_access_error) = match service_access {
         Ok(access) => (access, None),
         Err(error) => {
-            eprintln!("Private AI Proxy backend: {error}");
+            desktop_runtime::diagnostic(format_args!("Private AI Proxy backend: {error}"));
             (None, Some(error))
         }
     };
@@ -56,9 +62,9 @@ async fn run() -> Result<(), String> {
             name.to_string()
         }
     };
-    let launcher = Arc::new(TokioSidecarLauncher::new(
-        directory.join(name("private-ai-proxy")),
-    )?);
+    let launcher = Arc::new(serve::InProcessVerifierLauncher::new(
+        tokio::runtime::Handle::current(),
+    ));
     let options = RuntimeOptions {
         launcher,
         helper_path: directory.join(name("private-ai-proxy-helper")),
@@ -78,7 +84,9 @@ async fn run() -> Result<(), String> {
     ) {
         Ok(monitor) => Some(monitor),
         Err(error) => {
-            eprintln!("System wake monitoring is unavailable: {error}");
+            desktop_runtime::diagnostic(format_args!(
+                "System wake monitoring is unavailable: {error}"
+            ));
             None
         }
     };
