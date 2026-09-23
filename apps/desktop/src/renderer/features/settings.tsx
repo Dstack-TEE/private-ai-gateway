@@ -14,7 +14,9 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../componen
 import { SettingsSection, SettingsList, SettingsLink, SettingsToggle } from "../components/settings";
 import type { DistributionCapabilities, GatewayState, LaunchPreferences, WebUiStatus } from "../../shared/contracts";
 import { desktopApi } from "../lib/environment";
-import { parentDirectory, serviceHost } from "../lib/format";
+import { localEndpoint, parentDirectory, serviceHost } from "../lib/format";
+import { localAddressKind } from "../lib/local-api-config";
+import { webUiConfig } from "./web-ui";
 import type { SettingsTarget } from "../components/navigation";
 import { isProtected, profileIsAvailable } from "../lib/protection";
 
@@ -52,9 +54,9 @@ function CliRegistrationControl(): React.JSX.Element {
   </Item>;
 }
 
-function WebUiControl({ status, web }: { status: WebUiStatus; web: boolean }): React.JSX.Element {
+function WebUiControl({ status, web, onOpen }: { status: WebUiStatus; web: boolean; onOpen(): void }): React.JSX.Element {
   const mutation = useMutation({
-    mutationFn: (enabled: boolean) => desktopApi.saveWebUi({ enabled, port: status.port }),
+    mutationFn: (enabled: boolean) => desktopApi.saveWebUi({ ...webUiConfig(status), enabled }),
   });
   const change = async () => {
     const enabled = !status.enabled;
@@ -67,13 +69,15 @@ function WebUiControl({ status, web }: { status: WebUiStatus; web: boolean }): R
     catch { /* ErrorAlert observes the mutation failure. */ }
   };
   const description = !status.enabled
-    ? `Manage this app from a browser on 127.0.0.1:${status.port}. Off by default.`
+    ? `Manage this app from a browser at ${localEndpoint(status) ?? "the configured address"}. Off by default.`
     : status.url
       ? `Listening on ${status.url}. Sign in with pap app open --web.`
       : status.error ?? "Starting…";
+  const network = localAddressKind(status.listenAddress) !== "loopback";
   return <>
     <ErrorAlert title="Web UI could not be changed" error={mutation.error ? errorMessage(mutation.error) : undefined} />
     <SettingsToggle label="Web UI" description={description} checked={status.enabled} disabled={mutation.isPending} onToggle={() => void change()} />
+    <SettingsLink title="Web UI listener" description={`${status.listenAddress}:${status.port} · ${network ? "Network access over unencrypted HTTP" : "This device only"}`} aria-label="Web UI listener settings" aria-haspopup="dialog" onClick={onOpen} />
   </>;
 }
 
@@ -122,7 +126,7 @@ export function SettingsView({
       <SettingsSection title="Connections">
           <SettingsLink title="Profiles" aria-label="Profiles" aria-haspopup="dialog" onClick={() => onOpen("confidential")} description={activeProfile ? `${activeProfile.name} · ${serviceHost(activeProfile.remoteUrl)} · ${isProtected(state) ? "Protected" : profileIsAvailable(activeProfile, state) ? "Ready" : "Connect account or add an API key"}` : "No provider configured"} />
           <SettingsLink title="Local API" description="Listener and client access" aria-label="Local API settings" aria-haspopup="dialog" onClick={() => onOpen("local-api")} />
-          {distribution.webUi && state.webUi && <WebUiControl status={state.webUi} web={distribution.channel === "web"} />}
+          {distribution.webUi && state.webUi && <WebUiControl status={state.webUi} web={distribution.channel === "web"} onOpen={() => onOpen("web-ui")} />}
       </SettingsSection>
 
       <Collapsible className="group mt-5 [&:first-child]:mt-0 settings-advanced [&_[data-slot=collapsible-trigger]]:mb-2 [&_[aria-expanded=true]_>_svg]:rotate-90">

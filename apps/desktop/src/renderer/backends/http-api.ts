@@ -59,7 +59,11 @@ function createPlatform(bootstrap: Bootstrap): UiPlatform {
     getCliRegistration: async () => registration,
     setCliRegistration: async () => registration,
     stopAllAndQuit: async () => undefined,
-    copyText: async (text) => navigator.clipboard.writeText(text),
+    copyText: async (text) => {
+      // Absent outside secure contexts, such as plain HTTP on a network address.
+      if (!window.isSecureContext) throw new Error("Copying needs 127.0.0.1 or HTTPS in this browser. Select and copy the text instead.");
+      await navigator.clipboard.writeText(text);
+    },
     selectProfileBackup,
     saveProfileExport: async () => download(
       "private-ai-proxy-profiles.json",

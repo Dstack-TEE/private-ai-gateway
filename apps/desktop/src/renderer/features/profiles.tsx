@@ -158,6 +158,15 @@ function connectionRequirement(profile: Pick<ConfidentialProfile, "provider">): 
   return `Connect ${serviceProviderOption(profile.provider)?.name ?? "account"} or add an API key`;
 }
 
+/** A v4 UUID; `crypto.randomUUID` is missing outside secure contexts, such as a web UI on a LAN address. */
+function randomUuid(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40;
+  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 export function ProfileEditorSheet({
   state,
   busy,
@@ -184,7 +193,7 @@ export function ProfileEditorSheet({
   const frozen = busy;
   const isNew = !profile;
   const [draft, setDraft] = useState<ConfidentialProfileInput>(() => ({
-    id: profile?.id ?? `profile-${crypto.randomUUID()}`,
+    id: profile?.id ?? `profile-${randomUuid()}`,
     name: profile?.name ?? DEFAULT_SERVICE_PRESET.name,
     provider: profile?.provider ?? DEFAULT_SERVICE_PRESET.id,
     remoteUrl: profile?.remoteUrl ?? DEFAULT_SERVICE_PRESET.url,

@@ -162,6 +162,7 @@ pub fn diagnostics(state: &GatewayState, version: &str) -> serde_json::Value {
         "wakeMonitorAvailable": state.wake_monitor_available,
         "gateway": { "status": status, "hasError": state.error.is_some(), "configurationVerification": state.configuration_verification, "productionOsRequired": state.config.require_production_os },
         "localApi": { "bound": state.proxy_url.is_some(), "hasError": state.endpoint_error.is_some(), "networkAccessAllowed": state.local_api.allow_network_access },
+        "webUi": { "enabled": state.web_ui.enabled, "bound": state.web_ui.url.is_some(), "hasError": state.web_ui.error.is_some(), "networkAccessAllowed": state.web_ui.allow_network_access },
         "profiles": { "count": state.profiles.len(), "activeCredentialAvailable": state.api_key_saved },
         "verification": { "identityPresent": state.identity.is_some(), "passedChecks": state.checks.iter().filter(|check| check.status == "pass").count(), "failedChecks": state.checks.iter().filter(|check| check.status == "fail").count() },
         "catalog": { "modelCount": state.catalog.as_ref().map_or(0, |catalog| catalog.models.len()) },

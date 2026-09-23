@@ -388,6 +388,12 @@ pub(super) enum SettingsKey {
     WebUi,
     #[value(name = "webUiPort")]
     WebUiPort,
+    #[value(name = "webUiListenAddress")]
+    WebUiListenAddress,
+    #[value(name = "webUiAllowNetworkAccess")]
+    WebUiAllowNetworkAccess,
+    #[value(name = "webUiClientHost")]
+    WebUiClientHost,
 }
 
 impl SettingsKey {
@@ -404,6 +410,9 @@ impl SettingsKey {
             Self::ClientHost => "clientHost",
             Self::WebUi => "webUi",
             Self::WebUiPort => "webUiPort",
+            Self::WebUiListenAddress => "webUiListenAddress",
+            Self::WebUiAllowNetworkAccess => "webUiAllowNetworkAccess",
+            Self::WebUiClientHost => "webUiClientHost",
         }
     }
 }

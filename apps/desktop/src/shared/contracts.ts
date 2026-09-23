@@ -221,16 +221,18 @@ export interface NotificationConfiguration {
   alertsEnabled?: boolean;
 }
 
-export interface LocalApiConfig {
+/** A TCP listener shared by the Local API and the web UI. */
+export interface ListenConfig {
   listenAddress: string;
   allowNetworkAccess: boolean;
   port: number;
   clientHost?: string;
 }
 
-export interface WebUiConfig {
+export type LocalApiConfig = ListenConfig;
+
+export interface WebUiConfig extends ListenConfig {
   enabled: boolean;
-  port: number;
 }
 
 /** Listener state of the service-hosted web UI; never includes login codes. */
@@ -395,7 +397,7 @@ export interface DesktopApi {
   onProfileRepairRequest(listener: () => void): () => void;
   onUsageProofRequest(listener: (recordId: string) => void): () => void;
   onClientKeyChange(listener: (available: boolean) => void): () => void;
-  openNativeDialog(kind: "profiles" | "profile-editor" | "setup-profile" | "privacy" | "local-api" | "usage-proof" | "local-api-example" | "notifications", options?: { repair?: boolean; recordId?: string; profileId?: string }): Promise<void>;
+  openNativeDialog(kind: "profiles" | "profile-editor" | "setup-profile" | "privacy" | "local-api" | "usage-proof" | "local-api-example" | "notifications" | "web-ui", options?: { repair?: boolean; recordId?: string; profileId?: string }): Promise<void>;
   nativeDialogReady(): Promise<void>;
   mainWindowReady(): Promise<void>;
   onNativeDialogOpen(listener: (request: { state: GatewayState; repair: boolean; recordId?: string | null; profileId?: string | null; startAfterSave?: boolean }) => void): () => void;

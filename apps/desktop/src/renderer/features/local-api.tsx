@@ -1,18 +1,15 @@
 import React, { useState } from "react";
 import { Check, Copy, Eye, EyeOff, RefreshCw } from "lucide-react";
 import { Button } from "../components/ui/button";
-import { ListenAddress } from "../components/listen-address";
+import { ListenerFields } from "../components/listen-address";
 import { localAddressKind } from "../lib/local-api-config";
-import { NetworkWarning } from "../components/network-warning";
 import { Hint } from "../components/hint";
 import { Field, FieldGroup, FieldLabel, FieldDescription, FieldSeparator } from "../components/ui/field";
 import { useErrorAlert } from "../lib/error-alert";
 import { Item } from "../components/ui/item";
-import { Input } from "../components/ui/input";
 import { InputGroup, InputGroupInput, InputGroupAddon, InputGroupButton } from "../components/ui/input-group";
 import { IconButton } from "../components/controls";
 import { Sheet, SheetActions } from "../components/sheet";
-import { FormField } from "../components/settings";
 import type { GatewayState, LocalApiConfig } from "../../shared/contracts";
 import { maskClientKey } from "../lib/format";
 import { desktopApi } from "../lib/environment";
@@ -120,9 +117,6 @@ export function LocalApiSheet({
   const networkAccess = Boolean(addressKind && addressKind !== "loopback");
   const [saving, setSaving] = useState(false);
   const reportError = useErrorAlert("Local API action failed", externalError);
-  const update = <Key extends keyof LocalApiConfig>(key: Key, value: LocalApiConfig[Key]) => {
-    setDraft((current) => ({ ...current, [key]: value }));
-  };
   const rotateKey = async () => {
     setSaving(true);
     try {
@@ -168,19 +162,7 @@ export function LocalApiSheet({
       <form onSubmit={(event) => void submit(event)}>
         <div className="sheet-scroll py-4">
           <FieldGroup>
-          <div className="grid grid-cols-[minmax(0,1fr)_7rem] items-start gap-4">
-          <Field>
-            <div className="flex min-h-5 items-center gap-2"><FieldLabel htmlFor="local-listen-address">Listen address</FieldLabel>{networkAccess && <NetworkWarning />}</div>
-            <ListenAddress api={desktopApi} value={draft.listenAddress} disabled={frozen || saving} onChange={(value) => update("listenAddress", value)} />
-          </Field>
-          <Field>
-            <FieldLabel className="min-h-5" htmlFor="local-port">Port</FieldLabel>
-            <Input id="local-port" type="number" min="1024" max="65535" required value={draft.port} disabled={frozen || saving} onChange={(event) => update("port", Number(event.target.value))} />
-          </Field>
-          </div>
-          <FormField id="local-client-host" label="Client host" description={addressKind === "unspecified" ? "Required for all-interface listeners. Use an address reachable by your clients." : "Optional host for client URLs and agent configs. Does not change the listener."}>
-            <Input id="local-client-host" aria-describedby="local-client-host-note" value={draft.clientHost ?? ""} required={addressKind === "unspecified"} placeholder="Same as listen address" disabled={frozen || saving} spellCheck={false} autoComplete="off" onChange={(event) => update("clientHost", event.target.value || undefined)} />
-          </FormField>
+          <ListenerFields api={desktopApi} idPrefix="local" value={draft} minPort={1024} clientHostNote="Optional host for client URLs and agent configs. Does not change the listener." disabled={frozen || saving} onChange={setDraft} />
           <FieldSeparator />
           <Field>
             <FieldLabel htmlFor="local-client-key">Client key</FieldLabel>
