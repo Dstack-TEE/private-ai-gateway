@@ -9,8 +9,8 @@ npm install --global private-ai-proxy
 ```
 
 The package installs `pap` as the preferred command. `private-ai-proxy` is the
-full-name alias and `aci` is the protocol-focused alias; all three run the same
-CLI. npm selects the native package for the current operating system and CPU
+full-name alias and `aci` is a legacy alias kept for existing scripts; all three
+run the same CLI. npm selects the native package for the current operating system and CPU
 architecture.
 
 Do not install with `--omit=optional`: the platform-specific executable is

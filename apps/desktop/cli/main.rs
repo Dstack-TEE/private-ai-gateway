@@ -14,6 +14,7 @@ mod transcript;
 mod verify;
 
 use clap::{FromArgMatches, Subcommand};
+use std::{io::IsTerminal, path::Path};
 
 #[tokio::main]
 async fn main() {
@@ -27,6 +28,7 @@ async fn main() {
         .skip(1)
         .take_while(|arg| arg != "--")
         .any(|arg| arg == "--json");
+    legacy_alias_hint();
     let matches = command.clone().try_get_matches().unwrap_or_else(|error| {
         if json && error.use_stderr() {
             eprintln!("{}", serde_json::json!({"error":{"code":"invalid_arguments","message":error.to_string()}}));
@@ -66,4 +68,23 @@ async fn main() {
         }
     };
     std::process::exit(code);
+}
+
+/// `aci` is a legacy alias of this executable. Interactive use gets a one-line
+/// nudge toward `pap`; machine-readable modes and redirected stderr never do.
+fn legacy_alias_hint() {
+    let invoked_as_aci = std::env::args_os().next().is_some_and(|name| {
+        Path::new(&name)
+            .file_stem()
+            .is_some_and(|stem| stem == "aci")
+    });
+    let machine_output = std::env::args_os()
+        .skip(1)
+        .take_while(|arg| arg != "--")
+        .any(|arg| arg == "--json" || arg == "--json-events");
+    if invoked_as_aci && !machine_output && std::io::stderr().is_terminal() {
+        desktop_runtime::diagnostic(format_args!(
+            "note: `aci` is a legacy alias; use `pap` or `private-ai-proxy` instead."
+        ));
+    }
 }

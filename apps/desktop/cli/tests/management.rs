@@ -135,6 +135,35 @@ fn command_discovery_is_detailed_and_machine_readable() {
     assert_eq!(conflict.status.code(), Some(2));
 }
 
+/// Scripts such as `scripts/live_e2e` run `aci audit --json` and read its
+/// streams; the legacy alias must stay byte-for-byte the canonical command.
+#[cfg(unix)]
+#[test]
+fn legacy_aci_alias_output_matches_the_canonical_command() {
+    let directory = tempfile::tempdir().unwrap();
+    let alias = directory.path().join("aci");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_private-ai-proxy"), &alias).unwrap();
+    let missing = directory.path().join("missing-report.json");
+    for args in [
+        vec!["--version"],
+        vec!["audit", "--report", missing.to_str().unwrap(), "--json"],
+    ] {
+        let run = |program: &Path| {
+            Command::new(program)
+                .args(&args)
+                .env("PRIVATE_AI_PROXY_HOME", directory.path())
+                .stdin(Stdio::null())
+                .output()
+                .unwrap()
+        };
+        let canonical = run(Path::new(env!("CARGO_BIN_EXE_private-ai-proxy")));
+        let legacy = run(&alias);
+        assert_eq!(legacy.status.code(), canonical.status.code(), "{args:?}");
+        assert_eq!(legacy.stdout, canonical.stdout, "{args:?}");
+        assert_eq!(legacy.stderr, canonical.stderr, "{args:?}");
+    }
+}
+
 #[test]
 fn adding_a_profile_requires_consent_before_startup_or_credential_input() {
     let home = tempfile::tempdir().unwrap();

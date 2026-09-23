@@ -13,9 +13,10 @@ The desktop product and the remote Private AI Gateway are independent projects:
 - They share only the neutral `aci-protocol` wire types and canonical encoding
   crate. Producer logic and relying-party verification remain independent.
 
-The preferred user-facing command is `pap`. `private-ai-proxy` is the
-full-name alias and `aci` is the protocol-focused alias; all three run the same
-executable rather than separate binaries or crates.
+The preferred user-facing command is `pap`; `private-ai-proxy` is the
+canonical executable name. `aci` is a legacy alias kept for existing scripts:
+it runs the same executable and prints a one-line deprecation note only on an
+interactive terminal outside JSON modes.
 
 ## Documentation
 
@@ -34,9 +35,10 @@ executable rather than separate binaries or crates.
 | --- | --- |
 | `src/renderer` | React UI and native-window content |
 | `src-tauri` | Tauri application, system integration, tray, menus, dialogs, updates |
-| `runtime` | Persistent backend, profiles, sessions, IPC, lifecycle, usage |
-| `gateway` | Local inference API and reversible agent configuration |
-| `cli` | Unified CLI, ACI relying-party verifier, and local streaming proxy |
+| `cli` | The only command-line surface (arguments, output, completions, schema), ACI relying-party verifier, local streaming proxy, and the `private-ai-proxy-service` entry point |
+| `runtime` | Persistent backend, profiles, verifier sessions, IPC, lifecycle, usage |
+| `agent-bridge` | Coding-agent bridge: Local API proxy, agent tokens, catalog, reversible agent configuration, and the `private-ai-proxy-helper` binary |
+| `gateway/src/endpoint-support.json` | Published model endpoint inventory; released apps fetch this path, so it stays put |
 | `../../crates/aci-protocol` | Shared ACI wire types and deterministic encoding rules |
 | `brand` | Source branding and icon assets |
 | `scripts` | Reproducible build, packaging, release, and endpoint-probe tooling |
@@ -47,7 +49,7 @@ The direct-download application contains three sibling executables:
 - `private-ai-proxy-service`
 - `private-ai-proxy-helper`
 
-There is no standalone `aci` executable. The package neither embeds nor imports
+There is no standalone `aci` executable; it is a legacy alias. The package neither embeds nor imports
 the remote Private AI Gateway server.
 
 ## Request Path
