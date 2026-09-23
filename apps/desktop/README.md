@@ -96,8 +96,14 @@ npm run dist
 Build only the unified CLI:
 
 ```bash
-cargo build --manifest-path apps/desktop/cli/Cargo.toml --bin private-ai-proxy
+cd apps/desktop
+cargo build --package private-ai-proxy --bin private-ai-proxy
 ```
+
+All four Rust packages under `apps/desktop` share this workspace's `Cargo.lock`
+and write build output to `apps/desktop/target` unless `CARGO_TARGET_DIR` is set.
+Tauri, its sidecars, and the standalone CLI therefore resolve one dependency
+graph and reuse one build cache.
 
 The Tauri development server is only the renderer transport used by
 `tauri dev`. The repository does not ship a browser preview application, a mock
@@ -113,9 +119,8 @@ npm run test:release
 npm run test:probe
 
 cargo fmt --all -- --check
-cargo clippy --locked --all-targets -- -D warnings
+cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
-cargo test --locked --manifest-path src-tauri/Cargo.toml
 ```
 
 The Rust suites cover protocol verification, local proxy behavior, lifecycle,

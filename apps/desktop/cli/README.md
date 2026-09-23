@@ -7,7 +7,7 @@ The installed command is normally `pap`. It invokes the packaged
 alias expose the same commands.
 
 ```bash
-cargo run --manifest-path cli/Cargo.toml --bin private-ai-proxy -- <command> --help
+cargo run --package private-ai-proxy --bin private-ai-proxy -- <command> --help
 ```
 
 | Command | What it does |

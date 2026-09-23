@@ -9,7 +9,7 @@ Status: implemented.
 | Private AI Gateway | Remote attested inference service and signed receipts | `src/aggregator`, `src/middleware` |
 | Private AI Proxy | Desktop profiles, agent connections, verification and usage | `apps/desktop` |
 | Local backend | Sessions, configuration transactions, local API and process ownership | `apps/desktop/runtime`, `apps/desktop/gateway` |
-| `private-ai-proxy` | Unified managed-client and ACI protocol commands | `apps/desktop/cli` |
+| `private-ai-proxy` | Unified managed CLI and ACI protocol commands | `apps/desktop/cli` |
 | `private-ai-proxy-service` | Per-user backend entry point | `apps/desktop/cli/service.rs` |
 
 ## Project boundary
@@ -21,8 +21,8 @@ There is one PAP user-facing executable and one PAP relying-party verifier.
 Desktop integration adds lifecycle events for process integration and post-delivery receipt auditing.
 The Private AI Proxy package owns the user-facing CLI, its managed service binary,
 and its relying-party ACI modules under `apps/desktop/cli/aci`; shared protocol
-encoding lives in `crates/aci-protocol`. Its managed-client feature adds the
-desktop runtime only for the executable targets.
+encoding lives in `crates/aci-protocol`. The CLI always includes its managed
+runtime because every supported build and package ships both executable targets.
 
 Private AI Gateway and Private AI Proxy are independent projects. Gateway owns
 its service-side ACI implementation; PAP owns its relying-party verification,

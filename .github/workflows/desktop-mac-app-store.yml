@@ -51,7 +51,7 @@ permissions:
 
 env:
   CARGO_BUILD_JOBS: 2
-  CARGO_TARGET_DIR: ${{ github.workspace }}/apps/desktop/src-tauri/target
+  CARGO_TARGET_DIR: ${{ github.workspace }}/apps/desktop/target
 
 concurrency:
   group: desktop-mac-app-store-${{ github.ref }}-${{ inputs.build_number || 'verify' }}
@@ -82,8 +82,8 @@ jobs:
             ${{ env.CARGO_TARGET_DIR }}/*/.fingerprint
             ${{ env.CARGO_TARGET_DIR }}/*/deps
             ${{ env.CARGO_TARGET_DIR }}/*/build
-          key: pap-mas-verify-${{ runner.os }}-${{ hashFiles('apps/desktop/package-lock.json', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}
-          restore-keys: pap-mas-verify-${{ runner.os }}-
+          key: pap-mas-verify-v2-${{ runner.os }}-${{ hashFiles('apps/desktop/package-lock.json', 'apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}
+          restore-keys: pap-mas-verify-v2-${{ runner.os }}-
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: |
@@ -99,8 +99,8 @@ jobs:
         working-directory: apps/desktop
         run: |
           npm run build:sidecars:debug
-          cargo clippy --locked --all-targets --manifest-path src-tauri/Cargo.toml -- -D warnings
-          cargo test --locked --manifest-path src-tauri/Cargo.toml autostart
+          cargo clippy --locked --all-targets --package private-ai-proxy-desktop -- -D warnings
+          cargo test --locked --package private-ai-proxy-desktop autostart
       - name: Stage Tauri sidecars
         working-directory: apps/desktop
         env:
@@ -109,12 +109,12 @@ jobs:
       - name: Verify App Store sources
         working-directory: apps/desktop
         run: |
-          cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+          cargo fmt --all -- --check
           cargo clippy --locked --all-targets --package private-ai-proxy-runtime --features mac-app-store -- -D warnings
           cargo test --locked --package private-ai-proxy-runtime --features mac-app-store
           export TAURI_CONFIG="$(cat src-tauri/tauri.appstore.conf.json)"
-          cargo clippy --locked --all-targets --manifest-path src-tauri/Cargo.toml --features mac-app-store -- -D warnings
-          cargo test --locked --manifest-path src-tauri/Cargo.toml --features mac-app-store
+          cargo clippy --locked --all-targets --package private-ai-proxy-desktop --features mac-app-store -- -D warnings
+          cargo test --locked --package private-ai-proxy-desktop --features mac-app-store
 
   package:
     if: inputs.version != ''
@@ -201,8 +201,8 @@ jobs:
             ${{ env.CARGO_TARGET_DIR }}/*/*/.fingerprint
             ${{ env.CARGO_TARGET_DIR }}/*/*/deps
             ${{ env.CARGO_TARGET_DIR }}/*/*/build
-          key: pap-mas-package-${{ runner.os }}-${{ hashFiles('apps/desktop/package-lock.json', 'apps/desktop/Cargo.lock', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}
-          restore-keys: pap-mas-package-${{ runner.os }}-
+          key: pap-mas-package-v2-${{ runner.os }}-${{ hashFiles('apps/desktop/package-lock.json', 'apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}
+          restore-keys: pap-mas-package-v2-${{ runner.os }}-
       - name: Install build targets and dependencies
         working-directory: apps/desktop
         run: |
@@ -257,7 +257,7 @@ jobs:
         run: |
           set -euo pipefail
           npm run dist:app-store -- --bundles app
-          app_bundle="$(find src-tauri/target/universal-apple-darwin/release/bundle/macos -maxdepth 1 -type d -name '*.app' -print -quit)"
+          app_bundle="$(find target/universal-apple-darwin/release/bundle/macos -maxdepth 1 -type d -name '*.app' -print -quit)"
           test -n "$app_bundle"
           echo "APPLE_APP_STORE_APP=$PWD/$app_bundle" >> "$GITHUB_ENV"
       - name: Smoke test App Store runtime

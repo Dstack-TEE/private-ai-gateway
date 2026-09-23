@@ -7,15 +7,7 @@ edition = "2021"
 rust-version = "1.98"
 
 [features]
-default = ["managed-client"]
-managed-client = [
-    "dep:async-stream",
-    "dep:axum",
-    "dep:clap",
-    "dep:desktop-gateway",
-    "dep:desktop-runtime",
-    "dep:tokio-util",
-]
+default = []
 mac-app-store = ["desktop-runtime/mac-app-store"]
 
 [lib]
@@ -25,23 +17,21 @@ path = "lib.rs"
 [[bin]]
 name = "private-ai-proxy"
 path = "main.rs"
-required-features = ["managed-client"]
 
 [[bin]]
 name = "private-ai-proxy-service"
 path = "service.rs"
-required-features = ["managed-client"]
 
 [dependencies]
 aci-protocol = { path = "../../../crates/aci-protocol" }
-async-stream = { version = "0.3", optional = true }
-axum = { version = "0.7", optional = true }
+async-stream = "0.3"
+axum = "0.7"
 base64 = "0.22"
 bytes = "1"
-clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context"], optional = true }
+clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
 dcap-qvl = { version = "0.3.12", default-features = false, features = ["std", "report", "rustcrypto"] }
-desktop-gateway = { package = "private-ai-proxy-gateway", path = "../gateway", optional = true }
-desktop-runtime = { package = "private-ai-proxy-runtime", path = "../runtime", optional = true }
+desktop-gateway = { package = "private-ai-proxy-gateway", path = "../gateway" }
+desktop-runtime = { package = "private-ai-proxy-runtime", path = "../runtime" }
 ed25519-dalek = "2"
 futures-util = "0.3"
 hex = "0.4"
@@ -53,7 +43,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
 thiserror = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "process", "io-util", "sync", "time"] }
-tokio-util = { version = "0.7", optional = true }
+tokio-util = "0.7"
 webpki-roots = "1"
 x509-parser = "0.16"
 

@@ -43,14 +43,13 @@ await mkdir(destinationDir, { recursive: true });
 
 // Executables embedded by the Tauri shell. The helper remains a console
 // process so credential commands work on Windows.
-const cliManifest = path.join(appRoot, "cli/Cargo.toml");
 const appStore = distribution() === MAC_APP_STORE_DISTRIBUTION;
 const directSidecars = [
-  { name: "private-ai-proxy", manifestPath: cliManifest, appStoreFeatures: ["mac-app-store"] },
-  { name: "private-ai-proxy-service", manifestPath: cliManifest, appStoreFeatures: ["mac-app-store"] },
+  { name: "private-ai-proxy", package: "private-ai-proxy", appStoreFeatures: ["mac-app-store"] },
+  { name: "private-ai-proxy-service", package: "private-ai-proxy", appStoreFeatures: ["mac-app-store"] },
   {
     name: "private-ai-proxy-helper",
-    manifestPath: path.join(appRoot, "gateway/Cargo.toml"),
+    package: "private-ai-proxy-gateway",
     appStoreFeatures: [],
   },
 ];
@@ -60,7 +59,7 @@ const sidecars = appStore
 
 for (const sidecar of sidecars) {
   for (const target of targets) {
-    const buildArgs = ["build", "--locked", "--manifest-path", sidecar.manifestPath, "--bin", sidecar.name];
+    const buildArgs = ["build", "--locked", "--package", sidecar.package, "--bin", sidecar.name];
     if (appStore && sidecar.appStoreFeatures.length > 0) {
       buildArgs.push("--features", sidecar.appStoreFeatures.join(","));
     }
@@ -72,7 +71,7 @@ for (const sidecar of sidecars) {
   }
   const executable = process.platform === "win32" ? `${sidecar.name}.exe` : sidecar.name;
   const metadata = JSON.parse(execFileSync(cargo, [
-    "metadata", "--no-deps", "--format-version", "1", "--manifest-path", sidecar.manifestPath,
+    "metadata", "--no-deps", "--format-version", "1",
   ], { cwd: appRoot, env: buildEnv, encoding: "utf8" }));
   const sources = targets.map((target) => path.join(metadata.target_directory, ...(explicitTarget ? [target] : []), profile, executable));
   const destinationName = process.platform === "win32"
