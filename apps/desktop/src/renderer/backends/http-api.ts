@@ -14,8 +14,10 @@ type EventListener = (payload: never) => void;
 type Bootstrap = { version: string; distribution: DistributionCapabilities };
 
 const tokenKey = "private-ai-proxy-web-token";
-const token = consumeToken();
+const signedOut = "This sign-in link has expired or was already used. Run pap app open --web for a new link.";
 const listeners = new Map<string, Set<EventListener>>();
+let token = "";
+let ended = false;
 
 export async function createBackend(): Promise<{
   desktopApi: ReturnType<typeof createDesktopApi>;
@@ -23,6 +25,7 @@ export async function createBackend(): Promise<{
   initialGatewayState: GatewayState | undefined;
   initialAppearance: Appearance | undefined;
 }> {
+  token = await signIn();
   const bootstrap = await request<Bootstrap>("/api/bootstrap", { method: "GET" });
   const transport: UiTransport = { call: rpc, subscribe };
   void readEvents();
@@ -122,18 +125,42 @@ function createPlatform(bootstrap: Bootstrap): UiPlatform {
   };
 }
 
-function consumeToken(): string {
-  const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ""));
-  const supplied = fragment.get("token");
-  if (supplied) {
-    sessionStorage.setItem(tokenKey, supplied);
-    history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+/**
+ * Exchanges the one-time code from `pap app open --web` for a session token.
+ * The code leaves the address bar before any request; reloads reuse the tab's session.
+ */
+async function signIn(): Promise<string> {
+  const code = new URLSearchParams(window.location.hash.replace(/^#/, "")).get("code");
+  history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+  if (code) {
+    const response = await fetch("/api/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+      cache: "no-store",
+      credentials: "same-origin",
+    });
+    const payload: unknown = await response.json().catch(() => undefined);
+    const issued = payload && typeof payload === "object" && "token" in payload ? payload.token : undefined;
+    if (!response.ok || typeof issued !== "string") endSession();
+    sessionStorage.setItem(tokenKey, issued);
+    return issued;
   }
-  const stored = supplied ?? sessionStorage.getItem(tokenKey);
-  if (!stored || !/^[A-Za-z0-9_-]{43}$/.test(stored)) {
-    throw new Error("This web UI link is missing or has an invalid session token. Run `pap ui` again.");
-  }
+  const stored = sessionStorage.getItem(tokenKey);
+  if (!stored) endSession();
   return stored;
+}
+
+/** Replaces the page with sign-in guidance; the session cannot be recovered in place. */
+function endSession(): never {
+  ended = true;
+  sessionStorage.removeItem(tokenKey);
+  const message = document.createElement("p");
+  message.textContent = signedOut;
+  message.setAttribute("role", "alert");
+  message.style.cssText = "margin:3rem auto;max-width:32rem;padding:0 1rem;font:15px/1.5 system-ui,sans-serif";
+  document.body.replaceChildren(message);
+  throw new Error(signedOut);
 }
 
 async function rpc<T>(method: UiMethod, params: Record<string, unknown> = {}): Promise<T> {
@@ -159,6 +186,7 @@ async function request<T>(path: string, init: RequestInit): Promise<T> {
     credentials: "same-origin",
   });
   const payload: unknown = await response.json().catch(() => undefined);
+  if (response.status === 401) endSession();
   if (!response.ok) {
     const message = isErrorPayload(payload) ? payload.error.message : "Web UI request failed";
     throw new Error(message);
@@ -194,6 +222,7 @@ async function readEvents(): Promise<void> {
       cache: "no-store",
       credentials: "same-origin",
     });
+    if (response.status === 401) endSession();
     if (!response.ok || !response.body) throw new Error("Event stream unavailable");
     const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
     let buffer = "";
@@ -216,7 +245,7 @@ async function readEvents(): Promise<void> {
   } catch {
     // Reconnect below.
   }
-  window.setTimeout(() => void readEvents(), 1_000);
+  if (!ended) window.setTimeout(() => void readEvents(), 1_000);
 }
 
 function isWebEvent(value: unknown): value is { event: string; payload: unknown } {

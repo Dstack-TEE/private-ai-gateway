@@ -228,6 +228,17 @@ export interface LocalApiConfig {
   clientHost?: string;
 }
 
+export interface WebUiConfig {
+  enabled: boolean;
+  port: number;
+}
+
+/** Listener state of the service-hosted web UI; never includes login codes. */
+export interface WebUiStatus extends WebUiConfig {
+  url?: string;
+  error?: string;
+}
+
 export interface GatewayState {
   backendInstance?: string;
   clientKeyRevision?: number;
@@ -261,6 +272,7 @@ export interface GatewayState {
   localApi: LocalApiConfig;
   apiKeySaved: boolean;
   catalog?: CatalogSummary;
+  webUi?: WebUiStatus;
 }
 
 export interface AgentStatus {
@@ -333,6 +345,7 @@ export interface DistributionCapabilities {
   sandboxHomeAccess: boolean;
   launchAtLogin: boolean;
   notifications: boolean;
+  webUi: boolean;
 }
 
 export type AgentAccessStatus = "authorized" | "authorizationRequired" | "reauthorizationRequired";
@@ -358,6 +371,7 @@ export interface DesktopApi {
   getClientKey(): Promise<string>;
   rotateClientKey(): Promise<string>;
   saveLocalApiConfig(config: LocalApiConfig): Promise<GatewayState>;
+  saveWebUi(config: WebUiConfig): Promise<GatewayState>;
   listListenAddresses(): Promise<{ address: string; name: string }[]>;
   getNotificationSettings(): Promise<NotificationConfiguration>;
   selectProfileBackup(): Promise<ProfileBackup | null>;

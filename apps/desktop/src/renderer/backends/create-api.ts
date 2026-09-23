@@ -19,6 +19,7 @@ import type {
   UpdateInfo,
   UsagePage,
   UsageQuery,
+  WebUiConfig,
 } from "../../shared/contracts";
 
 // Mirrors the Rust allowlist in runtime/src/ui_api.rs.
@@ -29,7 +30,7 @@ export type UiMethod =
   | "saveAccountLogin" | "getAccountDetails" | "getAccountBalance"
   | "getOrganizationUrl" | "getTopUpUrl"
   | "cancelAccountLogin" | "getClientKey" | "rotateClientKey"
-  | "saveLocalApiConfig" | "listListenAddresses" | "importProfiles"
+  | "saveLocalApiConfig" | "saveWebUi" | "listListenAddresses" | "importProfiles"
   | "exportProfilesContent" | "exportDiagnosticsContent"
   | "queryUsage" | "getUsageRecord" | "listAgents" | "getAgentAccess"
   | "requestAgentAccess" | "previewAgent" | "applyAgent" | "getAppearance"
@@ -97,6 +98,7 @@ export function createDesktopApi(transport: UiTransport, platform: UiPlatform): 
     getClientKey: () => call<string>("getClientKey"),
     rotateClientKey: () => call<string>("rotateClientKey"),
     saveLocalApiConfig: (config: LocalApiConfig) => call("saveLocalApiConfig", { config }),
+    saveWebUi: (config: WebUiConfig) => call("saveWebUi", { config }),
     listListenAddresses: () => call("listListenAddresses"),
     getNotificationSettings: () => call("getNotificationSettings"),
     selectProfileBackup: platform.selectProfileBackup,

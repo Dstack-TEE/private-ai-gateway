@@ -236,8 +236,8 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
       confirmed = await desktopApi.confirm({
         title: "Reset settings?",
         message: agentAccessStatus === "authorized"
-          ? "Stop protection, disconnect all agents and restore their configurations, and reset appearance, notifications, startup preferences, development OS policy, update channel, Local API settings, and window size. Profiles, credentials, the local API key, and usage history are kept. This does not change system notification permission or uninstall the private-ai-proxy command."
-          : "Stop protection and reset appearance, notifications, startup preferences, development OS policy, Local API settings, and window size. Profiles, credentials, the local API key, and usage history are kept. This does not change system notification permission.",
+          ? "Stop protection, disconnect all agents and restore their configurations, and reset appearance, notifications, startup preferences, development OS policy, update channel, Local API settings, web UI, and window size. Profiles, credentials, the local API key, and usage history are kept. This does not change system notification permission or uninstall the private-ai-proxy command."
+          : "Stop protection and reset appearance, notifications, startup preferences, development OS policy, Local API settings, web UI, and window size. Profiles, credentials, the local API key, and usage history are kept. This does not change system notification permission.",
         confirmLabel: "Reset settings",
       });
     } catch (error) {
