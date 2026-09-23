@@ -430,6 +430,7 @@ async fn dispatch(runtime: &Arc<DesktopRuntime>, command: Command) -> Result<Val
                 runtime.export_profiles(path)?;
                 value(())
             }
+            Command::ExportProfilesContent => value(runtime.export_profiles_content()?),
             Command::ExportDiagnostics { path } => {
                 let path = std::path::PathBuf::from(path);
                 if !path.is_absolute() {
@@ -437,6 +438,9 @@ async fn dispatch(runtime: &Arc<DesktopRuntime>, command: Command) -> Result<Val
                 }
                 runtime.export_diagnostics(path, protocol::BUILD_VERSION)?;
                 value(())
+            }
+            Command::ExportDiagnosticsContent => {
+                value(runtime.export_diagnostics_content(protocol::BUILD_VERSION)?)
             }
             Command::Usage(query) => value(runtime.query_usage(query)?),
             Command::UsageRecord { record_id } => value(runtime.usage_record(&record_id)?),

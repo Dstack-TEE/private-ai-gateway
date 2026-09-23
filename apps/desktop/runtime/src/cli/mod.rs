@@ -19,6 +19,8 @@ mod account;
 mod args;
 mod output;
 mod schema;
+#[cfg(feature = "web-ui")]
+mod web_ui;
 
 use args::*;
 
@@ -32,6 +34,10 @@ pub fn run_matches(matches: &clap::ArgMatches, command: clap::Command) -> Result
 }
 
 fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
+    #[cfg(feature = "web-ui")]
+    if let Action::Ui { port, no_open } = &cli.command {
+        return web_ui::run(*port, *no_open);
+    }
     match &cli.command {
         Action::Completions { shell } => {
             let name = command.get_name().to_owned();
@@ -491,6 +497,8 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
             });
             json!({"opened": true})
         }
+        #[cfg(feature = "web-ui")]
+        Action::Ui { .. } => unreachable!(),
         Action::Completions { .. } | Action::Schema => unreachable!(),
     };
     finish_output(output(&result, cli))

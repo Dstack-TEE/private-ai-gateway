@@ -26,6 +26,16 @@ pub(super) struct Cli {
 
 #[derive(Subcommand)]
 pub(super) enum Action {
+    #[cfg(feature = "web-ui")]
+    /// Open the browser-based management UI on loopback.
+    Ui {
+        /// Loopback port (0 selects a random available port).
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        /// Print the authenticated URL without opening a browser.
+        #[arg(long)]
+        no_open: bool,
+    },
     /// Show backend and gateway state. This does not start the backend.
     Status {
         /// Stream state changes. Human output suppresses unchanged heartbeats; JSON remains NDJSON.

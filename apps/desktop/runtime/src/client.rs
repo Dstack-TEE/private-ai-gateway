@@ -292,10 +292,16 @@ impl Client {
             path: export_path(&path)?,
         })
     }
+    pub fn export_profiles_content(&self) -> Result<String, String> {
+        self.request(Command::ExportProfilesContent)
+    }
     pub fn export_diagnostics(&self, path: PathBuf) -> Result<(), String> {
         self.request(Command::ExportDiagnostics {
             path: export_path(&path)?,
         })
+    }
+    pub fn export_diagnostics_content(&self) -> Result<String, String> {
+        self.request(Command::ExportDiagnosticsContent)
     }
     pub fn query_usage(&self, query: UsageQuery) -> Result<UsagePage, String> {
         self.request(Command::Usage(query))

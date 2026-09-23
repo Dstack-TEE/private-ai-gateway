@@ -31,7 +31,7 @@ bytes = "1"
 clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
 dcap-qvl = { version = "0.6.3", default-features = false, features = ["std", "report", "rustcrypto"] }
 desktop-gateway = { package = "private-ai-proxy-gateway", path = "../gateway" }
-desktop-runtime = { package = "private-ai-proxy-runtime", path = "../runtime" }
+desktop-runtime = { package = "private-ai-proxy-runtime", path = "../runtime", features = ["web-ui"] }
 ed25519-dalek = "2"
 futures-util = "0.3"
 hex = "0.4"

@@ -439,11 +439,20 @@ impl DesktopRuntime {
         crate::maintenance::write_json(&path, &backup)
     }
 
+    pub fn export_profiles_content(&self) -> Result<String, String> {
+        let backup = crate::maintenance::ProfileBackup::from_profiles(&self.state()?.profiles);
+        crate::maintenance::json_content(&backup)
+    }
+
     pub fn export_diagnostics(&self, path: PathBuf, version: &str) -> Result<(), String> {
         crate::maintenance::write_json(
             &path,
             &crate::maintenance::diagnostics(&self.state()?, version),
         )
+    }
+
+    pub fn export_diagnostics_content(&self, version: &str) -> Result<String, String> {
+        crate::maintenance::json_content(&crate::maintenance::diagnostics(&self.state()?, version))
     }
 
     pub fn usage_record(&self, record_id: &str) -> Result<Option<RequestActivity>, String> {

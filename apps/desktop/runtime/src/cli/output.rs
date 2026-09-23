@@ -3,6 +3,8 @@ use serde_json::Value;
 
 pub(super) fn render(action: &Action, value: &Value) -> String {
     match action {
+        #[cfg(feature = "web-ui")]
+        Action::Ui { .. } => String::new(),
         Action::Status { .. }
         | Action::Start { .. }
         | Action::Stop

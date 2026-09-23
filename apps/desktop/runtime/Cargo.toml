@@ -9,6 +9,7 @@ rust-version = "1.98"
 [features]
 default = []
 mac-app-store = ["dep:objc2", "dep:objc2-foundation"]
+web-ui = ["dep:async-stream", "dep:futures-core", "dep:if-addrs", "dep:rust-embed"]
 
 [lib]
 name = "desktop_runtime"
@@ -16,8 +17,12 @@ path = "src/lib.rs"
 
 [dependencies]
 axum = "0.8"
+async-stream = { version = "0.3", optional = true }
 base64 = "0.23"
+futures-core = { version = "0.3", optional = true }
+if-addrs = { version = "0.15", optional = true }
 rand = "0.8"
+rust-embed = { version = "8", optional = true }
 sha2 = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["form", "json", "rustls-no-provider"] }
 tokio-util = { version = "0.7", features = ["rt"] }
@@ -29,7 +34,7 @@ desktop-gateway = { package = "private-ai-proxy-gateway", path = "../gateway" }
 rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "process", "io-util", "signal", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "process", "io-util", "signal", "macros", "net"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 netwatcher = "0.8"
@@ -53,3 +58,4 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Secur
 [dev-dependencies]
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 tokio = { version = "1", features = ["test-util"] }
+tower = { version = "0.5", features = ["util"] }

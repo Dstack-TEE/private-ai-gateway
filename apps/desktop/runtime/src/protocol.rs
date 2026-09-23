@@ -112,9 +112,11 @@ pub enum Command {
     ExportProfiles {
         path: String,
     },
+    ExportProfilesContent,
     ExportDiagnostics {
         path: String,
     },
+    ExportDiagnosticsContent,
     Usage(UsageQuery),
     UsageRecord {
         record_id: String,
