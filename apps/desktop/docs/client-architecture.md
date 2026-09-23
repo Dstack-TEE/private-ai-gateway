@@ -56,9 +56,17 @@ service. No distribution contains an independent `aci` executable.
 | Crate | Package | Responsibility |
 | --- | --- | --- |
 | `cli` | `private-ai-proxy` | Every command-line surface, the ACI verifier, `pap serve`, and the `private-ai-proxy-service` entry point that injects the verifier into the backend |
-| `runtime` | `private-ai-proxy-runtime` | Backend controller, management protocol and client, IPC transport, usage, account login, web UI, and the verifier session state machine (`verifier_session`) |
+| `core` | `private-ai-proxy-core` | Client side shared by every process: renderer and IPC contracts, the management command table and client, IPC transport, backend launch, shared UI API, release-channel update checks, preferences and profile settings files, app paths, locks and owner-only file primitives |
+| `runtime` | `private-ai-proxy-runtime` | The backend: controller, management server and command dispatch, verifier session state machine (`verifier_session`), usage store, account login, web UI, wake monitoring |
 | `agent-bridge` | `private-ai-proxy-agent-bridge` | Loopback Local API proxy, agent tokens, verified catalog, OS secrets, reversible agent configuration, and `private-ai-proxy-helper` |
 | `src-tauri` | `private-ai-proxy-desktop` | Tauri shell: windows, tray, menus, notifications, updates |
+
+Dependencies point one way: `src-tauri` → `core`; `agent-bridge` → `core`;
+`runtime` → `agent-bridge`, `core`; `cli` → all three. The desktop shell only
+talks to the backend over IPC, so it links neither the backend nor the agent
+bridge (no HTTP server, SQLite, keyring, config editors or CLI parser). The
+backend binary lives in `cli` because it injects the in-process verifier, which
+`cli` owns, into `runtime` through `VerifierLauncher`.
 
 In prose, "gateway" names the remote Private AI Gateway. Some wire and UI names
 predate that rule and are kept for compatibility across updates: the
@@ -79,7 +87,7 @@ notification preference all describe local protection state.
   modules. Apply, disconnect, recovery and rollback stay together in transactions.
 - OAuth provider/HTTP/billing helpers and verifier events are separate from their
   session owners. Tauri command modules adapt the shared runtime to IPC.
-- `runtime/src/ui_api.rs` is the renderer management table. Each method maps to
+- `core/src/ui_api.rs` is the renderer management table. Each method maps to
   protocol commands through one `Backend`: the desktop shell sends them to the
   service over IPC, and the service-hosted web UI calls the IPC server's own
   admission and dispatch in process. Tauri commands and the web RPC route are
@@ -200,7 +208,8 @@ console executables and do not require the desktop UI.
 
 Repository: https://github.com/Dstack-TEE/private-ai-gateway
 Primary contracts: `apps/desktop/cli/args.rs`, `apps/desktop/cli/manage/args.rs`,
-`apps/desktop/cli/serve.rs`, `apps/desktop/runtime/src/verifier_session.rs`,
+`apps/desktop/core/src/protocol.rs`, `apps/desktop/cli/serve.rs`,
+`apps/desktop/runtime/src/verifier_session.rs`,
 `apps/desktop/scripts/package-cli.mjs`.
 
 Official contracts: [Rust file locks](https://doc.rust-lang.org/1.89.0/std/fs/struct.File.html#method.try_lock),
