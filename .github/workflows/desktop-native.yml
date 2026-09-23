@@ -89,7 +89,7 @@ permissions:
 
 env:
   CARGO_BUILD_JOBS: 2
-  CARGO_TARGET_DIR: ${{ github.workspace }}/apps/desktop/src-tauri/target
+  CARGO_TARGET_DIR: ${{ github.workspace }}/apps/desktop/target
   PAP_RUST_CACHE_NAMESPACE: ubuntu-24.04
 
 concurrency:
@@ -129,10 +129,10 @@ jobs:
             ${{ env.CARGO_TARGET_DIR }}/*/*/.fingerprint
             ${{ env.CARGO_TARGET_DIR }}/*/*/deps
             ${{ env.CARGO_TARGET_DIR }}/*/*/build
-          key: pap-rust-v1-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_RUST_CACHE_NAMESPACE }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}
+          key: pap-rust-v2-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_RUST_CACHE_NAMESPACE }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}
           restore-keys: |
-            pap-rust-v1-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_RUST_CACHE_NAMESPACE }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}-partial-
-            pap-rust-v1-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_RUST_CACHE_NAMESPACE }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-
+            pap-rust-v2-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_RUST_CACHE_NAMESPACE }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}-partial-
+            pap-rust-v2-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_RUST_CACHE_NAMESPACE }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-
       - name: Install Linux desktop dependencies
         run: |
           sudo apt-get update
@@ -162,23 +162,14 @@ jobs:
       - name: Verify Rust sources
         working-directory: apps/desktop
         run: |
-          cargo fmt --package private-ai-proxy -- --check
-          cargo fmt --package private-ai-proxy-gateway -- --check
-          cargo fmt --package private-ai-proxy-runtime -- --check
-          cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-          cargo clippy --locked --all-targets --package private-ai-proxy -- -D warnings
-          cargo clippy --locked --all-targets --package private-ai-proxy-gateway -- -D warnings
-          cargo clippy --locked --all-targets --package private-ai-proxy-runtime -- -D warnings
-          cargo clippy --locked --all-targets --manifest-path src-tauri/Cargo.toml -- -D warnings
-          cargo test --locked --package private-ai-proxy
-          cargo test --locked --package private-ai-proxy-gateway
-          cargo test --locked --package private-ai-proxy-runtime
-          cargo test --locked --manifest-path src-tauri/Cargo.toml
+          cargo fmt --all -- --check
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          cargo test --locked --workspace
           app_store_config="$(cat src-tauri/tauri.appstore.conf.json)"
           cargo clippy --locked --all-targets --package private-ai-proxy-runtime --features mac-app-store -- -D warnings
           cargo test --locked --package private-ai-proxy-runtime --features mac-app-store
-          TAURI_CONFIG="$app_store_config" cargo clippy --locked --all-targets --manifest-path src-tauri/Cargo.toml --features mac-app-store -- -D warnings
-          TAURI_CONFIG="$app_store_config" cargo test --locked --manifest-path src-tauri/Cargo.toml --features mac-app-store
+          TAURI_CONFIG="$app_store_config" cargo clippy --locked --all-targets --package private-ai-proxy-desktop --features mac-app-store -- -D warnings
+          TAURI_CONFIG="$app_store_config" cargo test --locked --package private-ai-proxy-desktop --features mac-app-store
           cargo test --locked --manifest-path ../../crates/aci-protocol/Cargo.toml
       - &save-rust-cache
         name: Save Rust dependencies
@@ -250,7 +241,7 @@ jobs:
     env:
       DESKTOP_RELEASE_VERSION: ${{ inputs.release_version }}
       PAP_BUILD_TARGET: ${{ matrix.target }}
-      PAP_BUNDLE_DIR: ${{ github.workspace }}/apps/desktop/src-tauri/target/${{ matrix.bundle_dir }}
+      PAP_BUNDLE_DIR: ${{ github.workspace }}/apps/desktop/target/${{ matrix.bundle_dir }}
       PAP_RUST_CACHE_NAMESPACE: ${{ matrix.os }}
       DESKTOP_RELEASE_CHANNEL: ${{ inputs.release_channel || 'beta' }}
       TAURI_UPDATER_PUBLIC_KEY: ${{ inputs.release_version && vars.TAURI_UPDATER_PUBLIC_KEY || '' }}
@@ -561,7 +552,7 @@ jobs:
         if: runner.os == 'macOS'
         working-directory: apps/desktop
         run: |
-          cargo test --release --locked --manifest-path runtime/Cargo.toml --target "$(rustc -vV | sed -n 's/^host: //p')" --lib
+          cargo test --release --locked --package private-ai-proxy-runtime --target "$(rustc -vV | sed -n 's/^host: //p')" --lib
 
       - name: Test Windows desktop libraries
         if: runner.os == 'Windows'
@@ -569,9 +560,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --release --locked --manifest-path gateway/Cargo.toml --lib
-          cargo test --release --locked --manifest-path runtime/Cargo.toml --lib
-          cargo test --release --locked --manifest-path src-tauri/Cargo.toml --lib
+          cargo test --release --locked --package private-ai-proxy-gateway --lib
+          cargo test --release --locked --package private-ai-proxy-runtime --lib
+          cargo test --release --locked --package private-ai-proxy-desktop --lib
 
       - name: Check installed Windows sidecars without UI
         if: runner.os == 'Windows'
@@ -608,9 +599,9 @@ jobs:
               throw 'private-ai-proxy reported an unexpected registered command path'
             }
             $env:PAP_TEST_HELPER_PATH = "$installDir/private-ai-proxy-helper.exe"
-            cargo test --release --locked --manifest-path gateway/Cargo.toml --lib -- --ignored hermes_windows_installed_command_round_trip
+            cargo test --release --locked --package private-ai-proxy-gateway --lib -- --ignored hermes_windows_installed_command_round_trip
             if ($LASTEXITCODE -ne 0) { throw 'Hermes credential command failed' }
-            cargo test --release --locked --manifest-path gateway/Cargo.toml --lib -- --ignored keyring_round_trip
+            cargo test --release --locked --package private-ai-proxy-gateway --lib -- --ignored keyring_round_trip
             if ($LASTEXITCODE -ne 0) { throw 'Credential Manager check failed' }
           } finally {
             if (Test-Path "$installDir/uninstall.exe") {
@@ -659,7 +650,7 @@ jobs:
             keyring_pid=$!
             trap "kill $keyring_pid 2>/dev/null || true; wait $keyring_pid || true" EXIT
             gdbus wait --session --timeout 10 org.freedesktop.secrets
-            cargo test --release --locked --manifest-path gateway/Cargo.toml --lib -- --ignored keyring_round_trip
+            cargo test --release --locked --package private-ai-proxy-gateway --lib -- --ignored keyring_round_trip
           '
           xvfb-run -a dbus-run-session -- node scripts/native-backend-smoke.mjs /usr/bin
       - name: Stage and inspect macOS package

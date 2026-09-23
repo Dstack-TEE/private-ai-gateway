@@ -3,10 +3,12 @@ members = [
     "cli",
     "gateway",
     "runtime",
+    "src-tauri",
 ]
 default-members = [
     "cli",
     "gateway",
     "runtime",
+    "src-tauri",
 ]
 resolver = "2"

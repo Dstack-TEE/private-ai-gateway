@@ -264,7 +264,7 @@ mod tests {
 
     /// Live-network check that a registered pin is enforced fail-closed:
     /// a handshake presenting any other key must abort the connection.
-    /// Run with: cargo test --manifest-path apps/desktop/cli/Cargo.toml --bin private-ai-proxy -- --ignored pin_mismatch
+    /// Run from apps/desktop with: cargo test --package private-ai-proxy --bin private-ai-proxy -- --ignored pin_mismatch
     #[tokio::test]
     #[ignore]
     async fn pin_mismatch_fails_closed_live() {
