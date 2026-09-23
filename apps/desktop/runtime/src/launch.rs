@@ -396,7 +396,8 @@ fn exit_timeout(pid: u32, timeout: Duration) -> String {
     )
 }
 
-#[cfg(test)]
+// MAS resolves IPC from its app container, not inherited native runtime variables.
+#[cfg(all(test, not(all(target_os = "macos", feature = "mac-app-store"))))]
 mod tests {
     use super::*;
 
