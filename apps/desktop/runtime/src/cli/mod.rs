@@ -488,10 +488,22 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
         }
         Action::App {
             command: App::Open { web },
-        } => match desktop_app().filter(|_| !*web && graphical_session()) {
-            Some(app) => open_desktop_app(app)?,
-            None => open_web_ui(cli, &client)?,
-        },
+        } => {
+            // Like the desktop app, the web path fails fast during installer updates
+            // instead of waiting out the startup gate.
+            let data = desktop_gateway::agents::app_data_dir()?;
+            let startup = desktop_gateway::lock::startup(&data)
+                .map_err(|_| "Cannot acquire app startup lock")?
+                .ok_or("Backend startup or an update is already in progress.")?;
+            match desktop_app().filter(|_| !*web && graphical_session()) {
+                Some(app) => open_desktop_app(app)?,
+                None => {
+                    // Backend startup takes the gate itself.
+                    drop(startup);
+                    open_web_ui(cli, &client)?
+                }
+            }
+        }
         Action::Completions { .. } | Action::Schema => unreachable!(),
     };
     finish_output(output(&result, cli))
@@ -517,10 +529,6 @@ fn graphical_session() -> bool {
 }
 
 fn open_desktop_app(app: PathBuf) -> Result<Value, String> {
-    let data = desktop_gateway::agents::app_data_dir()?;
-    let _startup = desktop_gateway::lock::startup(&data)
-        .map_err(|_| "Cannot acquire app startup lock")?
-        .ok_or("Backend startup or an update is already in progress.")?;
     let mut child = std::process::Command::new(app)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

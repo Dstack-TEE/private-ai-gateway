@@ -320,6 +320,29 @@ fn web_ui_is_opt_in_and_login_links_work_once() {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+#[test]
+fn app_open_fails_fast_while_an_update_holds_the_startup_gate() {
+    let backend = Backend::start();
+    let data = backend.directory.path().join("home/.private-ai-proxy");
+    let gate = desktop_gateway::lock::startup(&data).unwrap().unwrap();
+    let started = Instant::now();
+    let blocked = backend
+        .command(&["app", "open", "--web", "--yes", "--json"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    // Backend startup would wait out a brief gate; app open reports it at once.
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(!blocked.status.success());
+    assert!(String::from_utf8_lossy(&blocked.stderr)
+        .contains("Backend startup or an update is already in progress"));
+    drop(gate);
+    assert_eq!(
+        backend.run(&["status"])["gateway"]["webUi"]["enabled"],
+        false
+    );
+}
+
 /// Every 127.0.0.0/8 address is loopback on Linux, so moving the listener needs no confirmation.
 #[cfg(target_os = "linux")]
 #[test]
