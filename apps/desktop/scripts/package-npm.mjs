@@ -14,7 +14,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import semver from "semver";
 
-import { binaries } from "./package-cli.mjs";
+import { assertWebBundle, binaries } from "./package-cli.mjs";
 
 const scriptPath = fileURLToPath(import.meta.url);
 const appRoot = path.resolve(path.dirname(scriptPath), "..");
@@ -166,10 +166,11 @@ function packDirectory(directory, output) {
     ["pack", directory, "--json", "--pack-destination", output],
     { encoding: "utf8" },
   ));
-  if (!Array.isArray(packed) || packed.length !== 1 || typeof packed[0]?.filename !== "string") {
+  const entries = Array.isArray(packed) ? packed : Object.values(packed);
+  if (entries.length !== 1 || typeof entries[0]?.filename !== "string") {
     throw new Error("npm pack did not report exactly one tarball");
   }
-  return path.resolve(output, packed[0].filename);
+  return path.resolve(output, entries[0].filename);
 }
 
 function parseArguments(arguments_) {
@@ -211,6 +212,7 @@ function parseArguments(arguments_) {
 }
 
 async function main() {
+  await assertWebBundle();
   const options = parseArguments(process.argv.slice(2));
   const tarball = options.command === "wrapper"
     ? await buildWrapperPackage(options)

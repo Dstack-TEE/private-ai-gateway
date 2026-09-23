@@ -23,6 +23,8 @@ const buildEnv = {
   ...(path.isAbsolute(cargo) ? { PATH: `${cargoDirectory}${path.delimiter}${pathValue}` } : {}),
   ...(buildVersion ? { PAP_BUILD_VERSION: buildVersion } : {}),
 };
+const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+execFileSync(npm, ["run", "build:web"], { cwd: appRoot, env: buildEnv, stdio: "inherit" });
 const rustcOutput = execFileSync(rustc, ["-vV"], {
   cwd: appRoot,
   encoding: "utf8",

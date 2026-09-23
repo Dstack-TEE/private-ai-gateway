@@ -154,6 +154,7 @@ jobs:
         working-directory: apps/desktop
         run: |
           npm run check
+          npm run build:web
           npm run test:release
           npm run test:probe
       - name: Stage Tauri sidecars
@@ -276,6 +277,9 @@ jobs:
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci
+      - name: Build embedded web UI
+        working-directory: apps/desktop
+        run: npm run build:web
       - name: Import optional Windows code-signing certificate
         if: runner.os == 'Windows' && inputs.release_version != ''
         shell: pwsh

@@ -5,6 +5,7 @@
 !.env.example
 *.log
 *.tmp
+apps/desktop/runtime/web-dist/
 __pycache__/
 *.py[cod]
 .DS_Store

@@ -93,6 +93,7 @@ jobs:
         working-directory: apps/desktop
         run: |
           npm run check
+          npm run build:web
           npm run test:release
           node --check scripts/macos-app-store-smoke.mjs
       - name: Verify Direct macOS upgrade
@@ -209,6 +210,7 @@ jobs:
           xcodebuild -version
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
           npm ci
+          npm run build:web
       - name: Validate release request
         working-directory: apps/desktop
         run: |

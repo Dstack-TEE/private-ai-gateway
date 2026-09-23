@@ -26,6 +26,13 @@ export const aliases = ["pap", "aci"];
 const scriptPath = fileURLToPath(import.meta.url);
 const appRoot = path.resolve(path.dirname(scriptPath), "..");
 
+export async function assertWebBundle(root = appRoot) {
+  const index = path.join(root, "runtime/web-dist/index.html");
+  if (!(await stat(index).catch(() => undefined))?.isFile()) {
+    throw new Error(`Missing embedded web UI ${index}; run npm run build:web before building or packaging the CLI`);
+  }
+}
+
 export function releaseVersionParts(version) {
   const parsed = semver.parse(version);
   if (!parsed || semver.valid(version) !== version || parsed.build.length > 0) {
@@ -88,6 +95,7 @@ export async function stageLinuxPackageRoot(portableDirectory, packageRoot) {
 }
 
 async function main() {
+  await assertWebBundle();
   const options = parseArguments(process.argv.slice(2));
   await mkdir(options.output, { recursive: true });
   const scratch = await mkdtemp(path.join(options.output, ".pap-cli-"));

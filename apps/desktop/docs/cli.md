@@ -49,6 +49,61 @@ start protection. `start` waits for verified protection. `stop` stops protection
 and restores managed agent configuration but keeps management available.
 `service stop` shuts down the backend. Closing the desktop app does not stop it.
 
+## Browser UI
+
+`pap ui` starts the same renderer used by the desktop app and attaches it to the
+per-user backend. It binds only to `127.0.0.1`; the default port is selected by
+the operating system. `--port <number>` selects a fixed loopback port and
+`--no-open` prints the URL without launching a browser.
+
+```sh
+pap ui
+pap ui --port 49152 --no-open
+```
+
+The printed URL contains a fresh 256-bit session token in its fragment. The
+fragment is not sent in HTTP requests: the renderer moves it to
+`sessionStorage`, removes it from the address bar, and sends it in the
+`Authorization` header. Do not paste the original URL into logs, tickets, shell
+history, or messages. The token exists only in the `pap ui` process and stops
+working when that process exits. Starting another UI creates an independent
+token.
+
+The management server rejects missing or incorrect tokens, non-loopback or
+unexpected `Host` values, and cross-origin requests. Mutations are explicit
+JSON `POST` requests. Management errors use the backend's sanitized operation
+mapping. Responses disable caching and framing and include a restrictive CSP
+and content-type protections. The Local API client key is fetched only after a
+user chooses to reveal it or opens a key-dependent dialog.
+
+The web UI deliberately degrades desktop-only integration:
+
+| Feature | Web behavior |
+| --- | --- |
+| Profile import and exports | Browser file picker and downloads; browser paths are never sent to the service. |
+| Native child windows | In-page modal sheets. |
+| Clipboard and external links | Browser clipboard and allowlisted HTTPS tabs. |
+| Open at Login, tray/menu state | Hidden or no-op. Protect on launch remains shared with the backend. |
+| OS notifications and native updates | Hidden; update ownership stays with the CLI installer/package manager. |
+| CLI registration | Hidden because the running CLI is already installed. |
+| RedPill loopback OAuth | Use **Paste callback link** when the browser cannot reach port 4181 on the service machine. Phala device flow is unchanged. |
+
+For a remote machine, keep the server on its loopback interface and forward the
+same port with SSH. Run these commands in separate terminals; do not expose a
+public listener:
+
+```sh
+# Remote shell
+pap ui --port 49152 --no-open
+
+# Local shell
+ssh -N -L 49152:127.0.0.1:49152 user@example-host
+```
+
+Open the URL printed by the remote command locally. The local and remote port
+must match because the server validates the exact HTTP `Host` port against DNS
+rebinding.
+
 The user session survives transport failures, retries and profile changes until
 protection is explicitly stopped. After an abnormal backend exit, its session ID
 and usage can be resumed; verification and forwarding permission are never
@@ -132,6 +187,7 @@ credential-store unlock probe.
 | Core capability | CLI |
 | --- | --- |
 | Backend and protection lifecycle | `service`, `start`, `stop`, `status --watch` |
+| Browser management UI | `ui [--port N] [--no-open]` |
 | Profile inspection, verification and selection | `profiles list/show/add/edit/verify/use/remove` |
 | Credential replacement and removal | `profiles verify --key-stdin`, `token clear-credential` |
 | Agent configuration review and restoration | `agents list/connect/disconnect/disconnect-all` |

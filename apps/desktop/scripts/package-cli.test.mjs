@@ -4,7 +4,19 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { binaries, releaseVersionParts, stageLinuxPackageRoot, stagePortable } from "./package-cli.mjs";
+import { assertWebBundle, binaries, releaseVersionParts, stageLinuxPackageRoot, stagePortable } from "./package-cli.mjs";
+
+test("requires the web renderer before CLI packaging", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pap-cli-web-"));
+  try {
+    await assert.rejects(assertWebBundle(root), /run npm run build:web/);
+    await mkdir(path.join(root, "runtime/web-dist"), { recursive: true });
+    await writeFile(path.join(root, "runtime/web-dist/index.html"), "<!doctype html>");
+    await assert.doesNotReject(assertWebBundle(root));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("stages the three sibling CLI executables and portable alias and Linux package symlinks", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pap-cli-package-"));
