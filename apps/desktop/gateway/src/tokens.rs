@@ -404,8 +404,8 @@ mod tests {
 
     #[test]
     fn tokens_are_private_per_agent_and_revocable() {
-        let dir = std::env::temp_dir().join(format!("pap-tokens-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("tokens");
         let files = TokenFiles::new(&dir);
         let codex = files.ensure("codex").unwrap();
         assert_eq!(codex.len(), TOKEN_BYTES * 2);
@@ -454,7 +454,6 @@ mod tests {
         assert!(rotated.starts_with("sk-pap-"));
         files.revoke("codex").unwrap();
         assert!(files.read("codex").unwrap().is_none());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

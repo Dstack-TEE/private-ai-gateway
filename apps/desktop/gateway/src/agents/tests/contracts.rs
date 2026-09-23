@@ -893,9 +893,8 @@ fn connect_rolls_everything_back_when_the_record_cannot_be_saved() {
 
 #[test]
 fn atomic_writes_refuse_symlinks_and_changed_files() {
-    let dir = env::temp_dir().join(format!("pap-atomic-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
     let target = dir.join("config.json");
     write_atomic(&target, "{}", Some(None)).unwrap();
     assert!(write_atomic(&target, "{\"a\":1}", Some(Some("changed"))).is_err());
@@ -913,14 +912,13 @@ fn atomic_writes_refuse_symlinks_and_changed_files() {
         assert!(write_atomic(&link, "{}", None).is_err());
         assert_eq!(fs::read_to_string(&target).unwrap(), "{\"a\":1}");
     }
-    assert!(fs::read_dir(&dir).unwrap().all(|entry| {
+    assert!(fs::read_dir(dir).unwrap().all(|entry| {
         !entry
             .unwrap()
             .file_name()
             .to_string_lossy()
             .ends_with(".tmp")
     }));
-    let _ = fs::remove_dir_all(&dir);
 }
 
 /// Config drift or corruption deauthorizes the token on the next load,

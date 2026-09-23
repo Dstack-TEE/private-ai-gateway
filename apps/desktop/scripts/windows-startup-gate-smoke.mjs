@@ -78,6 +78,14 @@ const reservePort = async () => {
   return port;
 };
 
+// Matches the unique scratch name because TEMP may be an 8.3 short path.
+const killPortableProcesses = () => execute("powershell.exe", [
+  "-NoProfile",
+  "-NonInteractive",
+  "-Command",
+  "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like ('*\\' + $env:PAP_SMOKE_SCRATCH + '\\bin\\*') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
+], { env: { ...process.env, PAP_SMOKE_SCRATCH: path.basename(scratch) }, timeout: 30_000, windowsHide: true });
+
 try {
   await stagePortable({
     sourceDir: path.join(appRoot, "src-tauri/binaries"),
@@ -99,8 +107,9 @@ try {
   await once(gate, "spawn");
   gateSpawned = true;
   await waitFor(() => access(acquired).then(() => true, () => false), 10_000, "NSIS did not acquire startup.lock");
-  await expectGateFailure(["app", "open"], 5_000);
+  // `app open` starts a backend too if the gate fails to hold.
   backendAttempted = true;
+  await expectGateFailure(["app", "open"], 5_000);
   await expectGateFailure(["service", "start"], 20_000);
 
   await writeFile(release, "release");
@@ -131,6 +140,8 @@ try {
     });
   }
   if (cleanupError) {
+    // Keep the state for diagnosis but never a process running from it.
+    await killPortableProcesses().catch((error) => console.error(`Could not kill test-owned processes: ${error.message}`));
     console.error(`Preserving failed startup-gate state at ${scratch}`);
     throw cleanupError;
   }

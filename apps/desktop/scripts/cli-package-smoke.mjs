@@ -44,6 +44,7 @@ const env = {
   ANTHROPIC_API_KEY: "",
 };
 let ownedBackend;
+let startAttempted = false;
 
 const runJson = async (arguments_, timeout = 20_000) => {
   console.log(`CLI lifecycle: ${arguments_.join(" ")}`);
@@ -110,6 +111,7 @@ try {
   await chmod(localApi, 0o600);
 
   assert.equal((await runJson(["service", "status"])).status, "not_running");
+  startAttempted = true;
   ownedBackend = await runJson(["service", "start"]);
   assert.equal(ownedBackend.version, expectedVersion);
   assert.ok(Number.isInteger(ownedBackend.processId) && ownedBackend.processId > 0);
@@ -131,21 +133,24 @@ try {
   assert.equal((await waitForNotRunning(10_000)).status, "not_running");
   assert.equal((await runJson(["service", "status"])).status, "not_running");
   ownedBackend = undefined;
+  startAttempted = false;
   console.log(`CLI package: lifecycle passed with three sibling executables; ${version}`);
 } finally {
   let cleanupError;
   try {
-    if (ownedBackend) {
+    if (startAttempted) {
+      // Every backend in this isolated home is test-owned, including one whose
+      // start timed out before reporting it.
       const status = await runJson(["service", "status"]).catch(() => undefined);
-      const stillOwned = status?.backend?.instanceId === ownedBackend.instanceId
-        || (status === undefined && processExists(ownedBackend.processId));
-      if (stillOwned) {
+      const processId = status?.backend?.processId
+        ?? (status === undefined ? ownedBackend?.processId : undefined);
+      if (processId && processExists(processId)) {
         await runJson(["--yes", "service", "stop"]).catch(() => undefined);
-        if (!(await waitForExit(ownedBackend.processId, 5_000))) {
-          process.kill(ownedBackend.processId, "SIGTERM");
-          if (!(await waitForExit(ownedBackend.processId, 5_000))) {
-            process.kill(ownedBackend.processId, "SIGKILL");
-            assert.ok(await waitForExit(ownedBackend.processId, 5_000), "Owned backend did not exit");
+        if (!(await waitForExit(processId, 5_000))) {
+          process.kill(processId, "SIGTERM");
+          if (!(await waitForExit(processId, 5_000))) {
+            process.kill(processId, "SIGKILL");
+            assert.ok(await waitForExit(processId, 5_000), "Owned backend did not exit");
           }
         }
       }

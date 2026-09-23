@@ -98,8 +98,8 @@ mod tests {
 
     #[test]
     fn apply_lock_serializes_writers() {
-        let dir = std::env::temp_dir().join(format!("pap-apply-lock-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("data");
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         let holder_dir = dir.clone();
         let holder = std::thread::spawn(move || {
@@ -118,6 +118,5 @@ mod tests {
         release_tx.send(()).unwrap();
         holder.join().unwrap().unwrap();
         assert!(waiter.join().unwrap().unwrap() >= std::time::Duration::from_millis(100));
-        let _ = fs::remove_dir_all(&dir);
     }
 }
