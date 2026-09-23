@@ -73,7 +73,6 @@ export async function rewriteRpm(file, version) {
     const spec = path.join(scratch, "package.spec");
     await writeFile(spec, rpmSpec({
       name: query("%{NAME}"),
-      epoch: query("%{EPOCH}"),
       version: rpmVersion,
       release: rpmRelease,
       summary: query("%{SUMMARY}"),
@@ -97,8 +96,9 @@ export async function rewriteRpm(file, version) {
   return true;
 }
 
-// Repackage the unchanged payload, dependencies and scriptlets under a new version.
-export function rpmSpec({ name, epoch, version, release, summary, license, url, description, requires, scriptlets, files, root }) {
+// Repackage the unchanged payload, dependencies and scriptlets under a new
+// version. Desktop RPMs carry no epoch, matching the CLI RPM.
+export function rpmSpec({ name, version, release, summary, license, url, description, requires, scriptlets, files, root }) {
   const escape = (value) => value.replaceAll("%", "%%");
   const present = (value) => value && value !== "(none)";
   const lines = [
@@ -106,7 +106,6 @@ export function rpmSpec({ name, epoch, version, release, summary, license, url, 
     "%global debug_package %{nil}",
     "%define _build_id_links none",
     `Name: ${name}`,
-    ...(present(epoch) ? [`Epoch: ${epoch}`] : []),
     `Version: ${version}`,
     `Release: ${release}`,
     `Summary: ${escape(summary)}`,

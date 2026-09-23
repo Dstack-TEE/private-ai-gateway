@@ -67,7 +67,7 @@ test("desktop RPM prereleases keep payload, dependencies and scriptlets under na
     await writeFile(spec, [
       "%global __os_install_post %{nil}",
       "%global debug_package %{nil}",
-      "Name: private-ai-proxy", "Epoch: 1", "Version: 1.2.3", "Release: 1", "Summary: Fixture", "License: MIT", "AutoReqProv: no",
+      "Name: private-ai-proxy", "Version: 1.2.3", "Release: 1", "Summary: Fixture", "License: MIT", "AutoReqProv: no",
       "Requires: libgtk-3.so.0()(64bit)",
       "%description", "Fixture with 100%% coverage", "%install",
       'mkdir -p %{buildroot}/usr/bin "%{buildroot}/usr/share/applications"',
@@ -85,7 +85,7 @@ test("desktop RPM prereleases keep payload, dependencies and scriptlets under na
     assert.deepEqual(await normalizeLinuxPackages(bundle, "1.2.3-beta.4"), [rpm]);
 
     const query = (format) => output("rpm", ["-qp", "--qf", format, rpm]);
-    assert.equal(query("%{EPOCH}:%{VERSION}-%{RELEASE}"), "1:1.2.3-0.beta.4.1");
+    assert.equal(query("%{EPOCH}:%{VERSION}-%{RELEASE}"), "(none):1.2.3-0.beta.4.1");
     assert.equal(query("%{DESCRIPTION}"), "Fixture with 100% coverage");
     assert.equal(query("[%{FILENAMES}|%{FILEMODES:perms}\n]"), "/usr/bin/private-ai-proxy|-rwxr-xr-x\n/usr/share/applications/Private AI Proxy.desktop|-rw-r--r--");
     assert.match(output("rpm", ["-qp", "--requires", rpm]), /^libgtk-3\.so\.0\(\)\(64bit\)$/m);

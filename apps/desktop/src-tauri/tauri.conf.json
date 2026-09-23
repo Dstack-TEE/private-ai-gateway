@@ -84,7 +84,6 @@
         }
       },
       "rpm": {
-        "epoch": 1,
         "preInstallScript": "installer/rpm-pre-install.sh",
         "preRemoveScript": "installer/linux-pre-remove.sh",
         "files": {
