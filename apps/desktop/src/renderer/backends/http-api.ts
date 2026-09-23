@@ -105,7 +105,14 @@ function createPlatform(bootstrap: Bootstrap): UiPlatform {
     showErrorAlert: async (title, message) => {
       await showBrowserDialog({ title, message, confirmLabel: "OK" });
     },
-    presentAccountLogin: (login) => openAllowed(login.url),
+    presentAccountLogin: (login) => {
+      // The login sheet keeps a manual link, so a blocked or rejected tab must not fail the login.
+      try {
+        openAllowed(login.url);
+      } catch {
+        return;
+      }
+    },
     openOrganization: async (organizationSlug) => openAllowed(
       await rpc<string>("getOrganizationUrl", { organizationSlug }),
     ),
@@ -129,7 +136,7 @@ function consumeToken(): string {
   return stored;
 }
 
-async function rpc<T>(method: UiMethod | "exportProfilesContent" | "exportDiagnosticsContent" | "getOrganizationUrl" | "getTopUpUrl", params: Record<string, unknown> = {}): Promise<T> {
+async function rpc<T>(method: UiMethod, params: Record<string, unknown> = {}): Promise<T> {
   const response = await request<{ result?: T; error?: { message?: string } }>(
     `/api/rpc/${encodeURIComponent(method)}`,
     {
@@ -180,6 +187,7 @@ function emit(event: string, payload: unknown): void {
 }
 
 async function readEvents(): Promise<void> {
+  // The server sends a fresh state snapshot on every connection, so reconnecting loses nothing.
   try {
     const response = await fetch("/api/events", {
       headers: { Authorization: `Bearer ${token}` },
@@ -206,8 +214,9 @@ async function readEvents(): Promise<void> {
       }
     }
   } catch {
-    window.setTimeout(() => void readEvents(), 1_000);
+    // Reconnect below.
   }
+  window.setTimeout(() => void readEvents(), 1_000);
 }
 
 function isWebEvent(value: unknown): value is { event: string; payload: unknown } {
