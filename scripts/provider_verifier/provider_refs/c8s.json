@@ -1,0 +1,66 @@
+{
+  "provider": "c8s",
+  "provider_name": "Confidential AI (c8s)",
+  "reviewed_at": "2026-09-23",
+  "review": "docs/providers/confidential-ai/review.md",
+  "rtmr3_policy": "RTMR3 is matched against accepted_rtmr3. Every value accepted on 2026-09-23 has the c8s operator key armed, so it is non-zero. The provider plans to remove that key and pin RTMR3 to zero; zero is not accepted until a reviewed release publishes it.",
+  "releases": {
+    "v0.13.27-static-attestation-20260910": {
+      "environment": "production",
+      "bundle_sha256": "sha256:2bb6c5a35c82e278f4eb583688580ca72934daab103356df2f1b8c6ed7e5afc4",
+      "bundle_source": {
+        "repository": "https://github.com/confidential-dot-ai/confidential-inference",
+        "path": "releases/production/release-bundle.json",
+        "commit": "475c35da81d8684fa1a38c9306774e203f0465cd",
+        "signed": false
+      },
+      "policy_mode": "static",
+      "mrtd": "9309eaae9c151e766de0f97b1d1aaeb76b8c8c366080803943fb566521c8f0cf00a142d8b7b0683ed1d42c5a27198ba1",
+      "rtmr1": "95f6515ef906192daabd8f203290b788c702f0a963335ec3173aa199e8cf5faad07450485e81af80351bb5593b6486fd",
+      "rtmr2": "cd3b67c1888624ee97af2676dfed59348dd3299094d4f763b6a9ea28e015fa150885ac2551607f1d450c5e24cd827a1d",
+      "accepted_rtmr3": [
+        {
+          "value": "584a9673f9cffd74517d4573a07990423e03dc2c7ddfe3665d1cf04dc2d1a75a842cb77c58ef3d9e3a82441d7887e759",
+          "source": "observed-live",
+          "observed_at": "2026-09-23",
+          "operator_key_armed": true
+        }
+      ],
+      "accepted_allowlist_sha256": [
+        "sha256:05235c60dd61b239f3ac6a367b4fd6469008d766270002a235df4f54b02e217c"
+      ],
+      "accepted_mesh_ca_sha256": []
+    },
+    "v0.13.28-rc.2": {
+      "environment": "production",
+      "bundle_sha256": "sha256:82859291c495814e7fe6347d58d526bb5152cff88f520db1eba19cc6258a5586",
+      "bundle_source": {
+        "repository": "https://github.com/confidential-dot-ai/confidential-inference",
+        "path": "releases/production/release-bundle.json",
+        "commit": "a54319a2ebb2ae51f161d7c2085bffcca02e082c",
+        "release_tag": "v0.13.28-rc.2",
+        "prerelease": true,
+        "signed": true,
+        "sigstore_bundle_sha256": "sha256:b8850d81446950358e05ba7b96b54f5f1b9591fc5998da71a8a657b0dc0e7ce5"
+      },
+      "policy_mode": "operator",
+      "mrtd": "9309eaae9c151e766de0f97b1d1aaeb76b8c8c366080803943fb566521c8f0cf00a142d8b7b0683ed1d42c5a27198ba1",
+      "rtmr1": "70f5d4740bab2ead4193c069a156052128854f87835b7828e78b821c31af2e4145fe11ce903686c0650bfb4efb2ade6c",
+      "rtmr2": "f57af25bd9d14e1b761ddde6b5e8124f8eaad2d6d5ec875d6eaa369e30e23186fead763b6d04844d7f31aa50e3eb5b59",
+      "accepted_rtmr3": [
+        {
+          "value": "3e70612c6cd297bb2ded912284fcafd674d76f2ed8bf9bacfa03eee9bcb5d754cbc80e442b503a2608f8a720de75091f",
+          "source": "observed-live",
+          "observed_at": "2026-09-23",
+          "operator_key_armed": true
+        }
+      ],
+      "accepted_allowlist_sha256": [
+        "sha256:eb60199e3664fc2480688a309e50c55e5eebb42f38aa5f20b98b519f998a0dcc"
+      ],
+      "accepted_mesh_ca_sha256": [
+        "sha256:0dea2dd7ee630fe23b9de95d8a835e8bacff2702c79f7a3149e22cae9dac7426"
+      ]
+    }
+  }
+}

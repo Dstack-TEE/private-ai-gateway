@@ -317,6 +317,62 @@ impl UpstreamVerifier for SecretAiProviderVerifier {
     }
 }
 
+/// Verifier for one Confidential AI c8s origin. The external bridge verifies
+/// the front-door TDX quote, the attest-lb transcript that binds the serving
+/// TLS leaf and nonce, the mesh identity proof, and the node measurements
+/// against the reviewed release registry checked into this repository.
+#[derive(Debug, Clone)]
+pub struct C8sProviderVerifier {
+    verifier: ExternalProviderVerifier,
+}
+
+impl C8sProviderVerifier {
+    pub fn new(timeout_seconds: u64) -> Self {
+        Self::new_with_cache(timeout_seconds, 0)
+    }
+
+    pub fn new_with_cache(timeout_seconds: u64, cache_ttl_seconds: u64) -> Self {
+        Self {
+            verifier: ExternalProviderVerifier::private_inference(
+                "c8s",
+                UpstreamProvider::C8s.attestation_scope(),
+                timeout_seconds,
+                cache_ttl_seconds,
+            ),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_command(
+        command: Vec<String>,
+        timeout_seconds: u64,
+    ) -> Result<Self, ProviderVerifierConfigError> {
+        Ok(Self {
+            verifier: ExternalProviderVerifier::with_command(
+                "c8s",
+                UpstreamProvider::C8s.attestation_scope(),
+                command,
+                timeout_seconds,
+            )?,
+        })
+    }
+}
+
+#[async_trait]
+impl UpstreamVerifier for C8sProviderVerifier {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        self.verifier.verify(request).await
+    }
+
+    async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        self.verifier.refresh(request).await
+    }
+
+    fn invalidate(&self, request: &UpstreamVerificationRequest) {
+        self.verifier.invalidate(request);
+    }
+}
+
 /// Verifier for `PhalaDirect` upstreams: a Phala dstack-vllm-proxy attestation
 /// endpoint reached directly (per model). The external bridge fetches the
 /// `version=2` attestation report, verifies the dstack TDX quote, GPU evidence,

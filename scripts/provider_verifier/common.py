@@ -6,7 +6,9 @@ import base64
 import hashlib
 import json
 import sys
+from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 __all__ = [
     "emit",
@@ -28,6 +30,8 @@ __all__ = [
     "provider_options",
     "request_timeout_seconds",
     "tdx_debug_enabled",
+    "RootOrigin",
+    "parse_root_https_origin",
 ]
 
 
@@ -183,3 +187,33 @@ def tdx_debug_enabled(quote_bytes: bytes) -> bool:
     if len(td_attributes) != 8:
         raise ValueError(f"invalid TDX td_attributes length: {len(td_attributes)}")
     return td_attributes[0] != 0
+
+
+@dataclass(frozen=True)
+class RootOrigin:
+    origin: str
+    host: str
+    port: int
+
+
+def parse_root_https_origin(value: Any, label: str) -> RootOrigin:
+    """Parse a root HTTPS origin with no userinfo, path, query, or fragment."""
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{label} upstream is missing url_origin")
+    parsed = urlsplit(value)
+    if parsed.scheme != "https":
+        raise ValueError(f"{label} url_origin must use https://")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError(f"{label} url_origin must not contain userinfo")
+    if parsed.hostname is None:
+        raise ValueError(f"{label} url_origin must include a host")
+    if parsed.path not in ("", "/"):
+        raise ValueError(f"{label} url_origin must not include a path")
+    if parsed.query or parsed.fragment:
+        raise ValueError(f"{label} url_origin must not include a query or fragment")
+    try:
+        port = parsed.port or 443
+    except ValueError as exc:
+        raise ValueError(f"{label} url_origin has an invalid port") from exc
+    origin = value[:-1] if parsed.path == "/" else value
+    return RootOrigin(origin=origin, host=parsed.hostname, port=port)

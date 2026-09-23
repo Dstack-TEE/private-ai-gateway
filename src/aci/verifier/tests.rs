@@ -90,11 +90,11 @@ fn receipt_custody_fixture(
 }
 
 /// The scope token a stub verifier declares. Only routers declare a scope in
-/// production (near.ai / Tinfoil / SecretAI); per-model and per-instance verifiers omit it
+/// production (near.ai / Tinfoil / SecretAI / c8s); per-model and per-instance verifiers omit it
 /// and the seam accepts `None`. Stubs mirror that so the real accept paths run.
 fn declared_scope(provider: &str) -> Option<&'static str> {
     match provider {
-        "near-ai" | "tinfoil" | "secret-ai" => Some("router"),
+        "near-ai" | "tinfoil" | "secret-ai" | "c8s" => Some("router"),
         _ => None,
     }
 }
@@ -332,6 +332,33 @@ async fn secret_ai_provider_verifier_runs_embedded_bridge() {
         &verifier,
         "secret-ai",
         "private-ai-verifier/secret-ai/v1",
+        ChannelBinding::TlsSpkiSha256 {
+            origin: "https://provider.example".to_string(),
+            spki_sha256: "aa".repeat(32),
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn c8s_provider_verifier_runs_embedded_bridge() {
+    let verifier = C8sProviderVerifier::with_command(
+        provider_script(
+            "c8s",
+            "private-ai-verifier/c8s/v1",
+            json!({
+                "type": "tls_spki_sha256",
+                "origin": "https://provider.example",
+                "spki_sha256": "AA".repeat(32),
+            }),
+        ),
+        5,
+    )
+    .unwrap();
+    assert_provider_script_verifier(
+        &verifier,
+        "c8s",
+        "private-ai-verifier/c8s/v1",
         ChannelBinding::TlsSpkiSha256 {
             origin: "https://provider.example".to_string(),
             spki_sha256: "aa".repeat(32),

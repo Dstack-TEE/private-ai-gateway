@@ -67,16 +67,16 @@ carries a stable `provider_type` (distinct from the operator's per-endpoint
 config `name`) that selects the mapping. A `failed` result asserts
 nothing.
 
-| Claim | tinfoil | near-ai | chutes | phala-direct | secret-ai⁴ | generic |
-| --- | --- | --- | --- | --- | --- | --- |
-| `tee_attested` | ✅ hardware | ✅ hardware | ✅ hardware | ✅ hardware | ✅ hardware | ✅ verifier-derived |
-| `tcb_up_to_date` | tri-state¹ | tri-state¹ | tri-state¹ | tri-state¹ | TDX ✅ / SEV unknown | unknown |
-| `serving_software_known_good` | ✅ Sigstore² | unknown | unknown | unknown | optional pin | unknown |
-| `os_known_good` | unknown | unknown | unknown | unknown | ✅ registry | unknown |
-| `gpu_attested` | unknown | unknown | ✅³ | ✅³ | ✅ required | unknown |
-| `model_weights_provenance` | unknown | unknown | unknown | unknown | unknown | unknown |
+| Claim | tinfoil | near-ai | chutes | phala-direct | secret-ai⁴ | c8s⁵ | generic |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `tee_attested` | ✅ hardware | ✅ hardware | ✅ hardware | ✅ hardware | ✅ hardware | ✅ hardware | ✅ verifier-derived |
+| `tcb_up_to_date` | tri-state¹ | tri-state¹ | tri-state¹ | tri-state¹ | TDX ✅ / SEV unknown | ✅ required | unknown |
+| `serving_software_known_good` | ✅ Sigstore² | unknown | unknown | unknown | optional pin | unknown | unknown |
+| `os_known_good` | unknown | unknown | unknown | unknown | ✅ registry | ❌ operator key armed | unknown |
+| `gpu_attested` | unknown | unknown | ✅³ | ✅³ | ✅ required | unknown | unknown |
+| `model_weights_provenance` | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
 
-- For the five real provider verifiers `tee_attested` is `hardware_proven`: a
+- For the six real provider verifiers `tee_attested` is `hardware_proven`: a
   genuine TEE quote was verified and the request channel bound to it.
 - NEAR AI's quote covers its **gateway** TD, a router fronting many models
   behind one TEE. Its attested session is that gateway *channel* — one session
@@ -113,6 +113,10 @@ nothing.
   facts stay in `extra`.
 - ⁴ SecretAI policy and claim details are documented in
   [SecretAI verification](providers/secret-ai/verification.md).
+- ⁵ c8s requires DCAP `UpToDate`. `os_known_good` is refuted while the
+  accepted RTMR3 arms the c8s operator key, and asserted once a reviewed
+  release pins it with the key removed. GPU evidence is not verified. See
+  [Confidential AI (c8s) verification](providers/c8s/verification.md).
 - "generic" is a verifier path with no provider-specific identity: it asserts
   only `tee_attested` (`verifier_derived`), nothing else.
 

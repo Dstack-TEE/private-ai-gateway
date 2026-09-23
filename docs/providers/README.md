@@ -16,6 +16,7 @@ One directory per upstream provider. Each holds up to two documents:
 | AciService (first-party) | Intel TDX + NVIDIA CC | `tls_spki_sha256` | [verification](aci-service/verification.md) | — (first-party) |
 | PhalaDirect | Intel TDX + NVIDIA CC | `tls_spki_sha256` | [verification](phala-direct/verification.md) | [review](phala-direct/review.md) |
 | SecretAI | AMD SEV-SNP or Intel TDX + NVIDIA CC | `tls_spki_sha256` | [verification](secret-ai/verification.md) | [review](secret-ai/review.md) |
+| Confidential AI (c8s) | Intel TDX (GPU unverified) | `tls_spki_sha256` | [verification](c8s/verification.md) | [review](confidential-ai/review.md) (pending) |
 
 The two columns are different document *types* — `verification.md` tracks the running
 code; `review.md` is a dated audit snapshot — so they are kept side by side rather than

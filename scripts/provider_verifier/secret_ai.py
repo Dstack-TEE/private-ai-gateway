@@ -20,7 +20,6 @@ import struct
 import sys
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlsplit
 
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from cryptography.x509 import load_der_x509_certificate
@@ -33,8 +32,10 @@ from secretvm.verify import (
 )
 
 from .common import (
+    RootOrigin,
     emit,
     failed,
+    parse_root_https_origin,
     provider_options,
     raw_http_bundle_evidence,
     raw_http_item,
@@ -66,11 +67,7 @@ _MINIMUM_SEV_TCB = {"boot_loader": 10, "tee": 0, "snp": 23, "microcode": 88}
 _SEV_MIGRATE_MA = 1 << 18
 
 
-@dataclass(frozen=True)
-class _Endpoint:
-    origin: str
-    host: str
-    port: int
+_Endpoint = RootOrigin
 
 
 @dataclass(frozen=True)
@@ -91,25 +88,7 @@ class _PinnedWorkload:
 
 
 def _parse_origin(value: Any) -> _Endpoint:
-    if not isinstance(value, str) or not value:
-        raise ValueError("SecretAI upstream is missing url_origin")
-    parsed = urlsplit(value)
-    if parsed.scheme != "https":
-        raise ValueError("SecretAI url_origin must use https://")
-    if parsed.username is not None or parsed.password is not None:
-        raise ValueError("SecretAI url_origin must not contain userinfo")
-    if parsed.hostname is None:
-        raise ValueError("SecretAI url_origin must include a host")
-    if parsed.path not in ("", "/"):
-        raise ValueError("SecretAI url_origin must not include a path")
-    if parsed.query or parsed.fragment:
-        raise ValueError("SecretAI url_origin must not include a query or fragment")
-    try:
-        port = parsed.port or 443
-    except ValueError as exc:
-        raise ValueError("SecretAI url_origin has an invalid port") from exc
-    origin = value[:-1] if parsed.path == "/" else value
-    return _Endpoint(origin=origin, host=parsed.hostname, port=port)
+    return parse_root_https_origin(value, "SecretAI")
 
 
 def _fetch_evidence(endpoint: _Endpoint, name: str, timeout: int) -> tuple[bytes, str]:

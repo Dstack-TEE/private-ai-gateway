@@ -107,7 +107,7 @@ fn looks_like_uuid(value: &str) -> bool {
         && value.chars().all(|c| c == '-' || c.is_ascii_hexdigit())
 }
 
-fn valid_secret_ai_origin(value: &str) -> bool {
+fn valid_root_https_origin(value: &str) -> bool {
     let Ok(origin) = reqwest::Url::parse(value) else {
         return false;
     };
@@ -181,10 +181,18 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
             )));
         }
         if upstream.provider == UpstreamProvider::SecretAi
-            && !valid_secret_ai_origin(&upstream.base_url)
+            && !valid_root_https_origin(&upstream.base_url)
         {
             return Err(UpstreamConfigError::InvalidConfig(format!(
                 "upstream {:?} provider secret-ai requires a root HTTPS base_url without userinfo, query, or fragment",
+                upstream.name
+            )));
+        }
+        if upstream.provider == UpstreamProvider::C8s
+            && !valid_root_https_origin(&upstream.base_url)
+        {
+            return Err(UpstreamConfigError::InvalidConfig(format!(
+                "upstream {:?} provider c8s requires a root HTTPS base_url without userinfo, query, or fragment",
                 upstream.name
             )));
         }

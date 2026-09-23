@@ -14,9 +14,10 @@ use crate::aci::upstream::{
     OpenAICompatibleBackend, UpstreamBackend,
 };
 use crate::aci::verifier::{
-    AciServiceUpstreamVerifier, AciServiceVerifierPolicy, ChutesProviderVerifier,
-    NearAiProviderVerifier, PhalaDirectProviderVerifier, PreverifiedUpstreamVerifier,
-    RoutingUpstreamVerifier, SecretAiProviderVerifier, TinfoilProviderVerifier,
+    AciServiceUpstreamVerifier, AciServiceVerifierPolicy, C8sProviderVerifier,
+    ChutesProviderVerifier, NearAiProviderVerifier, PhalaDirectProviderVerifier,
+    PreverifiedUpstreamVerifier, RoutingUpstreamVerifier, SecretAiProviderVerifier,
+    TinfoilProviderVerifier,
 };
 use crate::aggregator::service::UpstreamVerifier;
 
@@ -79,7 +80,8 @@ fn provider_is_tee(provider: UpstreamProvider) -> bool {
         | UpstreamProvider::Tinfoil
         | UpstreamProvider::NearAi
         | UpstreamProvider::SecretAi
-        | UpstreamProvider::PhalaDirect => true,
+        | UpstreamProvider::PhalaDirect
+        | UpstreamProvider::C8s => true,
     }
 }
 
@@ -114,7 +116,8 @@ fn build_provider_backend(
         | UpstreamProvider::Tinfoil
         | UpstreamProvider::NearAi
         | UpstreamProvider::SecretAi
-        | UpstreamProvider::PhalaDirect => {
+        | UpstreamProvider::PhalaDirect
+        | UpstreamProvider::C8s => {
             let mut backend = OpenAICompatibleBackend::new_with_timeouts(
                 cfg.base_url.clone(),
                 connect_timeout_seconds,
@@ -276,6 +279,10 @@ fn build_provider_verifier(
                 }
                 Some(Arc::new(verifier))
             }
+            UpstreamProvider::C8s => Some(Arc::new(C8sProviderVerifier::new_with_cache(
+                request_timeout_seconds,
+                cache_seconds,
+            ))),
         };
         if let Some(verifier) = verifier {
             router = router.add_route(

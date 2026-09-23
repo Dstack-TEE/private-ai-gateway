@@ -70,7 +70,7 @@ fn router_provider_verifies_once_per_channel() {
 
 #[test]
 fn provider_attestation_scopes() {
-    // NEAR AI, Tinfoil, and SecretAI front many models behind one verified
+    // NEAR AI, Tinfoil, SecretAI, and c8s front many models behind one verified
     // channel, so they are per-router. Phala-direct verifies a TEE per model;
     // Chutes a key per instance; the rest default to per-model. Only per-router
     // drops the model from the channel identity.
@@ -78,6 +78,7 @@ fn provider_attestation_scopes() {
     assert_eq!(UpstreamProvider::NearAi.attestation_scope(), PerRouter);
     assert_eq!(UpstreamProvider::Tinfoil.attestation_scope(), PerRouter);
     assert_eq!(UpstreamProvider::SecretAi.attestation_scope(), PerRouter);
+    assert_eq!(UpstreamProvider::C8s.attestation_scope(), PerRouter);
     assert_eq!(UpstreamProvider::PhalaDirect.attestation_scope(), PerModel);
     assert_eq!(UpstreamProvider::Chutes.attestation_scope(), PerInstance);
     assert_eq!(
@@ -105,6 +106,45 @@ fn parse_secret_ai_allows_an_unpinned_workload() {
 
     assert_eq!(config[0].provider, UpstreamProvider::SecretAi);
     assert_eq!(config[0].accepted_subjects, None);
+}
+
+#[test]
+fn parse_c8s_accepts_a_root_origin_and_rejects_others() {
+    let config = parse_config_text(
+        r#"
+            [{
+              "name": "confidential-ai",
+              "provider": "c8s",
+              "base_url": "https://api.confidential.ai",
+              "models": {"public-model": "upstream-model"}
+            }]
+            "#,
+    )
+    .expect("c8s should accept a root HTTPS origin");
+    assert_eq!(config[0].provider, UpstreamProvider::C8s);
+
+    for base_url in [
+        "http://api.confidential.ai",
+        "https://user@api.confidential.ai",
+        "https://api.confidential.ai/v1",
+        "https://api.confidential.ai?target=other",
+        "https://api.confidential.ai#fragment",
+    ] {
+        let err = parse_config_text(&format!(
+            r#"[{{
+              "name": "confidential-ai",
+              "provider": "c8s",
+              "base_url": "{base_url}",
+              "models": {{"public-model": "upstream-model"}}
+            }}]"#
+        ))
+        .expect_err("c8s must reject an origin that the verifier cannot use");
+        assert!(
+            err.to_string()
+                .contains("provider c8s requires a root HTTPS base_url"),
+            "{base_url:?}: {err}"
+        );
+    }
 }
 
 #[test]

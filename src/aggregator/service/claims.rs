@@ -30,6 +30,7 @@ pub(super) fn claim_mapper(provider_type: Option<&str>) -> &'static dyn Provider
     match provider_type {
         Some("tinfoil") => &TinfoilClaims,
         Some("secret-ai") => &SecretAiClaims,
+        Some("c8s") => &C8sClaims,
         Some("near-ai") | Some("chutes") | Some("phala-direct") => &IntelTdxClaims,
         _ => &GenericClaims,
     }
@@ -209,6 +210,23 @@ impl ProviderClaimMapper for SecretAiClaims {
             serving_software_known_good: secret_ai_software_claim(event),
             os_known_good: secret_ai_os_claim(event),
             gpu_attested: secret_ai_gpu_claim(event),
+            ..SessionClaims::default()
+        }
+    }
+}
+
+/// Confidential AI (c8s): a DCAP-verified TDX front-door quote whose
+/// report_data binds the serving TLS leaf, with node measurements matched to a
+/// reviewed release. Serving software stays Unknown (the allowlist digest is a
+/// provider statement, not quote-bound), and the provider's GPU evidence is not
+/// verified, so `gpu_attested` stays Unknown.
+pub(super) struct C8sClaims;
+impl ProviderClaimMapper for C8sClaims {
+    fn claims(&self, event: &UpstreamVerifiedEvent) -> SessionClaims {
+        SessionClaims {
+            tee_attested: hardware_tee_attested(event),
+            tcb_up_to_date: tcb_up_to_date_claim(event),
+            os_known_good: c8s_os_claim(event),
             ..SessionClaims::default()
         }
     }
@@ -406,6 +424,32 @@ pub(super) fn secret_ai_gpu_claim(event: &UpstreamVerifiedEvent) -> Claim {
     }
 }
 
+/// c8s node OS: MRTD and RTMR1-RTMR3 matched a reviewed release. An accepted
+/// RTMR3 that arms the c8s operator key lets that key reach cluster-admin and
+/// exec into TEE workloads, so it **refutes** (like a dev image's operator
+/// shell) rather than asserting a known-good OS.
+pub(super) fn c8s_os_claim(event: &UpstreamVerifiedEvent) -> Claim {
+    let claims = event.provider_claims.as_ref();
+    let field = |key: &str| claims.and_then(|c| c.get(key));
+    let pinned = field("node_measurements_pinned").and_then(Value::as_bool);
+    let release = field("release_id").and_then(Value::as_str);
+    let operator_key_armed = field("operator_key_armed").and_then(Value::as_bool);
+    match (pinned, release, operator_key_armed) {
+        (Some(true), Some(release), Some(true)) => Claim::refuted(
+            ClaimSource::VerifierDerived,
+            format!(
+                "c8s node measurements match reviewed release {release}, but its RTMR3 arms \
+                 the operator key, which can reach cluster-admin inside the TEE"
+            ),
+        ),
+        (Some(true), Some(release), Some(false)) => Claim::asserted(
+            ClaimSource::VerifierDerived,
+            format!("c8s node MRTD and RTMR1-RTMR3 match reviewed release {release}"),
+        ),
+        _ => Claim::unknown(),
+    }
+}
+
 #[cfg(test)]
 mod claim_mapping_tests {
     use super::session_claims_for_event;
@@ -558,6 +602,51 @@ mod claim_mapping_tests {
             claims.serving_software_known_good.status,
             ClaimStatus::Unknown
         );
+    }
+
+    #[test]
+    fn c8s_refutes_the_os_while_the_operator_key_is_armed() {
+        let provider_claims = |armed: bool| {
+            json!({
+                "tcb_status": "UpToDate",
+                "node_measurements_pinned": true,
+                "release_id": "v0.13.28-rc.2",
+                "operator_key_armed": armed,
+                "gpu_verified": false,
+            })
+        };
+        let armed = session_claims_for_event(&event(
+            Some("c8s"),
+            VerificationResult::Verified,
+            Some(provider_claims(true)),
+        ));
+        assert_eq!(armed.tee_attested.status, ClaimStatus::Asserted);
+        assert_eq!(armed.tee_attested.source, Some(ClaimSource::HardwareProven));
+        assert_eq!(armed.tcb_up_to_date.status, ClaimStatus::Asserted);
+        assert_eq!(armed.os_known_good.status, ClaimStatus::Refuted);
+        let reason = armed.os_known_good.reason.unwrap();
+        assert!(reason.contains("v0.13.28-rc.2"), "{reason}");
+        // GPU evidence is not verified and serving software is not quote-bound.
+        assert_eq!(armed.gpu_attested.status, ClaimStatus::Unknown);
+        assert_eq!(
+            armed.serving_software_known_good.status,
+            ClaimStatus::Unknown
+        );
+        assert_eq!(armed.model_weights_provenance.status, ClaimStatus::Unknown);
+
+        let disarmed = session_claims_for_event(&event(
+            Some("c8s"),
+            VerificationResult::Verified,
+            Some(provider_claims(false)),
+        ));
+        assert_eq!(disarmed.os_known_good.status, ClaimStatus::Asserted);
+
+        let unpinned = session_claims_for_event(&event(
+            Some("c8s"),
+            VerificationResult::Verified,
+            Some(json!({ "tcb_status": "UpToDate" })),
+        ));
+        assert_eq!(unpinned.os_known_good.status, ClaimStatus::Unknown);
     }
 
     #[test]

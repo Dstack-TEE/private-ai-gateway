@@ -19,6 +19,7 @@ import os
 import sys
 
 from provider_verifier import (
+    verify_c8s,
     verify_chutes,
     verify_nearai,
     verify_phala_direct,
@@ -28,6 +29,7 @@ from provider_verifier import (
 from provider_verifier.common import failed
 
 __all__ = [
+    "verify_c8s",
     "verify_chutes",
     "verify_nearai",
     "verify_phala_direct",
@@ -61,6 +63,8 @@ async def main() -> None:
             await verify_secret_ai(request)
         elif provider == "chutes":
             await verify_chutes(request)
+        elif provider == "c8s":
+            await verify_c8s(request)
         else:
             failed(str(provider), f"unsupported provider: {provider!r}")
     except Exception as exc:
