@@ -19,6 +19,7 @@ pub fn observing_spki_client(
     connect_timeout_seconds: u64,
     read_timeout_seconds: u64,
 ) -> Result<reqwest::Client, String> {
+    crate::install_crypto_provider();
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let inner = rustls::client::WebPkiServerVerifier::builder(Arc::new(roots))

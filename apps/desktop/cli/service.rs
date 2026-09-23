@@ -23,6 +23,7 @@ struct Arguments {}
 
 #[tokio::main]
 async fn main() {
+    private_ai_proxy::install_crypto_provider();
     if let Err(error) = run().await {
         desktop_runtime::diagnostic(format_args!("Private AI Proxy backend: {error}"));
         std::process::exit(1);

@@ -17,6 +17,7 @@ use clap::{FromArgMatches, Subcommand};
 
 #[tokio::main]
 async fn main() {
+    private_ai_proxy::install_crypto_provider();
     let command = args::Command::augment_subcommands(managed::cli_command())
         .name("private-ai-proxy")
         .about("Private AI Proxy: manage local protection and verify confidential AI services")
