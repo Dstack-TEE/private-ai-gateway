@@ -10,21 +10,17 @@ mod notifications;
 mod tray;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 mod tray_theme;
+mod ui_api;
 mod updates;
 mod window_state;
 
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use desktop_runtime::{
     cli_install::Registration,
     client::Client,
-    contracts::{
-        AgentPreview, AgentStatus, ConfidentialProfileInput, ConnectOptions, GatewayState,
-        LocalApiConfig, RequestActivity, StartGatewayConfig,
-    },
+    contracts::{ConfidentialProfileInput, ConnectOptions, LocalApiConfig, StartGatewayConfig},
     preferences::Appearance,
-    protocol::Preference,
-    usage::{UsagePage, UsageQuery},
 };
 use tauri::{
     webview::{PageLoadEvent, WebviewWindowBuilder},
@@ -67,53 +63,6 @@ pub(crate) async fn run_blocking<T: Send + 'static>(
     tauri::async_runtime::spawn_blocking(operation)
         .await
         .map_err(|_| "The background operation could not complete. Please try again.")?
-}
-
-#[derive(Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LaunchPreferences {
-    open_at_login: bool,
-    connect_on_launch: bool,
-}
-
-#[derive(serde::Serialize)]
-struct ListenAddress {
-    address: String,
-    name: String,
-}
-
-fn load_launch_preferences(app: &AppHandle, client: &Client) -> Result<LaunchPreferences, String> {
-    Ok(LaunchPreferences {
-        open_at_login: autostart::is_enabled(app)?,
-        connect_on_launch: client.preferences()?.connect_on_launch,
-    })
-}
-
-fn refresh_preferences(app: &AppHandle, client: &Arc<Client>) {
-    if client.cached_state().backend_connected == Some(false) {
-        return;
-    }
-    let app = app.clone();
-    let client = client.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        notifications::initialize(&app);
-        let result = (|| {
-            let preferences = client.preferences()?;
-            let launch = load_launch_preferences(&app, &client)?;
-            Ok::<_, String>((preferences.appearance, launch))
-        })();
-        match result {
-            Ok((appearance, launch)) => {
-                let app_for_main_thread = app.clone();
-                let _ = app.run_on_main_thread(move || {
-                    apply_appearance(&app_for_main_thread, appearance);
-                    let _ = app_for_main_thread.emit("gateway://appearance", appearance);
-                    let _ = app_for_main_thread.emit("gateway://launch-preferences", launch);
-                });
-            }
-            Err(error) => eprintln!("Cannot refresh desktop preferences: {error}"),
-        }
-    });
 }
 
 fn apply_appearance(app: &AppHandle, appearance: Appearance) {
@@ -330,6 +279,7 @@ pub fn run() {
             commands::gateway::get_client_key,
             commands::gateway::rotate_client_key,
             commands::gateway::save_local_api_config,
+            commands::gateway::save_web_ui,
             commands::gateway::list_listen_addresses,
             commands::gateway::list_agents,
             commands::gateway::preview_agent_connection,
@@ -403,7 +353,18 @@ pub fn run() {
             window.on_window_event(move |event| {
                 if matches!(event, WindowEvent::Focused(true)) {
                     let _ = window_for_events.emit("gateway://agents-changed", ());
-                    refresh_preferences(&app_for_events, &client_for_events);
+                    let host = ui_api::TauriHost::new(window_for_events.clone());
+                    let client = client_for_events.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(error) =
+                            desktop_runtime::ui_api::refresh_preferences(&client, &host).await
+                        {
+                            desktop_runtime::diagnostic(format_args!(
+                                "Cannot refresh desktop preferences: {}",
+                                error.message()
+                            ));
+                        }
+                    });
                 }
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
@@ -425,27 +386,18 @@ pub fn run() {
             let handle = app.handle().clone();
             let mut states = client.subscribe();
             let initial = states.borrow().clone();
-            let mut client_key_revision = initial.client_key_revision;
-            let mut backend_instance = initial.backend_instance.clone();
+            let mut projection = desktop_runtime::ui_api::StateEventProjection::new(&initial);
+            let host = ui_api::TauriHost::new(window.clone());
             tray::sync(&handle, &initial);
             let mut alerts = notifications::Observer::new(&initial);
             tauri::async_runtime::spawn(async move {
                 while states.changed().await.is_ok() {
                     let state = states.borrow().clone();
-                    if state.client_key_revision != client_key_revision
-                        || state.backend_instance != backend_instance
-                    {
-                        client_key_revision = state.client_key_revision;
-                        backend_instance = state.backend_instance.clone();
-                        // A restarted backend may retain a token without a rotation result yet.
-                        let _ = handle.emit(
-                            "gateway://client-key-changed",
-                            state.client_key_available.unwrap_or(true),
-                        );
+                    for event in projection.project(&state) {
+                        let _ = desktop_runtime::ui_api::Host::emit(&host, event);
                     }
                     tray::sync(&handle, &state);
                     alerts.update(&handle, &state);
-                    let _ = handle.emit("gateway://state", state);
                 }
             });
             if show_on_launch {

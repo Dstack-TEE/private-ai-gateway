@@ -117,8 +117,11 @@ fn resolve(profile: &ProfileConfiguration) -> Result<ConfidentialProfile, String
 }
 
 pub fn write_json(path: &Path, data: &impl Serialize) -> Result<(), String> {
+    write_export(path, &json_content(data)?)
+}
+
+pub fn write_export(path: &Path, text: &str) -> Result<(), String> {
     use std::io::Write;
-    let text = serde_json::to_string_pretty(data).map_err(|_| "Could not encode the export")?;
     let write = || -> std::io::Result<()> {
         let parent = path
             .parent()
@@ -140,6 +143,12 @@ pub fn write_json(path: &Path, data: &impl Serialize) -> Result<(), String> {
             "Could not save the export file".to_string()
         }
     })
+}
+
+pub fn json_content(data: &impl Serialize) -> Result<String, String> {
+    let mut text = serde_json::to_string_pretty(data).map_err(|_| "Could not encode the export")?;
+    text.push('\n');
+    Ok(text)
 }
 
 /// An allowlist of typed fields; never serialize state, raw errors or stderr.
@@ -178,6 +187,15 @@ mod tests {
             assert!(write_json(&link, &serde_json::json!({})).is_err());
             assert_eq!(std::fs::read(&destination).unwrap(), original);
         }
+    }
+    #[test]
+    fn content_exports_are_complete_json_documents() {
+        let content = json_content(&serde_json::json!({"formatVersion": 1})).unwrap();
+        assert!(content.ends_with('\n'));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&content).unwrap(),
+            serde_json::json!({"formatVersion": 1})
+        );
     }
     fn backup() -> ProfileBackup {
         ProfileBackup {

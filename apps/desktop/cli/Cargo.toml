@@ -7,8 +7,10 @@ edition = "2021"
 rust-version = "1.98"
 
 [features]
-default = []
+default = ["web-ui"]
 mac-app-store = ["desktop-runtime/mac-app-store"]
+# The service-hosted browser UI; App Store builds disable default features to omit it.
+web-ui = ["desktop-runtime/web-ui"]
 
 [lib]
 name = "private_ai_proxy"

@@ -10,6 +10,7 @@
     "prepare:brand": "node scripts/prepare-brand.mjs",
     "prepare:macos-icon": "node scripts/prepare-macos-icon.mjs",
     "build": "npm run prepare:brand && npm run prepare:macos-icon && vite build",
+    "build:web": "npm run prepare:brand && vite build --mode web",
     "build:sidecars": "node scripts/bundle-sidecars.mjs",
     "build:sidecars:debug": "node scripts/bundle-sidecars.mjs --debug",
     "package:cli": "node scripts/package-cli.mjs",

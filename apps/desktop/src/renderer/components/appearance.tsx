@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useLayoutEffect, type PropsWithChildren } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { initialAppearance } from "../desktop-api";
+import { initialAppearance } from "../lib/environment";
 import { Hint } from "./hint";
 import type { Appearance, DesktopApi } from "../../shared/contracts";
 import { Item, ItemContent, ItemTitle, ItemActions } from "./ui/item";

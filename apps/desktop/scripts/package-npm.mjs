@@ -166,10 +166,11 @@ function packDirectory(directory, output) {
     ["pack", directory, "--json", "--pack-destination", output],
     { encoding: "utf8" },
   ));
-  if (!Array.isArray(packed) || packed.length !== 1 || typeof packed[0]?.filename !== "string") {
+  const entries = Array.isArray(packed) ? packed : Object.values(packed);
+  if (entries.length !== 1 || typeof entries[0]?.filename !== "string") {
     throw new Error("npm pack did not report exactly one tarball");
   }
-  return path.resolve(output, packed[0].filename);
+  return path.resolve(output, entries[0].filename);
 }
 
 function parseArguments(arguments_) {

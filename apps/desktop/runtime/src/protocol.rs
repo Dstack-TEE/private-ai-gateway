@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::{
     contracts::*,
-    preferences::{Appearance, NotificationPreferences, UpdateChannel},
+    preferences::{Appearance, NotificationPreferences, UpdateChannel, WebUiConfig},
     usage::UsageQuery,
 };
 
@@ -112,9 +112,11 @@ pub enum Command {
     ExportProfiles {
         path: String,
     },
+    ExportProfilesContent,
     ExportDiagnostics {
         path: String,
     },
+    ExportDiagnosticsContent,
     Usage(UsageQuery),
     UsageRecord {
         record_id: String,
@@ -127,6 +129,9 @@ pub enum Command {
     ClientKey,
     RotateClientKey,
     SaveLocalApi(LocalApiConfig),
+    SaveWebUi(WebUiConfig),
+    /// Mint a one-time web UI login link. Only the authenticated IPC endpoint can ask.
+    WebUiLogin,
     RefreshCatalog,
     Agents,
     PreviewAgent {
@@ -202,6 +207,7 @@ impl RpcError {
             );
         }
         for prefix in [
+            "Web UI",
             "Stop protection before",
             "Gateway is already running",
             "Create a Confidential AI profile",

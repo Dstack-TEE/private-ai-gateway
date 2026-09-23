@@ -1,13 +1,12 @@
 mod permission;
 use desktop_runtime::{
-    client::Client, contracts::GatewayState, preferences::NotificationPreferences,
-    protocol::Preference,
+    client::Client, contracts::GatewayState, preferences::NotificationPreferences, ui_api::Method,
 };
 use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, State, WebviewWindow};
 use tauri_plugin_notification::NotificationExt;
 
 #[derive(Default)]
@@ -31,28 +30,55 @@ pub fn initialize(app: &AppHandle) {
     }
 }
 
-#[tauri::command]
-pub async fn get_notification_settings(app: AppHandle) -> Result<Configuration, String> {
-    let client = app.state::<Arc<Client>>().inner().clone();
-    let preferences = crate::run_blocking(move || Ok(client.preferences()?.notifications)).await?;
-    Ok(Configuration {
+pub async fn configuration(
+    app: &AppHandle,
+    preferences: NotificationPreferences,
+) -> Result<serde_json::Value, String> {
+    serde_json::to_value(Configuration {
         preferences,
-        system: permission::query(&app).await,
+        system: permission::query(app).await,
     })
+    .map_err(|_| "Management response failed".to_string())
+}
+
+pub fn set_cached_preferences(
+    app: &AppHandle,
+    preferences: NotificationPreferences,
+) -> Result<(), String> {
+    *app.state::<Settings>()
+        .0
+        .lock()
+        .map_err(|_| "Notification settings are unavailable")? = preferences;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_notification_settings(
+    window: WebviewWindow,
+    client: State<'_, Arc<Client>>,
+) -> Result<serde_json::Value, String> {
+    crate::ui_api::invoke(
+        window,
+        client,
+        Method::GetNotificationSettings,
+        serde_json::json!({}),
+    )
+    .await
 }
 
 #[tauri::command]
 pub async fn save_notification_settings(
-    app: AppHandle,
+    window: WebviewWindow,
+    client: State<'_, Arc<Client>>,
     config: NotificationPreferences,
-) -> Result<(), String> {
-    let client = app.state::<Arc<Client>>().inner().clone();
-    crate::run_blocking(move || client.set_preference(Preference::Notifications(config))).await?;
-    *app.state::<Settings>()
-        .0
-        .lock()
-        .map_err(|_| "Notification settings are unavailable")? = config;
-    Ok(())
+) -> Result<serde_json::Value, String> {
+    crate::ui_api::invoke(
+        window,
+        client,
+        Method::SaveNotificationSettings,
+        serde_json::json!({ "config": config }),
+    )
+    .await
 }
 
 #[tauri::command]

@@ -154,6 +154,7 @@ jobs:
         working-directory: apps/desktop
         run: |
           npm run check
+          npm run build:web
           npm run test:release
           npm run test:probe
       - name: Stage Tauri sidecars

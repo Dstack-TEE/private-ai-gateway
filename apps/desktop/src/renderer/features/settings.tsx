@@ -12,7 +12,7 @@ import { ErrorAlert } from "../components/error-alert";
 import { Item, ItemActions, ItemContent, ItemTitle, ItemDescription } from "../components/ui/item";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
 import { SettingsSection, SettingsList, SettingsLink, SettingsToggle } from "../components/settings";
-import type { DistributionCapabilities, GatewayState, LaunchPreferences } from "../../shared/contracts";
+import type { DistributionCapabilities, GatewayState, LaunchPreferences, WebUiStatus } from "../../shared/contracts";
 import { desktopApi } from "../lib/environment";
 import { parentDirectory, serviceHost } from "../lib/format";
 import type { SettingsTarget } from "../components/navigation";
@@ -52,6 +52,31 @@ function CliRegistrationControl(): React.JSX.Element {
   </Item>;
 }
 
+function WebUiControl({ status, web }: { status: WebUiStatus; web: boolean }): React.JSX.Element {
+  const mutation = useMutation({
+    mutationFn: (enabled: boolean) => desktopApi.saveWebUi({ enabled, port: status.port }),
+  });
+  const change = async () => {
+    const enabled = !status.enabled;
+    if (!enabled && web && !await desktopApi.confirm({
+      title: "Turn off the web UI?",
+      message: "This browser session ends now. Turn the web UI on again from the desktop app or with pap settings set webUi true.",
+      confirmLabel: "Turn Off",
+    })) return;
+    try { await mutation.mutateAsync(enabled); }
+    catch { /* ErrorAlert observes the mutation failure. */ }
+  };
+  const description = !status.enabled
+    ? `Manage this app from a browser on 127.0.0.1:${status.port}. Off by default.`
+    : status.url
+      ? `Listening on ${status.url}. Sign in with pap app open --web.`
+      : status.error ?? "Starting…";
+  return <>
+    <ErrorAlert title="Web UI could not be changed" error={mutation.error ? errorMessage(mutation.error) : undefined} />
+    <SettingsToggle label="Web UI" description={description} checked={status.enabled} disabled={mutation.isPending} onToggle={() => void change()} />
+  </>;
+}
+
 export function SettingsView({
   updates,
   distribution,
@@ -89,14 +114,15 @@ export function SettingsView({
     <div className="page-body max-w-230 min-h-full mt-0 mr-auto mb-0 ml-auto settings-page">
 
       <SettingsSection title="General">
-          <SettingsToggle label="Open at Login" checked={launchPreferences?.openAtLogin ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("openAtLogin", !launchPreferences?.openAtLogin)} />
+          {distribution.launchAtLogin && <SettingsToggle label="Open at Login" checked={launchPreferences?.openAtLogin ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("openAtLogin", !launchPreferences?.openAtLogin)} />}
           <SettingsToggle label="Protect on launch" checked={launchPreferences?.connectOnLaunch ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("connectOnLaunch", !launchPreferences?.connectOnLaunch)} />
           <AppearanceControl />
-          <SettingsLink title="Notifications" aria-label="Notifications" aria-haspopup="dialog" onClick={() => onOpen("notifications")} />
+          {distribution.notifications && <SettingsLink title="Notifications" aria-label="Notifications" aria-haspopup="dialog" onClick={() => onOpen("notifications")} />}
       </SettingsSection>
       <SettingsSection title="Connections">
           <SettingsLink title="Profiles" aria-label="Profiles" aria-haspopup="dialog" onClick={() => onOpen("confidential")} description={activeProfile ? `${activeProfile.name} · ${serviceHost(activeProfile.remoteUrl)} · ${isProtected(state) ? "Protected" : profileIsAvailable(activeProfile, state) ? "Ready" : "Connect account or add an API key"}` : "No provider configured"} />
           <SettingsLink title="Local API" description="Listener and client access" aria-label="Local API settings" aria-haspopup="dialog" onClick={() => onOpen("local-api")} />
+          {distribution.webUi && state.webUi && <WebUiControl status={state.webUi} web={distribution.channel === "web"} />}
       </SettingsSection>
 
       <Collapsible className="group mt-5 [&:first-child]:mt-0 settings-advanced [&_[data-slot=collapsible-trigger]]:mb-2 [&_[aria-expanded=true]_>_svg]:rotate-90">
@@ -114,7 +140,7 @@ export function SettingsView({
 
 
       <SettingsSection title="About">
-          <UpdateControl updates={updates} productName={brand.productName} />
+          <UpdateControl updates={updates} productName={brand.productName} managedLabel={distribution.channel === "web" ? "Updates are managed by the CLI installation" : undefined} />
           {([ ["documentation", "Documentation"], ["github", "GitHub"] ] as const).map(([target, label]) => <SettingsLink key={target} title={label} external onClick={() => onAboutLink(target)} />)}
       </SettingsSection>
       {diagnosticMessage && <p role="status" className="text-sm text-muted-foreground">{diagnosticMessage}</p>}

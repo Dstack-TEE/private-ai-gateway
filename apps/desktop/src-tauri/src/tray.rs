@@ -309,20 +309,33 @@ fn sync_autostart(app: &AppHandle) {
     let menu = app.state::<TrayMenu>();
     let checked = menu.autostart.is_checked().unwrap_or(false);
     let app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let menu = app.state::<TrayMenu>();
-        let result = set_open_at_login(&app, checked);
+    tauri::async_runtime::spawn(async move {
+        let client = app.state::<std::sync::Arc<Client>>().inner().clone();
+        let host = crate::ui_api::TauriHost::from_app(app.clone());
+        let result = desktop_runtime::ui_api::invoke(
+            &client,
+            &host,
+            desktop_runtime::ui_api::Method::SetLaunchPreference,
+            serde_json::json!({ "name": "openAtLogin", "enabled": checked }),
+        )
+        .await;
         if let Err(error) = result {
+            let menu = app.state::<TrayMenu>();
             let _ = menu.autostart.set_checked(!checked);
             crate::report_surface_error(
                 &app,
                 crate::SurfaceErrorScope::Settings,
-                format!("Open at Login could not be changed: {error}"),
+                format!("Open at Login could not be changed: {}", error.message()),
             );
-        }
-        let client = app.state::<std::sync::Arc<Client>>();
-        if let Ok(preferences) = crate::load_launch_preferences(&app, &client) {
-            let _ = app.emit("gateway://launch-preferences", preferences);
+            // Keep open windows in sync with the preference that actually applies.
+            if let Ok(preferences) =
+                desktop_runtime::ui_api::launch_preferences(&client, &host).await
+            {
+                let _ = app.emit(
+                    desktop_runtime::ui_api::LAUNCH_PREFERENCES_EVENT,
+                    preferences,
+                );
+            }
         }
     });
 }

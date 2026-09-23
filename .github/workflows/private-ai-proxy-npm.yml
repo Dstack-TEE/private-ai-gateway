@@ -221,6 +221,7 @@ jobs:
           test "$("$prefix/bin/private-ai-proxy" --version)" = "private-ai-proxy $VERSION"
           test "$("$prefix/bin/pap" --version)" = "private-ai-proxy $VERSION"
           test "$("$prefix/bin/aci" --version)" = "private-ai-proxy $VERSION"
+          "$prefix/bin/pap" app open --help | grep -F -- '--web'
       - name: Upload npm tarballs
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:

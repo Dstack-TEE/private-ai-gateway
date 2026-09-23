@@ -447,6 +447,7 @@ impl GatewayManager {
             session_usage: previous.session_usage.clone(),
             usage_revision: previous.usage_revision,
             catalog: previous.catalog.clone(),
+            web_ui: previous.web_ui.clone(),
             ..GatewayState::default()
         }
     }
@@ -547,6 +548,10 @@ impl GatewayManager {
                 state.endpoint_error = Some(error);
             }
         });
+    }
+
+    pub fn set_web_ui(&self, status: crate::contracts::WebUiStatus) {
+        self.update(|state| state.web_ui = status);
     }
 
     pub fn local_api(&self) -> Result<local_api::ResolvedLocalApi, String> {

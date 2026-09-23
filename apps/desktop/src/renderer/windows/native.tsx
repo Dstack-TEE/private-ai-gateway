@@ -4,13 +4,12 @@ import { useGatewayState } from "../lib/use-gateway-state";
 import { useWindowReady } from "../lib/use-window-ready";
 import { errorMessage } from "../lib/error-message";
 import { showErrorAlert, useErrorAlert } from "../lib/error-alert";
-import { initialGatewayState } from "../desktop-api";
 import { brand } from "../generated/brand";
 import { LocalApiExamples } from "../components/local-api-examples";
 import { NotificationsProvider, NotificationsSheet, useNotifications } from "../components/notifications";
 import { NativeDialogHost } from "../components/sheet";
 import type { GatewayState, LocalApiConfig } from "../../shared/contracts";
-import { desktopApi, query } from "../lib/environment";
+import { desktopApi, initialGatewayState, query, web } from "../lib/environment";
 import { INITIAL_STATE, protectionFlags } from "../lib/protection";
 import { ProfileEditorSheet, ProfilesSheet } from "../features/profiles";
 import { localEndpoint } from "../lib/format";
@@ -27,6 +26,7 @@ type NativeWindowOptions = {
 };
 
 type NativeWindowRequest = {
+  kind?: string;
   state?: GatewayState;
   repair: boolean;
   recordId?: string | null;
@@ -52,6 +52,7 @@ function useNativeGatewayWindow(title: string, options: NativeWindowOptions = {}
   useWindowReady(loaded && (options.contentReady ?? true) && !loadError, desktopApi.nativeDialogReady, setLoadError);
 
   useEffect(() => {
+    if (web) return;
     document.title = `${title} - ${brand.productName}`;
     const root = document.documentElement;
     root.classList.add("is-native-dialog");
@@ -269,7 +270,7 @@ function NativeUsageProofWindow({ initialRecordId }: { initialRecordId: string }
 
 export function NativeWindowContent(): React.JSX.Element | null {
   const nativeDialog = query.get("native-dialog");
-  const [request, setRequest] = useState<NativeWindowRequest | null>(() => ({
+  const [request, setRequest] = useState<NativeWindowRequest | null>(() => web ? null : ({
     state: initialGatewayState, repair: query.get("repair") === "1",
     recordId: query.get("record"), profileId: query.get("profile"), startAfterSave: query.get("start") === "1",
   }));
@@ -284,7 +285,7 @@ export function NativeWindowContent(): React.JSX.Element | null {
     return () => { opened(); dismissed(); };
   }, []);
   if (!request) return null;
-  const content = nativeWindowContent(nativeDialog, request);
+  const content = nativeWindowContent(request.kind ?? nativeDialog, request);
   return <NativeStateContext.Provider key={generation} value={request.state}>{content}</NativeStateContext.Provider>;
 }
 

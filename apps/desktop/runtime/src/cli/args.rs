@@ -122,7 +122,13 @@ pub(super) enum Service {
 #[derive(Subcommand)]
 pub(super) enum App {
     /// Open the installed desktop UI; startup may honor saved connect-on-launch behavior.
-    Open,
+    /// Without a desktop app or graphical session, or with --web, print a one-time
+    /// browser login link for the service-hosted web UI (offering to enable it).
+    Open {
+        /// Print a one-time web UI login link instead of opening the desktop app.
+        #[arg(long)]
+        web: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -378,6 +384,10 @@ pub(super) enum SettingsKey {
     Port,
     #[value(name = "clientHost")]
     ClientHost,
+    #[value(name = "webUi")]
+    WebUi,
+    #[value(name = "webUiPort")]
+    WebUiPort,
 }
 
 impl SettingsKey {
@@ -392,6 +402,8 @@ impl SettingsKey {
             Self::AllowNetworkAccess => "allowNetworkAccess",
             Self::Port => "port",
             Self::ClientHost => "clientHost",
+            Self::WebUi => "webUi",
+            Self::WebUiPort => "webUiPort",
         }
     }
 }
@@ -406,7 +418,7 @@ impl fmt::Display for SettingsKey {
 pub(super) enum Settings {
     /// Stop protection and reset backend settings, preserving profiles, keys and usage.
     Reset,
-    /// Show desktop preferences and Local API settings.
+    /// Show desktop preferences, Local API settings and web UI status.
     Show,
     /// Change one setting. This may restart the Local API or protection.
     Set {

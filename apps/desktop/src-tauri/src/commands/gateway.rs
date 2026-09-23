@@ -1,176 +1,154 @@
 use crate::*;
-
-#[cfg(all(target_os = "macos", feature = "mac-app-store"))]
-pub(crate) static AGENT_ACCESS_REQUEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+use desktop_runtime::ui_api::Method;
+use serde_json::{json, Value};
 
 #[tauri::command]
 pub(crate) async fn get_gateway_state(
+    window: tauri::WebviewWindow,
     client: State<'_, Arc<Client>>,
-) -> Result<GatewayState, String> {
-    let client = client.inner().clone();
-    run_blocking(move || client.state_or_cached()).await
+) -> Result<Value, String> {
+    crate::ui_api::invoke(window, client, Method::GetState, json!({})).await
 }
 
 #[tauri::command]
 pub(crate) async fn start_gateway(
+    window: tauri::WebviewWindow,
     client: State<'_, Arc<Client>>,
     config: StartGatewayConfig,
-) -> Result<GatewayState, String> {
-    let client = client.inner().clone();
-    run_blocking(move || client.start(config)).await
+) -> Result<Value, String> {
+    crate::ui_api::invoke(window, client, Method::Start, json!({ "config": config })).await
 }
 
 #[tauri::command]
 pub(crate) async fn start_backend_service(
+    window: tauri::WebviewWindow,
     client: State<'_, Arc<Client>>,
-) -> Result<GatewayState, String> {
-    let client = client.inner().clone();
-    run_blocking(move || {
-        Client::ensure_service()?;
-        client.state()
-    })
-    .await
+) -> Result<Value, String> {
+    crate::ui_api::invoke(window, client, Method::StartBackendService, json!({})).await
 }
 
 #[tauri::command]
-pub(crate) async fn stop_gateway(client: State<'_, Arc<Client>>) -> Result<GatewayState, String> {
-    let client = client.inner().clone();
-    run_blocking(move || client.stop()).await
+pub(crate) async fn stop_gateway(
+    window: tauri::WebviewWindow,
+    client: State<'_, Arc<Client>>,
+) -> Result<Value, String> {
+    crate::ui_api::invoke(window, client, Method::Stop, json!({})).await
 }
 
 #[tauri::command]
-pub(crate) async fn get_client_key(client: State<'_, Arc<Client>>) -> Result<String, String> {
-    let client = client.inner().clone();
-    run_blocking(move || client.client_key()).await
+pub(crate) async fn get_client_key(
+    window: tauri::WebviewWindow,
+    client: State<'_, Arc<Client>>,
+) -> Result<Value, String> {
+    crate::ui_api::invoke(window, client, Method::GetClientKey, json!({})).await
 }
 
 #[tauri::command]
-pub(crate) async fn rotate_client_key(client: State<'_, Arc<Client>>) -> Result<String, String> {
-    let client = client.inner().clone();
-    run_blocking(move || client.rotate_client_key()).await
+pub(crate) async fn rotate_client_key(
+    window: tauri::WebviewWindow,
+    client: State<'_, Arc<Client>>,
+) -> Result<Value, String> {
+    crate::ui_api::invoke(window, client, Method::RotateClientKey, json!({})).await
 }
 
 #[tauri::command]
 pub(crate) async fn save_local_api_config(
+    window: tauri::WebviewWindow,
     client: State<'_, Arc<Client>>,
     config: LocalApiConfig,
-) -> Result<GatewayState, String> {
-    client.inner().clone().save_local_api_config(config).await
-}
-
-#[tauri::command]
-pub(crate) async fn list_listen_addresses() -> Result<Vec<ListenAddress>, String> {
-    run_blocking(|| {
-        let interfaces = if_addrs::get_if_addrs()
-            .map_err(|_| "Could not read network interfaces. Enter an IP address manually.".to_string())?;
-        let mut addresses: Vec<_> = interfaces
-            .into_iter()
-            .filter(|interface| interface.is_oper_up())
-            // Link-local IPv6 needs a scope ID, which the listener does not support.
-            .filter(|interface| !matches!(interface.ip(), std::net::IpAddr::V6(ip) if ip.is_unicast_link_local()))
-            .map(|interface| ListenAddress {
-                address: interface.ip().to_string(),
-                name: interface.name,
-            })
-            .collect();
-        addresses.sort_by(|a, b| a.address.cmp(&b.address).then(a.name.cmp(&b.name)));
-        addresses.dedup_by(|a, b| a.address == b.address);
-        Ok(addresses)
-    })
+) -> Result<Value, String> {
+    crate::ui_api::invoke(
+        window,
+        client,
+        Method::SaveLocalApiConfig,
+        json!({ "config": config }),
+    )
     .await
 }
 
 #[tauri::command]
-pub(crate) async fn list_agents(
-    app: AppHandle,
+pub(crate) async fn save_web_ui(
+    window: tauri::WebviewWindow,
     client: State<'_, Arc<Client>>,
-) -> Result<Vec<AgentStatus>, String> {
-    let client = client.inner().clone();
-    let agents = run_blocking(move || client.list_agents()).await?;
-    tray::sync_agents(&app, &agents);
-    Ok(agents)
+    config: desktop_runtime::preferences::WebUiConfig,
+) -> Result<Value, String> {
+    crate::ui_api::invoke(
+        window,
+        client,
+        Method::SaveWebUi,
+        json!({ "config": config }),
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn list_listen_addresses(
+    window: tauri::WebviewWindow,
+    client: State<'_, Arc<Client>>,
+) -> Result<Value, String> {
+    crate::ui_api::invoke(window, client, Method::ListListenAddresses, json!({})).await
+}
+
+#[tauri::command]
+pub(crate) async fn list_agents(
+    window: tauri::WebviewWindow,
+    client: State<'_, Arc<Client>>,
+) -> Result<Value, String> {
+    crate::ui_api::invoke(window, client, Method::ListAgents, json!({})).await
 }
 
 #[tauri::command]
 pub(crate) async fn preview_agent_connection(
+    window: tauri::WebviewWindow,
     client: State<'_, Arc<Client>>,
     agent_id: String,
     connect: bool,
     options: ConnectOptions,
-) -> Result<AgentPreview, String> {
-    let client = client.inner().clone();
-    run_blocking(move || client.preview_agent(agent_id, connect, options)).await
+) -> Result<Value, String> {
+    crate::ui_api::invoke(
+        window,
+        client,
+        Method::PreviewAgent,
+        json!({ "agentId": agent_id, "connect": connect, "options": options }),
+    )
+    .await
 }
 
 #[tauri::command]
 pub(crate) async fn apply_agent_connection(
+    window: tauri::WebviewWindow,
     client: State<'_, Arc<Client>>,
     agent_id: String,
     connect: bool,
     revision: String,
     options: ConnectOptions,
-) -> Result<AgentStatus, String> {
-    let client = client.inner().clone();
-    run_blocking(move || client.apply_agent(agent_id, connect, revision, options)).await
+) -> Result<Value, String> {
+    crate::ui_api::invoke(
+        window,
+        client,
+        Method::ApplyAgent,
+        json!({
+            "agentId": agent_id,
+            "connect": connect,
+            "revision": revision,
+            "options": options
+        }),
+    )
+    .await
 }
 
 #[tauri::command]
 pub(crate) async fn get_agent_access(
-) -> Result<desktop_runtime::agent_access::AgentAccessStatus, String> {
-    run_blocking(|| Ok(desktop_runtime::agent_access::status())).await
+    window: tauri::WebviewWindow,
+    client: State<'_, Arc<Client>>,
+) -> Result<Value, String> {
+    crate::ui_api::invoke(window, client, Method::GetAgentAccess, json!({})).await
 }
 
-#[cfg(all(target_os = "macos", feature = "mac-app-store"))]
 #[tauri::command]
 pub(crate) async fn request_agent_access(
     window: tauri::WebviewWindow,
     client: State<'_, Arc<Client>>,
-) -> Result<desktop_runtime::agent_access::AgentAccessStatus, String> {
-    use tauri::Emitter;
-    use tauri_plugin_dialog::DialogExt;
-
-    // Serialize explicit requests across windows; never stack native panels.
-    let Ok(_request) = AGENT_ACCESS_REQUEST.try_lock() else {
-        return get_agent_access().await;
-    };
-    let status = get_agent_access().await?;
-    if window.label() != "main" || crate::native_dialog::has_active_dialog(window.app_handle()) {
-        return Ok(status);
-    }
-    if status != desktop_runtime::agent_access::AgentAccessStatus::Authorized {
-        let home = desktop_runtime::agent_access::expected_home()?;
-        let (send, receive) = tokio::sync::oneshot::channel();
-        window
-            .dialog()
-            .file()
-            .set_parent(&window)
-            .set_title("Choose Home Folder")
-            .set_directory(&home)
-            .set_can_create_directories(false)
-            .pick_folder(move |selection| {
-                let _ = send.send(selection);
-            });
-        let Some(selection) = receive
-            .await
-            .map_err(|_| "The Home folder picker could not complete".to_string())?
-        else {
-            return run_blocking(|| Ok(desktop_runtime::agent_access::status())).await;
-        };
-        let path = selection
-            .into_path()
-            .map_err(|_| "The selected Home folder is invalid".to_string())?;
-        run_blocking(move || desktop_runtime::agent_access::authorize(&path)).await?;
-    }
-    run_blocking(desktop_runtime::agent_access::prepare_for_service).await?;
-    let client = client.inner().clone();
-    run_blocking(move || client.restart_service()).await?;
-    let _ = window.emit("gateway://agents-changed", ());
-    run_blocking(|| Ok(desktop_runtime::agent_access::status())).await
-}
-
-#[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
-#[tauri::command]
-pub(crate) async fn request_agent_access(
-) -> Result<desktop_runtime::agent_access::AgentAccessStatus, String> {
-    get_agent_access().await
+) -> Result<Value, String> {
+    crate::ui_api::invoke(window, client, Method::RequestAgentAccess, json!({})).await
 }

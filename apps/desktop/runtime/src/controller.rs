@@ -5,6 +5,7 @@ mod credentials;
 mod endpoint;
 mod lifecycle;
 mod profiles;
+mod web_ui;
 
 use std::{
     path::PathBuf,
@@ -70,6 +71,8 @@ pub struct DesktopRuntime {
     #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
     agent_home: Option<PathBuf>,
     instance: Option<lock::InstanceLock>,
+    web_ui: crate::web_ui::WebUi,
+    admission: Arc<crate::server::Admission>,
 }
 
 struct SavedConfiguration<'a> {
@@ -302,6 +305,8 @@ impl DesktopRuntime {
             #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
             agent_home,
             instance: Some(instance),
+            web_ui: crate::web_ui::WebUi::new(task_runtime.clone()),
+            admission: Arc::default(),
         });
 
         match (listener, launch_error) {
@@ -331,6 +336,10 @@ impl DesktopRuntime {
             manager.report_error(error);
         }
         if runtime.instance.is_some() {
+            match crate::preferences::load() {
+                Ok(saved) => runtime.apply_web_ui(saved.web_ui),
+                Err(error) => runtime.report_error(error),
+            }
             runtime.initialize_startup_tokens();
             if let Err(error) = runtime.recovery.start() {
                 runtime.report_error(error);
@@ -435,15 +444,20 @@ impl DesktopRuntime {
     }
 
     pub fn export_profiles(&self, path: PathBuf) -> Result<(), String> {
+        crate::maintenance::write_export(&path, &self.export_profiles_content()?)
+    }
+
+    pub fn export_profiles_content(&self) -> Result<String, String> {
         let backup = crate::maintenance::ProfileBackup::from_profiles(&self.state()?.profiles);
-        crate::maintenance::write_json(&path, &backup)
+        crate::maintenance::json_content(&backup)
     }
 
     pub fn export_diagnostics(&self, path: PathBuf, version: &str) -> Result<(), String> {
-        crate::maintenance::write_json(
-            &path,
-            &crate::maintenance::diagnostics(&self.state()?, version),
-        )
+        crate::maintenance::write_export(&path, &self.export_diagnostics_content(version)?)
+    }
+
+    pub fn export_diagnostics_content(&self, version: &str) -> Result<String, String> {
+        crate::maintenance::json_content(&crate::maintenance::diagnostics(&self.state()?, version))
     }
 
     pub fn usage_record(&self, record_id: &str) -> Result<Option<RequestActivity>, String> {

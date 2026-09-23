@@ -184,6 +184,7 @@ impl DesktopRuntime {
             false,
         );
         crate::preferences::reset()?;
+        self.apply_web_ui(crate::preferences::WebUiConfig::default());
         self.manager.snapshot()
     }
 }

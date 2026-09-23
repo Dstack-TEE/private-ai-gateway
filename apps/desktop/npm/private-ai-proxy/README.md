@@ -22,9 +22,13 @@ delivered as an optional dependency.
 pap --help
 pap service start
 pap service status
+pap app open --web
 ```
 
 The CLI, service, and credential helper are distributed together so the local
-service can start the matching binaries from the same installation.
+service can start the matching binaries from the same installation. The
+service can also host the management UI on `127.0.0.1` (off by default): enable
+it with `pap settings set webUi true`, then sign in with the one-time link from
+`pap app open --web`.
 
 Source and release notes: https://github.com/Dstack-TEE/private-ai-gateway

@@ -17,6 +17,9 @@ pub(crate) struct DistributionCapabilities {
     pub cli_registration: bool,
     pub account_portal_links: bool,
     pub sandbox_home_access: bool,
+    pub launch_at_login: bool,
+    pub notifications: bool,
+    pub web_ui: bool,
 }
 
 #[cfg(feature = "mac-app-store")]
@@ -26,6 +29,9 @@ pub(crate) const CAPABILITIES: DistributionCapabilities = DistributionCapabiliti
     cli_registration: false,
     account_portal_links: false,
     sandbox_home_access: cfg!(target_os = "macos"),
+    launch_at_login: true,
+    notifications: true,
+    web_ui: false,
 };
 
 #[cfg(not(feature = "mac-app-store"))]
@@ -35,6 +41,9 @@ pub(crate) const CAPABILITIES: DistributionCapabilities = DistributionCapabiliti
     cli_registration: true,
     account_portal_links: true,
     sandbox_home_access: false,
+    launch_at_login: true,
+    notifications: true,
+    web_ui: true,
 };
 
 pub(crate) fn initialization_script() -> String {
@@ -69,6 +78,9 @@ mod tests {
                 "cliRegistration": !app_store,
                 "accountPortalLinks": !app_store,
                 "sandboxHomeAccess": app_store && cfg!(target_os = "macos"),
+                "launchAtLogin": true,
+                "notifications": true,
+                "webUi": !app_store,
             })
         );
         assert_eq!(

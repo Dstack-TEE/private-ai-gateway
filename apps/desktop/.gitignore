@@ -3,6 +3,7 @@
 /brand/.generated/
 /release/
 /target/
+/runtime/web-dist/
 /src-tauri/binaries/*
 /src-tauri/icons/Assets.car
 /src-tauri/tauri.brand.conf.json

@@ -359,11 +359,12 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
         Action::Settings { command } => {
             match command {
                 Settings::Reset => {
-                    confirm(cli, "Stop protection, restore all agents, and reset backend settings? Profiles, keys and usage are kept. Open at Login is managed by the desktop app.")?;
+                    confirm(cli, "Stop protection, restore all agents, and reset backend settings, including turning off the web UI? Profiles, keys and usage are kept. Open at Login is managed by the desktop app.")?;
                     value(client.reset_settings()?)?
                 }
                 Settings::Show => {
-                    json!({"preferences": client.preferences()?, "localApi": client.state()?.local_api})
+                    let state = client.state()?;
+                    json!({"preferences": client.preferences()?, "localApi": state.local_api, "webUi": state.web_ui})
                 }
                 Settings::Set { key, value: input } => {
                     confirm(cli, "Change gateway settings?")?;
@@ -392,6 +393,15 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                             _ => return Err("Expected beta or stable".into()),
                         },
                     ))?)?,
+                    SettingsKey::WebUi | SettingsKey::WebUiPort => {
+                        let mut config = client.preferences()?.web_ui;
+                        if matches!(key, SettingsKey::WebUi) {
+                            config.enabled = parse_bool(input)?;
+                        } else {
+                            config.port = input.parse().map_err(|_| "Expected a valid port number")?;
+                        }
+                        client.request(Command::SaveWebUi(config))?
+                    }
                     SettingsKey::ListenAddress
                     | SettingsKey::AllowNetworkAccess
                     | SettingsKey::Port
@@ -462,38 +472,100 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
             client.export_diagnostics(path.clone())?;
             json!({"exported": path})
         }
-        Action::App { command: App::Open } => {
-            let data = desktop_gateway::agents::app_data_dir()?;
-            let _startup = desktop_gateway::lock::startup(&data)
-                .map_err(|_| "Cannot acquire app startup lock")?
-                .ok_or("Backend startup or an update is already in progress.")?;
-            let backend = crate::launch::service_executable()?;
-            let app =
-                backend
-                    .parent()
-                    .ok_or("Cannot locate app directory")?
-                    .join(if cfg!(windows) {
-                        "private-ai-proxy-desktop.exe"
-                    } else {
-                        "private-ai-proxy-desktop"
-                    });
-            if !app.is_file() {
-                return Err("Desktop UI is not installed alongside this CLI.".into());
-            }
-            let mut child = std::process::Command::new(app)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .map_err(|_| "Cannot launch desktop UI")?;
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
-            json!({"opened": true})
-        }
+        Action::App {
+            command: App::Open { web },
+        } => match desktop_app().filter(|_| !*web && graphical_session()) {
+            Some(app) => open_desktop_app(app)?,
+            None => open_web_ui(cli, &client)?,
+        },
         Action::Completions { .. } | Action::Schema => unreachable!(),
     };
     finish_output(output(&result, cli))
+}
+
+fn desktop_app() -> Option<PathBuf> {
+    let backend = crate::launch::service_executable().ok()?;
+    let app = backend.parent()?.join(if cfg!(windows) {
+        "private-ai-proxy-desktop.exe"
+    } else {
+        "private-ai-proxy-desktop"
+    });
+    app.is_file().then_some(app)
+}
+
+/// Whether windows can appear for this user; remote shells get printed links instead.
+fn graphical_session() -> bool {
+    let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+    if set("SSH_CONNECTION") || set("SSH_TTY") {
+        return false;
+    }
+    cfg!(any(target_os = "macos", windows)) || set("DISPLAY") || set("WAYLAND_DISPLAY")
+}
+
+fn open_desktop_app(app: PathBuf) -> Result<Value, String> {
+    let data = desktop_gateway::agents::app_data_dir()?;
+    let _startup = desktop_gateway::lock::startup(&data)
+        .map_err(|_| "Cannot acquire app startup lock")?
+        .ok_or("Backend startup or an update is already in progress.")?;
+    let mut child = std::process::Command::new(app)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|_| "Cannot launch desktop UI")?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(json!({"opened": true}))
+}
+
+/// Prints a one-time login link minted over the authenticated management endpoint.
+fn open_web_ui(cli: &Cli, client: &Client) -> Result<Value, String> {
+    Client::ensure_service()?;
+    let status = client.state()?.web_ui;
+    if !status.enabled {
+        if !cli.yes && (cli.json || cli.non_interactive || !io::stdin().is_terminal()) {
+            return Err("The web UI is off. Enable it with `pap settings set webUi true`, or rerun with --yes.".into());
+        }
+        confirm(
+            cli,
+            &format!("Web UI is off. Enable it on 127.0.0.1:{}?", status.port),
+        )?;
+        // The same change `settings set webUi true` makes.
+        let mut config = client.preferences()?.web_ui;
+        config.enabled = true;
+        client.request::<GatewayState>(Command::SaveWebUi(config))?;
+    }
+    let login: crate::web_ui::WebUiLogin = client.request(Command::WebUiLogin)?;
+    let opened = graphical_session() && open_browser(&login.url).is_ok();
+    Ok(json!({
+        "url": login.url,
+        "expiresInSeconds": login.expires_in_seconds,
+        "browserOpened": opened
+    }))
+}
+
+fn open_browser(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(target_os = "macos")]
+    command.arg(url);
+    #[cfg(windows)]
+    let mut command = std::process::Command::new("rundll32.exe");
+    #[cfg(windows)]
+    command.args(["url.dll,FileProtocolHandler", url]);
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let mut command = std::process::Command::new("xdg-open");
+    #[cfg(not(any(target_os = "macos", windows)))]
+    command.arg(url);
+    // Without a terminal, a text-mode fallback browser cannot take over this shell.
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(drop)
+        .map_err(|_| "Cannot open a browser".to_string())
 }
 
 fn new_export_path(path: &std::path::Path) -> Result<PathBuf, String> {

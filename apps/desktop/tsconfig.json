@@ -9,7 +9,7 @@
     "noImplicitOverride": true,
     "noFallthroughCasesInSwitch": true,
     "skipLibCheck": true,
-    "paths": { "@/*": ["./src/renderer/*"] },
+    "paths": { "@/*": ["./src/renderer/*"], "#backend": ["./src/renderer/backends/tauri-api.ts"] },
     "types": ["node", "vite/client"],
     "noUnusedLocals": true
   },

@@ -1,137 +1,101 @@
-use crate::*;
+use std::{path::PathBuf, sync::Arc};
+
+use desktop_runtime::{
+    client::Client, maintenance::ProfileBackup, preferences::Appearance, protocol::Preference,
+    ui_api::Method,
+};
+use serde_json::{json, Value};
+use tauri::{AppHandle, Manager, State, WebviewWindow};
+
+use crate::{distribution, run_blocking, run_cli_command, CliRegistration, CliStartup};
 
 #[tauri::command]
 pub(crate) async fn get_launch_preferences(
-    app: AppHandle,
+    window: WebviewWindow,
     client: State<'_, Arc<Client>>,
-) -> Result<LaunchPreferences, String> {
-    let client = client.inner().clone();
-    run_blocking(move || load_launch_preferences(&app, &client)).await
+) -> Result<Value, String> {
+    crate::ui_api::invoke(window, client, Method::GetLaunchPreferences, json!({})).await
 }
 
 #[tauri::command]
 pub(crate) async fn set_launch_preference(
-    app: AppHandle,
+    window: WebviewWindow,
     client: State<'_, Arc<Client>>,
     name: String,
     enabled: bool,
-) -> Result<LaunchPreferences, String> {
-    let client = client.inner().clone();
-    run_blocking(move || {
-        match name.as_str() {
-            "openAtLogin" => tray::set_open_at_login(&app, enabled)?,
-            "connectOnLaunch" => {
-                client.set_preference(Preference::ConnectOnLaunch(enabled))?;
-            }
-            _ => return Err("Unknown startup preference".to_string()),
-        }
-        let preferences = load_launch_preferences(&app, &client)?;
-        let _ = app.emit("gateway://launch-preferences", &preferences);
-        Ok(preferences)
-    })
+) -> Result<Value, String> {
+    crate::ui_api::invoke(
+        window,
+        client,
+        Method::SetLaunchPreference,
+        json!({ "name": name, "enabled": enabled }),
+    )
     .await
 }
 
 #[tauri::command]
 pub(crate) async fn reset_settings(
-    app: AppHandle,
+    window: WebviewWindow,
     client: State<'_, Arc<Client>>,
-    prepared: State<'_, updates::PreparedUpdate>,
-) -> Result<GatewayState, String> {
-    let mut prepared = prepared
-        .0
-        .try_lock()
-        .map_err(|_| "An update operation is in progress")?;
-    let worker_app = app.clone();
-    let client = client.inner().clone();
-    let worker = client.clone();
-    let result = run_blocking(move || {
-        let state = worker.reset_settings()?;
-        tray::set_open_at_login(&worker_app, false)?;
-        if let (Some(window), Some(defaults)) = (
-            worker_app.get_webview_window("main"),
-            worker_app
-                .config()
-                .app
-                .windows
-                .iter()
-                .find(|window| window.label == "main"),
-        ) {
-            window
-                .set_fullscreen(false)
-                .map_err(|_| "Could not reset the window")?;
-            window
-                .unmaximize()
-                .map_err(|_| "Could not reset the window")?;
-            window
-                .set_size(tauri::LogicalSize::new(defaults.width, defaults.height))
-                .map_err(|_| "Could not reset the window size")?;
-            window.center().map_err(|_| "Could not center the window")?;
-        }
-        Ok(state)
-    })
-    .await;
-    *prepared = None;
-    refresh_preferences(&app, &client);
-    let state = result.map_err(|error| {
-        format!("Reset did not finish. Review the error and retry Reset settings. {error}")
-    })?;
-    app.emit_to("main", "gateway://settings-reset", ())
-        .map_err(|_| "Settings reset, but the interface could not refresh")?;
-    Ok(state)
+) -> Result<Value, String> {
+    crate::ui_api::invoke(window, client, Method::ResetSettings, json!({})).await
 }
 
 #[tauri::command]
-pub(crate) async fn get_appearance(client: State<'_, Arc<Client>>) -> Result<Appearance, String> {
-    let client = client.inner().clone();
-    run_blocking(move || Ok(client.preferences()?.appearance)).await
+pub(crate) async fn get_appearance(
+    window: WebviewWindow,
+    client: State<'_, Arc<Client>>,
+) -> Result<Value, String> {
+    crate::ui_api::invoke(window, client, Method::GetAppearance, json!({})).await
 }
 
 #[tauri::command]
 pub(crate) async fn set_appearance(
-    app: AppHandle,
+    window: WebviewWindow,
     client: State<'_, Arc<Client>>,
     appearance: Appearance,
-) -> Result<(), String> {
-    let client = client.inner().clone();
-    run_blocking(move || {
-        client.set_preference(Preference::Appearance(appearance))?;
-        Ok(())
-    })
-    .await?;
-    apply_appearance(&app, appearance);
-    app.emit("gateway://appearance", appearance)
-        .map_err(|_| "Could not sync appearance".to_string())
+) -> Result<Value, String> {
+    crate::ui_api::invoke(
+        window,
+        client,
+        Method::SetAppearance,
+        json!({ "appearance": appearance }),
+    )
+    .await
 }
 
 #[tauri::command]
-pub(crate) async fn read_profile_backup(
-    path: PathBuf,
-) -> Result<desktop_runtime::maintenance::ProfileBackup, String> {
-    run_blocking(move || desktop_runtime::maintenance::ProfileBackup::read(&path)).await
+pub(crate) async fn read_profile_backup(path: PathBuf) -> Result<ProfileBackup, String> {
+    run_blocking(move || ProfileBackup::read(&path)).await
 }
 
 #[tauri::command]
 pub(crate) async fn import_profiles(
-    runtime: State<'_, Arc<Client>>,
-    backup: desktop_runtime::maintenance::ProfileBackup,
-) -> Result<desktop_runtime::maintenance::ImportResult, String> {
-    let runtime = runtime.inner().clone();
-    run_blocking(move || runtime.import_profiles(backup)).await
+    window: WebviewWindow,
+    client: State<'_, Arc<Client>>,
+    backup: ProfileBackup,
+) -> Result<Value, String> {
+    crate::ui_api::invoke(
+        window,
+        client,
+        Method::ImportProfiles,
+        json!({ "backup": backup }),
+    )
+    .await
 }
 
 #[tauri::command]
 pub(crate) async fn export_profiles(
-    runtime: State<'_, Arc<Client>>,
+    window: WebviewWindow,
+    client: State<'_, Arc<Client>>,
     path: PathBuf,
 ) -> Result<(), String> {
-    let runtime = runtime.inner().clone();
-    run_blocking(move || {
-        let backup =
-            desktop_runtime::maintenance::ProfileBackup::from_profiles(&runtime.state()?.profiles);
-        desktop_runtime::maintenance::write_json(&path, &backup)
-    })
-    .await
+    let content =
+        crate::ui_api::invoke(window, client, Method::ExportProfilesContent, json!({})).await?;
+    let content: String =
+        serde_json::from_value(content).map_err(|_| "Management response failed")?;
+    // The app writes the file so sandboxed builds keep the picker's file access.
+    run_blocking(move || desktop_runtime::maintenance::write_export(&path, &content)).await
 }
 
 #[tauri::command]
@@ -156,7 +120,7 @@ pub(crate) async fn get_cli_registration(app: AppHandle) -> Result<CliRegistrati
         "Command registration is unavailable in this distribution",
     )?;
     #[cfg(target_os = "macos")]
-    register_cli_on_startup(&app).await;
+    crate::register_cli_on_startup(&app).await;
     let registration = run_cli_command(&app, vec!["cli", "status", "--json"]).await?;
     let startup_error = app.state::<CliStartup>().0.lock().await.last_error.clone();
     Ok(CliRegistration {
@@ -175,7 +139,7 @@ pub(crate) async fn set_cli_registration(
         "Command registration is unavailable in this distribution",
     )?;
     #[cfg(target_os = "macos")]
-    register_cli_on_startup(&app).await;
+    crate::register_cli_on_startup(&app).await;
     let startup = app.state::<CliStartup>();
     let mut state = startup.0.lock().await;
     let client = app.state::<Arc<Client>>().inner().clone();

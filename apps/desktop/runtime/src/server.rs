@@ -22,11 +22,23 @@ use crate::{
 
 const MAX_CLIENTS: usize = 32;
 
-struct Admission {
+/// Lifecycle admission shared by every management transport of one service.
+pub(crate) struct Admission {
     draining: AtomicBool,
     mutations: RwLock<()>,
     watchers: Semaphore,
     exports: Semaphore,
+}
+
+impl Default for Admission {
+    fn default() -> Self {
+        Self {
+            draining: AtomicBool::new(false),
+            mutations: RwLock::new(()),
+            watchers: Semaphore::new(4),
+            exports: Semaphore::new(1),
+        }
+    }
 }
 
 pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
@@ -53,12 +65,7 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
     };
     let stopping = Arc::new(AtomicBool::new(false));
     let permits = Arc::new(Semaphore::new(MAX_CLIENTS));
-    let admission = Arc::new(Admission {
-        draining: AtomicBool::new(false),
-        mutations: RwLock::new(()),
-        watchers: Semaphore::new(4),
-        exports: Semaphore::new(1),
-    });
+    let admission = runtime.admission();
     let mut tasks = JoinSet::new();
     let handle = Handle::current();
     let startup = runtime.clone();
@@ -274,49 +281,7 @@ fn connection(
             },
         );
     }
-    if matches!(request.command, Command::State) {
-        let result = handle.block_on(dispatch(&runtime, request.command));
-        return protocol::write(
-            reader.get_mut(),
-            &Response {
-                id: request.id,
-                outcome: outcome(result),
-            },
-        );
-    }
-    let _operation = admission
-        .mutations
-        .read()
-        .map_err(|_| std::io::Error::other("Management admission failed"))?;
-    if admission.draining.load(Ordering::Acquire) {
-        return protocol::write(
-            reader.get_mut(),
-            &Response {
-                id: request.id,
-                outcome: Outcome::Error(RpcError::new("busy", "The backend is shutting down.")),
-            },
-        );
-    }
-    let _export = if matches!(request.command, Command::ExportUsage { .. }) {
-        match admission.exports.try_acquire() {
-            Ok(permit) => Some(permit),
-            Err(_) => {
-                return protocol::write(
-                    reader.get_mut(),
-                    &Response {
-                        id: request.id,
-                        outcome: Outcome::Error(RpcError::new(
-                            "busy",
-                            "Another export is in progress.",
-                        )),
-                    },
-                )
-            }
-        }
-    } else {
-        None
-    };
-    let result = handle.block_on(dispatch(&runtime, request.command));
+    let result = execute(&runtime, &admission, &handle, request.command);
     protocol::write(
         reader.get_mut(),
         &Response {
@@ -324,6 +289,37 @@ fn connection(
             outcome: outcome(result),
         },
     )
+}
+
+/// Admits and runs one management command. Both the IPC endpoint and the
+/// service-hosted web UI use this path.
+pub(crate) fn execute(
+    runtime: &Arc<DesktopRuntime>,
+    admission: &Admission,
+    handle: &Handle,
+    command: Command,
+) -> Result<Value, RpcError> {
+    if matches!(command, Command::State) {
+        return handle.block_on(dispatch(runtime, command));
+    }
+    let _operation = admission
+        .mutations
+        .read()
+        .map_err(|_| RpcError::new("busy", "Management admission failed."))?;
+    if admission.draining.load(Ordering::Acquire) {
+        return Err(RpcError::new("busy", "The backend is shutting down."));
+    }
+    let _export = if matches!(command, Command::ExportUsage { .. }) {
+        Some(
+            admission
+                .exports
+                .try_acquire()
+                .map_err(|_| RpcError::new("busy", "Another export is in progress."))?,
+        )
+    } else {
+        None
+    };
+    handle.block_on(dispatch(runtime, command))
 }
 
 fn shutdown(
@@ -430,6 +426,7 @@ async fn dispatch(runtime: &Arc<DesktopRuntime>, command: Command) -> Result<Val
                 runtime.export_profiles(path)?;
                 value(())
             }
+            Command::ExportProfilesContent => value(runtime.export_profiles_content()?),
             Command::ExportDiagnostics { path } => {
                 let path = std::path::PathBuf::from(path);
                 if !path.is_absolute() {
@@ -437,6 +434,9 @@ async fn dispatch(runtime: &Arc<DesktopRuntime>, command: Command) -> Result<Val
                 }
                 runtime.export_diagnostics(path, protocol::BUILD_VERSION)?;
                 value(())
+            }
+            Command::ExportDiagnosticsContent => {
+                value(runtime.export_diagnostics_content(protocol::BUILD_VERSION)?)
             }
             Command::Usage(query) => value(runtime.query_usage(query)?),
             Command::UsageRecord { record_id } => value(runtime.usage_record(&record_id)?),
@@ -451,6 +451,8 @@ async fn dispatch(runtime: &Arc<DesktopRuntime>, command: Command) -> Result<Val
             Command::ClientKey => value(runtime.client_key()?),
             Command::RotateClientKey => value(runtime.rotate_client_key()?),
             Command::SaveLocalApi(config) => value(runtime.save_local_api_config(config).await?),
+            Command::SaveWebUi(config) => value(runtime.save_web_ui(config)?),
+            Command::WebUiLogin => value(runtime.web_ui_login()?),
             Command::RefreshCatalog => value(runtime.refresh_catalog().await?),
             Command::Agents => value(runtime.list_agents()?),
             Command::PreviewAgent {
