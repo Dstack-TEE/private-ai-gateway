@@ -8,6 +8,7 @@
 //! Only digests and verdicts are retained after the request; bodies never go to disk.
 //! No bodies are logged.
 
+use std::collections::VecDeque;
 use std::future::Future;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,9 +16,10 @@ use std::sync::{Arc, Mutex};
 
 use crate::capture::{tee, CompletionHook, StreamEnd};
 use axum::body::{to_bytes, Body, Bytes};
+use axum::extract::Path;
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
-use axum::Router;
+use axum::{Json, Router};
 use desktop_gateway::proxy::{
     hop_by_hop_names, ForwardContext, ProxyEvent, VerifiedResponse, VerifiedService, MAX_BODY_BYTES,
 };
@@ -40,6 +42,12 @@ use crate::client::{AciClient, HttpResult};
 use crate::sessions::audit_current_sessions;
 use crate::transcript::{Status, Transcript};
 use crate::verify::{verify_service, ServiceVerification};
+
+macro_rules! diagnostic {
+    ($($arg:tt)*) => {
+        desktop_runtime::diagnostic(format_args!($($arg)*))
+    };
+}
 
 /// Headers that select either E2EE v2 or the legacy encrypted transport.
 /// `private-ai-proxy serve` exposes a plaintext local API, so even a partial encrypted
@@ -118,6 +126,9 @@ pub struct RecordedExchange {
     delivery: ResponseDelivery,
     /// The client's §5.3 pinned session ids from the request body.
     pub pinned_sessions: Vec<String>,
+    pub at: u64,
+    /// Verdict of the last verification, when one reached a verdict.
+    pub verified: Option<bool>,
     pub context: Option<ForwardContext>,
     /// Whether the forwarded body differs from what the caller sent.
     pub local_policy_applied: bool,
@@ -129,6 +140,9 @@ enum ResponseDelivery {
     Failed(String),
     Cancelled,
 }
+
+/// Recorded exchanges kept for standalone on-demand verification.
+const RECORDED_CAP: usize = 256;
 
 pub struct ProxyState {
     client: AciClient,
@@ -149,6 +163,7 @@ pub struct ProxyState {
     blocked: AtomicBool,
     /// Serializes the re-verify so a burst of blocked requests reverifies once.
     reverify: tokio::sync::Mutex<()>,
+    recorded: Mutex<VecDeque<RecordedExchange>>,
     /// `--session`: a fixed §5.3 accepted set composed with every request's
     /// own pins. Never refreshed, so a 412 refusal surfaces as-is.
     fixed_pins: Vec<String>,
@@ -207,6 +222,7 @@ impl ProxyState {
             }),
             blocked: AtomicBool::new(false),
             reverify: tokio::sync::Mutex::new(()),
+            recorded: Mutex::new(VecDeque::new()),
             fixed_pins,
             required_claims,
             policy_pins: Mutex::new(Vec::new()),
@@ -224,6 +240,14 @@ impl ProxyState {
             .lock()
             .expect("delivery gate poisoned")
             .clone()
+    }
+
+    fn record(&self, exchange: RecordedExchange) {
+        let mut recorded = self.recorded.lock().expect("recorded ring poisoned");
+        if recorded.len() == RECORDED_CAP {
+            recorded.pop_front();
+        }
+        recorded.push_back(exchange);
     }
 
     /// Cancel every delivery admitted under the previous identity.
@@ -307,7 +331,7 @@ impl ProxyState {
         };
         self.blocked.store(false, Ordering::SeqCst);
         (self.event_sink)(identity_event);
-        eprintln!("private-ai-proxy serve: re-verified after keyset change; resuming forwards");
+        diagnostic!("private-ai-proxy serve: re-verified after keyset change; resuming forwards");
         Ok(())
     }
 }
@@ -352,6 +376,25 @@ impl InProcessVerifierLauncher {
     pub fn new(runtime: tokio::runtime::Handle) -> Self {
         Self { runtime }
     }
+
+    fn spawn_task<F, Fut>(&self, events: VerifierEventSink, worker: F) -> Box<dyn VerifierTask>
+    where
+        F: FnOnce(tokio_util::sync::CancellationToken) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<(), String>> + Send + 'static,
+    {
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let worker = self.runtime.spawn(worker(cancellation.clone()));
+        self.runtime.spawn(async move {
+            let error = match worker.await {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(error),
+                Err(error) if error.is_cancelled() => None,
+                Err(error) => Some(format!("Verifier task failed: {error}")),
+            };
+            events(VerifierEvent::Terminated { error });
+        });
+        Box::new(InProcessVerifierTask { cancellation })
+    }
 }
 
 #[allow(dead_code)]
@@ -379,14 +422,13 @@ impl VerifierLauncher for InProcessVerifierLauncher {
         events: VerifierEventSink,
         requests: tokio::sync::mpsc::Sender<ProxyEvent>,
     ) -> Result<Box<dyn VerifierTask>, String> {
-        let cancellation = tokio_util::sync::CancellationToken::new();
-        let cancelled = cancellation.clone();
         let worker_events = events.clone();
-        let worker = self.runtime.spawn(async move {
+        let task = self.spawn_task(events, move |cancelled| async move {
             let args = ServeArgs {
                 base_url: config.remote_url.clone(),
                 accepted_composes: Vec::new(),
                 listen: None,
+                control: None,
                 json_events: false,
                 allow_unverified: false,
                 sessions: Vec::new(),
@@ -422,16 +464,7 @@ impl VerifierLauncher for InProcessVerifierLauncher {
                 }
             }
         });
-        self.runtime.spawn(async move {
-            let error = match worker.await {
-                Ok(Ok(())) => None,
-                Ok(Err(error)) => Some(error),
-                Err(error) if error.is_cancelled() => None,
-                Err(error) => Some(format!("Verifier task failed: {error}")),
-            };
-            events(VerifierEvent::Terminated { error });
-        });
-        Ok(Box::new(InProcessVerifierTask { cancellation }))
+        Ok(task)
     }
 }
 
@@ -475,12 +508,20 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
     let local = listener
         .local_addr()
         .map_err(|e| format!("cannot read listen address: {e}"))?;
+    let control = args.control.as_deref().unwrap_or("127.0.0.1:4181");
+    let control_listener = tokio::net::TcpListener::bind(control)
+        .await
+        .map_err(|e| format!("cannot bind control address {control}: {e}"))?;
+    let control_local = control_listener
+        .local_addr()
+        .map_err(|e| format!("cannot read control address: {e}"))?;
     if args.json_events {
         let event = lifecycle_json(
             "ready",
             ready_identity,
             Some(json!({
                 "proxy_url": format!("http://{local}"),
+                "control_url": format!("http://{control_local}"),
                 "remote_url": base_url,
                 "policy": {
                     "enforce_verified": !args.allow_unverified,
@@ -499,7 +540,10 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
         println!(
             "forwarding every method and path; Authorization passed through unchanged; every \
              upstream hop pinned to the attested TLS key; each POST response's receipt id and \
-             body digests recorded; responses stream immediately and receipts are audited after delivery.\n{}",
+             body digests recorded; responses stream immediately and receipts are audited after delivery.\n\
+             verify on demand: GET http://{control_local}/receipts lists recent exchanges, \
+             POST http://{control_local}/receipts/<id>/verify checks one (send Authorization \
+             if the receipt fetch needs it).\n{}",
             if args.allow_unverified {
                 "verified serving NOT demanded (--allow-unverified)."
             } else {
@@ -510,9 +554,16 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
         println!();
     }
 
-    axum::serve(listener, build_proxy_router(state))
-        .await
-        .map_err(|e| format!("proxy server error: {e}"))?;
+    let control_server = axum::serve(control_listener, build_control_router(state.clone()));
+    let proxy_server = axum::serve(listener, build_proxy_router(state));
+    tokio::select! {
+        result = control_server => {
+            result.map_err(|e| format!("control server error: {e}"))?;
+        }
+        result = proxy_server => {
+            result.map_err(|e| format!("proxy server error: {e}"))?;
+        }
+    }
     Ok(0)
 }
 
@@ -603,6 +654,13 @@ async fn initialize(
     Ok((state, ready_identity, base_url))
 }
 
+fn build_control_router(state: Arc<ProxyState>) -> Router {
+    Router::new()
+        .route("/receipts", axum::routing::get(control_list))
+        .route("/receipts/:id/verify", axum::routing::post(control_verify))
+        .with_state(state)
+}
+
 fn build_proxy_router(state: Arc<ProxyState>) -> Router {
     // No route list: every method and path forwards to the same path on the
     // service, so protocol surfaces this proxy does not know about
@@ -648,14 +706,14 @@ async fn proxy_request(
             code: None,
             reason: reason.clone(),
         });
-        eprintln!("!! {method} {path} -> 503 blocked: {reason}");
+        diagnostic!("!! {method} {path} -> 503 blocked: {reason}");
         return text_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "upstream keyset changed or expired and re-verification failed; refusing to forward\n",
         );
     }
     if state.snapshot().keyset_digest != identity_before {
-        eprintln!("!! {method} {path} -> 503 identity changed during re-verification; retry");
+        diagnostic!("!! {method} {path} -> 503 identity changed during re-verification; retry");
         return text_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "service identity changed during re-verification; retry once the gateway is verified again\n",
@@ -744,7 +802,7 @@ async fn proxy_inference(
     let path = uri.path().to_string();
 
     if has_e2ee_request_headers(&headers) {
-        eprintln!("!! POST {path} -> 400 E2EE request rejected by plaintext local API");
+        diagnostic!("!! POST {path} -> 400 E2EE request rejected by plaintext local API");
         return text_response(
             StatusCode::BAD_REQUEST,
             "private-ai-proxy serve accepts plaintext requests only; remove E2EE request headers\n",
@@ -764,7 +822,7 @@ async fn proxy_inference(
         match apply_constraints(body.to_vec(), state.enforce_verified, &active_pins) {
             Ok(body) => body,
             Err(reason) => {
-                eprintln!("!! POST {path} -> 400: {reason}");
+                diagnostic!("!! POST {path} -> 400: {reason}");
                 return text_response(
                     StatusCode::BAD_REQUEST,
                     "request session ids are not accepted by the local ACI policy\n",
@@ -797,7 +855,7 @@ async fn proxy_inference(
     if resp.status().as_u16() == 412 && injected_policy_pins {
         match derive_policy_pins(&state).await {
             Ok(pins) if !pins.is_empty() && pins != active_pins => {
-                eprintln!(
+                diagnostic!(
                     "private-ai-proxy serve: pinned sessions refused (412); policy re-accepted {} current \
                      session(s), retrying",
                     pins.len()
@@ -807,7 +865,7 @@ async fn proxy_inference(
                 {
                     Ok(body) => body,
                     Err(reason) => {
-                        eprintln!("private-ai-proxy serve: refreshed session policy rejected request: {reason}");
+                        diagnostic!("private-ai-proxy serve: refreshed session policy rejected request: {reason}");
                         return text_response(
                             StatusCode::BAD_REQUEST,
                             "request session ids are not accepted by the refreshed ACI policy\n",
@@ -823,7 +881,9 @@ async fn proxy_inference(
                 }
             }
             Ok(_) => {}
-            Err(e) => eprintln!("private-ai-proxy serve: policy pin refresh after 412 failed: {e}"),
+            Err(e) => {
+                diagnostic!("private-ai-proxy serve: policy pin refresh after 412 failed: {e}")
+            }
         }
     }
     let status = resp.status().as_u16();
@@ -852,11 +912,15 @@ async fn proxy_inference(
     // the same membership rule as `private-ai-proxy send --session`.
     let pinned_sessions = pinned_session_ids(&request_body);
     let audit_bearer = bearer_token(&headers);
+    let hook_delivery = delivery.clone();
     let hook: CompletionHook = Box::new(move |end| {
         let (response, delivery) = match end {
             StreamEnd::Complete(digest) => (digest, ResponseDelivery::Complete),
             // ACI §9.3(4) uses the wire hash to catch truncation, so it must
             // reach the report rather than vanish.
+            StreamEnd::Errored { partial, error: _ } if hook_delivery.is_cancelled() => {
+                (partial, ResponseDelivery::Cancelled)
+            }
             StreamEnd::Errored { partial, error } => (partial, ResponseDelivery::Failed(error)),
             StreamEnd::Cancelled(partial) => (partial, ResponseDelivery::Cancelled),
         };
@@ -883,9 +947,12 @@ async fn proxy_inference(
                 response,
                 delivery: delivery.clone(),
                 pinned_sessions,
+                at: crate::checks::now_secs(),
+                verified: None,
                 context: context.clone(),
                 local_policy_applied,
             };
+            hook_state.record(exchange.clone());
             if matches!(delivery, ResponseDelivery::Complete) {
                 (hook_state.reporter)(outcome(
                     Some(receipt_id),
@@ -962,6 +1029,16 @@ fn audit_exchange(
     let report = move |verified, detail, rewritten| {
         let state = &report_state;
         let exchange = &report_exchange;
+        if let Some(entry) = state
+            .recorded
+            .lock()
+            .expect("recorded ring poisoned")
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.receipt_id == exchange.receipt_id && entry.at == exchange.at)
+        {
+            entry.verified = verified;
+        }
         (state.reporter)(RequestOutcome {
             method: Method::POST,
             path: exchange.path.clone(),
@@ -989,7 +1066,7 @@ fn audit_exchange(
         ResponseDelivery::Cancelled => {
             report(
                 None,
-                "Response stream was canceled by the client; no complete response proof was recorded."
+                "Response stream was canceled or protection stopped; no complete response proof was recorded."
                     .into(),
                 None,
             );
@@ -1021,17 +1098,121 @@ fn audit_exchange(
             ),
             Ok(Err(_)) => report(
                 None,
-                "Response delivered; receipt audit could not complete. Retry the audit later."
-                    .into(),
+                format!(
+                    "Response delivered; receipt audit could not complete. Standalone serve can retry with POST /receipts/{}/verify.",
+                    exchange.receipt_id
+                ),
                 None,
             ),
             Err(_) => report(
                 None,
-                "Response delivered; receipt audit timed out. Retry the audit later.".into(),
+                format!(
+                    "Response delivered; receipt audit timed out. Standalone serve can retry with POST /receipts/{}/verify.",
+                    exchange.receipt_id
+                ),
                 None,
             ),
         }
     });
+}
+
+/// GET /receipts on the standalone control endpoint: newest first.
+async fn control_list(
+    axum::extract::State(state): axum::extract::State<Arc<ProxyState>>,
+) -> Json<Value> {
+    let recorded = state.recorded.lock().expect("recorded ring poisoned");
+    Json(Value::Array(
+        recorded
+            .iter()
+            .rev()
+            .map(|exchange| {
+                json!({
+                    "receipt_id": exchange.receipt_id,
+                    "path": exchange.path,
+                    "status": exchange.status,
+                    "streamed": exchange.streamed,
+                    "truncated": matches!(&exchange.delivery, ResponseDelivery::Failed(_)),
+                    "cancelled": matches!(&exchange.delivery, ResponseDelivery::Cancelled),
+                    "at": exchange.at,
+                    "verified": exchange.verified,
+                })
+            })
+            .collect(),
+    ))
+}
+
+/// Re-run receipt verification against the stored digests. Authorization is
+/// forwarded only to the out-of-band receipt fetch when the upstream needs it.
+async fn control_verify(
+    axum::extract::State(state): axum::extract::State<Arc<ProxyState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let exchange = {
+        let recorded = state.recorded.lock().expect("recorded ring poisoned");
+        recorded
+            .iter()
+            .rev()
+            .find(|exchange| exchange.receipt_id == id)
+            .cloned()
+    };
+    let Some(exchange) = exchange else {
+        return json_response(
+            StatusCode::NOT_FOUND,
+            json!({ "error": format!("no recorded exchange cites receipt {id}") }),
+        );
+    };
+    let bearer = bearer_token(&headers);
+    let trusted = state.snapshot();
+    let report = |verified: Option<bool>, rewritten: Option<bool>, detail: String| {
+        (state.reporter)(RequestOutcome {
+            method: Method::POST,
+            path: exchange.path.clone(),
+            status: exchange.status,
+            streamed: exchange.streamed,
+            receipt_id: Some(exchange.receipt_id.clone()),
+            verified,
+            detail,
+            context: exchange.context.clone(),
+            rewritten,
+            local_policy_applied: exchange.local_policy_applied,
+        });
+    };
+    match verify_exchange(&state, &trusted, &exchange, bearer.as_deref()).await {
+        Ok((transcript, detail)) => {
+            let verified = transcript.verified();
+            let rewritten = Some(rewrite_noted(&transcript));
+            if let Some(entry) = state
+                .recorded
+                .lock()
+                .expect("recorded ring poisoned")
+                .iter_mut()
+                .rev()
+                .find(|entry| entry.receipt_id == id)
+            {
+                entry.verified = Some(verified);
+            }
+            report(Some(verified), rewritten, detail);
+            let mut body = transcript.to_json(false);
+            body["receipt_id"] = json!(id);
+            json_response(StatusCode::OK, body)
+        }
+        Err(error) => {
+            let detail = format!("receipt {id}: {error}");
+            if let Some(entry) = state
+                .recorded
+                .lock()
+                .expect("recorded ring poisoned")
+                .iter_mut()
+                .rev()
+                .find(|entry| entry.receipt_id == id)
+            {
+                entry.verified = None;
+            }
+            report(None, None, detail.clone());
+            json_response(StatusCode::BAD_GATEWAY, json!({ "error": detail }))
+        }
+    }
 }
 
 async fn verify_exchange(
@@ -1166,7 +1347,6 @@ async fn fetch_session_for_audit(
     }
 }
 
-#[cfg(test)]
 fn json_response(status: StatusCode, body: Value) -> Response {
     Response::builder()
         .status(status)
@@ -1264,7 +1444,7 @@ fn default_reporter(outcome: RequestOutcome) {
         line.push_str(&outcome.detail);
     }
     if outcome.verified == Some(false) {
-        eprintln!("!! {line}");
+        diagnostic!("!! {line}");
     } else {
         println!("{line}");
     }
@@ -1273,7 +1453,7 @@ fn default_reporter(outcome: RequestOutcome) {
 fn json_reporter(outcome: RequestOutcome) {
     let event = request_outcome_event(outcome);
     if let Err(error) = write_json_event(&event) {
-        eprintln!("private-ai-proxy serve: cannot write JSON event: {error}");
+        diagnostic!("private-ai-proxy serve: cannot write JSON event: {error}");
     }
 }
 
@@ -1296,7 +1476,7 @@ fn json_event_sink(event: VerifierEvent) {
         VerifierEvent::Ready { .. } => return,
     };
     if let Err(error) = write_json_event(&value) {
-        eprintln!("private-ai-proxy serve: cannot write JSON event: {error}");
+        diagnostic!("private-ai-proxy serve: cannot write JSON event: {error}");
     }
 }
 
@@ -1365,11 +1545,24 @@ fn lifecycle_json(kind: &str, identity: IdentityEvent, extra: Option<Value>) -> 
 
 #[allow(dead_code)]
 fn managed_reporter(events: tokio::sync::mpsc::Sender<ProxyEvent>) -> Reporter {
+    // Receipt verdicts are correctness-sensitive. Serialize them through a
+    // lossless handoff and await the runtime's bounded queue off the response
+    // hot path. The gateway's own usage-progress emitter remains intentionally
+    // lossy when its bounded queue is saturated.
+    let (verdicts, mut pending) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(event) = pending.recv().await {
+            if events.send(event).await.is_err() {
+                break;
+            }
+        }
+    });
     Arc::new(move |outcome| {
         let Some(context) = outcome.context else {
             return;
         };
-        let _ = events.try_send(ProxyEvent {
+        let _ = verdicts.send(ProxyEvent {
+            generation: context.generation,
             request_id: context.request_id,
             session_id: context.session_id,
             agent: Some(context.agent),
@@ -1408,7 +1601,7 @@ async fn race_delivery<T>(
 }
 
 fn delivery_revoked_response(path: &str) -> Response {
-    eprintln!("!! {path} -> 503 verification changed before the request was sent");
+    diagnostic!("!! {path} -> 503 verification changed before the request was sent");
     text_response(
         StatusCode::SERVICE_UNAVAILABLE,
         "verification changed before the request was sent; retry once the gateway is verified again\n",
@@ -1430,7 +1623,7 @@ fn rotation_gate(state: &ProxyState, trusted_digest: &str, headers: &HeaderMap) 
                 code: Some("keyset_changed".to_string()),
                 reason,
             });
-            eprintln!(
+            diagnostic!(
                 "!! upstream X-ACI-Keyset-Digest changed ({observed} != {trusted_digest}); \
                  blocking further inference forwards until re-verify"
             );
@@ -1519,7 +1712,7 @@ async fn derive_policy_pins(state: &ProxyState) -> Result<Vec<String>, String> {
         audit_current_sessions(&state.client, &state.base_url, None, &state.required_claims)
             .await?;
     for rejected in audited.iter().filter(|session| !session.accepted()) {
-        eprintln!(
+        diagnostic!(
             "private-ai-proxy serve: session {} rejected ({})",
             rejected.session_id,
             match &rejected.audit {
@@ -1543,7 +1736,7 @@ fn forward_headers(
     let dropped = dropped_headers(headers);
     for (name, value) in headers.iter() {
         let name_str = name.as_str();
-        if !dropped.contains(name_str) {
+        if !dropped.contains(name_str) && name_str != "x-aci-tag" {
             req = req.header(name, value);
         }
     }
@@ -1879,6 +2072,7 @@ mod tests {
             Some(json!({
                 "remote_url": "https://tee.example",
                 "proxy_url": "http://127.0.0.1:4181",
+                "control_url": "http://127.0.0.1:4182",
                 "policy": {},
             })),
         );
@@ -1887,6 +2081,7 @@ mod tests {
         assert_eq!(event["tee_type"], "tdx");
         assert_eq!(event["keyset_digest"], report.workload_keyset_digest);
         assert_eq!(event["tls_spki"], "sha256:observed");
+        assert_eq!(event["control_url"], "http://127.0.0.1:4182");
     }
 
     fn state_over(base_url: String, tx: mpsc::UnboundedSender<RequestOutcome>) -> Arc<ProxyState> {
@@ -1925,6 +2120,8 @@ mod tests {
             response: BodyDigest::of(b"data: partial\n\n"),
             delivery: ResponseDelivery::Cancelled,
             pinned_sessions: Vec::new(),
+            at: 1,
+            verified: None,
             context: None,
             local_policy_applied: false,
         };
@@ -1934,7 +2131,46 @@ mod tests {
 
         let outcome = outcomes.recv().await.expect("cancellation outcome");
         assert_eq!(outcome.verified, None);
-        assert!(outcome.detail.contains("canceled by the client"));
+        assert!(outcome.detail.contains("canceled or protection stopped"));
+    }
+
+    #[tokio::test]
+    async fn standalone_control_lists_and_retries_recorded_exchanges() {
+        let (tx, _outcomes) = mpsc::unbounded_channel();
+        let state = state_over("http://127.0.0.1:9".to_string(), tx);
+        state.record(RecordedExchange {
+            receipt_id: "rcpt-control".to_string(),
+            path: "/v1/responses".to_string(),
+            status: 200,
+            streamed: true,
+            request: BodyDigest::of(REQUEST_BODY),
+            response: BodyDigest::of(b"partial"),
+            delivery: ResponseDelivery::Cancelled,
+            pinned_sessions: Vec::new(),
+            at: 17,
+            verified: None,
+            context: None,
+            local_policy_applied: false,
+        });
+        let control = spawn_server(build_control_router(state)).await;
+
+        let listed: Value = reqwest::get(format!("{control}/receipts"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(listed[0]["receipt_id"], "rcpt-control");
+        assert_eq!(listed[0]["cancelled"], true);
+
+        let retried = reqwest::Client::new()
+            .post(format!("{control}/receipts/rcpt-control/verify"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(retried.status(), StatusCode::BAD_GATEWAY);
+        let body: Value = retried.json().await.unwrap();
+        assert!(body["error"].as_str().unwrap().contains("canceled"));
     }
 
     #[tokio::test]
@@ -1987,6 +2223,8 @@ mod tests {
             response: BodyDigest::of(RESPONSE_BODY),
             delivery: ResponseDelivery::Complete,
             pinned_sessions: Vec::new(),
+            at: 1,
+            verified: None,
             context: None,
             local_policy_applied: false,
         };
@@ -2510,5 +2748,176 @@ mod tests {
                 }
             );
         }
+    }
+
+    async fn terminated(receiver: &mut mpsc::UnboundedReceiver<VerifierEvent>) -> Option<String> {
+        loop {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
+                .await
+                .expect("verifier termination event timed out")
+                .expect("verifier event channel closed");
+            if let VerifierEvent::Terminated { error } = event {
+                return error;
+            }
+        }
+    }
+
+    fn test_launcher_events() -> (VerifierEventSink, mpsc::UnboundedReceiver<VerifierEvent>) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        (
+            Arc::new(move |event| {
+                let _ = sender.send(event);
+            }),
+            receiver,
+        )
+    }
+
+    #[tokio::test]
+    async fn in_process_launcher_reports_panics_as_failures() {
+        let launcher = InProcessVerifierLauncher::new(tokio::runtime::Handle::current());
+        let (events, mut received) = test_launcher_events();
+        let _task = launcher.spawn_task(events, |_| async move {
+            panic!("synthetic verifier panic");
+            #[allow(unreachable_code)]
+            Ok(())
+        });
+
+        assert!(terminated(&mut received).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn in_process_launcher_explicit_stop_is_clean() {
+        let launcher = InProcessVerifierLauncher::new(tokio::runtime::Handle::current());
+        let (events, mut received) = test_launcher_events();
+        let mut task = launcher.spawn_task(events, |cancelled| async move {
+            cancelled.cancelled().await;
+            Ok(())
+        });
+
+        task.stop().unwrap();
+        assert_eq!(terminated(&mut received).await, None);
+    }
+
+    #[tokio::test]
+    async fn dropping_in_process_launcher_task_cancels_it_cleanly() {
+        let launcher = InProcessVerifierLauncher::new(tokio::runtime::Handle::current());
+        let (events, mut received) = test_launcher_events();
+        let task = launcher.spawn_task(events, |cancelled| async move {
+            cancelled.cancelled().await;
+            Ok(())
+        });
+
+        drop(task);
+        assert_eq!(terminated(&mut received).await, None);
+    }
+
+    fn proxy_event(generation: u64, request_id: &str) -> ProxyEvent {
+        ProxyEvent {
+            generation,
+            request_id: request_id.to_string(),
+            session_id: "session-1".to_string(),
+            agent: None,
+            method: "POST".to_string(),
+            path: "/v1/responses".to_string(),
+            model: None,
+            status: 200,
+            streamed: false,
+            receipt_id: None,
+            verified: None,
+            detail: String::new(),
+            at: 1,
+            local_policy_applied: None,
+            rewritten: None,
+            left_device: true,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            cost_usd: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_verdict_waits_for_a_full_queue_and_keeps_attribution() {
+        let (events, mut received) = mpsc::channel(1);
+        events.send(proxy_event(0, "queue-filler")).await.unwrap();
+        let reporter = managed_reporter(events);
+        reporter(RequestOutcome {
+            method: Method::POST,
+            path: "/v1/responses".to_string(),
+            status: 200,
+            streamed: true,
+            receipt_id: Some("rcpt-1".to_string()),
+            verified: Some(false),
+            detail: "receipt failed".to_string(),
+            context: Some(ForwardContext {
+                generation: 9,
+                request_id: "request-9".to_string(),
+                session_id: "session-9".to_string(),
+                agent: "codex".to_string(),
+                model: Some("test-model".to_string()),
+                at: 42,
+            }),
+            rewritten: Some(false),
+            local_policy_applied: true,
+        });
+
+        assert_eq!(received.recv().await.unwrap().request_id, "queue-filler");
+        let verdict = tokio::time::timeout(std::time::Duration::from_secs(2), received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(verdict.generation, 9);
+        assert_eq!(verdict.request_id, "request-9");
+        assert_eq!(verdict.session_id, "session-9");
+        assert_eq!(verdict.agent.as_deref(), Some("codex"));
+        assert_eq!(verdict.model.as_deref(), Some("test-model"));
+        assert_eq!(verdict.verified, Some(false));
+    }
+
+    #[tokio::test]
+    async fn stopping_during_post_stream_does_not_report_a_failed_verdict() {
+        let finish = Arc::new(tokio::sync::Notify::new());
+        let upstream_finish = finish.clone();
+        let upstream = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let finish = upstream_finish.clone();
+                async move {
+                    let body = Body::from_stream(async_stream::stream! {
+                        yield Ok::<_, std::io::Error>(Bytes::from_static(b"first"));
+                        finish.notified().await;
+                        yield Ok::<_, std::io::Error>(Bytes::from_static(b"second"));
+                    });
+                    Response::builder()
+                        .header("x-receipt-id", "rcpt-stopped")
+                        .body(body)
+                        .unwrap()
+                }
+            }),
+        );
+        let (sender, mut outcomes) = mpsc::unbounded_channel();
+        let state = state_over(spawn_server(upstream).await, sender);
+        let proxy = spawn_server(build_proxy_router(state.clone())).await;
+        let response = reqwest::Client::new()
+            .post(format!("{proxy}/v1/chat/completions"))
+            .body(REQUEST_BODY.to_vec())
+            .send()
+            .await
+            .unwrap();
+        let mut body = response.bytes_stream();
+        assert_eq!(body.next().await.unwrap().unwrap(), "first");
+
+        state.shutdown.cancel();
+        finish.notify_waiters();
+        let _ = body.next().await;
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), outcomes.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.receipt_id.as_deref(), Some("rcpt-stopped"));
+        assert_eq!(outcome.verified, None);
+        assert!(outcome.detail.contains("protection stopped"));
+        assert!(outcomes.try_recv().is_err());
     }
 }

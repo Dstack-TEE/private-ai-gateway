@@ -641,6 +641,54 @@ fn stopping_preserves_usage_but_not_the_protection_clock() {
     assert_eq!(stopped.protected_since, None);
     assert_eq!(stopped.session_usage.requests, 7);
 }
+
+#[tokio::test]
+async fn stale_verifier_generation_cannot_record_activity() {
+    let (events, _) = tokio::sync::mpsc::channel(8);
+    let proxy = ProxyState::new(events).unwrap();
+    let manager = GatewayManager::new(
+        proxy,
+        Arc::new(UsageStore::memory().unwrap()),
+        Arc::new(WaitingSidecar),
+        Handle::current(),
+        GatewayState::default(),
+    );
+    manager.lock().unwrap().generation = 2;
+
+    manager.record_proxy_event(ProxyEvent {
+        generation: 1,
+        request_id: "stale-request".to_string(),
+        session_id: "stale-session".to_string(),
+        agent: Some("codex".to_string()),
+        method: "POST".to_string(),
+        path: "/v1/responses".to_string(),
+        model: Some("test-model".to_string()),
+        status: 200,
+        streamed: true,
+        receipt_id: Some("stale-receipt".to_string()),
+        verified: Some(false),
+        detail: "late verdict".to_string(),
+        at: 1,
+        local_policy_applied: Some(true),
+        rewritten: Some(false),
+        left_device: true,
+        input_tokens: None,
+        output_tokens: None,
+        cache_read_tokens: None,
+        cache_write_tokens: None,
+        cost_usd: None,
+    });
+
+    assert!(manager.snapshot().unwrap().activity.is_empty());
+    assert_eq!(
+        manager
+            .usage
+            .session_summary("stale-session")
+            .unwrap()
+            .requests,
+        0
+    );
+}
 use serde_json::json;
 
 fn identity_event(value: serde_json::Value) -> IdentityEvent {

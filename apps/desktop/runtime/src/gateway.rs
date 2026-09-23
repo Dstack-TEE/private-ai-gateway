@@ -578,6 +578,14 @@ impl GatewayManager {
         if event.path == "/v1/models" {
             return;
         }
+        let Ok(mut runtime) = self.lock() else {
+            return;
+        };
+        // Receipt audits finish asynchronously. Never let a verdict from a
+        // stopped verifier generation mutate the current session's activity.
+        if event.generation != runtime.generation {
+            return;
+        }
         let activity = RequestActivity {
             id: event.request_id,
             session_id: event.session_id,
@@ -604,7 +612,8 @@ impl GatewayManager {
             .usage
             .upsert(&activity)
             .and_then(|()| self.usage.session_summary(&activity.session_id));
-        self.update(|state| {
+        {
+            let state = &mut runtime.state;
             merge_activity(state, activity.clone());
             state.usage_revision = state.usage_revision.wrapping_add(1);
             match summary {
@@ -616,7 +625,10 @@ impl GatewayManager {
                 Err(error) => state.error = Some(error),
                 _ => {}
             }
-        });
+        }
+        let state = runtime.state.clone();
+        drop(runtime);
+        self.state_tx.send_replace(state);
     }
 
     /// Refresh discovery without revoking the current verified session.
@@ -736,7 +748,9 @@ impl GatewayManager {
                 return;
             };
             if let Err(error) = manager.apply_inventory(generation, epoch) {
-                eprintln!("Cannot apply model endpoint inventory: {error}");
+                crate::diagnostic(format_args!(
+                    "Cannot apply model endpoint inventory: {error}"
+                ));
             }
         });
     }

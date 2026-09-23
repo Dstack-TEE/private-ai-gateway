@@ -24,7 +24,7 @@ struct Arguments {}
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
-        eprintln!("Private AI Proxy backend: {error}");
+        desktop_runtime::diagnostic(format_args!("Private AI Proxy backend: {error}"));
         std::process::exit(1);
     }
 }
@@ -37,7 +37,7 @@ async fn run() -> Result<(), String> {
     let (agent_home_access, agent_access_error) = match service_access {
         Ok(access) => (access, None),
         Err(error) => {
-            eprintln!("Private AI Proxy backend: {error}");
+            desktop_runtime::diagnostic(format_args!("Private AI Proxy backend: {error}"));
             (None, Some(error))
         }
     };
@@ -84,7 +84,9 @@ async fn run() -> Result<(), String> {
     ) {
         Ok(monitor) => Some(monitor),
         Err(error) => {
-            eprintln!("System wake monitoring is unavailable: {error}");
+            desktop_runtime::diagnostic(format_args!(
+                "System wake monitoring is unavailable: {error}"
+            ));
             None
         }
     };

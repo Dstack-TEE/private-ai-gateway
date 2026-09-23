@@ -250,6 +250,13 @@ pub struct ServeArgs {
     )]
     pub listen: Option<String>,
     #[arg(
+        long,
+        value_name = "ADDR:PORT",
+        help = "Local control endpoint for on-demand receipt verification \
+                (default 127.0.0.1:4181)."
+    )]
+    pub control: Option<String>,
+    #[arg(
         long = "json-events",
         help = "Emit the serve lifecycle and request activity as JSON Lines on stdout. \
                 Human-readable diagnostics remain on stderr."

@@ -75,6 +75,7 @@ async fn mock_sidecar() -> String {
                 "authorization": header("authorization"),
                 "x-api-key": header("x-api-key"),
                 "anthropic-beta": header("anthropic-beta"),
+                "x-aci-tag": header("x-aci-tag"),
                 "proxy-connection": header("proxy-connection"),
                 "body": String::from_utf8_lossy(&body),
             })),
@@ -347,6 +348,7 @@ async fn verified_catalog_models_are_forwarded_with_the_real_key() {
         .post(format!("{proxy}/v1/chat/completions"))
         .bearer_auth("opencode-token")
         .header("anthropic-beta", "keep-me")
+        .header("x-aci-tag", "client-controlled")
         .header("proxy-connection", "keep-alive")
         .json(&json!({ "model": "openai/gpt-oss-20b", "messages": [] }))
         .send()
@@ -358,6 +360,7 @@ async fn verified_catalog_models_are_forwarded_with_the_real_key() {
     assert_eq!(echo["authorization"], json!("Bearer sk-real"));
     assert_eq!(echo["x-api-key"], json!(""));
     assert_eq!(echo["anthropic-beta"], json!("keep-me"));
+    assert_eq!(echo["x-aci-tag"], json!(""));
     assert_eq!(echo["proxy-connection"], json!(""));
 
     let counted = client
@@ -402,6 +405,74 @@ async fn send_failures_are_not_reported_as_local_rejections() {
     assert_eq!(event.session_id, "test-session");
     assert_eq!(event.agent.as_deref(), Some("codex"));
     assert_eq!(event.model.as_deref(), Some("openai/gpt-oss-20b"));
+}
+
+struct PanicService;
+
+impl VerifiedService for PanicService {
+    fn call(
+        self: Arc<Self>,
+        _request: Request<Body>,
+        _context: Option<ForwardContext>,
+    ) -> VerifiedResponse {
+        panic!("synthetic verifier panic")
+    }
+}
+
+struct HangingService;
+
+impl VerifiedService for HangingService {
+    fn call(
+        self: Arc<Self>,
+        _request: Request<Body>,
+        _context: Option<ForwardContext>,
+    ) -> VerifiedResponse {
+        Box::pin(std::future::pending())
+    }
+}
+
+async fn verifier_failure(service: Arc<dyn VerifiedService>) -> (Response, ProxyEvent) {
+    let (state, mut events) = state();
+    let response = forward(
+        state,
+        service,
+        7,
+        "test-session",
+        "test-key",
+        "codex",
+        Surface::Responses,
+        "/v1/responses",
+        None,
+        &HeaderMap::new(),
+        Bytes::new(),
+        Some("test-model".into()),
+        CancellationToken::new(),
+    )
+    .await;
+    (response, events.recv().await.unwrap())
+}
+
+#[tokio::test]
+async fn verifier_panic_returns_502_and_records_activity() {
+    let (response, event) = verifier_failure(Arc::new(PanicService)).await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(body["error"]["code"], "upstream_unreachable");
+    assert_eq!(event.status, 502);
+    assert!(event.left_device);
+    assert_eq!(event.generation, 7);
+}
+
+#[tokio::test]
+async fn verifier_hang_returns_504_and_records_activity() {
+    let (response, event) = verifier_failure(Arc::new(HangingService)).await;
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(body["error"]["code"], "upstream_timeout");
+    assert_eq!(event.status, 504);
+    assert!(event.left_device);
 }
 
 /// The proxy relays: for every inference path the sidecar sees the same
@@ -579,6 +650,7 @@ async fn usage_is_recorded_when_the_consumer_stops_before_eof() {
     let response = forward(
         state,
         http_service(&sidecar),
+        1,
         "test-session",
         "test-key",
         "codex",

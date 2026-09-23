@@ -37,7 +37,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -56,6 +56,10 @@ use crate::{
 pub const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_IN_FLIGHT: usize = 64;
 const BODY_READ_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(not(test))]
+const VERIFIER_CALL_TIMEOUT: Duration = Duration::from_secs(660);
+#[cfg(test)]
+const VERIFIER_CALL_TIMEOUT: Duration = Duration::from_millis(100);
 // Match the gateway's SSE limit: Responses terminal events repeat the full output.
 const MAX_USAGE_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SSE_LINE_BYTES: usize = MAX_USAGE_CAPTURE_BYTES;
@@ -88,6 +92,7 @@ pub struct Session {
 /// receipt audit. This replaces the private `x-aci-tag` wire protocol.
 #[derive(Clone, Debug)]
 pub struct ForwardContext {
+    pub generation: u64,
     pub request_id: String,
     pub session_id: String,
     pub agent: String,
@@ -113,6 +118,7 @@ pub trait VerifiedService: Send + Sync {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyEvent {
+    pub generation: u64,
     pub request_id: String,
     pub session_id: String,
     pub agent: Option<String>,
@@ -516,6 +522,7 @@ async fn relay(
     forward(
         state,
         lease.service,
+        lease.generation,
         &lease.session_id,
         &key,
         &agent,
@@ -574,6 +581,7 @@ fn check_catalog(
 async fn forward(
     state: Arc<ProxyState>,
     service: Arc<dyn VerifiedService>,
+    generation: u64,
     session_id: &str,
     key: &str,
     agent: &str,
@@ -597,7 +605,7 @@ async fn forward(
         if !dropped.contains(name)
             && !matches!(
                 name,
-                "host" | "content-length" | "authorization" | "x-api-key"
+                "host" | "content-length" | "authorization" | "x-api-key" | "x-aci-tag"
             )
         {
             request = request.header(name, value);
@@ -626,6 +634,7 @@ async fn forward(
         }
     };
     let context = ForwardContext {
+        generation,
         request_id: request_id.clone(),
         session_id: session_id.to_string(),
         agent: agent.to_string(),
@@ -652,10 +661,18 @@ async fn forward(
     // Once the verifier call is polled, bytes may have reached the remote service even
     // if revocation, timeout, or a connection failure prevents a response.
     // Those failures must never be described as a local rejection.
+    let call = async move {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            service.clone().call(request, Some(context))
+        })) {
+            Ok(future) => std::panic::AssertUnwindSafe(future).catch_unwind().await,
+            Err(panic) => Err(panic),
+        }
+    };
     let sent = tokio::select! {
         biased;
         _ = delivery.cancelled() => None,
-        result = service.clone().call(request, Some(context)) => Some(result),
+        result = tokio::time::timeout(VERIFIER_CALL_TIMEOUT, call) => Some(result),
     };
     let Some(sent) = sent else {
         let rejection = Rejection::new(
@@ -665,10 +682,32 @@ async fn forward(
              its delivery could not be confirmed",
         );
         return reject_after_send(
-            &state, request_id, session_id, agent, path, model, surface, rejection,
+            &state, generation, request_id, session_id, agent, path, model, surface, rejection,
         );
     };
-    let upstream = sent;
+    let upstream = match sent {
+        Ok(Ok(response)) => response,
+        Ok(Err(_)) => {
+            let rejection = Rejection::new(
+                StatusCode::BAD_GATEWAY,
+                "upstream_unreachable",
+                "The verified upstream handler failed before returning a response",
+            );
+            return reject_after_send(
+                &state, generation, request_id, session_id, agent, path, model, surface, rejection,
+            );
+        }
+        Err(_) => {
+            let rejection = Rejection::new(
+                StatusCode::GATEWAY_TIMEOUT,
+                "upstream_timeout",
+                "The verified upstream did not return a response in time",
+            );
+            return reject_after_send(
+                &state, generation, request_id, session_id, agent, path, model, surface, rejection,
+            );
+        }
+    };
     let status = upstream.status().as_u16();
     let streamed = upstream
         .headers()
@@ -682,6 +721,7 @@ async fn forward(
         .filter(|value| !value.is_empty())
         .map(str::to_string);
     state.emit(ProxyEvent {
+        generation,
         request_id: request_id.clone(),
         session_id: session_id.to_string(),
         agent: Some(agent.to_string()),
@@ -723,6 +763,7 @@ async fn forward(
             capture: Some(UsageCapture::new(streamed)),
             state: event_state,
             event: ProxyEvent {
+                generation,
                 request_id: event_request_id,
                 session_id: event_session_id,
                 agent: Some(event_agent),
@@ -807,12 +848,12 @@ fn reject(
     surface: Surface,
     rejection: Rejection,
 ) -> Response {
-    let session_id = state
-        .session()
-        .session_id
-        .unwrap_or_else(|| "unscoped".to_string());
+    let session = state.session();
+    let generation = session.generation;
+    let session_id = session.session_id.unwrap_or_else(|| "unscoped".to_string());
     reject_with_context(
         state,
+        generation,
         new_id(),
         session_id,
         agent,
@@ -828,6 +869,7 @@ fn reject(
 #[allow(clippy::too_many_arguments)]
 fn reject_after_send(
     state: &ProxyState,
+    generation: u64,
     request_id: String,
     session_id: &str,
     agent: &str,
@@ -838,6 +880,7 @@ fn reject_after_send(
 ) -> Response {
     reject_with_context(
         state,
+        generation,
         request_id,
         session_id.to_string(),
         Some(agent.to_string()),
@@ -853,6 +896,7 @@ fn reject_after_send(
 #[allow(clippy::too_many_arguments)]
 fn reject_with_context(
     state: &ProxyState,
+    generation: u64,
     request_id: String,
     session_id: String,
     agent: Option<String>,
@@ -864,6 +908,7 @@ fn reject_with_context(
     left_device: bool,
 ) -> Response {
     state.emit(ProxyEvent {
+        generation,
         request_id,
         session_id,
         agent,

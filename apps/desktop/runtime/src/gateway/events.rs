@@ -90,7 +90,9 @@ impl GatewayManager {
         // Use the same runtime -> usage lock order as start_inner, so this
         // blocked event cannot delete the resume marker of a newer Start.
         if end_session && self.usage.end_session().is_err() {
-            eprintln!("Could not persist the end of a blocked protection session");
+            crate::diagnostic(format_args!(
+                "Could not persist the end of a blocked protection session"
+            ));
         }
         drop(runtime);
         if let Some(mut task) = retired_task {

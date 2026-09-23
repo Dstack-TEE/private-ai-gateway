@@ -102,7 +102,9 @@ and Windows only applied `CREATE_NO_WINDOW`. It had no lower-privilege token,
 separate sandbox or provider-key boundary. Git history introduced the supervisor
 to ensure backend death reaped the listener. In-process ownership preserves that
 lifecycle property without a separately reachable port. Standalone `pap serve`
-still uses the same verifier and retains its own explicit loopback listener.
+still uses the same verifier and retains its explicit proxy listener plus the
+documented `--control` receipt-audit listener. Managed mode binds neither
+verifier listener; it calls the verifier directly.
 
 ## Security and Protocol
 

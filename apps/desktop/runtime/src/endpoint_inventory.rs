@@ -101,7 +101,9 @@ impl InventoryUpdater {
                 // Persist before replacing the in-memory copy. A full disk must
                 // not discard validated data already available to this session.
                 if let Err(error) = persist(&self.cache_path, &updated) {
-                    eprintln!("Cannot cache model endpoint inventory: {error}");
+                    crate::diagnostic(format_args!(
+                        "Cannot cache model endpoint inventory: {error}"
+                    ));
                 }
                 *self.cache.lock().unwrap_or_else(PoisonError::into_inner) = updated;
             }

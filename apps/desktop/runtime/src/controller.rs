@@ -209,7 +209,7 @@ impl DesktopRuntime {
         if agent_configuration {
             if let Err(error) = crate::helper_staging::stage(&helper_path, &data_dir) {
                 // OpenClaw independently rejects an unavailable or mismatched staged copy.
-                eprintln!("Cannot stage the credential helper: {error}");
+                crate::diagnostic(format_args!("Cannot stage the credential helper: {error}"));
             }
         }
         let secrets: Arc<dyn SecretStore> = Arc::new(KeyringStore);
