@@ -1,4 +1,4 @@
-//! The desktop-owned local agent gateway.
+//! The coding-agent bridge: the Local API proxy and agent configuration.
 //!
 //! Coding agents talk to a stable loopback HTTP endpoint, authenticate with
 //! machine-local tokens, and are relayed unchanged to the in-process ACI

@@ -2,12 +2,12 @@ use super::*;
 
 #[derive(Debug)]
 pub enum AgentOperationError {
-    Agent(desktop_gateway::agents::AgentError),
+    Agent(agent_bridge::agents::AgentError),
     Runtime(String),
 }
 
-impl From<desktop_gateway::agents::AgentError> for AgentOperationError {
-    fn from(error: desktop_gateway::agents::AgentError) -> Self {
+impl From<agent_bridge::agents::AgentError> for AgentOperationError {
+    fn from(error: agent_bridge::agents::AgentError) -> Self {
         Self::Agent(error)
     }
 }

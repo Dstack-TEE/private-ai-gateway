@@ -3,8 +3,8 @@
 
 use std::collections::BTreeSet;
 
-pub use desktop_gateway::agents::{AgentPreview, AgentStatus, ConnectOptions};
-use desktop_gateway::catalog::Catalog;
+pub use agent_bridge::agents::{AgentPreview, AgentStatus, ConnectOptions};
+use agent_bridge::catalog::Catalog;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -527,7 +527,7 @@ pub struct StartGatewayConfig {
 impl Default for StartGatewayConfig {
     fn default() -> Self {
         Self {
-            remote_url: desktop_gateway::brand::SERVICE_DEFAULT_URL.to_string(),
+            remote_url: agent_bridge::brand::SERVICE_DEFAULT_URL.to_string(),
             require_production_os: true,
         }
     }
@@ -549,7 +549,7 @@ mod typescript {
         updates::{Installation, UpdateNotice},
         usage::{UsageModelPoint, UsagePage, UsagePoint, UsageQuery},
     };
-    use desktop_gateway::agents::{AgentRepairAction, ConfigChange};
+    use agent_bridge::agents::{AgentRepairAction, ConfigChange};
 
     const OUTPUT: &str = "src/shared/contracts.generated.ts";
 

@@ -2,7 +2,7 @@
 
 There is one user-facing CLI. `pap` is the preferred command,
 `private-ai-proxy` is its canonical executable and full-name alias, and `aci` is
-the protocol-focused alias. All three expose the same commands. The
+a legacy alias kept for existing scripts. All three expose the same commands. The
 desktop bundle and standalone CLI distribution do not ship a separate `aci`.
 They contain the same three executables:
 

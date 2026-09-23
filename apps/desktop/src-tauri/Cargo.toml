@@ -21,7 +21,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
-desktop-gateway = { package = "private-ai-proxy-gateway", path = "../gateway" }
+agent-bridge = { package = "private-ai-proxy-agent-bridge", path = "../agent-bridge" }
 desktop-runtime = { package = "private-ai-proxy-runtime", path = "../runtime" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }

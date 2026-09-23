@@ -5,7 +5,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use desktop_gateway::{
+use agent_bridge::{
     agents::{app_data_dir, write_atomic},
     tokens,
 };
@@ -55,7 +55,7 @@ impl ServiceSettings {
                 .iter()
                 .find(|profile| profile.id == self.active_profile_id)
                 .map(|profile| profile.remote_url.clone())
-                .unwrap_or_else(|| desktop_gateway::brand::SERVICE_DEFAULT_URL.to_string()),
+                .unwrap_or_else(|| agent_bridge::brand::SERVICE_DEFAULT_URL.to_string()),
             require_production_os: self.require_production_os,
         })
     }

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
 
-const directory = new URL("../gateway/resources/codex/", import.meta.url);
+const directory = new URL("../agent-bridge/resources/codex/", import.meta.url);
 const destination = new URL("models.json", directory);
 const temporary = new URL("models.json.tmp", directory);
 

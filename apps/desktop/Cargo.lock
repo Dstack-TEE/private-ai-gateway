@@ -4736,14 +4736,16 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "clap",
+ "clap_complete",
  "dcap-qvl",
  "ed25519-dalek",
  "futures-util",
  "hex",
- "private-ai-proxy-gateway",
+ "private-ai-proxy-agent-bridge",
  "private-ai-proxy-runtime",
  "rand 0.8.8",
  "reqwest",
+ "rpassword",
  "rustls",
  "serde",
  "serde_json",
@@ -4752,52 +4754,13 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
+ "uuid",
  "webpki-roots",
  "x509-parser",
 ]
 
 [[package]]
-name = "private-ai-proxy-desktop"
-version = "0.1.0"
-dependencies = [
- "auto-launch 0.5.0",
- "auto-launch 0.6.0",
- "block2",
- "futures-util",
- "libc",
- "objc2",
- "objc2-app-kit",
- "objc2-core-services",
- "objc2-foundation",
- "objc2-service-management",
- "objc2-user-notifications",
- "private-ai-proxy-gateway",
- "private-ai-proxy-runtime",
- "reqwest",
- "rustls",
- "semver",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-clipboard-manager",
- "tauri-plugin-deep-link",
- "tauri-plugin-dialog",
- "tauri-plugin-notification",
- "tauri-plugin-opener",
- "tauri-plugin-shell",
- "tauri-plugin-single-instance",
- "tauri-plugin-updater",
- "tauri-plugin-window-state",
- "tempfile",
- "tokio",
- "windows 0.61.3",
- "windows-registry 0.6.1",
- "zbus",
-]
-
-[[package]]
-name = "private-ai-proxy-gateway"
+name = "private-ai-proxy-agent-bridge"
 version = "0.1.0"
 dependencies = [
  "async-stream",
@@ -4826,6 +4789,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "private-ai-proxy-desktop"
+version = "0.1.0"
+dependencies = [
+ "auto-launch 0.5.0",
+ "auto-launch 0.6.0",
+ "block2",
+ "futures-util",
+ "libc",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-core-services",
+ "objc2-foundation",
+ "objc2-service-management",
+ "objc2-user-notifications",
+ "private-ai-proxy-agent-bridge",
+ "private-ai-proxy-runtime",
+ "reqwest",
+ "rustls",
+ "semver",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-clipboard-manager",
+ "tauri-plugin-deep-link",
+ "tauri-plugin-dialog",
+ "tauri-plugin-notification",
+ "tauri-plugin-opener",
+ "tauri-plugin-shell",
+ "tauri-plugin-single-instance",
+ "tauri-plugin-updater",
+ "tauri-plugin-window-state",
+ "tempfile",
+ "tokio",
+ "windows 0.61.3",
+ "windows-registry 0.6.1",
+ "zbus",
+]
+
+[[package]]
 name = "private-ai-proxy-runtime"
 version = "0.1.0"
 dependencies = [
@@ -4833,8 +4836,6 @@ dependencies = [
  "async-stream",
  "axum",
  "base64 0.23.1",
- "clap",
- "clap_complete",
  "futures-core",
  "futures-util",
  "if-addrs",
@@ -4842,10 +4843,9 @@ dependencies = [
  "netwatcher",
  "objc2",
  "objc2-foundation",
- "private-ai-proxy-gateway",
+ "private-ai-proxy-agent-bridge",
  "rand 0.8.8",
  "reqwest",
- "rpassword",
  "rusqlite",
  "rust-embed",
  "rustix",

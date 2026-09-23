@@ -1,13 +1,13 @@
 [package]
-name = "private-ai-proxy-gateway"
+name = "private-ai-proxy-agent-bridge"
 version = "0.1.0"
-description = "Desktop-owned local agent gateway: loopback proxy, catalog, secrets, and agent projections"
+description = "Coding-agent bridge: the loopback Local API proxy, agent tokens, catalog, secrets, and agent config projections"
 license = "Apache-2.0"
 edition = "2021"
 rust-version = "1.98"
 
 [lib]
-name = "desktop_gateway"
+name = "agent_bridge"
 path = "src/lib.rs"
 
 [[bin]]

@@ -14,7 +14,7 @@ use std::{
 #[cfg(any(test, all(target_os = "macos", feature = "mac-app-store")))]
 use std::ffi::OsStr;
 
-use desktop_gateway::{lock::InstanceLock, tokens};
+use agent_bridge::{lock::InstanceLock, tokens};
 use socket2::{Domain, SockAddr, Socket, Type};
 
 use super::endpoint_hash;
@@ -166,8 +166,8 @@ impl Write for Stream {
 
 pub(super) fn endpoint_path(data_dir: &Path) -> io::Result<PathBuf> {
     let hash = endpoint_hash(data_dir.as_os_str().as_bytes());
-    if env::var_os(desktop_gateway::agents::HOME_OVERRIDE_ENV).is_some()
-        || (env::var_os(desktop_gateway::agents::APP_DATA_OVERRIDE_ENV).is_some()
+    if env::var_os(agent_bridge::agents::HOME_OVERRIDE_ENV).is_some()
+        || (env::var_os(agent_bridge::agents::APP_DATA_OVERRIDE_ENV).is_some()
             && !cfg!(all(target_os = "macos", feature = "mac-app-store")))
     {
         let endpoint = data_dir.join("runtime").join(SOCKET_FILE);
@@ -177,7 +177,7 @@ pub(super) fn endpoint_path(data_dir: &Path) -> io::Result<PathBuf> {
     }
 
     #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
-    if env::var_os(desktop_gateway::agents::APP_DATA_OVERRIDE_ENV).is_some() {
+    if env::var_os(agent_bridge::agents::APP_DATA_OVERRIDE_ENV).is_some() {
         let base = app_container_runtime_base(data_dir).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -445,9 +445,7 @@ mod tests {
     #[test]
     fn authenticated_stream_round_trip_and_deadline() {
         let temp = tempfile::tempdir().unwrap();
-        let owner = desktop_gateway::lock::instance(temp.path())
-            .unwrap()
-            .unwrap();
+        let owner = agent_bridge::lock::instance(temp.path()).unwrap().unwrap();
         let endpoint = temp.path().join("ipc").join(SOCKET_FILE);
         let listener = Listener::bind_at(&owner, endpoint.clone()).unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -486,9 +484,7 @@ mod tests {
     #[test]
     fn bind_replaces_only_a_stale_socket() {
         let temp = tempfile::tempdir().unwrap();
-        let owner = desktop_gateway::lock::instance(temp.path())
-            .unwrap()
-            .unwrap();
+        let owner = agent_bridge::lock::instance(temp.path()).unwrap().unwrap();
         let endpoint = temp.path().join("ipc").join(SOCKET_FILE);
         fs::create_dir_all(endpoint.parent().unwrap()).unwrap();
         fs::set_permissions(
@@ -537,9 +533,7 @@ mod tests {
     #[test]
     fn bind_refuses_an_insecure_runtime_directory() {
         let temp = tempfile::tempdir().unwrap();
-        let owner = desktop_gateway::lock::instance(temp.path())
-            .unwrap()
-            .unwrap();
+        let owner = agent_bridge::lock::instance(temp.path()).unwrap().unwrap();
         let runtime = temp.path().join("ipc");
         fs::create_dir(&runtime).unwrap();
         fs::set_permissions(&runtime, fs::Permissions::from_mode(0o755)).unwrap();

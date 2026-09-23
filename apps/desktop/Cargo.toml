@@ -1,13 +1,13 @@
 [workspace]
 members = [
+    "agent-bridge",
     "cli",
-    "gateway",
     "runtime",
     "src-tauri",
 ]
 default-members = [
+    "agent-bridge",
     "cli",
-    "gateway",
     "runtime",
     "src-tauri",
 ]

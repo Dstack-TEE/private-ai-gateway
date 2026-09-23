@@ -161,7 +161,8 @@ impl EndpointInventory {
     }
 
     pub fn bundled() -> Result<Self, String> {
-        Self::parse(include_bytes!("endpoint-support.json"))
+        // Released apps refresh from this repository path, so the file stays there.
+        Self::parse(include_bytes!("../../gateway/src/endpoint-support.json"))
     }
 }
 

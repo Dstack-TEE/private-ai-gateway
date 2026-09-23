@@ -106,7 +106,7 @@ impl UsageStore {
             }
             Ok(_) => secure_file(&path)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                desktop_gateway::tokens::write_private(&path, "")
+                agent_bridge::tokens::write_private(&path, "")
                     .map_err(|error| format!("Cannot create the usage database: {error}"))?;
             }
             Err(error) => return Err(format!("Cannot inspect the usage database: {error}")),
@@ -620,7 +620,7 @@ fn secure_parent(path: &Path) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| "The usage database path has no parent".to_string())?;
-    desktop_gateway::tokens::create_private_dir(parent)
+    agent_bridge::tokens::create_private_dir(parent)
         .map_err(|error| format!("Cannot create the app data directory: {error}"))
 }
 

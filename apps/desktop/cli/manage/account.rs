@@ -1,6 +1,6 @@
 //! CLI account authorization uses the same runtime session as the desktop UI.
 use super::{args::AccountLoginOptions, service_provider, value, Cli};
-use crate::{client::Client, contracts::*, protocol::rpc};
+use desktop_runtime::{client::Client, contracts::*, protocol::rpc};
 use serde_json::Value;
 use std::{
     io::{self, IsTerminal, Read, Write},
@@ -15,7 +15,7 @@ impl Drop for Pending<'_> {
     fn drop(&mut self) {
         if let Some(id) = self.id.take() {
             if self.client.call(rpc::CancelAccountLogin { id }).is_err() {
-                crate::diagnostic(format_args!("Account cleanup could not complete; unused authorization expires automatically."));
+                desktop_runtime::diagnostic(format_args!("Account cleanup could not complete; unused authorization expires automatically."));
             }
         }
     }
@@ -60,19 +60,20 @@ pub(super) fn login(
         provider,
         remote_url: remote_url.into(),
     };
-    let login: crate::account_login::LoginPresentation = client.call(rpc::BeginAccountLogin {
-        profile: profile.clone(),
-    })?;
+    let login: desktop_runtime::account_login::LoginPresentation =
+        client.call(rpc::BeginAccountLogin {
+            profile: profile.clone(),
+        })?;
     let mut pending = Pending {
         client,
         id: Some(login.id.clone()),
     };
-    crate::diagnostic(format_args!("Open this URL to sign in:\n{}", login.url));
+    desktop_runtime::diagnostic(format_args!("Open this URL to sign in:\n{}", login.url));
     if let Some(code) = &login.user_code {
-        crate::diagnostic(format_args!("Confirm device code: {code}"));
+        desktop_runtime::diagnostic(format_args!("Confirm device code: {code}"));
     }
     if !options.no_browser && open_browser(&login.url).is_err() {
-        crate::diagnostic(format_args!(
+        desktop_runtime::diagnostic(format_args!(
             "Browser did not open. Open the URL above manually."
         ));
     }
@@ -110,7 +111,7 @@ pub(super) fn login(
         Some(details.workspaces[0].id)
     } else {
         for workspace in &details.workspaces {
-            crate::diagnostic(format_args!(
+            desktop_runtime::diagnostic(format_args!(
                 "{}: {}",
                 workspace.id,
                 workspace.name.escape_default()

@@ -300,7 +300,7 @@ pub fn run() {
             {
                 let data_dir = app.path().app_data_dir()?;
                 app_data::prepare(&data_dir)?;
-                std::env::set_var(desktop_gateway::agents::APP_DATA_OVERRIDE_ENV, &data_dir);
+                std::env::set_var(agent_bridge::agents::APP_DATA_OVERRIDE_ENV, &data_dir);
                 if let Err(error) = desktop_runtime::agent_access::prepare_for_service() {
                     eprintln!("Cannot prepare Agent Home access for the backend: {error}");
                 }
@@ -348,7 +348,7 @@ pub fn run() {
                 })
                 .build()?;
             window_state::migrate_legacy_default(app, &window, config.width, config.height)?;
-            window.set_title(desktop_gateway::brand::PRODUCT_NAME)?;
+            window.set_title(agent_bridge::brand::PRODUCT_NAME)?;
             let window_for_events = window.clone();
             let app_for_events = app.handle().clone();
             let client_for_events = client.clone();

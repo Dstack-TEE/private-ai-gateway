@@ -6,13 +6,14 @@ use std::{
     time::Duration,
 };
 
-use desktop_gateway::catalog::EndpointInventory;
+use agent_bridge::catalog::EndpointInventory;
 use reqwest::{
     header::{ETAG, IF_NONE_MATCH},
     Client, StatusCode,
 };
 use serde::Serialize;
 
+/// Released apps fetch this exact path; moving the file breaks their refresh.
 const SOURCE: &str = "https://raw.githubusercontent.com/Dstack-TEE/private-ai-gateway/main/apps/desktop/gateway/src/endpoint-support.json";
 const MAX_BYTES: usize = 1024 * 1024;
 

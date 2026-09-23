@@ -1,4 +1,5 @@
-//! Verifier lifecycle and the platform-neutral desktop view of the gateway.
+//! The verifier session state machine: verifier lifecycle and the
+//! platform-neutral protection state (`GatewayState`) clients observe.
 //!
 //! The stable local endpoint and verifier both run in the service process. A
 //! session is only opened for requests once the verifier's identity and the
@@ -23,14 +24,14 @@ use crate::endpoint_inventory::InventoryUpdater;
 use crate::usage::UsageStore;
 use crate::{local_api, service_config};
 use aci_protocol::types::ServiceCapabilities;
-use desktop_gateway::catalog::{Catalog, EndpointInventory};
-use desktop_gateway::proxy::{ProxyEvent, ProxyState, Session};
+use agent_bridge::catalog::{Catalog, EndpointInventory};
+use agent_bridge::proxy::{ProxyEvent, ProxyState, Session};
 use serde_json::{Map, Value};
 use tokio::{runtime::Handle, sync::watch};
 
 const MAX_ACTIVITY: usize = 50;
 
-pub struct GatewayManager {
+pub struct SessionManager {
     inventory: Option<Arc<InventoryUpdater>>,
     inner: Mutex<RuntimeState>,
     proxy: Arc<ProxyState>,
@@ -64,7 +65,7 @@ pub enum VerifierEvent {
     Ready {
         identity: IdentityEvent,
         remote_url: String,
-        service: Arc<dyn desktop_gateway::proxy::VerifiedService>,
+        service: Arc<dyn agent_bridge::proxy::VerifiedService>,
     },
     IdentityUpdated {
         identity: IdentityEvent,
@@ -110,7 +111,7 @@ struct RuntimeState {
     epoch: u64,
     catalog_read: u64,
     catalog: Option<Catalog>,
-    service: Option<Arc<dyn desktop_gateway::proxy::VerifiedService>>,
+    service: Option<Arc<dyn agent_bridge::proxy::VerifiedService>>,
     /// The verifier reported a verified identity for this generation.
     identity_ready: bool,
     /// A settings verification may attest and discover models, but it never
@@ -124,7 +125,7 @@ struct RuntimeState {
     state: GatewayState,
 }
 
-impl GatewayManager {
+impl SessionManager {
     pub(crate) fn with_endpoint_inventory(mut self, inventory: InventoryUpdater) -> Self {
         self.inventory = Some(Arc::new(inventory));
         self

@@ -8,15 +8,18 @@ Status: implemented.
 | --- | --- | --- |
 | Private AI Gateway | Remote attested inference service and signed receipts | `src/aggregator`, `src/middleware` |
 | Private AI Proxy | Desktop profiles, agent connections, verification and usage | `apps/desktop` |
-| Local backend | Sessions, configuration transactions, local API and verifier task ownership | `apps/desktop/runtime`, `apps/desktop/gateway` |
+| Local backend | Sessions, configuration transactions, local API and verifier task ownership | `apps/desktop/runtime`, `apps/desktop/agent-bridge` |
 | `private-ai-proxy` | Unified managed CLI and ACI protocol commands | `apps/desktop/cli` |
 | `private-ai-proxy-service` | Per-user backend entry point | `apps/desktop/cli/service.rs` |
 
 ## Project boundary
 
 `private-ai-proxy` composes the managed CLI's Clap command tree with its ACI
-commands. Management command execution and output live in
-`apps/desktop/runtime/src/cli`; ACI command modules live in `apps/desktop/cli`.
+commands. The `cli` crate is the only command-line surface: management
+arguments, execution, output, completions and `schema` live in
+`apps/desktop/cli/manage`; ACI command modules live beside them in
+`apps/desktop/cli`. The backend crates contain no argument parsing or terminal
+prompting.
 There is one PAP user-facing executable and one PAP relying-party verifier.
 Desktop integration adds lifecycle events for process integration and post-delivery receipt auditing.
 The Private AI Proxy package owns the user-facing CLI, its managed service binary,
@@ -30,8 +33,10 @@ audit, and local-proxy implementation. Neither Rust package imports the other;
 both depend on the neutral `aci-protocol` crate for wire types and deterministic
 encoding only. Verification policy and security decisions are not shared, and
 each project retains its own workspace and lockfile. `pap` is the preferred
-shell command; the full `private-ai-proxy` name and protocol-focused `aci`
-alias invoke the same executable rather than separate binaries or crates.
+shell command; the full `private-ai-proxy` name and the legacy `aci` alias
+invoke the same executable rather than separate binaries or crates. `aci`
+prints a one-line note toward `pap` only on an interactive terminal outside
+JSON modes, so scripted use keeps identical output.
 
 `pap verify/audit/sessions/send` do not initialize the managed backend or
 credential store. `pap serve` streams responses immediately and audits receipts
@@ -45,6 +50,21 @@ its own; stopping or losing the backend drops its only request path.
 Direct and independent CLI packages contain `private-ai-proxy`,
 `private-ai-proxy-service` and the credential helper. MAS contains only the
 service. No distribution contains an independent `aci` executable.
+
+## Crate boundaries
+
+| Crate | Package | Responsibility |
+| --- | --- | --- |
+| `cli` | `private-ai-proxy` | Every command-line surface, the ACI verifier, `pap serve`, and the `private-ai-proxy-service` entry point that injects the verifier into the backend |
+| `runtime` | `private-ai-proxy-runtime` | Backend controller, management protocol and client, IPC transport, usage, account login, web UI, and the verifier session state machine (`verifier_session`) |
+| `agent-bridge` | `private-ai-proxy-agent-bridge` | Loopback Local API proxy, agent tokens, verified catalog, OS secrets, reversible agent configuration, and `private-ai-proxy-helper` |
+| `src-tauri` | `private-ai-proxy-desktop` | Tauri shell: windows, tray, menus, notifications, updates |
+
+In prose, "gateway" names the remote Private AI Gateway. Some wire and UI names
+predate that rule and are kept for compatibility across updates: the
+`GatewayState` contract, `StartGatewayConfig`, the `start_gateway`,
+`stop_gateway` and `get_gateway_state` Tauri commands, and the `gateway`
+notification preference all describe local protection state.
 
 ## Module boundaries
 
@@ -73,7 +93,7 @@ service. No distribution contains an independent `aci` executable.
 
 - `status`, `doctor`, and help/version do not launch the backend. `service start`
   and `start` explicitly launch it without opening a window.
-- Closing or quitting the UI leaves the backend and gateway running. The tray's
+- Closing or quitting the UI leaves the backend and protection running. The tray's
   Stop All and Quit action requests confirmation, then shuts down the backend.
 - A disconnected UI offers Start backend. It does not silently restart a service
   during an updater operation or replay an earlier mutation.
@@ -95,7 +115,7 @@ service. No distribution contains an independent `aci` executable.
 ## Verifier execution
 
 Managed inference has one local HTTP listener. After authenticating the Agent,
-the gateway swaps in the provider credential and calls the verified service
+the Local API proxy swaps in the provider credential and calls the verified service
 directly with the request body and typed attribution context. The verifier makes
 the sole remote HTTP hop over its attestation-bound TLS client. Lifecycle events
 use a direct callback, and request delivery, usage and receipt-audit updates all
@@ -179,8 +199,8 @@ console executables and do not require the desktop UI.
 ## Sources
 
 Repository: https://github.com/Dstack-TEE/private-ai-gateway
-Primary contracts: `apps/desktop/cli/args.rs`, `apps/desktop/runtime/src/cli/args.rs`,
-`apps/desktop/cli/serve.rs`, `apps/desktop/runtime/src/gateway.rs`,
+Primary contracts: `apps/desktop/cli/args.rs`, `apps/desktop/cli/manage/args.rs`,
+`apps/desktop/cli/serve.rs`, `apps/desktop/runtime/src/verifier_session.rs`,
 `apps/desktop/scripts/package-cli.mjs`.
 
 Official contracts: [Rust file locks](https://doc.rust-lang.org/1.89.0/std/fs/struct.File.html#method.try_lock),

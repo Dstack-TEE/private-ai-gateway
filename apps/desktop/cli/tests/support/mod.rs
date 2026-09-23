@@ -141,10 +141,7 @@ fn teardown(root: &Path) -> Vec<String> {
         // The product's own stop path, whichever backend owns the endpoint.
         let mut stop = Command::new(cli);
         stop.args(["service", "stop", "--yes", "--json"])
-            .env(
-                desktop_gateway::agents::HOME_OVERRIDE_ENV,
-                root.join("home"),
-            )
+            .env(agent_bridge::agents::HOME_OVERRIDE_ENV, root.join("home"))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());

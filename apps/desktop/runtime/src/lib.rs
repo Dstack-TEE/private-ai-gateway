@@ -8,13 +8,11 @@ use std::io::Write;
 pub mod account_login;
 pub mod agent_access;
 mod balance_cache;
-pub mod cli;
 pub mod cli_install;
 pub mod client;
 pub mod contracts;
 pub mod controller;
 mod endpoint_inventory;
-pub mod gateway;
 #[cfg(all(unix, not(all(target_os = "macos", feature = "mac-app-store"))))]
 mod helper_staging;
 pub mod launch;
@@ -31,6 +29,7 @@ pub mod transport;
 pub mod ui_api;
 pub mod updates;
 pub mod usage;
+pub mod verifier_session;
 pub mod web_ui;
 
 /// Write a best-effort backend diagnostic without letting a detached stderr

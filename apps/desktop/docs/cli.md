@@ -4,9 +4,11 @@
 desktop app; it does not require an open window. Installations keep the
 canonical `private-ai-proxy` executable (including the verifier),
 `private-ai-proxy-service`, and the credential helper together; see
-[distribution](cli-distribution.md). `private-ai-proxy` is the full-name alias
-and `aci` is the protocol-focused alias. All three names accept the same
-commands and run the same implementation.
+[distribution](cli-distribution.md). `private-ai-proxy` is the canonical
+executable name. `aci` is a legacy alias for existing scripts; it accepts the
+same commands and runs the same implementation, and on an interactive terminal
+outside `--json`/`--json-events` it prints a one-line note pointing to `pap`.
+Prefer `pap` or `private-ai-proxy` in new scripts and documentation.
 
 ## Discover Commands
 
@@ -29,7 +31,7 @@ The same binary includes the ACI protocol commands:
 | `pap send <url>` | Send an inference request using the ACI client. |
 | `pap serve <url>` | Run the local streaming proxy with post-delivery receipt audits. |
 
-`private-ai-proxy` and `aci` accept these same commands. They are compiled from
+`private-ai-proxy` (and the legacy `aci` alias) accept these same commands. They are compiled from
 this package's ACI modules, not forwarded to another executable. `serve` is standalone;
 `start` below manages the persistent background service and saved profiles.
 

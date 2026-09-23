@@ -47,7 +47,7 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
     let executable = std::env::current_exe().map_err(|_| "Cannot locate backend executable")?;
     let hello = Hello {
         protocol_version: protocol::VERSION,
-        product: desktop_gateway::brand::APP_IDENTIFIER.into(),
+        product: agent_bridge::brand::APP_IDENTIFIER.into(),
         version: protocol::BUILD_VERSION.into(),
         instance_id: format!(
             "{}-{}",

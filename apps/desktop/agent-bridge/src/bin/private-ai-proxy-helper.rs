@@ -7,7 +7,7 @@
 
 use std::process::ExitCode;
 
-use desktop_gateway::{agents, tokens::TokenFiles};
+use agent_bridge::{agents, tokens::TokenFiles};
 
 fn usage() -> String {
     let ids = agents::Agent::ALL.map(agents::Agent::id).join("|");
@@ -34,7 +34,7 @@ fn main() -> ExitCode {
             token.ok_or_else(|| {
                 format!(
                     "No active gateway credential. Open {}, enable protection, and reconnect this agent if it needs attention. After disconnecting, restart the agent to reload its restored configuration.",
-                    desktop_gateway::brand::PRODUCT_NAME
+                    agent_bridge::brand::PRODUCT_NAME
                 )
             })
         });

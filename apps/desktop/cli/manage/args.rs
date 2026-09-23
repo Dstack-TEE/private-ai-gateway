@@ -6,7 +6,7 @@ use clap_complete::Shell;
 #[derive(Parser)]
 #[command(
     name = "private-ai-proxy",
-    version = crate::protocol::BUILD_VERSION,
+    version = desktop_runtime::protocol::BUILD_VERSION,
     about = "Control the Private AI Proxy",
     long_about = "Control the Private AI Proxy backend, protected connection, profiles, and coding-agent integrations. `private-ai-proxy start` explicitly starts protection and waits for verification. `private-ai-proxy service start` starts the backend; saved connect-on-launch behavior may then start protection automatically."
 )]

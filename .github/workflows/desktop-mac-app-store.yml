@@ -82,7 +82,7 @@ jobs:
             ${{ env.CARGO_TARGET_DIR }}/*/.fingerprint
             ${{ env.CARGO_TARGET_DIR }}/*/deps
             ${{ env.CARGO_TARGET_DIR }}/*/build
-          key: pap-mas-verify-v2-${{ runner.os }}-${{ hashFiles('apps/desktop/package-lock.json', 'apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}
+          key: pap-mas-verify-v2-${{ runner.os }}-${{ hashFiles('apps/desktop/package-lock.json', 'apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/agent-bridge/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}
           restore-keys: pap-mas-verify-v2-${{ runner.os }}-
       - name: Install desktop dependencies
         working-directory: apps/desktop
@@ -201,7 +201,7 @@ jobs:
             ${{ env.CARGO_TARGET_DIR }}/*/*/.fingerprint
             ${{ env.CARGO_TARGET_DIR }}/*/*/deps
             ${{ env.CARGO_TARGET_DIR }}/*/*/build
-          key: pap-mas-package-v2-${{ runner.os }}-${{ hashFiles('apps/desktop/package-lock.json', 'apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}
+          key: pap-mas-package-v2-${{ runner.os }}-${{ hashFiles('apps/desktop/package-lock.json', 'apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/agent-bridge/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}
           restore-keys: pap-mas-package-v2-${{ runner.os }}-
       - name: Install build targets and dependencies
         working-directory: apps/desktop

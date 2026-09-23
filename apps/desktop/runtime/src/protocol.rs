@@ -358,8 +358,8 @@ impl RpcError {
     }
 }
 
-impl From<desktop_gateway::agents::AgentError> for RpcError {
-    fn from(error: desktop_gateway::agents::AgentError) -> Self {
+impl From<agent_bridge::agents::AgentError> for RpcError {
+    fn from(error: agent_bridge::agents::AgentError) -> Self {
         Self::new(error.code(), &error.to_string())
     }
 }
@@ -532,7 +532,7 @@ mod tests {
 
     #[test]
     fn agent_failures_keep_actionable_causes_without_internal_details() {
-        use desktop_gateway::agents::AgentError;
+        use agent_bridge::agents::AgentError;
         for (error, code) in [
             (AgentError::NoCompatibleModels, "no_compatible_models"),
             (AgentError::IncompatibleModel, "incompatible_model"),
