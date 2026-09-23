@@ -141,7 +141,8 @@ The browser UI degrades desktop-only integration:
 | Native child windows and dialogs | In-page modal sheets and dialogs. |
 | Clipboard and external links | Browser clipboard and allowlisted HTTPS tabs. |
 | Open at Login, tray/menu state | Hidden. Protect on launch remains shared with the backend. |
-| OS notifications and native updates | Hidden; update ownership stays with the installer or package manager. |
+| OS notifications | Hidden. |
+| Software updates | Settings > About announces a newer release in the saved channel with the exact upgrade steps for the backend's installation; it never installs anything. |
 | CLI registration | Hidden. |
 | RedPill loopback OAuth | Use **Paste callback link** when the browser cannot reach port 4181 on the service machine. Phala device flow is unchanged. |
 
@@ -278,7 +279,9 @@ human message text or assume all failures are retryable.
 `doctor` reports every independent check, even when some fail. In that case it
 prints the partial report on stdout and exits nonzero; the `errors` object
 identifies failed checks. `credentialPolicy` describes policy, not an actual
-credential-store unlock probe.
+credential-store unlock probe. The `update` check is advisory: when the release
+feed is unreachable it reports an `error` inside `update` without failing
+`doctor`.
 
 ## Coverage
 
@@ -302,6 +305,9 @@ Usage time filters are Unix seconds. List pagination uses `--cursor` and
 currently displayed page. Exports refuse existing destination files.
 
 OS login startup, notification permissions and installer-based app updates stay
-in the desktop UI or OS installer. Shared notification preferences are available
+in the desktop UI or OS installer. `doctor` also reports whether the saved update
+channel (`settings set updateChannel beta|stable`) has a newer release and the
+exact upgrade steps for this installation; see
+[Updates by installation](distribution.md#updates-by-installation). Shared notification preferences are available
 through `settings`; they do not grant OS notification permission. CLI-only use
 still requires an accessible OS credential store. There is no plaintext fallback.

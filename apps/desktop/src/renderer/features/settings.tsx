@@ -144,7 +144,7 @@ export function SettingsView({
 
 
       <SettingsSection title="About">
-          <UpdateControl updates={updates} productName={brand.productName} managedLabel={distribution.channel === "web" ? "Updates are managed by the CLI installation" : undefined} />
+          <UpdateControl updates={updates} productName={brand.productName} desktop={distribution.channel !== "web"} />
           {([ ["documentation", "Documentation"], ["github", "GitHub"] ] as const).map(([target, label]) => <SettingsLink key={target} title={label} external onClick={() => onAboutLink(target)} />)}
       </SettingsSection>
       {diagnosticMessage && <p role="status" className="text-sm text-muted-foreground">{diagnosticMessage}</p>}

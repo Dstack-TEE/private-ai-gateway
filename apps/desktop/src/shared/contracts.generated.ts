@@ -124,6 +124,20 @@ url?: string, error?: string, };
 export type ListenAddress = { address: string, name: string, };
 export type Appearance = "system" | "light" | "dark";
 export type UpdateChannel = "beta" | "stable";
+export type Installation = "desktopApp" | "desktopPacman" | "deb" | "rpm" | "pacman" | "systemPackage" | "npm" | "portable";
+export type UpdateNotice = { installation: Installation, channel: UpdateChannel, currentVersion: string,
+/**
+ * A newer release in the selected channel.
+ */
+version: string | null,
+/**
+ * Shell steps that install `version`, when the installation has them.
+ */
+commands: Array<string>,
+/**
+ * Portable archive to extract into a fresh directory.
+ */
+downloadUrl: string | null, channelPublished: boolean, };
 export type NotificationPreferences = { enabled: boolean, gateway: boolean, localApi: boolean, verification: boolean, };
 export type LaunchPreferences = { openAtLogin: boolean, connectOnLaunch: boolean, };
 export type ProfileBackup = { version: number, profiles: Array<ProfileConfiguration>, };
@@ -174,4 +188,4 @@ export type ConnectOptions = {
 defaultModel?: string, };
 export type AgentAccessStatus = "authorized" | "authorizationRequired" | "reauthorizationRequired";
 /** A method the shared UI API accepts (`ui_api::Method`). */
-export type UiMethod = "startBackendService" | "getState" | "start" | "stop" | "activateProfile" | "deleteProfile" | "saveConfiguration" | "completeAccountLogin" | "beginAccountLogin" | "pollAccountLogin" | "saveAccountLogin" | "getAccountDetails" | "getAccountBalance" | "getOrganizationUrl" | "getTopUpUrl" | "cancelAccountLogin" | "getClientKey" | "rotateClientKey" | "saveLocalApiConfig" | "saveWebUi" | "listListenAddresses" | "importProfiles" | "exportProfilesContent" | "exportDiagnosticsContent" | "queryUsage" | "getUsageRecord" | "listAgents" | "getAgentAccess" | "requestAgentAccess" | "previewAgent" | "applyAgent" | "getAppearance" | "setAppearance" | "getLaunchPreferences" | "setLaunchPreference" | "getNotificationSettings" | "saveNotificationSettings" | "resetSettings";
+export type UiMethod = "startBackendService" | "getState" | "start" | "stop" | "activateProfile" | "deleteProfile" | "saveConfiguration" | "completeAccountLogin" | "beginAccountLogin" | "pollAccountLogin" | "saveAccountLogin" | "getAccountDetails" | "getAccountBalance" | "getOrganizationUrl" | "getTopUpUrl" | "cancelAccountLogin" | "getClientKey" | "rotateClientKey" | "saveLocalApiConfig" | "saveWebUi" | "listListenAddresses" | "importProfiles" | "exportProfilesContent" | "exportDiagnosticsContent" | "queryUsage" | "getUsageRecord" | "listAgents" | "getAgentAccess" | "requestAgentAccess" | "previewAgent" | "applyAgent" | "getAppearance" | "setAppearance" | "getLaunchPreferences" | "setLaunchPreference" | "getNotificationSettings" | "saveNotificationSettings" | "resetSettings" | "getUpdateNotice";

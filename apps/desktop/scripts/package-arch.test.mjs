@@ -6,7 +6,7 @@ import { archInstallScript, archPackageMetadata, archPkgbuild } from "./package-
 test("Arch packages preserve native version ordering and package ownership", () => {
   const desktop = archPackageMetadata("desktop", "1.2.3-beta.4", "x64");
   assert.equal(desktop.version, "1.2.3beta.4");
-  assert.equal(desktop.sourceVersion, "1.2.3-beta.4");
+  assert.equal(desktop.sourceVersion, "1.2.3~beta.4");
   assert.equal(archPackageMetadata("cli", "1.2.3-beta.4", "x64").sourceVersion, "1.2.3~beta.4");
   assert.equal(desktop.arch, "x86_64");
   assert.deepEqual(desktop.conflicts, ["private-ai-proxy-cli"]);

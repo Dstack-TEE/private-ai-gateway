@@ -2,8 +2,9 @@ use std::{sync::Arc, time::Duration};
 
 use desktop_runtime::{
     client::Client,
-    preferences::{self, UpdateChannel},
+    preferences::UpdateChannel,
     protocol::{rpc, Preference},
+    updates::{self, Installation},
 };
 use serde::Serialize;
 use tauri::{AppHandle, State};
@@ -18,46 +19,6 @@ pub(crate) struct DownloadedUpdate {
 #[derive(Default)]
 pub struct PreparedUpdate(pub(crate) tokio::sync::Mutex<Option<DownloadedUpdate>>);
 
-fn matches_channel(version: &str, channel: UpdateChannel) -> bool {
-    let Ok(version) = semver::Version::parse(version) else {
-        return false;
-    };
-    match channel {
-        UpdateChannel::Stable => version.pre.is_empty(),
-        UpdateChannel::Beta => version.pre.as_str().starts_with("beta."),
-    }
-}
-
-fn channel_name(channel: UpdateChannel) -> &'static str {
-    match channel {
-        UpdateChannel::Beta => "beta",
-        UpdateChannel::Stable => "stable",
-    }
-}
-
-fn channel_endpoint(
-    configured: &str,
-    channel: UpdateChannel,
-    target: &str,
-) -> Result<tauri::Url, String> {
-    let mut endpoint = tauri::Url::parse(configured)
-        .map_err(|_| "Updates are not configured correctly for this build")?;
-    let path = endpoint.path();
-    let marker = path
-        .rfind("/desktop-updates-")
-        .ok_or("Updates are not configured correctly for this build")?;
-    let feed = &path[marker + 1..];
-    if feed != "desktop-updates-beta/latest.json" && feed != "desktop-updates-stable/latest.json" {
-        return Err("Updates are not configured correctly for this build".to_string());
-    }
-    endpoint.set_path(&format!(
-        "{}/desktop-updates-{}/latest-{target}.json",
-        &path[..marker],
-        channel_name(channel)
-    ));
-    Ok(endpoint)
-}
-
 fn configured_endpoint(app: &AppHandle) -> Result<String, String> {
     app.config()
         .plugins
@@ -69,25 +30,6 @@ fn configured_endpoint(app: &AppHandle) -> Result<String, String> {
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
         .ok_or_else(|| "Updates are not configured correctly for this build".to_string())
-}
-
-async fn update_channel(app: &AppHandle) -> Result<UpdateChannel, String> {
-    let default = if app.package_info().version.pre.is_empty() {
-        UpdateChannel::Stable
-    } else {
-        UpdateChannel::Beta
-    };
-    crate::run_blocking(move || {
-        let channel = match preferences::load() {
-            Ok(saved) => saved.update_channel.unwrap_or(default),
-            Err(error) => {
-                eprintln!("Could not read update preferences; using the build channel: {error}");
-                default
-            }
-        };
-        Ok(channel)
-    })
-    .await
 }
 
 #[tauri::command]
@@ -127,6 +69,8 @@ pub struct UpdateInfo {
     channel: UpdateChannel,
     version: Option<String>,
     channel_published: bool,
+    /// Steps that install `version` when a package manager owns the app.
+    upgrade_commands: Vec<String>,
 }
 
 #[tauri::command]
@@ -134,72 +78,76 @@ pub async fn prepare_update(
     app: AppHandle,
     prepared: State<'_, PreparedUpdate>,
 ) -> Result<UpdateInfo, String> {
-    let system_managed = system_managed();
-    let enabled = crate::distribution::CAPABILITIES.native_updates
-        && app.config().plugins.0.contains_key("updater")
-        && !system_managed;
+    let configured = crate::distribution::CAPABILITIES.native_updates
+        && app.config().plugins.0.contains_key("updater");
     let mut prepared = prepared
         .0
         .try_lock()
         .map_err(|_| "An update operation is already in progress")?;
-    let channel = update_channel(&app).await?;
+    let current_version = app.package_info().version.to_string();
+    let build_version = current_version.clone();
+    let (channel, system_managed) = crate::run_blocking(move || {
+        Ok((
+            updates::selected_channel(&build_version),
+            updates::installation() == Installation::DesktopPacman,
+        ))
+    })
+    .await?;
     let mut info = UpdateInfo {
-        enabled,
+        enabled: configured && !system_managed,
         system_managed,
-        current_version: app.package_info().version.to_string(),
+        current_version,
         channel,
         version: None,
         channel_published: true,
+        upgrade_commands: Vec::new(),
     };
-    if !enabled {
+    if !configured || system_managed {
         *prepared = None;
+    }
+    if !configured {
         return Ok(info);
     }
-    let channel_name = channel_name(channel);
+    let feed = configured_endpoint(&app)?;
+    if system_managed {
+        // pacman owns the files: announce the release and its exact upgrade steps.
+        let notice = updates::check(
+            &feed,
+            channel,
+            &info.current_version,
+            Installation::DesktopPacman,
+        )
+        .await?;
+        info.version = notice.version;
+        info.upgrade_commands = notice.commands;
+        info.channel_published = notice.channel_published;
+        return Ok(info);
+    }
     let target =
         tauri_plugin_updater::target().ok_or("Updates are unavailable on this platform")?;
-    let endpoint = channel_endpoint(&configured_endpoint(&app)?, channel, &target)?;
-    let updater = app
-        .updater_builder()
-        .endpoints(vec![endpoint.clone()])
-        .map_err(|_| "Invalid update endpoint")?
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|_| "Updates are not configured correctly for this build")?;
-    let update = match updater.check().await {
-        Ok(update) => update,
-        // The plugin groups HTTP failures as ReleaseNotFound. Only a confirmed
-        // 404 means the selected channel has not published a feed yet.
-        Err(tauri_plugin_updater::Error::ReleaseNotFound) => {
-            let response = reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .map_err(|_| "Could not check the update channel")?
-                .head(endpoint.clone())
-                .send()
-                .await
-                .map_err(|_| "Could not reach the update channel")?;
-            if response.status() == reqwest::StatusCode::NOT_FOUND {
-                *prepared = None;
-                info.channel_published = false;
-                return Ok(info);
+    let mut selected: Option<Update> = None;
+    for &source in updates::feeds(channel) {
+        let endpoint = updates::feed_url(&feed, source, &target)?;
+        match feed_update(&app, endpoint, source).await {
+            Ok(Checked::Update(update)) => {
+                if selected
+                    .as_ref()
+                    .is_none_or(|current| newer(&update.version, &current.version))
+                {
+                    selected = Some(*update);
+                }
             }
-            return Err("The update channel is temporarily unavailable".to_string());
+            Ok(Checked::Unpublished) if source == channel => info.channel_published = false,
+            Ok(_) => {}
+            // The stable feed only supplements beta; its failure never hides beta releases.
+            Err(_) if source != channel => {}
+            Err(error) => {
+                *prepared = None;
+                return Err(error);
+            }
         }
-        Err(_) => return Err("Could not check for updates. Try again later.".to_string()),
-    };
-    if update.as_ref().is_some_and(|update| {
-        update
-            .raw_json
-            .get("channel")
-            .and_then(serde_json::Value::as_str)
-            != Some(channel_name)
-            || !matches_channel(&update.version, channel)
-    }) {
-        *prepared = None;
-        return Err("The update does not match the selected channel".to_string());
     }
-    let Some(update) = update else {
+    let Some(update) = selected else {
         *prepared = None;
         return Ok(info);
     };
@@ -228,16 +176,71 @@ pub async fn prepare_update(
     Ok(info)
 }
 
-#[cfg(target_os = "linux")]
-fn system_managed() -> bool {
-    std::path::Path::new("/usr/share/private-ai-proxy/package-manager").is_file()
-        && std::env::current_exe()
-            .is_ok_and(|path| path == std::path::Path::new("/usr/bin/private-ai-proxy-desktop"))
+enum Checked {
+    Update(Box<Update>),
+    Current,
+    Unpublished,
 }
 
-#[cfg(not(target_os = "linux"))]
-fn system_managed() -> bool {
-    false
+async fn feed_update(
+    app: &AppHandle,
+    endpoint: tauri::Url,
+    feed: UpdateChannel,
+) -> Result<Checked, String> {
+    let updater = app
+        .updater_builder()
+        .endpoints(vec![endpoint.clone()])
+        .map_err(|_| "Invalid update endpoint")?
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|_| "Updates are not configured correctly for this build")?;
+    match updater.check().await {
+        Ok(Some(update)) => {
+            if update
+                .raw_json
+                .get("channel")
+                .and_then(serde_json::Value::as_str)
+                != Some(updates::channel_name(feed))
+                || !updates::belongs_to_feed(&update.version, feed)
+            {
+                return Err("The update does not match the selected channel".into());
+            }
+            Ok(Checked::Update(Box::new(update)))
+        }
+        Ok(None) => Ok(Checked::Current),
+        // The plugin groups HTTP failures as ReleaseNotFound. Only a confirmed
+        // 404 means the channel has not published a feed yet.
+        Err(tauri_plugin_updater::Error::ReleaseNotFound) => {
+            if feed_missing(endpoint).await? {
+                Ok(Checked::Unpublished)
+            } else {
+                Err("The update channel is temporarily unavailable".into())
+            }
+        }
+        Err(_) => Err("Could not check for updates. Try again later.".into()),
+    }
+}
+
+async fn feed_missing(endpoint: tauri::Url) -> Result<bool, String> {
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|_| "Could not check the update channel")?
+        .head(endpoint)
+        .send()
+        .await
+        .map_err(|_| "Could not reach the update channel")?;
+    Ok(response.status() == reqwest::StatusCode::NOT_FOUND)
+}
+
+fn newer(candidate: &str, current: &str) -> bool {
+    match (
+        semver::Version::parse(candidate),
+        semver::Version::parse(current),
+    ) {
+        (Ok(candidate), Ok(current)) => candidate > current,
+        _ => false,
+    }
 }
 
 #[tauri::command]
@@ -274,32 +277,13 @@ pub async fn restart_to_update(
 
 #[cfg(test)]
 mod tests {
-    use super::{channel_endpoint, matches_channel, UpdateChannel};
+    use super::newer;
 
     #[test]
-    fn update_versions_must_belong_to_selected_channel() {
-        assert!(matches_channel("0.2.0", UpdateChannel::Stable));
-        assert!(matches_channel("0.2.0-beta.10", UpdateChannel::Beta));
-        assert!(!matches_channel("0.2.0-beta.1", UpdateChannel::Stable));
-        assert!(!matches_channel("0.2.0", UpdateChannel::Beta));
-        assert!(!matches_channel("0.2.0-rc.1", UpdateChannel::Beta));
-        assert!(!matches_channel("invalid", UpdateChannel::Stable));
-    }
-
-    #[test]
-    fn update_channels_derive_from_the_configured_feed() {
-        let configured = "https://example.test/releases/download/desktop-updates-beta/latest.json";
-        let endpoint = channel_endpoint(configured, UpdateChannel::Stable, "windows-x86_64")
-            .expect("valid update endpoint");
-        assert_eq!(
-            endpoint.as_str(),
-            "https://example.test/releases/download/desktop-updates-stable/latest-windows-x86_64.json"
-        );
-        assert!(channel_endpoint(
-            "https://example.test/releases/latest.json",
-            UpdateChannel::Beta,
-            "darwin-aarch64"
-        )
-        .is_err());
+    fn a_stable_release_supersedes_its_betas() {
+        assert!(newer("0.1.7", "0.1.7-beta.3"));
+        assert!(newer("0.1.8-beta.1", "0.1.7"));
+        assert!(!newer("0.1.7-beta.3", "0.1.7"));
+        assert!(!newer("invalid", "0.1.7"));
     }
 }

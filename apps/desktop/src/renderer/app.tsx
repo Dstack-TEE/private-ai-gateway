@@ -24,7 +24,7 @@ const errorTitles: Record<SurfaceErrorScope, string> = {
 };
 
 export function App({ initialView = "overview" }: { initialView?: View }): React.JSX.Element {
-  const updates = useUpdates(desktopApi, distributionCapabilities.nativeUpdates);
+  const updates = useUpdates(desktopApi, distributionCapabilities.nativeUpdates || distributionCapabilities.channel === "web");
   const [view, setView] = useState<View>(initialView);
   const gateway = useGatewayState(desktopApi, INITIAL_STATE);
   const state = gateway.error ? unavailableState(gateway.error) : gateway.data ?? INITIAL_STATE;
@@ -296,7 +296,7 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
 
   const windowContent = (
     <main className="app-shell w-full h-full grid grid-cols-[var(--sidebar-width)_minmax(0,_1fr)] overflow-hidden bg-background max-[780px]:grid-cols-[154px_minmax(0,_1fr)] max-[620px]:grid-cols-[68px_minmax(0,_1fr)] max-[440px]:grid-cols-[56px_minmax(0,_1fr)]">
-      <Sidebar view={view} updateReady={Boolean(updates.info?.version)} updateBusy={Boolean(updates.busy)} onRestartUpdate={() => void updates.restart()} onChange={changeView} />
+      <Sidebar view={view} updateReady={updates.ready} updateBusy={Boolean(updates.busy)} onRestartUpdate={() => void updates.restart()} onChange={changeView} />
       <section className="workspace min-w-0 min-h-0 flex flex-col">
         <PageHeader
           view={view}
