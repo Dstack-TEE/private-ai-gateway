@@ -21,8 +21,11 @@ Supporting documentation:
 - `confidential.ai/docs/c8s`
 - `confidential.ai/docs/attested-builds`
 
-> **Gateway verification:** not implemented. This review is the admissions
-> audit; there is no `verification.md` until an adapter lands.
+> **Gateway verification:** an adapter (provider kind `c8s`) is in progress;
+> its reference will be [`../c8s/verification.md`](../c8s/verification.md).
+> It implements the requirements below with one interim deviation, described
+> in [Interim RTMR3 Policy](#interim-rtmr3-policy). Having an adapter does not
+> change this admission verdict.
 
 ## Verdict
 
@@ -82,6 +85,18 @@ pinned to zero, and the control-plane state disk is encrypted.
    mesh CA, and the admitted image digests and argv against the same bundle.
 6. It pins the serving leaf SPKI for the lease. The serving key is TEE-held, so
    the SPKI pin is equivalent to the leaf binding. Scope is per-router.
+
+## Interim RTMR3 Policy
+
+The relying party chose to implement the adapter before the provider removes
+the operator key. Until then, the adapter accepts only the non-zero RTMR3
+values recorded for each reviewed release (observed live on 2026-09-23, because
+the release bundles do not publish RTMR3), never an unlisted value. It records
+`operator_key_armed: true` and **refutes** `os_known_good` in every session it
+establishes. Zero replaces those values once a reviewed release ships with the
+key removed. This is a routing decision for the relying party. It does not meet
+the hard reject above, so the verdict stays not acceptable for strict
+inclusion.
 
 ## Criteria Status
 
