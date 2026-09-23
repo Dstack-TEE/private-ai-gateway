@@ -1,132 +1,207 @@
 use crate::*;
+use desktop_runtime::ui_api::Method;
+use serde_json::{json, Value};
 
 #[tauri::command]
 pub(crate) async fn complete_account_login(
+    window: tauri::WebviewWindow,
     client: State<'_, Arc<Client>>,
     id: String,
     callback_url: String,
-) -> Result<(), String> {
-    client
-        .inner()
-        .clone()
-        .complete_account_login(id, callback_url)
-        .await
+) -> Result<Value, String> {
+    crate::ui_api::invoke(
+        window,
+        client,
+        Method::CompleteAccountLogin,
+        json!({ "id": id, "callbackUrl": callback_url }),
+    )
+    .await
 }
 
 #[tauri::command]
 pub(crate) async fn begin_account_login(
-    app: AppHandle,
+    window: tauri::WebviewWindow,
     client: State<'_, Arc<Client>>,
     profile: ConfidentialProfileInput,
-) -> Result<desktop_runtime::account_login::LoginPresentation, String> {
-    use tauri_plugin_opener::OpenerExt;
-    let client = client.inner().clone();
-    let login = client.begin_account_login(profile).await?;
-    if app.opener().open_url(&login.url, None::<&str>).is_err() {
-        // Keep the authorization available for the copy-link/manual callback path.
-        eprintln!("Cannot open the account connection page; use the manual connection link");
-    }
-    Ok(login)
+) -> Result<Value, String> {
+    crate::ui_api::invoke(
+        window,
+        client,
+        Method::BeginAccountLogin,
+        json!({ "profile": profile }),
+    )
+    .await
 }
 
 #[tauri::command]
 pub(crate) async fn poll_account_login(
+    window: tauri::WebviewWindow,
     client: State<'_, Arc<Client>>,
     id: String,
-) -> Result<Option<desktop_runtime::contracts::AccountLoginDetails>, String> {
-    client.inner().clone().poll_account_login(id).await
+) -> Result<Value, String> {
+    crate::ui_api::invoke(
+        window,
+        client,
+        Method::PollAccountLogin,
+        json!({ "id": id }),
+    )
+    .await
 }
 
 #[tauri::command]
 pub(crate) async fn save_account_login(
+    window: tauri::WebviewWindow,
     client: State<'_, Arc<Client>>,
     id: String,
     profile: ConfidentialProfileInput,
     require_production_os: bool,
     workspace_id: Option<i64>,
-) -> Result<GatewayState, String> {
-    client
-        .inner()
-        .clone()
-        .save_account_login(id, profile, require_production_os, workspace_id)
-        .await
+) -> Result<Value, String> {
+    crate::ui_api::invoke(
+        window,
+        client,
+        Method::SaveAccountLogin,
+        json!({
+            "id": id,
+            "profile": profile,
+            "requireProductionOs": require_production_os,
+            "workspaceId": workspace_id
+        }),
+    )
+    .await
 }
 
 #[tauri::command]
 pub(crate) async fn account_details(
+    window: tauri::WebviewWindow,
     client: State<'_, Arc<Client>>,
     profile_id: String,
-) -> Result<desktop_runtime::contracts::AccountLoginDetails, String> {
-    client.inner().clone().account_details(profile_id).await
+) -> Result<Value, String> {
+    crate::ui_api::invoke(
+        window,
+        client,
+        Method::GetAccountDetails,
+        json!({ "profileId": profile_id }),
+    )
+    .await
 }
 
 #[tauri::command]
 pub(crate) async fn account_balance(
+    window: tauri::WebviewWindow,
     client: State<'_, Arc<Client>>,
     target: desktop_runtime::contracts::AccountBalanceTarget,
-) -> Result<Option<desktop_runtime::contracts::AccountBalance>, String> {
-    client.inner().clone().account_balance(target).await
+) -> Result<Value, String> {
+    crate::ui_api::invoke(
+        window,
+        client,
+        Method::GetAccountBalance,
+        json!({ "target": target }),
+    )
+    .await
 }
 
 #[tauri::command]
 pub(crate) async fn open_top_up(
-    app: AppHandle,
+    window: tauri::WebviewWindow,
+    client: State<'_, Arc<Client>>,
     provider: desktop_runtime::contracts::ServiceProvider,
     scope_slug: Option<String>,
 ) -> Result<(), String> {
-    let url = desktop_runtime::account_login::top_up_url(&provider, scope_slug.as_deref())?;
-    open_account_url(app, url).await
+    let value = crate::ui_api::invoke(
+        window.clone(),
+        client,
+        Method::GetTopUpUrl,
+        json!({ "provider": provider, "scopeSlug": scope_slug }),
+    )
+    .await?;
+    let url = serde_json::from_value(value).map_err(|_| "Management response failed")?;
+    open_account_url(window.app_handle().clone(), url).await
 }
 
 #[tauri::command]
 pub(crate) async fn open_organization(
-    app: AppHandle,
+    window: tauri::WebviewWindow,
+    client: State<'_, Arc<Client>>,
     organization_slug: String,
 ) -> Result<(), String> {
     distribution::require(
         distribution::CAPABILITIES.account_portal_links,
         "Account portal links are unavailable in this distribution",
     )?;
-    let url = desktop_runtime::account_login::organization_url(Some(&organization_slug))?;
-    open_account_url(app, url).await
+    let value = crate::ui_api::invoke(
+        window.clone(),
+        client,
+        Method::GetOrganizationUrl,
+        json!({ "organizationSlug": organization_slug }),
+    )
+    .await?;
+    let url = serde_json::from_value(value).map_err(|_| "Management response failed")?;
+    open_account_url(window.app_handle().clone(), url).await
 }
 
 #[tauri::command]
 pub(crate) async fn cancel_account_login(
+    window: tauri::WebviewWindow,
     client: State<'_, Arc<Client>>,
     id: String,
-) -> Result<(), String> {
-    client.inner().clone().cancel_account_login(id).await
+) -> Result<Value, String> {
+    crate::ui_api::invoke(
+        window,
+        client,
+        Method::CancelAccountLogin,
+        json!({ "id": id }),
+    )
+    .await
 }
 
 #[tauri::command]
 pub(crate) async fn activate_profile(
+    window: tauri::WebviewWindow,
     client: State<'_, Arc<Client>>,
     profile_id: String,
-) -> Result<GatewayState, String> {
-    let client = client.inner().clone();
-    run_blocking(move || client.activate_profile(profile_id)).await
+) -> Result<Value, String> {
+    crate::ui_api::invoke(
+        window,
+        client,
+        Method::ActivateProfile,
+        json!({ "profileId": profile_id }),
+    )
+    .await
 }
 
 #[tauri::command]
 pub(crate) async fn delete_profile(
+    window: tauri::WebviewWindow,
     client: State<'_, Arc<Client>>,
     profile_id: String,
-) -> Result<GatewayState, String> {
-    let client = client.inner().clone();
-    run_blocking(move || client.delete_profile(profile_id)).await
+) -> Result<Value, String> {
+    crate::ui_api::invoke(
+        window,
+        client,
+        Method::DeleteProfile,
+        json!({ "profileId": profile_id }),
+    )
+    .await
 }
 
 #[tauri::command]
 pub(crate) async fn save_configuration(
+    window: tauri::WebviewWindow,
     client: State<'_, Arc<Client>>,
     profile: ConfidentialProfileInput,
     require_production_os: bool,
     key: Option<String>,
-) -> Result<GatewayState, String> {
-    client
-        .inner()
-        .clone()
-        .save_configuration(profile, require_production_os, key)
-        .await
+) -> Result<Value, String> {
+    crate::ui_api::invoke(
+        window,
+        client,
+        Method::SaveConfiguration,
+        json!({
+            "profile": profile,
+            "requireProductionOs": require_production_os,
+            "key": key
+        }),
+    )
+    .await
 }

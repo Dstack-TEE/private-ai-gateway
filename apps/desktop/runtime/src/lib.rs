@@ -27,6 +27,7 @@ mod recovery;
 pub mod server;
 pub mod service_config;
 pub mod transport;
+pub mod ui_api;
 pub mod usage;
 
 /// Write a best-effort backend diagnostic without letting a detached stderr

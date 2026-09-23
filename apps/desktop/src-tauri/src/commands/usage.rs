@@ -1,24 +1,35 @@
-use crate::*;
+use std::sync::Arc;
+
+use desktop_runtime::{client::Client, ui_api::Method, usage::UsageQuery};
+use serde_json::{json, Value};
+use tauri::{State, WebviewWindow};
 
 #[tauri::command]
 pub(crate) async fn query_usage(
+    window: WebviewWindow,
     client: State<'_, Arc<Client>>,
     query: UsageQuery,
-) -> Result<UsagePage, String> {
-    let client = client.inner().clone();
-    run_blocking(move || client.query_usage(query)).await
+) -> Result<Value, String> {
+    crate::ui_api::invoke(
+        window,
+        client,
+        Method::QueryUsage,
+        json!({ "query": query }),
+    )
+    .await
 }
 
 #[tauri::command]
 pub(crate) async fn get_usage_record(
+    window: WebviewWindow,
     client: State<'_, Arc<Client>>,
     record_id: String,
-) -> Result<RequestActivity, String> {
-    let client = client.inner().clone();
-    run_blocking(move || {
-        client
-            .usage_record(&record_id)?
-            .ok_or_else(|| "Usage record not found".to_string())
-    })
+) -> Result<Value, String> {
+    crate::ui_api::invoke(
+        window,
+        client,
+        Method::GetUsageRecord,
+        json!({ "recordId": record_id }),
+    )
     .await
 }

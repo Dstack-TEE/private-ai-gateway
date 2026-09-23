@@ -1,26 +1,14 @@
 import type {
-  AgentAccessStatus,
-  AgentPreview,
-  AgentStatus,
   Appearance,
   CliRegistration,
-  ConfidentialProfileInput,
-  ConnectOptions,
-  DesktopApi,
   DistributionCapabilities,
   GatewayState,
-  LocalApiConfig,
-  NotificationPreferences,
   ProfileBackup,
-  RequestActivity,
   ServiceProvider,
-  StartGatewayConfig,
-  UpdateChannel,
   UpdateInfo,
-  UsagePage,
-  UsageQuery,
 } from "../../shared/contracts";
 import { showBrowserDialog } from "../components/browser-dialog";
+import { createDesktopApi, type UiMethod, type UiPlatform, type UiTransport } from "./create-api";
 
 type EventListener = (payload: never) => void;
 type Bootstrap = { version: string; distribution: DistributionCapabilities };
@@ -29,34 +17,34 @@ const tokenKey = "private-ai-proxy-web-token";
 const token = consumeToken();
 const listeners = new Map<string, Set<EventListener>>();
 
-export const initialGatewayState = undefined;
-export const initialAppearance = undefined;
-
 export async function createBackend(): Promise<{
-  desktopApi: DesktopApi;
+  desktopApi: ReturnType<typeof createDesktopApi>;
   distributionCapabilities: DistributionCapabilities;
   initialGatewayState: GatewayState | undefined;
   initialAppearance: Appearance | undefined;
 }> {
   const bootstrap = await request<Bootstrap>("/api/bootstrap", { method: "GET" });
+  const transport: UiTransport = { call: rpc, subscribe };
   void readEvents();
   return {
-    desktopApi: createApi(bootstrap),
+    desktopApi: createDesktopApi(transport, createPlatform(bootstrap)),
     distributionCapabilities: bootstrap.distribution,
-    initialGatewayState,
-    initialAppearance,
+    initialGatewayState: undefined,
+    initialAppearance: undefined,
   };
 }
 
-function createApi(bootstrap: Bootstrap): DesktopApi {
+function createPlatform(bootstrap: Bootstrap): UiPlatform {
+  const registration: CliRegistration = {
+    executable: "private-ai-proxy",
+    commandPath: "pap",
+    installed: true,
+    onPath: true,
+  };
   return {
-    startBackendService: () => rpc("startBackendService"),
     showEditMenu: async () => undefined,
-    getAppearance: () => rpc("getAppearance"),
-    setAppearance: (appearance) => rpc("setAppearance", { appearance }),
-    onAppearanceChange: (listener) => subscribe("gateway://appearance", listener),
     getAppVersion: async () => bootstrap.version,
-    setUpdateChannel: async (channel: UpdateChannel) => channel,
+    setUpdateChannel: async (channel) => channel,
     prepareUpdate: async (): Promise<UpdateInfo> => ({
       enabled: false,
       systemManaged: true,
@@ -65,39 +53,30 @@ function createApi(bootstrap: Bootstrap): DesktopApi {
       channelPublished: false,
     }),
     restartToUpdate: async () => undefined,
-    getLaunchPreferences: () => rpc("getLaunchPreferences"),
-    setLaunchPreference: (name, enabled) => rpc("setLaunchPreference", { name, enabled }),
-    onLaunchPreferencesChange: (listener) => subscribe("gateway://launch-preferences", listener),
-    getCliRegistration: async (): Promise<CliRegistration> => ({ executable: "private-ai-proxy", commandPath: "pap", installed: true, onPath: true }),
-    setCliRegistration: async (): Promise<CliRegistration> => ({ executable: "private-ai-proxy", commandPath: "pap", installed: true, onPath: true }),
-    onStopAllRequest: () => () => undefined,
+    getCliRegistration: async () => registration,
+    setCliRegistration: async () => registration,
     stopAllAndQuit: async () => undefined,
     copyText: async (text) => navigator.clipboard.writeText(text),
-    getClientKey: () => rpc("getClientKey"),
-    rotateClientKey: () => rpc("rotateClientKey"),
-    saveLocalApiConfig: (config: LocalApiConfig) => rpc("saveLocalApiConfig", { config }),
-    listListenAddresses: () => rpc("listListenAddresses"),
-    getNotificationSettings: () => rpc("getNotificationSettings"),
     selectProfileBackup,
-    saveProfileExport: async () => download("private-ai-proxy-profiles.json", await rpc("exportProfilesContent")),
-    saveDiagnosticsExport: async () => download("private-ai-proxy-diagnostics.json", await rpc("exportDiagnosticsContent")),
-    readProfileBackup: async () => { throw new Error("Browser imports use a local file picker"); },
-    importProfiles: (backup) => rpc("importProfiles", { backup }),
-    exportProfiles: async () => { throw new Error("Browser exports download directly"); },
-    exportDiagnostics: async () => { throw new Error("Browser exports download directly"); },
-    saveNotificationSettings: (config: NotificationPreferences) => rpc("saveNotificationSettings", { config }),
+    saveProfileExport: async () => download(
+      "private-ai-proxy-profiles.json",
+      await rpc<string>("exportProfilesContent"),
+    ),
+    saveDiagnosticsExport: async () => download(
+      "private-ai-proxy-diagnostics.json",
+      await rpc<string>("exportDiagnosticsContent"),
+    ),
+    readProfileBackup: async () => {
+      throw new Error("Browser imports use a local file picker");
+    },
+    exportProfiles: async () => {
+      throw new Error("Browser exports download directly");
+    },
+    exportDiagnostics: async () => {
+      throw new Error("Browser exports download directly");
+    },
     requestNotificationPermission: async () => ({ permission: "unsupported", alertsEnabled: false }),
     openNotificationSettings: async () => undefined,
-    getState: () => rpc("getState"),
-    resetSettings: () => rpc("resetSettings"),
-    onSettingsReset: (listener) => subscribe("gateway://settings-reset", listener),
-    onStateChange: (listener) => subscribe("gateway://state", listener),
-    onSurfaceError: (listener) => subscribe("gateway://surface-error", listener),
-    onNavigate: () => () => undefined,
-    onAgentsChange: (listener) => subscribe("gateway://agents-changed", listener),
-    onProfileRepairRequest: () => () => undefined,
-    onUsageProofRequest: () => () => undefined,
-    onClientKeyChange: (listener) => subscribe("gateway://client-key-changed", listener),
     openNativeDialog: async (kind, options) => {
       const state = await rpc<GatewayState>("getState");
       emit("gateway://dialog-open", {
@@ -109,12 +88,9 @@ function createApi(bootstrap: Bootstrap): DesktopApi {
         startAfterSave: kind === "setup-profile",
       });
     },
+    closeNativeDialog: async () => emit("gateway://dialog-dismissed", undefined),
     nativeDialogReady: async () => undefined,
     mainWindowReady: async () => undefined,
-    onNativeDialogOpen: (listener) => subscribe("gateway://dialog-open", listener),
-    onNativeDialogDismissed: (listener) => subscribe("gateway://dialog-dismissed", listener),
-    onNativeCloseRequest: () => () => undefined,
-    closeNativeDialog: async () => emit("gateway://dialog-dismissed", undefined),
     openAboutLink: async (target) => openAllowed({
       documentation: "https://github.com/Dstack-TEE/private-ai-gateway#readme",
       github: "https://github.com/Dstack-TEE/private-ai-gateway",
@@ -122,33 +98,20 @@ function createApi(bootstrap: Bootstrap): DesktopApi {
     }[target]),
     openAgentWebsite: async (agentId) => openAllowed(agentWebsites[agentId]),
     openApiKeyPage: async (provider) => openAllowed(apiKeyPages[provider]),
-    confirm: browserConfirm,
-    showErrorAlert: browserAlert,
-    start: (config: StartGatewayConfig) => rpc("start", { config }),
-    saveConfiguration: (profile, requireProductionOs, key) => rpc("saveConfiguration", { profile, requireProductionOs, key }),
-    completeAccountLogin: (id, callbackUrl) => rpc("completeAccountLogin", { id, callbackUrl }),
-    beginAccountLogin: async (profile: ConfidentialProfileInput) => {
-      const login = await rpc<Awaited<ReturnType<DesktopApi["beginAccountLogin"]>>>("beginAccountLogin", { profile });
-      openAllowed(login.url);
-      return login;
+    confirm: (options) => showBrowserDialog({
+      ...options,
+      cancelLabel: options.cancelLabel ?? "Cancel",
+    }),
+    showErrorAlert: async (title, message) => {
+      await showBrowserDialog({ title, message, confirmLabel: "OK" });
     },
-    pollAccountLogin: (id) => rpc("pollAccountLogin", { id }),
-    saveAccountLogin: (id, profile, requireProductionOs, workspaceId) => rpc("saveAccountLogin", { id, profile, requireProductionOs, workspaceId }),
-    getAccountDetails: (profileId) => rpc("getAccountDetails", { profileId }),
-    getAccountBalance: (target) => rpc("getAccountBalance", { target }),
-    openOrganization: async (organizationSlug) => openAllowed(await rpc<string>("getOrganizationUrl", { organizationSlug })),
-    openTopUp: async (provider, scopeSlug) => openAllowed(await rpc<string>("getTopUpUrl", { provider, scopeSlug })),
-    cancelAccountLogin: (id) => rpc("cancelAccountLogin", { id }),
-    activateProfile: (profileId) => rpc("activateProfile", { profileId }),
-    deleteProfile: (profileId) => rpc("deleteProfile", { profileId }),
-    stop: () => rpc("stop"),
-    queryUsage: (query: UsageQuery): Promise<UsagePage> => rpc("queryUsage", { query }),
-    getUsageRecord: (recordId: string): Promise<RequestActivity> => rpc("getUsageRecord", { recordId }),
-    listAgents: (): Promise<AgentStatus[]> => rpc("listAgents"),
-    getAgentAccess: (): Promise<AgentAccessStatus> => rpc("getAgentAccess"),
-    requestAgentAccess: (): Promise<AgentAccessStatus> => rpc("requestAgentAccess"),
-    previewAgent: (agentId: string, connect: boolean, options: ConnectOptions): Promise<AgentPreview> => rpc("previewAgent", { agentId, connect, options }),
-    applyAgent: (agentId: string, connect: boolean, revision: string, options: ConnectOptions): Promise<AgentStatus> => rpc("applyAgent", { agentId, connect, revision, options }),
+    presentAccountLogin: (login) => openAllowed(login.url),
+    openOrganization: async (organizationSlug) => openAllowed(
+      await rpc<string>("getOrganizationUrl", { organizationSlug }),
+    ),
+    openTopUp: async (provider, scopeSlug) => openAllowed(
+      await rpc<string>("getTopUpUrl", { provider, scopeSlug }),
+    ),
   };
 }
 
@@ -166,12 +129,15 @@ function consumeToken(): string {
   return stored;
 }
 
-async function rpc<T>(method: string, params: object = {}): Promise<T> {
-  const response = await request<{ result?: T; error?: { message?: string } }>(`/api/rpc/${encodeURIComponent(method)}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(params),
-  });
+async function rpc<T>(method: UiMethod | "exportProfilesContent" | "exportDiagnosticsContent" | "getOrganizationUrl" | "getTopUpUrl", params: Record<string, unknown> = {}): Promise<T> {
+  const response = await request<{ result?: T; error?: { message?: string } }>(
+    `/api/rpc/${encodeURIComponent(method)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    },
+  );
   if (response.error) throw new Error(response.error.message || "Management request failed");
   return response.result as T;
 }
@@ -179,7 +145,12 @@ async function rpc<T>(method: string, params: object = {}): Promise<T> {
 async function request<T>(path: string, init: RequestInit): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${token}`);
-  const response = await fetch(path, { ...init, headers, cache: "no-store", credentials: "same-origin" });
+  const response = await fetch(path, {
+    ...init,
+    headers,
+    cache: "no-store",
+    credentials: "same-origin",
+  });
   const payload: unknown = await response.json().catch(() => undefined);
   if (!response.ok) {
     const message = isErrorPayload(payload) ? payload.error.message : "Web UI request failed";
@@ -191,7 +162,9 @@ async function request<T>(path: string, init: RequestInit): Promise<T> {
 function isErrorPayload(value: unknown): value is { error: { message: string } } {
   if (!value || typeof value !== "object" || !("error" in value)) return false;
   const error = value.error;
-  return Boolean(error && typeof error === "object" && "message" in error && typeof error.message === "string");
+  return Boolean(
+    error && typeof error === "object" && "message" in error && typeof error.message === "string",
+  );
 }
 
 function subscribe<T>(event: string, listener: (payload: T) => void): () => void {
@@ -223,8 +196,10 @@ async function readEvents(): Promise<void> {
       const blocks = buffer.split("\n\n");
       buffer = blocks.pop() ?? "";
       for (const block of blocks) {
-        const data = block.split("\n").filter((line) => line.startsWith("data:"))
-          .map((line) => line.slice(5).trimStart()).join("\n");
+        const data = block.split("\n")
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trimStart())
+          .join("\n");
         if (!data) continue;
         const decoded: unknown = JSON.parse(data);
         if (isWebEvent(decoded)) emit(decoded.event, decoded.payload);
@@ -236,7 +211,10 @@ async function readEvents(): Promise<void> {
 }
 
 function isWebEvent(value: unknown): value is { event: string; payload: unknown } {
-  return Boolean(value && typeof value === "object" && "event" in value && typeof value.event === "string" && "payload" in value);
+  return Boolean(
+    value && typeof value === "object" && "event" in value
+      && typeof value.event === "string" && "payload" in value,
+  );
 }
 
 function selectProfileBackup(): Promise<ProfileBackup | null> {
@@ -246,8 +224,14 @@ function selectProfileBackup(): Promise<ProfileBackup | null> {
     input.accept = "application/json,.json";
     input.addEventListener("change", () => {
       const file = input.files?.[0];
-      if (!file) { resolve(null); return; }
-      if (file.size > 256 * 1024) { reject(new Error("Profile configuration file is too large")); return; }
+      if (!file) {
+        resolve(null);
+        return;
+      }
+      if (file.size > 256 * 1024) {
+        reject(new Error("Profile configuration file is too large"));
+        return;
+      }
       void parseProfileBackup(file).then(resolve, reject);
     }, { once: true });
     input.click();
@@ -266,11 +250,13 @@ async function parseProfileBackup(file: File): Promise<ProfileBackup> {
 }
 
 function isProfileBackup(value: unknown): value is ProfileBackup {
-  if (!value || typeof value !== "object" || !("version" in value) || value.version !== 1 || !("profiles" in value) || !Array.isArray(value.profiles)) return false;
+  if (!value || typeof value !== "object" || !("version" in value) || value.version !== 1
+    || !("profiles" in value) || !Array.isArray(value.profiles)) return false;
   return value.profiles.every((profile: unknown) => Boolean(
     profile && typeof profile === "object"
       && "name" in profile && typeof profile.name === "string"
-      && "provider" in profile && (profile.provider === "phala" || profile.provider === "redpill" || profile.provider === "custom")
+      && "provider" in profile
+      && (profile.provider === "phala" || profile.provider === "redpill" || profile.provider === "custom")
       && "remoteUrl" in profile && typeof profile.remoteUrl === "string",
   ));
 }
@@ -291,19 +277,16 @@ function openAllowed(url: string | undefined): void {
   window.open(parsed.href, "_blank", "noopener,noreferrer");
 }
 
-function browserConfirm(options: { title: string; message: string; confirmLabel: string; cancelLabel?: string }): Promise<boolean> {
-  return showBrowserDialog({ ...options, cancelLabel: options.cancelLabel ?? "Cancel" });
-}
-
-async function browserAlert(title: string, message: string): Promise<void> {
-  await showBrowserDialog({ title, message, confirmLabel: "OK" });
-}
-
 const agentWebsites: Record<string, string> = {
-  codex: "https://developers.openai.com/codex/cli/", "claude-code": "https://code.claude.com",
-  opencode: "https://opencode.ai", pi: "https://pi.dev", hermes: "https://hermes-agent.nousresearch.com",
-  openclaw: "https://openclaw.ai", "oh-my-pi": "https://omp.sh",
+  codex: "https://developers.openai.com/codex/cli/",
+  "claude-code": "https://code.claude.com",
+  opencode: "https://opencode.ai",
+  pi: "https://pi.dev",
+  hermes: "https://hermes-agent.nousresearch.com",
+  openclaw: "https://openclaw.ai",
+  "oh-my-pi": "https://omp.sh",
 };
 const apiKeyPages: Partial<Record<ServiceProvider, string>> = {
-  phala: "https://cloud.phala.com/dashboard", redpill: "https://www.redpill.ai/dashboard",
+  phala: "https://cloud.phala.com/dashboard",
+  redpill: "https://www.redpill.ai/dashboard",
 };

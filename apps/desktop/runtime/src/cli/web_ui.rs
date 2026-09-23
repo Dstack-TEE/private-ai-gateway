@@ -3,30 +3,22 @@ use std::{convert::Infallible, sync::Arc, time::Duration};
 use axum::{
     body::Body,
     extract::{Path, State},
-    http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Method as HttpMethod, Request, StatusCode},
     middleware::{self, Next},
-    response::{sse::Event, IntoResponse, Response, Sse},
+    response::{sse::Event as SseEvent, IntoResponse, Response, Sse},
     routing::{get, post},
     Json, Router,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::{rngs::OsRng, RngCore};
 use rust_embed::RustEmbed;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
 use crate::{
-    agent_access,
     client::Client,
-    contracts::{
-        AccountBalanceTarget, ConfidentialProfileInput, ConnectOptions, LocalApiConfig,
-        StartGatewayConfig,
-    },
-    maintenance::ProfileBackup,
-    preferences::{Appearance, NotificationPreferences},
-    protocol::{Preference, RpcError, BUILD_VERSION},
-    usage::UsageQuery,
+    protocol::{RpcError, BUILD_VERSION},
+    ui_api::{self, Event, Host, Method, StateEventProjection},
 };
 
 #[derive(RustEmbed)]
@@ -34,144 +26,23 @@ use crate::{
 struct WebAssets;
 
 #[derive(Clone)]
+struct WebHost {
+    events: broadcast::Sender<Event>,
+}
+
+impl Host for WebHost {
+    fn emit(&self, event: Event) -> Result<(), String> {
+        let _ = self.events.send(event);
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
 struct AppState {
     client: Arc<Client>,
+    host: WebHost,
     token: Arc<[u8]>,
     port: u16,
-    events: broadcast::Sender<WebEvent>,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct WebEvent {
-    event: &'static str,
-    payload: Value,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ListenAddress {
-    address: String,
-    name: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct AppearanceParams {
-    appearance: Appearance,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct LaunchPreferenceParams {
-    name: String,
-    enabled: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct StartParams {
-    config: StartGatewayConfig,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ProfileIdParams {
-    profile_id: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SaveConfigurationParams {
-    profile: ConfidentialProfileInput,
-    require_production_os: bool,
-    key: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct LoginIdParams {
-    id: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CompleteLoginParams {
-    id: String,
-    callback_url: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct BeginLoginParams {
-    profile: ConfidentialProfileInput,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SaveLoginParams {
-    id: String,
-    profile: ConfidentialProfileInput,
-    require_production_os: bool,
-    workspace_id: Option<i64>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct BalanceParams {
-    target: AccountBalanceTarget,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct OrganizationParams {
-    organization_slug: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct TopUpParams {
-    provider: crate::contracts::ServiceProvider,
-    scope_slug: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct LocalApiParams {
-    config: LocalApiConfig,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ImportParams {
-    backup: ProfileBackup,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct NotificationsParams {
-    config: NotificationPreferences,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct UsageParams {
-    query: UsageQuery,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct UsageRecordParams {
-    record_id: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct AgentChangeParams {
-    agent_id: String,
-    connect: bool,
-    options: ConnectOptions,
-    revision: Option<String>,
 }
 
 pub(super) fn run(port: u16, no_open: bool) -> Result<(), String> {
@@ -207,9 +78,9 @@ async fn serve(port: u16, no_open: bool) -> Result<(), String> {
     let client = Client::attach(tokio::runtime::Handle::current())?;
     let state = AppState {
         client: client.clone(),
+        host: WebHost { events },
         token: Arc::from(token.as_bytes()),
         port,
-        events,
     };
     publish_state_events(state.clone());
     let app = router(state);
@@ -237,48 +108,6 @@ fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Explicit browser-management allowlist. The web surface never forwards an
-/// arbitrary protocol method to the local service.
-const RPC_METHODS: &[&str] = &[
-    "startBackendService",
-    "getState",
-    "start",
-    "stop",
-    "activateProfile",
-    "deleteProfile",
-    "saveConfiguration",
-    "completeAccountLogin",
-    "beginAccountLogin",
-    "pollAccountLogin",
-    "saveAccountLogin",
-    "getAccountDetails",
-    "getAccountBalance",
-    "getOrganizationUrl",
-    "getTopUpUrl",
-    "cancelAccountLogin",
-    "getClientKey",
-    "rotateClientKey",
-    "saveLocalApiConfig",
-    "listListenAddresses",
-    "importProfiles",
-    "exportProfilesContent",
-    "exportDiagnosticsContent",
-    "queryUsage",
-    "getUsageRecord",
-    "listAgents",
-    "getAgentAccess",
-    "requestAgentAccess",
-    "previewAgent",
-    "applyAgent",
-    "getAppearance",
-    "setAppearance",
-    "getLaunchPreferences",
-    "setLaunchPreference",
-    "getNotificationSettings",
-    "saveNotificationSettings",
-    "resetSettings",
-];
-
 async fn security(State(state): State<AppState>, request: Request<Body>, next: Next) -> Response {
     if !valid_host(request.headers(), state.port) {
         return secure_response(status(StatusCode::FORBIDDEN, "Invalid request host"));
@@ -290,7 +119,7 @@ async fn security(State(state): State<AppState>, request: Request<Body>, next: N
         if !valid_token(request.headers(), &state.token) {
             return secure_response(status(StatusCode::UNAUTHORIZED, "Authentication required"));
         }
-        if request.method() == Method::POST
+        if request.method() == HttpMethod::POST
             && request
                 .headers()
                 .get(header::CONTENT_TYPE)
@@ -344,8 +173,6 @@ fn valid_origin(headers: &HeaderMap, port: u16) -> bool {
     {
         return origins.iter().any(|expected| origin == expected);
     }
-    // Browsers omit Origin on same-origin GET requests. Referer is also
-    // browser-controlled and is accepted only for the exact loopback origin.
     headers
         .get(header::REFERER)
         .and_then(|value| value.to_str().ok())
@@ -393,17 +220,17 @@ async fn bootstrap() -> Json<Value> {
 
 async fn events(
     State(state): State<AppState>,
-) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
-    let mut receiver = state.events.subscribe();
-    let initial = WebEvent {
-        event: "gateway://state",
-        payload: serde_json::to_value(state.client.cached_state()).unwrap_or(Value::Null),
-    };
+) -> Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>> {
+    let mut receiver = state.host.events.subscribe();
+    let initial = Event::new(
+        ui_api::STATE_EVENT,
+        serde_json::to_value(state.client.cached_state()).unwrap_or(Value::Null),
+    );
     let stream = async_stream::stream! {
-        yield Ok(Event::default().json_data(initial).unwrap_or_else(|_| Event::default().data("{}")));
+        yield Ok(SseEvent::default().json_data(initial).unwrap_or_else(|_| SseEvent::default().data("{}")));
         loop {
             match receiver.recv().await {
-                Ok(event) => yield Ok(Event::default().json_data(event).unwrap_or_else(|_| Event::default().data("{}"))),
+                Ok(event) => yield Ok(SseEvent::default().json_data(event).unwrap_or_else(|_| SseEvent::default().data("{}"))),
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => break,
             }
@@ -421,314 +248,40 @@ async fn rpc(
     Path(method): Path<String>,
     Json(params): Json<Value>,
 ) -> Response {
-    match dispatch(&state, &method, params).await {
+    let Some(method) = Method::from_name(&method) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(
+                json!({ "error": RpcError::new("method_not_found", "Unknown management method") }),
+            ),
+        )
+            .into_response();
+    };
+    match ui_api::invoke(state.client, state.host, method, params).await {
         Ok(result) => Json(json!({ "result": result })).into_response(),
-        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": error.rpc() })),
+        )
+            .into_response(),
     }
-}
-
-async fn dispatch(state: &AppState, method: &str, value: Value) -> Result<Value, RpcError> {
-    if !RPC_METHODS.contains(&method) {
-        return Err(RpcError::new(
-            "method_not_found",
-            "Unknown management method",
-        ));
-    }
-    let client = state.client.clone();
-    match method {
-        "startBackendService" => {
-            blocking(move || {
-                Client::ensure_service()?;
-                client.state()
-            })
-            .await
-        }
-        "getState" => blocking(move || client.state_or_cached()).await,
-        "start" => {
-            let params: StartParams = params(value)?;
-            blocking(move || client.start(params.config)).await
-        }
-        "stop" => blocking(move || client.stop()).await,
-        "activateProfile" => {
-            let params: ProfileIdParams = params(value)?;
-            blocking(move || client.activate_profile(params.profile_id)).await
-        }
-        "deleteProfile" => {
-            let params: ProfileIdParams = params(value)?;
-            blocking(move || client.delete_profile(params.profile_id)).await
-        }
-        "saveConfiguration" => {
-            let params: SaveConfigurationParams = params(value)?;
-            value_result(
-                client
-                    .save_configuration(params.profile, params.require_production_os, params.key)
-                    .await,
-            )
-        }
-        "completeAccountLogin" => {
-            let params: CompleteLoginParams = params(value)?;
-            value_result(
-                client
-                    .complete_account_login(params.id, params.callback_url)
-                    .await,
-            )
-        }
-        "beginAccountLogin" => {
-            let params: BeginLoginParams = params(value)?;
-            value_result(client.begin_account_login(params.profile).await)
-        }
-        "pollAccountLogin" => {
-            let params: LoginIdParams = params(value)?;
-            value_result(client.poll_account_login(params.id).await)
-        }
-        "saveAccountLogin" => {
-            let params: SaveLoginParams = params(value)?;
-            value_result(
-                client
-                    .save_account_login(
-                        params.id,
-                        params.profile,
-                        params.require_production_os,
-                        params.workspace_id,
-                    )
-                    .await,
-            )
-        }
-        "getAccountDetails" => {
-            let params: ProfileIdParams = params(value)?;
-            value_result(client.account_details(params.profile_id).await)
-        }
-        "getAccountBalance" => {
-            let params: BalanceParams = params(value)?;
-            value_result(client.account_balance(params.target).await)
-        }
-        "getOrganizationUrl" => {
-            let params: OrganizationParams = params(value)?;
-            value_result(crate::account_login::organization_url(Some(
-                &params.organization_slug,
-            )))
-        }
-        "getTopUpUrl" => {
-            let params: TopUpParams = params(value)?;
-            value_result(crate::account_login::top_up_url(
-                &params.provider,
-                params.scope_slug.as_deref(),
-            ))
-        }
-        "cancelAccountLogin" => {
-            let params: LoginIdParams = params(value)?;
-            value_result(client.cancel_account_login(params.id).await)
-        }
-        "getClientKey" => blocking(move || client.client_key()).await,
-        "rotateClientKey" => blocking(move || client.rotate_client_key()).await,
-        "saveLocalApiConfig" => {
-            let params: LocalApiParams = params(value)?;
-            value_result(client.save_local_api_config(params.config).await)
-        }
-        "listListenAddresses" => blocking(list_listen_addresses).await,
-        "importProfiles" => {
-            let params: ImportParams = params(value)?;
-            blocking(move || client.import_profiles(params.backup)).await
-        }
-        "exportProfilesContent" => blocking(move || client.export_profiles_content()).await,
-        "exportDiagnosticsContent" => blocking(move || client.export_diagnostics_content()).await,
-        "queryUsage" => {
-            let params: UsageParams = params(value)?;
-            blocking(move || client.query_usage(params.query)).await
-        }
-        "getUsageRecord" => {
-            let params: UsageRecordParams = params(value)?;
-            blocking(move || {
-                client
-                    .usage_record(&params.record_id)?
-                    .ok_or_else(|| "Usage record not found".to_string())
-            })
-            .await
-        }
-        "listAgents" => blocking(move || client.list_agents()).await,
-        "getAgentAccess" | "requestAgentAccess" => value_result(Ok(agent_access::status())),
-        "previewAgent" => {
-            let params: AgentChangeParams = params(value)?;
-            blocking(move || client.preview_agent(params.agent_id, params.connect, params.options))
-                .await
-        }
-        "applyAgent" => {
-            let params: AgentChangeParams = params(value)?;
-            let revision = params
-                .revision
-                .ok_or_else(|| RpcError::new("invalid_request", "Missing agent revision"))?;
-            blocking(move || {
-                client.apply_agent(params.agent_id, params.connect, revision, params.options)
-            })
-            .await
-        }
-        "getAppearance" => blocking(move || Ok(client.preferences()?.appearance)).await,
-        "setAppearance" => {
-            let params: AppearanceParams = params(value)?;
-            let appearance = params.appearance;
-            let result = blocking(move || {
-                client.set_preference(Preference::Appearance(appearance))?;
-                Ok(())
-            })
-            .await;
-            if result.is_ok() {
-                emit(state, "gateway://appearance", json!(appearance));
-            }
-            result
-        }
-        "getLaunchPreferences" => launch_preferences(client).await,
-        "setLaunchPreference" => {
-            let params: LaunchPreferenceParams = params(value)?;
-            if params.name == "openAtLogin" {
-                return Err(RpcError::new(
-                    "unsupported",
-                    "Open at Login is unavailable in the web UI",
-                ));
-            }
-            if params.name != "connectOnLaunch" {
-                return Err(RpcError::new(
-                    "invalid_request",
-                    "Unknown startup preference",
-                ));
-            }
-            let enabled = params.enabled;
-            let result = blocking(move || {
-                client.set_preference(Preference::ConnectOnLaunch(enabled))?;
-                Ok(json!({"openAtLogin": false, "connectOnLaunch": enabled}))
-            })
-            .await;
-            if let Ok(payload) = &result {
-                emit(state, "gateway://launch-preferences", payload.clone());
-            }
-            result
-        }
-        "getNotificationSettings" => notification_settings(client).await,
-        "saveNotificationSettings" => {
-            let params: NotificationsParams = params(value)?;
-            blocking(move || {
-                client.set_preference(Preference::Notifications(params.config))?;
-                Ok(())
-            })
-            .await
-        }
-        "resetSettings" => {
-            let result = blocking(move || client.reset_settings()).await;
-            if result.is_ok() {
-                emit(state, "gateway://settings-reset", Value::Null);
-            }
-            result
-        }
-        _ => Err(RpcError::new(
-            "method_not_found",
-            "Unknown management method",
-        )),
-    }
-}
-
-async fn launch_preferences(client: Arc<Client>) -> Result<Value, RpcError> {
-    blocking(move || {
-        Ok(json!({
-            "openAtLogin": false,
-            "connectOnLaunch": client.preferences()?.connect_on_launch
-        }))
-    })
-    .await
-}
-
-async fn notification_settings(client: Arc<Client>) -> Result<Value, RpcError> {
-    blocking(move || {
-        Ok(json!({
-            "preferences": client.preferences()?.notifications,
-            "permission": "unsupported",
-            "alertsEnabled": false
-        }))
-    })
-    .await
-}
-
-fn params<T: DeserializeOwned>(value: Value) -> Result<T, RpcError> {
-    serde_json::from_value(value)
-        .map_err(|_| RpcError::new("invalid_request", "Invalid management request"))
-}
-
-async fn blocking<T, F>(operation: F) -> Result<Value, RpcError>
-where
-    T: Serialize + Send + 'static,
-    F: FnOnce() -> Result<T, String> + Send + 'static,
-{
-    let result = tokio::task::spawn_blocking(operation)
-        .await
-        .map_err(|_| RpcError::new("internal_error", "Management request failed"))?;
-    value_result(result)
-}
-
-fn value_result<T: Serialize>(result: Result<T, String>) -> Result<Value, RpcError> {
-    let value = result.map_err(|error| RpcError::operation(&error))?;
-    serde_json::to_value(value)
-        .map_err(|_| RpcError::new("internal_error", "Management response failed"))
-}
-
-fn emit(state: &AppState, event: &'static str, payload: Value) {
-    let _ = state.events.send(WebEvent { event, payload });
 }
 
 fn publish_state_events(state: AppState) {
     tokio::spawn(async move {
         let mut states = state.client.subscribe();
-        let initial = states.borrow().clone();
-        let mut client_key_revision = initial.client_key_revision;
-        let mut backend_instance = initial.backend_instance;
-        loop {
-            if states.changed().await.is_err() {
-                break;
-            }
+        let mut projection = StateEventProjection::new(&states.borrow());
+        while states.changed().await.is_ok() {
             let snapshot = states.borrow_and_update().clone();
-            emit(
-                &state,
-                "gateway://state",
-                serde_json::to_value(&snapshot).unwrap_or(Value::Null),
-            );
-            if snapshot.client_key_revision != client_key_revision
-                || snapshot.backend_instance != backend_instance
-            {
-                client_key_revision = snapshot.client_key_revision;
-                backend_instance = snapshot.backend_instance.clone();
-                emit(
-                    &state,
-                    "gateway://client-key-changed",
-                    json!(snapshot.client_key_available.unwrap_or(true)),
-                );
+            for event in projection.project(&snapshot) {
+                let _ = state.host.emit(event);
             }
         }
     });
 }
 
-fn list_listen_addresses() -> Result<Vec<ListenAddress>, String> {
-    let interfaces = if_addrs::get_if_addrs().map_err(|_| {
-        "Could not read network interfaces. Enter an IP address manually.".to_string()
-    })?;
-    let mut addresses: Vec<_> = interfaces
-        .into_iter()
-        .filter(|interface| interface.is_oper_up())
-        .filter(|interface| {
-            !matches!(interface.ip(), std::net::IpAddr::V6(ip) if ip.is_unicast_link_local())
-        })
-        .map(|interface| ListenAddress {
-            address: interface.ip().to_string(),
-            name: interface.name,
-        })
-        .collect();
-    addresses.sort_by(|left, right| {
-        left.address
-            .cmp(&right.address)
-            .then(left.name.cmp(&right.name))
-    });
-    addresses.dedup_by(|left, right| left.address == right.address);
-    Ok(addresses)
-}
-
 async fn asset(request: Request<Body>) -> Response {
-    if request.method() != Method::GET && request.method() != Method::HEAD {
+    if request.method() != HttpMethod::GET && request.method() != HttpMethod::HEAD {
         return status(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed");
     }
     let path = request.uri().path().trim_start_matches('/');
@@ -797,12 +350,22 @@ mod tests {
     }
 
     fn test_router() -> Router {
+        let (events, _) = broadcast::channel(1);
         router(AppState {
             client: Arc::new(Client::new()),
+            host: WebHost { events },
             token: Arc::from(&b"token"[..]),
             port: 3210,
-            events: broadcast::channel(1).0,
         })
+    }
+
+    #[test]
+    fn shared_allowlist_is_explicit_and_round_trips() {
+        assert!(Method::ALL.len() > 30);
+        for method in Method::ALL {
+            assert_eq!(Method::from_name(method.name()), Some(*method));
+        }
+        assert_eq!(Method::from_name("shutdown"), None);
     }
 
     #[test]
@@ -869,7 +432,7 @@ mod tests {
         ];
         for (host, origin, token, expected) in cases {
             let mut request = Request::builder()
-                .method(Method::GET)
+                .method(HttpMethod::GET)
                 .uri("/api/bootstrap")
                 .header(header::HOST, host)
                 .header(header::ORIGIN, origin);
@@ -890,9 +453,8 @@ mod tests {
 
     #[tokio::test]
     async fn mutations_are_post_only() {
-        let routes = test_router();
         let request = Request::builder()
-            .method(Method::GET)
+            .method(HttpMethod::GET)
             .uri("/api/rpc/stop")
             .header(header::HOST, "127.0.0.1:3210")
             .header(header::ORIGIN, "http://127.0.0.1:3210")
@@ -900,7 +462,7 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         assert_eq!(
-            routes.oneshot(request).await.unwrap().status(),
+            test_router().oneshot(request).await.unwrap().status(),
             StatusCode::METHOD_NOT_ALLOWED
         );
     }
