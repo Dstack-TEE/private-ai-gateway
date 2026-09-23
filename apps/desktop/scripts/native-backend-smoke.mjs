@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createServer } from "node:net";
@@ -40,6 +40,27 @@ async function stop(child) {
   if (child.exitCode === null && child.signalCode === null) {
     await new Promise((resolve) => child.once("exit", resolve));
   }
+}
+
+// The UI or a CLI command can relaunch a detached backend this script never
+// spawned. Stop it through the product first; as a last resort, kill anything
+// still running with this run's isolated home.
+let cleaning;
+const cleanup = () => (cleaning ??= (async () => {
+  await exec(path.join(binaries, "private-ai-proxy"), ["service", "stop", "--yes", "--json"], { env, timeout: 25_000 }).catch(() => {});
+  for (const child of children.reverse()) await stop(child);
+  const marker = `\0PRIVATE_AI_PROXY_HOME=${home}\0`;
+  for (const pid of await readdir("/proc")) {
+    if (!/^\d+$/.test(pid)) continue;
+    const environ = await readFile(`/proc/${pid}/environ`, "utf8").catch(() => "");
+    if (`\0${environ}`.includes(marker)) {
+      try { process.kill(Number(pid), "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
+    }
+  }
+  await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+})());
+for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]]) {
+  process.once(signal, () => cleanup().finally(() => process.exit(code)));
 }
 
 try {
@@ -83,6 +104,5 @@ try {
   assert.equal((await cli("status")).status, "not_running");
   console.log("Native window/process smoke passed: UI termination, same-backend reattachment, CLI mutation, explicit service shutdown");
 } finally {
-  for (const child of children.reverse()) await stop(child);
-  await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  await cleanup();
 }
