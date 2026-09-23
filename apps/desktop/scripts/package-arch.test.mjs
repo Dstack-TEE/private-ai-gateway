@@ -17,6 +17,11 @@ test("Arch packages preserve native version ordering and package ownership", () 
 
   const install = archInstallScript(desktop.name);
   assert.match(install, /pacman -Qqo/);
+  assert.match(
+    install,
+    /for binary in private-ai-proxy-desktop private-ai-proxy-service private-ai-proxy private-ai-proxy-helper/,
+  );
+  assert.match(install, /Close the desktop app/);
   assert.match(install, /pre_upgrade\(\) \{ check_private_ai_proxy_owner; \}/);
   assert.match(install, /pre_remove\(\) \{ check_private_ai_proxy_processes; \}/);
 });
