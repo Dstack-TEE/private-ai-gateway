@@ -71,10 +71,11 @@ token.
 
 The management server rejects missing or incorrect tokens, non-loopback or
 unexpected `Host` values, and cross-origin requests. Mutations are explicit
-JSON `POST` requests. Management errors use the backend's sanitized operation
-mapping. Responses disable caching and framing and include a restrictive CSP
-and content-type protections. The Local API client key is fetched only after a
-user chooses to reveal it or opens a key-dependent dialog.
+JSON `POST` requests. Management errors carry the same sanitized messages as
+the desktop app. Responses disable caching and framing and include a
+restrictive CSP and content-type protections. The token grants the same
+management authority as the desktop app, including reading the Local API client
+key, so treat it like that key.
 
 The web UI deliberately degrades desktop-only integration:
 

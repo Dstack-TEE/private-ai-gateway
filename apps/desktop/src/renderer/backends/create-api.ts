@@ -21,13 +21,16 @@ import type {
   UsageQuery,
 } from "../../shared/contracts";
 
+// Mirrors the Rust allowlist in runtime/src/ui_api.rs.
 export type UiMethod =
   | "startBackendService" | "getState" | "start" | "stop"
   | "activateProfile" | "deleteProfile" | "saveConfiguration"
   | "completeAccountLogin" | "beginAccountLogin" | "pollAccountLogin"
   | "saveAccountLogin" | "getAccountDetails" | "getAccountBalance"
+  | "getOrganizationUrl" | "getTopUpUrl"
   | "cancelAccountLogin" | "getClientKey" | "rotateClientKey"
   | "saveLocalApiConfig" | "listListenAddresses" | "importProfiles"
+  | "exportProfilesContent" | "exportDiagnosticsContent"
   | "queryUsage" | "getUsageRecord" | "listAgents" | "getAgentAccess"
   | "requestAgentAccess" | "previewAgent" | "applyAgent" | "getAppearance"
   | "setAppearance" | "getLaunchPreferences" | "setLaunchPreference"

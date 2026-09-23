@@ -134,7 +134,6 @@ export function Overview({
           <LocalApiPanel
             proxyUrl={state.proxyUrl}
             clientKey={clientKey}
-            clientKeyAvailable={state.clientKeyAvailable !== false}
             clientKeyVisible={clientKeyVisible}
             copied={copied}
             onCopy={onCopy}

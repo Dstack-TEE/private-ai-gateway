@@ -17,7 +17,6 @@ pub(crate) struct DistributionCapabilities {
     pub cli_registration: bool,
     pub account_portal_links: bool,
     pub sandbox_home_access: bool,
-    pub native_dialogs: bool,
     pub launch_at_login: bool,
     pub notifications: bool,
 }
@@ -29,7 +28,6 @@ pub(crate) const CAPABILITIES: DistributionCapabilities = DistributionCapabiliti
     cli_registration: false,
     account_portal_links: false,
     sandbox_home_access: cfg!(target_os = "macos"),
-    native_dialogs: true,
     launch_at_login: true,
     notifications: true,
 };
@@ -41,7 +39,6 @@ pub(crate) const CAPABILITIES: DistributionCapabilities = DistributionCapabiliti
     cli_registration: true,
     account_portal_links: true,
     sandbox_home_access: false,
-    native_dialogs: true,
     launch_at_login: true,
     notifications: true,
 };
@@ -78,7 +75,6 @@ mod tests {
                 "cliRegistration": !app_store,
                 "accountPortalLinks": !app_store,
                 "sandboxHomeAccess": app_store && cfg!(target_os = "macos"),
-                "nativeDialogs": true,
                 "launchAtLogin": true,
                 "notifications": true,
             })

@@ -435,8 +435,7 @@ impl DesktopRuntime {
     }
 
     pub fn export_profiles(&self, path: PathBuf) -> Result<(), String> {
-        let backup = crate::maintenance::ProfileBackup::from_profiles(&self.state()?.profiles);
-        crate::maintenance::write_json(&path, &backup)
+        crate::maintenance::write_export(&path, &self.export_profiles_content()?)
     }
 
     pub fn export_profiles_content(&self) -> Result<String, String> {
@@ -445,10 +444,7 @@ impl DesktopRuntime {
     }
 
     pub fn export_diagnostics(&self, path: PathBuf, version: &str) -> Result<(), String> {
-        crate::maintenance::write_json(
-            &path,
-            &crate::maintenance::diagnostics(&self.state()?, version),
-        )
+        crate::maintenance::write_export(&path, &self.export_diagnostics_content(version)?)
     }
 
     pub fn export_diagnostics_content(&self, version: &str) -> Result<String, String> {

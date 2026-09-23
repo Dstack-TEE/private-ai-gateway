@@ -113,10 +113,30 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
         window.requestAnimationFrame(() => document.getElementById(`page-title-${section}`)?.focus());
       }
     });
-    const unsubscribeClientKey = desktopApi.onClientKeyChange(() => {
+    let keyRead = 0;
+    const loadClientKey = () => {
+      const read = ++keyRead;
+      void desktopApi.getClientKey().then(
+        (key) => {
+          if (!active || read !== keyRead) return;
+          setClientKey(key);
+        },
+        () => {
+          if (!active || read !== keyRead) return;
+          setClientKey("");
+        },
+      );
+    };
+    loadClientKey();
+    const unsubscribeClientKey = desktopApi.onClientKeyChange((available) => {
       if (!active) return;
-      setClientKey("");
-      setClientKeyVisible(false);
+      if (!available) {
+        keyRead += 1;
+        setClientKey("");
+        setClientKeyVisible(false);
+        return;
+      }
+      loadClientKey();
     });
     return () => {
       active = false;
@@ -125,19 +145,6 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
       unsubscribeClientKey();
     };
   }, []);
-
-  const toggleClientKey = async () => {
-    if (clientKeyVisible) {
-      setClientKeyVisible(false);
-      return;
-    }
-    try {
-      setClientKey(await desktopApi.getClientKey());
-      setClientKeyVisible(true);
-    } catch (error) {
-      reportSurfaceError("local-api", error);
-    }
-  };
 
   // The form mirrors the configuration the backend will start with, so a
   // start from the tray switch shows up here too.
@@ -330,7 +337,7 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
             onAgents={() => changeView("agents")}
             onUsage={() => changeView("usage")}
             onCopy={copy}
-            onToggleClientKey={() => void toggleClientKey()}
+            onToggleClientKey={() => setClientKeyVisible((visible) => !visible)}
             onSelect={selectAgent}
             onInspect={inspectUsage}
           />

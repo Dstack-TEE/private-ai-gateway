@@ -358,7 +358,10 @@ pub fn run() {
                         if let Err(error) =
                             desktop_runtime::ui_api::refresh_preferences(client, &host).await
                         {
-                            eprintln!("Cannot refresh desktop preferences: {}", error.message());
+                            desktop_runtime::diagnostic(format_args!(
+                                "Cannot refresh desktop preferences: {}",
+                                error.message()
+                            ));
                         }
                     });
                 }

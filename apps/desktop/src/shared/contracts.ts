@@ -331,7 +331,6 @@ export interface DistributionCapabilities {
   cliRegistration: boolean;
   accountPortalLinks: boolean;
   sandboxHomeAccess: boolean;
-  nativeDialogs: boolean;
   launchAtLogin: boolean;
   notifications: boolean;
 }

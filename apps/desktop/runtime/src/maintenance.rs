@@ -117,8 +117,11 @@ fn resolve(profile: &ProfileConfiguration) -> Result<ConfidentialProfile, String
 }
 
 pub fn write_json(path: &Path, data: &impl Serialize) -> Result<(), String> {
+    write_export(path, &json_content(data)?)
+}
+
+pub fn write_export(path: &Path, text: &str) -> Result<(), String> {
     use std::io::Write;
-    let text = json_content(data)?;
     let write = || -> std::io::Result<()> {
         let parent = path
             .parent()

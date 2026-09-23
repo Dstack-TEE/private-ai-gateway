@@ -86,15 +86,16 @@ pub(crate) async fn import_profiles(
 
 #[tauri::command]
 pub(crate) async fn export_profiles(
-    runtime: State<'_, Arc<Client>>,
+    window: WebviewWindow,
+    client: State<'_, Arc<Client>>,
     path: PathBuf,
 ) -> Result<(), String> {
-    let runtime = runtime.inner().clone();
-    run_blocking(move || {
-        let backup = ProfileBackup::from_profiles(&runtime.state()?.profiles);
-        desktop_runtime::maintenance::write_json(&path, &backup)
-    })
-    .await
+    let content =
+        crate::ui_api::invoke(window, client, Method::ExportProfilesContent, json!({})).await?;
+    let content: String =
+        serde_json::from_value(content).map_err(|_| "Management response failed")?;
+    // The app writes the file so sandboxed builds keep the picker's file access.
+    run_blocking(move || desktop_runtime::maintenance::write_export(&path, &content)).await
 }
 
 #[tauri::command]

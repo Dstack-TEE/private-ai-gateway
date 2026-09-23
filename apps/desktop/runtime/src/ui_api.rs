@@ -142,7 +142,6 @@ impl StateEventProjection {
 pub enum Error {
     InvalidRequest,
     Operation(String),
-    Internal(&'static str),
 }
 
 impl Error {
@@ -150,15 +149,15 @@ impl Error {
         match self {
             Self::InvalidRequest => "Invalid management request".into(),
             Self::Operation(message) => message,
-            Self::Internal(message) => message.into(),
         }
     }
 
     pub fn rpc(&self) -> RpcError {
         match self {
             Self::InvalidRequest => RpcError::new("invalid_request", "Invalid management request"),
-            Self::Operation(message) => RpcError::operation(message),
-            Self::Internal(message) => RpcError::new("internal_error", message),
+            // Client messages were already sanitized by the backend or written locally;
+            // keep them identical to the Tauri transport.
+            Self::Operation(message) => RpcError::new("operation_failed", message),
         }
     }
 }
@@ -448,11 +447,15 @@ pub async fn invoke<H: Host>(
             value(()).map_err(Error::Operation)
         }
         Method::ResetSettings => {
-            let state = host
-                .reset_settings(client.clone())
-                .await
-                .map_err(Error::Operation)?;
-            refresh_preferences(client, &host).await?;
+            let result = host.reset_settings(client.clone()).await;
+            // A partial reset may still have changed preferences.
+            if let Err(error) = refresh_preferences(client, &host).await {
+                crate::diagnostic(format_args!(
+                    "Cannot refresh preferences after reset: {}",
+                    error.message()
+                ));
+            }
+            let state = result.map_err(Error::Operation)?;
             host.emit(Event::new(SETTINGS_RESET_EVENT, Value::Null))
                 .map_err(Error::Operation)?;
             value(state).map_err(Error::Operation)
@@ -677,4 +680,21 @@ struct AgentChangeParams {
     connect: bool,
     options: ConnectOptions,
     revision: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transports_report_the_same_operation_message() {
+        let message = "invalid_state: Stop protection before deleting the active profile";
+        let error = Error::Operation(message.into());
+        assert_eq!(error.rpc().message, message);
+        assert_eq!(error.message(), message);
+        assert_eq!(
+            Error::InvalidRequest.rpc().message,
+            Error::InvalidRequest.message()
+        );
+    }
 }

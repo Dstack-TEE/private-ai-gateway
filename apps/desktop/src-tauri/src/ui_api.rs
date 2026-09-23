@@ -69,7 +69,9 @@ impl Host for TauriHost {
 
     fn present_account_login(&self, url: &str) {
         if self.app().opener().open_url(url, None::<&str>).is_err() {
-            eprintln!("Cannot open the account connection page; use the manual connection link");
+            desktop_runtime::diagnostic(format_args!(
+                "Cannot open the account connection page; use the manual connection link"
+            ));
         }
     }
 
