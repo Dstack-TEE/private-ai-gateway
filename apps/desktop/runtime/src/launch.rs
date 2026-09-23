@@ -2,7 +2,7 @@
 
 use std::{
     io::{self, Read},
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Child, Command, ExitStatus, Stdio},
     sync::{Arc, Mutex},
     thread::JoinHandle,
@@ -57,7 +57,7 @@ pub fn service_executable() -> Result<PathBuf, String> {
     sibling_executable(SERVICE_BINARY)
 }
 
-pub fn spawn_background(data_dir: &Path) -> Result<BackgroundService, String> {
+pub fn spawn_background() -> Result<BackgroundService, String> {
     let executable = service_executable()?;
     let working_directory = executable
         .parent()
@@ -65,10 +65,11 @@ pub fn spawn_background(data_dir: &Path) -> Result<BackgroundService, String> {
     let mut command = Command::new(&executable);
     command
         .current_dir(working_directory)
-        .env(desktop_gateway::agents::APP_DATA_OVERRIDE_ENV, data_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+    // Inherit runtime-selection variables unchanged. A child-only data override
+    // would move its socket away from the parent's Linux or macOS endpoint.
     configure_background_command(&mut command);
     let mut child = command
         .spawn()
@@ -393,4 +394,81 @@ fn exit_timeout(pid: u32, timeout: Duration) -> String {
         "Timed out after {} ms waiting for PAP service process {pid} to exit",
         timeout.as_millis()
     )
+}
+
+// MAS resolves IPC from its app container, not inherited native runtime variables.
+#[cfg(all(test, not(all(target_os = "macos", feature = "mac-app-store"))))]
+mod tests {
+    use super::*;
+
+    const ENDPOINT_FIXTURE_ROLE: &str = "PAP_TEST_ENDPOINT_FIXTURE_ROLE";
+    const ENDPOINT_FIXTURE_OUTPUT: &str = "PAP_TEST_ENDPOINT_FIXTURE_OUTPUT";
+    const ENDPOINT_FIXTURE_TEST: &str = "launch::tests::endpoint_resolution_fixture";
+
+    #[test]
+    fn parent_and_child_resolve_the_same_backend_endpoint() {
+        for configured in [false, true] {
+            let fixture = tempfile::tempdir().unwrap();
+            let runtime = fixture.path().join("runtime");
+            std::fs::create_dir(&runtime).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            let output = fixture.path().join("endpoint");
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--ignored", "--exact", ENDPOINT_FIXTURE_TEST, "--nocapture"])
+                .env(ENDPOINT_FIXTURE_ROLE, "parent")
+                .env(ENDPOINT_FIXTURE_OUTPUT, &output)
+                .env_remove(desktop_gateway::agents::HOME_OVERRIDE_ENV);
+            if configured {
+                command
+                    .env(
+                        desktop_gateway::agents::APP_DATA_OVERRIDE_ENV,
+                        fixture.path().join("data"),
+                    )
+                    .env("XDG_RUNTIME_DIR", &runtime);
+            } else {
+                command
+                    .env_remove(desktop_gateway::agents::APP_DATA_OVERRIDE_ENV)
+                    .env_remove("XDG_RUNTIME_DIR");
+            }
+            let result = command.output().unwrap();
+            assert!(
+                result.status.success(),
+                "configured={configured}\n{}\n{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture for endpoint inheritance"]
+    fn endpoint_resolution_fixture() {
+        match std::env::var(ENDPOINT_FIXTURE_ROLE).as_deref() {
+            Ok("parent") => {
+                let parent = crate::transport::endpoint_path().unwrap();
+                let result = Command::new(std::env::current_exe().unwrap())
+                    .args(["--ignored", "--exact", ENDPOINT_FIXTURE_TEST, "--nocapture"])
+                    .env(ENDPOINT_FIXTURE_ROLE, "child")
+                    .output()
+                    .unwrap();
+                assert!(result.status.success());
+                let output = std::env::var_os(ENDPOINT_FIXTURE_OUTPUT).unwrap();
+                assert_eq!(
+                    std::fs::read_to_string(output).unwrap(),
+                    parent.to_string_lossy()
+                );
+            }
+            Ok("child") => {
+                let endpoint = crate::transport::endpoint_path().unwrap();
+                let output = std::env::var_os(ENDPOINT_FIXTURE_OUTPUT).unwrap();
+                std::fs::write(output, endpoint.to_string_lossy().as_bytes()).unwrap();
+            }
+            _ => {}
+        }
+    }
 }

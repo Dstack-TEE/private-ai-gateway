@@ -37,7 +37,7 @@ fn launch_requires_instance_ownership_before_initialization() {
         match case.as_str() {
             "held" => assert_eq!(
                 error,
-                "Another Private AI Proxy instance is already running"
+                "Another Private AI Proxy instance is already running. Stop the existing private-ai-proxy-service process before retrying."
             ),
             "invalid" => assert!(error.starts_with("Cannot take the instance lock:")),
             _ => panic!("Unknown instance ownership test case"),
