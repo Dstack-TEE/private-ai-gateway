@@ -1,13 +1,12 @@
 mod permission;
 use desktop_runtime::{
     client::Client, contracts::GatewayState, preferences::NotificationPreferences, protocol::rpc,
-    ui_api::Method,
 };
 use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tauri::{AppHandle, Manager, State, WebviewWindow};
+use tauri::{AppHandle, Manager};
 use tauri_plugin_notification::NotificationExt;
 
 #[derive(Default)]
@@ -51,35 +50,6 @@ pub fn set_cached_preferences(
         .lock()
         .map_err(|_| "Notification settings are unavailable")? = preferences;
     Ok(())
-}
-
-#[tauri::command]
-pub async fn get_notification_settings(
-    window: WebviewWindow,
-    client: State<'_, Arc<Client>>,
-) -> Result<serde_json::Value, String> {
-    crate::ui_api::invoke(
-        window,
-        client,
-        Method::GetNotificationSettings,
-        serde_json::json!({}),
-    )
-    .await
-}
-
-#[tauri::command]
-pub async fn save_notification_settings(
-    window: WebviewWindow,
-    client: State<'_, Arc<Client>>,
-    config: NotificationPreferences,
-) -> Result<serde_json::Value, String> {
-    crate::ui_api::invoke(
-        window,
-        client,
-        Method::SaveNotificationSettings,
-        serde_json::json!({ "config": config }),
-    )
-    .await
 }
 
 #[tauri::command]

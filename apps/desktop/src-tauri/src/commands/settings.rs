@@ -3,88 +3,17 @@ use std::{path::PathBuf, sync::Arc};
 use desktop_runtime::{
     client::Client,
     maintenance::ProfileBackup,
-    preferences::Appearance,
     protocol::{rpc, Preference},
     ui_api::Method,
 };
-use serde_json::{json, Value};
+use serde_json::json;
 use tauri::{AppHandle, Manager, State, WebviewWindow};
 
 use crate::{distribution, run_blocking, run_cli_command, CliRegistration, CliStartup};
 
 #[tauri::command]
-pub(crate) async fn get_launch_preferences(
-    window: WebviewWindow,
-    client: State<'_, Arc<Client>>,
-) -> Result<Value, String> {
-    crate::ui_api::invoke(window, client, Method::GetLaunchPreferences, json!({})).await
-}
-
-#[tauri::command]
-pub(crate) async fn set_launch_preference(
-    window: WebviewWindow,
-    client: State<'_, Arc<Client>>,
-    name: String,
-    enabled: bool,
-) -> Result<Value, String> {
-    crate::ui_api::invoke(
-        window,
-        client,
-        Method::SetLaunchPreference,
-        json!({ "name": name, "enabled": enabled }),
-    )
-    .await
-}
-
-#[tauri::command]
-pub(crate) async fn reset_settings(
-    window: WebviewWindow,
-    client: State<'_, Arc<Client>>,
-) -> Result<Value, String> {
-    crate::ui_api::invoke(window, client, Method::ResetSettings, json!({})).await
-}
-
-#[tauri::command]
-pub(crate) async fn get_appearance(
-    window: WebviewWindow,
-    client: State<'_, Arc<Client>>,
-) -> Result<Value, String> {
-    crate::ui_api::invoke(window, client, Method::GetAppearance, json!({})).await
-}
-
-#[tauri::command]
-pub(crate) async fn set_appearance(
-    window: WebviewWindow,
-    client: State<'_, Arc<Client>>,
-    appearance: Appearance,
-) -> Result<Value, String> {
-    crate::ui_api::invoke(
-        window,
-        client,
-        Method::SetAppearance,
-        json!({ "appearance": appearance }),
-    )
-    .await
-}
-
-#[tauri::command]
 pub(crate) async fn read_profile_backup(path: PathBuf) -> Result<ProfileBackup, String> {
     run_blocking(move || ProfileBackup::read(&path)).await
-}
-
-#[tauri::command]
-pub(crate) async fn import_profiles(
-    window: WebviewWindow,
-    client: State<'_, Arc<Client>>,
-    backup: ProfileBackup,
-) -> Result<Value, String> {
-    crate::ui_api::invoke(
-        window,
-        client,
-        Method::ImportProfiles,
-        json!({ "backup": backup }),
-    )
-    .await
 }
 
 #[tauri::command]
