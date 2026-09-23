@@ -1,0 +1,25 @@
+[package]
+name = "aci-verify"
+version = "0.1.0"
+description = "Policy-neutral verification primitives for Attested Confidential Inference"
+license = "Apache-2.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+
+[dependencies]
+aci-protocol = { path = "../aci-protocol" }
+base64 = "0.22"
+dcap-qvl = { version = "0.3.12", default-features = false, features = ["std", "report", "rustcrypto"] }
+hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+thiserror = "1"
+webpki-roots = "1"
+x509-parser = "0.16"
+
+[lints.rust]
+unused_must_use = "deny"

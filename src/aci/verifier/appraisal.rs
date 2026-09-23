@@ -1,23 +1,21 @@
 //! The §9.1 report appraisal: which checks run, in what order, and what each
 //! outcome means.
 //!
-//! Both verifiers go through [`appraise_report`] — the gateway folds the
-//! outcomes into one accept/reject, the CLI renders each as a transcript line.
-//! Deciding separately is how the two drift while each keeps passing its own
-//! tests.
+//! The Gateway owns this appraisal and folds its outcomes into one
+//! accept/reject decision. Policy-neutral mechanisms come from `aci-verify`;
+//! the Proxy owns a separate appraisal for its relying-party policy.
 
 use serde_json::Value;
 
-use super::dstack::{
-    dstack_app_id, verify_dstack_compose_measurement, verify_dstack_kms_receipt_custody,
-};
-use super::quote::{
-    parse_quote_evidence, quote_binds_report_data, verify_quote_to_root, QuoteStepError,
-};
-use super::report::{verify_report_binding, AciReportValidationError, ReportBinding};
+use super::dstack::verify_dstack_kms_receipt_custody;
 use super::{verify_dstack_event_log, AciServiceVerifierPolicy};
 use crate::aci::receipt::ChannelBinding;
 use crate::aci::types::{AttestationReport, SourceProvenance, WorkloadKeyset};
+use aci_verify::dstack::{dstack_app_id, verify_dstack_compose_measurement};
+use aci_verify::quote::{
+    parse_quote_evidence, quote_binds_report_data, verify_quote_to_root, QuoteStepError,
+};
+use aci_verify::report::{verify_report_binding, AciReportValidationError, ReportBinding};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CheckId {

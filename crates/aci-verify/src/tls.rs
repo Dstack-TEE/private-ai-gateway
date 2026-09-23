@@ -1,6 +1,6 @@
-//! TLS client that observes the first leaf SPKI and enforces the verified pin.
+//! TLS clients that extract, observe, and enforce leaf-certificate SPKI pins.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -11,19 +11,93 @@ use rustls::{CertificateError, DigitallySignedStruct, Error as RustlsError, Sign
 use sha2::{Digest, Sha256};
 use x509_parser::prelude::parse_x509_certificate;
 
-/// Client for Private AI Proxy's ACI commands: it has no pin before the first handshake — that
-/// is how it learns the SPKI to check at §9.1(6) — so it records what it sees
-/// and enforces any pin registered afterwards.
+pub fn pinned_spki_client(
+    accepted_spkis: Vec<String>,
+    connect_timeout_seconds: u64,
+    read_timeout_seconds: u64,
+) -> Result<reqwest::Client, String> {
+    let inner = webpki_verifier()?;
+    let verifier = Arc::new(SpkiPinVerifier {
+        inner,
+        accepted: accepted_spkis.into_iter().collect(),
+    });
+    let tls = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth();
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(connect_timeout_seconds))
+        .read_timeout(Duration::from_secs(read_timeout_seconds))
+        .use_preconfigured_tls(tls)
+        .build()
+        .map_err(|error| error.to_string())
+}
+
+struct SpkiPinVerifier {
+    inner: Arc<dyn ServerCertVerifier>,
+    accepted: HashSet<String>,
+}
+
+impl fmt::Debug for SpkiPinVerifier {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SpkiPinVerifier")
+            .field("accepted_count", &self.accepted.len())
+            .finish()
+    }
+}
+
+impl ServerCertVerifier for SpkiPinVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, RustlsError> {
+        if self.accepted.is_empty() {
+            return Err(application_verification_failure());
+        }
+        let digest = leaf_spki_sha256_hex(end_entity)?;
+        if self.accepted.contains(&digest) {
+            Ok(ServerCertVerified::assertion())
+        } else {
+            Err(application_verification_failure())
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
+}
+
+/// Build a client that records the first observed leaf SPKI and enforces pins
+/// registered for later handshakes.
 pub fn observing_spki_client(
     observations: Arc<SpkiObservations>,
     connect_timeout_seconds: u64,
     read_timeout_seconds: u64,
 ) -> Result<reqwest::Client, String> {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let inner = rustls::client::WebPkiServerVerifier::builder(Arc::new(roots))
-        .build()
-        .map_err(|e| format!("failed to build TLS verifier: {e}"))?;
+    let inner = webpki_verifier()?;
     let tls = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(ObservingSpkiVerifier {
@@ -37,11 +111,10 @@ pub fn observing_spki_client(
         .redirect(reqwest::redirect::Policy::none())
         .use_preconfigured_tls(tls)
         .build()
-        .map_err(|e| e.to_string())
+        .map_err(|error| error.to_string())
 }
 
-/// Per-hostname record of observed leaf SPKIs and registered pins, shared
-/// between an [`observing_spki_client`] and the code that owns it.
+/// Per-hostname record of observed leaf SPKIs and registered pins.
 #[derive(Debug, Default)]
 pub struct SpkiObservations {
     observed: Mutex<HashMap<String, String>>,
@@ -49,8 +122,6 @@ pub struct SpkiObservations {
 }
 
 impl SpkiObservations {
-    /// The leaf SPKI sha256 (hex) observed on the most recent TLS handshake
-    /// to `host`; `None` for hosts never contacted over TLS.
     pub fn observed_spki(&self, host: &str) -> Option<String> {
         self.observed
             .lock()
@@ -59,8 +130,6 @@ impl SpkiObservations {
             .cloned()
     }
 
-    /// Enforce `spki_sha256` (hex) on every future TLS handshake to `host`;
-    /// a handshake presenting any other key fails closed.
     pub fn pin(&self, host: &str, spki_sha256: &str) {
         self.pins
             .lock()
@@ -68,15 +137,10 @@ impl SpkiObservations {
             .insert(host.to_ascii_lowercase(), spki_sha256.to_ascii_lowercase());
     }
 
-    /// Enforce any pin registered for `host`, then record the SPKI observed.
-    /// A rejected handshake records nothing: the observation map feeds
-    /// transcripts, which must never report a key that was refused.
     fn observe(&self, host: String, spki: String) -> Result<(), RustlsError> {
         if let Some(expected) = self.pins.lock().expect("SPKI pin map poisoned").get(&host) {
             if *expected != spki {
-                return Err(RustlsError::InvalidCertificate(
-                    CertificateError::ApplicationVerificationFailure,
-                ));
+                return Err(application_verification_failure());
             }
         }
         self.observed
@@ -87,20 +151,15 @@ impl SpkiObservations {
     }
 }
 
-/// Records the leaf SPKI per hostname and enforces registered pins. The
-/// certificate chain is deliberately not consulted: ACI's root of trust is the
-/// attested keyset (§1.1), and an attested certificate may be self-signed.
-/// Verification is what the §9.1 transcript reports; the handshake only
-/// observes and enforces the pin.
 struct ObservingSpkiVerifier {
-    /// Handshake signature checks and supported schemes only.
+    /// Used for handshake-signature checks and supported schemes only.
     inner: Arc<dyn ServerCertVerifier>,
     observations: Arc<SpkiObservations>,
 }
 
 impl fmt::Debug for ObservingSpkiVerifier {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ObservingSpkiVerifier").finish()
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("ObservingSpkiVerifier").finish()
     }
 }
 
@@ -143,10 +202,19 @@ impl ServerCertVerifier for ObservingSpkiVerifier {
     }
 }
 
-fn leaf_spki_sha256_hex(end_entity: &CertificateDer<'_>) -> Result<String, RustlsError> {
+pub fn leaf_spki_sha256_hex(end_entity: &CertificateDer<'_>) -> Result<String, RustlsError> {
     let (_, cert) = parse_x509_certificate(end_entity.as_ref())
         .map_err(|_| RustlsError::InvalidCertificate(CertificateError::BadEncoding))?;
     Ok(hex::encode(Sha256::digest(cert.public_key().raw)))
+}
+
+fn webpki_verifier() -> Result<Arc<dyn ServerCertVerifier>, String> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    rustls::client::WebPkiServerVerifier::builder(Arc::new(roots))
+        .build()
+        .map(|verifier| verifier as Arc<dyn ServerCertVerifier>)
+        .map_err(|error| format!("failed to build TLS verifier: {error}"))
 }
 
 fn server_name_string(name: &ServerName<'_>) -> String {
@@ -155,4 +223,8 @@ fn server_name_string(name: &ServerName<'_>) -> String {
         ServerName::IpAddress(ip) => std::net::IpAddr::from(*ip).to_string(),
         other => format!("{other:?}"),
     }
+}
+
+fn application_verification_failure() -> RustlsError {
+    RustlsError::InvalidCertificate(CertificateError::ApplicationVerificationFailure)
 }

@@ -1,15 +1,16 @@
-//! dstack event-log replay used by the client's provenance appraisal.
+//! dstack event-log replay and RTMR3-bound measurement helpers.
 
 use serde_json::Value;
 use sha2::{Digest, Sha256, Sha384};
 
-use super::decode_hex;
+use crate::decode_hex;
 
 const DSTACK_RUNTIME_EVENT_TYPE: u32 = 0x08000001;
 
-/// Wire representation of the dstack event evidence consumed by verification.
-/// Verification is platform-neutral and does not depend on the Unix client SDK.
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+/// Wire representation of dstack event evidence.
+#[derive(
+    Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize,
+)]
 pub struct DstackEventLog {
     pub imr: u32,
     pub event_type: u32,
@@ -18,10 +19,15 @@ pub struct DstackEventLog {
     pub event_payload: String,
 }
 
-/// Replay the dstack event log to RTMR3 and require it to match the quote,
-/// returning the verified events. Private AI Proxy reuses this for its own
-/// §9.1(4) compose check, so failures are plain strings rather than this
-/// module's provider-verifier error type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum AppComposeError {
+    #[error("missing dstack app_compose evidence")]
+    Missing,
+    #[error("dstack app_compose preimage does not match the RTMR3-bound compose hash")]
+    HashMismatch,
+}
+
+/// Replay the dstack event log to RTMR3 and require it to match the quote.
 pub fn verify_dstack_event_log(
     evidence: &Value,
     report: &dcap_qvl::quote::Report,
@@ -31,7 +37,7 @@ pub fn verify_dstack_event_log(
         .and_then(Value::as_str)
         .ok_or("missing dstack event_log evidence")?;
     let events = serde_json::from_str::<Vec<DstackEventLog>>(event_log)
-        .map_err(|e| format!("invalid dstack event_log evidence: {e}"))?;
+        .map_err(|error| format!("invalid dstack event_log evidence: {error}"))?;
     let rtmr3 = replay_dstack_rtmr(&events, 3)?;
     let quote_rtmr3 =
         dcap_rtmr3(report).ok_or("dstack event log verification requires a TDX quote")?;
@@ -41,18 +47,8 @@ pub fn verify_dstack_event_log(
     Ok(events)
 }
 
-/// The single pre-`system-ready` dstack runtime event named `event_name`
-/// (`None` when the verified log carries none). A log carrying more than one
-/// is the tampering shape this lookup exists to catch, so it is an error,
-/// never a silent "absent".
+/// Find the single pre-`system-ready` dstack runtime event named `event_name`.
 pub fn dstack_rtmr3_event<'a>(
-    events: &'a [DstackEventLog],
-    event_name: &str,
-) -> Result<Option<&'a DstackEventLog>, String> {
-    runtime_event_before_system_ready(events, event_name).map_err(|e| e.to_string())
-}
-
-fn runtime_event_before_system_ready<'a>(
     events: &'a [DstackEventLog],
     event_name: &str,
 ) -> Result<Option<&'a DstackEventLog>, String> {
@@ -77,40 +73,43 @@ fn runtime_event_before_system_ready<'a>(
     Ok(event)
 }
 
-/// The RTMR3-measured compose hash that `app_compose` reproduces (§9.1(4)).
-///
-/// Returns the measured hash as lowercase hex, so a caller can report or pin
-/// it.
-pub(super) fn verify_dstack_compose_measurement(
+/// Verify `app_compose` against the RTMR3-bound compose-hash event and return
+/// the measured hash as lowercase hex.
+pub fn verify_dstack_compose_measurement(
     evidence: &Value,
     events: &[DstackEventLog],
 ) -> Result<String, String> {
     let measured = dstack_rtmr3_event(events, "compose-hash")
-        .map_err(|e| format!("dstack event log rejected: {e}"))?
+        .map_err(|error| format!("dstack event log rejected: {error}"))?
         .ok_or_else(|| "verified event log carries no compose-hash event".to_string())?;
     let measured_hash: [u8; 32] = decode_hex(&measured.event_payload)?
         .as_slice()
         .try_into()
         .map_err(|_| "compose-hash event must contain 32 bytes".to_string())?;
-    verify_dstack_app_compose(evidence, &measured_hash)?;
+    verify_dstack_app_compose(evidence, &measured_hash).map_err(|error| error.to_string())?;
     Ok(hex::encode(measured_hash))
 }
 
-/// Verify that `app_compose` is the preimage of the compose measurement
-/// bound into RTMR3 by the verified event log.
-pub(super) fn verify_dstack_app_compose(
+/// Return the RTMR3-measured app-id used by custody policies.
+pub fn dstack_app_id(events: &[DstackEventLog]) -> Result<Vec<u8>, String> {
+    let event = dstack_rtmr3_event(events, "app-id")
+        .map_err(|error| format!("dstack event log rejected: {error}"))?
+        .ok_or_else(|| "verified event log carries no app-id event".to_string())?;
+    decode_hex(&event.event_payload)
+}
+
+/// Verify that `app_compose` is the preimage of the measured compose hash.
+pub fn verify_dstack_app_compose(
     evidence: &Value,
     measured_compose_hash: &[u8; 32],
-) -> Result<(), String> {
+) -> Result<(), AppComposeError> {
     let app_compose = evidence
         .get("app_compose")
         .and_then(Value::as_str)
-        .ok_or_else(|| "missing dstack app_compose evidence".to_string())?;
+        .ok_or(AppComposeError::Missing)?;
     let actual_compose_hash: [u8; 32] = Sha256::digest(app_compose.as_bytes()).into();
     if &actual_compose_hash != measured_compose_hash {
-        return Err(
-            "dstack app_compose preimage does not match the RTMR3-bound compose hash".into(),
-        );
+        return Err(AppComposeError::HashMismatch);
     }
     Ok(())
 }
@@ -194,7 +193,7 @@ mod tests {
         };
 
         assert!(
-            runtime_event_before_system_ready(&[disguised_firmware_event], "compose-hash")
+            dstack_rtmr3_event(&[disguised_firmware_event], "compose-hash")
                 .unwrap()
                 .is_none()
         );
@@ -203,15 +202,11 @@ mod tests {
     #[test]
     fn rejects_duplicate_semantic_events() {
         let compose_hash = runtime_event("compose-hash", &[0x44; 32]);
-        let err = runtime_event_before_system_ready(
-            &[compose_hash.clone(), compose_hash],
-            "compose-hash",
-        )
-        .unwrap_err()
-        .to_string();
+        let error =
+            dstack_rtmr3_event(&[compose_hash.clone(), compose_hash], "compose-hash").unwrap_err();
 
         assert_eq!(
-            err,
+            error,
             "invalid dstack event_log evidence: multiple pre-system-ready compose-hash events"
         );
     }

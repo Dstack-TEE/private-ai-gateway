@@ -3,18 +3,15 @@
 pub const DEFAULT_DCAP_PCCS_URL: &str = dcap_qvl::PHALA_PCCS_URL;
 
 mod appraisal;
-mod dstack;
-mod quote;
-mod report;
 
+pub use aci_verify::dstack::{dstack_rtmr3_event, verify_dstack_event_log, DstackEventLog};
+pub use aci_verify::quote::QuoteStepError;
+pub use aci_verify::report::{
+    validate_aci_report_binding, AciReportValidationError, ReportBinding, ValidatedAciReport,
+};
 pub use appraisal::{
     appraise_report, Appraisal, AppraisalInputs, ChannelEvidence, CheckId, CheckResult,
     CustodyEvidence, FailureCause, Outcome, QuoteSource,
-};
-pub use dstack::{dstack_rtmr3_event, verify_dstack_event_log, DstackEventLog};
-pub use quote::QuoteStepError;
-pub use report::{
-    validate_aci_report_binding, AciReportValidationError, ReportBinding, ValidatedAciReport,
 };
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
@@ -28,12 +25,4 @@ fn decode_hex_32(value: &str) -> Result<[u8; 32], String> {
         .as_slice()
         .try_into()
         .map_err(|_| format!("expected 32 bytes, got {}", bytes.len()))
-}
-
-fn dcap_report_data(report: &dcap_qvl::quote::Report) -> &[u8; 64] {
-    match report {
-        dcap_qvl::quote::Report::SgxEnclave(report) => &report.report_data,
-        dcap_qvl::quote::Report::TD10(report) => &report.report_data,
-        dcap_qvl::quote::Report::TD15(report) => &report.base.report_data,
-    }
 }
