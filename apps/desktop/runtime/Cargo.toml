@@ -16,6 +16,7 @@ name = "desktop_runtime"
 path = "src/lib.rs"
 
 [dependencies]
+aci-protocol = { path = "../../../crates/aci-protocol" }
 axum = "0.8"
 async-stream = { version = "0.3", optional = true }
 base64 = "0.23"
@@ -26,6 +27,8 @@ rust-embed = { version = "8", optional = true }
 sha2 = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["form", "json", "rustls-no-provider"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+# Serde `alias` only widens deserialization, so its ts-rs notice is noise.
+ts-rs = { version = "12", features = ["no-serde-warnings"] }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 tempfile = "3"

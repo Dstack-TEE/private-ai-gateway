@@ -131,9 +131,10 @@ export function UsageView({
             label="Next usage page"
             disabled={loading || !page?.nextCursor}
             onClick={() => {
-              if (!page?.nextCursor) return;
+              const next = page?.nextCursor;
+              if (!next) return;
               focusAfterPage.current = true;
-              setCursors((value) => [...value, page.nextCursor]);
+              setCursors((value) => [...value, next]);
             }}
           ><ChevronRight size={16} /></IconButton>
         </div>

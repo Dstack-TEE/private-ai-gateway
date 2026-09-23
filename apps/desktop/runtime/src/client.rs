@@ -9,14 +9,13 @@ use std::{
 };
 
 use serde::de::DeserializeOwned;
+use serde_json::Value;
 use tokio::sync::watch;
 
 use crate::{
-    contracts::*,
-    preferences::Preferences,
-    protocol::{self, Command, Hello, Outcome, Preference, Request, Response, ShutdownMode},
+    contracts::GatewayState,
+    protocol::{self, rpc, Call, Command, Hello, Outcome, Request, Response, ShutdownMode},
     transport::Stream,
-    usage::{UsagePage, UsageQuery},
 };
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -224,7 +223,17 @@ impl Client {
         }
     }
 
-    pub fn request<T: DeserializeOwned>(&self, command: Command) -> Result<T, String> {
+    /// Sends one typed request and decodes exactly its declared response.
+    pub fn call<C: Call>(&self, request: C) -> Result<C::Response, String> {
+        self.request(request.into())
+    }
+
+    /// Forwards a command whose result is passed through unchanged.
+    pub fn forward(&self, command: Command) -> Result<Value, String> {
+        self.request(command)
+    }
+
+    fn request<T: DeserializeOwned>(&self, command: Command) -> Result<T, String> {
         let (mut reader, _) = open_current().map_err(connection_error)?;
         reader
             .get_mut()
@@ -250,9 +259,11 @@ impl Client {
     pub fn subscribe(&self) -> watch::Receiver<GatewayState> {
         self.states.subscribe()
     }
+
     pub fn state(&self) -> Result<GatewayState, String> {
-        self.request(Command::State)
+        self.call(rpc::State)
     }
+
     pub fn state_or_cached(&self) -> Result<GatewayState, String> {
         match self.state() {
             Ok(state) => Ok(state),
@@ -266,153 +277,15 @@ impl Client {
             }
         }
     }
-    pub fn start(&self, config: StartGatewayConfig) -> Result<GatewayState, String> {
-        self.request(Command::Start(config))
-    }
-    pub fn stop(&self) -> Result<GatewayState, String> {
-        self.request(Command::Stop)
-    }
-    pub fn activate_profile(&self, profile_id: String) -> Result<GatewayState, String> {
-        self.request(Command::ActivateProfile { profile_id })
-    }
-    pub fn delete_profile(&self, profile_id: String) -> Result<GatewayState, String> {
-        self.request(Command::DeleteProfile { profile_id })
-    }
-    pub fn clear_api_key(&self) -> Result<GatewayState, String> {
-        self.request(Command::ClearApiKey)
-    }
-    pub fn import_profiles(
-        &self,
-        backup: crate::maintenance::ProfileBackup,
-    ) -> Result<crate::maintenance::ImportResult, String> {
-        self.request(Command::ImportProfiles(backup))
-    }
-    pub fn export_profiles(&self, path: PathBuf) -> Result<(), String> {
-        self.request(Command::ExportProfiles {
-            path: export_path(&path)?,
-        })
-    }
-    pub fn export_diagnostics(&self, path: PathBuf) -> Result<(), String> {
-        self.request(Command::ExportDiagnostics {
-            path: export_path(&path)?,
-        })
-    }
-    pub fn query_usage(&self, query: UsageQuery) -> Result<UsagePage, String> {
-        self.request(Command::Usage(query))
-    }
-    pub fn usage_record(&self, record_id: &str) -> Result<Option<RequestActivity>, String> {
-        self.request(Command::UsageRecord {
-            record_id: record_id.into(),
-        })
-    }
-    pub fn export_usage_csv(&self, query: UsageQuery, path: PathBuf) -> Result<usize, String> {
-        self.request(Command::ExportUsage {
-            query,
-            path: export_path(&path)?,
-        })
-    }
-    pub fn clear_usage(&self) -> Result<u64, String> {
-        self.request(Command::ClearUsage)
-    }
-    pub fn client_key(&self) -> Result<String, String> {
-        self.request(Command::ClientKey)
-    }
-    pub fn rotate_client_key(&self) -> Result<String, String> {
-        self.request(Command::RotateClientKey)
-    }
-    pub fn list_agents(&self) -> Result<Vec<AgentStatus>, String> {
-        self.request(Command::Agents)
-    }
-    pub fn preview_agent(
-        &self,
-        agent_id: String,
-        connect: bool,
-        options: ConnectOptions,
-    ) -> Result<AgentPreview, String> {
-        self.request(Command::PreviewAgent {
-            agent_id,
-            connect,
-            options,
-        })
-    }
-    pub fn apply_agent(
-        &self,
-        agent_id: String,
-        connect: bool,
-        revision: String,
-        options: ConnectOptions,
-    ) -> Result<AgentStatus, String> {
-        self.request(Command::ApplyAgent {
-            agent_id,
-            connect,
-            revision,
-            options,
-        })
-    }
-    pub fn disconnect_all_agents(&self) -> Result<Vec<AgentStatus>, String> {
-        self.request(Command::DisconnectAllAgents)
-    }
-    pub fn preferences(&self) -> Result<Preferences, String> {
-        self.request(Command::Preferences)
-    }
-    pub fn reset_settings(&self) -> Result<GatewayState, String> {
-        self.request(Command::ResetSettings)
-    }
-    pub fn set_preference(&self, change: Preference) -> Result<Preferences, String> {
-        self.request(Command::SetPreference(change))
-    }
 
-    pub async fn begin_account_login(
-        self: &Arc<Self>,
-        profile: ConfidentialProfileInput,
-    ) -> Result<crate::account_login::LoginPresentation, String> {
-        self.background(Command::BeginAccountLogin { profile })
-            .await
-    }
-    pub async fn poll_account_login(
-        self: &Arc<Self>,
-        id: String,
-    ) -> Result<Option<AccountLoginDetails>, String> {
-        self.background(Command::PollAccountLogin { id }).await
-    }
-
-    pub async fn verify_configuration(
-        self: &Arc<Self>,
-        profile: ConfidentialProfileInput,
-        require_production_os: bool,
-        key: Option<String>,
-    ) -> Result<GatewayState, String> {
-        self.background(Command::Verify {
-            profile,
-            require_production_os,
-            key,
-        })
-        .await
-    }
-    pub async fn save_local_api_config(
-        self: &Arc<Self>,
-        config: LocalApiConfig,
-    ) -> Result<GatewayState, String> {
-        self.background(Command::SaveLocalApi(config)).await
-    }
-    pub async fn refresh_catalog(self: &Arc<Self>) -> Result<GatewayState, String> {
-        self.background(Command::RefreshCatalog).await
-    }
-    async fn background<T: DeserializeOwned + Send + 'static>(
-        self: &Arc<Self>,
-        command: Command,
-    ) -> Result<T, String> {
-        let client = self.clone();
-        tokio::task::spawn_blocking(move || client.request(command))
-            .await
-            .map_err(|_| "Management request task failed")?
-    }
     pub fn toggle(&self) -> Result<GatewayState, String> {
         self.state().and_then(|state| {
             if state.should_stop_protection() {
-                self.stop()
+                self.call(rpc::Stop)
             } else {
-                self.start(state.config)
+                self.call(rpc::Start {
+                    config: state.config,
+                })
             }
         })
     }
@@ -521,12 +394,6 @@ impl Client {
     }
 }
 
-fn export_path(path: &std::path::Path) -> Result<String, String> {
-    path.to_str()
-        .map(str::to_owned)
-        .ok_or_else(|| "Export paths must be valid Unicode".into())
-}
-
 fn open() -> io::Result<(BufReader<Stream>, Hello)> {
     let stream = Stream::connect()?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -608,9 +475,6 @@ fn connection_error(error: io::Error) -> String {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::export_path;
-    use std::{ffi::OsString, os::unix::ffi::OsStringExt, path::PathBuf};
-
     #[test]
     fn attach_keeps_a_disconnected_client_when_backend_startup_fails() {
         const CHILD: &str = "PAP_TEST_ATTACH_FAILURE";
@@ -664,16 +528,6 @@ mod tests {
         assert_eq!(
             client.states.borrow().error.as_deref(),
             Some("unexpected disconnection")
-        );
-    }
-
-    #[test]
-    fn export_rejects_paths_that_json_cannot_represent() {
-        let path = PathBuf::from(OsString::from_vec(b"/tmp/pap-\xff.csv".to_vec()));
-        assert!(export_path(&path).is_err());
-        assert_eq!(
-            export_path(std::path::Path::new("/tmp/pap.csv")).unwrap(),
-            "/tmp/pap.csv"
         );
     }
 }

@@ -123,6 +123,10 @@ cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
 ```
 
+Renderer DTOs in `src/shared/contracts.generated.ts` are generated from the
+Rust contracts with `npm run generate:contracts`; `cargo test` fails when the
+committed file is stale.
+
 The Rust suites cover protocol verification, local proxy behavior, lifecycle,
 configuration transactions, recovery, usage, and native command boundaries.
 Renderer correctness is checked by TypeScript and exercised through the real

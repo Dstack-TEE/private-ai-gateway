@@ -1,0 +1,69 @@
+//! Tauri commands served by the shared UI API. Each keeps its own command name
+//! so capabilities still grant it per window; its arguments are passed through
+//! unchanged as the method parameters the web UI sends.
+
+use std::sync::Arc;
+
+use desktop_runtime::{client::Client, ui_api::Method};
+use serde_json::Value;
+use tauri::{
+    ipc::{InvokeBody, Request},
+    State, WebviewWindow,
+};
+
+macro_rules! ui_commands {
+    ($($command:ident => $method:ident),+ $(,)?) => {$(
+        #[tauri::command]
+        pub(crate) async fn $command(
+            window: WebviewWindow,
+            client: State<'_, Arc<Client>>,
+            request: Request<'_>,
+        ) -> Result<Value, String> {
+            crate::ui_api::invoke(window, client, Method::$method, params(&request)?).await
+        }
+    )+};
+}
+
+ui_commands! {
+    start_backend_service => StartBackendService,
+    get_gateway_state => GetState,
+    start_gateway => Start,
+    stop_gateway => Stop,
+    activate_profile => ActivateProfile,
+    delete_profile => DeleteProfile,
+    save_configuration => SaveConfiguration,
+    complete_account_login => CompleteAccountLogin,
+    begin_account_login => BeginAccountLogin,
+    poll_account_login => PollAccountLogin,
+    save_account_login => SaveAccountLogin,
+    account_details => GetAccountDetails,
+    account_balance => GetAccountBalance,
+    cancel_account_login => CancelAccountLogin,
+    get_client_key => GetClientKey,
+    rotate_client_key => RotateClientKey,
+    save_local_api_config => SaveLocalApiConfig,
+    save_web_ui => SaveWebUi,
+    list_listen_addresses => ListListenAddresses,
+    import_profiles => ImportProfiles,
+    query_usage => QueryUsage,
+    get_usage_record => GetUsageRecord,
+    list_agents => ListAgents,
+    get_agent_access => GetAgentAccess,
+    request_agent_access => RequestAgentAccess,
+    preview_agent_connection => PreviewAgent,
+    apply_agent_connection => ApplyAgent,
+    get_appearance => GetAppearance,
+    set_appearance => SetAppearance,
+    get_launch_preferences => GetLaunchPreferences,
+    set_launch_preference => SetLaunchPreference,
+    get_notification_settings => GetNotificationSettings,
+    save_notification_settings => SaveNotificationSettings,
+    reset_settings => ResetSettings,
+}
+
+fn params(request: &Request<'_>) -> Result<Value, String> {
+    match request.body() {
+        InvokeBody::Json(params) => Ok(params.clone()),
+        InvokeBody::Raw(_) => Err("Invalid management request".into()),
+    }
+}

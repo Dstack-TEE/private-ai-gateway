@@ -17,10 +17,7 @@ mod window_state;
 use std::sync::Arc;
 
 use desktop_runtime::{
-    cli_install::Registration,
-    client::Client,
-    contracts::{ConfidentialProfileInput, ConnectOptions, LocalApiConfig, StartGatewayConfig},
-    preferences::Appearance,
+    cli_install::Registration, client::Client, preferences::Appearance, protocol::rpc,
 };
 use tauri::{
     webview::{PageLoadEvent, WebviewWindowBuilder},
@@ -156,8 +153,13 @@ async fn register_cli_on_startup(app: &AppHandle) {
     if reader.cached_state().backend_connected == Some(false) {
         return;
     }
-    let enabled =
-        run_blocking(move || Ok(reader.preferences()?.auto_cli_registration.unwrap_or(true))).await;
+    let enabled = run_blocking(move || {
+        Ok(reader
+            .call(rpc::Preferences)?
+            .auto_cli_registration
+            .unwrap_or(true))
+    })
+    .await;
     state.attempted = enabled.is_ok();
     let result = match enabled {
         Ok(true) => match allow_automatic_cli_registration() {
@@ -232,38 +234,38 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(notifications::Settings::default())
         .invoke_handler(tauri::generate_handler![
-            commands::gateway::start_backend_service,
-            commands::gateway::get_gateway_state,
-            commands::settings::reset_settings,
+            commands::ui::start_backend_service,
+            commands::ui::get_gateway_state,
+            commands::ui::reset_settings,
             commands::settings::read_profile_backup,
-            commands::settings::import_profiles,
+            commands::ui::import_profiles,
             commands::settings::export_profiles,
             commands::settings::export_diagnostics,
-            notifications::get_notification_settings,
-            notifications::save_notification_settings,
+            commands::ui::get_notification_settings,
+            commands::ui::save_notification_settings,
             notifications::request_notification_permission,
             notifications::open_notification_settings,
-            commands::settings::get_appearance,
-            commands::settings::set_appearance,
+            commands::ui::get_appearance,
+            commands::ui::set_appearance,
             updates::prepare_update,
             updates::set_update_channel,
             updates::restart_to_update,
-            commands::settings::get_launch_preferences,
-            commands::settings::set_launch_preference,
-            commands::gateway::start_gateway,
-            commands::accounts::begin_account_login,
-            commands::accounts::complete_account_login,
-            commands::accounts::save_configuration,
-            commands::accounts::poll_account_login,
-            commands::accounts::save_account_login,
-            commands::accounts::account_details,
-            commands::accounts::account_balance,
+            commands::ui::get_launch_preferences,
+            commands::ui::set_launch_preference,
+            commands::ui::start_gateway,
+            commands::ui::begin_account_login,
+            commands::ui::complete_account_login,
+            commands::ui::save_configuration,
+            commands::ui::poll_account_login,
+            commands::ui::save_account_login,
+            commands::ui::account_details,
+            commands::ui::account_balance,
             commands::accounts::open_top_up,
             commands::accounts::open_organization,
-            commands::accounts::cancel_account_login,
-            commands::accounts::activate_profile,
-            commands::accounts::delete_profile,
-            commands::gateway::stop_gateway,
+            commands::ui::cancel_account_login,
+            commands::ui::activate_profile,
+            commands::ui::delete_profile,
+            commands::ui::stop_gateway,
             commands::desktop::copy_text,
             commands::desktop::show_edit_menu,
             commands::desktop::show_error_alert,
@@ -273,19 +275,19 @@ pub fn run() {
             commands::desktop::open_agent_website,
             commands::desktop::open_api_key_page,
             commands::desktop::close_native_dialog,
-            commands::usage::query_usage,
-            commands::usage::get_usage_record,
+            commands::ui::query_usage,
+            commands::ui::get_usage_record,
             commands::desktop::open_about_link,
-            commands::gateway::get_client_key,
-            commands::gateway::rotate_client_key,
-            commands::gateway::save_local_api_config,
-            commands::gateway::save_web_ui,
-            commands::gateway::list_listen_addresses,
-            commands::gateway::list_agents,
-            commands::gateway::preview_agent_connection,
-            commands::gateway::apply_agent_connection,
-            commands::gateway::get_agent_access,
-            commands::gateway::request_agent_access,
+            commands::ui::get_client_key,
+            commands::ui::rotate_client_key,
+            commands::ui::save_local_api_config,
+            commands::ui::save_web_ui,
+            commands::ui::list_listen_addresses,
+            commands::ui::list_agents,
+            commands::ui::preview_agent_connection,
+            commands::ui::apply_agent_connection,
+            commands::ui::get_agent_access,
+            commands::ui::request_agent_access,
             commands::settings::get_cli_registration,
             commands::settings::set_cli_registration,
             commands::desktop::stop_all_and_quit
@@ -312,7 +314,7 @@ pub fn run() {
                     .plugin(tauri_plugin_updater::Builder::new().build())?;
             }
             let client = Client::attach(tauri::async_runtime::handle().inner().clone())?;
-            if let Ok(preferences) = client.preferences() {
+            if let Ok(preferences) = client.call(rpc::Preferences) {
                 apply_appearance(app.handle(), preferences.appearance);
             }
             app.manage(client.clone());

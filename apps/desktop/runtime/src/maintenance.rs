@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{fs::File, io::Read, path::Path};
 
 const MAX_BACKUP_BYTES: usize = 256 * 1024;
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ProfileConfiguration {
     pub name: String,
@@ -14,14 +14,14 @@ pub struct ProfileConfiguration {
     pub remote_url: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileBackup {
     pub version: u8,
     pub profiles: Vec<ProfileConfiguration>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, ts_rs::TS)]
 pub struct ImportResult {
     pub imported: usize,
     pub skipped: usize,

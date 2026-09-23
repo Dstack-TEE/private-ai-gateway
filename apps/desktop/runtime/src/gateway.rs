@@ -22,6 +22,7 @@ use crate::contracts::{
 use crate::endpoint_inventory::InventoryUpdater;
 use crate::usage::UsageStore;
 use crate::{local_api, service_config};
+use aci_protocol::types::ServiceCapabilities;
 use desktop_gateway::catalog::{Catalog, EndpointInventory};
 use desktop_gateway::proxy::{ProxyEvent, ProxyState, Session};
 use serde_json::{Map, Value};
@@ -56,12 +57,6 @@ pub struct IdentitySourceProvenance {
     pub repo_url: Option<String>,
     pub repo_commit: Option<String>,
     pub image_digest: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-pub struct ServiceCapabilities {
-    pub serving: String,
-    pub supported_e2ee_versions: Vec<String>,
 }
 
 #[derive(Clone)]

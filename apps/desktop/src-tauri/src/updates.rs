@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use desktop_runtime::{
     client::Client,
     preferences::{self, UpdateChannel},
-    protocol::Preference,
+    protocol::{rpc, Preference},
 };
 use serde::Serialize;
 use tauri::{AppHandle, State};
@@ -107,7 +107,9 @@ pub async fn set_update_channel(
     let client = client.inner().clone();
     crate::run_blocking(move || {
         client
-            .set_preference(Preference::UpdateChannel(channel))
+            .call(rpc::SetPreference {
+                change: Preference::UpdateChannel(channel),
+            })
             .map(|_| ())
             .map_err(|_| "Could not save update channel".to_string())
     })

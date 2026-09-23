@@ -1,5 +1,4 @@
 import type {
-  AccountLogin,
   AgentAccessStatus,
   AgentPreview,
   AgentStatus,
@@ -9,33 +8,20 @@ import type {
   DesktopApi,
   GatewayState,
   LocalApiConfig,
+  LoginPresentation,
   NotificationConfiguration,
   NotificationPreferences,
   ProfileBackup,
   RequestActivity,
   ServiceProvider,
   StartGatewayConfig,
+  UiMethod,
   UpdateChannel,
   UpdateInfo,
   UsagePage,
   UsageQuery,
   WebUiConfig,
 } from "../../shared/contracts";
-
-// Mirrors the Rust allowlist in runtime/src/ui_api.rs.
-export type UiMethod =
-  | "startBackendService" | "getState" | "start" | "stop"
-  | "activateProfile" | "deleteProfile" | "saveConfiguration"
-  | "completeAccountLogin" | "beginAccountLogin" | "pollAccountLogin"
-  | "saveAccountLogin" | "getAccountDetails" | "getAccountBalance"
-  | "getOrganizationUrl" | "getTopUpUrl"
-  | "cancelAccountLogin" | "getClientKey" | "rotateClientKey"
-  | "saveLocalApiConfig" | "saveWebUi" | "listListenAddresses" | "importProfiles"
-  | "exportProfilesContent" | "exportDiagnosticsContent"
-  | "queryUsage" | "getUsageRecord" | "listAgents" | "getAgentAccess"
-  | "requestAgentAccess" | "previewAgent" | "applyAgent" | "getAppearance"
-  | "setAppearance" | "getLaunchPreferences" | "setLaunchPreference"
-  | "getNotificationSettings" | "saveNotificationSettings" | "resetSettings";
 
 export interface UiTransport {
   call<T>(method: UiMethod, params?: Record<string, unknown>): Promise<T>;
@@ -69,7 +55,7 @@ export interface UiPlatform {
   openApiKeyPage(provider: ServiceProvider): Promise<void>;
   confirm(options: ConfirmationOptions): Promise<boolean>;
   showErrorAlert(title: string, message: string): Promise<void>;
-  presentAccountLogin(login: AccountLogin): void;
+  presentAccountLogin(login: LoginPresentation): void;
   openOrganization(organizationSlug: string): Promise<void>;
   openTopUp(provider: ServiceProvider, scopeSlug?: string): Promise<void>;
 }
@@ -137,7 +123,7 @@ export function createDesktopApi(transport: UiTransport, platform: UiPlatform): 
     saveConfiguration: (profile, requireProductionOs, key) => call("saveConfiguration", { profile, requireProductionOs, key }),
     completeAccountLogin: (id, callbackUrl) => call("completeAccountLogin", { id, callbackUrl }),
     beginAccountLogin: async (profile) => {
-      const login = await call<AccountLogin>("beginAccountLogin", { profile });
+      const login = await call<LoginPresentation>("beginAccountLogin", { profile });
       platform.presentAccountLogin(login);
       return login;
     },

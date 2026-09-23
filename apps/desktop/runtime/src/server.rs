@@ -7,16 +7,13 @@ use std::{
     time::Duration,
 };
 
-use serde::Serialize;
 use serde_json::Value;
 use tokio::{runtime::Handle, sync::Semaphore, task::JoinSet};
 
 use crate::{
     controller::DesktopRuntime,
     preferences,
-    protocol::{
-        self, Command, Hello, Outcome, Preference, Request, Response, RpcError, ShutdownMode,
-    },
+    protocol::{self, rpc, Command, Hello, Outcome, Request, Response, RpcError, ShutdownMode},
     transport::{Listener, Stream},
 };
 
@@ -235,8 +232,7 @@ fn connection(
         };
         let mut states = runtime.subscribe();
         while !stopping.load(Ordering::Acquire) {
-            let state = states.borrow_and_update().clone();
-            let result = encode(state);
+            let result = protocol::encode::<rpc::Watch>(states.borrow_and_update().clone());
             protocol::write(
                 reader.get_mut(),
                 &Response {
@@ -268,8 +264,8 @@ fn connection(
             );
         }
         let result = shutdown(&runtime, &admission, &handle, *mode)
-            .map(|()| Value::Null)
-            .map_err(|error| RpcError::operation(&error));
+            .map_err(|error| RpcError::operation(&error))
+            .and_then(protocol::encode::<rpc::Shutdown>);
         if result.is_ok() {
             stopping.store(true, Ordering::Release);
         }
@@ -300,7 +296,7 @@ pub(crate) fn execute(
     command: Command,
 ) -> Result<Value, RpcError> {
     if matches!(command, Command::State) {
-        return handle.block_on(dispatch(runtime, command));
+        return handle.block_on(protocol::dispatch(runtime, command));
     }
     let _operation = admission
         .mutations
@@ -319,7 +315,7 @@ pub(crate) fn execute(
     } else {
         None
     };
-    handle.block_on(dispatch(runtime, command))
+    handle.block_on(protocol::dispatch(runtime, command))
 }
 
 fn shutdown(
@@ -349,140 +345,4 @@ fn outcome(result: Result<Value, RpcError>) -> Outcome {
         Ok(value) => Outcome::Result(value),
         Err(error) => Outcome::Error(error),
     }
-}
-
-fn encode(value: impl Serialize) -> Result<Value, RpcError> {
-    serde_json::to_value(value)
-        .map_err(|_| RpcError::new("encoding_failed", "Cannot encode the operation result."))
-}
-
-async fn dispatch(runtime: &Arc<DesktopRuntime>, command: Command) -> Result<Value, RpcError> {
-    async fn execute(runtime: &Arc<DesktopRuntime>, command: Command) -> Result<Value, RpcError> {
-        fn value(input: impl Serialize) -> Result<Value, RpcError> {
-            encode(input)
-        }
-        match command {
-            Command::State => value(runtime.state()?),
-            Command::Start(config) => value(runtime.start(config)?),
-            Command::Stop => value(runtime.stop()?),
-            Command::Shutdown { .. } => Err("Shutdown requires lifecycle admission".into()),
-            Command::Verify {
-                profile,
-                require_production_os,
-                key,
-            } => value(
-                runtime
-                    .verify_configuration(profile, require_production_os, key)
-                    .await?,
-            ),
-            Command::SaveConfiguration {
-                profile,
-                require_production_os,
-                key,
-            } => value(
-                runtime
-                    .save_configuration(profile, require_production_os, key)
-                    .await?,
-            ),
-            Command::CompleteAccountLogin { id, callback_url } => {
-                value(runtime.complete_account_login(id, callback_url).await?)
-            }
-            Command::BeginAccountLogin { profile } => {
-                value(runtime.begin_account_login(profile).await?)
-            }
-            Command::SaveAccountLogin {
-                operation_id,
-                id,
-                profile,
-                require_production_os,
-                workspace_id,
-            } => value(runtime.begin_account_save(
-                operation_id,
-                id,
-                profile,
-                require_production_os,
-                workspace_id,
-            )?),
-            Command::AccountSaveResult { operation_id } => {
-                value(runtime.account_save_result(&operation_id)?)
-            }
-            Command::AccountDetails { profile_id } => {
-                value(runtime.account_details(profile_id).await?)
-            }
-            Command::AccountBalance { target } => value(runtime.account_balance(target).await?),
-            Command::PollAccountLogin { id } => value(runtime.poll_account_login(id).await?),
-            Command::CancelAccountLogin { id } => value(runtime.cancel_account_login(id).await?),
-            Command::ActivateProfile { profile_id } => value(runtime.activate_profile(profile_id)?),
-            Command::DeleteProfile { profile_id } => {
-                value(runtime.delete_profile(profile_id).await?)
-            }
-            Command::ClearApiKey => value(runtime.clear_api_key().await?),
-            Command::ImportProfiles(backup) => value(runtime.import_profiles(backup)?),
-            Command::ExportProfiles { path } => {
-                let path = std::path::PathBuf::from(path);
-                if !path.is_absolute() {
-                    return Err("Export path must be absolute".into());
-                }
-                runtime.export_profiles(path)?;
-                value(())
-            }
-            Command::ExportProfilesContent => value(runtime.export_profiles_content()?),
-            Command::ExportDiagnostics { path } => {
-                let path = std::path::PathBuf::from(path);
-                if !path.is_absolute() {
-                    return Err("Export path must be absolute".into());
-                }
-                runtime.export_diagnostics(path, protocol::BUILD_VERSION)?;
-                value(())
-            }
-            Command::ExportDiagnosticsContent => {
-                value(runtime.export_diagnostics_content(protocol::BUILD_VERSION)?)
-            }
-            Command::Usage(query) => value(runtime.query_usage(query)?),
-            Command::UsageRecord { record_id } => value(runtime.usage_record(&record_id)?),
-            Command::ExportUsage { query, path } => {
-                let path = std::path::PathBuf::from(path);
-                if !path.is_absolute() {
-                    return Err("Export path must be absolute".into());
-                }
-                value(runtime.export_usage_csv(query, path)?)
-            }
-            Command::ClearUsage => value(runtime.clear_usage()?),
-            Command::ClientKey => value(runtime.client_key()?),
-            Command::RotateClientKey => value(runtime.rotate_client_key()?),
-            Command::SaveLocalApi(config) => value(runtime.save_local_api_config(config).await?),
-            Command::SaveWebUi(config) => value(runtime.save_web_ui(config)?),
-            Command::WebUiLogin => value(runtime.web_ui_login()?),
-            Command::RefreshCatalog => value(runtime.refresh_catalog().await?),
-            Command::Agents => value(runtime.list_agents()?),
-            Command::PreviewAgent {
-                agent_id,
-                connect,
-                options,
-            } => value(runtime.preview_agent(agent_id, connect, options)?),
-            Command::ApplyAgent {
-                agent_id,
-                connect,
-                revision,
-                options,
-            } => value(runtime.apply_agent(agent_id, connect, revision, options)?),
-            Command::DisconnectAllAgents => value(runtime.disconnect_all_agents()?),
-            Command::ResetSettings => value(runtime.reset_settings().await?),
-            Command::Preferences => value(preferences::load()?),
-            Command::SetPreference(change) => {
-                preferences::update(|saved| match change {
-                    Preference::AutoCliRegistration(enabled) => {
-                        saved.auto_cli_registration = Some(enabled)
-                    }
-                    Preference::Notifications(config) => saved.notifications = config,
-                    Preference::ConnectOnLaunch(enabled) => saved.connect_on_launch = enabled,
-                    Preference::Appearance(appearance) => saved.appearance = appearance,
-                    Preference::UpdateChannel(channel) => saved.update_channel = Some(channel),
-                })?;
-                value(preferences::load()?)
-            }
-            Command::Watch => Err("Subscription requires its own connection".into()),
-        }
-    }
-    execute(runtime, command).await
 }

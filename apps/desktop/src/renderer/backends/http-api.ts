@@ -5,10 +5,11 @@ import type {
   GatewayState,
   ProfileBackup,
   ServiceProvider,
+  UiMethod,
   UpdateInfo,
 } from "../../shared/contracts";
 import { showBrowserDialog } from "../components/browser-dialog";
-import { createDesktopApi, type UiMethod, type UiPlatform, type UiTransport } from "./create-api";
+import { createDesktopApi, type UiPlatform, type UiTransport } from "./create-api";
 
 type EventListener = (payload: never) => void;
 type Bootstrap = { version: string; distribution: DistributionCapabilities };

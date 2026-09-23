@@ -1,6 +1,6 @@
 //! CLI account authorization uses the same runtime session as the desktop UI.
 use super::{args::AccountLoginOptions, service_provider, value, Cli};
-use crate::{client::Client, contracts::*, protocol::Command};
+use crate::{client::Client, contracts::*, protocol::rpc};
 use serde_json::Value;
 use std::{
     io::{self, IsTerminal, Read, Write},
@@ -14,11 +14,7 @@ struct Pending<'a> {
 impl Drop for Pending<'_> {
     fn drop(&mut self) {
         if let Some(id) = self.id.take() {
-            if self
-                .client
-                .request::<Value>(Command::CancelAccountLogin { id })
-                .is_err()
-            {
+            if self.client.call(rpc::CancelAccountLogin { id }).is_err() {
                 crate::diagnostic(format_args!("Account cleanup could not complete; unused authorization expires automatically."));
             }
         }
@@ -64,10 +60,9 @@ pub(super) fn login(
         provider,
         remote_url: remote_url.into(),
     };
-    let login: crate::account_login::LoginPresentation =
-        client.request(Command::BeginAccountLogin {
-            profile: profile.clone(),
-        })?;
+    let login: crate::account_login::LoginPresentation = client.call(rpc::BeginAccountLogin {
+        profile: profile.clone(),
+    })?;
     let mut pending = Pending {
         client,
         id: Some(login.id.clone()),
@@ -83,7 +78,7 @@ pub(super) fn login(
     }
     if options.callback_stdin {
         let callback = read_callback()?;
-        client.request::<Value>(Command::CompleteAccountLogin {
+        client.call(rpc::CompleteAccountLogin {
             id: login.id.clone(),
             callback_url: callback,
         })?;
@@ -93,11 +88,9 @@ pub(super) fn login(
         if Instant::now() >= deadline {
             return Err("Account login timed out; retry profiles login.".into());
         }
-        if let Some(details) =
-            client.request::<Option<AccountLoginDetails>>(Command::PollAccountLogin {
-                id: login.id.clone(),
-            })?
-        {
+        if let Some(details) = client.call(rpc::PollAccountLogin {
+            id: login.id.clone(),
+        })? {
             break details;
         }
         std::thread::sleep(Duration::from_millis(500));
@@ -148,7 +141,7 @@ pub(super) fn login(
         Some(id)
     };
     let operation_id = uuid::Uuid::new_v4().to_string();
-    let initial = client.request::<AccountSaveResult>(Command::SaveAccountLogin {
+    let initial = client.call(rpc::SaveAccountLogin {
         operation_id: operation_id.clone(),
         id: login.id,
         profile,
@@ -159,7 +152,7 @@ pub(super) fn login(
     pending.id = None;
     let mut result = match initial {
         Ok(result) => result,
-        Err(_) => client.request(Command::AccountSaveResult {
+        Err(_) => client.call(rpc::AccountSaveResult {
             operation_id: operation_id.clone(),
         })?,
     };
@@ -170,7 +163,7 @@ pub(super) fn login(
             AccountSaveResult::Failed { error } => return Err(error),
             AccountSaveResult::Running => {
                 std::thread::sleep(Duration::from_millis(500));
-                result = client.request(Command::AccountSaveResult {
+                result = client.call(rpc::AccountSaveResult {
                     operation_id: operation_id.clone(),
                 })?;
             }
