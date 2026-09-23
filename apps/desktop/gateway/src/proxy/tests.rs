@@ -383,9 +383,15 @@ async fn send_failures_are_not_reported_as_local_rejections() {
     verified(&state, &sidecar, 1, 1).await;
     state.set_api_key(Some("sk-real".to_string()));
 
+    // Drop every connection unanswered. A closed port would do on Unix, but Windows
+    // takes seconds to refuse a loopback connection, past the test call timeout.
     let unavailable = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let unavailable_url = format!("http://{}", unavailable.local_addr().unwrap());
-    drop(unavailable);
+    tokio::spawn(async move {
+        while let Ok((connection, _)) = unavailable.accept().await {
+            drop(connection);
+        }
+    });
     state.publish(Session {
         service: Some(http_service(&unavailable_url)),
         ..state.session()
