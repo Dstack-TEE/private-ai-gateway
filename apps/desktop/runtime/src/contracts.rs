@@ -1,23 +1,27 @@
-//! Shapes shared with the renderer (mirrored in `src/shared/contracts.ts`).
+//! Shapes shared with the renderer. `src/shared/contracts.generated.ts` is
+//! generated from them; run `npm run generate:contracts` after changing one.
 
 use std::collections::BTreeSet;
 
 pub use desktop_gateway::agents::{AgentPreview, AgentStatus, ConnectOptions};
 use desktop_gateway::catalog::Catalog;
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct VerificationCheck {
     pub id: String,
     pub section: String,
     pub title: String,
+    #[ts(type = r#""pass" | "fail" | "skip" | "info""#)]
     pub status: String,
     pub detail: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(optional_fields)]
 pub struct SourceProvenance {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo_url: Option<String>,
@@ -27,8 +31,9 @@ pub struct SourceProvenance {
     pub image_digest: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(optional_fields)]
 pub struct GatewayIdentity {
     pub tee_type: String,
     pub trust_level: String,
@@ -43,8 +48,9 @@ pub struct GatewayIdentity {
 
 /// One request seen by the local gateway: forwarded through the verifier (with
 /// its receipt verdict) or answered locally (rejected before any receipt).
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(optional_fields)]
 pub struct RequestActivity {
     pub id: String,
     pub session_id: String,
@@ -56,6 +62,7 @@ pub struct RequestActivity {
     pub streamed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub receipt_id: Option<String>,
+    #[ts(optional = false)]
     pub verified: Option<bool>,
     pub detail: String,
     pub at: u64,
@@ -84,7 +91,7 @@ pub struct RequestActivity {
     pub cost_usd: Option<f64>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageSummary {
     pub requests: u64,
@@ -98,8 +105,9 @@ pub struct UsageSummary {
     pub failed_proof: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(optional_fields)]
 pub struct ModelSummary {
     pub id: String,
     pub name: String,
@@ -126,7 +134,7 @@ pub struct ModelSummary {
     pub description: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogSummary {
     pub revision: String,
@@ -136,7 +144,7 @@ pub struct CatalogSummary {
     pub removed: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub enum ServiceProvider {
     Phala,
@@ -170,7 +178,7 @@ pub enum AccountSaveResult {
     Failed { error: String },
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountScope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -184,7 +192,7 @@ pub struct AccountScope {
     pub workspace_id: Option<i64>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountWorkspace {
     pub id: i64,
@@ -193,14 +201,14 @@ pub struct AccountWorkspace {
     pub is_default: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountLoginDetails {
     pub auth: ProfileAuth,
     pub workspaces: Vec<AccountWorkspace>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountBalance {
     pub balance_usd: String,
@@ -210,7 +218,7 @@ pub struct AccountBalance {
     pub scope: AccountScope,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum AccountBalanceTarget {
     Login {
@@ -222,13 +230,13 @@ pub enum AccountBalanceTarget {
     },
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct AccountImages {
     pub user: Option<String>,
     pub organization: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind")]
 pub enum ProfileAuth {
     #[serde(rename = "apiKey")]
@@ -242,16 +250,20 @@ pub enum ProfileAuth {
             default,
             skip_serializing_if = "Option::is_none"
         )]
+        #[ts(optional)]
         account_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         images: Option<AccountImages>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         scope: Option<Box<AccountScope>>,
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(optional_fields)]
 pub struct ConfidentialProfile {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -266,7 +278,7 @@ pub struct ConfidentialProfile {
     pub verified_at: Option<u64>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfidentialProfileInput {
     pub id: String,
@@ -324,8 +336,9 @@ impl CatalogSummary {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(optional_fields)]
 pub struct GatewayState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_instance: Option<String>,
@@ -340,6 +353,7 @@ pub struct GatewayState {
     pub wake_monitor_available: Option<bool>,
     /// `stopped`, `verifying` (identity and catalog not both in), `verified`,
     /// `blocked`, or `error`.
+    #[ts(type = r#""stopped" | "verifying" | "verified" | "blocked" | "error""#)]
     pub status: String,
     /// True while Settings is verifying a candidate configuration without
     /// opening the forwarding session or turning protection on.
@@ -392,8 +406,9 @@ pub struct GatewayState {
 }
 
 /// Listener state of the service-hosted web UI. Never carries login codes or tokens.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(optional_fields)]
 pub struct WebUiStatus {
     pub enabled: bool,
     #[serde(default)]
@@ -477,8 +492,9 @@ impl Default for GatewayState {
 
 /// A TCP listener shared by the Local API and the web UI. Non-loopback
 /// addresses require `allow_network_access`; see [`crate::listen::resolve`].
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(optional_fields)]
 pub struct ListenConfig {
     pub listen_address: String,
     pub allow_network_access: bool,
@@ -501,7 +517,7 @@ impl Default for ListenConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct StartGatewayConfig {
     pub remote_url: String,
@@ -514,5 +530,117 @@ impl Default for StartGatewayConfig {
             remote_url: desktop_gateway::brand::SERVICE_DEFAULT_URL.to_string(),
             require_production_os: true,
         }
+    }
+}
+
+#[cfg(test)]
+mod typescript {
+    use std::path::Path;
+
+    use ts_rs::{Config, TS};
+
+    use super::*;
+    use crate::{
+        account_login::LoginPresentation,
+        agent_access::AgentAccessStatus,
+        maintenance::{ImportResult, ProfileBackup, ProfileConfiguration},
+        preferences::{Appearance, NotificationPreferences, UpdateChannel, WebUiConfig},
+        ui_api::{LaunchPreferences, ListenAddress, Method},
+        usage::{UsageModelPoint, UsagePage, UsagePoint, UsageQuery},
+    };
+    use desktop_gateway::agents::{AgentRepairAction, ConfigChange};
+
+    const OUTPUT: &str = "src/shared/contracts.generated.ts";
+
+    macro_rules! declarations {
+        ($config:expr, $($type:ty),+ $(,)?) => {
+            [$(format!(
+                "{}export {}\n",
+                <$type as TS>::docs().unwrap_or_default(),
+                <$type as TS>::decl($config)
+            )),+]
+        };
+    }
+
+    fn typescript() -> String {
+        let config = Config::new().with_large_int("number");
+        let methods: Vec<_> = Method::ALL
+            .iter()
+            .map(|method| format!("\"{}\"", method.name()))
+            .collect();
+        let mut output = String::from(
+            "// Generated from the Rust contracts by `npm run generate:contracts`. Do not edit.\n\n",
+        );
+        for declaration in declarations!(
+            &config,
+            GatewayState,
+            VerificationCheck,
+            GatewayIdentity,
+            SourceProvenance,
+            RequestActivity,
+            UsageSummary,
+            CatalogSummary,
+            ModelSummary,
+            ServiceProvider,
+            ProfileAuth,
+            AccountImages,
+            AccountScope,
+            ConfidentialProfile,
+            ConfidentialProfileInput,
+            AccountWorkspace,
+            AccountLoginDetails,
+            AccountBalance,
+            AccountBalanceTarget,
+            LoginPresentation,
+            StartGatewayConfig,
+            ListenConfig,
+            WebUiConfig,
+            WebUiStatus,
+            ListenAddress,
+            Appearance,
+            UpdateChannel,
+            NotificationPreferences,
+            LaunchPreferences,
+            ProfileBackup,
+            ProfileConfiguration,
+            ImportResult,
+            UsageQuery,
+            UsagePage,
+            UsagePoint,
+            UsageModelPoint,
+            AgentStatus,
+            AgentRepairAction,
+            AgentPreview,
+            ConfigChange,
+            ConnectOptions,
+            AgentAccessStatus,
+        ) {
+            output.push_str(&declaration);
+        }
+        output.push_str(&format!(
+            "/** A method the shared UI API accepts (`ui_api::Method`). */\nexport type UiMethod = {};\n",
+            methods.join(" | ")
+        ));
+        output
+            .lines()
+            .map(|line| format!("{}\n", line.trim_end()))
+            .collect()
+    }
+
+    #[test]
+    fn generated_typescript_contracts_are_current() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(OUTPUT);
+        let expected = typescript();
+        if std::env::var_os("PAP_WRITE_CONTRACTS").is_some() {
+            std::fs::write(&path, &expected).unwrap();
+            return;
+        }
+        let current = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            current.replace("\r\n", "\n") == expected,
+            "{OUTPUT} is stale; run `npm run generate:contracts` in apps/desktop"
+        );
     }
 }

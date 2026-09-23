@@ -5,6 +5,9 @@ import type { ConfidentialProfile, GatewayState } from "../../shared/contracts";
 import { serviceKeyLabel } from "./services";
 
 export const INITIAL_STATE: GatewayState = {
+  clientKeyRevision: 0,
+  reconnecting: false,
+  sessionActive: false,
   status: "stopped",
   configurationVerification: false,
   checks: [],
@@ -26,6 +29,7 @@ export const INITIAL_STATE: GatewayState = {
   activeProfileId: "",
   localApi: { listenAddress: "127.0.0.1", allowNetworkAccess: false, port: 4180 },
   apiKeySaved: false,
+  webUi: { enabled: false, listenAddress: "127.0.0.1", allowNetworkAccess: false, port: 4182 },
 };
 
 export function unavailableState(error: unknown): GatewayState {

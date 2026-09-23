@@ -1,17 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AccountLogin, ConfidentialProfileInput, DesktopApi, AccountLoginDetails } from "../../shared/contracts";
+import type { LoginPresentation, ConfidentialProfileInput, DesktopApi, AccountLoginDetails } from "../../shared/contracts";
 
 type LoginApi = Pick<DesktopApi, "beginAccountLogin" | "pollAccountLogin" | "cancelAccountLogin" | "completeAccountLogin">;
 type LoginState =
   | { phase: "idle" }
-  | { phase: "authorizing"; session: AccountLogin }
-  | { phase: "authorized"; session: AccountLogin; details: AccountLoginDetails };
+  | { phase: "authorizing"; session: LoginPresentation }
+  | { phase: "authorized"; session: LoginPresentation; details: AccountLoginDetails };
 
 /** Owns a draft authorization, independently of the form's save operation. */
 export function useAccountLogin(api: LoginApi, onError: (error: unknown) => void) {
   const [state, setState] = useState<LoginState>({ phase: "idle" });
   const [working, setWorking] = useState(false);
-  const session = useRef<AccountLogin | undefined>(undefined);
+  const session = useRef<LoginPresentation | undefined>(undefined);
   const mounted = useRef(false);
   const operation = useRef(false);
 

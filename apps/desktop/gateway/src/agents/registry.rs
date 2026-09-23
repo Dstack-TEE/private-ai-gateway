@@ -1,7 +1,8 @@
 use super::*;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(optional_fields)]
 pub struct AgentStatus {
     pub id: String,
     pub name: String,
@@ -23,7 +24,7 @@ pub struct AgentStatus {
     pub repair_action: Option<AgentRepairAction>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum AgentRepairAction {
     Reconnect,
@@ -32,7 +33,7 @@ pub enum AgentRepairAction {
 
 /// One config field a connection changes. Sensitive fields never show their
 /// values; `None` means absent.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, ts_rs::TS)]
 pub struct ConfigChange {
     pub key: String,
     pub before: Option<String>,
@@ -40,7 +41,7 @@ pub struct ConfigChange {
     pub sensitive: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentPreview {
     pub agent: AgentStatus,
@@ -53,8 +54,9 @@ pub struct AgentPreview {
 }
 
 /// User choices a connection is projected with.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(optional_fields)]
 pub struct ConnectOptions {
     /// Optional default selected from the verified catalog. The full model
     /// list is discovered natively or generated from that catalog.

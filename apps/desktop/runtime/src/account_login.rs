@@ -53,7 +53,7 @@ const KEY_URL: &str = "https://service.redpill.ai/api/oauth/key";
 const PHALA_API: &str = "https://cloud-api.phala.com";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(900);
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct LoginPresentation {
     pub id: String,

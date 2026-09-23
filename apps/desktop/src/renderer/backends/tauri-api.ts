@@ -9,8 +9,9 @@ import type {
   DistributionCapabilities,
   GatewayState,
   ProfileBackup,
+  UiMethod,
 } from "../../shared/contracts";
-import { createDesktopApi, type UiMethod, type UiPlatform, type UiTransport } from "./create-api";
+import { createDesktopApi, type UiPlatform, type UiTransport } from "./create-api";
 
 declare global {
   interface Window {

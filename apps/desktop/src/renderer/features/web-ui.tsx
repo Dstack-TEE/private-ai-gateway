@@ -24,7 +24,7 @@ export function WebUiSheet({
   onSave(config: WebUiConfig): Promise<string | undefined>;
   onClose(): void;
 }): React.JSX.Element {
-  const [draft, setDraft] = useState<WebUiConfig>(() => state.webUi ? webUiConfig(state.webUi) : { ...DEFAULT_LISTENER, enabled: false });
+  const [draft, setDraft] = useState<WebUiConfig>(() => webUiConfig(state.webUi));
   const addressKind = localAddressKind(draft.listenAddress);
   const networkAccess = Boolean(addressKind && addressKind !== "loopback");
   const [saving, setSaving] = useState(false);

@@ -8,14 +8,14 @@ use std::sync::Mutex;
 
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdateChannel {
     Beta,
     Stable,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "lowercase")]
 pub enum Appearance {
     #[default]
@@ -43,8 +43,9 @@ pub struct Preferences {
 
 /// The service-hosted browser UI. It is off until the user enables it and
 /// listens on loopback unless network access is explicitly allowed.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+#[ts(optional_fields)]
 pub struct WebUiConfig {
     pub enabled: bool,
     pub listen_address: String,
@@ -89,7 +90,7 @@ pub fn load() -> Result<Preferences, String> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ts_rs::TS)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct NotificationPreferences {
     pub enabled: bool,

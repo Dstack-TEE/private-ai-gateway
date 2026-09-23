@@ -169,14 +169,14 @@ impl From<String> for Error {
     }
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct LaunchPreferences {
     pub open_at_login: bool,
     pub connect_on_launch: bool,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ListenAddress {
     pub address: String,
