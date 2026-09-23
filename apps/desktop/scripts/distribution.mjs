@@ -1,7 +1,6 @@
 export const DIRECT_DISTRIBUTION = "direct";
 export const MAC_APP_STORE_DISTRIBUTION = "mac-app-store";
 export const MAC_APP_STORE_SIDECARS = Object.freeze([
-  "private-ai-proxy",
   "private-ai-proxy-service",
 ]);
 

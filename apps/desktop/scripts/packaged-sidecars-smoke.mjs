@@ -58,7 +58,7 @@ try {
   for (const command of ["verify", "sessions", "send"]) {
     await run("private-ai-proxy", [command, url, "--json"], 1);
   }
-  const events = (await run("private-ai-proxy", ["serve", url, "--json-events", "--listen", "127.0.0.1:0", "--control", "127.0.0.1:0"], 1))
+  const events = (await run("private-ai-proxy", ["serve", url, "--json-events", "--listen", "127.0.0.1:0"], 1))
     .trim().split(/\r?\n/).map((line) => JSON.parse(line));
   assert.ok(events.some((event) => event.type === "fatal"));
   assert.ok(events.every((event) => event.type !== "ready"));

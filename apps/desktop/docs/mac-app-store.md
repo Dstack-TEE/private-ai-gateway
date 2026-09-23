@@ -161,8 +161,8 @@ References: [SDK requirements](https://developer.apple.com/support/third-party-S
 - Connect all supported Agents using Home token files without any PAP helper.
   Check 0600/0700 permissions, no provider secrets in Home, disconnect/reconnect
   rotation, config drift, restoration failure and recovery after relaunch.
-- Quit and crash the GUI with protection active. Verify service, supervisor and
-  verifier exit, local ports close, and no external Agent restarts the backend.
+- Quit and crash the GUI with protection active. Verify the service exits, the
+  Local API port closes, and no external Agent restarts the backend.
   Disabling protection must withdraw authority and restore owned configuration.
 - Verify OAuth callback/Keychain behavior, balance-button eligibility, external
   browser routing to the correct scoped provider account, blocked general account

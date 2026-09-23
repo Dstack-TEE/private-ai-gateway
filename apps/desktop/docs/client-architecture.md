@@ -8,7 +8,7 @@ Status: implemented.
 | --- | --- | --- |
 | Private AI Gateway | Remote attested inference service and signed receipts | `src/aggregator`, `src/middleware` |
 | Private AI Proxy | Desktop profiles, agent connections, verification and usage | `apps/desktop` |
-| Local backend | Sessions, configuration transactions, local API and process ownership | `apps/desktop/runtime`, `apps/desktop/gateway` |
+| Local backend | Sessions, configuration transactions, local API and verifier task ownership | `apps/desktop/runtime`, `apps/desktop/gateway` |
 | `private-ai-proxy` | Unified managed CLI and ACI protocol commands | `apps/desktop/cli` |
 | `private-ai-proxy-service` | Per-user backend entry point | `apps/desktop/cli/service.rs` |
 
@@ -39,11 +39,12 @@ afterward by default. Receipt checks never gate streaming. `pap --json serve`
 emits lifecycle JSON events.
 
 `pap start/stop` retain managed profiles, user-session continuity and reversible
-agent configuration. The backend's supervised verifier process now runs
-`private-ai-proxy serve`. Ownership-pipe and child-reaping
-behavior is preserved; a backend crash must not leave a verifier listening.
-Packages contain `private-ai-proxy`, `private-ai-proxy-service` and the credential
-helper. They do not contain an independent `aci` executable.
+agent configuration. The backend runs the same verifier implementation as
+`private-ai-proxy serve` as an owned Tokio task. The task has no listener of
+its own; stopping or losing the backend drops its only request path.
+Direct and independent CLI packages contain `private-ai-proxy`,
+`private-ai-proxy-service` and the credential helper. MAS contains only the
+service. No distribution contains an independent `aci` executable.
 
 ## Module boundaries
 
@@ -80,9 +81,28 @@ helper. They do not contain an independent `aci` executable.
   for existing mutations, restores managed agent configuration, stops listeners,
   and awaits process exit. Failure to restore leaves management available for
   recovery instead of closing the inference listener halfway through shutdown.
-- A parent-pipe supervisor owns ACI. Backend death closes the pipe in the kernel;
-  the supervisor terminates and reaps its verifier child. Normal stop waits for the
-  supervisor; reap timeout preserves the completion handle for a later retry.
+- An owned verifier task performs attestation, TLS pinning and receipt audits in
+  the backend process. Task failure publishes the same error/reconnect state as
+  the former verifier-process exit; explicit stop cancels the task after first
+  revoking the published forwarding session.
+
+## Verifier execution
+
+Managed inference has one local HTTP listener. After authenticating the Agent,
+the gateway swaps in the provider credential and calls the verified service
+directly with the request body and typed attribution context. The verifier makes
+the sole remote HTTP hop over its attestation-bound TLS client. Lifecycle events
+use a direct callback, and request delivery, usage and receipt-audit updates all
+flow through `ProxyEvent`; there is no stdout JSON protocol, control listener,
+tag header or supervisor process.
+
+Process isolation was not a security boundary: the old verifier received the
+provider credential, MAS signed both children with `app-sandbox` plus `inherit`,
+and Windows only applied `CREATE_NO_WINDOW`. It had no lower-privilege token,
+separate sandbox or provider-key boundary. Git history introduced the supervisor
+to ensure backend death reaped the listener. In-process ownership preserves that
+lifecycle property without a separately reachable port. Standalone `pap serve`
+still uses the same verifier and retains its own explicit loopback listener.
 
 ## Security and Protocol
 
@@ -138,10 +158,10 @@ console executables and do not require the desktop UI.
 
 Repository: https://github.com/Dstack-TEE/private-ai-gateway
 Primary contracts: `apps/desktop/cli/args.rs`, `apps/desktop/runtime/src/cli/args.rs`,
-`apps/desktop/runtime/src/process.rs`, `apps/desktop/scripts/package-cli.mjs`.
+`apps/desktop/cli/serve.rs`, `apps/desktop/runtime/src/gateway.rs`,
+`apps/desktop/scripts/package-cli.mjs`.
 
 Official contracts: [Rust file locks](https://doc.rust-lang.org/1.89.0/std/fs/struct.File.html#method.try_lock),
-[Tauri sidecars](https://v2.tauri.app/develop/sidecar/),
 [Tauri NSIS hooks](https://v2.tauri.app/distribute/windows-installer/),
 [Windows pipe security](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights),
 [XDG runtime directories](https://specifications.freedesktop.org/basedir/latest/),

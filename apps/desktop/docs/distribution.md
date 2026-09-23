@@ -120,8 +120,8 @@ revokes tokens on disconnect/suspend, and rotates them on reconnect. In-memory
 proxy authority is withdrawn before restoration; restoration failures remain
 retryable. File removal alone is not the entire revocation mechanism.
 
-MAS bundles only the verifier and service. Both are children of the sandboxed
-application and inherit its sandbox. The credential helper remains Direct-only;
+MAS bundles only the service, which contains the verifier and inherits the
+sandboxed application's sandbox. The credential helper remains Direct-only;
 MAS neither copies it to the container nor installs it in Home/shared paths.
 The private management socket uses the short `pap-ipc/backend.sock` path at the
 root of the App Container so the Unix socket length limit is respected; it never
