@@ -39,6 +39,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "process", "io-util", "signal", "macros", "net"] }
 url = "2"
+semver = "1"
 uuid = { version = "1", features = ["v4"] }
 netwatcher = "0.8"
 

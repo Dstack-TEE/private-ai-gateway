@@ -706,8 +706,12 @@ fn doctor(client: &Client) -> Value {
         crate::transport::endpoint_path()
             .map_err(|_| "Cannot resolve management endpoint".to_string()),
     );
+    // Update availability is advisory: an offline check never fails the doctor.
+    let update =
+        update_notice().map_or_else(|error| json!({ "error": error }), |notice| json!(notice));
     json!({
         "version": crate::protocol::BUILD_VERSION,
+        "update": update,
         "backendRunning": backend_running,
         "cli": cli,
         "backendExecutable": backend_executable,
@@ -715,6 +719,19 @@ fn doctor(client: &Client) -> Value {
         "credentialPolicy": "OS credential store; no plaintext fallback",
         "errors": errors,
     })
+}
+
+fn update_notice() -> Result<crate::updates::UpdateNotice, String> {
+    // The CLI dispatches synchronously inside the async entry point.
+    std::thread::spawn(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| "Could not check for updates".to_string())?
+            .block_on(crate::updates::check_installation())
+    })
+    .join()
+    .map_err(|_| "Could not check for updates".to_string())?
 }
 
 fn doctor_check<T: Serialize>(

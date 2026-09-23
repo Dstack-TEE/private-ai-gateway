@@ -49,6 +49,60 @@ child workflows retain their focused verification and recovery entry points, but
 coordinated stable publication uses the top-level workflow. Windows Authenticode
 remains optional and does not block the coordinated release.
 
+## Updates by installation
+
+Every Direct installation follows the saved update channel (desktop **Update
+channel** toggle, or `pap settings set updateChannel beta|stable`); without a saved
+choice it follows the channel of the running build. The beta channel reads both
+the beta and the stable feed and offers whichever release is newer, so beta users
+also receive stable releases. The stable channel never offers a beta. Switching
+channels never downgrades: a beta build stays installed until the new channel has
+a newer release. Releases up to and including 0.1.7-beta.1 predate this and only
+read their own channel's feed.
+
+Feeds are the GitHub releases `desktop-updates-beta` and `desktop-updates-stable`.
+Clients read `latest-<os>-<arch>.json` (for example `latest-linux-x86_64.json`),
+whose `version` and `channel` must match the feed. Every artifact is signed with
+the updater key and verified before installation.
+
+| Installation | Update key or source | How it updates | Backend and restart |
+| --- | --- | --- | --- |
+| macOS DMG app | `darwin-<arch>` (`.app.tar.gz`) | In-app: the Tauri updater replaces the app bundle | The owned backend is stopped first; the relaunched app starts the new bundled backend |
+| Windows NSIS (current user) | `windows-<arch>` (the updater falls back from `windows-<arch>-nsis`) | In-app: the signed setup runs with `/P /UPDATE /R` | The owned backend is stopped first; the installer hooks stop any remaining backend under the startup lock, keep the user `PATH` entry, and relaunch the app |
+| Linux desktop DEB | `linux-<arch>-deb` | In-app: `pkexec dpkg -i` (then zenity/kdialog with `sudo -S`, then `sudo`) | The owned backend is stopped first; maintainer scripts only exempt the updating app's own process tree; the app restarts and starts the new backend |
+| Linux desktop RPM | `linux-<arch>-rpm` | In-app: `pkexec rpm -U` with the same fallbacks | As DEB |
+| Arch desktop package | Version from `latest-linux-<arch>.json` | Settings > About shows the release and the steps: quit the app, `private-ai-proxy --yes service stop`, `sudo pacman -U <release package URL>` | pacman refuses while the app or backend runs; the next launch starts the new backend |
+| CLI-only DEB | Same | `pap doctor` and the web UI show `private-ai-proxy --yes service stop`, `curl -fLO <URL>`, `sudo apt install ./<file>` | User-driven; the next client start runs the new backend |
+| CLI-only RPM | Same | As above with `sudo rpm -U <URL>` | As above |
+| CLI-only Arch | Same | As above with `sudo pacman -U <URL>` | As above |
+| npm | Same | As above with `npm install --global private-ai-proxy@<version>` | As above |
+| Portable archive | Same | As above with the archive URL; extract it into a fresh directory | As above |
+| Mac App Store | App Store | App Store | MAS has no feed checks |
+| AppImage (legacy) | None | Unsupported; migrate to a native package manually | — |
+
+Package-manager installs never modify themselves: they announce the release and
+print exact commands built from the compiled feed location and the validated
+version. Linux CLI and Arch packages record their owner in
+`/usr/share/private-ai-proxy/package-manager` (`deb`, `rpm` or `pacman`); the
+desktop disables in-app installation only when that marker says `pacman`. CLI
+packages from releases up to 0.1.7-beta.1 lack the marker and are reported as a
+system package without commands.
+
+Native package versions keep prereleases ordered before their stable release:
+DEB `x.y.z~beta.n`, RPM `x.y.z-0.beta.n.1` (the desktop RPM with epoch 1), and
+Arch `x.y.zbeta.n`. Tauri writes
+the SemVer string verbatim, so the package job rewrites the desktop DEB and RPM
+with `scripts/normalize-linux-packages.mjs` and re-signs the rewritten bytes
+before the manifest is created. The desktop RPM uses epoch 1 because releases up
+to 0.1.7-beta.1 were published as `0.1.7-beta.1-1`, which `rpm -U` orders after
+`0.1.7`. dpkg installs the one-time `0.1.7-beta.1` to `0.1.7~beta.2` transition
+with a downgrade warning.
+
+A feed advances only after its release is public and every manifest URL
+responds, so a feed never names an unpublished asset. Assets are replaced one
+file at a time; a client that reads during the replacement sees the previous
+release or a transient "not published" state and retries.
+
 ## Agent access and credentials
 
 MAS exposes **Agent Integrations** as an explicitly enabled, app-level module.

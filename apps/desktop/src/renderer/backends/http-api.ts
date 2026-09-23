@@ -7,6 +7,7 @@ import type {
   ServiceProvider,
   UiMethod,
   UpdateInfo,
+  UpdateNotice,
 } from "../../shared/contracts";
 import { showBrowserDialog } from "../components/browser-dialog";
 import { createDesktopApi, type UiPlatform, type UiTransport } from "./create-api";
@@ -49,13 +50,20 @@ function createPlatform(bootstrap: Bootstrap): UiPlatform {
     showEditMenu: async () => undefined,
     getAppVersion: async () => bootstrap.version,
     setUpdateChannel: async (channel) => channel,
-    prepareUpdate: async (): Promise<UpdateInfo> => ({
-      enabled: false,
-      systemManaged: true,
-      currentVersion: bootstrap.version,
-      channel: "stable",
-      channelPublished: false,
-    }),
+    // The backend's own installation owns updates; the browser only announces them.
+    prepareUpdate: async (): Promise<UpdateInfo> => {
+      const notice = await rpc<UpdateNotice>("getUpdateNotice");
+      return {
+        enabled: false,
+        systemManaged: true,
+        currentVersion: notice.currentVersion,
+        channel: notice.channel,
+        version: notice.version,
+        channelPublished: notice.channelPublished,
+        upgradeCommands: notice.commands,
+        downloadUrl: notice.downloadUrl,
+      };
+    },
     restartToUpdate: async () => undefined,
     getCliRegistration: async () => registration,
     setCliRegistration: async () => registration,

@@ -78,6 +78,7 @@ methods! {
     GetNotificationSettings => "getNotificationSettings",
     SaveNotificationSettings => "saveNotificationSettings",
     ResetSettings => "resetSettings",
+    GetUpdateNotice => "getUpdateNotice",
 }
 
 pub const APPEARANCE_EVENT: &str = "gateway://appearance";
@@ -409,6 +410,9 @@ pub async fn invoke(
         }
         Method::GetLaunchPreferences => {
             return Ok(value(launch_preferences(backend, host).await?)?);
+        }
+        Method::GetUpdateNotice => {
+            return Ok(value(crate::updates::check_installation().await?)?);
         }
         Method::SetLaunchPreference => {
             let input: LaunchPreferenceParams = params(input)?;

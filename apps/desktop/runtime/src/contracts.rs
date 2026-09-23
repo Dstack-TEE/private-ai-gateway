@@ -546,6 +546,7 @@ mod typescript {
         maintenance::{ImportResult, ProfileBackup, ProfileConfiguration},
         preferences::{Appearance, NotificationPreferences, UpdateChannel, WebUiConfig},
         ui_api::{LaunchPreferences, ListenAddress, Method},
+        updates::{Installation, UpdateNotice},
         usage::{UsageModelPoint, UsagePage, UsagePoint, UsageQuery},
     };
     use desktop_gateway::agents::{AgentRepairAction, ConfigChange};
@@ -599,6 +600,8 @@ mod typescript {
             ListenAddress,
             Appearance,
             UpdateChannel,
+            Installation,
+            UpdateNotice,
             NotificationPreferences,
             LaunchPreferences,
             ProfileBackup,

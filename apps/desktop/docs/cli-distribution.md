@@ -135,15 +135,17 @@ SmartScreen warnings.
 
 ## Updates
 
+The update behavior of every installation is in
+[Updates by installation](distribution.md#updates-by-installation). Desktop
+DMG, NSIS, DEB and RPM installs update in-app. Arch Linux packages, CLI-only
+native packages, npm, and portable archives never modify themselves: `pap doctor`,
+the web UI, and (for the Arch desktop package) the desktop app announce a newer
+release in the saved channel together with the exact upgrade commands.
+
 AppImage is intentionally unsupported. Its temporary mount cannot provide a
-stable executable lifetime for a backend that survives the UI process. Linux
-desktop DEB/RPM builds participate in the signed Tauri updater using the
-installer-specific `linux-x86_64-deb` and `linux-x86_64-rpm` manifest entries;
-the updater verifies the artifact and obtains user authorization for the native
-installer. Arch Linux desktop packages and CLI-only native packages are managed
-by pacman instead of the in-app updater. Existing AppImage installations cannot
-automatically change bundle type and require a manual migration to a native
-package.
+stable executable lifetime for a backend that survives the UI process. Existing
+AppImage installations cannot automatically change bundle type and require a
+manual migration to a native package.
 
 Arch packages use the standard `.pkg.tar.zst` format for x86_64 and aarch64.
 Install or upgrade a downloaded desktop package with:

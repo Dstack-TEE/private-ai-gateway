@@ -40,6 +40,10 @@ export interface UpdateInfo {
   channel: UpdateChannel;
   version?: string | null;
   channelPublished: boolean;
+  /** Steps that install `version` when a package manager or the user owns the installation. */
+  upgradeCommands?: string[];
+  /** Portable archive to extract into a fresh directory. */
+  downloadUrl?: string | null;
 }
 
 export interface NotificationConfiguration {

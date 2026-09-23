@@ -29,6 +29,7 @@ pub mod server;
 pub mod service_config;
 pub mod transport;
 pub mod ui_api;
+pub mod updates;
 pub mod usage;
 pub mod web_ui;
 
