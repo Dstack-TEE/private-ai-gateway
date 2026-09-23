@@ -51,7 +51,9 @@ export function archPackageMetadata(kind, version, arch) {
   return {
     ...definition,
     version: versions.arch,
-    sourceVersion: versions.deb,
+    // Tauri writes the SemVer string unchanged into the desktop DEB; only the
+    // CLI DEB built by package-cli.mjs uses the Debian `~` prerelease form.
+    sourceVersion: kind === "desktop" ? version : versions.deb,
     arch: arch === "x64" ? "x86_64" : "aarch64",
   };
 }
