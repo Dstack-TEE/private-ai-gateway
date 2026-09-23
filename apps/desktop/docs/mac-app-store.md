@@ -107,7 +107,7 @@ No speculative `PrivacyInfo.xcprivacy` is supplied. The published required-reaso
 API enforcement platform list does not currently include macOS; privacy data
 collection disclosures / Nutrition Labels apply across platforms.
 
-Repository audit covers the desktop npm lockfile, both Cargo lockfiles, native
+Repository audit covers the desktop npm lockfile, the unified desktop Cargo lockfile, native
 framework wrappers, and the macOS dependency tree. No named Apple required-manifest
 SDK was identified in the current shipped dependency inventory. `openssl-probe`
 is a certificate-location Rust utility, not the OpenSSL SDK, and is not in the
@@ -184,10 +184,10 @@ the Direct updater or install replacement code as a MAS rollback mechanism.
 ## Repository verification
 
 Run from `apps/desktop`: focused Agent contract tests; `cargo test --locked
---workspace --all-features`; workspace and src-tauri fmt/clippy; src-tauri tests
-for both feature selections; `npm run check` (brand generation, TypeScript and
-Agent Integrations tests); `npm run test:release` (includes MAS package tests);
-and `git diff --check`. Both Direct PR verification and the MAS workflow call
+--workspace`; workspace fmt/clippy; runtime and desktop tests with the
+`mac-app-store` feature; `npm run check` (brand generation, TypeScript and Agent
+Integrations tests); `npm run test:release` (includes MAS package tests); and
+`git diff --check`. Both Direct PR verification and the MAS workflow call
 `npm run check`; their `apps/desktop/**` path filters cover renderer, TypeScript
 and script changes. Use `npm run test:agents` for a focused rerun.
 
