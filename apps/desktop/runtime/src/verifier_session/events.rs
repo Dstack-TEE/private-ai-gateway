@@ -1,6 +1,6 @@
 use super::*;
 
-impl GatewayManager {
+impl SessionManager {
     pub(super) fn handle_event(
         self: &Arc<Self>,
         generation: u64,

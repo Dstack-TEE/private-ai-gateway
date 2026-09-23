@@ -1,4 +1,5 @@
-//! Verifier lifecycle and the platform-neutral desktop view of the gateway.
+//! The verifier session state machine: verifier lifecycle and the
+//! platform-neutral protection state (`GatewayState`) clients observe.
 //!
 //! The stable local endpoint and verifier both run in the service process. A
 //! session is only opened for requests once the verifier's identity and the
@@ -30,7 +31,7 @@ use tokio::{runtime::Handle, sync::watch};
 
 const MAX_ACTIVITY: usize = 50;
 
-pub struct GatewayManager {
+pub struct SessionManager {
     inventory: Option<Arc<InventoryUpdater>>,
     inner: Mutex<RuntimeState>,
     proxy: Arc<ProxyState>,
@@ -124,7 +125,7 @@ struct RuntimeState {
     state: GatewayState,
 }
 
-impl GatewayManager {
+impl SessionManager {
     pub(crate) fn with_endpoint_inventory(mut self, inventory: InventoryUpdater) -> Self {
         self.inventory = Some(Arc::new(inventory));
         self

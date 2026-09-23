@@ -30,10 +30,10 @@ use crate::{
         AgentPreview, AgentStatus, ConfidentialProfileInput, ConnectOptions, GatewayState,
         LocalApiConfig, RequestActivity, ServiceProvider, StartGatewayConfig,
     },
-    gateway::{GatewayManager, VerifierLauncher},
     local_api::{self, ResolvedLocalApi},
     service_config,
     usage::{UsagePage, UsageQuery, UsageStore},
+    verifier_session::{SessionManager, VerifierLauncher},
 };
 
 pub struct RuntimeOptions {
@@ -55,7 +55,7 @@ pub struct DesktopRuntime {
             tokio::sync::watch::Receiver<crate::contracts::AccountSaveResult>,
         )>,
     >,
-    manager: Arc<GatewayManager>,
+    manager: Arc<SessionManager>,
     proxy: Arc<ProxyState>,
     usage: Arc<UsageStore>,
     secrets: Arc<dyn SecretStore>,
@@ -156,7 +156,7 @@ impl EndpointRuntime {
 
     fn start(
         &self,
-        manager: Arc<GatewayManager>,
+        manager: Arc<SessionManager>,
         proxy: Arc<ProxyState>,
         listener: std::net::TcpListener,
         config: LocalApiConfig,
@@ -274,7 +274,7 @@ impl DesktopRuntime {
             ..GatewayState::default()
         };
         let manager = Arc::new(
-            GatewayManager::new(
+            SessionManager::new(
                 proxy.clone(),
                 usage.clone(),
                 options.launcher,

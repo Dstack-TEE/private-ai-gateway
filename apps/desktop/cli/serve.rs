@@ -23,7 +23,7 @@ use axum::extract::Path;
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
 use axum::{Json, Router};
-use desktop_runtime::gateway::{
+use desktop_runtime::verifier_session::{
     IdentityEvent, IdentitySourceProvenance, VerifierConfig, VerifierEvent, VerifierEventSink,
     VerifierLauncher, VerifierTask,
 };

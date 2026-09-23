@@ -5,10 +5,10 @@ struct NoVerifier;
 impl VerifierLauncher for NoVerifier {
     fn spawn(
         &self,
-        _: crate::gateway::VerifierConfig,
-        _: crate::gateway::VerifierEventSink,
+        _: crate::verifier_session::VerifierConfig,
+        _: crate::verifier_session::VerifierEventSink,
         _: tokio::sync::mpsc::Sender<ProxyEvent>,
-    ) -> Result<Box<dyn crate::gateway::VerifierTask>, String> {
+    ) -> Result<Box<dyn crate::verifier_session::VerifierTask>, String> {
         Err("No verifier in this listener test".to_string())
     }
 }
@@ -82,7 +82,7 @@ fn test_runtime(
     let (events, _) = tokio::sync::mpsc::channel(8);
     let proxy = ProxyState::new(events).unwrap();
     let usage = Arc::new(UsageStore::memory().unwrap());
-    let manager = Arc::new(GatewayManager::new(
+    let manager = Arc::new(SessionManager::new(
         proxy.clone(),
         usage.clone(),
         Arc::new(NoVerifier),

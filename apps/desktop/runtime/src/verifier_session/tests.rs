@@ -91,7 +91,7 @@ async fn compatibility_refresh_is_background_work_and_cannot_resurrect_a_stopped
     let (events, _) = tokio::sync::mpsc::channel(8);
     let proxy = ProxyState::new(events).unwrap();
     let manager = Arc::new(
-        GatewayManager::new(
+        SessionManager::new(
             proxy.clone(),
             Arc::new(UsageStore::memory().unwrap()),
             Arc::new(WaitingSidecar),
@@ -187,7 +187,7 @@ async fn late_catalog_failure_cannot_override_a_newer_success_or_security_stop()
     });
     let (events, _) = tokio::sync::mpsc::channel(8);
     let proxy = ProxyState::new(events).unwrap();
-    let manager = Arc::new(GatewayManager::new(
+    let manager = Arc::new(SessionManager::new(
         proxy.clone(),
         Arc::new(UsageStore::memory().unwrap()),
         Arc::new(WaitingSidecar),
@@ -288,7 +288,7 @@ async fn ready_event_loads_catalog_before_opening_the_session() {
     });
     let (events, _) = tokio::sync::mpsc::channel(8);
     let proxy = ProxyState::new(events).unwrap();
-    let manager = Arc::new(GatewayManager::new(
+    let manager = Arc::new(SessionManager::new(
         proxy.clone(),
         Arc::new(UsageStore::memory().unwrap()),
         Arc::new(WaitingSidecar),
@@ -344,7 +344,7 @@ fn unexpected_termination_revokes_forwarding_and_requests_reconnect() {
     let executor = tokio::runtime::Runtime::new().unwrap();
     let (events, _) = tokio::sync::mpsc::channel(8);
     let proxy = ProxyState::new(events).unwrap();
-    let manager = Arc::new(GatewayManager::new(
+    let manager = Arc::new(SessionManager::new(
         proxy.clone(),
         Arc::new(UsageStore::memory().unwrap()),
         Arc::new(WaitingSidecar),
@@ -384,7 +384,7 @@ fn explicit_stop_stops_the_task_and_ends_the_session() {
     let (events, _) = tokio::sync::mpsc::channel(8);
     let proxy = ProxyState::new(events).unwrap();
     let usage = Arc::new(UsageStore::memory().unwrap());
-    let manager = Arc::new(GatewayManager::new(
+    let manager = Arc::new(SessionManager::new(
         proxy.clone(),
         usage.clone(),
         Arc::new(StopTrackingLauncher(stopped.clone())),
@@ -409,7 +409,7 @@ fn explicit_stop_stops_the_task_and_ends_the_session() {
 async fn silent_verifier_times_out_without_stopping_a_completed_verification() {
     let (events, _) = tokio::sync::mpsc::channel(8);
     let proxy = ProxyState::new(events).unwrap();
-    let manager = Arc::new(GatewayManager::new(
+    let manager = Arc::new(SessionManager::new(
         proxy.clone(),
         Arc::new(UsageStore::memory().unwrap()),
         Arc::new(WaitingSidecar),
@@ -450,7 +450,7 @@ fn keyset_change_requests_fresh_verification_without_ending_the_session() {
     let (events, _) = tokio::sync::mpsc::channel(8);
     let proxy = ProxyState::new(events).unwrap();
     let usage = Arc::new(UsageStore::memory().unwrap());
-    let manager = Arc::new(GatewayManager::new(
+    let manager = Arc::new(SessionManager::new(
         proxy.clone(),
         usage.clone(),
         Arc::new(WaitingSidecar),
@@ -487,7 +487,7 @@ fn security_blocks_survive_process_failure_without_cancelling_candidate_sessions
         let (events, _) = tokio::sync::mpsc::channel(8);
         let proxy = ProxyState::new(events).unwrap();
         let usage = Arc::new(UsageStore::memory().unwrap());
-        let manager = Arc::new(GatewayManager::new(
+        let manager = Arc::new(SessionManager::new(
             proxy.clone(),
             usage.clone(),
             Arc::new(WaitingSidecar),
@@ -552,7 +552,7 @@ fn reconnection_preserves_session_history_but_requires_fresh_verification() {
     let executor = tokio::runtime::Runtime::new().unwrap();
     let (events, _) = tokio::sync::mpsc::channel(8);
     let proxy = ProxyState::new(events).unwrap();
-    let manager = Arc::new(GatewayManager::new(
+    let manager = Arc::new(SessionManager::new(
         proxy.clone(),
         Arc::new(UsageStore::memory().unwrap()),
         Arc::new(WaitingSidecar),
@@ -590,7 +590,7 @@ fn reconnection_preserves_session_history_but_requires_fresh_verification() {
     manager
         .fail(proxy.session().generation, "Transport interrupted".into())
         .unwrap();
-    let recovered = GatewayManager::new(
+    let recovered = SessionManager::new(
         proxy.clone(),
         manager.usage.clone(),
         Arc::new(WaitingSidecar),
@@ -637,7 +637,7 @@ fn stopping_preserves_usage_but_not_the_protection_clock() {
         ..GatewayState::default()
     };
     state.session_usage.requests = 7;
-    let stopped = GatewayManager::carried(&state);
+    let stopped = SessionManager::carried(&state);
     assert_eq!(stopped.protected_since, None);
     assert_eq!(stopped.session_usage.requests, 7);
 }
@@ -646,7 +646,7 @@ fn stopping_preserves_usage_but_not_the_protection_clock() {
 async fn stale_verifier_generation_cannot_record_activity() {
     let (events, _) = tokio::sync::mpsc::channel(8);
     let proxy = ProxyState::new(events).unwrap();
-    let manager = GatewayManager::new(
+    let manager = SessionManager::new(
         proxy,
         Arc::new(UsageStore::memory().unwrap()),
         Arc::new(WaitingSidecar),
