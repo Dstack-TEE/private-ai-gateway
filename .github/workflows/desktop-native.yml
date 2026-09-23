@@ -985,7 +985,7 @@ jobs:
     if: inputs.publish_release && inputs.release_version != ''
     needs: update-feed
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 75
     permissions:
       actions: write
       contents: read
