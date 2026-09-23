@@ -25,27 +25,27 @@ path = "service.rs"
 [dependencies]
 aci-protocol = { path = "../../../crates/aci-protocol" }
 async-stream = "0.3"
-axum = "0.7"
-base64 = "0.22"
+axum = "0.8"
+base64 = "0.23"
 bytes = "1"
 clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
-dcap-qvl = { version = "0.3.12", default-features = false, features = ["std", "report", "rustcrypto"] }
+dcap-qvl = { version = "0.6.3", default-features = false, features = ["std", "report", "rustcrypto"] }
 desktop-gateway = { package = "private-ai-proxy-gateway", path = "../gateway" }
 desktop-runtime = { package = "private-ai-proxy-runtime", path = "../runtime" }
 ed25519-dalek = "2"
 futures-util = "0.3"
 hex = "0.4"
 rand = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "stream"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "stream"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
-thiserror = "1"
+thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "process", "io-util", "sync", "time"] }
 tokio-util = "0.7"
 webpki-roots = "1"
-x509-parser = "0.16"
+x509-parser = "0.18"
 
 [dev-dependencies]
 tempfile = "3"

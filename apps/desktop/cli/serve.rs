@@ -657,7 +657,7 @@ async fn initialize(
 fn build_control_router(state: Arc<ProxyState>) -> Router {
     Router::new()
         .route("/receipts", axum::routing::get(control_list))
-        .route("/receipts/:id/verify", axum::routing::post(control_verify))
+        .route("/receipts/{id}/verify", axum::routing::post(control_verify))
         .with_state(state)
 }
 
@@ -2179,7 +2179,7 @@ mod tests {
         let session_calls = Arc::new(AtomicUsize::new(0));
         let upstream = Router::new()
             .route(
-                "/v1/aci/receipts/:id",
+                "/v1/aci/receipts/{id}",
                 get({
                     let calls = receipt_calls.clone();
                     move || {
@@ -2194,7 +2194,7 @@ mod tests {
                 }),
             )
             .route(
-                "/v1/aci/sessions/:id",
+                "/v1/aci/sessions/{id}",
                 get({
                     let calls = session_calls.clone();
                     move || {
@@ -2391,7 +2391,7 @@ mod tests {
                 }),
             )
             .route(
-                "/v1/aci/sessions/:id",
+                "/v1/aci/sessions/{id}",
                 get({
                     let session_bytes = session_bytes.clone();
                     move || {
@@ -2448,6 +2448,7 @@ mod tests {
     }
 
     async fn spawn_server(app: Router) -> String {
+        private_ai_proxy::install_crypto_provider();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -2484,7 +2485,7 @@ mod tests {
                 post(|| async { Json(json!({ "ok": true })) }),
             )
             .route(
-                "/v1/aci/receipts/:id",
+                "/v1/aci/receipts/{id}",
                 get(|headers: HeaderMap| async move {
                     assert_eq!(
                         header_str(&headers, "authorization"),
@@ -2495,7 +2496,7 @@ mod tests {
             )
             .route(
                 // Sessions are served as their exact sealed bytes (§8).
-                "/v1/aci/sessions/:id",
+                "/v1/aci/sessions/{id}",
                 get(|| async {
                     (
                         [("content-type", "application/json")],
@@ -2615,10 +2616,10 @@ mod tests {
                 }
             }))
             .route(
-                "/v1/aci/receipts/:id",
+                "/v1/aci/receipts/{id}",
                 get(|| async { json_response(StatusCode::OK, vector_receipt_envelope()) }),
             )
-            .route("/v1/aci/sessions/:id", get(|| async {
+            .route("/v1/aci/sessions/{id}", get(|| async {
                 ([(("content-type"), "application/json")], vector_session_bytes())
             }));
         let (tx, mut outcomes) = mpsc::unbounded_channel();
@@ -2681,7 +2682,7 @@ mod tests {
                         }
                     }
                 }))
-                .route("/v1/aci/receipts/:id", get({
+                .route("/v1/aci/receipts/{id}", get({
                     let started = audit_started.clone();
                     let finish = finish_audit.clone();
                     move || {
@@ -2697,7 +2698,7 @@ mod tests {
                         }
                     }
                 }))
-                .route("/v1/aci/sessions/:id", get(|| async {
+                .route("/v1/aci/sessions/{id}", get(|| async {
                     ([("content-type", "application/json")], vector_session_bytes())
                 }));
             let (tx, mut outcomes) = mpsc::unbounded_channel();
