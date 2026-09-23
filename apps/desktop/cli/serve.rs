@@ -24,8 +24,8 @@ use desktop_gateway::proxy::{
     hop_by_hop_names, ForwardContext, ProxyEvent, VerifiedResponse, VerifiedService, MAX_BODY_BYTES,
 };
 use desktop_runtime::gateway::{
-    IdentityEvent, IdentitySourceProvenance, ServiceCapabilities, VerifierConfig, VerifierEvent,
-    VerifierEventSink, VerifierLauncher, VerifierTask,
+    IdentityEvent, IdentitySourceProvenance, VerifierConfig, VerifierEvent, VerifierEventSink,
+    VerifierLauncher, VerifierTask,
 };
 use futures_util::StreamExt;
 use private_ai_proxy::aci::types::{
@@ -1497,10 +1497,7 @@ fn identity_event(
             repo_commit: report.attestation.source_provenance.repo_commit.clone(),
             image_digest: report.attestation.source_provenance.image_digest.clone(),
         },
-        service_capabilities: ServiceCapabilities {
-            serving: report.service_capabilities.serving.clone(),
-            supported_e2ee_versions: report.service_capabilities.supported_e2ee_versions.clone(),
-        },
+        service_capabilities: report.service_capabilities.clone(),
         verification,
     }
 }

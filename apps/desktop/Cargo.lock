@@ -4829,6 +4829,7 @@ dependencies = [
 name = "private-ai-proxy-runtime"
 version = "0.1.0"
 dependencies = [
+ "aci-protocol",
  "async-stream",
  "axum",
  "base64 0.23.1",
