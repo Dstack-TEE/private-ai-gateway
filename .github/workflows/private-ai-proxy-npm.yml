@@ -230,16 +230,29 @@ jobs:
           retention-days: 14
           path: npm-packages/*.tgz
 
+  # Trusted publishing (OIDC) only authorizes `npm publish`; `npm dist-tag` is
+  # not available to this job. The wrapper therefore moves the channel tag as it
+  # publishes, so it is published only after every platform version it aliases
+  # is served by the public registry and a fresh install of the wrapper tarball
+  # resolves them.
   publish:
     if: inputs.publish
     needs: package
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 45
     environment: npm
     permissions:
       contents: read
       id-token: write
+    env:
+      REGISTRY_HELPER: apps/desktop/scripts/npm-registry.mjs
+      REGISTRY_WAIT_SECONDS: 900
     steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          sparse-checkout: apps/desktop/scripts/npm-registry.mjs
+          sparse-checkout-cone-mode: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
@@ -249,38 +262,14 @@ jobs:
         with:
           name: private-ai-proxy-npm-${{ needs.package.outputs.version }}
           path: npm-packages
-      - name: Publish platform versions, then wrapper
+      - name: Publish platform versions
         env:
           DIST_TAG: ${{ needs.package.outputs.dist_tag }}
           VERSION: ${{ needs.package.outputs.version }}
         run: |
           set -euo pipefail
           npm_version="$(npm --version)"
-          node -e 'const [major, minor] = process.argv[1].split(".").map(Number); if (major < 11 || (major === 11 && minor < 5)) process.exit(1)' "$npm_version"
-          publish_if_missing() {
-            local tarball="$1"
-            local expected_version="$2"
-            local tag="$3"
-            local manifest name package_version
-            manifest="$(tar -xOf "$tarball" package/package.json)"
-            name="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).name)' "$manifest")"
-            package_version="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).version)' "$manifest")"
-            test "$name" = private-ai-proxy
-            test "$package_version" = "$expected_version"
-            local local_integrity registry_integrity
-            local_integrity="sha512-$(openssl dgst -sha512 -binary "$tarball" | openssl base64 -A)"
-            if npm view "$name@$package_version" version >/dev/null 2>&1; then
-              registry_integrity="$(npm view "$name@$package_version" dist.integrity)"
-              if [[ "$registry_integrity" != "$local_integrity" ]]; then
-                echo "$name@$package_version exists with different contents" >&2
-                exit 1
-              fi
-              echo "$name@$package_version already exists with matching contents; skipping"
-            else
-              npm publish "$(realpath "$tarball")" --access public --provenance --tag "$tag"
-            fi
-          }
-
+          node -e 'const [major, minor, patch] = process.argv[1].split(".").map(Number); if (major < 11 || (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))) process.exit(1)' "$npm_version"
           for target in \
             darwin-arm64 \
             darwin-x64 \
@@ -293,13 +282,61 @@ jobs:
             if [[ "$DIST_TAG" != latest ]]; then
               platform_tag="${DIST_TAG}-${target}"
             fi
-            platform_version="${VERSION}-${target}"
-            publish_if_missing \
-              "npm-packages/private-ai-proxy-${platform_version}.tgz" \
-              "$platform_version" \
-              "$platform_tag"
+            tarball="$(realpath "npm-packages/private-ai-proxy-${VERSION}-${target}.tgz")"
+            state="$(node "$REGISTRY_HELPER" state "$tarball")"
+            if [[ "$state" == published ]]; then
+              echo "private-ai-proxy@${VERSION}-${target} already exists with matching contents; skipping"
+            else
+              npm publish "$tarball" --access public --provenance --tag "$platform_tag"
+            fi
           done
-          publish_if_missing \
-            "npm-packages/private-ai-proxy-${VERSION}.tgz" \
-            "$VERSION" \
-            "$DIST_TAG"
+      - name: Wait for the registry to serve every platform version
+        env:
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          node "$REGISTRY_HELPER" wait --timeout-seconds "$REGISTRY_WAIT_SECONDS" \
+            npm-packages/private-ai-proxy-"${VERSION}"-*.tgz
+      - name: Install the wrapper against the public platform versions
+        env:
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          smoke="$RUNNER_TEMP/npm-registry-smoke"
+          mkdir -p "$smoke"
+          : > "$smoke/npmrc"
+          NPM_CONFIG_USERCONFIG="$smoke/npmrc" npm install --global \
+            --prefix "$smoke/prefix" --cache "$smoke/cache" \
+            --registry https://registry.npmjs.org \
+            --ignore-scripts --no-audit --no-fund \
+            "$(realpath "npm-packages/private-ai-proxy-${VERSION}.tgz")"
+          test "$("$smoke/prefix/bin/private-ai-proxy" --version)" = "private-ai-proxy $VERSION"
+      - name: Publish wrapper with the channel dist-tag
+        env:
+          DIST_TAG: ${{ needs.package.outputs.dist_tag }}
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          tarball="$(realpath "npm-packages/private-ai-proxy-${VERSION}.tgz")"
+          state="$(node "$REGISTRY_HELPER" state "$tarball")"
+          if [[ "$state" == published ]]; then
+            echo "private-ai-proxy@${VERSION} already exists with matching contents; skipping"
+          else
+            npm publish "$tarball" --access public --provenance --tag "$DIST_TAG"
+          fi
+      - name: Install the published release
+        env:
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          node "$REGISTRY_HELPER" wait --timeout-seconds "$REGISTRY_WAIT_SECONDS" \
+            "npm-packages/private-ai-proxy-${VERSION}.tgz"
+          smoke="$RUNNER_TEMP/npm-release-smoke"
+          mkdir -p "$smoke"
+          : > "$smoke/npmrc"
+          NPM_CONFIG_USERCONFIG="$smoke/npmrc" npm install --global \
+            --prefix "$smoke/prefix" --cache "$smoke/cache" \
+            --registry https://registry.npmjs.org \
+            --ignore-scripts --no-audit --no-fund \
+            "private-ai-proxy@${VERSION}"
+          test "$("$smoke/prefix/bin/private-ai-proxy" --version)" = "private-ai-proxy $VERSION"
