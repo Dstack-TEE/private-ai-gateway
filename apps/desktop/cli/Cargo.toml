@@ -34,6 +34,7 @@ required-features = ["managed-client"]
 
 [dependencies]
 aci-protocol = { path = "../../../crates/aci-protocol" }
+aci-verify = { path = "../../../crates/aci-verify" }
 async-stream = { version = "0.3", optional = true }
 axum = { version = "0.7", optional = true }
 base64 = "0.22"
@@ -47,15 +48,12 @@ futures-util = "0.3"
 hex = "0.4"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "stream"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
 thiserror = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "process", "io-util", "sync", "time"] }
 tokio-util = { version = "0.7", optional = true }
-webpki-roots = "1"
-x509-parser = "0.16"
 
 [dev-dependencies]
 tempfile = "3"

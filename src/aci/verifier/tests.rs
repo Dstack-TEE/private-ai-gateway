@@ -7,7 +7,7 @@ use sha3::{Digest, Keccak256};
 
 use super::aci_service::{declared_tls_channel_bindings, CachedAciServiceVerification};
 use super::appraisal::appraise_provenance;
-use super::dstack::{verify_dstack_app_compose, verify_dstack_kms_receipt_custody};
+use super::dstack::verify_dstack_kms_receipt_custody;
 use super::external::ExternalProviderVerifier;
 use super::*;
 use crate::aci::keys::ALGO_ED25519;
@@ -19,6 +19,7 @@ use crate::aci::types::{
 use crate::aci::upstream::ChutesSessionStore;
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 use crate::aggregator::upstream_config::AttestationScope;
+use aci_verify::dstack::verify_dstack_app_compose;
 
 fn signing_key(byte: u8) -> SigningKey {
     SigningKey::from_slice(&[byte; 32]).unwrap()

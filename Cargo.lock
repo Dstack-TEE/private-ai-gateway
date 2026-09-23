@@ -14,6 +14,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "aci-verify"
+version = "0.1.0"
+dependencies = [
+ "aci-protocol",
+ "base64 0.22.1",
+ "dcap-qvl",
+ "hex",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+ "webpki-roots",
+ "x509-parser",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3284,6 +3302,7 @@ name = "private-ai-gateway"
 version = "0.1.0"
 dependencies = [
  "aci-protocol",
+ "aci-verify",
  "aes-gcm",
  "async-stream",
  "async-trait",
@@ -3309,7 +3328,6 @@ dependencies = [
  "rand_core 0.6.4",
  "reqwest",
  "rust_decimal",
- "rustls",
  "rustls-pemfile",
  "serde",
  "serde_json",
@@ -3321,7 +3339,6 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
- "webpki-roots",
  "x25519-dalek",
  "x509-parser",
 ]

@@ -1,10 +1,10 @@
-//! The §9.1(1) quote checks used by the ACI client transcript.
+//! DCAP quote verification steps for ACI §9.1(1).
 
+use aci_protocol::identity;
 use dcap_qvl::quote::{Quote, Report};
 use serde_json::Value;
 
-use super::decode_hex;
-use crate::aci::identity;
+use crate::decode_hex;
 
 #[derive(Debug, thiserror::Error)]
 pub enum QuoteStepError {
@@ -34,30 +34,31 @@ pub enum QuoteStepError {
     },
 }
 
-pub(super) struct VerifiedQuote {
+pub struct VerifiedQuote {
     /// The collateral's TCB status, for the caller to appraise (§8.3).
     pub status: String,
     pub tee_type: &'static str,
 }
 
-pub(super) fn parse_quote_evidence(evidence: &Value) -> Result<(Vec<u8>, Quote), QuoteStepError> {
+pub fn parse_quote_evidence(evidence: &Value) -> Result<(Vec<u8>, Quote), QuoteStepError> {
     let quote_hex = evidence
         .get("quote")
         .and_then(Value::as_str)
         .ok_or(QuoteStepError::MissingQuote)?;
     let raw = decode_hex(quote_hex).map_err(QuoteStepError::InvalidQuoteHex)?;
-    let quote = Quote::parse(&raw).map_err(|e| QuoteStepError::UnparsableQuote(e.to_string()))?;
+    let quote =
+        Quote::parse(&raw).map_err(|error| QuoteStepError::UnparsableQuote(error.to_string()))?;
     Ok((raw, quote))
 }
 
 /// Check the quote's 64-byte report-data slot carries `report_data`, and that
 /// `evidence.quote_report_data`, when published, agrees with the quote itself.
-pub(super) fn quote_binds_report_data(
+pub fn quote_binds_report_data(
     evidence: &Value,
     quote_report: &Report,
     report_data: [u8; 32],
 ) -> Result<(), QuoteStepError> {
-    let slot = super::dcap_report_data(quote_report);
+    let slot = dcap_report_data(quote_report);
     if let Some(published) = evidence.get("quote_report_data").and_then(Value::as_str) {
         let published =
             decode_hex(published).map_err(QuoteStepError::InvalidEvidenceReportDataHex)?;
@@ -75,7 +76,7 @@ pub(super) fn quote_binds_report_data(
 
 /// Verify the quote to its vendor root and confirm the report's claimed
 /// `tee_type` is the one the quote actually carries.
-pub(super) async fn verify_quote_to_root(
+pub async fn verify_quote_to_root(
     raw_quote: &[u8],
     pccs_url: &str,
     now_secs: u64,
@@ -83,12 +84,12 @@ pub(super) async fn verify_quote_to_root(
 ) -> Result<VerifiedQuote, QuoteStepError> {
     let collateral = dcap_qvl::collateral::get_collateral(pccs_url, raw_quote)
         .await
-        .map_err(|e| QuoteStepError::Collateral {
+        .map_err(|error| QuoteStepError::Collateral {
             url: pccs_url.to_string(),
-            reason: e.to_string(),
+            reason: error.to_string(),
         })?;
     let verified = dcap_qvl::verify::rustcrypto::verify(raw_quote, &collateral, now_secs)
-        .map_err(|e| QuoteStepError::Verification(e.to_string()))?;
+        .map_err(|error| QuoteStepError::Verification(error.to_string()))?;
     let tee_type = if verified.report.is_sgx() {
         "sgx"
     } else {
@@ -104,4 +105,12 @@ pub(super) async fn verify_quote_to_root(
         status: verified.status,
         tee_type,
     })
+}
+
+pub fn dcap_report_data(report: &Report) -> &[u8; 64] {
+    match report {
+        Report::SgxEnclave(report) => &report.report_data,
+        Report::TD10(report) => &report.report_data,
+        Report::TD15(report) => &report.base.report_data,
+    }
 }

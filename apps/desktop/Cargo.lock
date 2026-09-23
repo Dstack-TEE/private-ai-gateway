@@ -14,6 +14,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "aci-verify"
+version = "0.1.0"
+dependencies = [
+ "aci-protocol",
+ "base64 0.22.1",
+ "dcap-qvl",
+ "hex",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+ "webpki-roots",
+ "x509-parser",
+]
+
+[[package]]
 name = "aes"
 version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2481,6 +2499,7 @@ name = "private-ai-proxy"
 version = "0.1.0"
 dependencies = [
  "aci-protocol",
+ "aci-verify",
  "async-stream",
  "axum",
  "base64 0.22.1",
@@ -2494,7 +2513,6 @@ dependencies = [
  "private-ai-proxy-runtime",
  "rand 0.8.6",
  "reqwest",
- "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -2502,8 +2520,6 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
- "webpki-roots",
- "x509-parser",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/aci-protocol"]
+members = ["crates/aci-protocol", "crates/aci-verify"]
 default-members = ["."]
 resolver = "2"
 
@@ -20,6 +20,7 @@ path = "src/main.rs"
 
 [dependencies]
 aci-protocol = { path = "crates/aci-protocol" }
+aci-verify = { path = "crates/aci-verify" }
 # Canonical-JSON, types, and serialization.
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -45,8 +46,6 @@ rand_core = "0.6"
 hex = "0.4"
 rustls-pemfile = "2"
 x509-parser = "0.16"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-webpki-roots = "1"
 
 # HTTP server.
 axum = "0.7"

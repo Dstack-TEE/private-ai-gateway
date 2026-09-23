@@ -6,13 +6,13 @@
 
 use serde_json::Value;
 
-use super::dstack::verify_dstack_compose_measurement;
-use super::quote::{
-    parse_quote_evidence, quote_binds_report_data, verify_quote_to_root, QuoteStepError,
-};
-use super::report::{verify_report_binding, AciReportValidationError, ReportBinding};
 use super::verify_dstack_event_log;
 use crate::aci::types::{AttestationReport, SourceProvenance, WorkloadKeyset};
+use aci_verify::dstack::verify_dstack_compose_measurement;
+use aci_verify::quote::{
+    parse_quote_evidence, quote_binds_report_data, verify_quote_to_root, QuoteStepError,
+};
+use aci_verify::report::{verify_report_binding, AciReportValidationError, ReportBinding};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CheckId {
@@ -257,7 +257,7 @@ async fn appraise_quote(
         format!(
             "report_data (32 bytes) = {}\nquote report_data slot (64 bytes) = {}",
             inputs.report.attestation.report_data_hex,
-            hex::encode(super::dcap_report_data(&quote.report))
+            hex::encode(aci_verify::quote::dcap_report_data(&quote.report))
         )
     });
     if let Err(e) = quote_binds_report_data(evidence, &quote.report, claimed_report_data) {

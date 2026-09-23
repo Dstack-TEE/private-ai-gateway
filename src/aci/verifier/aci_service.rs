@@ -14,12 +14,12 @@ use super::appraisal::{
     QuoteSource,
 };
 use super::dstack::compressed_k256_public_key_hex;
-use super::quote::QuoteStepError;
-use super::report::AciReportValidationError;
 use super::{DEFAULT_VERIFIER_CONNECT_TIMEOUT_SECONDS, DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS};
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crate::aci::types::{AttestationReport, SourceProvenance, WorkloadKeyset};
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
+use aci_verify::quote::QuoteStepError;
+use aci_verify::report::AciReportValidationError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AciServiceVerifierConfigError {
@@ -150,10 +150,6 @@ pub(super) enum AciServiceVerificationError {
     QuoteReportDataMismatch,
     #[error("invalid dstack event_log evidence: {0}")]
     InvalidEventLog(String),
-    #[error("missing dstack app_compose evidence")]
-    MissingAppCompose,
-    #[error("dstack app_compose preimage does not match the RTMR3-bound compose hash")]
-    AppComposeHashMismatch,
     #[error("missing dstack KMS key custody evidence")]
     MissingKeyCustody,
     #[error("unsupported key custody provider: {0}")]
@@ -519,8 +515,8 @@ impl AciServiceUpstreamVerifier {
         let report: AttestationReport = serde_json::from_slice(&body)
             .map_err(|e| AciServiceVerificationError::InvalidJson(e.to_string()))?;
         let verified_at = now_secs();
-        // One appraisal, shared with the CLI verifier (`appraisal.rs`): this
-        // deployment folds the §9.1 outcomes into a single accept/reject.
+        // The Gateway-owned appraisal folds its §9.1 outcomes into a single
+        // accept/reject under this deployment's custody and channel policy.
         let appraisal = appraise_report(AppraisalInputs {
             report: &report,
             nonce: Some(&nonce),
@@ -555,7 +551,11 @@ impl AciServiceUpstreamVerifier {
         let expires_at = verified_at
             .saturating_add(self.cache_ttl_seconds)
             .min(keyset.not_after);
-        let evidence = Some(super::report::raw_evidence(&body, "application/json", None));
+        let evidence = Some(aci_verify::report::raw_evidence(
+            &body,
+            "application/json",
+            None,
+        ));
         let channel_bindings = appraisal.channel_bindings;
 
         Ok(CachedAciServiceVerification {
@@ -623,21 +623,4 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .expect("system time is before UNIX_EPOCH")
-}
-
-/// The `report_data` field of a parsed DCAP quote, across report variants.
-pub fn dcap_report_data(report: &dcap_qvl::quote::Report) -> &[u8; 64] {
-    match report {
-        dcap_qvl::quote::Report::SgxEnclave(report) => &report.report_data,
-        dcap_qvl::quote::Report::TD10(report) => &report.report_data,
-        dcap_qvl::quote::Report::TD15(report) => &report.base.report_data,
-    }
-}
-
-pub(super) fn dcap_rtmr3(report: &dcap_qvl::quote::Report) -> Option<&[u8; 48]> {
-    match report {
-        dcap_qvl::quote::Report::TD10(report) => Some(&report.rt_mr3),
-        dcap_qvl::quote::Report::TD15(report) => Some(&report.base.rt_mr3),
-        dcap_qvl::quote::Report::SgxEnclave(_) => None,
-    }
 }
