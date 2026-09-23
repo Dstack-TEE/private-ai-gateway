@@ -1,17 +1,31 @@
 //! Real binaries and isolated user state; no UI, provider calls, or OS secrets.
+mod support;
+
 use serde_json::Value;
 use std::{
     fs,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
     time::{Duration, Instant},
 };
+use support::{executable, Sandbox};
 
+/// Readiness is bounded only to fail a hung startup; loaded hosts are slow.
+const READY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// A backend in its own install tree and home. Dropping it stops every process
+/// started from that tree and removes it; see `support`.
 struct Backend {
-    directory: tempfile::TempDir,
+    directory: Sandbox,
     child: Child,
+}
+
+#[test]
+#[ignore = "subprocess fixture that tears down a test sandbox"]
+fn sandbox_teardown_watchdog() {
+    support::watchdog();
 }
 
 #[test]
@@ -152,24 +166,16 @@ fn adding_a_profile_requires_consent_before_startup_or_credential_input() {
 
 impl Backend {
     fn start() -> Self {
-        let directory = tempfile::tempdir().unwrap();
-        let binary = |name: &str| {
-            directory.path().join(if cfg!(windows) {
-                format!("{name}.exe")
-            } else {
-                name.into()
-            })
-        };
-        fs::copy(
+        let directory = Sandbox::new();
+        let binary = |name: &str| directory.path().join(executable(name));
+        install(
             env!("CARGO_BIN_EXE_private-ai-proxy"),
-            binary("private-ai-proxy"),
-        )
-        .unwrap();
-        fs::copy(
+            &binary("private-ai-proxy"),
+        );
+        install(
             env!("CARGO_BIN_EXE_private-ai-proxy-service"),
-            binary("private-ai-proxy-service"),
-        )
-        .unwrap();
+            &binary("private-ai-proxy-service"),
+        );
         // No test requests agent credentials. Keep this unused helper tiny:
         // startup durably stages it, so copying a debug CLI would fsync hundreds
         // of megabytes per backend before its management endpoint becomes ready.
@@ -201,7 +207,7 @@ impl Backend {
             .spawn()
             .unwrap();
         let mut backend = Self { directory, child };
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + READY_TIMEOUT;
         loop {
             let output = backend.command(&["status", "--json"]).output().unwrap();
             if output.status.success() {
@@ -234,11 +240,7 @@ impl Backend {
         )
     }
     fn cli(&self) -> PathBuf {
-        self.directory.path().join(if cfg!(windows) {
-            "private-ai-proxy.exe"
-        } else {
-            "private-ai-proxy"
-        })
+        self.directory.path().join(executable("private-ai-proxy"))
     }
     fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(self.cli());
@@ -256,9 +258,18 @@ impl Backend {
 }
 impl Drop for Backend {
     fn drop(&mut self) {
-        let _ = self.command(&["service", "stop", "--yes"]).output();
+        self.directory.close();
+        // Teardown already killed it; this only reaps the process.
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+/// Places a build output in a sandbox. A hard link avoids copying hundreds of
+/// megabytes of debug binaries per backend; the launcher still sees a sibling.
+fn install(source: &str, destination: &Path) {
+    if fs::hard_link(source, destination).is_err() {
+        fs::copy(source, destination).unwrap();
     }
 }
 #[test]
@@ -471,6 +482,8 @@ fn assert_success(output: &Output) {
 
 #[test]
 fn reset_settings_preserves_user_data_and_requires_explicit_consent() {
+    // Declared first so it is released only after the backend has stopped.
+    let _default_port = default_port_lock();
     let backend = Backend::start();
     let backup = backend.directory.path().join("profiles-reset.json");
     fs::write(&backup, r#"{"version":1,"profiles":[{"name":"Work","provider":"phala","remoteUrl":"https://inference.phala.com"}]}"#).unwrap();
@@ -487,7 +500,8 @@ fn reset_settings_preserves_user_data_and_requires_explicit_consent() {
         .unwrap();
     assert!(!refused.status.success());
     assert_eq!(backend.run(&["settings", "show"]), before);
-    let occupied = TcpListener::bind("127.0.0.1:4180").unwrap();
+    let occupied = TcpListener::bind("127.0.0.1:4180")
+        .expect("127.0.0.1:4180 is in use outside the tests; stop the local Private AI Proxy");
     let failed = backend
         .command(&["settings", "reset", "--yes", "--json"])
         .output()
@@ -514,6 +528,15 @@ fn reset_settings_preserves_user_data_and_requires_explicit_consent() {
     assert_eq!(settings["preferences"]["appearance"], "system");
     assert_eq!(settings["preferences"]["connectOnLaunch"], false);
     assert_eq!(settings["preferences"]["notifications"]["enabled"], true);
+}
+
+/// Reset moves the Local API to its fixed default port, which every test
+/// process on this host shares; hold this while a test backend may bind it.
+fn default_port_lock() -> fs::File {
+    let lock =
+        fs::File::create(std::env::temp_dir().join("private-ai-proxy-test-4180.lock")).unwrap();
+    lock.lock().unwrap();
+    lock
 }
 
 #[test]
