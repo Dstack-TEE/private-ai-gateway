@@ -62,7 +62,7 @@ impl DesktopRuntime {
             }
             return Ok(());
         }
-        agent_bridge::agents::write_atomic(
+        desktop_core::private_fs::write_atomic(
             &path,
             &serde_json::to_string(entries).map_err(|_| "Cannot encode cleanup manifest")?,
             None,

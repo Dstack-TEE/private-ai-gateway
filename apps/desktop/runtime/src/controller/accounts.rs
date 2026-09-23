@@ -24,7 +24,7 @@ impl DesktopRuntime {
     pub async fn begin_account_login(
         self: &Arc<Self>,
         profile: ConfidentialProfileInput,
-    ) -> Result<crate::account_login::LoginPresentation, String> {
+    ) -> Result<desktop_core::account::LoginPresentation, String> {
         let mut slot = self.account_login.try_lock().map_err(|_| {
             "Account: An account operation is in progress. Finish it before signing in again."
         })?;
@@ -47,7 +47,7 @@ impl DesktopRuntime {
     pub async fn poll_account_login(
         self: &Arc<Self>,
         id: String,
-    ) -> Result<Option<crate::contracts::AccountLoginDetails>, String> {
+    ) -> Result<Option<desktop_core::contracts::AccountLoginDetails>, String> {
         self.account_login
             .lock()
             .await
@@ -64,8 +64,8 @@ impl DesktopRuntime {
         profile: ConfidentialProfileInput,
         require_production_os: bool,
         workspace_id: Option<i64>,
-    ) -> Result<crate::contracts::AccountSaveResult, String> {
-        use crate::contracts::AccountSaveResult;
+    ) -> Result<desktop_core::contracts::AccountSaveResult, String> {
+        use desktop_core::contracts::AccountSaveResult;
         uuid::Uuid::parse_str(&operation_id).map_err(|_| "Invalid save operation ID")?;
         let mut operation = self
             .account_save
@@ -95,7 +95,7 @@ impl DesktopRuntime {
                     state: Box::new(state),
                 },
                 Err(error) => AccountSaveResult::Failed {
-                    error: crate::protocol::RpcError::operation(&error).message,
+                    error: desktop_core::protocol::RpcError::operation(&error).message,
                 },
             };
             sender.send_replace(result);
@@ -106,7 +106,7 @@ impl DesktopRuntime {
     pub fn account_save_result(
         &self,
         operation_id: &str,
-    ) -> Result<crate::contracts::AccountSaveResult, String> {
+    ) -> Result<desktop_core::contracts::AccountSaveResult, String> {
         let operation = self
             .account_save
             .lock()
@@ -118,10 +118,10 @@ impl DesktopRuntime {
                 "Account: Save outcome is unavailable. Check the saved profile before retrying.",
             )?;
         let outcome = result.borrow().clone();
-        if matches!(outcome, crate::contracts::AccountSaveResult::Running)
+        if matches!(outcome, desktop_core::contracts::AccountSaveResult::Running)
             && result.has_changed().is_err()
         {
-            return Ok(crate::contracts::AccountSaveResult::Failed {
+            return Ok(desktop_core::contracts::AccountSaveResult::Failed {
                 error: "Account: Save was interrupted. Check the saved profile before retrying."
                     .into(),
             });
@@ -175,8 +175,8 @@ impl DesktopRuntime {
     pub async fn account_details(
         &self,
         profile_id: String,
-    ) -> Result<crate::contracts::AccountLoginDetails, String> {
-        use crate::contracts::{ProfileAuth, ServiceProvider};
+    ) -> Result<desktop_core::contracts::AccountLoginDetails, String> {
+        use desktop_core::contracts::{ProfileAuth, ServiceProvider};
         let state = self.manager.snapshot()?;
         let profile = state
             .profiles
@@ -198,9 +198,9 @@ impl DesktopRuntime {
 
     pub async fn account_balance(
         &self,
-        target: crate::contracts::AccountBalanceTarget,
-    ) -> Result<Option<crate::contracts::AccountBalance>, String> {
-        use crate::contracts::{AccountBalanceTarget, ProfileAuth};
+        target: desktop_core::contracts::AccountBalanceTarget,
+    ) -> Result<Option<desktop_core::contracts::AccountBalance>, String> {
+        use desktop_core::contracts::{AccountBalanceTarget, ProfileAuth};
         match target {
             AccountBalanceTarget::Login { id } => {
                 self.balances

@@ -44,9 +44,13 @@ use serde_json::{json, Value};
 use tokio::{net::TcpListener, sync::mpsc, sync::Semaphore};
 use tokio_util::sync::CancellationToken;
 
-use crate::{
+use desktop_core::{
     agents::Agent,
     brand::{PRODUCT_NAME, SERVICE_NAME},
+};
+
+use crate::{
+    agents::AgentIntegration,
     catalog::{Catalog, Surface},
     tokens::{agent_allows, TokenSet},
 };

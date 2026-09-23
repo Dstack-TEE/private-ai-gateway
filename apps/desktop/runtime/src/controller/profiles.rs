@@ -41,7 +41,7 @@ impl DesktopRuntime {
         profile: ConfidentialProfileInput,
         require_production_os: bool,
         key: Option<String>,
-        auth: Option<crate::contracts::ProfileAuth>,
+        auth: Option<desktop_core::contracts::ProfileAuth>,
         verify: bool,
     ) -> Result<SavedConfiguration<'_>, String> {
         let _operation = self.configuration_change()?;
@@ -175,7 +175,7 @@ impl DesktopRuntime {
                 entry: service_config::profile_credential_entry(old)?,
                 revoke: old.provider == ServiceProvider::Redpill
                     && old_key != &candidate_key
-                    && matches!(old.auth, crate::contracts::ProfileAuth::OAuth { .. }),
+                    && matches!(old.auth, desktop_core::contracts::ProfileAuth::OAuth { .. }),
             }) {
                 self.proxy.set_api_key(None);
                 self.manager.restore_snapshot(previous);
@@ -191,7 +191,10 @@ impl DesktopRuntime {
         }
         if replace_key
             && candidate.provider == ServiceProvider::Redpill
-            && matches!(candidate.auth, crate::contracts::ProfileAuth::OAuth { .. })
+            && matches!(
+                candidate.auth,
+                desktop_core::contracts::ProfileAuth::OAuth { .. }
+            )
         {
             if let Err(error) = self.queue_retired(RetiredCredential {
                 profile_id: candidate.id.clone(),
@@ -312,7 +315,10 @@ impl DesktopRuntime {
         let entry = service_config::profile_credential_entry(&removed)?;
         let removed_key = self.secrets.get(&entry)?;
         if removed.provider == ServiceProvider::Redpill
-            && matches!(removed.auth, crate::contracts::ProfileAuth::OAuth { .. })
+            && matches!(
+                removed.auth,
+                desktop_core::contracts::ProfileAuth::OAuth { .. }
+            )
         {
             if let Some(key) = &removed_key {
                 self.queue_retired(RetiredCredential {
@@ -385,7 +391,10 @@ impl DesktopRuntime {
             .find(|p| p.id == state.active_profile_id)
         {
             if profile.provider == ServiceProvider::Redpill
-                && matches!(profile.auth, crate::contracts::ProfileAuth::OAuth { .. })
+                && matches!(
+                    profile.auth,
+                    desktop_core::contracts::ProfileAuth::OAuth { .. }
+                )
             {
                 if let Some(key) = &previous_key {
                     self.queue_retired(RetiredCredential {
@@ -430,8 +439,8 @@ impl DesktopRuntime {
 
     pub fn import_profiles(
         &self,
-        backup: crate::maintenance::ProfileBackup,
-    ) -> Result<crate::maintenance::ImportResult, String> {
+        backup: desktop_core::maintenance::ProfileBackup,
+    ) -> Result<desktop_core::maintenance::ImportResult, String> {
         let _operation = self.configuration_change()?;
         let state = self.manager.snapshot()?;
         let mut settings = service_config::settings_from_state(

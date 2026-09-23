@@ -1,0 +1,63 @@
+//! The client side of Private AI Proxy, shared by the desktop shell, the CLI
+//! and the backend: renderer and IPC contracts, the management protocol and
+//! its client, the IPC transport, backend launch, preferences, app paths and
+//! owner-only file primitives. It links no server, database or HTTP stack.
+
+use std::io::Write;
+
+pub mod account;
+pub mod agent_access;
+pub mod agents;
+pub mod brand;
+pub mod client;
+pub mod contracts;
+pub mod launch;
+pub mod listen;
+pub mod local_api;
+pub mod lock;
+pub mod maintenance;
+pub mod paths;
+pub mod preferences;
+pub mod private_fs;
+pub mod protocol;
+pub mod service_config;
+pub mod transport;
+pub mod ui_api;
+pub mod updates;
+pub mod usage;
+
+/// Write a best-effort backend diagnostic without letting a detached stderr
+/// pipe turn an otherwise recoverable request error into a process panic.
+pub fn diagnostic(args: std::fmt::Arguments<'_>) {
+    let stderr = std::io::stderr();
+    diagnostic_to(&mut stderr.lock(), args);
+}
+
+fn diagnostic_to(writer: &mut impl Write, args: std::fmt::Arguments<'_>) {
+    let _ = writeln!(writer, "{args}");
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    struct ClosedPipe;
+
+    impl Write for ClosedPipe {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "reader closed",
+            ))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn diagnostic_ignores_a_closed_stderr_pipe() {
+        diagnostic_to(&mut ClosedPipe, format_args!("backend keeps serving"));
+    }
+}

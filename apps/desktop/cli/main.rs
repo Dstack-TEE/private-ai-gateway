@@ -83,7 +83,7 @@ fn legacy_alias_hint() {
         .take_while(|arg| arg != "--")
         .any(|arg| arg == "--json" || arg == "--json-events");
     if invoked_as_aci && !machine_output && std::io::stderr().is_terminal() {
-        desktop_runtime::diagnostic(format_args!(
+        desktop_core::diagnostic(format_args!(
             "note: `aci` is a legacy alias; use `pap` or `private-ai-proxy` instead."
         ));
     }

@@ -16,23 +16,28 @@ use std::{
 };
 
 use agent_bridge::{
-    agents::{app_data_dir, Agent, Projector},
+    agents::Projector,
     catalog::Catalog,
-    lock,
     proxy::{self, ProxyEvent, ProxyState},
     secrets::{validate_api_key, KeyringStore, SecretStore},
     tokens::{TokenFiles, TokenSet, LOCAL_TOOLS_AGENT},
 };
-use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
-
-use crate::{
+use desktop_core::{
+    agents::Agent,
     contracts::{
         AgentPreview, AgentStatus, ConfidentialProfileInput, ConnectOptions, GatewayState,
         LocalApiConfig, RequestActivity, ServiceProvider, StartGatewayConfig,
     },
     local_api::{self, ResolvedLocalApi},
+    lock,
+    paths::app_data_dir,
     service_config,
-    usage::{UsagePage, UsageQuery, UsageStore},
+    usage::{UsagePage, UsageQuery},
+};
+use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
+
+use crate::{
+    usage::UsageStore,
     verifier_session::{SessionManager, VerifierLauncher},
 };
 
@@ -52,7 +57,7 @@ pub struct DesktopRuntime {
     account_save: Mutex<
         Option<(
             String,
-            tokio::sync::watch::Receiver<crate::contracts::AccountSaveResult>,
+            tokio::sync::watch::Receiver<desktop_core::contracts::AccountSaveResult>,
         )>,
     >,
     manager: Arc<SessionManager>,
@@ -86,7 +91,7 @@ struct SavedConfiguration<'a> {
 struct RetiredCredential {
     profile_id: String,
     action: String,
-    provider: crate::contracts::ServiceProvider,
+    provider: desktop_core::contracts::ServiceProvider,
     key: String,
     entry: String,
     revoke: bool,
@@ -336,7 +341,7 @@ impl DesktopRuntime {
             manager.report_error(error);
         }
         if runtime.instance.is_some() {
-            match crate::preferences::load() {
+            match desktop_core::preferences::load() {
                 Ok(saved) => runtime.apply_web_ui(&saved.web_ui),
                 Err(error) => runtime.report_error(error),
             }
@@ -444,20 +449,24 @@ impl DesktopRuntime {
     }
 
     pub fn export_profiles(&self, path: PathBuf) -> Result<(), String> {
-        crate::maintenance::write_export(&path, &self.export_profiles_content()?)
+        desktop_core::maintenance::write_export(&path, &self.export_profiles_content()?)
     }
 
     pub fn export_profiles_content(&self) -> Result<String, String> {
-        let backup = crate::maintenance::ProfileBackup::from_profiles(&self.state()?.profiles);
-        crate::maintenance::json_content(&backup)
+        let backup =
+            desktop_core::maintenance::ProfileBackup::from_profiles(&self.state()?.profiles);
+        desktop_core::maintenance::json_content(&backup)
     }
 
     pub fn export_diagnostics(&self, path: PathBuf, version: &str) -> Result<(), String> {
-        crate::maintenance::write_export(&path, &self.export_diagnostics_content(version)?)
+        desktop_core::maintenance::write_export(&path, &self.export_diagnostics_content(version)?)
     }
 
     pub fn export_diagnostics_content(&self, version: &str) -> Result<String, String> {
-        crate::maintenance::json_content(&crate::maintenance::diagnostics(&self.state()?, version))
+        desktop_core::maintenance::json_content(&desktop_core::maintenance::diagnostics(
+            &self.state()?,
+            version,
+        ))
     }
 
     pub fn usage_record(&self, record_id: &str) -> Result<Option<RequestActivity>, String> {

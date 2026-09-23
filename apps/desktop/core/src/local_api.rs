@@ -3,10 +3,8 @@ use std::{fs, path::PathBuf};
 use crate::{
     contracts::LocalApiConfig,
     listen::{self, ResolvedListen},
-};
-use agent_bridge::{
-    agents::{app_data_dir, write_atomic},
-    tokens,
+    paths::app_data_dir,
+    private_fs::{self, write_atomic},
 };
 
 const CONFIG_FILE: &str = "local-api.json";
@@ -32,7 +30,7 @@ pub fn save(config: LocalApiConfig) -> Result<ResolvedLocalApi, String> {
     let parent = path
         .parent()
         .ok_or_else(|| "The Local API settings path has no parent".to_string())?;
-    tokens::create_private_dir(parent)
+    private_fs::create_private_dir(parent)
         .map_err(|error| format!("Cannot create the app data directory: {error}"))?;
     write_atomic(&path, &text, None)
         .map_err(|error| format!("Cannot save Local API settings: {error}"))?;

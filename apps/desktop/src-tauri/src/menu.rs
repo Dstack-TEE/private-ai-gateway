@@ -13,7 +13,7 @@ pub const NAVIGATE_EVENT: &str = "gateway://navigate";
 
 #[cfg(target_os = "macos")]
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
-    use agent_bridge::brand::{ORGANIZATION_NAME, PRODUCT_NAME};
+    use desktop_core::brand::{ORGANIZATION_NAME, PRODUCT_NAME};
     use tauri::{
         menu::{
             AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID,

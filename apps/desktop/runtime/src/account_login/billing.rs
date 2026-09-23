@@ -96,33 +96,3 @@ pub(super) fn parse_account_balance(
         })),
     }
 }
-
-pub fn top_up_url(provider: &ServiceProvider, scope_slug: Option<&str>) -> Result<String, String> {
-    let slug = validated_scope_slug(scope_slug)?;
-    match provider {
-        ServiceProvider::Phala => Ok(format!("https://cloud.phala.com/{slug}/billing")),
-        ServiceProvider::Redpill => Ok(format!("https://redpill.ai/{slug}/credits")),
-        ServiceProvider::Custom => Err("Billing is only available for Phala and RedPill".into()),
-    }
-}
-
-pub fn organization_url(organization_slug: Option<&str>) -> Result<String, String> {
-    Ok(format!(
-        "https://redpill.ai/{}",
-        validated_scope_slug(organization_slug)?
-    ))
-}
-
-pub(super) fn validated_scope_slug(slug: Option<&str>) -> Result<&str, String> {
-    slug.filter(|slug| {
-        !slug.is_empty()
-            && slug.len() <= 255
-            && slug.split('-').all(|part| {
-                !part.is_empty()
-                    && part
-                        .bytes()
-                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-            })
-    })
-    .ok_or("Refresh account details or reconnect the account to open billing.".into())
-}

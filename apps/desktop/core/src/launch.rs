@@ -475,17 +475,17 @@ mod tests {
                 .args(["--ignored", "--exact", ENDPOINT_FIXTURE_TEST, "--nocapture"])
                 .env(ENDPOINT_FIXTURE_ROLE, "parent")
                 .env(ENDPOINT_FIXTURE_OUTPUT, &output)
-                .env_remove(agent_bridge::agents::HOME_OVERRIDE_ENV);
+                .env_remove(crate::paths::HOME_OVERRIDE_ENV);
             if configured {
                 command
                     .env(
-                        agent_bridge::agents::APP_DATA_OVERRIDE_ENV,
+                        crate::paths::APP_DATA_OVERRIDE_ENV,
                         fixture.path().join("data"),
                     )
                     .env("XDG_RUNTIME_DIR", &runtime);
             } else {
                 command
-                    .env_remove(agent_bridge::agents::APP_DATA_OVERRIDE_ENV)
+                    .env_remove(crate::paths::APP_DATA_OVERRIDE_ENV)
                     .env_remove("XDG_RUNTIME_DIR");
             }
             let result = command.output().unwrap();

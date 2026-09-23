@@ -2,12 +2,14 @@
 members = [
     "agent-bridge",
     "cli",
+    "core",
     "runtime",
     "src-tauri",
 ]
 default-members = [
     "agent-bridge",
     "cli",
+    "core",
     "runtime",
     "src-tauri",
 ]

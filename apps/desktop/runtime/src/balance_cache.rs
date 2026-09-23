@@ -1,5 +1,5 @@
 //! Short-lived, non-secret balance results shared by every desktop window.
-use crate::contracts::AccountBalance;
+use desktop_core::contracts::AccountBalance;
 use std::{
     collections::HashMap,
     future::Future,

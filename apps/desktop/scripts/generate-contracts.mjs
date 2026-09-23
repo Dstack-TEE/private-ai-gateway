@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Writes src/shared/contracts.generated.ts from the Rust contracts through the
-// runtime test that also fails CI when the committed file is stale. Pass
+// core test that also fails CI when the committed file is stale. Pass
 // `--check` to only verify it.
 import { spawnSync } from "node:child_process";
 import path from "node:path";
@@ -14,7 +14,7 @@ const result = spawnSync(
     "test",
     "--locked",
     "--package",
-    "private-ai-proxy-runtime",
+    "private-ai-proxy-core",
     "--lib",
     "contracts::typescript",
   ],

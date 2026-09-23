@@ -1,4 +1,5 @@
 use super::*;
+use desktop_core::protocol::RpcError;
 
 #[derive(Debug)]
 pub enum AgentOperationError {
@@ -9,6 +10,15 @@ pub enum AgentOperationError {
 impl From<agent_bridge::agents::AgentError> for AgentOperationError {
     fn from(error: agent_bridge::agents::AgentError) -> Self {
         Self::Agent(error)
+    }
+}
+
+impl From<AgentOperationError> for RpcError {
+    fn from(error: AgentOperationError) -> Self {
+        match error {
+            AgentOperationError::Agent(error) => error.into(),
+            AgentOperationError::Runtime(message) => Self::operation(&message),
+        }
     }
 }
 

@@ -180,14 +180,14 @@ impl DesktopRuntime {
             credential_saved,
             false,
         );
-        crate::preferences::reset()?;
-        self.apply_web_ui(&crate::preferences::WebUiConfig::default());
+        desktop_core::preferences::reset()?;
+        self.apply_web_ui(&desktop_core::preferences::WebUiConfig::default());
         self.manager.snapshot()
     }
 }
 
 /// Binds a port whose Local API listener was just stopped.
 fn rebind(address: std::net::SocketAddr) -> Result<std::net::TcpListener, String> {
-    crate::listen::bind(address, true)
+    desktop_core::listen::bind(address, true)
         .map_err(|error| format!("Cannot listen on {address}: {error}"))
 }

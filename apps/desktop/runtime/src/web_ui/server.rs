@@ -24,9 +24,9 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use super::{auth::THROTTLE_REFILL, Auth, Throttle};
-use crate::{
+use crate::controller::DesktopRuntime;
+use desktop_core::{
     contracts::GatewayState,
-    controller::DesktopRuntime,
     listen::{self, url_host, ResolvedListen},
     protocol::{Command, RpcError, BUILD_VERSION},
     ui_api::{self, Backend, Event, Host, Method, StateEventProjection},
@@ -487,7 +487,7 @@ mod tests {
     }
 
     fn fixture_on(address: &str, client_host: Option<&str>) -> Fixture {
-        let listen = crate::listen::resolve(crate::contracts::ListenConfig {
+        let listen = desktop_core::listen::resolve(desktop_core::contracts::ListenConfig {
             listen_address: address.into(),
             allow_network_access: true,
             port: 3210,

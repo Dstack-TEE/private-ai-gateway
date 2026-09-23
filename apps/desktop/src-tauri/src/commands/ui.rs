@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use desktop_runtime::{client::Client, ui_api::Method};
+use desktop_core::{client::Client, ui_api::Method};
 use serde_json::Value;
 use tauri::{
     ipc::{InvokeBody, Request},

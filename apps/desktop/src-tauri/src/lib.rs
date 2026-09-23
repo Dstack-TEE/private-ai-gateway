@@ -16,8 +16,8 @@ mod window_state;
 
 use std::sync::Arc;
 
-use desktop_runtime::{
-    cli_install::Registration, client::Client, preferences::Appearance, protocol::rpc,
+use desktop_core::{
+    client::Client, contracts::CommandRegistration, preferences::Appearance, protocol::rpc,
 };
 use tauri::{
     webview::{PageLoadEvent, WebviewWindowBuilder},
@@ -80,7 +80,10 @@ async fn open_account_url(app: AppHandle, url: String) -> Result<(), String> {
     .await
 }
 
-async fn run_cli_command(app: &AppHandle, arguments: Vec<&str>) -> Result<Registration, String> {
+async fn run_cli_command(
+    app: &AppHandle,
+    arguments: Vec<&str>,
+) -> Result<CommandRegistration, String> {
     let output = app
         .shell()
         .sidecar("private-ai-proxy")
@@ -115,7 +118,7 @@ struct CliStartupState {
 #[serde(rename_all = "camelCase")]
 struct CliRegistration {
     #[serde(flatten)]
-    registration: Registration,
+    registration: CommandRegistration,
     #[serde(skip_serializing_if = "Option::is_none")]
     startup_error: Option<String>,
 }
@@ -183,7 +186,7 @@ fn configure_account_return(app: &tauri::App) {
     }
     let handle = app.handle().clone();
     app.deep_link().on_open_url(move |event| {
-        let expected = desktop_runtime::account_login::account_return_url();
+        let expected = desktop_core::account::account_return_url();
         if !event.urls().iter().any(|url| url.as_str() == expected) {
             return;
         }
@@ -206,7 +209,7 @@ pub fn run() {
         tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if !args
                 .iter()
-                .any(|arg| arg == &desktop_runtime::account_login::account_return_url())
+                .any(|arg| arg == &desktop_core::account::account_return_url())
             {
                 tray::show_window(app);
             }
@@ -300,8 +303,8 @@ pub fn run() {
             {
                 let data_dir = app.path().app_data_dir()?;
                 app_data::prepare(&data_dir)?;
-                std::env::set_var(agent_bridge::agents::APP_DATA_OVERRIDE_ENV, &data_dir);
-                if let Err(error) = desktop_runtime::agent_access::prepare_for_service() {
+                std::env::set_var(desktop_core::paths::APP_DATA_OVERRIDE_ENV, &data_dir);
+                if let Err(error) = desktop_core::agent_access::prepare_for_service() {
                     eprintln!("Cannot prepare Agent Home access for the backend: {error}");
                 }
             }
@@ -348,7 +351,7 @@ pub fn run() {
                 })
                 .build()?;
             window_state::migrate_legacy_default(app, &window, config.width, config.height)?;
-            window.set_title(agent_bridge::brand::PRODUCT_NAME)?;
+            window.set_title(desktop_core::brand::PRODUCT_NAME)?;
             let window_for_events = window.clone();
             let app_for_events = app.handle().clone();
             let client_for_events = client.clone();
@@ -359,9 +362,9 @@ pub fn run() {
                     let client = client_for_events.clone();
                     tauri::async_runtime::spawn(async move {
                         if let Err(error) =
-                            desktop_runtime::ui_api::refresh_preferences(&client, &host).await
+                            desktop_core::ui_api::refresh_preferences(&client, &host).await
                         {
-                            desktop_runtime::diagnostic(format_args!(
+                            desktop_core::diagnostic(format_args!(
                                 "Cannot refresh desktop preferences: {}",
                                 error.message()
                             ));
@@ -388,7 +391,7 @@ pub fn run() {
             let handle = app.handle().clone();
             let mut states = client.subscribe();
             let initial = states.borrow().clone();
-            let mut projection = desktop_runtime::ui_api::StateEventProjection::new(&initial);
+            let mut projection = desktop_core::ui_api::StateEventProjection::new(&initial);
             let host = ui_api::TauriHost::new(window.clone());
             tray::sync(&handle, &initial);
             let mut alerts = notifications::Observer::new(&initial);
@@ -396,7 +399,7 @@ pub fn run() {
                 while states.changed().await.is_ok() {
                     let state = states.borrow().clone();
                     for event in projection.project(&state) {
-                        let _ = desktop_runtime::ui_api::Host::emit(&host, event);
+                        let _ = desktop_core::ui_api::Host::emit(&host, event);
                     }
                     tray::sync(&handle, &state);
                     alerts.update(&handle, &state);

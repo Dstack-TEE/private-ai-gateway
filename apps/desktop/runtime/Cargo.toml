@@ -1,14 +1,14 @@
 [package]
 name = "private-ai-proxy-runtime"
 version = "0.1.0"
-description = "Platform-neutral state and persistence for Private AI Proxy"
+description = "Private AI Proxy per-user backend: controller, management server, verifier sessions, usage, account login and web UI"
 license = "Apache-2.0"
 edition = "2021"
 rust-version = "1.98"
 
 [features]
 default = []
-mac-app-store = ["dep:objc2", "dep:objc2-foundation"]
+mac-app-store = ["desktop-core/mac-app-store"]
 web-ui = ["dep:async-stream", "dep:futures-core", "dep:rust-embed"]
 
 [lib]
@@ -18,43 +18,35 @@ path = "src/lib.rs"
 [dependencies]
 aci-protocol = { path = "../../../crates/aci-protocol" }
 agent-bridge = { package = "private-ai-proxy-agent-bridge", path = "../agent-bridge" }
+desktop-core = { package = "private-ai-proxy-core", path = "../core" }
 axum = "0.8"
 async-stream = { version = "0.3", optional = true }
 base64 = "0.23"
 futures-core = { version = "0.3", optional = true }
-if-addrs = "0.15"
 rand = "0.8"
 rust-embed = { version = "8", optional = true }
 sha2 = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["form", "json", "rustls-no-provider"] }
 tokio-util = { version = "0.7", features = ["rt"] }
-# Serde `alias` only widens deserialization, so its ts-rs notice is noise.
-ts-rs = { version = "12", features = ["no-serde-warnings"] }
 tempfile = "3"
 rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "process", "io-util", "signal", "macros", "net"] }
 url = "2"
-semver = "1"
 uuid = { version = "1", features = ["v4"] }
 netwatcher = "0.8"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-socket2 = "0.6"
 rustix = { version = "1", features = ["process"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2 = { version = "0.6", optional = true }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSError", "NSString", "NSURL"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 futures-util = "0.3"
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Power", "Win32_System_Threading", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging", "Win32_System_Environment"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Power", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }

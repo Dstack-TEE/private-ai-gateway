@@ -17,7 +17,7 @@ pub fn stage(bundled: &Path, app_data: &Path) -> io::Result<PathBuf> {
     }
 
     let directory = app_data.join("helpers");
-    agent_bridge::tokens::create_private_dir(&directory)?;
+    desktop_core::private_fs::create_private_dir(&directory)?;
     let metadata = fs::symlink_metadata(&directory)?;
     if !metadata.is_dir() || metadata.permissions().mode() & 0o077 != 0 || metadata.uid() != uid {
         return Err(io::Error::new(
@@ -177,7 +177,7 @@ mod tests {
         fs::create_dir(&user_data).unwrap();
         chown(&user_data, Some(65534), Some(65534)).unwrap();
         let root_directory = root.path().join("root-data").join("helpers");
-        agent_bridge::tokens::create_private_dir(&root_directory).unwrap();
+        desktop_core::private_fs::create_private_dir(&root_directory).unwrap();
         fs::set_permissions(
             root_directory.parent().unwrap(),
             fs::Permissions::from_mode(0o755),

@@ -15,11 +15,11 @@ name = "private-ai-proxy-helper"
 path = "src/bin/private-ai-proxy-helper.rs"
 
 [dependencies]
+desktop-core = { package = "private-ai-proxy-core", path = "../core" }
 axum = "0.8"
 async-stream = "0.3"
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
-fd-lock = "4"
 futures-util = "0.3"
 jsonc-parser = { version = "0.33.1", features = ["serde", "cst"] }
 keyring = "4"
@@ -29,7 +29,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
 shlex = "2"
-ts-rs = "12"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 tokio-util = "0.7"
 toml_edit = "0.25"
@@ -43,6 +42,8 @@ base64 = "0.22"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_WindowsProgramming"] }
 
 [dev-dependencies]
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
+# Core's update check enables reqwest's provider-less rustls; tests that build
+# clients without the backend's provider setup need the bundled one.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }

@@ -1,5 +1,5 @@
 mod permission;
-use desktop_runtime::{
+use desktop_core::{
     client::Client, contracts::GatewayState, preferences::NotificationPreferences, protocol::rpc,
 };
 use std::{

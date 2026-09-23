@@ -9,9 +9,9 @@ use tauri::{
 };
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
-use agent_bridge::agents::{Agent, AgentStatus, ConnectOptions};
-use agent_bridge::brand::PRODUCT_NAME as APP_NAME;
-use desktop_runtime::{client::Client, contracts::GatewayState, protocol::rpc};
+use desktop_core::agents::{Agent, AgentStatus, ConnectOptions};
+use desktop_core::brand::PRODUCT_NAME as APP_NAME;
+use desktop_core::{client::Client, contracts::GatewayState, protocol::rpc};
 
 /// Native menu handles mirror backend state; actions use the same client as the window.
 pub struct TrayMenu {
@@ -322,10 +322,10 @@ fn sync_autostart(app: &AppHandle) {
     tauri::async_runtime::spawn(async move {
         let client = app.state::<std::sync::Arc<Client>>().inner().clone();
         let host = crate::ui_api::TauriHost::from_app(app.clone());
-        let result = desktop_runtime::ui_api::invoke(
+        let result = desktop_core::ui_api::invoke(
             &client,
             &host,
-            desktop_runtime::ui_api::Method::SetLaunchPreference,
+            desktop_core::ui_api::Method::SetLaunchPreference,
             serde_json::json!({ "name": "openAtLogin", "enabled": checked }),
         )
         .await;
@@ -338,13 +338,9 @@ fn sync_autostart(app: &AppHandle) {
                 format!("Open at Login could not be changed: {}", error.message()),
             );
             // Keep open windows in sync with the preference that actually applies.
-            if let Ok(preferences) =
-                desktop_runtime::ui_api::launch_preferences(&client, &host).await
+            if let Ok(preferences) = desktop_core::ui_api::launch_preferences(&client, &host).await
             {
-                let _ = app.emit(
-                    desktop_runtime::ui_api::LAUNCH_PREFERENCES_EVENT,
-                    preferences,
-                );
+                let _ = app.emit(desktop_core::ui_api::LAUNCH_PREFERENCES_EVENT, preferences);
             }
         }
     });
@@ -605,7 +601,7 @@ fn activate_app() {}
 #[cfg(test)]
 mod tests {
     use super::{menu_state, protection_action, protection_action_enabled, should_stop};
-    use desktop_runtime::contracts::{
+    use desktop_core::contracts::{
         ConfidentialProfile, GatewayState, ProfileAuth, ServiceProvider,
     };
 

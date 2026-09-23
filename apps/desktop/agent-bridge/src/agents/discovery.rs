@@ -187,22 +187,6 @@ pub(super) fn executable_metadata(path: &Path) -> Option<fs::Metadata> {
     Some(metadata)
 }
 
-pub(super) fn env_path(name: &str) -> Option<PathBuf> {
-    env::var_os(name)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-}
-
-pub(super) fn home_dir() -> Result<PathBuf, String> {
-    #[cfg(windows)]
-    if let Some(home) = env_path("USERPROFILE") {
-        return Ok(home);
-    }
-    env_path("HOME")
-        .or_else(|| env_path("USERPROFILE"))
-        .ok_or_else(|| "Cannot determine the home directory".to_string())
-}
-
 pub(super) fn validate_authorized_home(home: &Path) -> Result<(), String> {
     let metadata = fs::metadata(home).map_err(|_| {
         "Agent Home access is not available to the backend. Re-enable Agent integrations and try again."
@@ -218,40 +202,14 @@ pub(super) fn validate_authorized_home(home: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// The per-user app data directory (tokens, connection record, locks),
-/// resolved the same way by the desktop shell and the
-/// bundled helper.
-pub fn app_data_dir() -> Result<PathBuf, String> {
-    if let Some(path) = env_path(APP_DATA_OVERRIDE_ENV) {
-        return if path.is_absolute() {
-            Ok(path)
-        } else {
-            Err("The app data override must be an absolute path".to_string())
-        };
-    }
-    if let Some(home) = env_path(HOME_OVERRIDE_ENV) {
-        return Ok(home.join(".private-ai-proxy"));
-    }
-    let base = if cfg!(target_os = "macos") {
-        home_dir()?.join("Library").join("Application Support")
-    } else if cfg!(windows) {
-        env_path("APPDATA").ok_or_else(|| "APPDATA is not set".to_string())?
-    } else {
-        env_path("XDG_DATA_HOME").map_or_else(
-            || home_dir().map(|home| home.join(".local").join("share")),
-            Ok,
-        )?
-    };
-    Ok(base.join(APP_IDENTIFIER))
-}
-
 impl Projector {
     /// Project the app-owned Codex baseline and verified provider metadata.
     /// Both distributions embed the same catalog; no host executable is involved.
     pub fn sync_codex_catalog(&self, catalog: &Catalog) -> Result<(), AgentError> {
         let metadata = codex_catalog(catalog).map_err(AgentError::MetadataUnavailable)?;
         let text = serde_json::to_string_pretty(&metadata).map_err(|_| AgentError::Internal)?;
-        tokens::create_private_dir(&self.data_dir).map_err(|_| AgentError::ConfigurationWrite)?;
+        private_fs::create_private_dir(&self.data_dir)
+            .map_err(|_| AgentError::ConfigurationWrite)?;
         let path = self.codex_catalog_path();
         if fs::read_to_string(&path).is_ok_and(|current| current == text) {
             return Ok(());

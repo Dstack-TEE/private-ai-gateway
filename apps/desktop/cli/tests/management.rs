@@ -180,7 +180,7 @@ fn adding_a_profile_requires_consent_before_startup_or_credential_input() {
             "https://example.com",
             "--key-stdin",
         ])
-        .env(agent_bridge::agents::HOME_OVERRIDE_ENV, home.path())
+        .env(desktop_core::paths::HOME_OVERRIDE_ENV, home.path())
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -217,19 +217,19 @@ impl Backend {
         }
         let home = directory.path().join("home");
         let data = home.join(".private-ai-proxy");
-        agent_bridge::tokens::create_private_dir(&data).unwrap();
+        desktop_core::private_fs::create_private_dir(&data).unwrap();
         let port = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
             .unwrap()
             .port();
-        agent_bridge::tokens::write_private(
+        desktop_core::private_fs::write_private(
             &data.join("local-api.json"),
             &format!(r#"{{"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":{port}}}"#),
         )
         .unwrap();
         let child = Command::new(binary("private-ai-proxy-service"))
-            .env(agent_bridge::agents::HOME_OVERRIDE_ENV, &home)
+            .env(desktop_core::paths::HOME_OVERRIDE_ENV, &home)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(fs::File::create(directory.path().join("backend.log")).unwrap())
@@ -274,7 +274,7 @@ impl Backend {
     fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(self.cli());
         command.args(args).env(
-            agent_bridge::agents::HOME_OVERRIDE_ENV,
+            desktop_core::paths::HOME_OVERRIDE_ENV,
             self.directory.path().join("home"),
         );
         command
@@ -364,7 +364,7 @@ fn web_ui_is_opt_in_and_login_links_work_once() {
 fn app_open_fails_fast_while_an_update_holds_the_startup_gate() {
     let backend = Backend::start();
     let data = backend.directory.path().join("home/.private-ai-proxy");
-    let gate = agent_bridge::lock::startup(&data).unwrap().unwrap();
+    let gate = desktop_core::lock::startup(&data).unwrap().unwrap();
     let started = Instant::now();
     let blocked = backend
         .command(&["app", "open", "--web", "--yes", "--json"])
@@ -715,7 +715,7 @@ fn malformed_client_and_watch_disconnect_do_not_stop_backend() {
         .unwrap();
     drop(stream);
     {
-        use desktop_runtime::protocol::{
+        use desktop_core::protocol::{
             self, Command as RpcCommand, Hello, Outcome, Request, Response,
         };
         let mut subscribers = Vec::new();

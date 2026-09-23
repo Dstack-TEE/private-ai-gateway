@@ -8,65 +8,14 @@ use std::{
 use rusqlite::{
     params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension, Row,
 };
-use serde::{Deserialize, Serialize};
 
-use crate::contracts::{RequestActivity, UsageSummary};
+use desktop_core::{
+    contracts::{RequestActivity, UsageSummary},
+    usage::{UsageModelPoint, UsagePage, UsagePoint, UsageQuery},
+};
 
 const DEFAULT_PAGE_SIZE: usize = 20;
 const MAX_PAGE_SIZE: usize = 100;
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize, ts_rs::TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(optional_fields)]
-pub struct UsageQuery {
-    #[serde(default)]
-    pub agent: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub session_id: Option<String>,
-    #[serde(default)]
-    pub since: Option<u64>,
-    #[serde(default)]
-    pub until: Option<u64>,
-    #[serde(default)]
-    pub cursor: Option<String>,
-    #[serde(default)]
-    pub limit: Option<usize>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, ts_rs::TS)]
-#[serde(rename_all = "camelCase")]
-pub struct UsagePoint {
-    pub day: String,
-    pub requests: u64,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub tokens: u64,
-    pub cost_usd: f64,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, ts_rs::TS)]
-#[serde(rename_all = "camelCase")]
-pub struct UsagePage {
-    pub items: Vec<RequestActivity>,
-    pub next_cursor: Option<String>,
-    pub summary: UsageSummary,
-    pub series: Vec<UsagePoint>,
-    pub model_series: Vec<UsageModelPoint>,
-    pub agents: Vec<String>,
-    pub models: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, ts_rs::TS)]
-#[serde(rename_all = "camelCase")]
-pub struct UsageModelPoint {
-    pub day: String,
-    pub model: Option<String>,
-    pub requests: u64,
-    pub tokens: u64,
-    pub cost_usd: f64,
-}
 
 pub struct UsageStore {
     connection: Mutex<Connection>,
@@ -106,7 +55,7 @@ impl UsageStore {
             }
             Ok(_) => secure_file(&path)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                agent_bridge::tokens::write_private(&path, "")
+                desktop_core::private_fs::write_private(&path, "")
                     .map_err(|error| format!("Cannot create the usage database: {error}"))?;
             }
             Err(error) => return Err(format!("Cannot inspect the usage database: {error}")),
@@ -620,7 +569,7 @@ fn secure_parent(path: &Path) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| "The usage database path has no parent".to_string())?;
-    agent_bridge::tokens::create_private_dir(parent)
+    desktop_core::private_fs::create_private_dir(parent)
         .map_err(|error| format!("Cannot create the app data directory: {error}"))
 }
 

@@ -7,10 +7,11 @@
 
 use std::process::ExitCode;
 
-use agent_bridge::{agents, tokens::TokenFiles};
+use agent_bridge::tokens::TokenFiles;
+use desktop_core::{agents::Agent, brand::PRODUCT_NAME, paths::app_data_dir};
 
 fn usage() -> String {
-    let ids = agents::Agent::ALL.map(agents::Agent::id).join("|");
+    let ids = Agent::ALL.map(Agent::id).join("|");
     format!("usage: private-ai-proxy-helper --agent-token <{ids}>")
 }
 
@@ -27,14 +28,14 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let token = agents::Agent::from_id(&agent)
-        .and_then(|agent| agents::app_data_dir().map(|dir| (agent, dir)))
+    let token = Agent::from_id(&agent)
+        .and_then(|agent| app_data_dir().map(|dir| (agent, dir)))
         .and_then(|(agent, dir)| TokenFiles::new(&dir).read(agent.id()))
         .and_then(|token| {
             token.ok_or_else(|| {
                 format!(
                     "No active gateway credential. Open {}, enable protection, and reconnect this agent if it needs attention. After disconnecting, restart the agent to reload its restored configuration.",
-                    agent_bridge::brand::PRODUCT_NAME
+                    PRODUCT_NAME
                 )
             })
         });

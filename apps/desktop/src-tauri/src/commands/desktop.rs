@@ -3,7 +3,7 @@ use crate::*;
 #[tauri::command]
 pub(crate) async fn open_agent_website(app: AppHandle, agent_id: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
-    let url = agent_bridge::agents::Agent::from_id(&agent_id)?.website();
+    let url = desktop_core::agents::Agent::from_id(&agent_id)?.website();
     run_blocking(move || {
         app.opener()
             .open_url(url, None::<&str>)
@@ -16,7 +16,7 @@ pub(crate) async fn open_agent_website(app: AppHandle, agent_id: String) -> Resu
 pub(crate) async fn open_about_link(app: AppHandle, target: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
     let url = match target.as_str() {
-        "documentation" => agent_bridge::brand::SUPPORT_URL,
+        "documentation" => desktop_core::brand::SUPPORT_URL,
         "github" => "https://github.com/Dstack-TEE/private-ai-gateway",
         "aci" => "https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/attested-confidential-inference.md",
         _ => return Err("Unknown resource".to_string()),
@@ -168,16 +168,16 @@ pub(crate) async fn stop_all_and_quit(
 #[tauri::command]
 pub(crate) async fn open_api_key_page(
     app: AppHandle,
-    provider: desktop_runtime::contracts::ServiceProvider,
+    provider: desktop_core::contracts::ServiceProvider,
 ) -> Result<(), String> {
     distribution::require(
         distribution::CAPABILITIES.account_portal_links,
         "Account portal links are unavailable in this distribution",
     )?;
     let url = match provider {
-        desktop_runtime::contracts::ServiceProvider::Phala => "https://cloud.phala.com/dashboard",
-        desktop_runtime::contracts::ServiceProvider::Redpill => "https://www.redpill.ai/dashboard",
-        desktop_runtime::contracts::ServiceProvider::Custom => {
+        desktop_core::contracts::ServiceProvider::Phala => "https://cloud.phala.com/dashboard",
+        desktop_core::contracts::ServiceProvider::Redpill => "https://www.redpill.ai/dashboard",
+        desktop_core::contracts::ServiceProvider::Custom => {
             return Err("Custom providers do not have a built-in API key page".into())
         }
     };

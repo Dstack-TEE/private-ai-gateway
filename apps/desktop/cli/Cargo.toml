@@ -34,6 +34,7 @@ bytes = "1"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 dcap-qvl = { version = "0.6.3", default-features = false, features = ["std", "report", "rustcrypto"] }
+desktop-core = { package = "private-ai-proxy-core", path = "../core" }
 desktop-runtime = { package = "private-ai-proxy-runtime", path = "../runtime" }
 ed25519-dalek = "2"
 futures-util = "0.3"
@@ -51,6 +52,9 @@ tokio-util = "0.7"
 uuid = { version = "1", features = ["v4"] }
 webpki-roots = "1"
 x509-parser = "0.18"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Environment", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 tempfile = "3"

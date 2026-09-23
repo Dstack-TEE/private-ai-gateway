@@ -129,9 +129,9 @@ jobs:
             ${{ env.CARGO_TARGET_DIR }}/*/*/.fingerprint
             ${{ env.CARGO_TARGET_DIR }}/*/*/deps
             ${{ env.CARGO_TARGET_DIR }}/*/*/build
-          key: pap-rust-v2-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_RUST_CACHE_NAMESPACE }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/agent-bridge/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}
+          key: pap-rust-v2-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_RUST_CACHE_NAMESPACE }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/core/Cargo.toml', 'apps/desktop/agent-bridge/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}
           restore-keys: |
-            pap-rust-v2-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_RUST_CACHE_NAMESPACE }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/agent-bridge/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}-partial-
+            pap-rust-v2-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_RUST_CACHE_NAMESPACE }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/core/Cargo.toml', 'apps/desktop/agent-bridge/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}-partial-
             pap-rust-v2-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_RUST_CACHE_NAMESPACE }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-
       - name: Install Linux desktop dependencies
         run: |
@@ -144,10 +144,10 @@ jobs:
         working-directory: apps/desktop
         run: |
           npm run prepare:brand
-          status="$(git status --porcelain=v1 --untracked-files=all -- src/renderer/generated agent-bridge/src/brand.rs src-tauri/icons/32x32.png src-tauri/icons/128x128.png src-tauri/icons/128x128@2x.png src-tauri/icons/icon.png src-tauri/icons/icon.icns src-tauri/icons/icon.ico src-tauri/icons/AppIcon.icon src-tauri/installer/brand-*.bmp src-tauri/installer/brand-dmg-background.png assets/tray)"
+          status="$(git status --porcelain=v1 --untracked-files=all -- src/renderer/generated core/src/brand.rs src-tauri/icons/32x32.png src-tauri/icons/128x128.png src-tauri/icons/128x128@2x.png src-tauri/icons/icon.png src-tauri/icons/icon.icns src-tauri/icons/icon.ico src-tauri/icons/AppIcon.icon src-tauri/installer/brand-*.bmp src-tauri/installer/brand-dmg-background.png assets/tray)"
           if [[ -n "$status" ]]; then
             printf '%s\n' "$status"
-            git diff -- src/renderer/generated agent-bridge/src/brand.rs src-tauri/icons src-tauri/installer assets/tray
+            git diff -- src/renderer/generated core/src/brand.rs src-tauri/icons src-tauri/installer assets/tray
             exit 1
           fi
       - name: Verify renderer
@@ -167,7 +167,9 @@ jobs:
           cargo clippy --locked --workspace --all-targets -- -D warnings
           cargo test --locked --workspace
           app_store_config="$(cat src-tauri/tauri.appstore.conf.json)"
+          cargo clippy --locked --all-targets --package private-ai-proxy-core --features mac-app-store -- -D warnings
           cargo clippy --locked --all-targets --package private-ai-proxy-runtime --features mac-app-store -- -D warnings
+          cargo test --locked --package private-ai-proxy-core --features mac-app-store
           cargo test --locked --package private-ai-proxy-runtime --features mac-app-store
           TAURI_CONFIG="$app_store_config" cargo clippy --locked --all-targets --package private-ai-proxy-desktop --features mac-app-store -- -D warnings
           TAURI_CONFIG="$app_store_config" cargo test --locked --package private-ai-proxy-desktop --features mac-app-store
@@ -563,6 +565,7 @@ jobs:
         if: runner.os == 'macOS'
         working-directory: apps/desktop
         run: |
+          cargo test --release --locked --package private-ai-proxy-core --target "$(rustc -vV | sed -n 's/^host: //p')" --lib
           cargo test --release --locked --package private-ai-proxy-runtime --target "$(rustc -vV | sed -n 's/^host: //p')" --lib
 
       - name: Test Windows desktop libraries
@@ -572,6 +575,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --release --locked --package private-ai-proxy-agent-bridge --lib
+          cargo test --release --locked --package private-ai-proxy-core --lib
           cargo test --release --locked --package private-ai-proxy-runtime --lib
           cargo test --release --locked --package private-ai-proxy-desktop --lib
 

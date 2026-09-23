@@ -69,8 +69,42 @@ impl fmt::Display for AgentError {
 
 impl std::error::Error for AgentError {}
 
-impl From<crate::lock::ApplyLockError> for AgentError {
-    fn from(_: crate::lock::ApplyLockError) -> Self {
+impl From<desktop_core::lock::ApplyLockError> for AgentError {
+    fn from(_: desktop_core::lock::ApplyLockError) -> Self {
         Self::ConfigurationLock
+    }
+}
+
+impl From<AgentError> for desktop_core::protocol::RpcError {
+    fn from(error: AgentError) -> Self {
+        Self::new(error.code(), &error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use desktop_core::protocol::RpcError;
+
+    #[test]
+    fn agent_failures_keep_actionable_causes_without_internal_details() {
+        for (error, code) in [
+            (AgentError::NoCompatibleModels, "no_compatible_models"),
+            (AgentError::IncompatibleModel, "incompatible_model"),
+            (AgentError::ConfigurationRead, "configuration_read_failed"),
+            (AgentError::ConfigurationWrite, "configuration_write_failed"),
+            (AgentError::Internal, "operation_failed"),
+        ] {
+            let public = RpcError::from(error);
+            assert_eq!(public.code, code);
+            assert!(!public.message.contains("PRIVATE_OS_DETAIL"));
+            assert!(!public.message.contains("sk-hidden"));
+        }
+        let diagnostic =
+            "The app-owned Codex model catalog is invalid. Reinstall Private AI Proxy.";
+        assert_eq!(
+            RpcError::from(AgentError::MetadataUnavailable(diagnostic.to_string())).message,
+            diagnostic
+        );
     }
 }

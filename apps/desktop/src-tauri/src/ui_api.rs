@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use desktop_runtime::{
+use desktop_core::{
     agent_access::AgentAccessStatus,
     client::Client,
     contracts::{AgentStatus, GatewayState},
@@ -70,7 +70,7 @@ impl Host for TauriHost {
 
     fn present_account_login(&self, url: &str) {
         if self.app().opener().open_url(url, None::<&str>).is_err() {
-            desktop_runtime::diagnostic(format_args!(
+            desktop_core::diagnostic(format_args!(
                 "Cannot open the account connection page; use the manual connection link"
             ));
         }
@@ -141,7 +141,7 @@ impl Host for TauriHost {
             .ok_or_else(|| "Home access requires the main window".to_string())?;
         let client = self.app().state::<Arc<Client>>().inner().clone();
         request_agent_access(window, client).await?;
-        serde_json::to_value(desktop_runtime::agent_access::status())
+        serde_json::to_value(desktop_core::agent_access::status())
             .map_err(|_| "Management response failed".to_string())
     }
 }
@@ -167,8 +167,8 @@ async fn request_agent_access(window: WebviewWindow, client: Arc<Client>) -> Res
     if window.label() != "main" || native_dialog::has_active_dialog(window.app_handle()) {
         return Ok(());
     }
-    if desktop_runtime::agent_access::status() != AgentAccessStatus::Authorized {
-        let home = desktop_runtime::agent_access::expected_home()?;
+    if desktop_core::agent_access::status() != AgentAccessStatus::Authorized {
+        let home = desktop_core::agent_access::expected_home()?;
         let (send, receive) = tokio::sync::oneshot::channel();
         window
             .dialog()
@@ -189,9 +189,9 @@ async fn request_agent_access(window: WebviewWindow, client: Arc<Client>) -> Res
         let path = selection
             .into_path()
             .map_err(|_| "The selected Home folder is invalid".to_string())?;
-        run_blocking(move || desktop_runtime::agent_access::authorize(&path)).await?;
+        run_blocking(move || desktop_core::agent_access::authorize(&path)).await?;
     }
-    run_blocking(desktop_runtime::agent_access::prepare_for_service).await?;
+    run_blocking(desktop_core::agent_access::prepare_for_service).await?;
     run_blocking(move || client.restart_service()).await?;
     let _ = window.emit(shared::AGENTS_CHANGED_EVENT, ());
     Ok(())

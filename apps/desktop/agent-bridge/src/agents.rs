@@ -17,14 +17,11 @@ mod registry;
 mod transactions;
 mod validation;
 
-pub use discovery::app_data_dir;
 use discovery::*;
 pub use error::AgentError;
 use projection::*;
 use providers::*;
-pub use registry::{
-    Agent, AgentPreview, AgentRepairAction, AgentStatus, ConfigChange, ConnectOptions,
-};
+pub(crate) use registry::AgentIntegration;
 
 use std::{
     collections::BTreeMap,
@@ -40,24 +37,24 @@ mod oh_my_pi;
 mod openclaw;
 mod selection;
 
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{
-    brand::PRODUCT_NAME,
-    catalog::{Catalog, Surface},
-    config_doc::{parse_jsonc, ConfigDoc, ConfigValue, Format},
+use desktop_core::{
+    agents::{Agent, AgentPreview, AgentRepairAction, AgentStatus, ConfigChange, ConnectOptions},
+    brand::{APP_IDENTIFIER, PRODUCT_NAME},
     lock,
-    secrets::SecretStore,
-    tokens::{self, TokenFiles, TokenSet},
+    paths::{app_data_dir, env_path, home_dir, HOME_OVERRIDE_ENV},
+    private_fs::{self, write_atomic},
 };
 
-/// Test-only override for the home directory (and the app data directory).
-pub const HOME_OVERRIDE_ENV: &str = "PRIVATE_AI_PROXY_HOME";
-/// Exact app-data override used by sandboxed desktop distributions.
-pub const APP_DATA_OVERRIDE_ENV: &str = "PRIVATE_AI_PROXY_DATA_DIR";
-pub use crate::brand::APP_IDENTIFIER;
+use crate::{
+    catalog::{Catalog, Surface},
+    config_doc::{parse_jsonc, ConfigDoc, ConfigValue, Format},
+    secrets::SecretStore,
+    tokens::{TokenFiles, TokenSet},
+};
+
 const STORE_FILE: &str = "agent-connections.json";
 const CODEX_CATALOG_FILE: &str = "codex-model-catalog.json";
 const HELPER_MISSING: &str =
@@ -425,7 +422,7 @@ impl Projector {
     /// permission side effects); maintenance happens only under
     /// the apply lock.
     fn load_store(&self) -> Result<Store, String> {
-        let text = tokens::read_private_text(&self.store_path())
+        let text = private_fs::read_private_text(&self.store_path())
             .map_err(|error| format!("Cannot read the agent connection record: {error}"))?;
         match text {
             None => Ok(Store::new()),
@@ -444,7 +441,7 @@ impl Projector {
                 self.credential_directory(),
                 self.credential_directory().join("agent-tokens"),
             ] {
-                tokens::create_private_dir(&path)
+                private_fs::create_private_dir(&path)
                     .map_err(|_| "Cannot create Agent credential directory")?;
                 let metadata = fs::symlink_metadata(&path)
                     .map_err(|_| "Cannot inspect Agent credential directory")?;
@@ -462,7 +459,7 @@ impl Projector {
                 }
             }
         }
-        tokens::tighten_private(&self.store_path())
+        private_fs::tighten_private(&self.store_path())
             .map_err(|error| format!("Cannot secure the agent connection record: {error}"))?;
         self.tokens.maintain(&Agent::ALL.map(Agent::id))
     }
@@ -535,70 +532,6 @@ fn secret_entry(agent: Agent, path: &[String]) -> String {
         agent.id(),
         hex(&Sha256::digest(path.join("\u{1f}")))
     )
-}
-
-/// Replace `path` atomically: refuse symlinks, re-check that the file still
-/// holds `expected` right before the swap, write a random owner-only temp file
-/// (never following links), keep the target's permissions when it exists,
-/// rename, then fsync the directory on Unix. Callers that need cross-process
-/// exclusion wrap this in `lock::with_apply_lock`.
-pub fn write_atomic(path: &Path, content: &str, expected: Option<Option<&str>>) -> io::Result<()> {
-    let dir = path
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no parent directory"))?;
-    fs::create_dir_all(dir)?;
-    let existing = match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "refusing to replace a symlink",
-            ))
-        }
-        Ok(metadata) => Some(metadata),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error),
-    };
-    if let Some(expected) = expected {
-        let current = match fs::read_to_string(path) {
-            Ok(text) => Some(text),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error),
-        };
-        if current.as_deref() != expected {
-            return Err(io::Error::other(
-                "the file changed on disk since it was read",
-            ));
-        }
-    }
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("config");
-    let mut nonce = [0u8; 8];
-    rand::rngs::OsRng.fill_bytes(&mut nonce);
-    let temp = dir.join(format!(".{name}.{}.tmp", hex(&nonce)));
-    let result = (|| {
-        tokens::write_private(&temp, content)?;
-        if let Some(metadata) = &existing {
-            fs::set_permissions(&temp, metadata.permissions())?;
-        }
-        fs::rename(&temp, path)?;
-        sync_dir(dir)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result
-}
-
-#[cfg(unix)]
-fn sync_dir(dir: &Path) -> io::Result<()> {
-    fs::File::open(dir)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_dir(_dir: &Path) -> io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]
