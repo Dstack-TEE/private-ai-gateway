@@ -59,8 +59,14 @@ const sidecars = appStore
   : directSidecars;
 // The service embeds the browser UI; the App Store build omits it.
 if (!appStore) {
-  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-  execFileSync(npm, ["run", "build:web"], { cwd: appRoot, env: buildEnv, stdio: "inherit" });
+  // Node refuses to spawn Windows .cmd shims without a shell (CVE-2024-27980).
+  // The arguments are constant, so running npm through the shell is safe.
+  execFileSync("npm", ["run", "build:web"], {
+    cwd: appRoot,
+    env: buildEnv,
+    stdio: "inherit",
+    shell: process.platform === "win32",
+  });
   await assertWebBundle();
 }
 
