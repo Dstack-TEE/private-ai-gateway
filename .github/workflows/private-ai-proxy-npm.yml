@@ -46,9 +46,6 @@ jobs:
       - name: Install packaging dependencies
         working-directory: apps/desktop
         run: npm ci --ignore-scripts
-      - name: Verify embedded web UI source
-        working-directory: apps/desktop
-        run: npm run build:web
       - id: release
         name: Validate release
         env:
@@ -224,7 +221,7 @@ jobs:
           test "$("$prefix/bin/private-ai-proxy" --version)" = "private-ai-proxy $VERSION"
           test "$("$prefix/bin/pap" --version)" = "private-ai-proxy $VERSION"
           test "$("$prefix/bin/aci" --version)" = "private-ai-proxy $VERSION"
-          "$prefix/bin/pap" ui --help | grep -F -- '--no-open'
+          "$prefix/bin/pap" app open --help | grep -F -- '--web'
       - name: Upload npm tarballs
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:

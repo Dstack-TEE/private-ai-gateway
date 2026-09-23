@@ -9,6 +9,7 @@ import {
   MAC_APP_STORE_SIDECARS,
   runtimeBuildVersion,
 } from "./distribution.mjs";
+import { assertWebBundle } from "./package-cli.mjs";
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const debug = process.argv.includes("--debug");
@@ -23,8 +24,6 @@ const buildEnv = {
   ...(path.isAbsolute(cargo) ? { PATH: `${cargoDirectory}${path.delimiter}${pathValue}` } : {}),
   ...(buildVersion ? { PAP_BUILD_VERSION: buildVersion } : {}),
 };
-const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-execFileSync(npm, ["run", "build:web"], { cwd: appRoot, env: buildEnv, stdio: "inherit" });
 const rustcOutput = execFileSync(rustc, ["-vV"], {
   cwd: appRoot,
   encoding: "utf8",
@@ -58,12 +57,19 @@ const directSidecars = [
 const sidecars = appStore
   ? directSidecars.filter((sidecar) => MAC_APP_STORE_SIDECARS.includes(sidecar.name))
   : directSidecars;
+// The service embeds the browser UI; the App Store build omits it.
+if (!appStore) {
+  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+  execFileSync(npm, ["run", "build:web"], { cwd: appRoot, env: buildEnv, stdio: "inherit" });
+  await assertWebBundle();
+}
 
 for (const sidecar of sidecars) {
   for (const target of targets) {
     const buildArgs = ["build", "--locked", "--package", sidecar.package, "--bin", sidecar.name];
     if (appStore && sidecar.appStoreFeatures.length > 0) {
-      buildArgs.push("--features", sidecar.appStoreFeatures.join(","));
+      // Replacing the default features drops the CLI package's web UI.
+      buildArgs.push("--no-default-features", "--features", sidecar.appStoreFeatures.join(","));
     }
     if (explicitTarget) buildArgs.push("--target", target);
     if (!debug) buildArgs.push("--release");

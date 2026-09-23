@@ -20,18 +20,9 @@ import {
   platformPackageAlias,
   platformPackageVersion,
 } from "./package-npm.mjs";
-import { assertWebBundle, binaries } from "./package-cli.mjs";
+import { binaries } from "./package-cli.mjs";
 
 const version = "1.2.3-beta.4";
-
-test("npm native packaging shares the CLI web bundle prerequisite", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "pap-npm-web-"));
-  try {
-    await assert.rejects(assertWebBundle(root), /Missing embedded web UI/);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
 
 test("packs a thin wrapper and a native package that execute together", {
   skip: process.platform !== "linux" || process.arch !== "x64",

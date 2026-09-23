@@ -14,7 +14,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import semver from "semver";
 
-import { assertWebBundle, binaries } from "./package-cli.mjs";
+import { binaries } from "./package-cli.mjs";
 
 const scriptPath = fileURLToPath(import.meta.url);
 const appRoot = path.resolve(path.dirname(scriptPath), "..");
@@ -212,7 +212,6 @@ function parseArguments(arguments_) {
 }
 
 async function main() {
-  await assertWebBundle();
   const options = parseArguments(process.argv.slice(2));
   const tarball = options.command === "wrapper"
     ? await buildWrapperPackage(options)
