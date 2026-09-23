@@ -1,9 +1,8 @@
-//! Sidecar lifecycle and the platform-neutral desktop view of the gateway.
+//! Verifier lifecycle and the platform-neutral desktop view of the gateway.
 //!
-//! The verifier process listens on a private loopback port; the stable
-//! local endpoint belongs to the in-process proxy. A session is only opened
-//! for requests once the sidecar's verified identity and the catalog read
-//! through it are both in, and they are published to the proxy together under
+//! The stable local endpoint and verifier both run in the service process. A
+//! session is only opened for requests once the verifier's identity and the
+//! catalog read through it are both in, and they are published together under
 //! one generation; any loss of verification revokes the session and clears
 //! the catalog at once. Platform clients subscribe to state changes and map
 //! them to their own window and tray surfaces.
@@ -12,7 +11,6 @@ mod events;
 use events::*;
 
 use std::{
-    collections::VecDeque,
     sync::{Arc, Mutex, MutexGuard},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -27,56 +25,98 @@ use crate::{local_api, service_config};
 use desktop_gateway::catalog::{Catalog, EndpointInventory};
 use desktop_gateway::proxy::{ProxyEvent, ProxyState, Session};
 use serde_json::{Map, Value};
-use tokio::{
-    runtime::Handle,
-    sync::{mpsc::Receiver, watch},
-};
+use tokio::{runtime::Handle, sync::watch};
 
 const MAX_ACTIVITY: usize = 50;
-const MAX_DIAGNOSTIC_BYTES: usize = 4_096;
-const MAX_EVENT_BYTES: usize = 1_048_576;
 
 pub struct GatewayManager {
     inventory: Option<Arc<InventoryUpdater>>,
     inner: Mutex<RuntimeState>,
     proxy: Arc<ProxyState>,
     usage: Arc<UsageStore>,
-    launcher: Arc<dyn SidecarLauncher>,
+    launcher: Arc<dyn VerifierLauncher>,
     task_runtime: Handle,
     state_tx: watch::Sender<GatewayState>,
 }
 
-pub enum SidecarEvent {
-    Stdout(Vec<u8>),
-    Stderr(Vec<u8>),
-    Error(String),
-    Terminated,
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct IdentityEvent {
+    pub trust_level: String,
+    pub tee_type: String,
+    pub keyset_digest: String,
+    pub keyset_not_after: u64,
+    pub tls_spki: Option<String>,
+    pub source_provenance: IdentitySourceProvenance,
+    pub service_capabilities: ServiceCapabilities,
+    pub verification: Value,
 }
 
-pub trait SidecarChild: Send {
-    fn kill(&mut self) -> Result<(), String>;
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct IdentitySourceProvenance {
+    pub repo_url: Option<String>,
+    pub repo_commit: Option<String>,
+    pub image_digest: Option<String>,
 }
 
-pub trait SidecarLauncher: Send + Sync {
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct ServiceCapabilities {
+    pub serving: String,
+    pub supported_e2ee_versions: Vec<String>,
+}
+
+#[derive(Clone)]
+pub enum VerifierEvent {
+    Ready {
+        identity: IdentityEvent,
+        remote_url: String,
+        service: Arc<dyn desktop_gateway::proxy::VerifiedService>,
+    },
+    IdentityUpdated {
+        identity: IdentityEvent,
+    },
+    Blocked {
+        code: Option<String>,
+        reason: String,
+    },
+    Fatal {
+        message: String,
+    },
+    Terminated {
+        error: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct VerifierConfig {
+    pub remote_url: String,
+    pub require_production_os: bool,
+}
+
+pub type VerifierEventSink = Arc<dyn Fn(VerifierEvent) + Send + Sync>;
+
+pub trait VerifierTask: Send {
+    fn stop(&mut self) -> Result<(), String>;
+}
+
+pub trait VerifierLauncher: Send + Sync {
     fn spawn(
         &self,
-        args: Vec<String>,
-    ) -> Result<(Receiver<SidecarEvent>, Box<dyn SidecarChild>), String>;
+        config: VerifierConfig,
+        events: VerifierEventSink,
+        requests: tokio::sync::mpsc::Sender<ProxyEvent>,
+    ) -> Result<Box<dyn VerifierTask>, String>;
 }
 
 struct RuntimeState {
-    child: Option<Box<dyn SidecarChild>>,
+    task: Option<Box<dyn VerifierTask>>,
     /// Bumped on every start and stop; doubles as the proxy session generation.
     generation: u64,
     /// Bumped on identity changes, independently of catalog refreshes.
     epoch: u64,
     catalog_read: u64,
     catalog: Option<Catalog>,
-    stdout: Vec<u8>,
-    diagnostic: VecDeque<u8>,
-    /// Where the sidecar listens once ready; private to this process.
-    sidecar_url: Option<String>,
-    /// The sidecar reported a verified identity for this generation.
+    service: Option<Arc<dyn desktop_gateway::proxy::VerifiedService>>,
+    /// The verifier reported a verified identity for this generation.
     identity_ready: bool,
     /// A settings verification may attest and discover models, but it never
     /// opens the local forwarding session to agents.
@@ -97,7 +137,7 @@ impl GatewayManager {
     pub fn new(
         proxy: Arc<ProxyState>,
         usage: Arc<UsageStore>,
-        launcher: Arc<dyn SidecarLauncher>,
+        launcher: Arc<dyn VerifierLauncher>,
         task_runtime: Handle,
         mut state: GatewayState,
     ) -> Self {
@@ -125,14 +165,12 @@ impl GatewayManager {
         let (state_tx, _) = watch::channel(state.clone());
         Self {
             inner: Mutex::new(RuntimeState {
-                child: None,
+                task: None,
                 generation: 0,
                 epoch: 0,
                 catalog_read: 0,
                 catalog: None,
-                stdout: Vec::new(),
-                diagnostic: VecDeque::with_capacity(MAX_DIAGNOSTIC_BYTES),
-                sidecar_url: None,
+                service: None,
                 identity_ready: false,
                 verification_only: false,
                 session_id,
@@ -181,25 +219,9 @@ impl GatewayManager {
         if let Some(error) = &runtime.state.endpoint_error {
             return Err(format!("The local endpoint is unavailable: {error}"));
         }
-        if runtime.child.is_some() {
+        if runtime.task.is_some() {
             return Err("Gateway is already running".to_string());
         }
-
-        let mut args = Vec::with_capacity(8);
-        if config.require_production_os {
-            args.push("--require-production-os".to_string());
-        }
-        args.extend([
-            "serve".to_string(),
-            remote_url.clone(),
-            "--listen".to_string(),
-            "127.0.0.1:0".to_string(),
-            "--control".to_string(),
-            "127.0.0.1:0".to_string(),
-            "--json-events".to_string(),
-        ]);
-
-        let (receiver, mut child) = self.launcher.spawn(args)?;
 
         runtime.generation = runtime.generation.wrapping_add(1);
         let generation = runtime.generation;
@@ -214,19 +236,7 @@ impl GatewayManager {
             None
         }
         .or_else(|| (!verification_only).then(now_secs));
-        if !verification_only {
-            if let Err(error) = self
-                .usage
-                .save_active_session(&session_id, started_at.unwrap_or_else(now_secs))
-            {
-                let _ = child.kill();
-                return Err(error);
-            }
-        }
-        runtime.child = Some(child);
-        runtime.stdout.clear();
-        runtime.diagnostic.clear();
-        runtime.sidecar_url = None;
+        runtime.service = None;
         runtime.identity_ready = false;
         runtime.verification_only = verification_only;
         if reset_catalog_history {
@@ -268,7 +278,51 @@ impl GatewayManager {
             ..Session::default()
         });
         self.publish();
-        spawn_event_reader(Arc::clone(self), generation, receiver);
+        let weak = Arc::downgrade(self);
+        let events: VerifierEventSink = Arc::new(move |event| {
+            if let Some(manager) = weak.upgrade() {
+                if let Err(error) = manager.handle_event(generation, event) {
+                    let _ = manager.fail(generation, error);
+                }
+            }
+        });
+        let task = self.launcher.spawn(
+            VerifierConfig {
+                remote_url: config.remote_url.clone(),
+                require_production_os: config.require_production_os,
+            },
+            events,
+            self.proxy.event_sender(),
+        );
+        let mut task = match task {
+            Ok(task) => task,
+            Err(error) => {
+                let _ = self.fail(generation, error.clone());
+                return Err(error);
+            }
+        };
+        if !verification_only {
+            if let Err(error) = self
+                .usage
+                .save_active_session(&session_id, started_at.unwrap_or_else(now_secs))
+            {
+                let _ = task.stop();
+                let _ = self.fail(generation, error.clone());
+                return Err(error);
+            }
+        }
+        {
+            let mut runtime = self.lock()?;
+            if runtime.generation != generation {
+                let _ = task.stop();
+                return Err("Gateway start was superseded".to_string());
+            }
+            if matches!(runtime.state.status.as_str(), "error" | "blocked") {
+                let _ = task.stop();
+            } else {
+                runtime.task = Some(task);
+            }
+        }
         let manager = Arc::clone(self);
         self.task_runtime.spawn(async move {
             let budget = Duration::from_secs(if verification_only { 45 } else { 120 });
@@ -326,20 +380,18 @@ impl GatewayManager {
         self.publish();
     }
 
-    /// Stop the sidecar in any state, including while verifying. Requests
-    /// already forwarded fail with the sidecar; no new request is accepted.
+    /// Stop the verifier task in any state, including while verifying. Requests
+    /// already forwarded are revoked; no new request is accepted.
     pub fn stop(&self) -> Result<GatewayState, String> {
         self.stop_with_reconnect(false)
     }
 
     pub fn stop_with_reconnect(&self, reconnecting: bool) -> Result<GatewayState, String> {
         let mut runtime = self.lock()?;
-        let child = runtime.child.take();
+        let task = runtime.task.take();
         runtime.generation = runtime.generation.wrapping_add(1);
         let generation = runtime.generation;
-        runtime.stdout.clear();
-        runtime.diagnostic.clear();
-        runtime.sidecar_url = None;
+        runtime.service = None;
         runtime.identity_ready = false;
         runtime.verification_only = false;
         let protected_since = runtime.state.protected_since;
@@ -365,17 +417,16 @@ impl GatewayManager {
         } else {
             self.usage.end_session()
         };
-        if let Some(mut child) = child {
-            child
-                .kill()
-                .map_err(|error| format!("Cannot stop verifier process: {error}"))?;
+        if let Some(mut task) = task {
+            task.stop()
+                .map_err(|error| format!("Cannot stop verifier task: {error}"))?;
         }
         self.publish();
         session_result?;
         Ok(state)
     }
 
-    /// What survives a stop or restart of the sidecar: settings, key status,
+    /// What survives a stop or restart of the verifier: settings, key status,
     /// the local endpoint, and recent activity. The catalog does not: it
     /// belongs to a verified session.
     fn carried(previous: &GatewayState) -> GatewayState {
@@ -503,7 +554,7 @@ impl GatewayManager {
     }
 
     pub fn is_running(&self) -> Result<bool, String> {
-        Ok(self.lock()?.child.is_some())
+        Ok(self.lock()?.task.is_some())
     }
 
     pub fn report_error(&self, message: String) {
@@ -600,7 +651,7 @@ impl GatewayManager {
         {
             return Ok(());
         }
-        if runtime.sidecar_url.is_none() {
+        if runtime.service.is_none() {
             return Ok(());
         }
         let result = result.and_then(|mut catalog| {
@@ -630,7 +681,7 @@ impl GatewayManager {
                     Err(message)
                 } else {
                     // The first catalog read failed: never leave a running
-                    // sidecar behind a stopped-looking UI. Terminate it and
+                    // verifier behind a stopped-looking UI. Terminate it and
                     // land in a plain, retryable error state.
                     drop(runtime);
                     let _ = self.fail(generation, message.clone());
@@ -657,7 +708,7 @@ impl GatewayManager {
                 generation: runtime.generation,
                 epoch: runtime.epoch,
                 session_id: Some(runtime.session_id.clone()),
-                base_url: runtime.sidecar_url.clone(),
+                service: runtime.service.clone(),
                 verified: true,
                 catalog: Some(catalog),
             });
@@ -733,27 +784,24 @@ impl GatewayManager {
         }
     }
 
-    fn terminated(&self, generation: u64) -> Result<(), String> {
+    fn terminated(&self, generation: u64, error: Option<String>) -> Result<(), String> {
         let mut runtime = self.lock()?;
         if runtime.generation != generation {
             return Ok(());
         }
-        runtime.child = None;
+        runtime.task = None;
+        runtime.service = None;
         runtime.epoch += 1;
         runtime.identity_ready = false;
         runtime.verification_only = false;
         runtime.state.catalog = None;
         runtime.state.progress = None;
         if !matches!(runtime.state.status.as_str(), "error" | "blocked") {
-            let diagnostic =
-                String::from_utf8_lossy(&runtime.diagnostic.iter().copied().collect::<Vec<_>>())
-                    .trim()
-                    .to_string();
             runtime.state.status = "error".to_string();
-            runtime.state.error = Some(if diagnostic.is_empty() {
-                "Verifier stopped unexpectedly".to_string()
+            runtime.state.error = Some(if let Some(error) = error {
+                format!("Verifier task stopped unexpectedly: {error}")
             } else {
-                format!("Verifier stopped unexpectedly: {diagnostic}")
+                "Verifier stopped unexpectedly".to_string()
             });
         }
         runtime.state.reconnecting = crate::recovery::connection_intended(&runtime.state);
@@ -786,7 +834,8 @@ impl GatewayManager {
         {
             return Ok(());
         }
-        let child = runtime.child.take();
+        let task = runtime.task.take();
+        runtime.service = None;
         runtime.epoch += 1;
         runtime.identity_ready = false;
         runtime.verification_only = false;
@@ -806,8 +855,8 @@ impl GatewayManager {
             session_id: Some(session_id),
             ..Session::default()
         });
-        if let Some(mut child) = child {
-            let _ = child.kill();
+        if let Some(mut task) = task {
+            let _ = task.stop();
         }
         self.publish();
         Ok(())

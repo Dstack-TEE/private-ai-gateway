@@ -9,8 +9,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::process::sibling_executable;
-
 const SERVICE_BINARY: &str = "private-ai-proxy-service";
 const MAX_STARTUP_DIAGNOSTICS: usize = 16 * 1024;
 
@@ -55,6 +53,61 @@ impl BackgroundService {
 
 pub fn service_executable() -> Result<PathBuf, String> {
     sibling_executable(SERVICE_BINARY)
+}
+
+fn sibling_executable(name: &str) -> Result<PathBuf, String> {
+    let current = std::env::current_exe()
+        .map_err(|error| format!("Cannot locate the application executable: {error}"))?;
+    let current = std::fs::canonicalize(&current).map_err(|error| {
+        format!(
+            "Cannot resolve the application executable {}: {error}",
+            current.display()
+        )
+    })?;
+    let directory = current
+        .parent()
+        .ok_or_else(|| "Cannot locate the application directory".to_string())?;
+    let file_name = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
+    let candidate = directory.join(file_name);
+    let executable = std::fs::canonicalize(&candidate).map_err(|error| {
+        format!(
+            "Cannot locate bundled executable {}: {error}",
+            candidate.display()
+        )
+    })?;
+    if executable.parent() != Some(directory) {
+        return Err(format!(
+            "Bundled executable resolves outside the application directory: {}",
+            executable.display()
+        ));
+    }
+    let metadata = std::fs::metadata(&executable).map_err(|error| {
+        format!(
+            "Cannot inspect executable {}: {error}",
+            executable.display()
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "Executable is not a file: {}",
+            executable.display()
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(format!(
+                "Executable is not executable: {}",
+                executable.display()
+            ));
+        }
+    }
+    Ok(executable)
 }
 
 pub fn spawn_background() -> Result<BackgroundService, String> {

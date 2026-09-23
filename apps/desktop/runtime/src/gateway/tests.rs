@@ -1,5 +1,50 @@
 use super::*;
 
+struct HttpService {
+    base_url: String,
+    client: reqwest::Client,
+}
+
+impl desktop_gateway::proxy::VerifiedService for HttpService {
+    fn call(
+        self: Arc<Self>,
+        request: axum::http::Request<axum::body::Body>,
+        _context: Option<desktop_gateway::proxy::ForwardContext>,
+    ) -> desktop_gateway::proxy::VerifiedResponse {
+        Box::pin(async move {
+            let (parts, body) = request.into_parts();
+            let bytes = axum::body::to_bytes(body, desktop_gateway::proxy::MAX_BODY_BYTES)
+                .await
+                .unwrap();
+            let mut upstream = self
+                .client
+                .request(parts.method, format!("{}{}", self.base_url, parts.uri));
+            for (name, value) in &parts.headers {
+                upstream = upstream.header(name, value);
+            }
+            let response = upstream.body(bytes).send().await.unwrap();
+            let status = response.status();
+            let headers = response.headers().clone();
+            let mut builder = axum::response::Response::builder().status(status);
+            for (name, value) in headers {
+                if let Some(name) = name {
+                    builder = builder.header(name, value);
+                }
+            }
+            builder
+                .body(axum::body::Body::from_stream(response.bytes_stream()))
+                .unwrap()
+        })
+    }
+}
+
+fn http_service(base_url: &str) -> Arc<dyn desktop_gateway::proxy::VerifiedService> {
+    Arc::new(HttpService {
+        base_url: base_url.to_string(),
+        client: reqwest::Client::builder().no_proxy().build().unwrap(),
+    })
+}
+
 #[tokio::test]
 async fn compatibility_refresh_is_background_work_and_cannot_resurrect_a_stopped_session() {
     use axum::{routing::get, Json, Router};
@@ -60,13 +105,13 @@ async fn compatibility_refresh_is_background_work_and_cannot_resurrect_a_stopped
         runtime.generation = 1;
         runtime.epoch = 1;
         runtime.identity_ready = true;
-        runtime.sidecar_url = Some(base.clone());
+        runtime.service = Some(http_service(&base));
         runtime.state.remote_url = Some("https://tee.redpill.ai".into());
     }
     proxy.publish(Session {
         generation: 1,
         epoch: 1,
-        base_url: Some(base),
+        service: Some(http_service(&base)),
         ..Session::default()
     });
     tokio::time::timeout(Duration::from_secs(2), manager.load_catalog(1, 1))
@@ -152,10 +197,10 @@ async fn late_catalog_failure_cannot_override_a_newer_success_or_security_stop()
     {
         let mut runtime = manager.lock().unwrap();
         runtime.identity_ready = true;
-        runtime.sidecar_url = Some(base.clone());
+        runtime.service = Some(http_service(&base));
     }
     proxy.publish(Session {
-        base_url: Some(base),
+        service: Some(http_service(&base)),
         ..Session::default()
     });
     for stop in [false, true] {
@@ -184,21 +229,180 @@ async fn late_catalog_failure_cannot_override_a_newer_success_or_security_stop()
     server.abort();
     let _ = server.await;
 }
-struct WaitingChild(Option<tokio::sync::mpsc::Sender<SidecarEvent>>);
-impl SidecarChild for WaitingChild {
-    fn kill(&mut self) -> Result<(), String> {
-        self.0.take();
+struct WaitingTask;
+impl VerifierTask for WaitingTask {
+    fn stop(&mut self) -> Result<(), String> {
         Ok(())
     }
 }
-impl SidecarLauncher for WaitingSidecar {
+
+struct StopTrackingTask(Arc<std::sync::atomic::AtomicBool>);
+
+impl VerifierTask for StopTrackingTask {
+    fn stop(&mut self) -> Result<(), String> {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+struct StopTrackingLauncher(Arc<std::sync::atomic::AtomicBool>);
+
+impl VerifierLauncher for StopTrackingLauncher {
     fn spawn(
         &self,
-        _: Vec<String>,
-    ) -> Result<(Receiver<SidecarEvent>, Box<dyn SidecarChild>), String> {
-        let (sender, receiver) = tokio::sync::mpsc::channel(1);
-        Ok((receiver, Box::new(WaitingChild(Some(sender)))))
+        _: VerifierConfig,
+        _: VerifierEventSink,
+        _: tokio::sync::mpsc::Sender<ProxyEvent>,
+    ) -> Result<Box<dyn VerifierTask>, String> {
+        Ok(Box::new(StopTrackingTask(self.0.clone())))
     }
+}
+
+impl VerifierLauncher for WaitingSidecar {
+    fn spawn(
+        &self,
+        _: VerifierConfig,
+        _: VerifierEventSink,
+        _: tokio::sync::mpsc::Sender<ProxyEvent>,
+    ) -> Result<Box<dyn VerifierTask>, String> {
+        Ok(Box::new(WaitingTask))
+    }
+}
+
+#[tokio::test]
+async fn ready_event_loads_catalog_before_opening_the_session() {
+    use axum::{routing::get, Json, Router};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route(
+                "/v1/models",
+                get(|| async { Json(serde_json::json!({"data":[{"id":"test-model"}]})) }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+    let (events, _) = tokio::sync::mpsc::channel(8);
+    let proxy = ProxyState::new(events).unwrap();
+    let manager = Arc::new(GatewayManager::new(
+        proxy.clone(),
+        Arc::new(UsageStore::memory().unwrap()),
+        Arc::new(WaitingSidecar),
+        Handle::current(),
+        GatewayState::default(),
+    ));
+    let started = manager
+        .start(StartGatewayConfig {
+            remote_url: "https://inference.phala.com".into(),
+            require_production_os: true,
+        })
+        .unwrap();
+    let identity = identity_event(serde_json::json!({
+        "tee_type": "tdx",
+        "trust_level": "hardware_verified",
+        "keyset_digest": "sha256:keyset",
+        "keyset_not_after": 2_000_000_000_u64,
+        "tls_spki": null,
+        "source_provenance": {},
+        "service_capabilities": {
+            "serving": "aggregator",
+            "supported_e2ee_versions": []
+        },
+        "verification": { "checks": [] }
+    }));
+    manager
+        .handle_event(
+            proxy.session().generation,
+            VerifierEvent::Ready {
+                identity,
+                remote_url: "https://inference.phala.com".into(),
+                service: http_service(&base),
+            },
+        )
+        .unwrap();
+    let state = manager
+        .wait_for_verification(
+            started.session_id.as_deref().unwrap(),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(state.status, "verified");
+    assert_eq!(state.catalog.unwrap().models[0].id, "test-model");
+    assert!(proxy.session().verified);
+    manager.stop().unwrap();
+    server.abort();
+    let _ = server.await;
+}
+
+#[test]
+fn unexpected_termination_revokes_forwarding_and_requests_reconnect() {
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let (events, _) = tokio::sync::mpsc::channel(8);
+    let proxy = ProxyState::new(events).unwrap();
+    let manager = Arc::new(GatewayManager::new(
+        proxy.clone(),
+        Arc::new(UsageStore::memory().unwrap()),
+        Arc::new(WaitingSidecar),
+        executor.handle().clone(),
+        GatewayState::default(),
+    ));
+    manager
+        .start(StartGatewayConfig {
+            remote_url: "https://inference.phala.com".into(),
+            require_production_os: true,
+        })
+        .unwrap();
+    let generation = proxy.session().generation;
+    manager
+        .handle_event(
+            generation,
+            VerifierEvent::Terminated {
+                error: Some("panic".into()),
+            },
+        )
+        .unwrap();
+    let state = manager.snapshot().unwrap();
+    assert_eq!(state.status, "error");
+    assert_eq!(
+        state.error.as_deref(),
+        Some("Verifier task stopped unexpectedly: panic")
+    );
+    assert!(state.reconnecting && crate::recovery::should_retry(&state));
+    assert!(!manager.is_running().unwrap());
+    assert!(!proxy.session().verified);
+}
+
+#[test]
+fn explicit_stop_stops_the_task_and_ends_the_session() {
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (events, _) = tokio::sync::mpsc::channel(8);
+    let proxy = ProxyState::new(events).unwrap();
+    let usage = Arc::new(UsageStore::memory().unwrap());
+    let manager = Arc::new(GatewayManager::new(
+        proxy.clone(),
+        usage.clone(),
+        Arc::new(StopTrackingLauncher(stopped.clone())),
+        executor.handle().clone(),
+        GatewayState::default(),
+    ));
+    manager
+        .start(StartGatewayConfig {
+            remote_url: "https://inference.phala.com".into(),
+            require_production_os: true,
+        })
+        .unwrap();
+    let state = manager.stop().unwrap();
+    assert_eq!(state.status, "stopped");
+    assert!(stopped.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(!manager.is_running().unwrap());
+    assert!(proxy.session().session_id.is_none());
+    assert!(usage.active_session().unwrap().is_none());
 }
 
 #[tokio::test(start_paused = true)]
@@ -260,9 +464,12 @@ fn keyset_change_requests_fresh_verification_without_ending_the_session() {
         })
         .unwrap();
     manager
-        .handle_line(
+        .handle_event(
             proxy.session().generation,
-            r#"{"type":"blocked","code":"keyset_changed","reason":"rotation"}"#,
+            VerifierEvent::Blocked {
+                code: Some("keyset_changed".into()),
+                reason: "rotation".into(),
+            },
         )
         .unwrap();
     let state = manager.snapshot().unwrap();
@@ -298,27 +505,40 @@ fn security_blocks_survive_process_failure_without_cancelling_candidate_sessions
         }
         let generation = proxy.session().generation;
         manager
-            .handle_line(
+            .handle_event(
                 generation,
-                r#"{"type":"blocked","reason":"identity rejected"}"#,
+                VerifierEvent::Blocked {
+                    code: None,
+                    reason: "identity rejected".into(),
+                },
             )
             .unwrap();
         assert_eq!(usage.active_session().unwrap().is_some(), verification_only);
         let running = manager.is_running().unwrap();
         manager
-            .handle_line(
+            .handle_event(
                 generation,
-                r#"{"type":"blocked","code":"keyset_changed","reason":"late rotation"}"#,
+                VerifierEvent::Blocked {
+                    code: Some("keyset_changed".into()),
+                    reason: "late rotation".into(),
+                },
             )
             .unwrap();
         assert_eq!(manager.snapshot().unwrap().status, "blocked");
         assert_eq!(usage.active_session().unwrap().is_some(), verification_only);
         assert_eq!(manager.is_running().unwrap(), running);
         manager
-            .handle_line(generation, r#"{"type":"fatal","message":"process failed"}"#)
+            .handle_event(
+                generation,
+                VerifierEvent::Fatal {
+                    message: "task failed".into(),
+                },
+            )
             .unwrap();
-        manager.terminated(generation).unwrap();
-        manager.fail(generation, "reader failed".into()).unwrap();
+        manager.terminated(generation, None).unwrap();
+        manager
+            .fail(generation, "event sink failed".into())
+            .unwrap();
         let state = manager.snapshot().unwrap();
         assert_eq!(state.status, "blocked");
         assert_eq!(state.configuration_verification, verification_only);
@@ -365,7 +585,7 @@ fn reconnection_preserves_session_history_but_requires_fresh_verification() {
     assert!(resumed.identity.is_none() && resumed.catalog.is_none());
     assert!(!proxy.session().verified);
     assert!(proxy.session().generation > retired_generation);
-    manager.terminated(retired_generation).unwrap();
+    manager.terminated(retired_generation, None).unwrap();
     assert_eq!(manager.snapshot().unwrap().status, "verifying");
     manager
         .fail(proxy.session().generation, "Transport interrupted".into())
@@ -423,16 +643,37 @@ fn stopping_preserves_usage_but_not_the_protection_clock() {
 }
 use serde_json::json;
 
-fn identity_event(value: serde_json::Value) -> crate::sidecar_protocol::IdentityEvent {
+fn identity_event(value: serde_json::Value) -> IdentityEvent {
     serde_json::from_value(value).unwrap()
 }
 
-fn request_event(value: &serde_json::Value) -> crate::sidecar_protocol::RequestCompleteEvent {
-    serde_json::from_value(value.clone()).unwrap()
+fn receipt_activity(id: &str, session_id: &str, status: u16, detail: &str) -> RequestActivity {
+    RequestActivity {
+        id: id.to_string(),
+        session_id: session_id.to_string(),
+        method: "POST".to_string(),
+        path: "/v1/messages".to_string(),
+        model: Some("openai/gpt-oss-20b".to_string()),
+        status,
+        streamed: true,
+        receipt_id: Some("rcpt-merge".to_string()),
+        verified: Some(status < 400),
+        detail: detail.to_string(),
+        at: 101,
+        agent: Some("claude-code".to_string()),
+        local_policy_applied: Some(true),
+        rewritten: Some(true),
+        left_device: true,
+        input_tokens: None,
+        output_tokens: None,
+        cache_read_tokens: None,
+        cache_write_tokens: None,
+        cost_usd: None,
+    }
 }
 
 #[test]
-fn identity_alone_does_not_verify_and_requests_are_attributed() {
+fn identity_alone_does_not_verify() {
     let identity = json!({
         "tee_type": "tdx",
         "trust_level": "hardware_verified",
@@ -456,35 +697,6 @@ fn identity_alone_does_not_verify_and_requests_are_attributed() {
         "status is decided once the catalog is in"
     );
     assert!(state.identity.is_some());
-
-    let request = json!({
-        "method": "POST", "path": "/v1/messages", "status": 200, "streamed": true,
-        "receipt_id": "rcpt-1", "verified": null,
-        "detail": "receipt rcpt-1 recorded", "tag": "pap:req-1:session-1:claude-code"
-    });
-    for tag in [serde_json::Value::Null, json!("claude-code")] {
-        let mut invalid = request.clone();
-        invalid["tag"] = tag;
-        assert!(apply_request_event(&mut state, &request_event(&invalid)).is_err());
-        assert!(state.activity.is_empty());
-    }
-    apply_request_event(&mut state, &request_event(&request)).unwrap();
-    let verdict = json!({
-        "method": "POST", "path": "/v1/messages", "status": 200, "streamed": true,
-        "receipt_id": "rcpt-1", "verified": true, "rewritten": true,
-        "local_policy_applied": true,
-        "detail": "receipt verified", "tag": "pap:req-1:session-1:claude-code"
-    });
-    apply_request_event(&mut state, &request_event(&verdict)).unwrap();
-
-    assert_eq!(state.activity.len(), 1);
-    let item = &state.activity[0];
-    assert_eq!(item.id, "req-1");
-    assert_eq!(item.session_id, "session-1");
-    assert_eq!(item.agent.as_deref(), Some("claude-code"));
-    assert_eq!(item.verified, Some(true));
-    assert_eq!(item.rewritten, Some(true));
-    assert_eq!(item.local_policy_applied, Some(true));
 }
 
 #[test]
@@ -516,14 +728,8 @@ fn proxy_receipt_and_usage_events_merge_into_one_complete_activity() {
         },
     );
 
-    let verdict = json!({
-        "method": "POST", "path": "/v1/messages", "status": 200,
-        "streamed": true, "receipt_id": "rcpt-merge", "verified": true,
-        "local_policy_applied": true, "rewritten": true,
-        "detail": "receipt verified",
-        "tag": "pap:req-merge:session-merge:claude-code"
-    });
-    apply_request_event(&mut state, &request_event(&verdict)).unwrap();
+    let verdict = receipt_activity("req-merge", "session-merge", 200, "receipt verified");
+    merge_activity(&mut state, verdict.clone());
 
     merge_activity(
         &mut state,
@@ -568,7 +774,7 @@ fn proxy_receipt_and_usage_events_merge_into_one_complete_activity() {
     timeout.status = 504;
     timeout.detail = "Client delivery timed out".into();
     merge_activity(&mut state, timeout);
-    apply_request_event(&mut state, &request_event(&verdict)).unwrap();
+    merge_activity(&mut state, verdict.clone());
     assert_eq!(state.activity[0].status, 504);
     assert_eq!(state.activity[0].detail, "Client delivery timed out");
     assert_eq!(state.activity[0].input_tokens, Some(1_024));
@@ -578,12 +784,13 @@ fn proxy_receipt_and_usage_events_merge_into_one_complete_activity() {
     pending.detail.clear();
     pending.verified = None;
     merge_activity(&mut state, pending);
-    let mut withheld = verdict.clone();
-    withheld["tag"] = json!("pap:req-proof:session-merge:claude-code");
-    withheld["status"] = json!(502);
-    withheld["detail"] = json!("Response withheld: receipt verification failed");
-    withheld["verified"] = json!(false);
-    apply_request_event(&mut state, &request_event(&withheld)).unwrap();
+    let withheld = receipt_activity(
+        "req-proof",
+        "session-merge",
+        502,
+        "Response withheld: receipt verification failed",
+    );
+    merge_activity(&mut state, withheld);
     let proof = state
         .activity
         .iter()

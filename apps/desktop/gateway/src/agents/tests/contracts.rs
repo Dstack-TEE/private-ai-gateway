@@ -1013,9 +1013,31 @@ fn connect_creates_the_official_config_from_scratch() {
 /// auth and nothing reaches the sidecar.
 #[tokio::test]
 async fn a_scan_after_config_drift_revokes_the_old_token_at_the_proxy() {
-    use crate::proxy::{router, ProxyState, Session};
-    use axum::{routing::get, routing::post, Json, Router};
+    use crate::proxy::{ForwardContext, ProxyState, Session, VerifiedResponse, VerifiedService};
+    use axum::{body::Body, response::Response, Json};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct DirectService(Arc<AtomicUsize>);
+    impl VerifiedService for DirectService {
+        fn call(
+            self: Arc<Self>,
+            request: axum::http::Request<Body>,
+            _context: Option<ForwardContext>,
+        ) -> VerifiedResponse {
+            Box::pin(async move {
+                if request.uri().path() == "/v1/models" {
+                    return axum::response::IntoResponse::into_response(Json(
+                        serde_json::json!({ "data": [{ "id": "openai/gpt-oss-20b" }] }),
+                    ));
+                }
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Response::builder()
+                    .status(200)
+                    .body(Body::from("{\"ok\":true}"))
+                    .unwrap()
+            })
+        }
+    }
 
     let sandbox = sandbox("proxy-drift");
     let path = sandbox.home.join(".claude").join("settings.json");
@@ -1028,24 +1050,9 @@ async fn a_scan_after_config_drift_revokes_the_old_token_at_the_proxy() {
         .unwrap()
         .unwrap();
 
-    // A counting sidecar and a verified session for it.
+    // A counting verifier and a verified session for it.
     let hits = Arc::new(AtomicUsize::new(0));
-    let counter = hits.clone();
-    let sidecar = Router::new()
-        .route(
-            "/v1/messages",
-            post(move || {
-                counter.fetch_add(1, Ordering::SeqCst);
-                async { Json(serde_json::json!({"ok": true})) }
-            }),
-        )
-        .route(
-            "/v1/models",
-            get(|| async { Json(serde_json::json!({ "data": [{ "id": "openai/gpt-oss-20b" }] })) }),
-        );
-    let sidecar_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base_url = format!("http://{}", sidecar_listener.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(sidecar_listener, sidecar).await.unwrap() });
+    let service: Arc<dyn VerifiedService> = Arc::new(DirectService(hits.clone()));
 
     let (sender, _events) = tokio::sync::mpsc::channel(8);
     let state = ProxyState::new(sender).unwrap();
@@ -1054,7 +1061,7 @@ async fn a_scan_after_config_drift_revokes_the_old_token_at_the_proxy() {
         generation: 1,
         epoch: 1,
         session_id: Some("test-session".to_string()),
-        base_url: Some(base_url.clone()),
+        service: Some(service.clone()),
         verified: false,
         catalog: None,
     });
@@ -1063,14 +1070,14 @@ async fn a_scan_after_config_drift_revokes_the_old_token_at_the_proxy() {
         generation: 1,
         epoch: 1,
         session_id: Some("test-session".to_string()),
-        base_url: Some(base_url),
+        service: Some(service),
         verified: true,
         catalog: Some(catalog),
     });
     state.set_tokens(sandbox.projector.scan(None).unwrap().1);
     let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_url = format!("http://{}", proxy_listener.local_addr().unwrap());
-    let app = router(state.clone());
+    let app = crate::proxy::router(state.clone());
     tokio::spawn(async move { axum::serve(proxy_listener, app).await.unwrap() });
 
     let client = reqwest::Client::new();

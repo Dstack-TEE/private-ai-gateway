@@ -1,8 +1,20 @@
+// The service compiles the shared verifier modules but does not call their
+// standalone CLI entry points.
+#![allow(dead_code)]
+
+mod args;
+mod capture;
+mod checks;
+mod client;
+mod serve;
+mod sessions;
+#[cfg(test)]
+mod spec_fixtures;
+mod transcript;
+mod verify;
+
 use clap::Parser;
-use desktop_runtime::{
-    controller::{DesktopRuntime, RuntimeOptions},
-    process::TokioSidecarLauncher,
-};
+use desktop_runtime::controller::{DesktopRuntime, RuntimeOptions};
 use std::sync::Arc;
 
 #[derive(Parser)]
@@ -18,12 +30,6 @@ async fn main() {
 }
 
 async fn run() -> Result<(), String> {
-    if let Some(status) = desktop_runtime::process::run_sidecar_supervisor_if_requested()? {
-        if status.success() {
-            return Ok(());
-        }
-        return Err("Verifier supervisor exited unsuccessfully".into());
-    }
     Arguments::parse();
     #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
     let service_access = desktop_runtime::agent_access::acquire_for_service();
@@ -56,9 +62,9 @@ async fn run() -> Result<(), String> {
             name.to_string()
         }
     };
-    let launcher = Arc::new(TokioSidecarLauncher::new(
-        directory.join(name("private-ai-proxy")),
-    )?);
+    let launcher = Arc::new(serve::InProcessVerifierLauncher::new(
+        tokio::runtime::Handle::current(),
+    ));
     let options = RuntimeOptions {
         launcher,
         helper_path: directory.join(name("private-ai-proxy-helper")),

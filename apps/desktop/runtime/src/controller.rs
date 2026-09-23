@@ -29,14 +29,14 @@ use crate::{
         AgentPreview, AgentStatus, ConfidentialProfileInput, ConnectOptions, GatewayState,
         LocalApiConfig, RequestActivity, ServiceProvider, StartGatewayConfig,
     },
-    gateway::{GatewayManager, SidecarLauncher},
+    gateway::{GatewayManager, VerifierLauncher},
     local_api::{self, ResolvedLocalApi},
     service_config,
     usage::{UsagePage, UsageQuery, UsageStore},
 };
 
 pub struct RuntimeOptions {
-    pub launcher: Arc<dyn SidecarLauncher>,
+    pub launcher: Arc<dyn VerifierLauncher>,
     pub helper_path: PathBuf,
     pub task_runtime: Handle,
     pub agent_configuration: bool,
