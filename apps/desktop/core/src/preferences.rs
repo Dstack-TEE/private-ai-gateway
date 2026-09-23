@@ -1,10 +1,13 @@
-use crate::contracts::ListenConfig;
-use agent_bridge::{
-    agents::{app_data_dir, write_atomic},
-    tokens,
+use crate::{
+    contracts::ListenConfig,
+    paths::app_data_dir,
+    private_fs::{self, write_atomic},
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
+
+/// Clear of the Local API (4180) and the account callback (4181).
+pub const WEB_UI_DEFAULT_PORT: u16 = 4182;
 
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -72,7 +75,7 @@ impl Default for WebUiConfig {
             enabled: false,
             listen_address: "127.0.0.1".into(),
             allow_network_access: false,
-            port: crate::web_ui::DEFAULT_PORT,
+            port: WEB_UI_DEFAULT_PORT,
             client_host: None,
         }
     }
@@ -80,7 +83,7 @@ impl Default for WebUiConfig {
 
 pub fn load() -> Result<Preferences, String> {
     let path = app_data_dir()?.join("preferences.json");
-    match tokens::read_private_text(&path)
+    match private_fs::read_private_text(&path)
         .map_err(|error| format!("Cannot read startup preferences: {error}"))?
     {
         Some(text) => {
@@ -112,7 +115,7 @@ impl Default for NotificationPreferences {
 
 pub fn save(preferences: Preferences) -> Result<(), String> {
     let dir = app_data_dir()?;
-    tokens::create_private_dir(&dir)
+    private_fs::create_private_dir(&dir)
         .map_err(|error| format!("Cannot save startup preferences: {error}"))?;
     let text = serde_json::to_string_pretty(&preferences).map_err(|error| error.to_string())?;
     write_atomic(&dir.join("preferences.json"), &text, None)

@@ -1,10 +1,7 @@
 //! Shapes shared with the renderer. `src/shared/contracts.generated.ts` is
 //! generated from them; run `npm run generate:contracts` after changing one.
 
-use std::collections::BTreeSet;
-
-pub use agent_bridge::agents::{AgentPreview, AgentStatus, ConnectOptions};
-use agent_bridge::catalog::Catalog;
+pub use crate::agents::{AgentPreview, AgentStatus, ConnectOptions};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -287,55 +284,6 @@ pub struct ConfidentialProfileInput {
     pub remote_url: String,
 }
 
-impl CatalogSummary {
-    pub fn from_catalog(catalog: &Catalog, previous: Option<&CatalogSummary>) -> Self {
-        let models: Vec<ModelSummary> = catalog
-            .models
-            .iter()
-            .map(|model| ModelSummary {
-                id: model.id().to_string(),
-                name: model.display_name().to_string(),
-                supported_endpoints: model.supported_surfaces.as_ref().map(|surfaces| {
-                    surfaces
-                        .iter()
-                        .map(|surface| surface.path().to_string())
-                        .collect()
-                }),
-                context_length: model.remote.context_length,
-                max_output_length: model.remote.max_output_length,
-                is_tee: model.bool_field("is_tee"),
-                input_price_per_million: model.price_per_million("prompt"),
-                output_price_per_million: model.price_per_million("completion"),
-                cache_read_price_per_million: model.price_per_million("input_cache_read"),
-                cache_write_price_per_million: model.price_per_million("input_cache_write"),
-                input_modalities: model.string_array("input_modalities"),
-                output_modalities: model.string_array("output_modalities"),
-                capabilities: model.string_array("supported_features"),
-                description: model.string_field("description"),
-            })
-            .collect();
-        // Carry forward ids that disappeared until the service lists them
-        // again, so a removed model is never quietly forgotten.
-        let removed: BTreeSet<String> = previous
-            .into_iter()
-            .flat_map(|previous| {
-                previous
-                    .models
-                    .iter()
-                    .map(|model| model.id.clone())
-                    .chain(previous.removed.iter().cloned())
-            })
-            .filter(|id| catalog.get(id).is_none())
-            .collect();
-        Self {
-            revision: catalog.revision.clone(),
-            fetched_at: catalog.fetched_at,
-            models,
-            removed: removed.into_iter().collect(),
-        }
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(optional_fields)]
@@ -527,10 +475,30 @@ pub struct StartGatewayConfig {
 impl Default for StartGatewayConfig {
     fn default() -> Self {
         Self {
-            remote_url: agent_bridge::brand::SERVICE_DEFAULT_URL.to_string(),
+            remote_url: crate::brand::SERVICE_DEFAULT_URL.to_string(),
             require_production_os: true,
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebUiLogin {
+    /// `http://HOST:PORT/#code=…` on the client host or listen address; the code
+    /// works once, within `expires_in_seconds`.
+    pub url: String,
+    pub expires_in_seconds: u64,
+}
+
+/// A `pap cli status|install|uninstall` result; the desktop shell reads it
+/// from the CLI's JSON output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandRegistration {
+    pub executable: std::path::PathBuf,
+    pub command_path: std::path::PathBuf,
+    pub installed: bool,
+    pub on_path: bool,
 }
 
 #[cfg(test)]
@@ -541,15 +509,15 @@ mod typescript {
 
     use super::*;
     use crate::{
-        account_login::LoginPresentation,
+        account::LoginPresentation,
         agent_access::AgentAccessStatus,
+        agents::{AgentRepairAction, ConfigChange},
         maintenance::{ImportResult, ProfileBackup, ProfileConfiguration},
         preferences::{Appearance, NotificationPreferences, UpdateChannel, WebUiConfig},
         ui_api::{LaunchPreferences, ListenAddress, Method},
         updates::{Installation, UpdateNotice},
         usage::{UsageModelPoint, UsagePage, UsagePoint, UsageQuery},
     };
-    use agent_bridge::agents::{AgentRepairAction, ConfigChange};
 
     const OUTPUT: &str = "src/shared/contracts.generated.ts";
 

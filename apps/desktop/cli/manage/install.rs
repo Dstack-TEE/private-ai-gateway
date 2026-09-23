@@ -1,25 +1,18 @@
+//! `pap cli status|install|uninstall`: registers this executable on PATH.
+
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use desktop_core::contracts::CommandRegistration;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Registration {
-    pub executable: PathBuf,
-    pub command_path: PathBuf,
-    pub installed: bool,
-    pub on_path: bool,
-}
-
-pub fn status() -> Result<Registration, String> {
+pub fn status() -> Result<CommandRegistration, String> {
     platform::status()
 }
 
-pub fn install(directory: Option<PathBuf>) -> Result<Registration, String> {
+pub fn install(directory: Option<PathBuf>) -> Result<CommandRegistration, String> {
     platform::install(directory)
 }
 
-pub fn uninstall(directory: Option<PathBuf>) -> Result<Registration, String> {
+pub fn uninstall(directory: Option<PathBuf>) -> Result<CommandRegistration, String> {
     platform::uninstall(directory)
 }
 
@@ -177,7 +170,7 @@ mod platform {
     use std::os::unix::fs::{symlink, DirBuilderExt, MetadataExt, PermissionsExt};
     use std::path::{Component, Path, PathBuf};
 
-    use super::{current_executable, Registration};
+    use super::{current_executable, CommandRegistration};
 
     #[derive(Debug)]
     enum CommandState {
@@ -186,13 +179,13 @@ mod platform {
         Executable,
     }
 
-    pub(super) fn status() -> Result<Registration, String> {
+    pub(super) fn status() -> Result<CommandRegistration, String> {
         let executable = current_executable()?;
         let directory = managed_system_directory(&executable).unwrap_or(default_directory()?);
         inspect(&executable, &directory, env::var_os("PATH").as_deref())
     }
 
-    pub(super) fn install(directory: Option<PathBuf>) -> Result<Registration, String> {
+    pub(super) fn install(directory: Option<PathBuf>) -> Result<CommandRegistration, String> {
         let executable = current_executable()?;
         if directory.is_none() {
             if let Some(directory) = managed_system_directory(&executable) {
@@ -205,7 +198,7 @@ mod platform {
         inspect(&executable, &directory, env::var_os("PATH").as_deref())
     }
 
-    pub(super) fn uninstall(directory: Option<PathBuf>) -> Result<Registration, String> {
+    pub(super) fn uninstall(directory: Option<PathBuf>) -> Result<CommandRegistration, String> {
         let executable = current_executable()?;
         if directory.is_none() && managed_system_directory(&executable).is_some() {
             return Err(
@@ -239,14 +232,14 @@ mod platform {
         executable: &Path,
         directory: &Path,
         path_value: Option<&std::ffi::OsStr>,
-    ) -> Result<Registration, String> {
+    ) -> Result<CommandRegistration, String> {
         let command_path = directory.join("private-ai-proxy");
         let installed = command_states(executable, directory)?
             .iter()
             .all(|(_, state)| {
                 matches!(state, CommandState::ManagedLink | CommandState::Executable)
             });
-        Ok(Registration {
+        Ok(CommandRegistration {
             executable: executable.to_path_buf(),
             command_path,
             installed,
@@ -578,19 +571,19 @@ mod platform {
         },
     };
 
-    use super::{current_executable, windows_alias, Registration};
+    use super::{current_executable, windows_alias, CommandRegistration};
 
     const ENVIRONMENT_KEY: &str = "Environment";
     const PATH_VALUE: &str = "Path";
     const OWNERSHIP_KEY: &str = r"Software\Private AI Proxy\CLI";
     const OWNERSHIP_VALUE: &str = "OwnedPath";
 
-    pub(super) fn status() -> Result<Registration, String> {
+    pub(super) fn status() -> Result<CommandRegistration, String> {
         let executable = current_executable()?;
         registration(executable, None)
     }
 
-    pub(super) fn install(directory: Option<PathBuf>) -> Result<Registration, String> {
+    pub(super) fn install(directory: Option<PathBuf>) -> Result<CommandRegistration, String> {
         let executable = current_executable()?;
         let directory = executable_directory(&executable, directory)?;
         reject_path_conflict(&executable)?;
@@ -631,7 +624,7 @@ mod platform {
         registration(executable, Some(directory))
     }
 
-    pub(super) fn uninstall(directory: Option<PathBuf>) -> Result<Registration, String> {
+    pub(super) fn uninstall(directory: Option<PathBuf>) -> Result<CommandRegistration, String> {
         let executable = current_executable()?;
         let directory = executable_directory(&executable, directory)?;
         windows_alias::uninstall(&executable)?;
@@ -668,7 +661,7 @@ mod platform {
     fn registration(
         executable: PathBuf,
         directory: Option<PathBuf>,
-    ) -> Result<Registration, String> {
+    ) -> Result<CommandRegistration, String> {
         let directory = executable_directory(&executable, directory)?;
         let command_path = directory.join("private-ai-proxy.exe");
         windows_alias::reject_alias_collision(&executable)?;
@@ -677,7 +670,7 @@ mod platform {
             .iter()
             .any(|entry| same_path_text(entry, &directory))
             && windows_alias::all_match(&executable);
-        Ok(Registration {
+        Ok(CommandRegistration {
             executable: PathBuf::from(path_text(&executable)?),
             command_path: PathBuf::from(path_text(&command_path)?),
             installed,

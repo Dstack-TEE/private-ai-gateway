@@ -6,7 +6,7 @@
 
 use std::{collections::HashMap, sync::Mutex};
 
-const SERVICE: &str = crate::brand::APP_IDENTIFIER;
+const SERVICE: &str = desktop_core::brand::APP_IDENTIFIER;
 const MAX_KEY_LEN: usize = 512;
 
 /// A named-entry secret store. Entry names are app-chosen, never user input.

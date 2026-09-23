@@ -245,7 +245,7 @@ fn structured_account_errors_survive_the_management_boundary_without_raw_details
         StatusCode::FORBIDDEN,
         &json!({"detail":{"error":"device_disabled","internal":"secret-do-not-show"}}),
     );
-    let public = crate::protocol::RpcError::operation(&error);
+    let public = desktop_core::protocol::RpcError::operation(&error);
     assert!(public.message.contains("disabled"));
     assert!(!public.message.contains("secret"));
 }

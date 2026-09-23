@@ -192,7 +192,7 @@ pub fn open(
             set_idle(app, spec.label, false)?;
             watch_presentation(&window);
             let state = app
-                .state::<std::sync::Arc<desktop_runtime::client::Client>>()
+                .state::<std::sync::Arc<desktop_core::client::Client>>()
                 .subscribe()
                 .borrow()
                 .clone();
@@ -229,7 +229,7 @@ pub fn open(
         )
         .ok_or_else(|| "The main window is unavailable".to_string())?;
     let state = app
-        .state::<std::sync::Arc<desktop_runtime::client::Client>>()
+        .state::<std::sync::Arc<desktop_core::client::Client>>()
         .subscribe()
         .borrow()
         .clone();

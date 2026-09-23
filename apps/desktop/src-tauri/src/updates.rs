@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use desktop_runtime::{
+use desktop_core::{
     client::Client,
     preferences::UpdateChannel,
     protocol::{rpc, Preference},

@@ -80,7 +80,7 @@ pub(super) async fn transition_at(
 pub(super) fn installation_id(profile_id: &str) -> Result<Uuid, String> {
     // Profile IDs are already random and persist with the credential. Deriving a
     // UUID mixes the profile with the local installation identity.
-    let data = agent_bridge::agents::app_data_dir()?;
+    let data = desktop_core::paths::app_data_dir()?;
     let path = data.join("installation-id");
     let device = match std::fs::read_to_string(&path) {
         Ok(value) => uuid::Uuid::parse_str(value.trim())
@@ -164,12 +164,8 @@ pub(super) fn callback_code(
 }
 
 /// A window-activation link only; OAuth credentials stay on the loopback channel.
-pub fn account_return_url() -> String {
-    format!("{}://oauth/return", agent_bridge::brand::APP_IDENTIFIER)
-}
-
 pub(super) fn callback_page(accepted: bool) -> String {
-    let product = agent_bridge::brand::PRODUCT_NAME
+    let product = desktop_core::brand::PRODUCT_NAME
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -190,7 +186,7 @@ pub(super) fn callback_page(accepted: bool) -> String {
         .replace("__PRODUCT__", &product)
         .replace(
             "__BYLINE__",
-            &agent_bridge::brand::BYLINE
+            &desktop_core::brand::BYLINE
                 .replace('&', "&amp;")
                 .replace('<', "&lt;")
                 .replace('>', "&gt;"),

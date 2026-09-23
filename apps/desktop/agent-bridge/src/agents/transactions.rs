@@ -504,7 +504,7 @@ impl Projector {
             record.validate_recovery()?;
         }
         let text = serde_json::to_string_pretty(store).map_err(|error| error.to_string())?;
-        tokens::create_private_dir(&self.data_dir)
+        private_fs::create_private_dir(&self.data_dir)
             .map_err(|error| format!("Cannot create the app data directory: {error}"))?;
         write_atomic(&self.store_path(), &text, None)
             .map_err(|error| format!("Cannot save the agent connection record: {error}"))

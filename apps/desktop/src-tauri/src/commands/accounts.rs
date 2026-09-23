@@ -1,12 +1,12 @@
 use crate::*;
-use desktop_runtime::ui_api::Method;
+use desktop_core::ui_api::Method;
 use serde_json::json;
 
 #[tauri::command]
 pub(crate) async fn open_top_up(
     window: tauri::WebviewWindow,
     client: State<'_, Arc<Client>>,
-    provider: desktop_runtime::contracts::ServiceProvider,
+    provider: desktop_core::contracts::ServiceProvider,
     scope_slug: Option<String>,
 ) -> Result<(), String> {
     let value = crate::ui_api::invoke(

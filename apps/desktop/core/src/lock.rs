@@ -10,7 +10,7 @@ use std::{fmt, fs, io, path::Path};
 
 use fd_lock::RwLock;
 
-use crate::tokens::create_private_dir;
+use crate::private_fs::create_private_dir;
 
 fn open(dir: &Path, name: &str) -> io::Result<fs::File> {
     create_private_dir(dir)?;
@@ -93,7 +93,16 @@ mod tests {
         // A second independent handle (as a second process would open) loses.
         assert!(instance(dir.path()).unwrap().is_none());
         drop(first);
-        assert!(instance(dir.path()).unwrap().is_some());
+        // A child that another test is spawning holds an inherited copy of the
+        // descriptor until its exec closes it, so release may lag briefly.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while instance(dir.path()).unwrap().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "lock was not released"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[test]

@@ -341,13 +341,13 @@ pub async fn invoke(
         },
         Method::GetOrganizationUrl => {
             let input: OrganizationParams = params(input)?;
-            return Ok(value(crate::account_login::organization_url(Some(
+            return Ok(value(crate::account::organization_url(Some(
                 &input.organization_slug,
             ))?)?);
         }
         Method::GetTopUpUrl => {
             let input: TopUpParams = params(input)?;
-            return Ok(value(crate::account_login::top_up_url(
+            return Ok(value(crate::account::top_up_url(
                 &input.provider,
                 input.scope_slug.as_deref(),
             )?)?);

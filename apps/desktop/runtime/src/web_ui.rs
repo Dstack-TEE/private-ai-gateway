@@ -14,29 +14,18 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 
 pub use auth::{Auth, Throttle};
 
-use crate::{
+use desktop_core::{
+    contracts::WebUiLogin,
     listen::{self, ResolvedListen},
     preferences::WebUiConfig,
 };
 
-/// Clear of the Local API (4180) and the account callback (4181).
-pub const DEFAULT_PORT: u16 = 4182;
 const ACCOUNT_CALLBACK_PORT: u16 = 4181;
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WebUiLogin {
-    /// `http://HOST:PORT/#code=…` on the client host or listen address; the code
-    /// works once, within `expires_in_seconds`.
-    pub url: String,
-    pub expires_in_seconds: u64,
-}
 
 /// Checks the port policy and the shared listener rules; non-loopback fails closed.
 pub fn validate(config: &WebUiConfig, local_api_port: u16) -> Result<ResolvedListen, String> {
@@ -135,6 +124,7 @@ impl WebUi {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use desktop_core::preferences::WEB_UI_DEFAULT_PORT;
 
     #[test]
     fn ports_cannot_collide_with_local_services() {
@@ -144,7 +134,9 @@ mod tests {
             ..WebUiConfig::default()
         };
         assert_eq!(
-            validate(&config(DEFAULT_PORT), 4180).unwrap().endpoint,
+            validate(&config(WEB_UI_DEFAULT_PORT), 4180)
+                .unwrap()
+                .endpoint,
             "http://127.0.0.1:4182"
         );
         assert!(validate(&config(0), 4180).is_err());

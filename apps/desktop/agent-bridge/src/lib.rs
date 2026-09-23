@@ -9,10 +9,8 @@
 //! from it and restored field by field.
 
 pub mod agents;
-pub mod brand;
 pub mod catalog;
 pub mod config_doc;
-pub mod lock;
 pub mod proxy;
 pub mod secrets;
 pub mod tokens;

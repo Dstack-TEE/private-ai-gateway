@@ -4,12 +4,11 @@ mod http;
 mod phala;
 mod redpill;
 pub(crate) use billing::account_balance;
+pub use billing::account_details;
 #[cfg(test)]
 use billing::*;
-pub use billing::{account_details, organization_url, top_up_url};
 use http::*;
 use phala::*;
-pub use redpill::account_return_url;
 pub(crate) use redpill::transition_credential;
 use redpill::*;
 
@@ -28,7 +27,6 @@ use base64::{
 };
 use rand::RngCore;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::{
@@ -41,7 +39,10 @@ use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use url::Url;
 use uuid::Uuid;
 
-use crate::contracts::{
+use desktop_core::account::{account_return_url, LoginPresentation};
+#[cfg(test)]
+use desktop_core::account::{organization_url, top_up_url};
+use desktop_core::contracts::{
     AccountBalance, AccountImages, AccountLoginDetails, AccountScope, AccountWorkspace,
     ConfidentialProfileInput, ProfileAuth, ServiceProvider,
 };
@@ -52,14 +53,6 @@ const CALLBACK: &str = "http://127.0.0.1:4181/oauth/callback";
 const KEY_URL: &str = "https://service.redpill.ai/api/oauth/key";
 const PHALA_API: &str = "https://cloud-api.phala.com";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(900);
-
-#[derive(Clone, Serialize, Deserialize, ts_rs::TS)]
-#[serde(rename_all = "camelCase")]
-pub struct LoginPresentation {
-    pub id: String,
-    pub url: String,
-    pub user_code: Option<String>,
-}
 
 #[derive(Clone)]
 pub(crate) struct Credential {
@@ -250,7 +243,7 @@ impl PendingLogin {
         workspace_id: Option<i64>,
     ) -> Result<Credential, String> {
         self.validate(id)?;
-        let candidate = crate::service_config::resolve_profile(profile.clone(), None)?;
+        let candidate = desktop_core::service_config::resolve_profile(profile.clone(), None)?;
         if candidate.id != self.profile.id
             || candidate.provider != self.profile.provider
             || candidate.remote_url != self.profile.remote_url
@@ -356,7 +349,8 @@ pub(crate) enum CredentialTransition {
 }
 
 pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<PendingLogin, String> {
-    profile.remote_url = crate::service_config::resolve_profile(profile.clone(), None)?.remote_url;
+    profile.remote_url =
+        desktop_core::service_config::resolve_profile(profile.clone(), None)?.remote_url;
     let client = client()?;
     let id = Uuid::new_v4().to_string();
     let (url, user_code, worker, callback_state) = match profile.provider {

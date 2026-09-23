@@ -18,14 +18,14 @@ use desktop_runtime::controller::{DesktopRuntime, RuntimeOptions};
 use std::sync::Arc;
 
 #[derive(Parser)]
-#[command(name = "private-ai-proxy-service", version = desktop_runtime::protocol::BUILD_VERSION, about = "Run the per-user Private AI Proxy backend in the foreground")]
+#[command(name = "private-ai-proxy-service", version = desktop_core::protocol::BUILD_VERSION, about = "Run the per-user Private AI Proxy backend in the foreground")]
 struct Arguments {}
 
 #[tokio::main]
 async fn main() {
     private_ai_proxy::install_crypto_provider();
     if let Err(error) = run().await {
-        desktop_runtime::diagnostic(format_args!("Private AI Proxy backend: {error}"));
+        desktop_core::diagnostic(format_args!("Private AI Proxy backend: {error}"));
         std::process::exit(1);
     }
 }
@@ -33,12 +33,12 @@ async fn main() {
 async fn run() -> Result<(), String> {
     Arguments::parse();
     #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
-    let service_access = desktop_runtime::agent_access::acquire_for_service();
+    let service_access = desktop_core::agent_access::acquire_for_service();
     #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
     let (agent_home_access, agent_access_error) = match service_access {
         Ok(access) => (access, None),
         Err(error) => {
-            desktop_runtime::diagnostic(format_args!("Private AI Proxy backend: {error}"));
+            desktop_core::diagnostic(format_args!("Private AI Proxy backend: {error}"));
             (None, Some(error))
         }
     };
@@ -85,7 +85,7 @@ async fn run() -> Result<(), String> {
     ) {
         Ok(monitor) => Some(monitor),
         Err(error) => {
-            desktop_runtime::diagnostic(format_args!(
+            desktop_core::diagnostic(format_args!(
                 "System wake monitoring is unavailable: {error}"
             ));
             None

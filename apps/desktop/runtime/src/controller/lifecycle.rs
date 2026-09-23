@@ -1,5 +1,5 @@
 use super::*;
-use crate::protocol::ShutdownMode;
+use desktop_core::protocol::ShutdownMode;
 
 impl DesktopRuntime {
     pub(super) fn configuration_change(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {

@@ -5,7 +5,7 @@ use std::{
 };
 
 use clap::{CommandFactory, FromArgMatches};
-use desktop_runtime::{
+use desktop_core::{
     client::Client,
     contracts::*,
     preferences::{Appearance, UpdateChannel},
@@ -17,6 +17,7 @@ use serde_json::{json, Map, Value};
 
 mod account;
 mod args;
+mod install;
 mod output;
 mod schema;
 
@@ -174,7 +175,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                         .ok_or("Profile not found")?,
                 )?,
                 Profiles::Import { file } => {
-                    let backup = desktop_runtime::maintenance::ProfileBackup::read(file)?;
+                    let backup = desktop_core::maintenance::ProfileBackup::read(file)?;
                     confirm(
                         cli,
                         "Import these unverified profile configurations without credentials?",
@@ -216,7 +217,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                         provider: service_provider(*provider),
                     };
                     // Validate before reading a credential or making a request.
-                    desktop_runtime::service_config::resolve_profile(profile.clone(), None)?;
+                    desktop_core::service_config::resolve_profile(profile.clone(), None)?;
                     confirm(
                         cli,
                         "Save this profile? This selects it as active and may restart protection.",
@@ -281,7 +282,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                         remote_url: url.clone().unwrap_or_else(|| saved.remote_url.clone()),
                     };
                     let resolved =
-                        desktop_runtime::service_config::resolve_profile(profile.clone(), None)?;
+                        desktop_core::service_config::resolve_profile(profile.clone(), None)?;
                     let target_changed = resolved.provider != saved.provider
                         || resolved.remote_url != saved.remote_url;
                     let credential_saved = saved.credential_saved;
@@ -459,7 +460,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                             }
                             _ => unreachable!(),
                         }
-                        desktop_runtime::local_api::resolve(config.clone())?;
+                        desktop_core::local_api::resolve(config.clone())?;
                         value(client.call(rpc::SaveLocalApi { config })?)?
                     }
                 }
@@ -485,13 +486,11 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
             }
         },
         Action::Cli { command } => match command {
-            Registration::Status => value(desktop_runtime::cli_install::status()?)?,
-            Registration::Install { directory } => {
-                value(desktop_runtime::cli_install::install(directory.clone())?)?
-            }
+            Registration::Status => value(install::status()?)?,
+            Registration::Install { directory } => value(install::install(directory.clone())?)?,
             Registration::Uninstall { directory } => {
                 confirm(cli, "Unregister the private-ai-proxy command?")?;
-                value(desktop_runtime::cli_install::uninstall(directory.clone())?)?
+                value(install::uninstall(directory.clone())?)?
             }
         },
         Action::Doctor => {
@@ -517,8 +516,8 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
         } => {
             // Like the desktop app, the web path fails fast during installer updates
             // instead of waiting out the startup gate.
-            let data = agent_bridge::agents::app_data_dir()?;
-            let startup = agent_bridge::lock::startup(&data)
+            let data = desktop_core::paths::app_data_dir()?;
+            let startup = desktop_core::lock::startup(&data)
                 .map_err(|_| "Cannot acquire app startup lock")?
                 .ok_or("Backend startup or an update is already in progress.")?;
             match desktop_app().filter(|_| !*web && graphical_session()) {
@@ -536,7 +535,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
 }
 
 fn desktop_app() -> Option<PathBuf> {
-    let backend = desktop_runtime::launch::service_executable().ok()?;
+    let backend = desktop_core::launch::service_executable().ok()?;
     let app = backend.parent()?.join(if cfg!(windows) {
         "private-ai-proxy-desktop.exe"
     } else {
@@ -579,7 +578,7 @@ fn open_web_ui(cli: &Cli, client: &Client) -> Result<Value, String> {
             cli,
             &format!(
                 "Web UI is off. Enable it on {}:{}?",
-                desktop_runtime::listen::url_host(&status.listen_address),
+                desktop_core::listen::url_host(&status.listen_address),
                 status.port
             ),
         )?;
@@ -681,7 +680,7 @@ fn agent_change(
         return value(preview);
     }
     if !cli.yes && !cli.json && !cli.non_interactive && io::stdin().is_terminal() {
-        desktop_runtime::diagnostic(format_args!("{}", output::details(&value(&preview)?)));
+        desktop_core::diagnostic(format_args!("{}", output::details(&value(&preview)?)));
     }
     confirm(cli, "Apply these agent configuration changes?")?;
     value(client.call(rpc::ApplyAgent {
@@ -695,23 +694,23 @@ fn agent_change(
 fn doctor(client: &Client) -> Value {
     let mut errors = Map::new();
     let backend_running = doctor_check(&mut errors, "backendRunning", client.is_running());
-    let cli = doctor_check(&mut errors, "cli", desktop_runtime::cli_install::status());
+    let cli = doctor_check(&mut errors, "cli", install::status());
     let backend_executable = doctor_check(
         &mut errors,
         "backendExecutable",
-        desktop_runtime::launch::service_executable(),
+        desktop_core::launch::service_executable(),
     );
     let endpoint = doctor_check(
         &mut errors,
         "endpoint",
-        desktop_runtime::transport::endpoint_path()
+        desktop_core::transport::endpoint_path()
             .map_err(|_| "Cannot resolve management endpoint".to_string()),
     );
     // Update availability is advisory: an offline check never fails the doctor.
     let update =
         update_notice().map_or_else(|error| json!({ "error": error }), |notice| json!(notice));
     json!({
-        "version": desktop_runtime::protocol::BUILD_VERSION,
+        "version": desktop_core::protocol::BUILD_VERSION,
         "update": update,
         "backendRunning": backend_running,
         "cli": cli,
@@ -722,14 +721,14 @@ fn doctor(client: &Client) -> Value {
     })
 }
 
-fn update_notice() -> Result<desktop_runtime::updates::UpdateNotice, String> {
+fn update_notice() -> Result<desktop_core::updates::UpdateNotice, String> {
     // The CLI dispatches synchronously inside the async entry point.
     std::thread::spawn(|| {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|_| "Could not check for updates".to_string())?
-            .block_on(desktop_runtime::updates::check_installation())
+            .block_on(desktop_core::updates::check_installation())
     })
     .join()
     .map_err(|_| "Could not check for updates".to_string())?

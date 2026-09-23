@@ -1,0 +1,44 @@
+[package]
+name = "private-ai-proxy-core"
+version = "0.1.0"
+description = "Private AI Proxy client side: contracts, management protocol and client, IPC transport, preferences and paths"
+license = "Apache-2.0"
+edition = "2021"
+rust-version = "1.98"
+
+[features]
+default = []
+mac-app-store = ["dep:objc2", "dep:objc2-foundation"]
+
+[lib]
+name = "desktop_core"
+path = "src/lib.rs"
+
+[dependencies]
+fd-lock = "4"
+if-addrs = "0.15"
+rand = "0.8"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
+semver = "1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+# Serde `alias` only widens deserialization, so its ts-rs notice is noise.
+ts-rs = { version = "12", features = ["no-serde-warnings"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+socket2 = { version = "0.6", features = ["all"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", optional = true }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSError", "NSString", "NSURL"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Threading"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

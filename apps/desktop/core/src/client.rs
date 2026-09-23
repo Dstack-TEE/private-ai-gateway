@@ -61,10 +61,10 @@ impl Client {
                 return Ok(());
             }
         }
-        let data = agent_bridge::agents::app_data_dir()?;
+        let data = crate::paths::app_data_dir()?;
         let deadline = Instant::now() + Duration::from_secs(15);
         let _startup = loop {
-            if let Some(lock) = agent_bridge::lock::startup(&data)
+            if let Some(lock) = crate::lock::startup(&data)
                 .map_err(|error| format!("Cannot acquire backend startup lock: {error}"))?
             {
                 break lock;
@@ -355,8 +355,8 @@ impl Client {
         &self,
         install: impl FnOnce() -> Result<(), String>,
     ) -> Result<(), String> {
-        let data = agent_bridge::agents::app_data_dir()?;
-        let startup = agent_bridge::lock::startup(&data)
+        let data = crate::paths::app_data_dir()?;
+        let startup = crate::lock::startup(&data)
             .map_err(|_| "Cannot secure update startup gate")?
             .ok_or("Another startup or update is in progress.")?;
         let expected = crate::launch::service_executable()?
@@ -366,7 +366,7 @@ impl Client {
         if was_running {
             self.shutdown_owned(Some(&expected), ShutdownMode::UpdateRestart)?;
         }
-        let ownership = agent_bridge::lock::instance(&data)
+        let ownership = crate::lock::instance(&data)
             .map_err(|_| "Cannot secure update ownership")?
             .ok_or("Another backend started before the update. Stop it before retrying.")?;
         let result = install();
@@ -400,8 +400,7 @@ fn open() -> io::Result<(BufReader<Stream>, Hello)> {
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let mut reader = BufReader::new(stream);
     let hello: Hello = protocol::read(&mut reader)?;
-    if hello.protocol_version != protocol::VERSION
-        || hello.product != agent_bridge::brand::APP_IDENTIFIER
+    if hello.protocol_version != protocol::VERSION || hello.product != crate::brand::APP_IDENTIFIER
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -487,7 +486,7 @@ mod tests {
                     "--nocapture",
                 ])
                 .env(CHILD, "1")
-                .env(agent_bridge::agents::HOME_OVERRIDE_ENV, home.path())
+                .env(crate::paths::HOME_OVERRIDE_ENV, home.path())
                 .output()
                 .unwrap();
             assert!(

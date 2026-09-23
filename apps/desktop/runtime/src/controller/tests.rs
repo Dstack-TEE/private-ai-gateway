@@ -1,5 +1,5 @@
 use super::*;
-use crate::contracts::{GatewayState, UsageSummary};
+use desktop_core::contracts::{GatewayState, UsageSummary};
 
 struct NoVerifier;
 impl VerifierLauncher for NoVerifier {
@@ -58,7 +58,7 @@ fn launch_requires_instance_ownership_before_initialization() {
                 "--nocapture",
             ])
             .env(CASE_ENV, case)
-            .env(agent_bridge::agents::HOME_OVERRIDE_ENV, home.path())
+            .env(desktop_core::paths::HOME_OVERRIDE_ENV, home.path())
             .output()
             .unwrap();
         assert!(
@@ -116,10 +116,9 @@ fn test_runtime(
 
 #[test]
 fn completed_authorization_is_staged_until_explicit_save_and_bound_to_its_provider() {
-    use crate::{
-        account_login::{Authorization, Credential, LoginPresentation, PendingLogin},
-        contracts::{ProfileAuth, ServiceProvider},
-    };
+    use crate::account_login::{Authorization, Credential, PendingLogin};
+    use desktop_core::account::LoginPresentation;
+    use desktop_core::contracts::{ProfileAuth, ServiceProvider};
     let executor = tokio::runtime::Runtime::new().unwrap();
     let directory = tempfile::tempdir().unwrap();
     let runtime = test_runtime(&executor, directory.path());
@@ -233,7 +232,7 @@ fn offline_removal_queues_cleanup_and_uncommitted_retirement_preserves_active_ke
         let home = tempfile::tempdir().unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "controller::tests::offline_removal_queues_cleanup_and_uncommitted_retirement_preserves_active_key", "--nocapture"])
-            .env(CHILD, "1").env(agent_bridge::agents::HOME_OVERRIDE_ENV, home.path()).output().unwrap();
+            .env(CHILD, "1").env(desktop_core::paths::HOME_OVERRIDE_ENV, home.path()).output().unwrap();
         assert!(
             output.status.success(),
             "{} {}",
@@ -254,7 +253,7 @@ fn offline_removal_queues_cleanup_and_uncommitted_retirement_preserves_active_ke
         ConfidentialProfileInput {
             id: "profile-test".into(),
             name: "Test".into(),
-            provider: crate::contracts::ServiceProvider::Redpill,
+            provider: desktop_core::contracts::ServiceProvider::Redpill,
             remote_url: "https://tee.redpill.ai".into(),
         },
         Some(1),
@@ -262,7 +261,7 @@ fn offline_removal_queues_cleanup_and_uncommitted_retirement_preserves_active_ke
     .unwrap();
     profile.credential_ref = Some("credential-old".into());
     profile.credential_saved = true;
-    profile.auth = crate::contracts::ProfileAuth::OAuth {
+    profile.auth = desktop_core::contracts::ProfileAuth::OAuth {
         account_id: "user_test".into(),
         account_name: None,
         images: None,
@@ -351,7 +350,7 @@ fn saving_an_offline_profile_does_not_launch_verification() {
                 "--nocapture",
             ])
             .env(CHILD, "1")
-            .env(agent_bridge::agents::HOME_OVERRIDE_ENV, home.path())
+            .env(desktop_core::paths::HOME_OVERRIDE_ENV, home.path())
             .output()
             .unwrap();
         assert!(
@@ -369,7 +368,7 @@ fn saving_an_offline_profile_does_not_launch_verification() {
     let profile = ConfidentialProfileInput {
         id: "offline".into(),
         name: "Offline".into(),
-        provider: crate::contracts::ServiceProvider::Custom,
+        provider: desktop_core::contracts::ServiceProvider::Custom,
         remote_url: "https://offline.invalid".into(),
     };
     let saved = executor
@@ -391,12 +390,12 @@ fn busy_save_is_a_definite_rejection_not_an_unknown_operation() {
     let directory = tempfile::tempdir().unwrap();
     let runtime = test_runtime(&executor, directory.path());
     let (_sender, receiver) =
-        tokio::sync::watch::channel(crate::contracts::AccountSaveResult::Running);
+        tokio::sync::watch::channel(desktop_core::contracts::AccountSaveResult::Running);
     *runtime.account_save.lock().unwrap() = Some((uuid::Uuid::new_v4().to_string(), receiver));
     let profile = ConfidentialProfileInput {
         id: "profile-test".into(),
         name: "Test".into(),
-        provider: crate::contracts::ServiceProvider::Redpill,
+        provider: desktop_core::contracts::ServiceProvider::Redpill,
         remote_url: "https://tee.redpill.ai".into(),
     };
     let result = runtime
@@ -409,7 +408,7 @@ fn busy_save_is_a_definite_rejection_not_an_unknown_operation() {
         )
         .unwrap();
     assert!(
-        matches!(result, crate::contracts::AccountSaveResult::Failed { error } if error.contains("Another save"))
+        matches!(result, desktop_core::contracts::AccountSaveResult::Failed { error } if error.contains("Another save"))
     );
 }
 
@@ -419,7 +418,7 @@ fn shutdown_blocks_later_configuration_changes() {
     let directory = tempfile::tempdir().unwrap();
     let runtime = test_runtime(&executor, directory.path());
     executor
-        .block_on(runtime.shutdown(crate::protocol::ShutdownMode::Quit))
+        .block_on(runtime.shutdown(desktop_core::protocol::ShutdownMode::Quit))
         .unwrap();
     let state = runtime.state().unwrap();
     assert_eq!(state.status, "stopped");
@@ -443,9 +442,17 @@ fn shutdown_blocks_later_configuration_changes() {
 #[test]
 fn update_restart_preserves_only_an_active_protection_session() {
     for (mode, active, preserved) in [
-        (crate::protocol::ShutdownMode::Quit, true, false),
-        (crate::protocol::ShutdownMode::UpdateRestart, true, true),
-        (crate::protocol::ShutdownMode::UpdateRestart, false, false),
+        (desktop_core::protocol::ShutdownMode::Quit, true, false),
+        (
+            desktop_core::protocol::ShutdownMode::UpdateRestart,
+            true,
+            true,
+        ),
+        (
+            desktop_core::protocol::ShutdownMode::UpdateRestart,
+            false,
+            false,
+        ),
     ] {
         let executor = tokio::runtime::Runtime::new().unwrap();
         let directory = tempfile::tempdir().unwrap();
@@ -524,7 +531,7 @@ fn recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them() {
                 "--nocapture",
             ])
             .env(CHILD, "1")
-            .env(agent_bridge::agents::HOME_OVERRIDE_ENV, home.path())
+            .env(desktop_core::paths::HOME_OVERRIDE_ENV, home.path())
             .output()
             .unwrap();
         assert!(
@@ -538,9 +545,8 @@ fn recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them() {
     let executor = tokio::runtime::Runtime::new().unwrap();
     let directory = app_data_dir().unwrap();
     std::fs::create_dir_all(&directory).unwrap();
-    let home = std::path::PathBuf::from(
-        std::env::var_os(agent_bridge::agents::HOME_OVERRIDE_ENV).unwrap(),
-    );
+    let home =
+        std::path::PathBuf::from(std::env::var_os(desktop_core::paths::HOME_OVERRIDE_ENV).unwrap());
     let mut runtime = test_runtime(&executor, &directory);
     let runtime_options = Arc::get_mut(&mut runtime).unwrap();
     runtime_options.instance = lock::instance(&directory).unwrap();
@@ -582,7 +588,7 @@ fn recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them() {
         .unwrap();
     let projected = std::fs::read(&path).unwrap();
     let credential_directory = if cfg!(all(target_os = "macos", feature = "mac-app-store")) {
-        home.join(format!(".{}-agents", agent_bridge::brand::APP_IDENTIFIER))
+        home.join(format!(".{}-agents", desktop_core::brand::APP_IDENTIFIER))
     } else {
         directory.clone()
     };
@@ -747,7 +753,7 @@ fn failed_and_noop_imports_preserve_recovery_and_monitor_state() {
     runtime.recovery.wait();
     runtime.system_resumed();
     assert!(runtime
-        .import_profiles(crate::maintenance::ProfileBackup {
+        .import_profiles(desktop_core::maintenance::ProfileBackup {
             version: 99,
             profiles: vec![]
         })
@@ -756,7 +762,7 @@ fn failed_and_noop_imports_preserve_recovery_and_monitor_state() {
     assert!(runtime.recovery.needs_check());
     assert_eq!(
         runtime
-            .import_profiles(crate::maintenance::ProfileBackup {
+            .import_profiles(desktop_core::maintenance::ProfileBackup {
                 version: 1,
                 profiles: vec![]
             })

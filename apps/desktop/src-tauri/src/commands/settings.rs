@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
-use desktop_runtime::{
+use desktop_core::{
     client::Client,
     maintenance::ProfileBackup,
     protocol::{rpc, Preference},
@@ -27,7 +27,7 @@ pub(crate) async fn export_profiles(
     let content: String =
         serde_json::from_value(content).map_err(|_| "Management response failed")?;
     // The app writes the file so sandboxed builds keep the picker's file access.
-    run_blocking(move || desktop_runtime::maintenance::write_export(&path, &content)).await
+    run_blocking(move || desktop_core::maintenance::write_export(&path, &content)).await
 }
 
 #[tauri::command]
@@ -39,8 +39,8 @@ pub(crate) async fn export_diagnostics(
     let version = app.package_info().version.to_string();
     let runtime = runtime.inner().clone();
     run_blocking(move || {
-        let diagnostics = desktop_runtime::maintenance::diagnostics(&runtime.state()?, &version);
-        desktop_runtime::maintenance::write_json(&path, &diagnostics)
+        let diagnostics = desktop_core::maintenance::diagnostics(&runtime.state()?, &version);
+        desktop_core::maintenance::write_json(&path, &diagnostics)
     })
     .await
 }

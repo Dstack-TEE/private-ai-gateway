@@ -845,7 +845,10 @@ fn disconnect_fails_closed_when_revocation_cannot_be_persisted() {
     let status = agent_status(&statuses, Agent::ClaudeCode);
     assert!(status.recorded && status.attention.is_some());
 
-    sandbox.projector.tokens.set_sync_parent(tokens::sync_dir);
+    sandbox
+        .projector
+        .tokens
+        .set_sync_parent(private_fs::sync_dir);
     disconnect(&sandbox, Agent::ClaudeCode);
     assert!(sandbox.projector.load_store().unwrap().is_empty());
 }

@@ -1,8 +1,8 @@
 use super::*;
-use crate::{
-    contracts::WebUiStatus,
+use crate::web_ui;
+use desktop_core::{
+    contracts::{WebUiLogin, WebUiStatus},
     preferences::{self, WebUiConfig},
-    web_ui::{self, WebUiLogin},
 };
 
 impl DesktopRuntime {

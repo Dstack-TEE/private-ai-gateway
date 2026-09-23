@@ -10,8 +10,9 @@ use std::{
 use serde_json::Value;
 use tokio::{runtime::Handle, sync::Semaphore, task::JoinSet};
 
-use crate::{
-    controller::DesktopRuntime,
+use crate::controller::DesktopRuntime;
+
+use desktop_core::{
     preferences,
     protocol::{self, rpc, Command, Hello, Outcome, Request, Response, RpcError, ShutdownMode},
     transport::{Listener, Stream},
@@ -47,7 +48,7 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
     let executable = std::env::current_exe().map_err(|_| "Cannot locate backend executable")?;
     let hello = Hello {
         protocol_version: protocol::VERSION,
-        product: agent_bridge::brand::APP_IDENTIFIER.into(),
+        product: desktop_core::brand::APP_IDENTIFIER.into(),
         version: protocol::BUILD_VERSION.into(),
         instance_id: format!(
             "{}-{}",
@@ -296,7 +297,7 @@ pub(crate) fn execute(
     command: Command,
 ) -> Result<Value, RpcError> {
     if matches!(command, Command::State) {
-        return handle.block_on(protocol::dispatch(runtime, command));
+        return handle.block_on(crate::dispatch::dispatch(runtime, command));
     }
     let _operation = admission
         .mutations
@@ -315,7 +316,7 @@ pub(crate) fn execute(
     } else {
         None
     };
-    handle.block_on(protocol::dispatch(runtime, command))
+    handle.block_on(crate::dispatch::dispatch(runtime, command))
 }
 
 fn shutdown(

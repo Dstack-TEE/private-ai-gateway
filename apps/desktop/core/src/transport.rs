@@ -7,7 +7,7 @@
 
 use std::{io, path::PathBuf};
 
-use agent_bridge::agents::app_data_dir;
+use crate::paths::app_data_dir;
 
 #[cfg(unix)]
 #[path = "transport/unix.rs"]

@@ -1,4 +1,4 @@
-use crate::contracts::GatewayState;
+use desktop_core::contracts::GatewayState;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,

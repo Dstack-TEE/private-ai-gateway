@@ -12,20 +12,23 @@ mod events;
 use events::*;
 
 use std::{
+    collections::BTreeSet,
     sync::{Arc, Mutex, MutexGuard},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crate::contracts::{
-    CatalogSummary, ConfidentialProfile, GatewayIdentity, GatewayState, LocalApiConfig,
-    RequestActivity, SourceProvenance, StartGatewayConfig, UsageSummary, VerificationCheck,
-};
 use crate::endpoint_inventory::InventoryUpdater;
 use crate::usage::UsageStore;
-use crate::{local_api, service_config};
 use aci_protocol::types::ServiceCapabilities;
 use agent_bridge::catalog::{Catalog, EndpointInventory};
 use agent_bridge::proxy::{ProxyEvent, ProxyState, Session};
+use desktop_core::contracts::{
+    CatalogSummary, ConfidentialProfile, GatewayIdentity, GatewayState, LocalApiConfig,
+    ModelSummary, RequestActivity, SourceProvenance, StartGatewayConfig, UsageSummary,
+    VerificationCheck,
+};
+use desktop_core::local_api;
+use desktop_core::service_config;
 use serde_json::{Map, Value};
 use tokio::{runtime::Handle, sync::watch};
 
@@ -546,7 +549,7 @@ impl SessionManager {
         });
     }
 
-    pub fn set_web_ui(&self, status: crate::contracts::WebUiStatus) {
+    pub fn set_web_ui(&self, status: desktop_core::contracts::WebUiStatus) {
         self.update(|state| state.web_ui = status);
     }
 
@@ -711,7 +714,7 @@ impl SessionManager {
     }
 
     fn publish_catalog(&self, runtime: &mut RuntimeState, catalog: Catalog) {
-        let summary = CatalogSummary::from_catalog(&catalog, runtime.last_catalog.as_ref());
+        let summary = catalog_summary(&catalog, runtime.last_catalog.as_ref());
         runtime.last_catalog = Some(summary.clone());
         runtime.state.catalog = Some(summary);
         runtime.catalog = Some(catalog.clone());
@@ -889,6 +892,54 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// Summarizes a verified catalog for clients, carrying forward removed ids.
+fn catalog_summary(catalog: &Catalog, previous: Option<&CatalogSummary>) -> CatalogSummary {
+    let models: Vec<ModelSummary> = catalog
+        .models
+        .iter()
+        .map(|model| ModelSummary {
+            id: model.id().to_string(),
+            name: model.display_name().to_string(),
+            supported_endpoints: model.supported_surfaces.as_ref().map(|surfaces| {
+                surfaces
+                    .iter()
+                    .map(|surface| surface.path().to_string())
+                    .collect()
+            }),
+            context_length: model.remote.context_length,
+            max_output_length: model.remote.max_output_length,
+            is_tee: model.bool_field("is_tee"),
+            input_price_per_million: model.price_per_million("prompt"),
+            output_price_per_million: model.price_per_million("completion"),
+            cache_read_price_per_million: model.price_per_million("input_cache_read"),
+            cache_write_price_per_million: model.price_per_million("input_cache_write"),
+            input_modalities: model.string_array("input_modalities"),
+            output_modalities: model.string_array("output_modalities"),
+            capabilities: model.string_array("supported_features"),
+            description: model.string_field("description"),
+        })
+        .collect();
+    // Carry forward ids that disappeared until the service lists them
+    // again, so a removed model is never quietly forgotten.
+    let removed: BTreeSet<String> = previous
+        .into_iter()
+        .flat_map(|previous| {
+            previous
+                .models
+                .iter()
+                .map(|model| model.id.clone())
+                .chain(previous.removed.iter().cloned())
+        })
+        .filter(|id| catalog.get(id).is_none())
+        .collect();
+    CatalogSummary {
+        revision: catalog.revision.clone(),
+        fetched_at: catalog.fetched_at,
+        models,
+        removed: removed.into_iter().collect(),
+    }
 }
 
 #[cfg(test)]

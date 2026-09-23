@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use agent_bridge::{agents::APP_IDENTIFIER, lock::InstanceLock};
+use crate::{brand::APP_IDENTIFIER, lock::InstanceLock};
 use windows_sys::Win32::{
     Foundation::{
         GetLastError, LocalFree, ERROR_BROKEN_PIPE, ERROR_FILE_NOT_FOUND,
@@ -684,7 +684,7 @@ mod tests {
     #[test]
     fn authenticated_stream_round_trip_and_deadline() {
         let temp = tempfile::tempdir().unwrap();
-        let owner = agent_bridge::lock::instance(temp.path()).unwrap().unwrap();
+        let owner = crate::lock::instance(temp.path()).unwrap().unwrap();
         let endpoint = test_endpoint();
         let listener = Listener::bind_at(&owner, endpoint.clone()).unwrap();
         listener.set_nonblocking(true).unwrap();

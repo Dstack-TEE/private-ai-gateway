@@ -45,7 +45,7 @@ use crate::verify::{verify_service, ServiceVerification};
 
 macro_rules! diagnostic {
     ($($arg:tt)*) => {
-        desktop_runtime::diagnostic(format_args!($($arg)*))
+        desktop_core::diagnostic(format_args!($($arg)*))
     };
 }
 

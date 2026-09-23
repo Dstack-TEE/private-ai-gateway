@@ -80,7 +80,7 @@ export async function stagePortable({ sourceDir, targetTriple, platform, destina
 }
 
 // Names the package manager that owns a Linux install, so update notices can
-// print its upgrade command (see runtime/src/updates.rs).
+// print its upgrade command (see core/src/updates.rs).
 export const packageManagerMarker = "usr/share/private-ai-proxy/package-manager";
 
 export async function writePackageManagerMarker(packageRoot, packageManager) {

@@ -5,15 +5,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use agent_bridge::{
-    agents::{app_data_dir, write_atomic},
-    tokens,
-};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::contracts::{
-    ConfidentialProfile, ConfidentialProfileInput, ProfileAuth, StartGatewayConfig,
+use crate::{
+    contracts::{ConfidentialProfile, ConfidentialProfileInput, ProfileAuth, StartGatewayConfig},
+    paths::app_data_dir,
+    private_fs::{self, write_atomic},
 };
 
 const CONFIG_FILE: &str = "confidential-ai.json";
@@ -55,7 +53,7 @@ impl ServiceSettings {
                 .iter()
                 .find(|profile| profile.id == self.active_profile_id)
                 .map(|profile| profile.remote_url.clone())
-                .unwrap_or_else(|| agent_bridge::brand::SERVICE_DEFAULT_URL.to_string()),
+                .unwrap_or_else(|| crate::brand::SERVICE_DEFAULT_URL.to_string()),
             require_production_os: self.require_production_os,
         })
     }
@@ -117,7 +115,7 @@ pub fn save(settings: ServiceSettings) -> Result<ServiceSettings, String> {
     let parent = path
         .parent()
         .ok_or_else(|| "The Confidential AI settings path has no parent".to_string())?;
-    tokens::create_private_dir(parent)
+    private_fs::create_private_dir(parent)
         .map_err(|error| format!("Cannot create the app data directory: {error}"))?;
     write_atomic(&path, &text, None)
         .map_err(|error| format!("Cannot save Confidential AI settings: {error}"))?;
