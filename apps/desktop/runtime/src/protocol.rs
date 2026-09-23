@@ -338,6 +338,61 @@ mod tests {
     }
 
     #[test]
+    fn wire_format_is_stable_across_builds() {
+        // Shutdown is sent to backends of other builds during updates, so the
+        // envelope and every command shape must keep these exact bytes.
+        let frames = [
+            (Command::State, r#"{"method":"state"}"#),
+            (
+                Command::Start(StartGatewayConfig {
+                    remote_url: "https://tee.example".into(),
+                    require_production_os: true,
+                }),
+                r#"{"method":"start","params":{"remoteUrl":"https://tee.example","requireProductionOs":true}}"#,
+            ),
+            (
+                Command::Shutdown {
+                    instance_id: "1-2".into(),
+                    mode: ShutdownMode::UpdateRestart,
+                },
+                r#"{"method":"shutdown","params":{"instance_id":"1-2","mode":"updateRestart"}}"#,
+            ),
+            (
+                Command::ActivateProfile {
+                    profile_id: "p".into(),
+                },
+                r#"{"method":"activateProfile","params":{"profile_id":"p"}}"#,
+            ),
+            (
+                Command::SetPreference(Preference::Appearance(Appearance::Dark)),
+                r#"{"method":"setPreference","params":{"name":"appearance","value":"dark"}}"#,
+            ),
+        ];
+        for (command, expected) in frames {
+            let request = Request {
+                version: VERSION,
+                id: 7,
+                command,
+            };
+            let encoded = serde_json::to_string(&request).unwrap();
+            assert_eq!(
+                encoded,
+                format!(r#"{{"version":{VERSION},"id":7,"command":{expected}}}"#)
+            );
+            let decoded: Request = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(serde_json::to_string(&decoded).unwrap(), encoded);
+        }
+        let response = Response {
+            id: 7,
+            outcome: Outcome::Result(Value::Null),
+        };
+        assert_eq!(
+            serde_json::to_string(&response).unwrap(),
+            r#"{"id":7,"outcome":{"result":null}}"#
+        );
+    }
+
+    #[test]
     fn agent_failures_keep_actionable_causes_without_internal_details() {
         use desktop_gateway::agents::AgentError;
         for (error, code) in [
