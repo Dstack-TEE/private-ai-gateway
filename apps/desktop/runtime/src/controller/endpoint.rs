@@ -95,10 +95,7 @@ impl DesktopRuntime {
             None
         };
         self.endpoint.stop().await?;
-        let listener = match prepared
-            .map(Ok)
-            .unwrap_or_else(|| proxy::bind_std(resolved.bind))
-        {
+        let listener = match prepared.map(Ok).unwrap_or_else(|| rebind(resolved.bind)) {
             Ok(listener) => listener,
             Err(error) => {
                 if let Err(restore_error) = self.restore_endpoint(current.clone()) {
@@ -141,7 +138,7 @@ impl DesktopRuntime {
         self: &Arc<Self>,
         previous: ResolvedLocalApi,
     ) -> Result<(), String> {
-        let listener = proxy::bind_std(previous.bind).map_err(|error| {
+        let listener = rebind(previous.bind).map_err(|error| {
             format!(
                 "The new Local API settings failed and the previous listener could not be restored: {error}"
             )
@@ -187,4 +184,10 @@ impl DesktopRuntime {
         self.apply_web_ui(&crate::preferences::WebUiConfig::default());
         self.manager.snapshot()
     }
+}
+
+/// Binds a port whose Local API listener was just stopped.
+fn rebind(address: std::net::SocketAddr) -> Result<std::net::TcpListener, String> {
+    crate::listen::bind(address, true)
+        .map_err(|error| format!("Cannot listen on {address}: {error}"))
 }

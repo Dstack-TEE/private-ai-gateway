@@ -27,7 +27,7 @@ use super::{auth::THROTTLE_REFILL, Auth, Throttle};
 use crate::{
     contracts::GatewayState,
     controller::DesktopRuntime,
-    listen::{url_host, ResolvedListen},
+    listen::{self, url_host, ResolvedListen},
     protocol::{Command, RpcError, BUILD_VERSION},
     ui_api::{self, Backend, Event, Host, Method, StateEventProjection},
 };
@@ -150,36 +150,20 @@ fn allowed_hosts(listen: &ResolvedListen) -> Vec<String> {
 
 fn bind(address: SocketAddr, reopening: bool) -> Result<std::net::TcpListener, String> {
     let (ip, port) = (address.ip(), address.port());
-    // A listener closed by the same change may take a moment to release its port.
-    let mut retries = if reopening { 20 } else { 0 };
-    loop {
-        match std::net::TcpListener::bind(address) {
-            Ok(listener) => {
-                listener
-                    .set_nonblocking(true)
-                    .map_err(|_| format!("Cannot configure the web UI listener on port {port}"))?;
-                return Ok(listener);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse && retries > 0 => {
-                retries -= 1;
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(error) => {
-                return Err(match error.kind() {
-                    std::io::ErrorKind::AddrInUse => {
-                        format!("Port {port} is already in use on {ip}")
-                    }
-                    std::io::ErrorKind::PermissionDenied => {
-                        format!("Port {port} requires elevated privileges; choose another port")
-                    }
-                    std::io::ErrorKind::AddrNotAvailable => {
-                        format!("Address {ip} is not assigned to this device")
-                    }
-                    _ => format!("Cannot listen on {address}"),
-                })
-            }
+    let listener = listen::bind(address, reopening).map_err(|error| match error.kind() {
+        std::io::ErrorKind::AddrInUse => format!("Port {port} is already in use on {ip}"),
+        std::io::ErrorKind::PermissionDenied => {
+            format!("Port {port} requires elevated privileges; choose another port")
         }
-    }
+        std::io::ErrorKind::AddrNotAvailable => {
+            format!("Address {ip} is not assigned to this device")
+        }
+        _ => format!("Cannot listen on {address}"),
+    })?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|_| format!("Cannot configure the web UI listener on port {port}"))?;
+    Ok(listener)
 }
 
 fn router<B: Backend>(state: WebState<B>) -> Router {
