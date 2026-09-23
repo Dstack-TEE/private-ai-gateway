@@ -14,6 +14,7 @@ use rand::{rngs::OsRng, RngCore};
 use rust_embed::RustEmbed;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     client::Client,
@@ -43,17 +44,21 @@ struct AppState {
     host: WebHost,
     token: Arc<[u8]>,
     port: u16,
+    shutdown: CancellationToken,
 }
 
 pub(super) fn run(port: u16, no_open: bool) -> Result<(), String> {
     std::thread::scope(|scope| {
         scope
             .spawn(|| {
-                tokio::runtime::Builder::new_multi_thread()
+                let runtime = tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
                     .build()
-                    .map_err(|_| "Cannot initialize the web UI runtime".to_string())?
-                    .block_on(serve(port, no_open))
+                    .map_err(|_| "Cannot initialize the web UI runtime".to_string())?;
+                let result = runtime.block_on(serve(port, no_open));
+                // The backend connection watcher blocks on IPC; do not wait for it on exit.
+                runtime.shutdown_background();
+                result
             })
             .join()
             .map_err(|_| "The web UI server stopped unexpectedly".to_string())?
@@ -81,7 +86,9 @@ async fn serve(port: u16, no_open: bool) -> Result<(), String> {
         host: WebHost { events },
         token: Arc::from(token.as_bytes()),
         port,
+        shutdown: CancellationToken::new(),
     };
+    let shutdown = state.shutdown.clone();
     publish_state_events(state.clone());
     let app = router(state);
     let url = format!("http://127.0.0.1:{port}/#token={token}");
@@ -95,8 +102,10 @@ async fn serve(port: u16, no_open: bool) -> Result<(), String> {
         ));
     }
     axum::serve(listener, app)
-        .with_graceful_shutdown(async {
+        .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
+            // Event streams never finish on their own and would block graceful shutdown.
+            shutdown.cancel();
         })
         .await
         .map_err(|_| "The web UI server failed".to_string())
@@ -215,7 +224,6 @@ async fn bootstrap() -> Json<Value> {
             "cliRegistration": false,
             "accountPortalLinks": true,
             "sandboxHomeAccess": false,
-            "nativeDialogs": false,
             "launchAtLogin": false,
             "notifications": false
         }
@@ -230,10 +238,15 @@ async fn events(
         ui_api::STATE_EVENT,
         serde_json::to_value(state.client.cached_state()).unwrap_or(Value::Null),
     );
+    let shutdown = state.shutdown.clone();
     let stream = async_stream::stream! {
         yield Ok(SseEvent::default().json_data(initial).unwrap_or_else(|_| SseEvent::default().data("{}")));
         loop {
-            match receiver.recv().await {
+            let received = tokio::select! {
+                () = shutdown.cancelled() => break,
+                received = receiver.recv() => received,
+            };
+            match received {
                 Ok(event) => yield Ok(SseEvent::default().json_data(event).unwrap_or_else(|_| SseEvent::default().data("{}"))),
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => break,
@@ -289,9 +302,16 @@ async fn asset(request: Request<Body>) -> Response {
         return status(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed");
     }
     let path = request.uri().path().trim_start_matches('/');
-    let asset = WebAssets::get(if path.is_empty() { "index.html" } else { path })
-        .or_else(|| WebAssets::get("index.html"));
-    let Some(asset) = asset else {
+    if path == "api" || path.starts_with("api/") {
+        return status(StatusCode::NOT_FOUND, "Unknown API endpoint");
+    }
+    // Unknown client routes render the single-page app.
+    let path = if WebAssets::get(path).is_some() {
+        path
+    } else {
+        "index.html"
+    };
+    let Some(asset) = WebAssets::get(path) else {
         return status(StatusCode::NOT_FOUND, "Web UI not found");
     };
     let content_type = match path.rsplit('.').next() {
@@ -354,12 +374,17 @@ mod tests {
     }
 
     fn test_router() -> Router {
+        test_router_with_shutdown(CancellationToken::new())
+    }
+
+    fn test_router_with_shutdown(shutdown: CancellationToken) -> Router {
         let (events, _) = broadcast::channel(1);
         router(AppState {
             client: Arc::new(Client::new()),
             host: WebHost { events },
             token: Arc::from(&b"token"[..]),
             port: 3210,
+            shutdown,
         })
     }
 
@@ -453,6 +478,32 @@ mod tests {
                 Some(&HeaderValue::from_static("nosniff"))
             );
         }
+    }
+
+    #[tokio::test]
+    async fn event_streams_end_on_shutdown() {
+        let shutdown = CancellationToken::new();
+        let request = Request::builder()
+            .uri("/api/events")
+            .header(header::HOST, "127.0.0.1:3210")
+            .header(header::ORIGIN, "http://127.0.0.1:3210")
+            .header(header::AUTHORIZATION, "Bearer token")
+            .body(Body::empty())
+            .unwrap();
+        let response = test_router_with_shutdown(shutdown.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        shutdown.cancel();
+        let body = tokio::time::timeout(
+            Duration::from_secs(5),
+            axum::body::to_bytes(response.into_body(), usize::MAX),
+        )
+        .await
+        .expect("event stream should end on shutdown")
+        .unwrap();
+        assert!(body.starts_with(b"data: "));
     }
 
     #[tokio::test]
