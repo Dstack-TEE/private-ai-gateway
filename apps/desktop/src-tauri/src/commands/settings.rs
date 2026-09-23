@@ -1,7 +1,10 @@
 use std::{path::PathBuf, sync::Arc};
 
 use desktop_runtime::{
-    client::Client, maintenance::ProfileBackup, preferences::Appearance, protocol::Preference,
+    client::Client,
+    maintenance::ProfileBackup,
+    preferences::Appearance,
+    protocol::{rpc, Preference},
     ui_api::Method,
 };
 use serde_json::{json, Value};
@@ -145,7 +148,12 @@ pub(crate) async fn set_cli_registration(
     let client = app.state::<Arc<Client>>().inner().clone();
     if !installed {
         let writer = client.clone();
-        run_blocking(move || writer.set_preference(Preference::AutoCliRegistration(false))).await?;
+        run_blocking(move || {
+            writer.call(rpc::SetPreference {
+                change: Preference::AutoCliRegistration(false),
+            })
+        })
+        .await?;
     }
     let registration = if installed {
         run_cli_command(&app, vec!["cli", "install", "--json"]).await
@@ -153,7 +161,12 @@ pub(crate) async fn set_cli_registration(
         run_cli_command(&app, vec!["cli", "uninstall", "--json", "--yes"]).await
     }?;
     if installed {
-        run_blocking(move || client.set_preference(Preference::AutoCliRegistration(true))).await?;
+        run_blocking(move || {
+            client.call(rpc::SetPreference {
+                change: Preference::AutoCliRegistration(true),
+            })
+        })
+        .await?;
     }
     state.last_error = None;
     Ok(CliRegistration {

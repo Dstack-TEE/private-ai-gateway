@@ -21,6 +21,7 @@ use desktop_runtime::{
     client::Client,
     contracts::{ConfidentialProfileInput, ConnectOptions, LocalApiConfig, StartGatewayConfig},
     preferences::Appearance,
+    protocol::rpc,
 };
 use tauri::{
     webview::{PageLoadEvent, WebviewWindowBuilder},
@@ -156,8 +157,13 @@ async fn register_cli_on_startup(app: &AppHandle) {
     if reader.cached_state().backend_connected == Some(false) {
         return;
     }
-    let enabled =
-        run_blocking(move || Ok(reader.preferences()?.auto_cli_registration.unwrap_or(true))).await;
+    let enabled = run_blocking(move || {
+        Ok(reader
+            .call(rpc::Preferences)?
+            .auto_cli_registration
+            .unwrap_or(true))
+    })
+    .await;
     state.attempted = enabled.is_ok();
     let result = match enabled {
         Ok(true) => match allow_automatic_cli_registration() {
@@ -312,7 +318,7 @@ pub fn run() {
                     .plugin(tauri_plugin_updater::Builder::new().build())?;
             }
             let client = Client::attach(tauri::async_runtime::handle().inner().clone())?;
-            if let Ok(preferences) = client.preferences() {
+            if let Ok(preferences) = client.call(rpc::Preferences) {
                 apply_appearance(app.handle(), preferences.appearance);
             }
             app.manage(client.clone());

@@ -11,7 +11,7 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use desktop_gateway::agents::{Agent, AgentStatus, ConnectOptions};
 use desktop_gateway::brand::PRODUCT_NAME as APP_NAME;
-use desktop_runtime::{client::Client, contracts::GatewayState};
+use desktop_runtime::{client::Client, contracts::GatewayState, protocol::rpc};
 
 /// Native menu handles mirror backend state; actions use the same client as the window.
 pub struct TrayMenu {
@@ -138,7 +138,7 @@ fn perform_action(app: &AppHandle, id: String) {
                 }
                 "copy-key" => {
                     app.clipboard()
-                        .write_text(client.client_key()?)
+                        .write_text(client.call(rpc::ClientKey)?)
                         .map_err(|_| "Cannot copy the client key")?;
                 }
                 "profiles" => {
@@ -146,12 +146,14 @@ fn perform_action(app: &AppHandle, id: String) {
                     crate::native_dialog::open_profiles(&app, false)?;
                 }
                 _ if id.starts_with("profile:") => {
-                    client.activate_profile(id[8..].to_string())?;
+                    client.call(rpc::ActivateProfile {
+                        profile_id: id[8..].to_string(),
+                    })?;
                 }
                 _ if id.starts_with("agent:") => {
                     let agent_id = &id[6..];
                     let agent = client
-                        .list_agents()?
+                        .call(rpc::Agents)?
                         .into_iter()
                         .find(|agent| agent.id == agent_id)
                         .ok_or("Agent is no longer available")?;
@@ -160,9 +162,17 @@ fn perform_action(app: &AppHandle, id: String) {
                     }
                     let connect = !agent.recorded;
                     let options = ConnectOptions::default();
-                    let preview =
-                        client.preview_agent(agent.id.clone(), connect, options.clone())?;
-                    client.apply_agent(agent.id, connect, preview.revision, options)?;
+                    let preview = client.call(rpc::PreviewAgent {
+                        agent_id: agent.id.clone(),
+                        connect,
+                        options: options.clone(),
+                    })?;
+                    client.call(rpc::ApplyAgent {
+                        agent_id: agent.id,
+                        connect,
+                        revision: preview.revision,
+                        options,
+                    })?;
                 }
                 _ => return Ok(()),
             }
@@ -182,7 +192,7 @@ fn perform_action(app: &AppHandle, id: String) {
         let state = client.state().unwrap_or_else(|_| client.cached_state());
         sync(&app, &state);
         if id.starts_with("agent:") {
-            if let Ok(agents) = client.list_agents() {
+            if let Ok(agents) = client.call(rpc::Agents) {
                 sync_agents(&app, &agents);
             }
             let _ = app.emit("gateway://agents-changed", ());

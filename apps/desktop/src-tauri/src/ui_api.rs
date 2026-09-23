@@ -5,7 +5,7 @@ use desktop_runtime::{
     client::Client,
     contracts::{AgentStatus, GatewayState},
     preferences::{Appearance, NotificationPreferences},
-    protocol::Command,
+    protocol::rpc,
     ui_api::{self as shared, Backend, Event, Host, Method},
 };
 use serde_json::Value;
@@ -101,7 +101,7 @@ impl Host for TauriHost {
             .try_lock()
             .map_err(|_| "An update operation is in progress")?;
         let worker_app = self.app().clone();
-        let reset = shared::call::<GatewayState>(backend, Command::ResetSettings).await;
+        let reset = shared::call(backend, rpc::ResetSettings).await;
         let result = run_blocking(move || {
             let state = reset?;
             tray::set_open_at_login(&worker_app, false)?;

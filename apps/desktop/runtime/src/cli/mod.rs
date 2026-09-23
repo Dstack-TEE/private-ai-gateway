@@ -8,7 +8,7 @@ use crate::{
     client::Client,
     contracts::*,
     preferences::{Appearance, UpdateChannel},
-    protocol::{Command, Preference},
+    protocol::{export_path, rpc, Preference},
     usage::UsageQuery,
 };
 use clap::{CommandFactory, FromArgMatches};
@@ -110,7 +110,9 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
             Client::ensure_service()?;
             if let Some(profile) = profile {
                 if client.state()?.active_profile_id != *profile {
-                    client.activate_profile(profile.clone())?;
+                    client.call(rpc::ActivateProfile {
+                        profile_id: profile.clone(),
+                    })?;
                 }
             }
             let state = client.state()?;
@@ -126,7 +128,9 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                 let started = if state.status == "verifying" && !state.configuration_verification {
                     state
                 } else {
-                    client.start(state.config)?
+                    client.call(rpc::Start {
+                        config: state.config,
+                    })?
                 };
                 let deadline = Instant::now() + Duration::from_secs(*timeout);
                 loop {
@@ -153,7 +157,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                 }
             }
         }
-        Action::Stop => value(client.stop()?)?,
+        Action::Stop => value(client.call(rpc::Stop)?)?,
         Action::Profiles { command } => {
             match command {
                 Profiles::Login(options) => {
@@ -176,20 +180,26 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                         "Import these unverified profile configurations without credentials?",
                     )?;
                     Client::ensure_service()?;
-                    value(client.import_profiles(backup)?)?
+                    value(client.call(rpc::ImportProfiles { backup })?)?
                 }
                 Profiles::Export { output } => {
                     let path = new_export_path(output)?;
-                    client.export_profiles(path.clone())?;
+                    client.call(rpc::ExportProfiles {
+                        path: export_path(&path)?,
+                    })?;
                     json!({"exported": path})
                 }
                 Profiles::Use { id } => {
                     confirm(cli, "Switch the active profile?")?;
-                    value(client.activate_profile(id.clone())?)?
+                    value(client.call(rpc::ActivateProfile {
+                        profile_id: id.clone(),
+                    })?)?
                 }
                 Profiles::Remove { id } => {
                     confirm(cli, "Delete this profile and its stored credential?")?;
-                    value(client.delete_profile(id.clone())?)?
+                    value(client.call(rpc::DeleteProfile {
+                        profile_id: id.clone(),
+                    })?)?
                 }
                 Profiles::Add {
                     id,
@@ -216,11 +226,11 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                         return Err("Profile ID already exists. Use profiles verify to update its credential.".into());
                     }
                     let key = read_key(cli, *key_stdin)?;
-                    client.request(Command::Verify {
+                    value(client.call(rpc::Verify {
                         profile,
                         require_production_os: !allow_development_os,
                         key: Some(key),
-                    })?
+                    })?)?
                 }
                 Profiles::Verify { id, key_stdin } => {
                     let state = client.state()?;
@@ -238,7 +248,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                     } else {
                         None
                     };
-                    client.request(Command::Verify {
+                    value(client.call(rpc::Verify {
                         profile: ConfidentialProfileInput {
                             id: profile.id,
                             name: profile.name,
@@ -247,7 +257,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                         },
                         require_production_os: state.config.require_production_os,
                         key,
-                    })?
+                    })?)?
                 }
                 Profiles::Edit {
                     id,
@@ -290,16 +300,16 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                     } else {
                         state.config.require_production_os
                     };
-                    client.request(Command::Verify {
+                    value(client.call(rpc::Verify {
                         profile,
                         require_production_os: production_os,
                         key,
-                    })?
+                    })?)?
                 }
             }
         }
         Action::Agents { command } => match command {
-            Agents::List => value(client.list_agents()?)?,
+            Agents::List => value(client.call(rpc::Agents)?)?,
             Agents::Connect {
                 id,
                 model,
@@ -324,14 +334,14 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                     cli,
                     "Disconnect all managed agents and restore their configuration?",
                 )?;
-                value(client.disconnect_all_agents()?)?
+                value(client.call(rpc::DisconnectAllAgents)?)?
             }
         },
         Action::Models {
             command: Models::List { refresh },
         } => {
             let state: GatewayState = if *refresh {
-                client.request(Command::RefreshCatalog)?
+                client.call(rpc::RefreshCatalog)?
             } else {
                 client.state()?
             };
@@ -342,43 +352,56 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
             )?
         }
         Action::Usage { command } => match command {
-            Usage::List { filter, page } => value(client.query_usage(query(filter, Some(page)))?)?,
-            Usage::Show { id } => value(client.usage_record(id)?.ok_or("Usage record not found")?)?,
+            Usage::List { filter, page } => value(client.call(rpc::Usage {
+                query: query(filter, Some(page)),
+            })?)?,
+            Usage::Show { id } => value(
+                client
+                    .call(rpc::UsageRecord {
+                        record_id: id.clone(),
+                    })?
+                    .ok_or("Usage record not found")?,
+            )?,
             Usage::Export { filter, output, .. } => {
                 let path = std::path::absolute(output).map_err(|_| "Cannot resolve export path")?;
                 if path.exists() {
                     return Err("Export target already exists; choose a new path.".into());
                 }
-                value(json!({"rows": client.export_usage_csv(query(filter, None), path)?}))?
+                let rows = client.call(rpc::ExportUsage {
+                    query: query(filter, None),
+                    path: export_path(&path)?,
+                })?;
+                value(json!({ "rows": rows }))?
             }
             Usage::Clear => {
                 confirm(cli, "Permanently clear all usage history?")?;
-                json!({"deleted": client.clear_usage()?})
+                json!({"deleted": client.call(rpc::ClearUsage)?})
             }
         },
         Action::Settings { command } => {
             match command {
                 Settings::Reset => {
                     confirm(cli, "Stop protection, restore all agents, and reset backend settings, including turning off the web UI? Profiles, keys and usage are kept. Open at Login is managed by the desktop app.")?;
-                    value(client.reset_settings()?)?
+                    value(client.call(rpc::ResetSettings)?)?
                 }
                 Settings::Show => {
                     let state = client.state()?;
-                    json!({"preferences": client.preferences()?, "localApi": state.local_api, "webUi": state.web_ui})
+                    json!({"preferences": client.call(rpc::Preferences)?, "localApi": state.local_api, "webUi": state.web_ui})
                 }
                 Settings::Set { key, value: input } => {
                     confirm(cli, "Change gateway settings?")?;
+                    let set = |change| client.call(rpc::SetPreference { change });
                     match key {
                     SettingsKey::AutoCliRegistration => value(
-                        client.set_preference(Preference::AutoCliRegistration(parse_bool(input)?))?,
+                        set(Preference::AutoCliRegistration(parse_bool(input)?))?,
                     )?,
-                    SettingsKey::Notifications => value(client.set_preference(Preference::Notifications(
+                    SettingsKey::Notifications => value(set(Preference::Notifications(
                         serde_json::from_str(input).map_err(|_| "Expected notification settings as a JSON object with boolean values")?
                     ))?)?,
                     SettingsKey::ConnectOnLaunch => value(
-                        client.set_preference(Preference::ConnectOnLaunch(parse_bool(input)?))?,
+                        set(Preference::ConnectOnLaunch(parse_bool(input)?))?,
                     )?,
-                    SettingsKey::Appearance => value(client.set_preference(Preference::Appearance(
+                    SettingsKey::Appearance => value(set(Preference::Appearance(
                         match input.as_str() {
                             "system" => Appearance::System,
                             "light" => Appearance::Light,
@@ -386,7 +409,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                             _ => return Err("Expected system, light, or dark".into()),
                         },
                     ))?)?,
-                    SettingsKey::UpdateChannel => value(client.set_preference(Preference::UpdateChannel(
+                    SettingsKey::UpdateChannel => value(set(Preference::UpdateChannel(
                         match input.as_str() {
                             "beta" => UpdateChannel::Beta,
                             "stable" => UpdateChannel::Stable,
@@ -398,7 +421,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                     | SettingsKey::WebUiListenAddress
                     | SettingsKey::WebUiAllowNetworkAccess
                     | SettingsKey::WebUiClientHost => {
-                        let mut config = client.preferences()?.web_ui;
+                        let mut config = client.call(rpc::Preferences)?.web_ui;
                         match key {
                             SettingsKey::WebUi => config.enabled = parse_bool(input)?,
                             SettingsKey::WebUiPort => {
@@ -414,7 +437,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                             }
                             _ => unreachable!(),
                         }
-                        client.request(Command::SaveWebUi(config))?
+                        value(client.call(rpc::SaveWebUi { config })?)?
                     }
                     SettingsKey::ListenAddress
                     | SettingsKey::AllowNetworkAccess
@@ -436,7 +459,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                             _ => unreachable!(),
                         }
                         crate::local_api::resolve(config.clone())?;
-                        client.request(Command::SaveLocalApi(config))?
+                        value(client.call(rpc::SaveLocalApi { config })?)?
                     }
                 }
                 }
@@ -448,16 +471,16 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                     cli,
                     "Rotate the local API token and revoke the previous token?",
                 )?;
-                let _ = client.rotate_client_key()?;
+                client.call(rpc::RotateClientKey)?;
                 json!({"rotated": true})
             }
             Token::Show => {
                 confirm(cli, "Reveal the local API token on stdout?")?;
-                json!({"token": client.client_key()?})
+                json!({"token": client.call(rpc::ClientKey)?})
             }
             Token::ClearCredential => {
                 confirm(cli, "Remove the active profile credential?")?;
-                value(client.clear_api_key()?)?
+                value(client.call(rpc::ClearApiKey)?)?
             }
         },
         Action::Cli { command } => match command {
@@ -483,7 +506,9 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
         }
         Action::Diagnostics { output } => {
             let path = new_export_path(output)?;
-            client.export_diagnostics(path.clone())?;
+            client.call(rpc::ExportDiagnostics {
+                path: export_path(&path)?,
+            })?;
             json!({"exported": path})
         }
         Action::App {
@@ -558,11 +583,11 @@ fn open_web_ui(cli: &Cli, client: &Client) -> Result<Value, String> {
             ),
         )?;
         // The same change `settings set webUi true` makes.
-        let mut config = client.preferences()?.web_ui;
+        let mut config = client.call(rpc::Preferences)?.web_ui;
         config.enabled = true;
-        client.request::<GatewayState>(Command::SaveWebUi(config))?;
+        client.call(rpc::SaveWebUi { config })?;
     }
-    let login: crate::web_ui::WebUiLogin = client.request(Command::WebUiLogin)?;
+    let login = client.call(rpc::WebUiLogin)?;
     let opened = graphical_session() && open_browser(&login.url).is_ok();
     Ok(json!({
         "url": login.url,
@@ -639,9 +664,18 @@ fn agent_change(
             cli,
             "Apply this previously previewed agent configuration revision?",
         )?;
-        return value(client.apply_agent(id.into(), connect, revision.into(), options)?);
+        return value(client.call(rpc::ApplyAgent {
+            agent_id: id.into(),
+            connect,
+            revision: revision.into(),
+            options,
+        })?);
     }
-    let preview = client.preview_agent(id.into(), connect, options.clone())?;
+    let preview = client.call(rpc::PreviewAgent {
+        agent_id: id.into(),
+        connect,
+        options: options.clone(),
+    })?;
     if dry_run {
         return value(preview);
     }
@@ -649,7 +683,12 @@ fn agent_change(
         crate::diagnostic(format_args!("{}", output::details(&value(&preview)?)));
     }
     confirm(cli, "Apply these agent configuration changes?")?;
-    value(client.apply_agent(id.into(), connect, preview.revision, options)?)
+    value(client.call(rpc::ApplyAgent {
+        agent_id: id.into(),
+        connect,
+        revision: preview.revision,
+        options,
+    })?)
 }
 
 fn doctor(client: &Client) -> Value {

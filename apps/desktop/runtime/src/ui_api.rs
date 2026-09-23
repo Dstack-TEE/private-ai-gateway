@@ -6,17 +6,15 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{
-    account_login::LoginPresentation,
     agent_access,
     client::Client,
     contracts::{
         AccountBalanceTarget, AccountSaveResult, AgentStatus, ConfidentialProfileInput,
-        ConnectOptions, GatewayState, LocalApiConfig, RequestActivity, ServiceProvider,
-        StartGatewayConfig,
+        ConnectOptions, GatewayState, LocalApiConfig, ServiceProvider, StartGatewayConfig,
     },
     maintenance::ProfileBackup,
     preferences::{Appearance, NotificationPreferences, Preferences, WebUiConfig},
-    protocol::{Command, Preference, RpcError},
+    protocol::{rpc, Call, Command, Preference, RpcError},
     usage::UsageQuery,
 };
 
@@ -204,7 +202,7 @@ pub trait Backend: Clone + Send + Sync + 'static {
 impl Backend for Arc<Client> {
     async fn execute(&self, command: Command) -> Result<Value, String> {
         let client = self.clone();
-        blocking(move || client.request(command)).await
+        blocking(move || client.forward(command)).await
     }
 
     async fn ensure_running(&self) -> Result<(), String> {
@@ -217,11 +215,9 @@ impl Backend for Arc<Client> {
     }
 }
 
-pub async fn call<T: DeserializeOwned>(
-    backend: &impl Backend,
-    command: Command,
-) -> Result<T, String> {
-    serde_json::from_value(backend.execute(command).await?)
+/// Sends one typed request and decodes exactly its declared response.
+pub async fn call<C: Call>(backend: &impl Backend, request: C) -> Result<C::Response, String> {
+    serde_json::from_value(backend.execute(request.into()).await?)
         .map_err(|_| "Management response failed".to_string())
 }
 
@@ -272,7 +268,7 @@ pub trait Host: Clone + Send + Sync + 'static {
         &self,
         backend: &impl Backend,
     ) -> impl Future<Output = Result<GatewayState, String>> + Send {
-        call(backend, Command::ResetSettings)
+        call(backend, rpc::ResetSettings)
     }
 
     fn request_agent_access(&self) -> impl Future<Output = Result<Value, String>> + Send {
@@ -325,8 +321,7 @@ pub async fn invoke(
         }
         Method::BeginAccountLogin => {
             let profile = params::<BeginLoginParams>(input)?.profile;
-            let login: LoginPresentation =
-                call(backend, Command::BeginAccountLogin { profile }).await?;
+            let login = call(backend, rpc::BeginAccountLogin { profile }).await?;
             host.present_account_login(&login.url);
             return Ok(value(login)?);
         }
@@ -372,14 +367,13 @@ pub async fn invoke(
         Method::QueryUsage => Command::Usage(params::<UsageParams>(input)?.query),
         Method::GetUsageRecord => {
             let record_id = params::<UsageRecordParams>(input)?.record_id;
-            let record: Option<RequestActivity> =
-                call(backend, Command::UsageRecord { record_id }).await?;
+            let record = call(backend, rpc::UsageRecord { record_id }).await?;
             return Ok(value(
                 record.ok_or_else(|| "Usage record not found".to_string())?,
             )?);
         }
         Method::ListAgents => {
-            let agents: Vec<AgentStatus> = call(backend, Command::Agents).await?;
+            let agents = call(backend, rpc::Agents).await?;
             host.sync_agents(&agents);
             return Ok(value(agents)?);
         }
@@ -467,10 +461,10 @@ async fn save_account_login(
     input: SaveLoginParams,
 ) -> Result<GatewayState, String> {
     let operation_id = uuid::Uuid::new_v4().to_string();
-    let result = |operation_id: String| Command::AccountSaveResult { operation_id };
-    let initial = call::<AccountSaveResult>(
+    let result = |operation_id: String| rpc::AccountSaveResult { operation_id };
+    let initial = call(
         backend,
-        Command::SaveAccountLogin {
+        rpc::SaveAccountLogin {
             operation_id: operation_id.clone(),
             id: input.id,
             profile: input.profile,
@@ -496,11 +490,11 @@ async fn save_account_login(
 }
 
 async fn preferences(backend: &impl Backend) -> Result<Preferences, String> {
-    call(backend, Command::Preferences).await
+    call(backend, rpc::Preferences).await
 }
 
 async fn set_preference(backend: &impl Backend, change: Preference) -> Result<(), String> {
-    call::<Preferences>(backend, Command::SetPreference(change))
+    call(backend, rpc::SetPreference { change })
         .await
         .map(|_| ())
 }
