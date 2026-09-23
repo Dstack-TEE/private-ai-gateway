@@ -61,10 +61,10 @@ impl Client {
                 return Ok(());
             }
         }
-        let data = desktop_gateway::agents::app_data_dir()?;
+        let data = agent_bridge::agents::app_data_dir()?;
         let deadline = Instant::now() + Duration::from_secs(15);
         let _startup = loop {
-            if let Some(lock) = desktop_gateway::lock::startup(&data)
+            if let Some(lock) = agent_bridge::lock::startup(&data)
                 .map_err(|error| format!("Cannot acquire backend startup lock: {error}"))?
             {
                 break lock;
@@ -355,8 +355,8 @@ impl Client {
         &self,
         install: impl FnOnce() -> Result<(), String>,
     ) -> Result<(), String> {
-        let data = desktop_gateway::agents::app_data_dir()?;
-        let startup = desktop_gateway::lock::startup(&data)
+        let data = agent_bridge::agents::app_data_dir()?;
+        let startup = agent_bridge::lock::startup(&data)
             .map_err(|_| "Cannot secure update startup gate")?
             .ok_or("Another startup or update is in progress.")?;
         let expected = crate::launch::service_executable()?
@@ -366,7 +366,7 @@ impl Client {
         if was_running {
             self.shutdown_owned(Some(&expected), ShutdownMode::UpdateRestart)?;
         }
-        let ownership = desktop_gateway::lock::instance(&data)
+        let ownership = agent_bridge::lock::instance(&data)
             .map_err(|_| "Cannot secure update ownership")?
             .ok_or("Another backend started before the update. Stop it before retrying.")?;
         let result = install();
@@ -401,7 +401,7 @@ fn open() -> io::Result<(BufReader<Stream>, Hello)> {
     let mut reader = BufReader::new(stream);
     let hello: Hello = protocol::read(&mut reader)?;
     if hello.protocol_version != protocol::VERSION
-        || hello.product != desktop_gateway::brand::APP_IDENTIFIER
+        || hello.product != agent_bridge::brand::APP_IDENTIFIER
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -487,7 +487,7 @@ mod tests {
                     "--nocapture",
                 ])
                 .env(CHILD, "1")
-                .env(desktop_gateway::agents::HOME_OVERRIDE_ENV, home.path())
+                .env(agent_bridge::agents::HOME_OVERRIDE_ENV, home.path())
                 .output()
                 .unwrap();
             assert!(

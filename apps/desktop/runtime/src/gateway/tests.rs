@@ -5,15 +5,15 @@ struct HttpService {
     client: reqwest::Client,
 }
 
-impl desktop_gateway::proxy::VerifiedService for HttpService {
+impl agent_bridge::proxy::VerifiedService for HttpService {
     fn call(
         self: Arc<Self>,
         request: axum::http::Request<axum::body::Body>,
-        _context: Option<desktop_gateway::proxy::ForwardContext>,
-    ) -> desktop_gateway::proxy::VerifiedResponse {
+        _context: Option<agent_bridge::proxy::ForwardContext>,
+    ) -> agent_bridge::proxy::VerifiedResponse {
         Box::pin(async move {
             let (parts, body) = request.into_parts();
-            let bytes = axum::body::to_bytes(body, desktop_gateway::proxy::MAX_BODY_BYTES)
+            let bytes = axum::body::to_bytes(body, agent_bridge::proxy::MAX_BODY_BYTES)
                 .await
                 .unwrap();
             let mut upstream = self
@@ -38,7 +38,7 @@ impl desktop_gateway::proxy::VerifiedService for HttpService {
     }
 }
 
-fn http_service(base_url: &str) -> Arc<dyn desktop_gateway::proxy::VerifiedService> {
+fn http_service(base_url: &str) -> Arc<dyn agent_bridge::proxy::VerifiedService> {
     Arc::new(HttpService {
         base_url: base_url.to_string(),
         client: reqwest::Client::builder().no_proxy().build().unwrap(),
@@ -123,7 +123,7 @@ async fn compatibility_refresh_is_background_work_and_cannot_resurrect_a_stopped
         .await
         .unwrap();
     assert!(proxy.session().catalog.unwrap().models[0]
-        .supports(desktop_gateway::catalog::Surface::Responses));
+        .supports(agent_bridge::catalog::Surface::Responses));
     // A second catalog read also stays responsive while the shared download waits.
     tokio::time::timeout(Duration::from_secs(2), manager.refresh_catalog())
         .await
@@ -139,7 +139,7 @@ async fn compatibility_refresh_is_background_work_and_cannot_resurrect_a_stopped
         .session()
         .catalog
         .unwrap()
-        .for_surface(desktop_gateway::catalog::Surface::Responses)
+        .for_surface(agent_bridge::catalog::Surface::Responses)
         .models
         .is_empty());
     assert_eq!(proxy.session().epoch, 1);

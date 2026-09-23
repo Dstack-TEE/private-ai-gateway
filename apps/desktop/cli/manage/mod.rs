@@ -517,8 +517,8 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
         } => {
             // Like the desktop app, the web path fails fast during installer updates
             // instead of waiting out the startup gate.
-            let data = desktop_gateway::agents::app_data_dir()?;
-            let startup = desktop_gateway::lock::startup(&data)
+            let data = agent_bridge::agents::app_data_dir()?;
+            let startup = agent_bridge::lock::startup(&data)
                 .map_err(|_| "Cannot acquire app startup lock")?
                 .ok_or("Backend startup or an update is already in progress.")?;
             match desktop_app().filter(|_| !*web && graphical_session()) {
@@ -796,7 +796,7 @@ fn read_key(cli: &Cli, stdin: bool) -> Result<String, String> {
         }
         rpassword::prompt_password("API key: ").map_err(|_| "Cannot read credential")?
     };
-    desktop_gateway::secrets::validate_api_key(&key)
+    agent_bridge::secrets::validate_api_key(&key)
 }
 fn parse_bool(value: &str) -> Result<bool, String> {
     value.parse().map_err(|_| "Expected true or false".into())

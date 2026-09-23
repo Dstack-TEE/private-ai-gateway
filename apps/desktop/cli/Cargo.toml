@@ -26,6 +26,7 @@ path = "service.rs"
 
 [dependencies]
 aci-protocol = { path = "../../../crates/aci-protocol" }
+agent-bridge = { package = "private-ai-proxy-agent-bridge", path = "../agent-bridge" }
 async-stream = "0.3"
 axum = "0.8"
 base64 = "0.23"
@@ -33,7 +34,6 @@ bytes = "1"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 dcap-qvl = { version = "0.6.3", default-features = false, features = ["std", "report", "rustcrypto"] }
-desktop-gateway = { package = "private-ai-proxy-gateway", path = "../gateway" }
 desktop-runtime = { package = "private-ai-proxy-runtime", path = "../runtime" }
 ed25519-dalek = "2"
 futures-util = "0.3"

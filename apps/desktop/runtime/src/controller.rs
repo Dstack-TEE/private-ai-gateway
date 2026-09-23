@@ -15,7 +15,7 @@ use std::{
     },
 };
 
-use desktop_gateway::{
+use agent_bridge::{
     agents::{app_data_dir, Agent, Projector},
     catalog::Catalog,
     lock,

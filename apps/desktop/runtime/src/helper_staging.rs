@@ -17,7 +17,7 @@ pub fn stage(bundled: &Path, app_data: &Path) -> io::Result<PathBuf> {
     }
 
     let directory = app_data.join("helpers");
-    desktop_gateway::tokens::create_private_dir(&directory)?;
+    agent_bridge::tokens::create_private_dir(&directory)?;
     let metadata = fs::symlink_metadata(&directory)?;
     if !metadata.is_dir() || metadata.permissions().mode() & 0o077 != 0 || metadata.uid() != uid {
         return Err(io::Error::new(
@@ -25,7 +25,7 @@ pub fn stage(bundled: &Path, app_data: &Path) -> io::Result<PathBuf> {
             "the helper directory must be private, owned by the current user, and not a symlink",
         ));
     }
-    let destination = directory.join(desktop_gateway::agents::helper_binary_name());
+    let destination = directory.join(agent_bridge::agents::helper_binary_name());
     match fs::symlink_metadata(&destination) {
         Ok(metadata) if !metadata.is_file() => {
             return Err(io::Error::new(
@@ -69,7 +69,7 @@ mod tests {
     fn bundled(root: &Path, name: &str, output: &str) -> PathBuf {
         let directory = root.join(name);
         fs::create_dir(&directory).unwrap();
-        let path = directory.join(desktop_gateway::agents::helper_binary_name());
+        let path = directory.join(agent_bridge::agents::helper_binary_name());
         fs::write(&path, format!("#!/bin/sh\nprintf '%s' '{output}'\n")).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         path
@@ -156,7 +156,7 @@ mod tests {
             let root = PathBuf::from(root);
             let source = root
                 .join("mount")
-                .join(desktop_gateway::agents::helper_binary_name());
+                .join(agent_bridge::agents::helper_binary_name());
             assert_eq!(fs::metadata(&source).unwrap().uid(), 0);
             let stable = stage(&source, &root.join("user-data")).unwrap();
             assert_eq!(
@@ -177,7 +177,7 @@ mod tests {
         fs::create_dir(&user_data).unwrap();
         chown(&user_data, Some(65534), Some(65534)).unwrap();
         let root_directory = root.path().join("root-data").join("helpers");
-        desktop_gateway::tokens::create_private_dir(&root_directory).unwrap();
+        agent_bridge::tokens::create_private_dir(&root_directory).unwrap();
         fs::set_permissions(
             root_directory.parent().unwrap(),
             fs::Permissions::from_mode(0o755),

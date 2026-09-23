@@ -214,11 +214,11 @@ mod mac_app_store {
     }
 
     fn bookmark_path() -> Result<PathBuf, String> {
-        Ok(desktop_gateway::agents::app_data_dir()?.join(BOOKMARK_FILE))
+        Ok(agent_bridge::agents::app_data_dir()?.join(BOOKMARK_FILE))
     }
 
     fn service_bookmark_path() -> Result<PathBuf, String> {
-        Ok(desktop_gateway::agents::app_data_dir()?.join(SERVICE_BOOKMARK_FILE))
+        Ok(agent_bridge::agents::app_data_dir()?.join(SERVICE_BOOKMARK_FILE))
     }
 
     fn save_app_bookmark(home: &Path) -> Result<(), String> {
@@ -280,7 +280,7 @@ mod mac_app_store {
         let directory = path
             .parent()
             .ok_or_else(|| "The Agent access path has no parent directory".to_string())?;
-        desktop_gateway::tokens::create_private_dir(directory)
+        agent_bridge::tokens::create_private_dir(directory)
             .map_err(|_| "Agent Home access could not be saved".to_string())?;
         if fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.is_file()) {
             return Err("Agent Home access could not be saved".to_string());

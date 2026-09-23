@@ -151,7 +151,7 @@ fn adding_a_profile_requires_consent_before_startup_or_credential_input() {
             "https://example.com",
             "--key-stdin",
         ])
-        .env(desktop_gateway::agents::HOME_OVERRIDE_ENV, home.path())
+        .env(agent_bridge::agents::HOME_OVERRIDE_ENV, home.path())
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -188,19 +188,19 @@ impl Backend {
         }
         let home = directory.path().join("home");
         let data = home.join(".private-ai-proxy");
-        desktop_gateway::tokens::create_private_dir(&data).unwrap();
+        agent_bridge::tokens::create_private_dir(&data).unwrap();
         let port = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
             .unwrap()
             .port();
-        desktop_gateway::tokens::write_private(
+        agent_bridge::tokens::write_private(
             &data.join("local-api.json"),
             &format!(r#"{{"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":{port}}}"#),
         )
         .unwrap();
         let child = Command::new(binary("private-ai-proxy-service"))
-            .env(desktop_gateway::agents::HOME_OVERRIDE_ENV, &home)
+            .env(agent_bridge::agents::HOME_OVERRIDE_ENV, &home)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(fs::File::create(directory.path().join("backend.log")).unwrap())
@@ -245,7 +245,7 @@ impl Backend {
     fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(self.cli());
         command.args(args).env(
-            desktop_gateway::agents::HOME_OVERRIDE_ENV,
+            agent_bridge::agents::HOME_OVERRIDE_ENV,
             self.directory.path().join("home"),
         );
         command
@@ -335,7 +335,7 @@ fn web_ui_is_opt_in_and_login_links_work_once() {
 fn app_open_fails_fast_while_an_update_holds_the_startup_gate() {
     let backend = Backend::start();
     let data = backend.directory.path().join("home/.private-ai-proxy");
-    let gate = desktop_gateway::lock::startup(&data).unwrap().unwrap();
+    let gate = agent_bridge::lock::startup(&data).unwrap().unwrap();
     let started = Instant::now();
     let blocked = backend
         .command(&["app", "open", "--web", "--yes", "--json"])

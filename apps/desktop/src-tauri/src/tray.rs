@@ -9,8 +9,8 @@ use tauri::{
 };
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
-use desktop_gateway::agents::{Agent, AgentStatus, ConnectOptions};
-use desktop_gateway::brand::PRODUCT_NAME as APP_NAME;
+use agent_bridge::agents::{Agent, AgentStatus, ConnectOptions};
+use agent_bridge::brand::PRODUCT_NAME as APP_NAME;
 use desktop_runtime::{client::Client, contracts::GatewayState, protocol::rpc};
 
 /// Native menu handles mirror backend state; actions use the same client as the window.

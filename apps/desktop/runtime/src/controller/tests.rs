@@ -58,7 +58,7 @@ fn launch_requires_instance_ownership_before_initialization() {
                 "--nocapture",
             ])
             .env(CASE_ENV, case)
-            .env(desktop_gateway::agents::HOME_OVERRIDE_ENV, home.path())
+            .env(agent_bridge::agents::HOME_OVERRIDE_ENV, home.path())
             .output()
             .unwrap();
         assert!(
@@ -93,7 +93,7 @@ fn test_runtime(
         manager,
         proxy,
         usage,
-        secrets: Arc::new(desktop_gateway::secrets::MemoryStore::default()),
+        secrets: Arc::new(agent_bridge::secrets::MemoryStore::default()),
         credentials: ClientCredentials::from_files(TokenFiles::new(directory)),
         account_login: tokio::sync::Mutex::new(None),
         account_save: Mutex::new(None),
@@ -233,7 +233,7 @@ fn offline_removal_queues_cleanup_and_uncommitted_retirement_preserves_active_ke
         let home = tempfile::tempdir().unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "controller::tests::offline_removal_queues_cleanup_and_uncommitted_retirement_preserves_active_key", "--nocapture"])
-            .env(CHILD, "1").env(desktop_gateway::agents::HOME_OVERRIDE_ENV, home.path()).output().unwrap();
+            .env(CHILD, "1").env(agent_bridge::agents::HOME_OVERRIDE_ENV, home.path()).output().unwrap();
         assert!(
             output.status.success(),
             "{} {}",
@@ -282,7 +282,7 @@ fn offline_removal_queues_cleanup_and_uncommitted_retirement_preserves_active_ke
         false,
     );
     struct NoCredentialAccess;
-    impl desktop_gateway::secrets::SecretStore for NoCredentialAccess {
+    impl agent_bridge::secrets::SecretStore for NoCredentialAccess {
         fn get(&self, _: &str) -> Result<Option<String>, String> {
             panic!("Empty cleanup must not read saved profile credentials");
         }
@@ -351,7 +351,7 @@ fn saving_an_offline_profile_does_not_launch_verification() {
                 "--nocapture",
             ])
             .env(CHILD, "1")
-            .env(desktop_gateway::agents::HOME_OVERRIDE_ENV, home.path())
+            .env(agent_bridge::agents::HOME_OVERRIDE_ENV, home.path())
             .output()
             .unwrap();
         assert!(
@@ -524,7 +524,7 @@ fn recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them() {
                 "--nocapture",
             ])
             .env(CHILD, "1")
-            .env(desktop_gateway::agents::HOME_OVERRIDE_ENV, home.path())
+            .env(agent_bridge::agents::HOME_OVERRIDE_ENV, home.path())
             .output()
             .unwrap();
         assert!(
@@ -539,7 +539,7 @@ fn recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them() {
     let directory = app_data_dir().unwrap();
     std::fs::create_dir_all(&directory).unwrap();
     let home = std::path::PathBuf::from(
-        std::env::var_os(desktop_gateway::agents::HOME_OVERRIDE_ENV).unwrap(),
+        std::env::var_os(agent_bridge::agents::HOME_OVERRIDE_ENV).unwrap(),
     );
     let mut runtime = test_runtime(&executor, &directory);
     let runtime_options = Arc::get_mut(&mut runtime).unwrap();
@@ -582,10 +582,7 @@ fn recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them() {
         .unwrap();
     let projected = std::fs::read(&path).unwrap();
     let credential_directory = if cfg!(all(target_os = "macos", feature = "mac-app-store")) {
-        home.join(format!(
-            ".{}-agents",
-            desktop_gateway::brand::APP_IDENTIFIER
-        ))
+        home.join(format!(".{}-agents", agent_bridge::brand::APP_IDENTIFIER))
     } else {
         directory.clone()
     };
@@ -619,11 +616,9 @@ fn recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them() {
         .unwrap();
     let codex_config = home.join(".codex/config.toml");
     let config = std::fs::read_to_string(&codex_config).unwrap();
-    let doc = desktop_gateway::config_doc::ConfigDoc::parse(
-        desktop_gateway::config_doc::Format::Toml,
-        &config,
-    )
-    .unwrap();
+    let doc =
+        agent_bridge::config_doc::ConfigDoc::parse(agent_bridge::config_doc::Format::Toml, &config)
+            .unwrap();
     let catalog_path = doc.get_str(&["model_catalog_json"]).unwrap();
     let expected = std::fs::read(&catalog_path).unwrap();
     let codex_token = files.read("codex").unwrap();

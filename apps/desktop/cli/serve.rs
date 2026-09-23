@@ -15,14 +15,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::capture::{tee, CompletionHook, StreamEnd};
+use agent_bridge::proxy::{
+    hop_by_hop_names, ForwardContext, ProxyEvent, VerifiedResponse, VerifiedService, MAX_BODY_BYTES,
+};
 use axum::body::{to_bytes, Body, Bytes};
 use axum::extract::Path;
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
 use axum::{Json, Router};
-use desktop_gateway::proxy::{
-    hop_by_hop_names, ForwardContext, ProxyEvent, VerifiedResponse, VerifiedService, MAX_BODY_BYTES,
-};
 use desktop_runtime::gateway::{
     IdentityEvent, IdentitySourceProvenance, VerifierConfig, VerifierEvent, VerifierEventSink,
     VerifierLauncher, VerifierTask,

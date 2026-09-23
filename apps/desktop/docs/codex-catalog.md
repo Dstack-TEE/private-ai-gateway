@@ -5,7 +5,7 @@ versions may reject its schema; PAP does not detect versions or provide legacy
 compatibility. Restart Codex after connecting or changing the model catalog.
 
 Direct and Mac App Store builds compile the same checked-in
-`gateway/resources/codex/models.json` into the gateway. No build or runtime step
+`agent-bridge/resources/codex/models.json` into the agent bridge. No build or runtime step
 needs an installed Codex CLI or a network download. Before applying Codex config,
 PAP atomically writes the projected catalog and points `model_catalog_json` at
 that file. Direct stores it in the private app-data directory. MAS stores it at
@@ -29,7 +29,7 @@ for file permissions, rotation and revocation.
 
 ## Explicit refresh
 
-`gateway/resources/codex/manifest.json` is the single machine-readable pin:
+`agent-bridge/resources/codex/manifest.json` is the single machine-readable pin:
 release version, upstream SHA-256, and model count. The input is OpenAI's
 `rust-v<version>/codex-rs/models-manager/models.json`, licensed under
 [Apache-2.0](https://github.com/openai/codex/blob/rust-v0.155.1/LICENSE).

@@ -23,8 +23,8 @@ use crate::endpoint_inventory::InventoryUpdater;
 use crate::usage::UsageStore;
 use crate::{local_api, service_config};
 use aci_protocol::types::ServiceCapabilities;
-use desktop_gateway::catalog::{Catalog, EndpointInventory};
-use desktop_gateway::proxy::{ProxyEvent, ProxyState, Session};
+use agent_bridge::catalog::{Catalog, EndpointInventory};
+use agent_bridge::proxy::{ProxyEvent, ProxyState, Session};
 use serde_json::{Map, Value};
 use tokio::{runtime::Handle, sync::watch};
 
@@ -64,7 +64,7 @@ pub enum VerifierEvent {
     Ready {
         identity: IdentityEvent,
         remote_url: String,
-        service: Arc<dyn desktop_gateway::proxy::VerifiedService>,
+        service: Arc<dyn agent_bridge::proxy::VerifiedService>,
     },
     IdentityUpdated {
         identity: IdentityEvent,
@@ -110,7 +110,7 @@ struct RuntimeState {
     epoch: u64,
     catalog_read: u64,
     catalog: Option<Catalog>,
-    service: Option<Arc<dyn desktop_gateway::proxy::VerifiedService>>,
+    service: Option<Arc<dyn agent_bridge::proxy::VerifiedService>>,
     /// The verifier reported a verified identity for this generation.
     identity_ready: bool,
     /// A settings verification may attest and discover models, but it never

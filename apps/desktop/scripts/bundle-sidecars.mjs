@@ -50,7 +50,7 @@ const directSidecars = [
   { name: "private-ai-proxy-service", package: "private-ai-proxy", appStoreFeatures: ["mac-app-store"] },
   {
     name: "private-ai-proxy-helper",
-    package: "private-ai-proxy-gateway",
+    package: "private-ai-proxy-agent-bridge",
     appStoreFeatures: [],
   },
 ];

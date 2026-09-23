@@ -5,7 +5,7 @@
 // by hand anywhere else:
 //
 //   src/renderer/generated/          brand.ts and app/tray icons
-//   gateway/src/brand.rs              Rust constants (tray, menus, data dir)
+//   agent-bridge/src/brand.rs         Rust constants (tray, menus, data dir)
 //   src-tauri/tauri.brand.conf.json   Tauri config overlay (ignored; passed as --config)
 //   src-tauri/icons/                  legacy desktop icons and Icon Composer asset
 //   assets/tray/trayTemplate*.png     monochrome template tray icon
@@ -204,7 +204,7 @@ const rust = (name, value) => {
   return `${prefix}${prefix.length + literal.length + 1 > 100 ? "\n    " : " "}${literal}`;
 };
 await writeFile(
-  path.join(appRoot, "gateway/src/brand.rs"),
+  path.join(appRoot, "agent-bridge/src/brand.rs"),
   `//! ${generatedNote}
 
 ${rust("ID", brand.id)}

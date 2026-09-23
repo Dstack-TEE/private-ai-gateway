@@ -17,6 +17,7 @@ path = "src/lib.rs"
 
 [dependencies]
 aci-protocol = { path = "../../../crates/aci-protocol" }
+agent-bridge = { package = "private-ai-proxy-agent-bridge", path = "../agent-bridge" }
 axum = "0.8"
 async-stream = { version = "0.3", optional = true }
 base64 = "0.23"
@@ -30,7 +31,6 @@ tokio-util = { version = "0.7", features = ["rt"] }
 # Serde `alias` only widens deserialization, so its ts-rs notice is noise.
 ts-rs = { version = "12", features = ["no-serde-warnings"] }
 tempfile = "3"
-desktop-gateway = { package = "private-ai-proxy-gateway", path = "../gateway" }
 rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }

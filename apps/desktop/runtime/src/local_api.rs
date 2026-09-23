@@ -4,7 +4,7 @@ use crate::{
     contracts::LocalApiConfig,
     listen::{self, ResolvedListen},
 };
-use desktop_gateway::{
+use agent_bridge::{
     agents::{app_data_dir, write_atomic},
     tokens,
 };

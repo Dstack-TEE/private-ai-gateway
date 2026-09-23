@@ -129,9 +129,9 @@ jobs:
             ${{ env.CARGO_TARGET_DIR }}/*/*/.fingerprint
             ${{ env.CARGO_TARGET_DIR }}/*/*/deps
             ${{ env.CARGO_TARGET_DIR }}/*/*/build
-          key: pap-rust-v2-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_RUST_CACHE_NAMESPACE }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}
+          key: pap-rust-v2-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_RUST_CACHE_NAMESPACE }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/agent-bridge/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}
           restore-keys: |
-            pap-rust-v2-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_RUST_CACHE_NAMESPACE }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}-partial-
+            pap-rust-v2-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_RUST_CACHE_NAMESPACE }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/agent-bridge/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}-partial-
             pap-rust-v2-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_RUST_CACHE_NAMESPACE }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-
       - name: Install Linux desktop dependencies
         run: |
@@ -144,10 +144,10 @@ jobs:
         working-directory: apps/desktop
         run: |
           npm run prepare:brand
-          status="$(git status --porcelain=v1 --untracked-files=all -- src/renderer/generated gateway/src/brand.rs src-tauri/icons/32x32.png src-tauri/icons/128x128.png src-tauri/icons/128x128@2x.png src-tauri/icons/icon.png src-tauri/icons/icon.icns src-tauri/icons/icon.ico src-tauri/icons/AppIcon.icon src-tauri/installer/brand-*.bmp src-tauri/installer/brand-dmg-background.png assets/tray)"
+          status="$(git status --porcelain=v1 --untracked-files=all -- src/renderer/generated agent-bridge/src/brand.rs src-tauri/icons/32x32.png src-tauri/icons/128x128.png src-tauri/icons/128x128@2x.png src-tauri/icons/icon.png src-tauri/icons/icon.icns src-tauri/icons/icon.ico src-tauri/icons/AppIcon.icon src-tauri/installer/brand-*.bmp src-tauri/installer/brand-dmg-background.png assets/tray)"
           if [[ -n "$status" ]]; then
             printf '%s\n' "$status"
-            git diff -- src/renderer/generated gateway/src/brand.rs src-tauri/icons src-tauri/installer assets/tray
+            git diff -- src/renderer/generated agent-bridge/src/brand.rs src-tauri/icons src-tauri/installer assets/tray
             exit 1
           fi
       - name: Verify renderer
@@ -571,7 +571,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --release --locked --package private-ai-proxy-gateway --lib
+          cargo test --release --locked --package private-ai-proxy-agent-bridge --lib
           cargo test --release --locked --package private-ai-proxy-runtime --lib
           cargo test --release --locked --package private-ai-proxy-desktop --lib
 
@@ -638,9 +638,9 @@ jobs:
               Remove-Item Env:PRIVATE_AI_PROXY_HOME
             }
             $env:PAP_TEST_HELPER_PATH = "$installDir/private-ai-proxy-helper.exe"
-            cargo test --release --locked --package private-ai-proxy-gateway --lib -- --ignored hermes_windows_installed_command_round_trip
+            cargo test --release --locked --package private-ai-proxy-agent-bridge --lib -- --ignored hermes_windows_installed_command_round_trip
             if ($LASTEXITCODE -ne 0) { throw 'Hermes credential command failed' }
-            cargo test --release --locked --package private-ai-proxy-gateway --lib -- --ignored keyring_round_trip
+            cargo test --release --locked --package private-ai-proxy-agent-bridge --lib -- --ignored keyring_round_trip
             if ($LASTEXITCODE -ne 0) { throw 'Credential Manager check failed' }
           } finally {
             if (Test-Path "$installDir/uninstall.exe") {
@@ -694,7 +694,7 @@ jobs:
             keyring_pid=$!
             trap "kill $keyring_pid 2>/dev/null || true; wait $keyring_pid || true" EXIT
             gdbus wait --session --timeout 10 org.freedesktop.secrets
-            cargo test --release --locked --package private-ai-proxy-gateway --lib -- --ignored keyring_round_trip
+            cargo test --release --locked --package private-ai-proxy-agent-bridge --lib -- --ignored keyring_round_trip
           '
           xvfb-run -a dbus-run-session -- node scripts/native-backend-smoke.mjs /usr/bin
       - name: Stage and inspect macOS package
