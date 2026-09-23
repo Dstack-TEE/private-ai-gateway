@@ -35,26 +35,44 @@ impl KeyringStore {
     fn entry(name: &str) -> Result<keyring::Entry, String> {
         keyring::Entry::new(SERVICE, name).map_err(store_error)
     }
+
+    #[cfg(target_os = "linux")]
+    fn run<T: Send>(operation: impl FnOnce() -> Result<T, String> + Send) -> Result<T, String> {
+        // The Linux keyring backend uses zbus's blocking API, which creates a
+        // Tokio runtime internally. Profile mutations already run on Tokio
+        // workers, so execute Secret Service calls on a plain scoped thread.
+        std::thread::scope(|scope| {
+            scope
+                .spawn(operation)
+                .join()
+                .map_err(|_| "The system credential store operation panicked".to_string())?
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn run<T>(operation: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+        operation()
+    }
 }
 
 impl SecretStore for KeyringStore {
     fn get(&self, entry: &str) -> Result<Option<String>, String> {
-        match Self::entry(entry)?.get_password() {
+        Self::run(|| match Self::entry(entry)?.get_password() {
             Ok(value) => Ok(Some(value)),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(error) => Err(store_error(error)),
-        }
+        })
     }
 
     fn set(&self, entry: &str, value: &str) -> Result<(), String> {
-        Self::entry(entry)?.set_password(value).map_err(store_error)
+        Self::run(|| Self::entry(entry)?.set_password(value).map_err(store_error))
     }
 
     fn delete(&self, entry: &str) -> Result<(), String> {
-        match Self::entry(entry)?.delete_credential() {
+        Self::run(|| match Self::entry(entry)?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(error) => Err(store_error(error)),
-        }
+        })
     }
 }
 
@@ -120,6 +138,18 @@ mod tests {
         assert!(validate_api_key("  ").is_err());
         assert!(validate_api_key("sk-a\nsk-b").is_err());
         assert_eq!(validate_api_key("  sk-abc  ").unwrap(), "sk-abc");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn keyring_operations_leave_the_callers_tokio_runtime() {
+        KeyringStore::run(|| {
+            tokio::runtime::Runtime::new()
+                .map_err(|error| error.to_string())?
+                .block_on(async {});
+            Ok(())
+        })
+        .unwrap();
     }
 
     /// Real credential store round trip; run explicitly on a desktop OS.

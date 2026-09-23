@@ -65,10 +65,18 @@ pub fn spawn_background(data_dir: &Path) -> Result<BackgroundService, String> {
     let mut command = Command::new(&executable);
     command
         .current_dir(working_directory)
-        .env(desktop_gateway::agents::APP_DATA_OVERRIDE_ENV, data_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+    // Native clients and services must independently resolve the same runtime
+    // socket under XDG_RUNTIME_DIR. Preserve an explicit sandbox override, but
+    // do not create one only in the child process because that changes its IPC
+    // endpoint and makes the parent wait on a different socket.
+    apply_data_override(
+        &mut command,
+        data_dir,
+        std::env::var_os(desktop_gateway::agents::APP_DATA_OVERRIDE_ENV),
+    );
     configure_background_command(&mut command);
     let mut child = command
         .spawn()
@@ -85,6 +93,16 @@ pub fn spawn_background(data_dir: &Path) -> Result<BackgroundService, String> {
         stderr_reader: Some(stderr_reader),
         diagnostics,
     })
+}
+
+fn apply_data_override(
+    command: &mut Command,
+    data_dir: &Path,
+    configured: Option<std::ffi::OsString>,
+) {
+    if configured.is_some() {
+        command.env(desktop_gateway::agents::APP_DATA_OVERRIDE_ENV, data_dir);
+    }
 }
 
 fn capture_stderr(mut stderr: impl Read, diagnostics: Arc<Mutex<Vec<u8>>>) {
@@ -393,4 +411,37 @@ fn exit_timeout(pid: u32, timeout: Duration) -> String {
         "Timed out after {} ms waiting for PAP service process {pid} to exit",
         timeout.as_millis()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn data_override(command: &Command) -> Option<Option<&std::ffi::OsStr>> {
+        command
+            .get_envs()
+            .find(|(key, _)| *key == desktop_gateway::agents::APP_DATA_OVERRIDE_ENV)
+            .map(|(_, value)| value)
+    }
+
+    #[test]
+    fn native_launch_does_not_create_a_child_only_data_override() {
+        let mut command = Command::new("private-ai-proxy-service");
+        apply_data_override(&mut command, Path::new("/tmp/pap-data"), None);
+        assert_eq!(data_override(&command), None);
+    }
+
+    #[test]
+    fn sandbox_launch_preserves_the_resolved_data_override() {
+        let mut command = Command::new("private-ai-proxy-service");
+        apply_data_override(
+            &mut command,
+            Path::new("/tmp/pap-data"),
+            Some("/sandbox/data".into()),
+        );
+        assert_eq!(
+            data_override(&command),
+            Some(Some(std::ffi::OsStr::new("/tmp/pap-data")))
+        );
+    }
 }
