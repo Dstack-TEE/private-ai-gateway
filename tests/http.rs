@@ -27,7 +27,8 @@ use private_ai_gateway::aci::receipt::{
 };
 use private_ai_gateway::aci::types::{ServiceCapabilities, TlsSpki};
 use private_ai_gateway::aci::upstream::{
-    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
+    PreparedUpstreamRequest, PrivatemodeProxyDeployment, UpstreamBackend, UpstreamError,
+    UpstreamRequest, UpstreamResponse,
 };
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore,
@@ -461,6 +462,73 @@ async fn chat_default_required_fails_closed_without_verifier() {
     assert_eq!(
         payload_event(&receipt, "response.returned")["body_hash"],
         private_ai_gateway::aci::digest::sha256_hex(&body)
+    );
+}
+
+#[tokio::test]
+async fn privatemode_deployment_rejects_plaintext_before_reading_the_body() {
+    let h = make_harness();
+    let credential_path = std::env::temp_dir().join(format!(
+        "pag-privatemode-e2ee-test-{}-{}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    std::fs::write(&credential_path, b"secret").unwrap();
+    let deployment = PrivatemodeProxyDeployment::new(
+        "http://privatemode-proxy:8080",
+        credential_path.with_extension("manifest-log"),
+        &credential_path,
+        private_ai_gateway::aci::digest::sha256_hex(b"secret"),
+        format!("sha256:{}", "22".repeat(32)),
+    )
+    .unwrap();
+    std::fs::remove_file(credential_path).unwrap();
+
+    let mut options = upstream_runtime_options();
+    options.privatemode_proxy = Some(Arc::new(deployment));
+    let manager = load_manager_with_options("[]", options);
+    let app = build_router_with_admin(h.service, manager, None, None);
+    let body_polled = Arc::new(AtomicBool::new(false));
+    let body_polled_by_stream = body_polled.clone();
+    let body = Body::from_stream(futures_util::stream::once(async move {
+        body_polled_by_stream.store(true, Ordering::SeqCst);
+        Ok::<_, Infallible>(br#"{"model":"x","messages":[]}"#.to_vec())
+    }));
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .body(body)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body_bytes(response.into_body()).await).unwrap()["error"]
+            ["type"],
+        "e2ee_required"
+    );
+    assert!(!body_polled.load(Ordering::SeqCst));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("x-e2ee-version", "2")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body_bytes(response.into_body()).await).unwrap()["error"]
+            ["type"],
+        "e2ee_invalid_version"
     );
 }
 
@@ -949,6 +1017,13 @@ fn upstream_runtime_options() -> UpstreamRuntimeOptions {
 }
 
 fn load_manager(config_json: &str) -> Arc<UpstreamConfigManager> {
+    load_manager_with_options(config_json, upstream_runtime_options())
+}
+
+fn load_manager_with_options(
+    config_json: &str,
+    options: UpstreamRuntimeOptions,
+) -> Arc<UpstreamConfigManager> {
     // Unique per call: a coarse system clock can hand concurrent tests the same
     // nanos, so an atomic counter guarantees distinct temp paths.
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -958,7 +1033,7 @@ fn load_manager(config_json: &str) -> Arc<UpstreamConfigManager> {
         SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     ));
     std::fs::write(&path, config_json).unwrap();
-    Arc::new(UpstreamConfigManager::load(&path, upstream_runtime_options()).unwrap())
+    Arc::new(UpstreamConfigManager::load(&path, options).unwrap())
 }
 
 fn setup_with_config(config_json: &str) -> (Arc<AciService>, Router) {

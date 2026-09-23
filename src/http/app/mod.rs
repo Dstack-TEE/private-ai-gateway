@@ -63,7 +63,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::{DefaultBodyLimit, Request, State},
-    http::{HeaderName, HeaderValue},
+    http::{HeaderName, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::Response,
     routing::{get, post},
@@ -174,6 +174,7 @@ pub struct AppState {
     pub upstream_config: Option<Arc<UpstreamConfigManager>>,
     pub admin_token: Option<String>,
     pub inference_token_sha256: Option<[u8; 32]>,
+    require_client_e2ee: bool,
     middleware: Option<Arc<Middleware>>,
 }
 
@@ -220,11 +221,15 @@ fn build_router_inner(
     inference_token_sha256: Option<[u8; 32]>,
     middleware: Option<Arc<Middleware>>,
 ) -> Router {
+    let require_client_e2ee = upstream_config
+        .as_ref()
+        .is_some_and(|config| config.requires_client_e2ee());
     let state = AppState {
         service,
         upstream_config,
         admin_token,
         inference_token_sha256,
+        require_client_e2ee,
         middleware,
     };
     Router::new()
@@ -286,6 +291,20 @@ async fn inference_auth_middleware(
 ) -> Response {
     if let Some(response) = enforce_inference(&state, req.headers()) {
         return response;
+    }
+    if state.require_client_e2ee
+        && (req
+            .headers()
+            .get("x-e2ee-version")
+            .and_then(|v| v.to_str().ok())
+            != Some("2")
+            || req.headers().contains_key("x-signing-algo"))
+    {
+        return error_responses::error_response(
+            StatusCode::BAD_REQUEST,
+            "e2ee_required",
+            "Privatemode inference requires attested client E2EE v2",
+        );
     }
     next.run(req).await
 }

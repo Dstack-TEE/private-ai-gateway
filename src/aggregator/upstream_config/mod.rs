@@ -354,6 +354,12 @@ pub struct UpstreamConfigManager {
 }
 
 impl UpstreamConfigManager {
+    /// A measured Privatemode sidecar must never receive prompts that were
+    /// plaintext on a client channel terminating outside the workload.
+    pub fn requires_client_e2ee(&self) -> bool {
+        self.options.privatemode_proxy.is_some()
+    }
+
     pub fn load(
         path: impl Into<PathBuf>,
         options: UpstreamRuntimeOptions,

@@ -3,7 +3,8 @@
 Audit date: 2026-05-26 UTC. Provider behavior was rechecked against
 Privatemode v1.48 and the live manifest on 2026-07-09. The gateway adapter was
 changed to the measured co-deployment boundary on 2026-07-13 and to dynamic
-manifest mode on 2026-07-31.
+manifest mode on 2026-07-31. The pinned v1.48 image was retested against live
+traffic on 2026-09-23, and upstream source through v1.56 was rechecked.
 
 Provider: [Privatemode](https://www.privatemode.ai/) by Edgeless Systems.
 TCB source: [`edgelesssys/privatemode-public`](https://github.com/edgelesssys/privatemode-public).
@@ -40,6 +41,8 @@ Deployment conditions:
   bound to the active inference secret.
 - Treat the proxy as part of the TCB. The gateway does not possess the provider
   E2EE secret.
+- Require attested client E2EE into the gateway: Phala's public TLS ends outside
+  the measured workload.
 
 ## Verified trust chain
 
@@ -104,6 +107,30 @@ chat, and SSE streaming against production; a direct plaintext request to the
 public API was rejected. The co-deployed v1.48 boundary was then exercised on
 Phala Cloud on 2026-07-13 with a real `gpt-oss-120b` response and a signed
 receipt.
+
+On 2026-09-23, the same pinned image again verified a live Coordinator SNP
+quote, exchanged a secret, and returned a real `gpt-oss-120b` completion
+through a fresh Phala deployment. A client E2EE v2 request over public ingress
+returned an encrypted response that decrypted to `private-ok`; the signed
+receipt/session audit had zero failures. Plaintext also worked before the new
+gateway guard, exposing the ingress trust-boundary gap. The guard now rejects
+plaintext and legacy E2EE for this deployment. `pap verify` passed quote,
+keyset, expiry, and measured-Compose checks but correctly failed `id-6` because
+the public TLS key is not in the attested keyset.
+
+The live manifest SHA-256 was
+`f53011576c782d61912c884158a781ae5b55f3a49948e577c6292befc2535ab7`:
+9 workload policies, one SNP profile, one TDX profile, and one seed-share
+owner key. Its policy set differs from the July observation. This digest is a
+proxy fetch-log observation, not proof that the request's active secret used
+that manifest. No worker GPU/OS/weights claims are added on its basis.
+
+Between source v1.48 and v1.56, the proxy gained listener/CORS and bounded
+HTTP request handling; the Secret Service path changed internally, but the
+client still verifies the mesh certificate and signed hybrid HPKE exchange.
+Full-body encryption and dynamic-manifest validation remain. The newer source
+does not upgrade the pinned v1.48 binary or bind its active secret to a
+manifest; a proxy-image update still needs a separate measured review.
 
 A later source trace showed that the proxy replaces inbound authorization with
 its startup credential. The current adapter therefore sends no internal Bearer,

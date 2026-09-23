@@ -112,8 +112,8 @@ by an authenticated inference request require that same inference bearer.
 
 ### Verify a Privatemode deployment
 
-Resolve the public gateway URL, wait for the gateway to become ready, install
-the mutable model route, and exercise real attested inference:
+Resolve the public gateway URL, wait for the gateway to become ready, and
+install the mutable model route:
 
 ```bash
 set -euo pipefail
@@ -159,33 +159,46 @@ curl -fsS -X PUT "$GATEWAY_URL/v1/admin/upstreams" \
   }]' |
   jq -e '.upstreams[] | select(.name == "privatemode-gpt-oss")'
 
+nonce="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
 artifact_dir="$(mktemp -d)"
-jq -n '{
-  model: "gpt-oss-120b-private",
-  messages: [{role: "user", content: "Reply with exactly: private-ok"}],
-  provider: {aci_verified: true}
-}' >"$artifact_dir/request.json"
-curl -fsS -D "$artifact_dir/inference.headers" \
-  -o "$artifact_dir/inference.json" \
-  -X POST "$GATEWAY_URL/v1/chat/completions" \
-  -H "Authorization: Bearer $PRIVATE_AI_GATEWAY_INFERENCE_TOKEN" \
-  -H "Content-Type: application/json" \
-  --data-binary @"$artifact_dir/request.json"
-receipt_id="$(
-  awk 'BEGIN{IGNORECASE=1} /^x-receipt-id:/{gsub("\r",""); print $2}' \
-    "$artifact_dir/inference.headers"
-)"
-test -n "$receipt_id"
+curl -fsS "$GATEWAY_URL/v1/aci/attestation?nonce=$nonce" \
+  -o "$artifact_dir/report.json"
+if pap verify "$GATEWAY_URL" --nonce "$nonce" --json \
+  >"$artifact_dir/live-verification.json"; then
+  :
+else
+  test "$?" -eq 1
+fi
+# Phala's public TLS terminates outside this workload: id-6 must fail. The
+# quote, nonce/keyset binding, expiry, and measured Compose must still pass.
+jq -e --slurpfile report "$artifact_dir/report.json" '
+  .verdict.failed == 1 and
+  .verdict.workload_keyset_digest == $report[0].workload_keyset_digest and
+  (["id-1", "id-2", "id-3", "id-4"] -
+    [.checks[] | select(.status == "pass") | .id] | length == 0) and
+  ([.checks[] | select(.status == "fail") | .id] == ["id-6"])
+' "$artifact_dir/live-verification.json"
+jq -e '
+  .service_capabilities.supported_e2ee_versions | index("2")
+' "$artifact_dir/report.json"
+```
+
+Do **not** send a plaintext inference request to this public URL. Its TLS
+terminates outside the attested workload; the gateway now rejects such
+requests with `e2ee_required`. Use a client implementing
+[ACI E2EE v2](../spec/e2ee-v2.md) to verify the quoted keyset, encrypt every
+content-bearing request field, and decrypt the response. For the receipt audit,
+save the request body as reconstructed by the gateway after E2EE decryption in
+`$artifact_dir/request.json`, the **exact encrypted response bytes received** in
+`$artifact_dir/inference.json`, and the response's `x-receipt-id` as `receipt_id`.
+The client can keep its locally decrypted response separately. Do not use
+`pap serve` here: it requires an attested TLS binding that Phala ingress does
+not provide. Then fetch and audit the receipt:
+
+```bash
 curl -fsS "$GATEWAY_URL/v1/aci/receipts/$receipt_id" \
   -H "Authorization: Bearer $PRIVATE_AI_GATEWAY_INFERENCE_TOKEN" \
   -o "$artifact_dir/receipt.json"
-
-nonce="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
-curl -fsS "$GATEWAY_URL/v1/aci/attestation?nonce=$nonce" \
-  -o "$artifact_dir/report.json"
-pap verify "$GATEWAY_URL" --nonce "$nonce" --json \
-  >"$artifact_dir/live-verification.json"
-jq -e '.verdict.verified == true' "$artifact_dir/live-verification.json"
 
 session_id="$(jq -er '
   [.event_log[] | select(.type == "upstream.verified" and .result == "verified") |
@@ -196,8 +209,8 @@ curl -fsS "$GATEWAY_URL/v1/aci/sessions/$session_id" \
   -o "$artifact_dir/session.json"
 
 # Offline audit has no live quote channel, so its verdict is PARTIAL. Require
-# zero failures and passing receipt/session checks; the live verify above
-# establishes the hardware root and channel separately.
+# zero failures and passing receipt/session checks. The live check above
+# establishes the hardware root and keyset, not a TLS channel.
 if pap audit \
   --report "$artifact_dir/report.json" \
   --receipt "$artifact_dir/receipt.json" \
@@ -246,9 +259,9 @@ jq -e \
   ' "$artifact_dir/session.json"
 ```
 
-The inference must return HTTP 2xx and a
-non-empty `x-receipt-id`. The Rust verifier checks report binding, the attested
-keyset, receipt signature, and exact request/response hashes. The first `jq`
+The E2EE inference must return HTTP 2xx and a non-empty `x-receipt-id`.
+The verifier checks report binding, the attested keyset, receipt signature,
+the gateway-side request hash, and the exact response wire-byte hash. The first `jq`
 assertion requires the complete attested Compose to equal the locally reviewed
 render; workload-owned labels are not treated as proof. The second independently
 applies local policy to the signed session binding and confirms that the session
