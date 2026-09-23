@@ -8,7 +8,6 @@ use std::io::Write;
 pub mod account_login;
 pub mod agent_access;
 mod balance_cache;
-pub mod cli;
 pub mod cli_install;
 pub mod client;
 pub mod contracts;

@@ -15,8 +15,11 @@ Status: implemented.
 ## Project boundary
 
 `private-ai-proxy` composes the managed CLI's Clap command tree with its ACI
-commands. Management command execution and output live in
-`apps/desktop/runtime/src/cli`; ACI command modules live in `apps/desktop/cli`.
+commands. The `cli` crate is the only command-line surface: management
+arguments, execution, output, completions and `schema` live in
+`apps/desktop/cli/manage`; ACI command modules live beside them in
+`apps/desktop/cli`. The backend crates contain no argument parsing or terminal
+prompting.
 There is one PAP user-facing executable and one PAP relying-party verifier.
 Desktop integration adds lifecycle events for process integration and post-delivery receipt auditing.
 The Private AI Proxy package owns the user-facing CLI, its managed service binary,
@@ -179,7 +182,7 @@ console executables and do not require the desktop UI.
 ## Sources
 
 Repository: https://github.com/Dstack-TEE/private-ai-gateway
-Primary contracts: `apps/desktop/cli/args.rs`, `apps/desktop/runtime/src/cli/args.rs`,
+Primary contracts: `apps/desktop/cli/args.rs`, `apps/desktop/cli/manage/args.rs`,
 `apps/desktop/cli/serve.rs`, `apps/desktop/runtime/src/gateway.rs`,
 `apps/desktop/scripts/package-cli.mjs`.
 

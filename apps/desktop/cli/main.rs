@@ -4,7 +4,7 @@ mod audit;
 mod capture;
 mod checks;
 mod client;
-use desktop_runtime::cli as managed;
+mod manage;
 mod send;
 mod serve;
 mod sessions;
@@ -18,7 +18,7 @@ use clap::{FromArgMatches, Subcommand};
 #[tokio::main]
 async fn main() {
     private_ai_proxy::install_crypto_provider();
-    let command = args::Command::augment_subcommands(managed::cli_command())
+    let command = args::Command::augment_subcommands(manage::cli_command())
         .name("private-ai-proxy")
         .about("Private AI Proxy: manage local protection and verify confidential AI services")
         .long_about("Manage profiles, coding agents and local protection, or verify and audit ACI services without starting the managed backend.")
@@ -49,7 +49,7 @@ async fn main() {
                 }
             }
         }
-        Err(_) => managed::run_matches(&matches, command).map(|()| 0),
+        Err(_) => manage::run_matches(&matches, command).map(|()| 0),
     };
     let code = match result {
         Ok(code) => code,
