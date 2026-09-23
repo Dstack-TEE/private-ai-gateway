@@ -51,10 +51,11 @@ and restores managed agent configuration but keeps management available.
 
 ## Web UI
 
-The backend service can also serve the desktop renderer to a browser on
-`127.0.0.1`. It is off by default and is not available in the Mac App Store
-build. Turn it on in the desktop app's Settings or with the settings command;
-changes apply immediately without restarting the service:
+The backend service can also serve the desktop renderer to a browser. It is off
+by default, listens on `127.0.0.1` unless you allow network access, and is not
+available in the Mac App Store build. Turn it on in the desktop app's Settings
+or with the settings command; changes apply immediately without restarting the
+service:
 
 ```sh
 pap settings set webUi true
@@ -63,9 +64,20 @@ pap settings show                 # preferences plus the web UI address or bind 
 pap settings set webUi false      # closes the listener and ends every browser session
 ```
 
-If the port cannot be opened (for example, `Port 4182 is already in use on
-127.0.0.1`), the service keeps running and reports the error in `pap status`,
-`pap settings show` and the desktop Settings page.
+The listener uses the same rules as the Local API's `listenAddress`,
+`allowNetworkAccess` and `clientHost`, under `webUi`-prefixed keys:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `webUiListenAddress` | `127.0.0.1` | IPv4 or IPv6 address to bind. |
+| `webUiAllowNetworkAccess` | `false` | Required before binding any non-loopback address. |
+| `webUiClientHost` | unset | Hostname or IP used in sign-in links and accepted as `Host`. Required when listening on `0.0.0.0` or `::`. |
+
+Changing the address, port or client host moves the listener at once and ends
+every browser session. If the address cannot be opened (for example, `Port 4182
+is already in use on 127.0.0.1`), the service keeps running and reports the
+error in `pap status`, `pap settings show` and the desktop Settings page. Saved
+settings that fail validation leave the web UI closed.
 
 Sign in with a one-time link:
 
@@ -76,9 +88,10 @@ pap app open --web
 `pap app open` still opens the installed desktop app when one is present and a
 graphical session is available. Without either, or with `--web`, it asks the
 service over the authenticated management endpoint for a login code and prints
-`http://127.0.0.1:PORT/#code=…`. It opens a browser only in a local graphical
+`http://HOST:PORT/#code=…`, where `HOST` is the client host or, without one,
+the listen address. It opens a browser only in a local graphical
 session and never falls back to a terminal browser. When the web UI is off, it
-asks `Web UI is off. Enable it on 127.0.0.1:<port>? [y/N]`; `--yes` enables it
+asks `Web UI is off. Enable it on <address>:<port>? [y/N]`; `--yes` enables it
 without prompting, and `--non-interactive` without `--yes` fails with a hint to
 run `pap settings set webUi true`.
 
@@ -98,11 +111,21 @@ Security model:
   `settings show`, logs or process arguments. A browser launched by `pap app
   open` receives the short-lived code in its arguments; it is useless once
   exchanged or expired.
-- The listener binds only `127.0.0.1`. Requests must carry exactly
-  `Host: 127.0.0.1:PORT` (blocking DNS rebinding and `localhost` resolving to
-  another address) and a same-origin `Origin`. Mutations are JSON `POST`
-  requests; cross-origin pages cannot add the `Authorization` header because
-  no CORS preflight is ever granted.
+- The listener binds `127.0.0.1` by default. A non-loopback address fails
+  closed unless `webUiAllowNetworkAccess` is `true`. Login codes are still
+  minted only over the local management endpoint, never over HTTP.
+- Requests must carry an allowed `Host`: the bound `IP:PORT`, the client
+  `HOST:PORT`, and `127.0.0.1:PORT` (or `[::1]:PORT`) when bound to every
+  interface. Anything else, including `localhost`, is refused, which blocks DNS
+  rebinding. `Origin`, `Sec-Fetch-Site` and `Referer`, when present, must
+  name that same host; every `POST` carries `Origin`. Mutations are JSON
+  `POST` requests; cross-origin pages cannot add the `Authorization` header
+  because no CORS preflight is ever granted.
+- Code exchanges and rejected API requests share a small token bucket: a burst
+  of 10, then one every 3 seconds, answered with `429` and `Retry-After`.
+  Codes are 256-bit, so this bounds request volume rather than guessing odds.
+  Signed-in requests never draw from it. The bucket is shared by all clients,
+  so a flood can briefly delay new sign-ins but not open sessions.
 - Browser requests run through the same command admission and dispatch as the
   management endpoint, and errors carry the same sanitized messages as the
   desktop app. Responses set a restrictive CSP, `nosniff`, `no-store` and
@@ -122,19 +145,62 @@ The browser UI degrades desktop-only integration:
 | CLI registration | Hidden. |
 | RedPill loopback OAuth | Use **Paste callback link** when the browser cannot reach port 4181 on the service machine. Phala device flow is unchanged. |
 
-For a remote machine, keep the listener on loopback and forward it over SSH:
+### Remote Access
 
-```sh
-# Remote shell
-pap settings set webUi true --yes
-pap app open --web
+Prefer these options, in order:
 
-# Local shell
-ssh -N -L 4182:127.0.0.1:4182 user@example-host
-```
+1. **SSH tunnel.** Keep the listener on loopback and forward it:
 
-Open the printed link locally within 60 seconds. The local and remote ports
-must match, because the service checks the exact `Host` header.
+   ```sh
+   # Remote shell
+   pap settings set webUi true --yes
+   pap app open --web
+
+   # Local shell
+   ssh -N -L 4182:127.0.0.1:4182 user@example-host
+   ```
+
+   Open the printed link locally within 60 seconds. The local and remote ports
+   must match, because the service checks the exact `Host` header.
+
+2. **Tailscale.** Keep the listener on loopback and forward the port to your
+   tailnet with a raw TCP forwarder. WireGuard encrypts the traffic, and only
+   devices your tailnet policy allows can connect. Set the client host to the
+   machine's MagicDNS name so the printed link and the `Host` check match:
+
+   ```sh
+   tailscale serve --bg --tcp 4182 tcp://127.0.0.1:4182
+   pap settings set webUiClientHost example-host.tailnet-name.ts.net --yes
+   pap settings set webUi true --yes
+   pap app open --web    # http://example-host.tailnet-name.ts.net:4182/#code=…
+   ```
+
+   Use `--tcp`, not the default HTTPS proxy: that proxy presents an `https://`
+   origin on port 443, which the service rejects. Remove the forwarder with
+   `tailscale serve --tcp=4182 off`.
+
+3. **Direct LAN listening.** Bind a LAN address only on a network you trust:
+
+   ```sh
+   pap settings set webUiAllowNetworkAccess true --yes
+   pap settings set webUiListenAddress 192.168.1.20 --yes
+   # or every interface, with the name clients use:
+   # pap settings set webUiClientHost studio.local --yes
+   # pap settings set webUiListenAddress 0.0.0.0 --yes
+   pap app open --web    # http://192.168.1.20:4182/#code=…
+   ```
+
+   The connection is **unencrypted HTTP**. Anyone who can observe or
+   intercept traffic on that network can read the sign-in code, the session
+   token and every page, including the Local API client key, and can act as
+   the signed-in user. Use this only on a trusted network and never expose
+   the port to the internet, through port forwarding or otherwise. The desktop
+   Settings page shows the same **Non-loopback** warning and asks for
+   confirmation before saving.
+
+Browsers treat plain HTTP on any address other than `127.0.0.1` as insecure, so
+over Tailscale or a LAN the copy buttons are unavailable; select and copy text
+instead.
 
 The user session survives transport failures, retries and profile changes until
 protection is explicitly stopped. After an abnormal backend exit, its session ID
@@ -219,7 +285,7 @@ credential-store unlock probe.
 | Core capability | CLI |
 | --- | --- |
 | Backend and protection lifecycle | `service`, `start`, `stop`, `status --watch` |
-| Browser management UI | `settings set webUi true`, `app open --web` |
+| Browser management UI | `settings set webUi true`, `webUiListenAddress`/`webUiAllowNetworkAccess`/`webUiClientHost`, `app open --web` |
 | Profile inspection, verification and selection | `profiles list/show/add/edit/verify/use/remove` |
 | Credential replacement and removal | `profiles verify --key-stdin`, `token clear-credential` |
 | Agent configuration review and restoration | `agents list/connect/disconnect/disconnect-all` |

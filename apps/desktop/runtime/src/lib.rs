@@ -18,6 +18,7 @@ pub mod gateway;
 #[cfg(all(unix, not(all(target_os = "macos", feature = "mac-app-store"))))]
 mod helper_staging;
 pub mod launch;
+pub mod listen;
 pub mod local_api;
 pub mod maintenance;
 pub mod power;

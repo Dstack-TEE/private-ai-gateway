@@ -1,3 +1,4 @@
+use crate::contracts::ListenConfig;
 use desktop_gateway::{
     agents::{app_data_dir, write_atomic},
     tokens,
@@ -40,19 +41,38 @@ pub struct Preferences {
     pub web_ui: WebUiConfig,
 }
 
-/// The service-hosted browser UI. It is off until the user enables it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// The service-hosted browser UI. It is off until the user enables it and
+/// listens on loopback unless network access is explicitly allowed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct WebUiConfig {
     pub enabled: bool,
+    pub listen_address: String,
+    pub allow_network_access: bool,
     pub port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_host: Option<String>,
+}
+
+impl WebUiConfig {
+    pub fn listen(&self) -> ListenConfig {
+        ListenConfig {
+            listen_address: self.listen_address.clone(),
+            allow_network_access: self.allow_network_access,
+            port: self.port,
+            client_host: self.client_host.clone(),
+        }
+    }
 }
 
 impl Default for WebUiConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            listen_address: "127.0.0.1".into(),
+            allow_network_access: false,
             port: crate::web_ui::DEFAULT_PORT,
+            client_host: None,
         }
     }
 }
@@ -116,7 +136,7 @@ pub fn reset() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Appearance, Preferences, UpdateChannel};
+    use super::{Appearance, Preferences, UpdateChannel, WebUiConfig};
 
     #[test]
     fn update_channel_is_optional_and_preserves_startup_preference() {
@@ -136,6 +156,21 @@ mod tests {
         assert!(serde_json::from_str::<Preferences>(r#"{"appearance":"invalid"}"#).is_err());
         assert_eq!(restored.update_channel, Some(UpdateChannel::Beta));
         assert!(serde_json::from_str::<Preferences>(r#"{"updateChannel":"nightly"}"#).is_err());
+    }
+
+    #[test]
+    fn web_ui_settings_saved_before_network_listening_stay_on_loopback() {
+        let preferences: Preferences =
+            serde_json::from_str(r#"{"webUi":{"enabled":true,"port":4190}}"#).unwrap();
+        assert_eq!(
+            preferences.web_ui,
+            WebUiConfig {
+                enabled: true,
+                port: 4190,
+                ..WebUiConfig::default()
+            }
+        );
+        assert!(serde_json::from_str::<Preferences>(r#"{"webUi":{"listen":"0.0.0.0"}}"#).is_err());
     }
 
     #[test]

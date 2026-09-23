@@ -13,7 +13,7 @@ import { cn } from "../lib/utils";
 
 export type View = "overview" | "agents" | "usage" | "settings";
 
-export type SettingsTarget = "confidential" | "privacy" | "local-api" | "local-api-example" | "notifications";
+export type SettingsTarget = "confidential" | "privacy" | "local-api" | "local-api-example" | "notifications" | "web-ui";
 
 const VIEWS: { id: View; label: string; icon: typeof LayoutGrid }[] = [
   { id: "overview", label: "Overview", icon: LayoutGrid },

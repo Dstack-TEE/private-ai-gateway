@@ -337,7 +337,7 @@ impl DesktopRuntime {
         }
         if runtime.instance.is_some() {
             match crate::preferences::load() {
-                Ok(saved) => runtime.apply_web_ui(saved.web_ui),
+                Ok(saved) => runtime.apply_web_ui(&saved.web_ui),
                 Err(error) => runtime.report_error(error),
             }
             runtime.initialize_startup_tokens();

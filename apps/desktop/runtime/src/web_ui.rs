@@ -1,22 +1,29 @@
-//! The browser UI hosted by the backend service on `127.0.0.1`.
+//! The browser UI hosted by the backend service.
 //!
-//! It is off by default. The IPC endpoint remains the root of trust: only an
-//! authenticated local client can mint the one-time login code that opens a
-//! browser session.
+//! It is off by default and listens on `127.0.0.1` unless network access is
+//! explicitly allowed, exactly like the Local API. The IPC endpoint remains the
+//! root of trust: only an authenticated local client can mint the one-time
+//! login code that opens a browser session.
 
 mod auth;
 #[cfg(feature = "web-ui")]
 mod server;
 
-use std::sync::{Arc, Mutex};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
 
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 
-pub use auth::Auth;
+pub use auth::{Auth, Throttle};
 
-use crate::preferences::WebUiConfig;
+use crate::{
+    listen::{self, ResolvedListen},
+    preferences::WebUiConfig,
+};
 
 /// Clear of the Local API (4180) and the account callback (4181).
 pub const DEFAULT_PORT: u16 = 4182;
@@ -25,12 +32,14 @@ const ACCOUNT_CALLBACK_PORT: u16 = 4181;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WebUiLogin {
-    /// `http://127.0.0.1:PORT/#code=…`; the code works once, within `expires_in_seconds`.
+    /// `http://HOST:PORT/#code=…` on the client host or listen address; the code
+    /// works once, within `expires_in_seconds`.
     pub url: String,
     pub expires_in_seconds: u64,
 }
 
-pub fn validate(config: WebUiConfig, local_api_port: u16) -> Result<(), String> {
+/// Checks the port policy and the shared listener rules; non-loopback fails closed.
+pub fn validate(config: &WebUiConfig, local_api_port: u16) -> Result<ResolvedListen, String> {
     let port = config.port;
     if port == 0 {
         return Err("Web UI port must be between 1 and 65535".into());
@@ -45,12 +54,15 @@ pub fn validate(config: WebUiConfig, local_api_port: u16) -> Result<(), String> 
             "Web UI port {port} is reserved for account connection callbacks; choose another port"
         ));
     }
-    Ok(())
+    // The prefix keeps these messages through the management error allowlist.
+    listen::resolve(config.listen()).map_err(|error| format!("Web UI: {error}"))
 }
 
 pub struct WebUi {
     auth: Arc<Auth>,
-    running: Mutex<Option<(u16, CancellationToken)>>,
+    #[cfg_attr(not(feature = "web-ui"), allow(dead_code))]
+    throttle: Arc<Throttle>,
+    running: Mutex<Option<(SocketAddr, CancellationToken)>>,
     #[cfg_attr(not(feature = "web-ui"), allow(dead_code))]
     handle: Handle,
 }
@@ -59,22 +71,23 @@ impl WebUi {
     pub(crate) fn new(handle: Handle) -> Self {
         Self {
             auth: Arc::default(),
+            throttle: Arc::default(),
             running: Mutex::new(None),
             handle,
         }
     }
 
-    /// Closes the listener and every browser session. Returns the port that was open.
-    pub(crate) fn stop(&self) -> Option<u16> {
+    /// Closes the listener and every browser session. Returns the address that was open.
+    pub(crate) fn stop(&self) -> Option<SocketAddr> {
         let previous = self
             .running
             .lock()
             .ok()
             .and_then(|mut running| running.take());
         self.auth.revoke_all();
-        previous.map(|(port, shutdown)| {
+        previous.map(|(bind, shutdown)| {
             shutdown.cancel();
-            port
+            bind
         })
     }
 
@@ -82,29 +95,30 @@ impl WebUi {
     pub(crate) fn start(
         &self,
         runtime: Arc<crate::controller::DesktopRuntime>,
-        port: u16,
+        listen: &ResolvedListen,
         reopening: bool,
     ) -> Result<String, String> {
         let shutdown = CancellationToken::new();
-        let url = server::start(
+        server::start(
             runtime,
-            port,
+            listen,
             reopening,
             self.auth.clone(),
+            self.throttle.clone(),
             shutdown.clone(),
             &self.handle,
         )?;
         if let Ok(mut running) = self.running.lock() {
-            *running = Some((port, shutdown));
+            *running = Some((listen.bind, shutdown));
         }
-        Ok(url)
+        Ok(listen.endpoint.clone())
     }
 
     #[cfg(not(feature = "web-ui"))]
     pub(crate) fn start(
         &self,
         _runtime: Arc<crate::controller::DesktopRuntime>,
-        _port: u16,
+        _listen: &ResolvedListen,
         _reopening: bool,
     ) -> Result<String, String> {
         Err("The web UI is not included in this build".into())
@@ -127,11 +141,38 @@ mod tests {
         let config = |port| WebUiConfig {
             enabled: true,
             port,
+            ..WebUiConfig::default()
         };
-        assert!(validate(config(DEFAULT_PORT), 4180).is_ok());
-        assert!(validate(config(0), 4180).is_err());
-        assert!(validate(config(4180), 4180).is_err());
-        assert!(validate(config(4181), 4180).is_err());
-        assert!(validate(config(5000), 5000).is_err());
+        assert_eq!(
+            validate(&config(DEFAULT_PORT), 4180).unwrap().endpoint,
+            "http://127.0.0.1:4182"
+        );
+        assert!(validate(&config(0), 4180).is_err());
+        assert!(validate(&config(4180), 4180).is_err());
+        assert!(validate(&config(4181), 4180).is_err());
+        assert!(validate(&config(5000), 5000).is_err());
+    }
+
+    #[test]
+    fn network_listening_needs_confirmation_and_a_reachable_host() {
+        let mut config = WebUiConfig {
+            enabled: true,
+            listen_address: "192.168.1.20".into(),
+            ..WebUiConfig::default()
+        };
+        assert!(validate(&config, 4180)
+            .unwrap_err()
+            .contains("explicit confirmation"));
+        config.allow_network_access = true;
+        assert_eq!(
+            validate(&config, 4180).unwrap().endpoint,
+            "http://192.168.1.20:4182"
+        );
+        config.listen_address = "0.0.0.0".into();
+        assert!(validate(&config, 4180).unwrap_err().contains("Client host"));
+        config.client_host = Some("Studio.local".into());
+        let listen = validate(&config, 4180).unwrap();
+        assert_eq!(listen.bind.to_string(), "0.0.0.0:4182");
+        assert_eq!(listen.endpoint, "http://studio.local:4182");
     }
 }

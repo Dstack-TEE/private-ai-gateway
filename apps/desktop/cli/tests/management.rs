@@ -47,6 +47,9 @@ fn command_discovery_is_detailed_and_machine_readable() {
         "clientHost",
         "webUi",
         "webUiPort",
+        "webUiListenAddress",
+        "webUiAllowNetworkAccess",
+        "webUiClientHost",
     ] {
         assert!(settings.contains(key), "missing settings key {key}");
     }
@@ -299,15 +302,16 @@ fn web_ui_is_opt_in_and_login_links_work_once() {
         .strip_prefix(&format!("http://127.0.0.1:{port}/#code="))
         .unwrap();
     let body = serde_json::json!({ "code": code }).to_string();
-    let (status, session) = http(&port, "POST", "/api/session", None, &body);
+    let authority = format!("127.0.0.1:{port}");
+    let (status, session) = http(&authority, "POST", "/api/session", None, &body);
     assert_eq!(status, 200);
     let token = session["token"].as_str().unwrap().to_string();
-    assert_eq!(http(&port, "POST", "/api/session", None, &body).0, 401);
+    assert_eq!(http(&authority, "POST", "/api/session", None, &body).0, 401);
     assert_eq!(
-        http(&port, "GET", "/api/bootstrap", Some(&token), "").0,
+        http(&authority, "GET", "/api/bootstrap", Some(&token), "").0,
         200
     );
-    assert_eq!(http(&port, "GET", "/api/bootstrap", None, "").0, 401);
+    assert_eq!(http(&authority, "GET", "/api/bootstrap", None, "").0, 401);
 
     backend.run(&["settings", "set", "webUi", "false", "--yes"]);
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -316,6 +320,90 @@ fn web_ui_is_opt_in_and_login_links_work_once() {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+/// Every 127.0.0.0/8 address is loopback on Linux, so moving the listener needs no confirmation.
+#[cfg(target_os = "linux")]
+#[test]
+fn web_ui_listener_fails_closed_and_rebinds_with_fresh_sessions() {
+    let backend = Backend::start();
+    let port = {
+        let free = TcpListener::bind("127.0.0.1:0").unwrap();
+        free.local_addr().unwrap().port().to_string()
+    };
+    backend.run(&["settings", "set", "webUiPort", &port, "--yes"]);
+    let set = |key: &str, value: &str| {
+        backend
+            .command(&["settings", "set", key, value, "--yes", "--json"])
+            .output()
+            .unwrap()
+    };
+    let refused = set("webUiListenAddress", "0.0.0.0");
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("explicit confirmation"));
+    assert_success(&set("webUiAllowNetworkAccess", "true"));
+    let refused = set("webUiListenAddress", "0.0.0.0");
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("Client host is required"));
+    assert_success(&set("webUiAllowNetworkAccess", "false"));
+
+    let state = backend.run(&["settings", "set", "webUi", "true", "--yes"]);
+    if state["webUi"]["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("assets are not built"))
+    {
+        return;
+    }
+    let first = format!("127.0.0.1:{port}");
+    let token = web_session(&backend, &first);
+    assert_eq!(
+        http(&first, "GET", "/api/bootstrap", Some(&token), "").0,
+        200
+    );
+
+    let state = backend.run(&[
+        "settings",
+        "set",
+        "webUiListenAddress",
+        "127.0.0.2",
+        "--yes",
+    ]);
+    let second = format!("127.0.0.2:{port}");
+    assert_eq!(state["webUi"]["url"], format!("http://{second}"));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while TcpStream::connect(&first).is_ok() {
+        assert!(
+            Instant::now() < deadline,
+            "the old web UI listener stayed open"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Moving the listener revokes every session; a new link signs in on the new address.
+    assert_eq!(
+        http(&second, "GET", "/api/bootstrap", Some(&token), "").0,
+        401
+    );
+    let token = web_session(&backend, &second);
+    assert_eq!(
+        http(&second, "GET", "/api/bootstrap", Some(&token), "").0,
+        200
+    );
+}
+
+/// Prints a login link for `authority` and exchanges its code for a session token.
+fn web_session(backend: &Backend, authority: &str) -> String {
+    let login = backend.web(&["app", "open", "--web", "--json"]);
+    assert_success(&login);
+    let login: Value = serde_json::from_slice(&login.stdout).unwrap();
+    let code = login["url"]
+        .as_str()
+        .unwrap()
+        .strip_prefix(&format!("http://{authority}/#code="))
+        .unwrap()
+        .to_string();
+    let body = serde_json::json!({ "code": code }).to_string();
+    let (status, session) = http(authority, "POST", "/api/session", None, &body);
+    assert_eq!(status, 200);
+    session["token"].as_str().unwrap().to_string()
+}
+
 impl Backend {
     /// Runs as a remote shell so no browser is launched.
     fn web(&self, args: &[&str]) -> Output {
@@ -326,14 +414,21 @@ impl Backend {
             .unwrap()
     }
 }
-fn http(port: &str, method: &str, path: &str, token: Option<&str>, body: &str) -> (u16, Value) {
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
+/// Sends a same-origin request to `authority` (`IP:PORT`).
+fn http(
+    authority: &str,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    body: &str,
+) -> (u16, Value) {
+    let mut stream = TcpStream::connect(authority).unwrap();
     let authorization = token
         .map(|token| format!("Authorization: Bearer {token}\r\n"))
         .unwrap_or_default();
     write!(
         stream,
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\n{authorization}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "{method} {path} HTTP/1.1\r\nHost: {authority}\r\nOrigin: http://{authority}\r\n{authorization}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
     .unwrap();

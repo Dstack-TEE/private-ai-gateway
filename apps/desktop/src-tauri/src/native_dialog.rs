@@ -30,17 +30,19 @@ const PROFILES_LABEL: &str = "profiles";
 const PROFILE_EDITOR_LABEL: &str = "profile-editor";
 const PRIVACY_LABEL: &str = "privacy";
 const LOCAL_API_LABEL: &str = "local-api";
+const WEB_UI_LABEL: &str = "web-ui";
 const USAGE_PROOF_LABEL: &str = "usage-proof";
 const PROFILE_REPAIR_EVENT: &str = "gateway://profile-repair";
 const USAGE_PROOF_EVENT: &str = "gateway://usage-proof";
 const PRESENTED_EVENT: &str = "gateway://dialog-presented";
-const DIALOG_LABELS: [&str; 7] = [
+const DIALOG_LABELS: [&str; 8] = [
     "notifications",
     "local-api-example",
     PROFILES_LABEL,
     PROFILE_EDITOR_LABEL,
     PRIVACY_LABEL,
     LOCAL_API_LABEL,
+    WEB_UI_LABEL,
     USAGE_PROOF_LABEL,
 ];
 
@@ -141,6 +143,15 @@ pub fn open(
             min_width: 540.0,
             min_height: 440.0,
             query: "index.html?native-dialog=local-api".to_string(),
+        },
+        "web-ui" => DialogSpec {
+            label: WEB_UI_LABEL,
+            title: "Web UI Settings",
+            width: 560.0,
+            height: 420.0,
+            min_width: 500.0,
+            min_height: 380.0,
+            query: "index.html?native-dialog=web-ui".to_string(),
         },
         "usage-proof" => {
             let record_id = record_id

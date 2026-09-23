@@ -393,12 +393,26 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                             _ => return Err("Expected beta or stable".into()),
                         },
                     ))?)?,
-                    SettingsKey::WebUi | SettingsKey::WebUiPort => {
+                    SettingsKey::WebUi
+                    | SettingsKey::WebUiPort
+                    | SettingsKey::WebUiListenAddress
+                    | SettingsKey::WebUiAllowNetworkAccess
+                    | SettingsKey::WebUiClientHost => {
                         let mut config = client.preferences()?.web_ui;
-                        if matches!(key, SettingsKey::WebUi) {
-                            config.enabled = parse_bool(input)?;
-                        } else {
-                            config.port = input.parse().map_err(|_| "Expected a valid port number")?;
+                        match key {
+                            SettingsKey::WebUi => config.enabled = parse_bool(input)?,
+                            SettingsKey::WebUiPort => {
+                                config.port =
+                                    input.parse().map_err(|_| "Expected a valid port number")?
+                            }
+                            SettingsKey::WebUiListenAddress => config.listen_address = input.clone(),
+                            SettingsKey::WebUiAllowNetworkAccess => {
+                                config.allow_network_access = parse_bool(input)?
+                            }
+                            SettingsKey::WebUiClientHost => {
+                                config.client_host = (!input.is_empty()).then(|| input.clone())
+                            }
+                            _ => unreachable!(),
                         }
                         client.request(Command::SaveWebUi(config))?
                     }
@@ -529,7 +543,11 @@ fn open_web_ui(cli: &Cli, client: &Client) -> Result<Value, String> {
         }
         confirm(
             cli,
-            &format!("Web UI is off. Enable it on 127.0.0.1:{}?", status.port),
+            &format!(
+                "Web UI is off. Enable it on {}:{}?",
+                crate::listen::url_host(&status.listen_address),
+                status.port
+            ),
         )?;
         // The same change `settings set webUi true` makes.
         let mut config = client.preferences()?.web_ui;

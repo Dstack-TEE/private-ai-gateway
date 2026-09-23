@@ -1,6 +1,6 @@
 use std::{
     convert::Infallible,
-    net::{Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
     time::Duration,
 };
@@ -23,10 +23,11 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::Auth;
+use super::{auth::THROTTLE_REFILL, Auth, Throttle};
 use crate::{
     contracts::GatewayState,
     controller::DesktopRuntime,
+    listen::{url_host, ResolvedListen},
     protocol::{Command, RpcError, BUILD_VERSION},
     ui_api::{self, Backend, Event, Host, Method, StateEventProjection},
 };
@@ -39,6 +40,7 @@ struct WebAssets;
 
 const EXPIRED_LINK: &str =
     "This sign-in link has expired or was already used. Run `pap app open --web` for a new link.";
+const THROTTLED: &str = "Too many sign-in attempts. Wait a few seconds and try again.";
 const SESSION_CHECK: Duration = Duration::from_secs(15);
 
 /// Runs management commands through the same admission and dispatch as the IPC endpoint.
@@ -76,31 +78,36 @@ struct WebState<B> {
     backend: B,
     host: WebHost,
     auth: Arc<Auth>,
+    throttle: Arc<Throttle>,
     states: watch::Receiver<GatewayState>,
-    port: u16,
+    /// Accepted `Host` values; see [`allowed_hosts`].
+    hosts: Arc<[String]>,
     shutdown: CancellationToken,
 }
 
 pub(super) fn start(
     runtime: Arc<DesktopRuntime>,
-    port: u16,
+    listen: &ResolvedListen,
     reopening: bool,
     auth: Arc<Auth>,
+    throttle: Arc<Throttle>,
     shutdown: CancellationToken,
     handle: &Handle,
-) -> Result<String, String> {
+) -> Result<(), String> {
     if WebAssets::get("index.html").is_none() {
         return Err("Web UI assets are not built. Run `npm run build:web` in apps/desktop and rebuild the service.".into());
     }
-    let listener = bind(port, reopening)?;
+    let address = listen.bind;
+    let listener = bind(address, reopening)?;
     let state = WebState {
         backend: ServiceBackend(runtime.clone()),
         host: WebHost {
             events: broadcast::channel(64).0,
         },
         auth,
+        throttle,
         states: runtime.subscribe(),
-        port,
+        hosts: allowed_hosts(listen).into(),
         shutdown: shutdown.clone(),
     };
     handle.spawn(async move {
@@ -112,15 +119,38 @@ pub(super) fn start(
             Err(_) => Err(()),
         };
         if result.is_err() {
-            crate::diagnostic(format_args!("The web UI listener on port {port} stopped"));
+            crate::diagnostic(format_args!("The web UI listener on {address} stopped"));
         }
     });
-    Ok(format!("http://127.0.0.1:{port}"))
+    Ok(())
 }
 
-fn bind(port: u16, reopening: bool) -> Result<std::net::TcpListener, String> {
-    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    // A listener closed by the same toggle may take a moment to release its port.
+/// `Host` values the listener answers to: the bound address, the client host,
+/// and loopback when bound to every interface. Anything else, including
+/// `localhost`, may be a DNS-rebinding page and is refused.
+fn allowed_hosts(listen: &ResolvedListen) -> Vec<String> {
+    let port = listen.bind.port();
+    let bound = match listen.bind.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    let mut hosts = Vec::new();
+    for host in std::iter::once(bound.to_string()).chain(listen.config.client_host.clone()) {
+        let host = url_host(&host);
+        hosts.push(format!("{host}:{port}"));
+        // Browsers omit the default port.
+        if port == 80 {
+            hosts.push(host);
+        }
+    }
+    hosts.dedup();
+    hosts
+}
+
+fn bind(address: SocketAddr, reopening: bool) -> Result<std::net::TcpListener, String> {
+    let (ip, port) = (address.ip(), address.port());
+    // A listener closed by the same change may take a moment to release its port.
     let mut retries = if reopening { 20 } else { 0 };
     loop {
         match std::net::TcpListener::bind(address) {
@@ -137,12 +167,15 @@ fn bind(port: u16, reopening: bool) -> Result<std::net::TcpListener, String> {
             Err(error) => {
                 return Err(match error.kind() {
                     std::io::ErrorKind::AddrInUse => {
-                        format!("Port {port} is already in use on 127.0.0.1")
+                        format!("Port {port} is already in use on {ip}")
                     }
                     std::io::ErrorKind::PermissionDenied => {
                         format!("Port {port} requires elevated privileges; choose another port")
                     }
-                    _ => format!("Cannot listen on 127.0.0.1:{port}"),
+                    std::io::ErrorKind::AddrNotAvailable => {
+                        format!("Address {ip} is not assigned to this device")
+                    }
+                    _ => format!("Cannot listen on {address}"),
                 })
             }
         }
@@ -166,19 +199,26 @@ async fn security<B: Backend>(
     next: Next,
 ) -> Response {
     let headers = request.headers();
-    if !valid_host(headers, state.port) {
+    let Some(host) = valid_host(headers, &state.hosts) else {
         return secure_response(status(StatusCode::FORBIDDEN, "Invalid request host"));
-    }
+    };
     let path = request.uri().path();
     if path.starts_with("/api/") {
-        if !valid_origin(headers, state.port) {
+        if !valid_origin(headers, host, request.method()) {
             return secure_response(status(StatusCode::FORBIDDEN, "Invalid request origin"));
         }
-        // Only the code exchange is reachable without a session.
-        if path != "/api/session"
-            && !bearer(headers).is_some_and(|token| state.auth.authorize(token))
-        {
-            return secure_response(status(StatusCode::UNAUTHORIZED, EXPIRED_LINK));
+        // Only the code exchange is reachable without a session, and both it and
+        // rejected requests draw from the throttle.
+        if path == "/api/session" {
+            if !state.throttle.allow() {
+                return secure_response(throttled());
+            }
+        } else if !bearer(headers).is_some_and(|token| state.auth.authorize(token)) {
+            return secure_response(if state.throttle.allow() {
+                status(StatusCode::UNAUTHORIZED, EXPIRED_LINK)
+            } else {
+                throttled()
+            });
         }
         if request.method() == HttpMethod::POST
             && headers
@@ -213,30 +253,42 @@ fn secure_response(mut response: Response) -> Response {
     response
 }
 
-/// Only the IPv4 loopback name the server binds; `localhost` may resolve elsewhere.
-fn valid_host(headers: &HeaderMap, port: u16) -> bool {
+/// Returns the request's `Host` when it is on the allowlist.
+fn valid_host<'a>(headers: &'a HeaderMap, allowed: &[String]) -> Option<&'a str> {
     headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value == format!("127.0.0.1:{port}"))
+        .filter(|value| {
+            allowed
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(value))
+        })
 }
 
-fn valid_origin(headers: &HeaderMap, port: u16) -> bool {
-    let origin = format!("http://127.0.0.1:{port}");
-    if let Some(actual) = headers
-        .get(header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-    {
-        return actual == origin;
+/// API requests must come from the page served on the same allowed host.
+///
+/// Browsers always send `Origin` on `POST`. Same-origin `GET`s may carry no
+/// origin signal at all: `Sec-Fetch-Site` is only sent to secure contexts, which
+/// plain HTTP on a network address is not, and the page sets `no-referrer`.
+/// Such reads are accepted; they still need a session token that cross-site
+/// pages cannot attach, because no CORS preflight is ever granted.
+fn valid_origin(headers: &HeaderMap, host: &str, method: &HttpMethod) -> bool {
+    let origin = format!("http://{host}");
+    let header = |name| {
+        headers
+            .get(name)
+            .and_then(|value: &HeaderValue| value.to_str().ok())
+    };
+    if let Some(actual) = header(header::ORIGIN) {
+        return actual.eq_ignore_ascii_case(&origin);
     }
-    headers
-        .get(header::REFERER)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|referer| referer == format!("{origin}/"))
-        || headers
-            .get("sec-fetch-site")
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value == "same-origin")
+    if let Some(site) = header(header::HeaderName::from_static("sec-fetch-site")) {
+        return site == "same-origin";
+    }
+    if let Some(referer) = header(header::REFERER) {
+        return referer.eq_ignore_ascii_case(&format!("{origin}/"));
+    }
+    method == HttpMethod::GET || method == HttpMethod::HEAD
 }
 
 fn bearer(headers: &HeaderMap) -> Option<&str> {
@@ -402,6 +454,15 @@ async fn asset(request: Request<Body>) -> Response {
         .into_response()
 }
 
+fn throttled() -> Response {
+    let mut response = status(StatusCode::TOO_MANY_REQUESTS, THROTTLED);
+    response.headers_mut().insert(
+        header::RETRY_AFTER,
+        HeaderValue::from(THROTTLE_REFILL.as_secs()),
+    );
+    response
+}
+
 fn status(code: StatusCode, message: &'static str) -> Response {
     (
         code,
@@ -438,6 +499,17 @@ mod tests {
     }
 
     fn fixture() -> Fixture {
+        fixture_on("127.0.0.1", None)
+    }
+
+    fn fixture_on(address: &str, client_host: Option<&str>) -> Fixture {
+        let listen = crate::listen::resolve(crate::contracts::ListenConfig {
+            listen_address: address.into(),
+            allow_network_access: true,
+            port: 3210,
+            client_host: client_host.map(Into::into),
+        })
+        .unwrap();
         let auth = Arc::new(Auth::default());
         let shutdown = CancellationToken::new();
         let (states, receiver) = watch::channel(GatewayState::default());
@@ -447,8 +519,9 @@ mod tests {
                 events: broadcast::channel(4).0,
             },
             auth: auth.clone(),
+            throttle: Arc::default(),
             states: receiver,
-            port: 3210,
+            hosts: allowed_hosts(&listen).into(),
             shutdown: shutdown.clone(),
         });
         Fixture {
@@ -593,6 +666,192 @@ mod tests {
         )
         .await;
         assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    }
+
+    async fn bootstrap_from(router: &Router, host: &str, origin: &str, token: &str) -> StatusCode {
+        send(
+            router,
+            Request::builder()
+                .uri("/api/bootstrap")
+                .header(header::HOST, host)
+                .header(header::ORIGIN, origin)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .status()
+    }
+
+    async fn assert_hosts(
+        address: &str,
+        client_host: Option<&str>,
+        allowed: &[&str],
+        refused: &[&str],
+    ) {
+        let fixture = fixture_on(address, client_host);
+        let token = fixture.auth.exchange(&fixture.auth.mint_code()).unwrap();
+        for host in allowed {
+            let origin = format!("http://{host}");
+            assert_eq!(
+                bootstrap_from(&fixture.router, host, &origin, &token).await,
+                StatusCode::OK,
+                "{address} should accept {host}"
+            );
+            assert_eq!(
+                bootstrap_from(&fixture.router, host, "http://attacker.example", &token).await,
+                StatusCode::FORBIDDEN
+            );
+        }
+        for host in refused {
+            assert_eq!(
+                bootstrap_from(&fixture.router, host, &format!("http://{host}"), &token).await,
+                StatusCode::FORBIDDEN,
+                "{address} should refuse {host}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn network_listeners_accept_only_their_own_hosts_and_origins() {
+        assert_hosts(
+            "0.0.0.0",
+            Some("gateway.lan"),
+            &["127.0.0.1:3210", "gateway.lan:3210", "Gateway.LAN:3210"],
+            &[
+                "0.0.0.0:3210",
+                "localhost:3210",
+                "192.168.1.20:3210",
+                "gateway.lan:3211",
+                "gateway.lan",
+                "attacker.example:3210",
+            ],
+        )
+        .await;
+        // A loopback listener behind a TCP forwarder such as `tailscale serve --tcp`.
+        assert_hosts(
+            "127.0.0.1",
+            Some("studio.tail1234.ts.net"),
+            &["127.0.0.1:3210", "studio.tail1234.ts.net:3210"],
+            &["localhost:3210", "studio.tail1234.ts.net"],
+        )
+        .await;
+        assert_hosts(
+            "192.168.1.20",
+            None,
+            &["192.168.1.20:3210"],
+            &["127.0.0.1:3210", "localhost:3210", "192.168.1.21:3210"],
+        )
+        .await;
+        assert_hosts(
+            "::",
+            Some("fd00::20"),
+            &["[::1]:3210", "[fd00::20]:3210"],
+            &["[::]:3210", "127.0.0.1:3210", "fd00::20:3210"],
+        )
+        .await;
+        // The origin must be the page on the requested host, not another allowed one.
+        let fixture = fixture_on("0.0.0.0", Some("gateway.lan"));
+        let token = fixture.auth.exchange(&fixture.auth.mint_code()).unwrap();
+        assert_eq!(
+            bootstrap_from(
+                &fixture.router,
+                "gateway.lan:3210",
+                "http://127.0.0.1:3210",
+                &token
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn requests_without_origin_signals_may_only_read() {
+        let fixture = fixture_on("192.168.1.20", None);
+        let token = fixture.auth.exchange(&fixture.auth.mint_code()).unwrap();
+        let send_with = |method: HttpMethod, uri: &str, headers: &[(&str, &str)]| {
+            let mut request = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::HOST, "192.168.1.20:3210")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json");
+            for (name, value) in headers {
+                request = request.header(*name, *value);
+            }
+            send(&fixture.router, request.body(Body::from("{}")).unwrap())
+        };
+        assert_eq!(
+            send_with(HttpMethod::GET, "/api/bootstrap", &[])
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            send_with(HttpMethod::POST, "/api/rpc/stop", &[])
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        for (name, value) in [
+            ("sec-fetch-site", "cross-site"),
+            ("referer", "http://attacker.example/"),
+        ] {
+            assert_eq!(
+                send_with(HttpMethod::GET, "/api/bootstrap", &[(name, value)])
+                    .await
+                    .status(),
+                StatusCode::FORBIDDEN
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_requests_are_throttled_but_sessions_are_not() {
+        let fixture = fixture_on("192.168.1.20", None);
+        let token = fixture.auth.exchange(&fixture.auth.mint_code()).unwrap();
+        let exchange = |code: &'static str| {
+            send(
+                &fixture.router,
+                Request::builder()
+                    .method(HttpMethod::POST)
+                    .uri("/api/session")
+                    .header(header::HOST, "192.168.1.20:3210")
+                    .header(header::ORIGIN, "http://192.168.1.20:3210")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({ "code": code }).to_string()))
+                    .unwrap(),
+            )
+        };
+        for _ in 0..super::super::auth::THROTTLE_BURST {
+            assert_eq!(exchange("guess").await.status(), StatusCode::UNAUTHORIZED);
+        }
+        let throttled = exchange("guess").await;
+        assert_eq!(throttled.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            throttled.headers().get(header::RETRY_AFTER),
+            Some(&HeaderValue::from(THROTTLE_REFILL.as_secs()))
+        );
+        assert_eq!(
+            bootstrap_from(
+                &fixture.router,
+                "192.168.1.20:3210",
+                "http://192.168.1.20:3210",
+                "wrong"
+            )
+            .await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            bootstrap_from(
+                &fixture.router,
+                "192.168.1.20:3210",
+                "http://192.168.1.20:3210",
+                &token
+            )
+            .await,
+            StatusCode::OK
+        );
     }
 
     #[tokio::test]

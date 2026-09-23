@@ -396,12 +396,32 @@ pub struct GatewayState {
 #[serde(rename_all = "camelCase")]
 pub struct WebUiStatus {
     pub enabled: bool,
+    #[serde(default)]
+    pub listen_address: String,
+    #[serde(default)]
+    pub allow_network_access: bool,
     pub port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_host: Option<String>,
     /// Present only while the listener is bound.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+impl From<&crate::preferences::WebUiConfig> for WebUiStatus {
+    fn from(config: &crate::preferences::WebUiConfig) -> Self {
+        Self {
+            enabled: config.enabled,
+            listen_address: config.listen_address.clone(),
+            allow_network_access: config.allow_network_access,
+            port: config.port,
+            client_host: config.client_host.clone(),
+            url: None,
+            error: None,
+        }
+    }
 }
 
 impl GatewayState {
@@ -450,14 +470,16 @@ impl Default for GatewayState {
             local_api: LocalApiConfig::default(),
             api_key_saved: false,
             catalog: None,
-            web_ui: WebUiStatus::default(),
+            web_ui: WebUiStatus::from(&crate::preferences::WebUiConfig::default()),
         }
     }
 }
 
+/// A TCP listener shared by the Local API and the web UI. Non-loopback
+/// addresses require `allow_network_access`; see [`crate::listen::resolve`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct LocalApiConfig {
+pub struct ListenConfig {
     pub listen_address: String,
     pub allow_network_access: bool,
     pub port: u16,
@@ -465,7 +487,10 @@ pub struct LocalApiConfig {
     pub client_host: Option<String>,
 }
 
-impl Default for LocalApiConfig {
+pub type LocalApiConfig = ListenConfig;
+
+/// The Local API listener; the web UI keeps its own defaults.
+impl Default for ListenConfig {
     fn default() -> Self {
         Self {
             listen_address: "127.0.0.1".to_string(),

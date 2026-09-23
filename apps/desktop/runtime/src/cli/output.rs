@@ -220,6 +220,12 @@ fn status(value: &Value) -> String {
                 (None, None) => "Not listening".into(),
             }
         ));
+        if let Some(network) = web_ui["allowNetworkAccess"].as_bool() {
+            lines.push(format!(
+                "Web UI network access: {}",
+                if network { "Allowed" } else { "Loopback only" }
+            ));
+        }
     }
     if let Some(required) = state["config"]["requireProductionOs"].as_bool() {
         lines.push(format!(

@@ -8,13 +8,14 @@ import { brand } from "../generated/brand";
 import { LocalApiExamples } from "../components/local-api-examples";
 import { NotificationsProvider, NotificationsSheet, useNotifications } from "../components/notifications";
 import { NativeDialogHost } from "../components/sheet";
-import type { GatewayState, LocalApiConfig } from "../../shared/contracts";
+import type { GatewayState, LocalApiConfig, WebUiConfig } from "../../shared/contracts";
 import { desktopApi, initialGatewayState, query, web } from "../lib/environment";
 import { INITIAL_STATE, protectionFlags } from "../lib/protection";
 import { ProfileEditorSheet, ProfilesSheet } from "../features/profiles";
 import { localEndpoint } from "../lib/format";
 import { PrivacyVerificationSheet } from "../features/privacy";
 import { LocalApiSheet } from "../features/local-api";
+import { WebUiSheet } from "../features/web-ui";
 import { UsageEvidenceSheet } from "../features/usage";
 
 const NativeStateContext = createContext<GatewayState | undefined>(initialGatewayState);
@@ -253,6 +254,21 @@ function NativeLocalApiWindow(): React.JSX.Element {
   );
 }
 
+function NativeWebUiWindow(): React.JSX.Element {
+  const native = useNativeGatewayWindow("Web UI Settings");
+  if (!native.loaded || native.loadError) {
+    return <NativeDialogStatus label="Web UI settings" error={native.loadError} onClose={native.close} />;
+  }
+  const save = async (config: WebUiConfig): Promise<string | undefined> => {
+    try {
+      native.setState(await desktopApi.saveWebUi(config));
+      return undefined;
+    } catch (error) {
+      return errorMessage(error);
+    }
+  };
+  return <NativeDialogHost><WebUiSheet state={native.state} onSave={save} onClose={native.close} /></NativeDialogHost>;
+}
 
 function NativeUsageProofWindow({ initialRecordId }: { initialRecordId: string }): React.JSX.Element {
   const [recordId, setRecordId] = useState(initialRecordId);
@@ -300,6 +316,7 @@ function nativeWindowContent(
     case "profile-editor": return <NativeProfilesWindow repair={false} editor profileId={request.profileId} startAfterSave={request.startAfterSave} />;
     case "privacy": return <NativePrivacyWindow />;
     case "local-api": return <NativeLocalApiWindow />;
+    case "web-ui": return <NativeWebUiWindow />;
     case "usage-proof": return <NativeUsageProofWindow initialRecordId={request.recordId ?? ""} />;
     default: return null;
   }
