@@ -86,9 +86,13 @@ async fn serve(port: u16, no_open: bool) -> Result<(), String> {
     let app = router(state);
     let url = format!("http://127.0.0.1:{port}/#token={token}");
     println!("Private AI Proxy web UI: {url}");
-    eprintln!("Keep this terminal open. Press Ctrl+C to stop the web UI.");
+    crate::diagnostic(format_args!(
+        "Keep this terminal open. Press Ctrl+C to stop the web UI."
+    ));
     if !no_open && open_browser(&url).is_err() {
-        eprintln!("Cannot open a browser automatically; open the printed URL manually.");
+        crate::diagnostic(format_args!(
+            "Cannot open a browser automatically; open the printed URL manually."
+        ));
     }
     axum::serve(listener, app)
         .with_graceful_shutdown(async {

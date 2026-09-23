@@ -4764,7 +4764,6 @@ dependencies = [
  "auto-launch 0.6.0",
  "block2",
  "futures-util",
- "if-addrs",
  "libc",
  "objc2",
  "objc2-app-kit",
