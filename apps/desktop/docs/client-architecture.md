@@ -59,6 +59,12 @@ service. No distribution contains an independent `aci` executable.
   modules. Apply, disconnect, recovery and rollback stay together in transactions.
 - OAuth provider/HTTP/billing helpers and verifier events are separate from their
   session owners. Tauri command modules adapt the shared runtime to IPC.
+- `runtime/src/ui_api.rs` is the renderer management table. Each method maps to
+  protocol commands through one `Backend`: the desktop shell sends them to the
+  service over IPC, and the service-hosted web UI calls the IPC server's own
+  admission and dispatch in process. Tauri commands and the web RPC route are
+  transport adapters; a `Host` supplies shell capabilities such as tray state.
+  The renderer builds one `DesktopApi` from a transport and platform primitives.
 - Core tests are grouped by behavior. Layout, color and asset-name assertions are
   excluded; authorization, recovery, ownership, accounting and cache isolation
   remain covered. Self-spawned tests retain explicit, checked test selectors.
@@ -136,6 +142,16 @@ also checks that the running executable belongs to the current installation.
 The service bounds frame sizes, frame deadlines, clients, subscriptions, and
 exports. Slow or malformed clients cannot close the service. Subscriptions have
 a separate quota so they cannot consume every short-request slot.
+
+The optional web UI is a second, browser-facing transport owned by the service.
+It is off by default, binds only `127.0.0.1` on its configured port, and applies
+setting changes live; bind failures are reported in state. The IPC endpoint is
+its root of trust: an authenticated client asks for a one-time login code (60 s,
+single use), and the page exchanges it for an idle-expiring session token.
+Disabling the web UI or restarting the service revokes every session. Requests
+require the exact loopback `Host`, a same-origin `Origin` and JSON mutations,
+then run through the same admission and dispatch as IPC commands. Its state
+stream is fed from the controller's state channel. Mac App Store builds omit it.
 
 Agent changes retain preview/revision/apply validation. CSV exports are streamed
 one row at a time into a newly created private file; existing targets and symlinks

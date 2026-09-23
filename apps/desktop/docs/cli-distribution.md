@@ -61,10 +61,9 @@ administrator context; `private-ai-proxy` never requests elevation itself.
 ## Standalone CLI
 
 Every platform publishes a portable archive containing the three sibling
-executables plus the `pap` and `aci` shortcuts. The `pap ui` web renderer is
-embedded inside the CLI binary; it does not add loose runtime files or a native
-desktop shell. Windows uses
-ZIP with `.cmd` forwarding scripts; macOS and Linux archives use tar.gz with
+executables plus the `pap` and `aci` shortcuts. The optional web UI renderer
+is embedded in `private-ai-proxy-service`; it adds no loose runtime files or
+native desktop shell. Windows uses ZIP with `.cmd` forwarding scripts; macOS and Linux archives use tar.gz with
 symlinks.
 Extract each version into a fresh directory rather than overlaying older files.
 Run `pap cli install` from a stable extracted location when PATH registration
@@ -81,10 +80,12 @@ upgrade. The in-app updater pauses the user-owned backend before invoking the na
 installer and preserves an active session so protection can resume after fresh
 verification when the app restarts.
 
-CLI compilation has one explicit asset prerequisite: run `npm run build:web`
-from `apps/desktop` before Cargo. This writes the renderer consumed by the
-CLI's `web-ui` runtime feature; CLI Cargo builds fail with an actionable error when `index.html` is
-missing. Release and sidecar build scripts run this step before compiling Rust.
+The web UI renderer comes from `npm run build:web` in `apps/desktop`, which
+writes `runtime/web-dist` for the CLI package's default `web-ui` feature. Plain
+Cargo builds work without it and print a warning; enabling the web UI in such a
+build reports that its assets are not built. `npm run build:sidecars` builds the
+bundle before compiling Rust, and CLI packaging refuses to run without it. Mac
+App Store sidecars are built without default features, so they omit the web UI.
 
 CI extracts every portable archive and CLI-only native package, then runs the
 packaged `private-ai-proxy` with a private temporary app home and loopback port. The smoke

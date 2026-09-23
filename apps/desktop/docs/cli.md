@@ -49,61 +49,92 @@ start protection. `start` waits for verified protection. `stop` stops protection
 and restores managed agent configuration but keeps management available.
 `service stop` shuts down the backend. Closing the desktop app does not stop it.
 
-## Browser UI
+## Web UI
 
-`pap ui` starts the same renderer used by the desktop app and attaches it to the
-per-user backend. It binds only to `127.0.0.1`; the default port is selected by
-the operating system. `--port <number>` selects a fixed loopback port and
-`--no-open` prints the URL without launching a browser.
+The backend service can also serve the desktop renderer to a browser on
+`127.0.0.1`. It is off by default and is not available in the Mac App Store
+build. Turn it on in the desktop app's Settings or with the settings command;
+changes apply immediately without restarting the service:
 
 ```sh
-pap ui
-pap ui --port 49152 --no-open
+pap settings set webUi true
+pap settings set webUiPort 4182   # default; must differ from the Local API (4180) and 4181
+pap settings show                 # preferences plus the web UI address or bind error
+pap settings set webUi false      # closes the listener and ends every browser session
 ```
 
-The printed URL contains a fresh 256-bit session token in its fragment. The
-fragment is not sent in HTTP requests: the renderer moves it to
-`sessionStorage`, removes it from the address bar, and sends it in the
-`Authorization` header. Do not paste the original URL into logs, tickets, shell
-history, or messages. The token exists only in the `pap ui` process and stops
-working when that process exits. Starting another UI creates an independent
-token.
+If the port cannot be opened (for example, `Port 4182 is already in use on
+127.0.0.1`), the service keeps running and reports the error in `pap status`,
+`pap settings show` and the desktop Settings page.
 
-The management server rejects missing or incorrect tokens, non-loopback or
-unexpected `Host` values, and cross-origin requests. Mutations are explicit
-JSON `POST` requests. Management errors carry the same sanitized messages as
-the desktop app. Responses disable caching and framing and include a
-restrictive CSP and content-type protections. The token grants the same
-management authority as the desktop app, including reading the Local API client
-key, so treat it like that key.
+Sign in with a one-time link:
 
-The web UI deliberately degrades desktop-only integration:
+```sh
+pap app open --web
+```
+
+`pap app open` still opens the installed desktop app when one is present and a
+graphical session is available. Without either, or with `--web`, it asks the
+service over the authenticated management endpoint for a login code and prints
+`http://127.0.0.1:PORT/#code=…`. It opens a browser only in a local graphical
+session and never falls back to a terminal browser. When the web UI is off, it
+asks `Web UI is off. Enable it on 127.0.0.1:<port>? [y/N]`; `--yes` enables it
+without prompting, and `--non-interactive` without `--yes` fails with a hint to
+run `pap settings set webUi true`.
+
+The code works once and expires after 60 seconds. The page removes it from the
+address bar before its first request and exchanges it for a session token that
+stays in the tab's `sessionStorage`, so reloading keeps the session. Opening the
+same link again, or in another tab, shows "This sign-in link has expired or was
+already used"; run `pap app open --web` for a new link. Sessions end after an
+hour without requests or an open page, when the web UI is turned off, and when
+the service restarts.
+
+Security model:
+
+- The management socket or named pipe, restricted to the current user, is the
+  root of trust. Only a client that can reach it can mint a login code. Codes
+  and session tokens are stored only as hashes and never appear in `status`,
+  `settings show`, logs or process arguments. A browser launched by `pap app
+  open` receives the short-lived code in its arguments; it is useless once
+  exchanged or expired.
+- The listener binds only `127.0.0.1`. Requests must carry exactly
+  `Host: 127.0.0.1:PORT` (blocking DNS rebinding and `localhost` resolving to
+  another address) and a same-origin `Origin`. Mutations are JSON `POST`
+  requests; cross-origin pages cannot add the `Authorization` header because
+  no CORS preflight is ever granted.
+- Browser requests run through the same command admission and dispatch as the
+  management endpoint, and errors carry the same sanitized messages as the
+  desktop app. Responses set a restrictive CSP, `nosniff`, `no-store` and
+  `no-referrer`.
+- A session has the same authority as the desktop app, including reading the
+  Local API client key. Treat an open session like an unlocked desktop app.
+
+The browser UI degrades desktop-only integration:
 
 | Feature | Web behavior |
 | --- | --- |
 | Profile import and exports | Browser file picker and downloads; browser paths are never sent to the service. |
-| Native child windows | In-page modal sheets. |
+| Native child windows and dialogs | In-page modal sheets and dialogs. |
 | Clipboard and external links | Browser clipboard and allowlisted HTTPS tabs. |
-| Open at Login, tray/menu state | Hidden or no-op. Protect on launch remains shared with the backend. |
-| OS notifications and native updates | Hidden; update ownership stays with the CLI installer/package manager. |
-| CLI registration | Hidden because the running CLI is already installed. |
+| Open at Login, tray/menu state | Hidden. Protect on launch remains shared with the backend. |
+| OS notifications and native updates | Hidden; update ownership stays with the installer or package manager. |
+| CLI registration | Hidden. |
 | RedPill loopback OAuth | Use **Paste callback link** when the browser cannot reach port 4181 on the service machine. Phala device flow is unchanged. |
 
-For a remote machine, keep the server on its loopback interface and forward the
-same port with SSH. Run these commands in separate terminals; do not expose a
-public listener:
+For a remote machine, keep the listener on loopback and forward it over SSH:
 
 ```sh
 # Remote shell
-pap ui --port 49152 --no-open
+pap settings set webUi true --yes
+pap app open --web
 
 # Local shell
-ssh -N -L 49152:127.0.0.1:49152 user@example-host
+ssh -N -L 4182:127.0.0.1:4182 user@example-host
 ```
 
-Open the URL printed by the remote command locally. The local and remote port
-must match because the server validates the exact HTTP `Host` port against DNS
-rebinding.
+Open the printed link locally within 60 seconds. The local and remote ports
+must match, because the service checks the exact `Host` header.
 
 The user session survives transport failures, retries and profile changes until
 protection is explicitly stopped. After an abnormal backend exit, its session ID
@@ -188,7 +219,7 @@ credential-store unlock probe.
 | Core capability | CLI |
 | --- | --- |
 | Backend and protection lifecycle | `service`, `start`, `stop`, `status --watch` |
-| Browser management UI | `ui [--port N] [--no-open]` |
+| Browser management UI | `settings set webUi true`, `app open --web` |
 | Profile inspection, verification and selection | `profiles list/show/add/edit/verify/use/remove` |
 | Credential replacement and removal | `profiles verify --key-stdin`, `token clear-credential` |
 | Agent configuration review and restoration | `agents list/connect/disconnect/disconnect-all` |
