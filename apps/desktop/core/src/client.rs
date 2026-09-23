@@ -89,7 +89,10 @@ impl Client {
             Err(error) => return Err(connection_error(error)),
         }
         let mut child = crate::launch::spawn_background()?;
-        let deadline = Instant::now() + Duration::from_secs(15);
+        // A backend that exits is reported immediately below; this only bounds a
+        // live but slow start, such as the first launch after an update while
+        // the OS scans the new binaries on a busy machine.
+        let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             match open() {
                 Ok((_, hello)) if hello.version == protocol::BUILD_VERSION => {
