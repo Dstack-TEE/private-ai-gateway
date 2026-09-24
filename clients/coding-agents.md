@@ -103,14 +103,16 @@ The branded plugins register matching inspection commands:
 /phala-session <session-id>
 ```
 
-Replace `phala` with `redpill` for RedPill. These OpenCode custom commands
-use OpenCode's official prompt-command mechanism to ask the selected model to
-call the provider-scoped read-only inspect tool. The tool itself performs the
-local inspection; no second verifier is involved. Pi can render the same data
-directly because its extension API supports command callbacks. Attestation and
-response receipt verification already happen automatically and fail closed.
-OpenCode keeps the latest 32 receipt-bearing wire digests by default, and that
-local history is cleared when the process exits.
+Replace `phala` with `redpill` for RedPill. On OpenCode 2 these commands run
+the provider-scoped inspection directly and post the formatted result, so no
+model turn is involved. On OpenCode 1 they use the official prompt-command
+mechanism to ask the selected model to call the provider-scoped read-only
+inspect tool. The tool itself performs the local inspection; no second verifier
+is involved. Pi can render the same data directly because its extension API
+supports command callbacks. Attestation and response receipt verification
+already happen automatically and fail closed. OpenCode keeps the latest 32
+receipt-bearing wire digests by default, and that local history is cleared when
+the process exits.
 
 For another ACI gateway, configure the neutral plugin:
 

@@ -17,6 +17,8 @@ import {
   createOpenCodeAccountAuthMethodV2,
   mapOpenCodeModelV2,
   OPENCODE_ACI_PACKAGE,
+  sameEndpoint,
+  verifiedEndpointOnly,
   type CreateOpenCodeAciV2PluginOptions,
 } from "./v2.ts";
 
@@ -25,6 +27,8 @@ export {
   createOpenCodeAccountAuthMethodV2,
   mapOpenCodeModelV2,
   OPENCODE_ACI_PACKAGE,
+  sameEndpoint,
+  verifiedEndpointOnly,
   type CreateOpenCodeAciV2PluginOptions,
 };
 export type { OpenCodeAciPluginOptions } from "./options.ts";

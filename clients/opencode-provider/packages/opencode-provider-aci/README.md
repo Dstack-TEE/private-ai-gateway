@@ -56,8 +56,11 @@ fields.
 Optional cache prices stay absent when the catalog does not publish them.
 
 The plugin registers `/aci-attestation`, `/aci-receipts`, `/aci-receipt [id]`,
-and `/aci-session <id>` as native OpenCode custom commands. They dispatch the
-read-only `aci_inspect` tool, whose five actions are `status`, `attestation`,
+and `/aci-session <id>` as native OpenCode custom commands. On OpenCode V2 each
+command inspects the verified connection directly and posts the formatted
+result, so no model turn or tokens are involved; on V1 the commands ask the
+selected model to call the read-only `aci_inspect` tool. Both expose the tool's
+five actions: `status`, `attestation`,
 `receipts`, `receipt`, and `session`. Receipt inspection verifies the latest
 recorded exchange when no id is supplied. Session inspection requires the bare
 64-hex session id and verifies its content address, API version, validity

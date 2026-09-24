@@ -35,6 +35,8 @@ verified connection and attestation, lists retained receipts, verifies a
 receipt, or verifies a content-addressed session without returning prompts,
 responses, or raw evidence. Provider-scoped commands expose those actions as
 `/<id>-attestation`, `/<id>-receipts`, `/<id>-receipt [receipt-id]`, and
-`/<id>-session <session-id>`. OpenCode commands are prompt templates: they ask
-the selected model to invoke that local tool and return its output. Verification
-remains automatic and fail closed; the commands are an inspection surface only.
+`/<id>-session <session-id>`. On OpenCode V2 the commands inspect the verified
+connection directly and post the result; on V1 they are prompt templates that
+ask the selected model to invoke that local tool and return its output.
+Verification remains automatic and fail closed; the commands are an inspection
+surface only.

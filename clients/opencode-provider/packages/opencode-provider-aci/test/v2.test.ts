@@ -5,6 +5,8 @@ import {
   createOpenCodeAccountAuthMethodV2,
   createOpenCodeAciV2Plugin,
   mapOpenCodeModelV2,
+  sameEndpoint,
+  verifiedEndpointOnly,
 } from "../src/index.ts";
 
 const baseURL = "https://gateway.invalid/v1";
@@ -32,9 +34,14 @@ function recordTransform<T>(): RecordedTransform<T> {
 interface FakeContextOptions {
   options?: Record<string, unknown>;
   activeConnection?: boolean;
+  existingCommands?: string[];
 }
 
-function fakeContext({ options = {}, activeConnection = false }: FakeContextOptions = {}) {
+function fakeContext({
+  options = {},
+  activeConnection = false,
+  existingCommands = [],
+}: FakeContextOptions = {}) {
   const provider = recordTransform<any>();
   const integration = recordTransform<any>();
   const aisdkHooks: {
@@ -47,6 +54,7 @@ function fakeContext({ options = {}, activeConnection = false }: FakeContextOpti
   const toolAdds: Record<string, any>[] = [];
   const commandAdds: Record<string, any>[] = [];
   const prompts: { sessionID: string; text: string; delivery?: string }[] = [];
+  const synthetics: { sessionID: string; text: string; delivery?: string }[] = [];
 
   const providerEditor = {
     add: (input: Record<string, any>) => providerAdds.push(input),
@@ -150,7 +158,7 @@ function fakeContext({ options = {}, activeConnection = false }: FakeContextOpti
         return { dispose: async () => {} };
       },
       reload: async () => {},
-      list: async () => ({ data: [] }),
+      list: async () => ({ data: existingCommands.map((name) => ({ name })) }),
     },
     event: {
       subscribe: ({ signal }: { signal?: AbortSignal } = {}) => ({
@@ -171,6 +179,10 @@ function fakeContext({ options = {}, activeConnection = false }: FakeContextOpti
         prompts.push(input);
         return { sessionID: input.sessionID };
       },
+      synthetic: async (input: { sessionID: string; text: string; delivery?: string }) => {
+        synthetics.push(input);
+        return { sessionID: input.sessionID };
+      },
     },
   };
 
@@ -182,6 +194,7 @@ function fakeContext({ options = {}, activeConnection = false }: FakeContextOpti
     toolAdds,
     commandAdds,
     prompts,
+    synthetics,
   };
 }
 
@@ -249,6 +262,9 @@ test("registers provider, integration, SDK hook, tool, and commands", async () =
     await expect(
       inspect.execute({ action: "status" }, { signal: new AbortController().signal }),
     ).rejects.toThrow("not connected to a verified gateway");
+    await expect(
+      inspect.execute({ action: "bogus" }, { signal: new AbortController().signal }),
+    ).rejects.toThrow("Unknown ACI inspection action");
 
     expect(fake.commandAdds.map((command) => command.name)).toEqual([
       "aci-attestation",
@@ -262,23 +278,96 @@ test("registers provider, integration, SDK hook, tool, and commands", async () =
       prompt: { text: "abc123" },
       delivery: "steer",
     });
-    expect(fake.prompts).toEqual([
+    expect(fake.prompts).toEqual([]);
+    expect(fake.synthetics).toEqual([
       {
         sessionID: "session",
-        text: 'Call the aci_inspect tool exactly once with action "receipt". Pass "abc123" exactly as id. Return the tool output verbatim without commentary and do not call any other tool.',
+        text: "Private AI Gateway is not connected to a verified gateway: ACI provider is still verifying the gateway",
         delivery: "steer",
       },
     ]);
     const session = fake.commandAdds.find((command) => command.name === "aci-session")!;
     await session.execute({
       sessionID: "session",
-      prompt: { text: "deadbeef" },
+      prompt: { text: "" },
       delivery: "queue",
     });
-    expect(fake.prompts[1]!.text).toContain('Pass "deadbeef" exactly as id.');
+    expect(fake.synthetics[1]!.text).toBe("Private AI Gateway: A session id is required.");
+
+    const attestation = fake.commandAdds.find((command) => command.name === "aci-attestation")!;
+    await attestation.execute({
+      sessionID: "session",
+      prompt: { text: "" },
+      delivery: "steer",
+    });
+    expect(fake.synthetics[2]!.text).toContain("is not connected to a verified gateway");
   } finally {
     await cleanup?.();
   }
+});
+
+test("keeps user-defined commands with the same name", async () => {
+  const fake = fakeContext({
+    options: { baseURL },
+    existingCommands: ["aci-attestation", "aci-session"],
+  });
+  const plugin = createOpenCodeAciV2Plugin({ id: "aci-test" });
+  const cleanup = await plugin.setup(fake.context);
+  try {
+    expect(fake.commandAdds.map((command) => command.name)).toEqual([
+      "aci-receipts",
+      "aci-receipt",
+    ]);
+  } finally {
+    await cleanup?.();
+  }
+});
+
+test("fails closed when the AI SDK hook cannot install the verified transport", async () => {
+  const fake = fakeContext({ options: { baseURL } });
+  const plugin = createOpenCodeAciV2Plugin({ id: "aci-test" });
+  const cleanup = await plugin.setup(fake.context);
+  try {
+    const hook = fake.aisdkHooks[0]!;
+    const base = { model: { providerID: "aci" }, options: { baseURL } };
+
+    expect(() => hook.callback({ ...base, package: "@ai-sdk/other" })).toThrow(
+      "requires the @ai-sdk/openai-compatible runtime package",
+    );
+    expect(() =>
+      hook.callback({ ...base, package: "@ai-sdk/openai-compatible", options: {} }),
+    ).toThrow("has no gateway endpoint configured");
+    expect(() =>
+      hook.callback({
+        ...base,
+        package: "@ai-sdk/openai-compatible",
+        options: { baseURL: "https://attacker.example/v1" },
+      }),
+    ).toThrow("endpoint mismatch");
+    expect(() => hook.callback({ ...base, package: "@ai-sdk/openai-compatible" })).not.toThrow();
+  } finally {
+    await cleanup?.();
+  }
+});
+
+test("compares endpoints and rejects foreign origins", () => {
+  expect(sameEndpoint("https://gateway.example/v1", "https://gateway.example/v1/")).toBe(true);
+  expect(sameEndpoint("https://gateway.example/v1", "https://gateway.example/v2")).toBe(false);
+  expect(sameEndpoint("https://gateway.example/v1", "https://attacker.example/v1")).toBe(false);
+  expect(sameEndpoint("not a url", "https://gateway.example/v1")).toBe(false);
+
+  expect(
+    verifiedEndpointOnly(
+      "https://gateway.example/v1/chat/completions",
+      "https://gateway.example/v1",
+    ),
+  ).toBeUndefined();
+  expect(
+    verifiedEndpointOnly(
+      new Request("https://attacker.example/chat/completions"),
+      "https://gateway.example/v1",
+    ),
+  ).toContain("not the verified gateway");
 });
 
 test("fails plugin setup on a misconfigured endpoint", async () => {

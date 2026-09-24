@@ -7,6 +7,7 @@ import {
   resolveAciProviderProfile,
   type AccountApiKeyAuth,
   type AciFetch,
+  type AciInspectionRequest,
   type AciModel,
   type AciProvider,
   type AciProviderProfile,
@@ -26,6 +27,34 @@ export const OPENCODE_ACI_PACKAGE = "aisdk:@ai-sdk/openai-compatible";
 /** AI SDK package name after OpenCode strips the `aisdk:` prefix. */
 const AISDK_OPENAI_COMPATIBLE = "@ai-sdk/openai-compatible";
 
+/** Compare HTTP(S) endpoints without a trailing-slash difference. */
+export function sameEndpoint(left: string, right: string): boolean {
+  try {
+    const a = new URL(left);
+    const b = new URL(right);
+    const path = (url: URL) => url.pathname.replace(/\/+$/, "");
+    return a.origin === b.origin && path(a) === path(b);
+  } catch {
+    return false;
+  }
+}
+
+/** Reject requests that do not target the verified gateway origin. */
+export function verifiedEndpointOnly(
+  request: RequestInfo | URL,
+  verifiedBaseURL: string,
+): string | undefined {
+  const target =
+    typeof request === "string" ? request : request instanceof URL ? request.href : request.url;
+  try {
+    const origin = new URL(target).origin;
+    const verified = new URL(verifiedBaseURL).origin;
+    return origin === verified ? undefined : `${origin} is not the verified gateway (${verified})`;
+  } catch {
+    return "invalid ACI request URL";
+  }
+}
+
 export interface CreateOpenCodeAciV2PluginOptions {
   /** Stable plugin id used for status, diagnostics, and plugin-scoped storage. */
   id: string;
@@ -38,8 +67,18 @@ export function mapOpenCodeModelV2(providerID: string, model: AciModel): Model.I
   const provider = Provider.ID.make(providerID);
   const id = Model.ID.make(model.id);
   // Cost fields are documented as plain per-million-token numbers; the schema
-  // brands them for static tracking only.
-  return {
+  // brands them for static tracking only, so the cast is limited to cost.
+  const cost = [
+    {
+      input: model.cost.input,
+      output: model.cost.output,
+      cache: {
+        read: model.cost.cacheRead ?? 0,
+        write: model.cost.cacheWrite ?? 0,
+      },
+    },
+  ] as unknown as Model.Info["cost"];
+  return Model.Info.make({
     ...Model.Info.default(provider, id),
     id,
     modelID: id,
@@ -51,17 +90,8 @@ export function mapOpenCodeModelV2(providerID: string, model: AciModel): Model.I
       output: [...model.output],
     },
     limit: { context: model.contextWindow, output: model.maxOutputTokens },
-    cost: [
-      {
-        input: model.cost.input,
-        output: model.cost.output,
-        cache: {
-          read: model.cost.cacheRead ?? 0,
-          write: model.cost.cacheWrite ?? 0,
-        },
-      },
-    ],
-  } as unknown as Model.Info;
+    cost,
+  });
 }
 
 export interface OpenCodeAciV2AccountAuthMethod {
@@ -90,6 +120,8 @@ export function createOpenCodeAccountAuthMethodV2(
         instructions: authorization.instructions ?? `Continue in ${authorization.url}`,
         callback: (async () => {
           const completed = await authorization.complete();
+          // The issued Confidential AI key does not expire, and no `refresh`
+          // callback is registered, so the host returns this credential as-is.
           return Credential.OAuth.make({
             type: "oauth",
             methodID: id,
@@ -142,6 +174,15 @@ export function createAciInspectV2Tool(options: {
     },
     async execute(input: unknown, context: { signal: AbortSignal }) {
       const { action, id } = input as { action: string; id?: string };
+      if (
+        action !== "status" &&
+        action !== "attestation" &&
+        action !== "receipts" &&
+        action !== "receipt" &&
+        action !== "session"
+      ) {
+        throw new Error(`Unknown ACI inspection action: ${String(action)}`);
+      }
       const provider = providerOrThrow();
       const request =
         action === "receipt"
@@ -189,22 +230,21 @@ export function aciInspectCommandDefinitions(providerID: string): AciInspectComm
   ];
 }
 
-export function renderAciInspectPrompt(
-  toolName: string,
+export function aciInspectRequest(
   action: AciInspectCommandDefinition["action"],
-  id: AciInspectCommandDefinition["id"],
-  argument: string,
-): string {
-  const value = argument.trim();
-  return [
-    `Call the ${toolName} tool exactly once with action "${action}".`,
-    ...(id === "optional"
-      ? [value ? `Pass ${JSON.stringify(value)} exactly as id.` : "Omit id."]
-      : id === "required"
-        ? [`Pass ${JSON.stringify(value)} exactly as id.`]
-        : []),
-    "Return the tool output verbatim without commentary and do not call any other tool.",
-  ].join(" ");
+  idArgument: string,
+): { request: AciInspectionRequest } | { error: string } {
+  const value = idArgument.trim().split(/\s+/)[0] ?? "";
+  if (action === "session") {
+    if (!value) return { error: "A session id is required." };
+    return { request: { action: "session", id: value } };
+  }
+  if (action === "receipt") {
+    return value
+      ? { request: { action: "receipt", id: value } }
+      : { request: { action: "receipt" } };
+  }
+  return { request: { action } };
 }
 
 export function createOpenCodeAciV2Plugin({
@@ -244,9 +284,12 @@ export function createOpenCodeAciV2Plugin({
       // registering a provider that can never verify.
       const initial = resolveConfig();
 
-      const secureFetch: AciFetch = (request, init) => {
-        if (!active) return Promise.reject(new Error(blockedReason));
-        return active.fetch(request, init);
+      const secureFetch: AciFetch = async (request, init) => {
+        const provider = active;
+        if (!provider) throw new Error(blockedReason);
+        const violation = verifiedEndpointOnly(request, provider.config.baseURL);
+        if (violation) throw new Error(`ACI inference blocked: ${violation}`);
+        return provider.fetch(request, init);
       };
 
       await ctx.provider.transform((editor) => {
@@ -285,17 +328,33 @@ export function createOpenCodeAciV2Plugin({
 
       // Settings cannot carry functions across OpenCode's transform boundary,
       // so the verified transport is installed by constructing the AI SDK
-      // provider inside the SDK hook.
+      // provider inside the SDK hook. Any other path would let OpenCode build a
+      // plain HTTPS transport, so mismatches fail the request instead of
+      // silently downgrading the channel.
       await ctx.aisdk.hook(
         "sdk",
         (event) => {
           if (event.model.providerID !== providerID) return;
-          if (event.package !== AISDK_OPENAI_COMPATIBLE) return;
+          if (event.package !== AISDK_OPENAI_COMPATIBLE) {
+            throw new Error(
+              `${profile.label} requires the ${AISDK_OPENAI_COMPATIBLE} runtime package; refusing to use ${event.package} without ACI verification`,
+            );
+          }
           const baseURL = event.options.baseURL;
-          if (typeof baseURL !== "string" || baseURL.length === 0) return;
+          if (typeof baseURL !== "string" || baseURL.length === 0) {
+            throw new Error(
+              `${profile.label} has no gateway endpoint configured; refusing to send model traffic`,
+            );
+          }
+          const verified = active?.config.baseURL ?? initial.baseURL;
+          if (!sameEndpoint(baseURL, verified)) {
+            throw new Error(
+              `${profile.label} endpoint mismatch: requests target ${baseURL} but the verified gateway is ${verified}`,
+            );
+          }
           event.sdk = createOpenAICompatible({
             ...event.options,
-            baseURL,
+            baseURL: verified,
             name: providerID,
             fetch: secureFetch as unknown as typeof fetch,
           });
@@ -313,20 +372,44 @@ export function createOpenCodeAciV2Plugin({
         );
       });
 
+      // Commands inspect the verified connection directly instead of asking the
+      // model to call the inspection tool: the output stays deterministic and
+      // token-free. User-defined commands with the same name win, matching the
+      // V1 `config.command[name] ??=` behavior.
+      const inspectForCommand = async (
+        action: AciInspectCommandDefinition["action"],
+        argument: string,
+      ): Promise<string> => {
+        const resolved = aciInspectRequest(action, argument);
+        if ("error" in resolved) return `${profile.label}: ${resolved.error}`;
+        const provider = active;
+        if (!provider) {
+          return `${profile.label} is not connected to a verified gateway: ${blockedReason}`;
+        }
+        try {
+          const result = await inspectAciProvider(provider, resolved.request, {
+            signal: AbortSignal.timeout(30_000),
+          });
+          return formatAciInspection(result, { providerLabel: profile.label });
+        } catch (error) {
+          return `${profile.label} inspection failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`;
+        }
+      };
+      const existingCommands = new Set(
+        (await ctx.command.list()).data.map((command) => command.name),
+      );
       await ctx.command.transform((editor) => {
         for (const definition of aciInspectCommandDefinitions(providerID)) {
+          if (existingCommands.has(definition.name)) continue;
           editor.add({
             name: definition.name,
             description: definition.description,
             async execute(invocation) {
-              await ctx.session.prompt({
+              await ctx.session.synthetic({
                 sessionID: invocation.sessionID,
-                text: renderAciInspectPrompt(
-                  inspectToolName,
-                  definition.action,
-                  definition.id,
-                  invocation.prompt.text,
-                ),
+                text: await inspectForCommand(definition.action, invocation.prompt.text),
                 delivery: invocation.delivery,
               });
             },
@@ -387,13 +470,12 @@ export function createOpenCodeAciV2Plugin({
               "data" in event && event.data && typeof event.data === "object"
                 ? (event.data as Record<string, unknown>)
                 : undefined;
-            if (
-              event.type === "credential.switched" &&
-              typeof data?.integrationID === "string" &&
-              data.integrationID !== providerID
-            ) {
-              continue;
-            }
+            const integration =
+              typeof data?.integrationID === "string" ? data.integrationID : undefined;
+            if (integration !== undefined && integration !== providerID) continue;
+            // Verification reads the plugin profile/env config and discovery is
+            // unauthenticated, so a refresh already in flight does not go stale
+            // when credentials change; coalescing is enough.
             void refresh().catch(report);
           }
         } catch {
