@@ -22,6 +22,15 @@ jobs:
     timeout-minutes: 10
     environment: desktop-release
     steps:
+      - name: Require the release GitHub App
+        env:
+          CLIENT_ID: ${{ vars.DESKTOP_RELEASE_APP_CLIENT_ID }}
+          PRIVATE_KEY: ${{ secrets.DESKTOP_RELEASE_APP_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$CLIENT_ID" || -z "$PRIVATE_KEY" ]]; then
+            echo "::error::Set the DESKTOP_RELEASE_APP_CLIENT_ID variable and the DESKTOP_RELEASE_APP_PRIVATE_KEY secret in the desktop-release environment (apps/desktop/docs/distribution.md#release-github-app)"
+            exit 1
+          fi
       # Events created with GITHUB_TOKEN start no workflows. A GitHub App token
       # lets the release PR run CI and the release tag start the build.
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0

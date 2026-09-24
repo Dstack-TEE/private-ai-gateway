@@ -66,6 +66,36 @@ Direct failure can leave only an uploaded, unsubmitted App Store build. To
 recover, re-run the failed jobs of the tag's run. Windows Authenticode remains
 optional and does not block the release.
 
+### Release GitHub App
+
+Workflows never start from events that `GITHUB_TOKEN` creates. `Desktop release
+PR` therefore acts as a GitHub App, so its release PR runs CI and its tag starts
+the release build. Until both settings below exist, the workflow fails with a
+message naming them.
+
+1. Create a GitHub App owned by the Dstack-TEE organization. Disable its
+   webhook. It needs these repository permissions, with nothing else beyond the
+   mandatory Metadata read:
+   - Contents: read and write (release commits, tags, draft releases);
+   - Pull requests: read and write (the release PR);
+   - Issues: read and write (release PR labels).
+2. Install it only on `Dstack-TEE/private-ai-gateway`.
+3. In the `desktop-release` environment, store the App's client ID as the
+   variable `DESKTOP_RELEASE_APP_CLIENT_ID` and a private key (the whole `.pem`)
+   as the secret `DESKTOP_RELEASE_APP_PRIVATE_KEY`. Keep the environment's
+   deployment rules to `main` and `desktop-v*`, so other branches cannot mint
+   the token.
+
+To rotate the key:
+
+1. Generate a new private key in the App settings.
+2. Replace the secret.
+3. Confirm the next `Desktop release PR` run succeeds.
+4. Delete the old key in the App settings.
+
+Installation tokens last one hour and are minted per run, so nothing else
+expires.
+
 ## Updates by installation
 
 Every Direct installation follows the saved update channel (desktop **Update
