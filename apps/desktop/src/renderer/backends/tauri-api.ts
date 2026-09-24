@@ -140,5 +140,6 @@ export async function createBackend() {
     distributionCapabilities,
     initialAppearance,
     initialGatewayState,
+    signOut: undefined,
   };
 }

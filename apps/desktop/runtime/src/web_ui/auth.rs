@@ -1,9 +1,11 @@
-//! One-time login codes and idle-expiring browser sessions for the web UI.
+//! One-time login codes and expiring browser sessions for the web UI.
 //!
 //! Only hashes are stored. Codes are minted over the authenticated IPC
 //! endpoint, travel in a URL fragment, and are exchanged once for a session
-//! token that the page keeps in `sessionStorage`. A token bucket bounds
-//! unauthenticated requests, which matters once the listener leaves loopback.
+//! token that the page keeps in `sessionStorage`. Sessions end after an idle
+//! period and, however active, after an absolute lifetime. A per-client rate
+//! limit bounds unauthenticated requests, which matters once the listener
+//! leaves loopback.
 
 use std::{
     sync::Mutex,
@@ -13,14 +15,14 @@ use std::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::{rngs::OsRng, RngCore};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 pub const CODE_TTL: Duration = Duration::from_secs(60);
 pub const SESSION_IDLE: Duration = Duration::from_secs(60 * 60);
+/// Open pages keep a session active, so this bounds every session regardless.
+pub const SESSION_LIFETIME: Duration = Duration::from_secs(12 * 60 * 60);
 const MAX_CODES: usize = 16;
 const MAX_SESSIONS: usize = 16;
-/// Unauthenticated requests allowed in a burst, then one per `THROTTLE_REFILL`.
-pub const THROTTLE_BURST: u32 = 10;
-pub const THROTTLE_REFILL: Duration = Duration::from_secs(3);
 
 type Digested = [u8; 32];
 
@@ -31,8 +33,20 @@ pub struct Auth(Mutex<Entries>);
 struct Entries {
     /// Code digest and expiry.
     codes: Vec<(Digested, Instant)>,
-    /// Session digest and last activity.
-    sessions: Vec<(Digested, Instant)>,
+    sessions: Vec<Session>,
+}
+
+struct Session {
+    digest: Digested,
+    created: Instant,
+    used: Instant,
+}
+
+impl Session {
+    fn live(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.used) < SESSION_IDLE
+            && now.saturating_duration_since(self.created) < SESSION_LIFETIME
+    }
 }
 
 impl Auth {
@@ -48,6 +62,19 @@ impl Auth {
     /// Accepts a live session and records activity.
     pub fn authorize(&self, token: &str) -> bool {
         self.authorize_at(token, Instant::now())
+    }
+
+    /// Ends one session, as when its page signs out.
+    pub fn revoke(&self, token: &str) {
+        if let Ok(mut entries) = self.0.lock() {
+            let wanted = digest(token);
+            if let Some(index) = position(
+                entries.sessions.iter().map(|session| &session.digest),
+                &wanted,
+            ) {
+                entries.sessions.swap_remove(index);
+            }
+        }
     }
 
     pub fn revoke_all(&self) {
@@ -71,16 +98,18 @@ impl Auth {
     fn exchange_at(&self, code: &str, now: Instant) -> Option<String> {
         let mut entries = self.0.lock().ok()?;
         entries.codes.retain(|(_, expires)| *expires > now);
-        let index = position(&entries.codes, &digest(code))?;
+        let index = position(entries.codes.iter().map(|(code, _)| code), &digest(code))?;
         entries.codes.swap_remove(index);
-        entries
-            .sessions
-            .retain(|(_, used)| now.saturating_duration_since(*used) < SESSION_IDLE);
+        entries.sessions.retain(|session| session.live(now));
         if entries.sessions.len() >= MAX_SESSIONS {
             entries.sessions.remove(0);
         }
         let token = secret();
-        entries.sessions.push((digest(&token), now));
+        entries.sessions.push(Session {
+            digest: digest(&token),
+            created: now,
+            used: now,
+        });
         Some(token)
     }
 
@@ -88,64 +117,18 @@ impl Auth {
         let Ok(mut entries) = self.0.lock() else {
             return false;
         };
-        entries
-            .sessions
-            .retain(|(_, used)| now.saturating_duration_since(*used) < SESSION_IDLE);
-        match position(&entries.sessions, &digest(token)) {
+        entries.sessions.retain(|session| session.live(now));
+        let wanted = digest(token);
+        match position(
+            entries.sessions.iter().map(|session| &session.digest),
+            &wanted,
+        ) {
             Some(index) => {
-                entries.sessions[index].1 = now;
+                entries.sessions[index].used = now;
                 true
             }
             None => false,
         }
-    }
-}
-
-/// A per-process token bucket shared by code exchanges and rejected API
-/// requests. Codes are 256-bit, so this bounds request volume rather than
-/// guessing odds; signed-in sessions never draw from it.
-pub struct Throttle(Mutex<Bucket>);
-
-struct Bucket {
-    tokens: u32,
-    refilled: Instant,
-}
-
-impl Default for Throttle {
-    fn default() -> Self {
-        Self(Mutex::new(Bucket {
-            tokens: THROTTLE_BURST,
-            refilled: Instant::now(),
-        }))
-    }
-}
-
-impl Throttle {
-    /// Takes one token, or returns false when the caller must back off.
-    pub fn allow(&self) -> bool {
-        self.allow_at(Instant::now())
-    }
-
-    fn allow_at(&self, now: Instant) -> bool {
-        let Ok(mut bucket) = self.0.lock() else {
-            return false;
-        };
-        let earned = now.saturating_duration_since(bucket.refilled).as_millis()
-            / THROTTLE_REFILL.as_millis();
-        let earned = u32::try_from(earned).unwrap_or(u32::MAX);
-        if earned > 0 {
-            bucket.tokens = bucket.tokens.saturating_add(earned).min(THROTTLE_BURST);
-            bucket.refilled = if bucket.tokens == THROTTLE_BURST {
-                now
-            } else {
-                bucket.refilled + THROTTLE_REFILL * earned
-            };
-        }
-        if bucket.tokens == 0 {
-            return false;
-        }
-        bucket.tokens -= 1;
-        true
     }
 }
 
@@ -160,16 +143,10 @@ fn digest(value: &str) -> Digested {
 }
 
 /// Compares every entry without early exit so timing does not reveal matches.
-fn position(entries: &[(Digested, Instant)], wanted: &Digested) -> Option<usize> {
+fn position<'a>(entries: impl Iterator<Item = &'a Digested>, wanted: &Digested) -> Option<usize> {
     let mut found = None;
-    for (index, (candidate, _)) in entries.iter().enumerate() {
-        let difference = candidate
-            .iter()
-            .zip(wanted)
-            .fold(0_u8, |difference, (left, right)| {
-                difference | (left ^ right)
-            });
-        if difference == 0 {
+    for (index, candidate) in entries.enumerate() {
+        if bool::from(candidate.ct_eq(wanted)) {
             found = Some(index);
         }
     }
@@ -213,21 +190,30 @@ mod tests {
     }
 
     #[test]
-    fn throttle_allows_a_burst_then_refills_slowly() {
-        let throttle = Throttle::default();
+    fn sessions_end_at_their_absolute_lifetime_despite_activity() {
+        let auth = Auth::default();
         let start = Instant::now();
-        for _ in 0..THROTTLE_BURST {
-            assert!(throttle.allow_at(start));
+        let token = auth
+            .exchange_at(&auth.mint_code_at(start), start)
+            .expect("fresh code");
+        let mut now = start;
+        while now + SESSION_IDLE / 2 < start + SESSION_LIFETIME {
+            now += SESSION_IDLE / 2;
+            assert!(auth.authorize_at(&token, now));
         }
-        assert!(!throttle.allow_at(start));
-        assert!(!throttle.allow_at(start + THROTTLE_REFILL / 2));
-        assert!(throttle.allow_at(start + THROTTLE_REFILL));
-        assert!(!throttle.allow_at(start + THROTTLE_REFILL));
-        let later = start + THROTTLE_REFILL * 100;
-        for _ in 0..THROTTLE_BURST {
-            assert!(throttle.allow_at(later));
-        }
-        assert!(!throttle.allow_at(later));
+        assert!(!auth.authorize_at(&token, start + SESSION_LIFETIME));
+    }
+
+    #[test]
+    fn signing_out_ends_only_that_session() {
+        let auth = Auth::default();
+        let first = auth.exchange(&auth.mint_code()).expect("fresh code");
+        let second = auth.exchange(&auth.mint_code()).expect("fresh code");
+        auth.revoke(&first);
+        assert!(!auth.authorize(&first));
+        assert!(auth.authorize(&second));
+        auth.revoke("unknown");
+        assert!(auth.authorize(&second));
     }
 
     #[test]

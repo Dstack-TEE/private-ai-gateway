@@ -13,7 +13,7 @@ import { Item, ItemActions, ItemContent, ItemTitle, ItemDescription } from "../c
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
 import { SettingsSection, SettingsList, SettingsLink, SettingsToggle } from "../components/settings";
 import type { DistributionCapabilities, GatewayState, LaunchPreferences, WebUiStatus } from "../../shared/contracts";
-import { desktopApi } from "../lib/environment";
+import { desktopApi, signOut } from "../lib/environment";
 import { localEndpoint, parentDirectory, serviceHost } from "../lib/format";
 import { localAddressKind } from "../lib/local-api-config";
 import { webUiConfig } from "./web-ui";
@@ -81,6 +81,21 @@ function WebUiControl({ status, web, onOpen }: { status: WebUiStatus; web: boole
   </>;
 }
 
+function SignOutControl({ onSignOut }: { onSignOut(): Promise<void> }): React.JSX.Element {
+  const mutation = useMutation({ mutationFn: onSignOut });
+  return <Item><ErrorAlert title="Could not sign out" error={mutation.error ? errorMessage(mutation.error) : undefined} />
+    <ItemContent>
+      <ItemTitle>This browser</ItemTitle>
+      <ItemDescription>Signing out ends this browser session. Run pap app open --web to sign in again.</ItemDescription>
+    </ItemContent>
+    <ItemActions>
+      <Button variant="outline" disabled={mutation.isPending} onClick={() => mutation.mutate()}>
+        {mutation.isPending ? "Signing Out…" : "Sign Out"}
+      </Button>
+    </ItemActions>
+  </Item>;
+}
+
 export function SettingsView({
   updates,
   distribution,
@@ -127,6 +142,7 @@ export function SettingsView({
           <SettingsLink title="Profiles" aria-label="Profiles" aria-haspopup="dialog" onClick={() => onOpen("confidential")} description={activeProfile ? `${activeProfile.name} · ${serviceHost(activeProfile.remoteUrl)} · ${isProtected(state) ? "Protected" : profileIsAvailable(activeProfile, state) ? "Ready" : "Connect account or add an API key"}` : "No provider configured"} />
           <SettingsLink title="Local API" description="Listener and client access" aria-label="Local API settings" aria-haspopup="dialog" onClick={() => onOpen("local-api")} />
           {distribution.webUi && state.webUi && <WebUiControl status={state.webUi} web={distribution.channel === "web"} onOpen={() => onOpen("web-ui")} />}
+          {signOut && <SignOutControl onSignOut={signOut} />}
       </SettingsSection>
 
       <Collapsible className="group mt-5 [&:first-child]:mt-0 settings-advanced [&_[data-slot=collapsible-trigger]]:mb-2 [&_[aria-expanded=true]_>_svg]:rotate-90">

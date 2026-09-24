@@ -16,7 +16,9 @@ type EventListener = (payload: never) => void;
 type Bootstrap = { version: string; distribution: DistributionCapabilities };
 
 const tokenKey = "private-ai-proxy-web-token";
-const signedOut = "This sign-in link has expired or was already used. Run pap app open --web for a new link.";
+const invalidLink = "This sign-in link has expired or was already used. Run pap app open --web for a new link.";
+const sessionEnded = "This web UI session has ended or expired. Run pap app open --web for a new link.";
+const signedOut = "You signed out of the web UI. Run pap app open --web to sign in again.";
 const listeners = new Map<string, Set<EventListener>>();
 let token = "";
 let ended = false;
@@ -26,6 +28,7 @@ export async function createBackend(): Promise<{
   distributionCapabilities: DistributionCapabilities;
   initialGatewayState: GatewayState | undefined;
   initialAppearance: Appearance | undefined;
+  signOut: (() => Promise<void>) | undefined;
 }> {
   token = await signIn();
   const bootstrap = await request<Bootstrap>("/api/bootstrap", { method: "GET" });
@@ -36,6 +39,7 @@ export async function createBackend(): Promise<{
     distributionCapabilities: bootstrap.distribution,
     initialGatewayState: undefined,
     initialAppearance: undefined,
+    signOut,
   };
 }
 
@@ -155,25 +159,35 @@ async function signIn(): Promise<string> {
     });
     const payload: unknown = await response.json().catch(() => undefined);
     const issued = payload && typeof payload === "object" && "token" in payload ? payload.token : undefined;
-    if (!response.ok || typeof issued !== "string") endSession();
+    if (!response.ok || typeof issued !== "string") endSession(invalidLink);
     sessionStorage.setItem(tokenKey, issued);
     return issued;
   }
   const stored = sessionStorage.getItem(tokenKey);
-  if (!stored) endSession();
+  if (!stored) endSession(invalidLink);
   return stored;
 }
 
+/** Revokes this tab's session on the server, then leaves sign-in guidance. */
+async function signOut(): Promise<void> {
+  await request<undefined>("/api/session", { method: "DELETE" });
+  showEnded(signedOut);
+}
+
 /** Replaces the page with sign-in guidance; the session cannot be recovered in place. */
-function endSession(): never {
+function endSession(text: string): never {
+  showEnded(text);
+  throw new Error(text);
+}
+
+function showEnded(text: string): void {
   ended = true;
   sessionStorage.removeItem(tokenKey);
   const message = document.createElement("p");
-  message.textContent = signedOut;
+  message.textContent = text;
   message.setAttribute("role", "alert");
   message.style.cssText = "margin:3rem auto;max-width:32rem;padding:0 1rem;font:15px/1.5 system-ui,sans-serif";
   document.body.replaceChildren(message);
-  throw new Error(signedOut);
 }
 
 async function rpc<T>(method: UiMethod, params: Record<string, unknown> = {}): Promise<T> {
@@ -199,7 +213,7 @@ async function request<T>(path: string, init: RequestInit): Promise<T> {
     credentials: "same-origin",
   });
   const payload: unknown = await response.json().catch(() => undefined);
-  if (response.status === 401) endSession();
+  if (response.status === 401) endSession(sessionEnded);
   if (!response.ok) {
     const message = isErrorPayload(payload) ? payload.error.message : "Web UI request failed";
     throw new Error(message);
@@ -235,7 +249,7 @@ async function readEvents(): Promise<void> {
       cache: "no-store",
       credentials: "same-origin",
     });
-    if (response.status === 401) endSession();
+    if (response.status === 401) endSession(sessionEnded);
     if (!response.ok || !response.body) throw new Error("Event stream unavailable");
     const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
     let buffer = "";

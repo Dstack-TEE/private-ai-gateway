@@ -7,6 +7,8 @@ const backend: {
   distributionCapabilities: DistributionCapabilities;
   initialGatewayState: GatewayState | undefined;
   initialAppearance: Appearance | undefined;
+  /** Ends this browser session; only the web build has one. */
+  signOut: (() => Promise<void>) | undefined;
 } = await createBackend();
 
 export const query = new URLSearchParams(window.location.search);
@@ -15,3 +17,4 @@ export const desktopApi = backend.desktopApi;
 export const distributionCapabilities = backend.distributionCapabilities;
 export const initialGatewayState = backend.initialGatewayState;
 export const initialAppearance = backend.initialAppearance;
+export const signOut = backend.signOut;
