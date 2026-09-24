@@ -45,6 +45,12 @@ pub fn app_data_dir() -> Result<PathBuf, String> {
     Ok(base.join(APP_IDENTIFIER))
 }
 
+/// The service's log files (`service.<date>.log`, one per day, a week kept),
+/// in the app data directory like Ollama's `~/.ollama/logs`.
+pub fn logs_dir() -> Result<PathBuf, String> {
+    Ok(app_data_dir()?.join("logs"))
+}
+
 /// The per-user settings directory. It holds only `config.toml`,
 /// `credentials.toml` and the schema, never state, so it can be synced on its
 /// own. Linux follows the XDG base directories

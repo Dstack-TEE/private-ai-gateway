@@ -184,12 +184,12 @@ What the proxy does:
   never delay streaming or retract delivered responses.
   Selecting verified AttestedSessions and enforcing the attested connection
   remain the pre-delivery checks; receipt checks are retrospective only.
-  The control endpoint on `127.0.0.1:4181` also supports inspection and
+  The control endpoint on `127.0.0.1:4183` also supports inspection and
   explicit re-verification:
 
   ```bash
-  curl -sS http://127.0.0.1:4181/receipts        # recent exchanges
-  curl -sS -X POST http://127.0.0.1:4181/receipts/<receipt-id>/verify \
+  curl -sS http://127.0.0.1:4183/receipts        # recent exchanges
+  curl -sS -X POST http://127.0.0.1:4183/receipts/<receipt-id>/verify \
     -H "Authorization: Bearer $API_KEY"          # if the receipt fetch needs it
   ```
 

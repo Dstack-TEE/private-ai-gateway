@@ -19,7 +19,6 @@ mod account;
 mod args;
 mod install;
 mod output;
-mod schema;
 
 use args::*;
 
@@ -39,13 +38,6 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
             let mut completion = Vec::new();
             clap_complete::generate(*shell, &mut command, name, &mut completion);
             return finish_output(write_bytes(&completion));
-        }
-        Action::Schema => {
-            command.build();
-            return finish_output(write_text(
-                &serde_json::to_string(&schema::command(&command))
-                    .map_err(|_| "Cannot encode command schema")?,
-            ));
         }
         Action::Settings {
             command: Settings::Schema,
@@ -560,7 +552,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                 }
             }
         }
-        Action::Completions { .. } | Action::Schema => unreachable!(),
+        Action::Completions { .. } => unreachable!(),
     };
     finish_output(output(&result, cli))
 }
@@ -723,7 +715,7 @@ fn agent_change(
         return value(preview);
     }
     if !cli.yes && !cli.json && !cli.non_interactive && io::stdin().is_terminal() {
-        desktop_core::diagnostic!("{}", output::details(&value(&preview)?));
+        tracing::info!("{}", output::details(&value(&preview)?));
     }
     confirm(cli, "Apply these agent configuration changes?")?;
     value(client.call(rpc::ApplyAgent {
@@ -749,6 +741,7 @@ fn doctor(client: &Client) -> Value {
         desktop_core::transport::endpoint_path()
             .map_err(|_| "Cannot resolve management endpoint".to_string()),
     );
+    let logs = doctor_check(&mut errors, "logs", desktop_core::paths::logs_dir());
     let mut warnings = Map::new();
     let settings = settings_diagnostics(client, &mut errors, &mut warnings);
     // Update availability is advisory: an offline check never fails the doctor.
@@ -761,6 +754,7 @@ fn doctor(client: &Client) -> Value {
         "cli": cli,
         "backendExecutable": backend_executable,
         "endpoint": endpoint,
+        "logs": logs,
         "settings": settings,
         "errors": errors,
         "warnings": warnings,
@@ -887,28 +881,19 @@ fn confirm(cli: &Cli, prompt: &str) -> Result<(), String> {
     }
 }
 fn read_key(cli: &Cli, stdin: bool) -> Result<String, String> {
-    let key = if stdin {
+    if stdin {
         if io::stdin().is_terminal() {
             return Err(
                 "Refusing to read a credential from a terminal with --key-stdin; omit the flag for a hidden prompt."
                     .into(),
             );
         }
-        let mut bytes = Vec::new();
-        io::stdin()
-            .take(514)
-            .read_to_end(&mut bytes)
-            .map_err(|_| "Cannot read credential from stdin")?;
-        if bytes.len() > 513 {
-            return Err("Credential input exceeds limit".into());
-        }
-        String::from_utf8(bytes).map_err(|_| "Credential must be UTF-8")?
-    } else {
-        if !io::stdin().is_terminal() || cli.json || cli.non_interactive {
-            return Err("Use --key-stdin for noninteractive credential input".into());
-        }
-        rpassword::prompt_password("API key: ").map_err(|_| "Cannot read credential")?
-    };
+        return private_ai_proxy::read_api_key(io::stdin());
+    }
+    if !io::stdin().is_terminal() || cli.json || cli.non_interactive {
+        return Err("Use --key-stdin for noninteractive credential input".into());
+    }
+    let key = rpassword::prompt_password("API key: ").map_err(|_| "Cannot read credential")?;
     desktop_core::config::validate_api_key(&key)
 }
 /// Reads a new web UI password from stdin or a hidden prompt. An explicit `""`

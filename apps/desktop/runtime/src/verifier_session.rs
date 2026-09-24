@@ -641,7 +641,7 @@ impl SessionManager {
         }
         let state = runtime.state.clone();
         drop(runtime);
-        self.state_tx.send_replace(state);
+        self.send(state);
     }
 
     /// Refresh discovery without revoking the current verified session.
@@ -761,7 +761,7 @@ impl SessionManager {
                 return;
             };
             if let Err(error) = manager.apply_inventory(generation, epoch) {
-                desktop_core::diagnostic!("Cannot apply model endpoint inventory: {error}");
+                tracing::warn!("Cannot apply model endpoint inventory: {error}");
             }
         });
     }
@@ -805,7 +805,22 @@ impl SessionManager {
 
     fn publish(&self) {
         if let Ok(runtime) = self.lock() {
-            self.state_tx.send_replace(runtime.state.clone());
+            self.send(runtime.state.clone());
+        }
+    }
+
+    /// Every state change goes through here; a new status or error is also
+    /// logged, so the service log keeps what clients were shown.
+    fn send(&self, state: AppState) {
+        let previous = self.state_tx.send_replace(state);
+        let current = self.state_tx.borrow();
+        if current.status != previous.status {
+            tracing::info!("Protection {}", current.status);
+        }
+        if current.error != previous.error {
+            if let Some(error) = &current.error {
+                tracing::warn!("{error}");
+            }
         }
     }
 

@@ -26,6 +26,8 @@ serde_json = { version = "1.0", features = ["preserve_order"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 toml_edit = { version = "0.25", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 ts-rs = "12"
 url = "2"
 uuid = { version = "1", features = ["v4"] }

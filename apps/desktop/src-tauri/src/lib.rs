@@ -144,7 +144,7 @@ async fn register_cli_on_startup(app: &AppHandle) {
 fn configure_account_return(app: &tauri::App) {
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     if let Err(error) = app.deep_link().register_all() {
-        desktop_core::diagnostic!("Cannot register app return link: {error}");
+        tracing::warn!("Cannot register app return link: {error}");
     }
     let handle = app.handle().clone();
     app.deep_link().on_open_url(move |event| {
@@ -159,6 +159,7 @@ fn configure_account_return(app: &tauri::App) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    desktop_core::logging::init();
     let _ = rustls::crypto::ring::default_provider().install_default();
     let app =
         tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
@@ -257,9 +258,7 @@ pub fn run() {
                 app_data::prepare(&data_dir)?;
                 std::env::set_var(desktop_core::paths::APP_DATA_OVERRIDE_ENV, &data_dir);
                 if let Err(error) = desktop_core::agent_access::prepare_for_service() {
-                    desktop_core::diagnostic!(
-                        "Cannot prepare Agent Home access for the backend: {error}"
-                    );
+                    tracing::warn!("Cannot prepare Agent Home access for the backend: {error}");
                 }
             }
             #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -317,7 +316,7 @@ pub fn run() {
                         if let Err(error) =
                             desktop_core::ui_api::refresh_preferences(&client, &host).await
                         {
-                            desktop_core::diagnostic!(
+                            tracing::warn!(
                                 "Cannot refresh desktop preferences: {}",
                                 error.message()
                             );
@@ -330,15 +329,15 @@ pub fn run() {
                 }
             });
             if let Err(error) = tray::setup(app.handle()) {
-                desktop_core::diagnostic!("The system tray is unavailable: {error}");
+                tracing::warn!("The system tray is unavailable: {error}");
             } else {
                 #[cfg(any(target_os = "windows", target_os = "linux"))]
                 if let Err(error) = tray_theme::setup(app.handle()) {
-                    desktop_core::diagnostic!("Cannot observe system tray appearance: {error}");
+                    tracing::warn!("Cannot observe system tray appearance: {error}");
                 }
             }
             if let Err(error) = menu::setup(app.handle()) {
-                desktop_core::diagnostic!("The application menu is unavailable: {error}");
+                tracing::warn!("The application menu is unavailable: {error}");
             }
 
             let handle = app.handle().clone();
@@ -358,7 +357,7 @@ pub fn run() {
                             if let Err(error) =
                                 desktop_core::ui_api::refresh_preferences(&client, &host).await
                             {
-                                desktop_core::diagnostic!(
+                                tracing::warn!(
                                     "Cannot refresh desktop preferences: {}",
                                     error.message()
                                 );
@@ -387,9 +386,7 @@ pub fn run() {
             if let Some(client) = _app.try_state::<Arc<Client>>() {
                 if client.is_running().unwrap_or(false) {
                     if let Err(error) = client.shutdown() {
-                        desktop_core::diagnostic!(
-                            "Cannot stop the App Store backend during exit: {error}"
-                        );
+                        tracing::warn!("Cannot stop the App Store backend during exit: {error}");
                     }
                 }
             }

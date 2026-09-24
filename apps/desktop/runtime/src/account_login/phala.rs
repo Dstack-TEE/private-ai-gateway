@@ -8,6 +8,10 @@ pub(super) async fn phala(
     phala_at(client, device, interval, PHALA_API).await
 }
 
+/// Polls Phala's device authorization (RFC 8628). Its endpoints take JSON and
+/// nest errors under `detail`, as Phala's own CLI expects, rather than the
+/// form bodies and top-level errors of RFC 8628 §3.4-3.5 that the `oauth2`
+/// crate speaks, so the polling is written out here.
 pub(super) async fn phala_at(
     client: Client,
     device: String,
@@ -21,8 +25,9 @@ pub(super) async fn phala_at(
         if !status.is_success() {
             match protocol_error(&data) {
                 Some("authorization_pending") => continue,
+                // RFC 8628 §3.5: 5 more seconds for this and every later request.
                 Some("slow_down") => {
-                    interval = (interval + 5).min(30);
+                    interval += 5;
                     continue;
                 }
                 _ => return Err(account_error(status, &data)),

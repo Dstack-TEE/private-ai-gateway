@@ -1,4 +1,11 @@
 use super::*;
+use desktop_core::private_fs;
+use oauth2::{
+    basic::{BasicClient, BasicErrorResponse},
+    AuthUrl, AuthorizationCode, ClientId, CsrfToken, EndpointNotSet, EndpointSet,
+    PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RequestTokenError, Scope, TokenResponse,
+    TokenUrl,
+};
 
 impl CallbackState {
     pub(super) async fn accept(&self, uri: &Uri, headers: &HeaderMap) -> Result<(), CallbackError> {
@@ -82,13 +89,16 @@ pub(super) fn installation_id(profile_id: &str) -> Result<Uuid, String> {
     // UUID mixes the profile with the local installation identity.
     let data = desktop_core::paths::app_data_dir()?;
     let path = data.join("installation-id");
-    let device = match std::fs::read_to_string(&path) {
-        Ok(value) => uuid::Uuid::parse_str(value.trim())
+    let device = match private_fs::read_private_text(&path) {
+        Ok(Some(value)) => uuid::Uuid::parse_str(value.trim())
             .map_err(|_| "Account: Device identity needs repair.")?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        Ok(None) => {
             let id = Uuid::new_v4();
-            std::fs::write(&path, id.to_string())
-                .map_err(|_| "Account: Cannot save device identity.")?;
+            // Owner-only and complete or absent, never over an existing identity.
+            private_fs::publish(&path, private_fs::Publish::NoClobber, |file| {
+                std::io::Write::write_all(file, id.to_string().as_bytes())
+            })
+            .map_err(|_| "Account: Cannot save device identity.")?;
             id
         }
         Err(_) => return Err("Account: Cannot read device identity.".into()),
@@ -99,10 +109,31 @@ pub(super) fn installation_id(profile_id: &str) -> Result<Uuid, String> {
     Ok(Uuid::from_bytes(bytes))
 }
 
-pub(super) fn random_secret() -> String {
-    let mut bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
-    URL_SAFE_NO_PAD.encode(bytes)
+/// The RedPill public client: no secret, so `oauth2` sends the client ID in
+/// the token request body (RFC 6749 §2.3.1 does not apply).
+pub(super) type RedpillClient =
+    BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet>;
+
+pub(super) fn redpill_client(authorize: Url, token: Url) -> Result<RedpillClient, String> {
+    Ok(BasicClient::new(ClientId::new(REDPILL_CLIENT_ID.into()))
+        .set_auth_uri(AuthUrl::from_url(authorize))
+        .set_token_uri(TokenUrl::from_url(token))
+        .set_redirect_uri(
+            RedirectUrl::new(callback_url()).map_err(|_| "Invalid account callback URL")?,
+        ))
+}
+
+/// The browser URL of an authorization code request with S256 PKCE
+/// (RFC 7636) and a random `state`, which the callback must return.
+pub(super) fn authorization_request(oauth: &RedpillClient) -> (Url, CsrfToken, PkceCodeVerifier) {
+    let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
+    let (url, state) = oauth
+        .authorize_url(CsrfToken::new_random)
+        .add_scopes(["openid", "profile", "user:org:read"].map(|scope| Scope::new(scope.into())))
+        .add_extra_param("response_mode", "query")
+        .set_pkce_challenge(challenge)
+        .url();
+    (url, state, verifier)
 }
 
 pub(super) fn validate_discovery(data: &Value) -> Result<(), String> {
@@ -235,14 +266,12 @@ pub(super) async fn callback(
     ], Html(callback_page(accepted)))
 }
 
-pub(super) async fn redpill(
-    client: Client,
+/// Serves the loopback callback until it (or a pasted link) delivers the code.
+pub(super) async fn receive_code(
     listener: TcpListener,
     state: Arc<CallbackState>,
     receiver: oneshot::Receiver<Result<String, String>>,
-    verifier: String,
-    token_url: Url,
-) -> Result<Authorization, String> {
+) -> Result<String, String> {
     let shutdown = CancellationToken::new();
     let stop = shutdown.clone();
     let app = Router::new()
@@ -256,28 +285,29 @@ pub(super) async fn redpill(
     let code = receiver.await.map_err(|_| "Login callback stopped")?;
     shutdown.cancel();
     let _ = timeout(Duration::from_secs(2), server).await;
-    let code = code?;
-    let token = response(client.post(token_url).form(&[
-        ("grant_type", "authorization_code"),
-        ("client_id", REDPILL_CLIENT_ID),
-        ("code", &code),
-        ("code_verifier", &verifier),
-        ("redirect_uri", &callback_url()),
-    ]))
-    .await?;
-    let access_token = string(&token, "access_token")?;
-    let info = response(
-        client
-            .get(format!("{ISSUER}/oauth/userinfo"))
-            .bearer_auth(&access_token),
-    )
-    .await?;
-    let account = response(
-        client
-            .get("https://service.redpill.ai/api/oauth/account")
-            .bearer_auth(&access_token),
-    )
-    .await?;
+    code
+}
+
+/// Exchanges the code with its PKCE verifier and checks that the account
+/// service and the issuer name the same user.
+pub(super) async fn redpill(
+    client: &Client,
+    oauth: &RedpillClient,
+    code: String,
+    verifier: PkceCodeVerifier,
+    userinfo_url: &str,
+    account_url: &str,
+) -> Result<Authorization, String> {
+    let http = |request| oauth_http(client.clone(), request);
+    let token = oauth
+        .exchange_code(AuthorizationCode::new(code))
+        .set_pkce_verifier(verifier)
+        .request_async(&http)
+        .await
+        .map_err(token_error)?;
+    let access_token = token.access_token().secret().clone();
+    let info = response(client.get(userinfo_url).bearer_auth(&access_token)).await?;
+    let account = response(client.get(account_url).bearer_auth(&access_token)).await?;
     if string(&account, "user_id")? != string(&info, "sub")? {
         return Err("Unexpected account identity".into());
     }
@@ -285,6 +315,21 @@ pub(super) async fn redpill(
         access_token,
         details: redpill_details(&account)?,
     })
+}
+
+/// Token endpoint errors (RFC 6749 §5.2, HTTP 400) as account errors; a
+/// malformed response is never echoed.
+fn token_error(error: RequestTokenError<std::io::Error, BasicErrorResponse>) -> String {
+    match error {
+        RequestTokenError::ServerResponse(response) => account_error(
+            StatusCode::BAD_REQUEST,
+            &json!({ "error": response.error().as_ref() }),
+        ),
+        RequestTokenError::Request(error) => error.to_string(),
+        RequestTokenError::Parse(..) | RequestTokenError::Other(_) => {
+            "Invalid account response".into()
+        }
+    }
 }
 
 pub(super) fn redpill_details(account: &Value) -> Result<AccountLoginDetails, String> {

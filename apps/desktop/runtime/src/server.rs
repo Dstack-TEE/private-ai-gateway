@@ -97,7 +97,7 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
                 match tokio::task::spawn_blocking(move || shutdown(&worker, &gate, &executor, ShutdownMode::Quit)).await {
                     Ok(Ok(())) => {},
                     Ok(Err(error)) => runtime.report_error(error),
-                    Err(error) => desktop_core::diagnostic!(
+                    Err(error) => tracing::warn!(
                         "Cannot finish backend shutdown: {error}"
                     ),
                 }
@@ -158,9 +158,24 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
 async fn owner_exited() {
     #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
     {
-        // A direct child is reparented to launchd when its owner exits, even
-        // after a crash. No PID lookup, polling of unrelated processes or IPC
-        // endpoint exposed to external agents is needed.
+        // The owner is this process's parent, so its exit is observed with
+        // kqueue's EVFILT_PROC/NOTE_EXIT like `launch::wait_for_exit`. No IPC
+        // endpoint is exposed to external agents. The waiting thread is
+        // detached: a blocking task would hold up the runtime's shutdown.
+        let parent = unsafe { libc::getppid() };
+        let (exited, exit) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            if parent == 1
+                || desktop_core::launch::wait_for_exit(parent as u32, Duration::MAX).is_ok()
+            {
+                let _ = exited.send(());
+            }
+        });
+        if exit.await.is_ok() {
+            return;
+        }
+        // Without kqueue, a child reparented to launchd (PID 1) has lost its
+        // owner, even after a crash.
         while unsafe { libc::getppid() } != 1 {
             tokio::time::sleep(Duration::from_millis(250)).await;
         }

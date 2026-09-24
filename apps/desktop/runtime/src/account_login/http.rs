@@ -12,23 +12,12 @@ pub(super) fn client() -> Result<Client, String> {
 pub(super) async fn request_json(
     request: reqwest::RequestBuilder,
 ) -> Result<(StatusCode, Value), String> {
-    let mut result = request
+    let result = request
         .send()
         .await
         .map_err(|_| "Account service could not be reached")?;
     let status = result.status();
-    // Bound untrusted account responses and never include bodies, tokens or URLs in errors.
-    let mut bytes = Vec::new();
-    while let Some(chunk) = result
-        .chunk()
-        .await
-        .map_err(|_| "Account response interrupted")?
-    {
-        if bytes.len() + chunk.len() > 65536 {
-            return Err("Account response is too large".into());
-        }
-        bytes.extend_from_slice(&chunk);
-    }
+    let bytes = body(result).await?;
     let data = serde_json::from_slice(&bytes).map_err(|_| {
         if status.is_success() {
             "Invalid account response".into()
@@ -40,6 +29,43 @@ pub(super) async fn request_json(
         }
     })?;
     Ok((status, data))
+}
+
+/// Bound untrusted account responses and never include bodies, tokens or URLs in errors.
+async fn body(mut response: reqwest::Response) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| "Account response interrupted")?
+    {
+        if bytes.len() + chunk.len() > 65536 {
+            return Err("Account response is too large".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+/// The account client for the `oauth2` crate, through its documented custom
+/// client hook: `oauth2` 5 bundles `reqwest` 0.12, and this client keeps the
+/// redirect policy, timeouts and response bound above.
+pub(super) async fn oauth_http(
+    client: Client,
+    request: oauth2::HttpRequest,
+) -> Result<oauth2::HttpResponse, std::io::Error> {
+    let request = reqwest::Request::try_from(request)
+        .map_err(|_| std::io::Error::other("Invalid account request"))?;
+    let response = client
+        .execute(request)
+        .await
+        .map_err(|_| std::io::Error::other("Account service could not be reached"))?;
+    let mut http = oauth2::http::Response::builder().status(response.status());
+    if let Some(headers) = http.headers_mut() {
+        *headers = response.headers().clone();
+    }
+    http.body(body(response).await.map_err(std::io::Error::other)?)
+        .map_err(|_| std::io::Error::other("Invalid account response"))
 }
 
 pub(super) fn protocol_error(data: &Value) -> Option<&str> {

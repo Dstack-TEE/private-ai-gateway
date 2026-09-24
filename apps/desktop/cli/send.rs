@@ -4,7 +4,7 @@
 //! SPKI-pinned connection capturing the exact wire bytes, then fetches
 //! and verifies the receipt (spec 9.3) and the session it cites (9.2).
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 
 use crate::aci::types::{PROVIDER_ACI_SESSION_IDS, PROVIDER_ACI_VERIFIED};
 use serde_json::{json, Value};
@@ -19,6 +19,20 @@ use crate::verify::{verify_service, ServiceVerification};
 const DEFAULT_PROMPT: &str = "Say hello and name the model serving this request.";
 
 pub async fn run(args: SendArgs, require_production_os: bool) -> Result<i32, String> {
+    let bearer = if args.api_key_stdin {
+        if std::io::stdin().is_terminal() {
+            return Err("Refusing to read the API key from a terminal with --api-key-stdin; pipe it in or set ACI_API_KEY.".into());
+        }
+        Some(crate::read_api_key(std::io::stdin())?)
+    } else if let Some(key) = args.api_key.clone() {
+        // Like the `aci` alias note, never mixed into JSON-mode stderr.
+        if !args.json {
+            tracing::warn!("warning: --api-key exposes the key to other local processes and will be removed in 0.3; use --api-key-stdin or ACI_API_KEY.");
+        }
+        Some(key)
+    } else {
+        std::env::var("ACI_API_KEY").ok()
+    };
     let verification = verify_service(
         &args.base_url,
         None,
@@ -54,10 +68,6 @@ pub async fn run(args: SendArgs, require_production_os: bool) -> Result<i32, Str
         client.pin(&host, spki);
     }
 
-    let bearer = args
-        .api_key
-        .clone()
-        .or_else(|| std::env::var("ACI_API_KEY").ok());
     let model = match &args.model {
         Some(model) => model.clone(),
         None => first_model(&client, &base_url, bearer.as_deref()).await?,

@@ -234,7 +234,7 @@ mod platform {
                 return Err(approval_required(interactive));
             }
             unsafe { service.registerAndReturnError() }.map_err(|error| {
-                desktop_core::diagnostic!(
+                tracing::warn!(
                     "Cannot register Open at Login: {}",
                     error.localizedDescription()
                 );
@@ -248,7 +248,7 @@ mod platform {
             }
         } else if current != SMAppServiceStatus::NotRegistered {
             unsafe { service.unregisterAndReturnError() }.map_err(|error| {
-                desktop_core::diagnostic!(
+                tracing::warn!(
                     "Cannot unregister Open at Login: {}",
                     error.localizedDescription()
                 );
@@ -321,7 +321,7 @@ mod platform {
     pub fn migrate_legacy(app: &AppHandle) {
         if let Err(error) = super::migration::migrate(&LegacyBackend(app)) {
             // Retain the old registration and retry on next launch; startup stays usable and silent.
-            desktop_core::diagnostic!("Open at Login migration deferred: {error}");
+            tracing::warn!("Open at Login migration deferred: {error}");
         }
     }
 }

@@ -413,9 +413,7 @@ impl Import<'_> {
     fn delete_imported(&self) {
         for entry in self.imported.iter().chain(&self.retired) {
             if let Err(error) = self.keychain.delete(entry) {
-                desktop_core::diagnostic!(
-                    "Cannot delete an imported credential store entry: {error}"
-                );
+                tracing::warn!("Cannot delete an imported credential store entry: {error}");
                 return;
             }
         }

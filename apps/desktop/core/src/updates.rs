@@ -55,9 +55,7 @@ pub fn selected_channel(current_version: &str) -> UpdateChannel {
     match config::load() {
         Ok(saved) => saved.update_channel.unwrap_or(default),
         Err(error) => {
-            crate::diagnostic!(
-                "Could not read the update channel; using the build channel: {error}"
-            );
+            tracing::warn!("Could not read the update channel; using the build channel: {error}");
             default
         }
     }

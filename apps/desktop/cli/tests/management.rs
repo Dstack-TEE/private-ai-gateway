@@ -47,7 +47,7 @@ fn argument_errors_are_machine_readable_in_json_mode() {
 }
 
 #[test]
-fn command_discovery_is_detailed_and_machine_readable() {
+fn command_discovery_is_detailed() {
     let settings = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
         .args(["settings", "set", "--help"])
         .output()
@@ -78,39 +78,24 @@ fn command_discovery_is_detailed_and_machine_readable() {
     assert!(!usage.contains("--cursor"));
     assert!(!usage.contains("--limit"));
 
-    let schema = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
-        .arg("schema")
+    let help = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
+        .arg("--help")
         .output()
         .unwrap();
-    assert_success(&schema);
-    let schema: Value = serde_json::from_slice(&schema.stdout).unwrap();
-    assert_eq!(schema["name"], "private-ai-proxy");
-    for name in ["verify", "audit", "sessions", "send", "serve"] {
-        assert!(schema["commands"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|command| command["name"] == name));
+    assert_success(&help);
+    let help = String::from_utf8(help.stdout).unwrap();
+    for name in ["verify", "audit", "sessions", "send", "serve", "profiles"] {
+        assert!(
+            help.contains(&format!("\n  {name} ")),
+            "missing command {name}"
+        );
         let output = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
             .args([name, "--help"])
             .output()
             .unwrap();
         assert_success(&output);
     }
-    let json_flag = schema["arguments"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|arg| arg["long"] == "json")
-        .unwrap();
-    assert_eq!(json_flag["takesValue"], false);
-    assert_eq!(json_flag["numArgs"]["max"], 0);
-    assert_eq!(json_flag["possibleValues"], serde_json::json!([]));
-    assert!(schema["commands"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|command| command["name"] == "profiles"));
+    assert!(help.contains("--json"));
 
     let completion = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
         .args(["completions", "bash"])
@@ -133,6 +118,34 @@ fn command_discovery_is_detailed_and_machine_readable() {
         .output()
         .unwrap();
     assert_eq!(conflict.status.code(), Some(2));
+}
+
+#[test]
+fn send_reads_the_api_key_from_stdin_not_arguments() {
+    let send = |args: &[&str], input: &str| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
+            .args(["send", "https://127.0.0.1:9"])
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        write!(child.stdin.take().unwrap(), "{input}").unwrap();
+        child.wait_with_output().unwrap()
+    };
+    // The key is read before any network access.
+    let empty = send(&["--api-key-stdin"], "  \n");
+    assert_eq!(empty.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&empty.stderr).contains("Enter an API key"));
+    let both = send(&["--api-key-stdin", "--api-key", "sk-test"], "");
+    assert_eq!(both.status.code(), Some(2));
+    let help = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
+        .args(["send", "--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("--api-key-stdin") && !help.contains("--api-key <"));
 }
 
 /// Scripts such as `scripts/live_e2e` run `aci audit --json` and read its
@@ -454,6 +467,48 @@ fn web_ui_requires_a_password_that_never_leaves_the_service() {
         false
     );
 }
+#[test]
+fn service_log_keeps_diagnostics_but_never_secrets() {
+    const API_KEY: &str = "sk-log-test-0123456789abcdef";
+    let backend = Backend::start();
+    let mut add = backend
+        .command(&[
+            "profiles",
+            "add",
+            "--id",
+            "local",
+            "--name",
+            "Local",
+            "--url",
+            "https://127.0.0.1:9",
+            "--key-stdin",
+            "--yes",
+            "--json",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    write!(add.stdin.take().unwrap(), "{API_KEY}").unwrap();
+    // Adding verifies the profile with the key; the unreachable service fails
+    // that, and the failure is logged.
+    assert!(!add.wait_with_output().unwrap().status.success());
+    assert_success(&backend.set_web_ui_password(WEB_PASSWORD));
+    backend.run(&["service", "stop", "--yes"]);
+
+    let logs = backend.directory.path().join("home/.private-ai-proxy/logs");
+    let mut log = String::new();
+    for entry in fs::read_dir(&logs).unwrap() {
+        log.push_str(&fs::read_to_string(entry.unwrap().path()).unwrap());
+    }
+    assert!(log.contains("Private AI Proxy backend"), "{log}");
+    assert!(log.contains("Protection error"), "{log}");
+    for secret in [API_KEY, WEB_PASSWORD, "$argon2"] {
+        assert!(!log.contains(secret), "the service log contains {secret}");
+    }
+}
+
 #[test]
 fn app_open_fails_fast_while_an_update_holds_the_startup_gate() {
     let backend = Backend::start();
