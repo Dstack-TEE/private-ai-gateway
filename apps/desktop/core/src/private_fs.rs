@@ -29,7 +29,7 @@ pub fn write_private(path: &Path, content: &str) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600).custom_flags(libc_nofollow());
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
     use std::io::Write;
     let mut file = options.open(path)?;
@@ -45,7 +45,7 @@ fn open_private(path: &Path) -> io::Result<Option<fs::File>> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc_nofollow());
+        options.custom_flags(libc::O_NOFOLLOW);
     }
     #[cfg(not(unix))]
     if fs::symlink_metadata(path)
@@ -114,7 +114,7 @@ pub fn sync_dir(dir: &Path) -> io::Result<()> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
     use std::os::unix::fs::OpenOptionsExt;
-    options.custom_flags(libc_directory() | libc_nofollow());
+    options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW);
     options.open(dir)?.sync_all()
 }
 
@@ -189,36 +189,50 @@ fn sync_parent(_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn libc_directory() -> i32 {
-    // O_DIRECTORY; the constant is stable across the Unix targets we build.
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    {
-        0x0010_0000
-    }
-    #[cfg(target_os = "freebsd")]
-    {
-        0x0002_0000
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd")))]
-    {
-        0o200000
-    }
-}
-
-#[cfg(unix)]
-fn libc_nofollow() -> i32 {
-    // O_NOFOLLOW; the constant is stable across the Unix targets we build.
-    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
-    {
-        0x0100
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd")))]
-    {
-        0o400000
-    }
-}
-
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    use super::*;
+
+    // Regression: the open(2) flags once came from hand-written constants
+    // that were only O_DIRECTORY/O_NOFOLLOW on x86_64 Linux.
+    #[test]
+    fn private_reads_refuse_symlinks() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target");
+        fs::write(&target, "secret").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+        let link = temp.path().join("link");
+        symlink(&target, &link).unwrap();
+
+        let error = read_private_text(&link).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(tighten_private(&link).is_err());
+        let mode = fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o644);
+        assert_eq!(
+            read_private_text(&target).unwrap().as_deref(),
+            Some("secret")
+        );
+    }
+
+    #[test]
+    fn sync_dir_opens_only_real_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("dir");
+        create_private_dir(&dir).unwrap();
+        sync_dir(&dir).unwrap();
+
+        let file = temp.path().join("file");
+        fs::write(&file, "").unwrap();
+        assert!(sync_dir(&file).is_err());
+        let link = temp.path().join("link");
+        symlink(&dir, &link).unwrap();
+        assert!(sync_dir(&link).is_err());
+    }
 }
