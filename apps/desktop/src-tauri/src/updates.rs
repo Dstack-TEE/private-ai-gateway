@@ -122,33 +122,18 @@ pub async fn prepare_update(
         info.channel_published = notice.channel_published;
         return Ok(info);
     }
-    let target =
-        tauri_plugin_updater::target().ok_or("Updates are unavailable on this platform")?;
-    let mut selected: Option<Update> = None;
-    for &source in updates::feeds(channel) {
-        let endpoint = updates::feed_url(&feed, source, &target)?;
-        match feed_update(&app, endpoint, source).await {
-            Ok(Checked::Update(update)) => {
-                if selected
-                    .as_ref()
-                    .is_none_or(|current| newer(&update.version, &current.version))
-                {
-                    selected = Some(*update);
-                }
-            }
-            Ok(Checked::Unpublished) if source == channel => info.channel_published = false,
-            Ok(_) => {}
-            // The stable feed only supplements beta; its failure never hides beta releases.
-            Err(_) if source != channel => {}
-            Err(error) => {
-                *prepared = None;
-                return Err(error);
-            }
+    let endpoint = updates::feed_url(&feed, channel)?;
+    let update = match feed_update(&app, endpoint, channel).await {
+        Ok(Checked::Update(update)) => *update,
+        Ok(checked) => {
+            *prepared = None;
+            info.channel_published = !matches!(checked, Checked::Unpublished);
+            return Ok(info);
         }
-    }
-    let Some(update) = selected else {
-        *prepared = None;
-        return Ok(info);
+        Err(error) => {
+            *prepared = None;
+            return Err(error);
+        }
     };
     let version = update.version.clone();
     if prepared
@@ -195,13 +180,7 @@ async fn feed_update(
         .map_err(|_| "Updates are not configured correctly for this build")?;
     match updater.check().await {
         Ok(Some(update)) => {
-            if update
-                .raw_json
-                .get("channel")
-                .and_then(serde_json::Value::as_str)
-                != Some(updates::channel_name(feed))
-                || !updates::belongs_to_feed(&update.version, feed)
-            {
+            if !updates::belongs_to_feed(&update.version, feed) {
                 return Err("The update does not match the selected channel".into());
             }
             Ok(Checked::Update(Box::new(update)))
@@ -230,16 +209,6 @@ async fn feed_missing(endpoint: tauri::Url) -> Result<bool, String> {
         .await
         .map_err(|_| "Could not reach the update channel")?;
     Ok(response.status() == reqwest::StatusCode::NOT_FOUND)
-}
-
-fn newer(candidate: &str, current: &str) -> bool {
-    match (
-        semver::Version::parse(candidate),
-        semver::Version::parse(current),
-    ) {
-        (Ok(candidate), Ok(current)) => candidate > current,
-        _ => false,
-    }
 }
 
 #[tauri::command]
@@ -272,17 +241,4 @@ pub async fn restart_to_update(
     // The Windows updater exits and relaunches the process itself. macOS and
     // Linux return after installation and restart here.
     app.restart();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::newer;
-
-    #[test]
-    fn a_stable_release_supersedes_its_betas() {
-        assert!(newer("0.1.7", "0.1.7-beta.3"));
-        assert!(newer("0.1.8-beta.1", "0.1.7"));
-        assert!(!newer("0.1.7-beta.3", "0.1.7"));
-        assert!(!newer("invalid", "0.1.7"));
-    }
 }

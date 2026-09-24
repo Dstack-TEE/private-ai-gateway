@@ -53,17 +53,32 @@ remains optional and does not block the coordinated release.
 
 Every Direct installation follows the saved update channel (desktop **Update
 channel** toggle, or `pap settings set update-channel beta|stable`); without a saved
-choice it follows the channel of the running build. The beta channel reads both
-the beta and the stable feed and offers whichever release is newer, so beta users
-also receive stable releases. The stable channel never offers a beta. Switching
-channels never downgrades: a beta build stays installed until the new channel has
-a newer release. Releases up to and including 0.1.7-beta.1 predate this and only
-read their own channel's feed.
+choice it follows the channel of the running build. Each client reads one
+static Tauri manifest, `desktop-updates-<channel>/latest.json`. Stable releases
+are published to both feeds (as electron-builder's
+`generateUpdatesFilesForAllChannels` does), so beta users also receive a stable
+release that is newer than the latest beta. The stable feed never carries a
+beta. A feed only advances to a newer SemVer version, and switching channels
+never downgrades: a beta build stays installed until the new channel has a newer
+release.
 
 Feeds are the GitHub releases `desktop-updates-beta` and `desktop-updates-stable`.
-Clients read `latest-<os>-<arch>.json` (for example `latest-linux-x86_64.json`),
-whose `version` and `channel` must match the feed. Every artifact is signed with
-the updater key and verified before installation.
+`latest.json` lists every platform under Tauri's `<os>-<arch>` and
+`<os>-<arch>-<installer>` keys; its `version` must belong to the feed. Every
+artifact is signed with the updater key and verified before installation.
+
+Clients up to 0.1.7-beta.4 read per-platform `latest-<os>-<arch>.json` files
+instead and require their `channel` to match the feed. Releases 0.1.7-beta.2 to
+0.1.7-beta.4 read both the beta and the stable feed and offer whichever release
+is newer; releases up to and including 0.1.7-beta.1 only read their own
+channel's feed. Each release keeps writing those files to its own channel's
+feed until 0.3 (see [Removal in 0.3](configuration.md#removal-in-03)).
+
+Beta builds that predate per-platform feeds (before 0.1.2-beta.44) read the beta
+feed's `latest.json` and accept only a beta. After a stable release is published
+to the beta feed, they report "The update does not match the selected channel"
+until the next beta is published. This is an accepted consequence of
+publishing stable releases to the beta feed.
 
 | Installation | Update key or source | How it updates | Backend and restart |
 | --- | --- | --- | --- |
@@ -71,7 +86,7 @@ the updater key and verified before installation.
 | Windows NSIS (current user) | `windows-<arch>` (the updater falls back from `windows-<arch>-nsis`) | In-app: the signed setup runs with `/P /UPDATE /R` | The owned backend is stopped first; the installer hooks stop any remaining backend under the startup lock, keep the user `PATH` entry, and relaunch the app |
 | Linux desktop DEB | `linux-<arch>-deb` | In-app: `pkexec dpkg -i` (then zenity/kdialog with `sudo -S`, then `sudo`) | The owned backend is stopped first; the app restarts and starts the new backend |
 | Linux desktop RPM | `linux-<arch>-rpm` | In-app: `pkexec rpm -U` with the same fallbacks | As DEB |
-| Arch desktop package | Version from `latest-linux-<arch>.json` | Settings > About shows the release and the steps: quit the app, `private-ai-proxy --yes service stop`, `sudo pacman -U <release package URL>` | The next launch starts the new backend |
+| Arch desktop package | Version from `latest.json` | Settings > About shows the release and the steps: quit the app, `private-ai-proxy --yes service stop`, `sudo pacman -U <release package URL>` | The next launch starts the new backend |
 | CLI-only DEB | Same | `pap doctor` and the web UI show `private-ai-proxy --yes service stop`, `curl -fLO <URL>`, `sudo apt install ./<file>` | User-driven; the next client start runs the new backend |
 | CLI-only RPM | Same | As above with `sudo rpm -U <URL>` | As above |
 | CLI-only Arch | Same | As above with `sudo pacman -U <URL>` | As above |

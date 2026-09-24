@@ -16,6 +16,10 @@ on:
 permissions:
   contents: write
 
+# One group per channel: GitHub keeps only one pending run per group, so a
+# shared group could drop a queued publish. A stable publish also writes the
+# beta feed's latest.json; if it overlaps a beta publish, the later upload
+# stands until the next release advances the feed.
 concurrency:
   group: desktop-update-feed-${{ contains(inputs.tag, '-beta.') && 'beta' || 'stable' }}
   cancel-in-progress: false

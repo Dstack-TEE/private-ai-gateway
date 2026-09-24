@@ -12,7 +12,11 @@ export function releaseChannel(version, channel = "beta") {
   if (channel === "beta" ? !beta : prerelease !== null) {
     throw new Error(channel === "beta" ? "Beta versions must use x.y.z-beta.n (n >= 1)" : "Stable versions must use x.y.z");
   }
-  return { channel, version, tag: `desktop-v${version}`, feedTag: `desktop-updates-${channel}`, prerelease: channel === "beta" };
+  return { channel, version, tag: `desktop-v${version}`, feedTag: feedTag(channel), prerelease: channel === "beta" };
+}
+
+export function feedTag(channel) {
+  return `desktop-updates-${channel}`;
 }
 
 export function releaseTitle(version, channel = "beta") {
@@ -39,10 +43,17 @@ export function validateReleaseRequest({ version = "", channel = "beta", platfor
   return release;
 }
 
-export function shouldAdvance(candidate, current, channel) {
-  releaseChannel(candidate, channel);
+// Mirrors belongs_to_feed in core/src/updates.rs: stable releases are also
+// published to the beta feed, as electron-builder's
+// generateUpdatesFilesForAllChannels publishes them to every lower channel.
+function assertInFeed(version, feed) {
+  releaseChannel(version, feed === "beta" && semver.valid(version) && !semver.prerelease(version) ? "stable" : feed);
+}
+
+export function shouldAdvance(candidate, current, feed) {
+  assertInFeed(candidate, feed);
   if (!current) return true;
-  releaseChannel(current, channel);
+  assertInFeed(current, feed);
   return semver.gt(candidate, current);
 }
 
