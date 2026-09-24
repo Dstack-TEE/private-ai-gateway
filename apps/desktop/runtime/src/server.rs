@@ -23,11 +23,14 @@ use desktop_core::{
 
 const MAX_CLIENTS: usize = 32;
 /// How long shutdown waits for running management commands (a slow account
-/// request, an export) and afterwards for open connections, and how long the
-/// service waits for leftover blocking tasks, before continuing without them.
-pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
-/// A shutdown that has not returned by then exits the process, as systemd's
-/// `TimeoutStopSec` or `docker stop`'s grace period would end it.
+/// request, an export) before stopping without them.
+pub(crate) const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the exit then waits for open connections, and the service for
+/// leftover blocking tasks, before continuing without them.
+pub const EXIT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+/// A process still running this long after its shutdown began exits, as
+/// systemd's `TimeoutStopSec` or `docker stop`'s grace period would end it.
+/// It covers both drains, the stop steps and the final exit drains.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_IN_PROGRESS: &str = "Shutdown is already in progress";
 
@@ -107,7 +110,7 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
                 let worker = runtime.clone();
                 let executor = handle.clone();
                 let gate = admission.clone();
-                match tokio::task::spawn_blocking(move || shutdown(&worker, &gate, &executor, ShutdownMode::Quit)).await {
+                match tokio::task::spawn_blocking(move || shutdown(&worker, &gate, &executor, ShutdownMode::Quit, false)).await {
                     Ok(Ok(())) => {},
                     Ok(Err(error)) => runtime.report_error(error),
                     Err(error) => tracing::warn!(
@@ -123,7 +126,7 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
                 let worker = runtime.clone();
                 let executor = handle.clone();
                 let gate = admission.clone();
-                let result = tokio::task::spawn_blocking(move || shutdown(&worker, &gate, &executor, ShutdownMode::Quit)).await.map_err(|_| "Shutdown task failed")?;
+                let result = tokio::task::spawn_blocking(move || shutdown(&worker, &gate, &executor, ShutdownMode::Quit, true)).await.map_err(|_| "Shutdown task failed")?;
                 match result {
                     Ok(()) => { stopping.store(true, Ordering::Release); break; },
                     Err(error) => runtime.report_error(error),
@@ -167,7 +170,7 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
     // Idle clients have bounded read deadlines; watch clients observe stopping.
     // A command blocked on the network is not waited for past the bound.
     tracing::info!("Shutdown: closing management connections");
-    let drained = tokio::time::timeout(DRAIN_TIMEOUT, async {
+    let drained = tokio::time::timeout(EXIT_DRAIN_TIMEOUT, async {
         while tasks.join_next().await.is_some() {}
     })
     .await;
@@ -175,7 +178,7 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
         tracing::warn!(
             "Shutdown: {} management connections still open after {} s; closing without them",
             tasks.len(),
-            DRAIN_TIMEOUT.as_secs()
+            EXIT_DRAIN_TIMEOUT.as_secs()
         );
     }
     Ok(())
@@ -305,7 +308,7 @@ fn connection(
         }
         tracing::info!("A client requested shutdown");
         // A refusal's reason, which may name local paths, stays in the service log.
-        let result = shutdown(&runtime, &admission, &handle, *mode)
+        let result = shutdown(&runtime, &admission, &handle, *mode, true)
             .map_err(|error| match error.as_str() {
                 SHUTDOWN_IN_PROGRESS => RpcError::operation(&error),
                 _ => RpcError::new(
@@ -363,21 +366,31 @@ pub(crate) fn execute(
     handle.block_on(crate::dispatch::dispatch(runtime, command))
 }
 
+/// Stops the backend. A failure keeps it running when `refusable`; the owning
+/// app's exit (not refusable) ends it regardless.
 fn shutdown(
     runtime: &Arc<DesktopRuntime>,
     admission: &Admission,
     handle: &Handle,
     mode: ShutdownMode,
+    refusable: bool,
 ) -> Result<(), String> {
     if admission.draining.swap(true, Ordering::AcqRel) {
         return Err(SHUTDOWN_IN_PROGRESS.into());
     }
     tracing::info!("Shutting down ({mode:?})");
-    let _watchdog = Watchdog::arm();
+    let watchdog = Watchdog::arm();
     let result = handle.block_on(drain_and_stop(runtime, admission, mode));
-    if let Err(error) = &result {
-        admission.draining.store(false, Ordering::Release);
-        tracing::error!("Shutdown refused; the backend keeps running: {error}");
+    match &result {
+        Err(error) if refusable => {
+            admission.draining.store(false, Ordering::Release);
+            tracing::error!("Shutdown refused; the backend keeps running: {error}");
+        }
+        Err(error) => {
+            tracing::error!("Shutdown failed; exiting anyway: {error}");
+            watchdog.keep_until_exit();
+        }
+        Ok(()) => watchdog.keep_until_exit(),
     }
     result
 }
@@ -401,9 +414,9 @@ pub(crate) async fn drain_and_stop(
     runtime.shutdown(mode).await
 }
 
-/// Exits the process if a shutdown has not returned within
-/// [`SHUTDOWN_TIMEOUT`] (a hung transaction or network call); dropping it
-/// disarms it.
+/// Exits the process if it is still running [`SHUTDOWN_TIMEOUT`] after
+/// shutdown began (a hung transaction, network call or drain). Dropping it
+/// disarms it, for a refused shutdown.
 struct Watchdog {
     _disarm: mpsc::Sender<()>,
 }
@@ -421,6 +434,12 @@ impl Watchdog {
             }
         });
         Self { _disarm: disarm }
+    }
+
+    /// Never disarm: the bound holds through the exit drains until the
+    /// process exits.
+    fn keep_until_exit(self) {
+        std::mem::forget(self);
     }
 }
 

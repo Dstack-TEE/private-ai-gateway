@@ -320,22 +320,23 @@ pub(super) async fn redpill(
 /// Token endpoint errors (RFC 6749 §5.2, HTTP 400) as account errors; a
 /// malformed response is never echoed.
 fn token_error(error: RequestTokenError<std::io::Error, BasicErrorResponse>) -> String {
+    // RFC 6749 §5.1 requires a 200 JSON body with `token_type`; name only the
+    // offending field, never a value.
+    if let RequestTokenError::Parse(error, _) = &error {
+        tracing::warn!(
+            "The account token response is invalid at `{}`",
+            error.path()
+        );
+    }
     match error {
         RequestTokenError::ServerResponse(response) => account_error(
             StatusCode::BAD_REQUEST,
             &json!({ "error": response.error().as_ref() }),
         ),
         RequestTokenError::Request(error) => error.to_string(),
-        // RFC 6749 §5.1 requires a 200 JSON body with `token_type`; name only
-        // the offending field, never a value.
-        RequestTokenError::Parse(error, _) => {
-            tracing::warn!(
-                "The account token response is invalid at `{}`",
-                error.path()
-            );
+        RequestTokenError::Parse(..) | RequestTokenError::Other(_) => {
             "Invalid account response".into()
         }
-        RequestTokenError::Other(_) => "Invalid account response".into(),
     }
 }
 

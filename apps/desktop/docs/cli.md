@@ -57,9 +57,9 @@ Stopping (or SIGTERM) first restores the coding-agent configuration; if that
 fails, the backend refuses to stop so agents are not left pointing at a stopped
 Local API. `service stop` then reports that it keeps running, and the service
 log has the reason. Mac App Store builds stop anyway. Shutdown is bounded:
-running commands get 10 seconds, open connections and leftover background
-tasks another 10 each, and a shutdown that has not finished after 30 seconds
-exits the process.
+running commands get 10 seconds, then open connections and leftover background
+tasks 5 seconds each, and the process exits at the latest 30 seconds after the
+shutdown began.
 
 ## Settings
 

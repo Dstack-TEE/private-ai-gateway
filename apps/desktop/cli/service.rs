@@ -31,7 +31,7 @@ fn main() {
     let result = executor.block_on(run());
     // A blocking task (a command waiting on the network) cannot be cancelled;
     // stop waiting for it after the bound instead of hanging the exit.
-    executor.shutdown_timeout(desktop_runtime::server::DRAIN_TIMEOUT);
+    executor.shutdown_timeout(desktop_runtime::server::EXIT_DRAIN_TIMEOUT);
     match result {
         Ok(()) => tracing::info!("Private AI Proxy backend stopped"),
         Err(error) => {
