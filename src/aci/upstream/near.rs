@@ -22,6 +22,7 @@ use async_trait::async_trait;
 use k256::ecdsa::{RecoveryId, Signature as K256Signature, VerifyingKey as K256VerifyingKey};
 use serde::Deserialize;
 use serde_json::{Map, Value};
+use sha2::Sha256;
 use sha3::{Digest, Keccak256};
 
 use super::openai::request_model_id;
@@ -29,7 +30,6 @@ use super::{
     OpenAICompatibleBackend, PreparedUpstreamRequest, UpstreamBackend, UpstreamError,
     UpstreamRequest, UpstreamResponse, UpstreamStreamResponse,
 };
-use crate::aci::digest::sha256_hex;
 use crate::aci::receipt::UpstreamVerifiedEvent;
 
 /// Receipt extension event recording the per-response enclave signature.
@@ -75,8 +75,8 @@ pub fn bind_response_signature(
     }
     let expected = format!(
         "{model}:{}:{}",
-        sha256_hex(request_body),
-        sha256_hex(response_body)
+        near_digest(request_body),
+        near_digest(response_body)
     );
     if sig.text != expected {
         return Err("signed text does not match the exchanged request and response".to_string());
@@ -89,6 +89,12 @@ pub fn bind_response_signature(
         ));
     }
     Ok(signer)
+}
+
+/// SHA-256 as NEAR signs it: bare lowercase hex, unlike the gateway's
+/// `sha256:`-prefixed digests.
+fn near_digest(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
 }
 
 /// Recover the Ethereum address that produced an EIP-191 `personal_sign`
@@ -373,7 +379,7 @@ mod tests {
     const RESP: &[u8] = br#"{"id":"chatcmpl-1","choices":[]}"#;
 
     fn text_for(model: &str, req: &[u8], resp: &[u8]) -> String {
-        format!("{model}:{}:{}", sha256_hex(req), sha256_hex(resp))
+        format!("{model}:{}:{}", near_digest(req), near_digest(resp))
     }
 
     #[test]
@@ -387,6 +393,26 @@ mod tests {
         assert_eq!(
             recover_eip191_signer("hello", &sig).unwrap(),
             "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"
+        );
+    }
+
+    /// Captured from NEAR AI Cloud on 2026-09-24: a non-streaming completion and
+    /// the `provider_tee` signature from `/v1/signature/{chat_id}`, signed by a
+    /// model enclave whose TDX and GPU attestation verified that day.
+    #[test]
+    fn live_near_signature_binds_the_exchanged_bytes() {
+        const LIVE_REQ: &[u8] = br#"{"model":"z-ai/glm-5.3-flash","messages":[{"role":"user","content":"Reply with the single word: sealed"}],"max_tokens":200,"stream":false}"#;
+        const LIVE_RESP: &[u8] = br#"{"choices":[{"finish_reason":"stop","index":0,"logprobs":null,"matched_stop":154827,"message":{"content":"sealed","reasoning_content":"The user has asked me to reply with the single word \"sealed\". This is a simple, direct request. There's nothing harmful about it. I should just comply and reply with the word \"sealed\".","role":"assistant"}}],"created":1790243703,"id":"c9776b549bc546638a958b0c5902a6b4","model":"z-ai/glm-5.3-flash","object":"chat.completion","usage":{"completion_tokens":44,"prompt_tokens":19,"prompt_tokens_details":null,"reasoning_tokens":42,"total_tokens":63}}"#;
+        let sig = NearResponseSignature {
+            text: "z-ai/glm-5.3-flash:0f2eaa629c0fdb8f79ff82016a241d7d2250a2fcfc31bcda589cd434d8af30c2:f9d68fc2a6269351b7aef78534b6e9e520aa7c1ddb480d6504138a2685499f2d".to_string(),
+            signature: "0xcf99a0fc3b04fafdb340c69f766607bb4d4af8cd3f966b1ea630b0d28b507b17601812ba77bf09fa3f86360a6f3ced6caa9ae91d4b2c075a286c83f586b67ab41b".to_string(),
+            signing_address: "0x3b753b4406613c5e70ae640508632b600424fa0c".to_string(),
+            signing_algo: "ecdsa".to_string(),
+            signature_kind: Some("provider_tee".to_string()),
+        };
+        assert_eq!(
+            bind_response_signature(&sig, "z-ai/glm-5.3-flash", LIVE_REQ, LIVE_RESP).unwrap(),
+            "0x3b753b4406613c5e70ae640508632b600424fa0c"
         );
     }
 
@@ -410,7 +436,7 @@ mod tests {
         let sig = signed(
             &key,
             "gateway",
-            format!("{}:{}", sha256_hex(REQ), sha256_hex(RESP)),
+            format!("{}:{}", near_digest(REQ), near_digest(RESP)),
         );
         assert!(
             bind_response_signature(&sig, "z-ai/glm-5.3-flash", REQ, RESP)

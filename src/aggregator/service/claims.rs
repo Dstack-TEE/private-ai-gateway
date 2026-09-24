@@ -174,6 +174,11 @@ pub(super) fn near_enclave_session_claims(
         }
     }
     let instance_tcb = per("instance_tcb_statuses");
+    // The enclave's own status, kept beside the folded one so a reader can tell
+    // whether the router or the enclave refutes `tcb_up_to_date`.
+    if let Some(status) = &instance_tcb {
+        pc.insert("instance_tcb_status".to_string(), status.clone());
+    }
     if let Some(status) = worse_tcb_status(full.get("gateway_tcb_status"), instance_tcb.as_ref()) {
         pc.insert("tcb_status".to_string(), status);
     }
@@ -1013,6 +1018,11 @@ mod claim_mapping_tests {
         assert_eq!(claims.os_known_good.status, ClaimStatus::Asserted);
         assert_eq!(claims.extra.get("signing_address"), Some(&json!("0xabc")));
         assert_eq!(claims.extra.get("compose_hash"), Some(&json!("c82b")));
+        assert_eq!(
+            claims.extra.get("instance_tcb_status"),
+            Some(&json!("UpToDate"))
+        );
+        assert_eq!(claims.extra.get("tcb_status"), Some(&json!("OutOfDate")));
 
         let current = near_enclave_session_claims(&near_event("UpToDate", true), "0xabc");
         assert_eq!(current.tcb_up_to_date.status, ClaimStatus::Asserted);

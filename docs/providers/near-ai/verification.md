@@ -22,18 +22,27 @@ enclave signer. After a buffered completion, `NearAiBackend` fetches
 `GET /v1/signature/{chat_id}?signing_algo=ecdsa` and requires:
 
 - `signature_kind` is `provider_tee` (the serving enclave signed, not the router);
-- the signed text is exactly `<model>:<sha256(request.forwarded bytes)>:<sha256(response.received bytes)>`;
+- the signed text is exactly `<model>:<sha256(request.forwarded bytes)>:<sha256(response.received bytes)>`,
+  with each digest as bare lowercase hex (no `sha256:` prefix);
 - the EIP-191 signer recovers to the reported `signing_address`.
 
 On success the receipt cites that enclave's session, whose claims carry the
 enclave's GPU, TCB and OS verdicts (the router's TCB and OS verdicts fold in,
-since the router relays the traffic). Every outcome is recorded in an
+since the router relays the traffic). `claims.extra` keeps the enclave's own
+`instance_tcb_status` beside the router's `gateway_tcb_status` and the folded
+`tcb_status`, so a refuted `tcb_up_to_date` shows which side caused it. Every outcome is recorded in an
 `upstream.response_attested` receipt event with the signature, so a verifier can
 re-check it offline. A signer outside the verified set, a `gateway` signature,
 or a streamed completion cites the router session.
 
 Requests to NEAR carry `x-no-aliasing: true` and `accept-encoding: identity`,
 which NEAR requires for enclave-signed responses.
+
+Checked live on 2026-09-24 (`z-ai/glm-5.3-flash`): a non-streaming completion
+bound to a verified enclave (`bound: true`, GPU and OS asserted, enclave TCB
+`UpToDate`, router TCB `OutOfDate`, so `tcb_up_to_date` refuted); a streamed
+completion cited the router session. The captured signature is a unit test
+(`live_near_signature_binds_the_exchanged_bytes`).
 
 **Operational note.** The dstack verifier resolves OS images from
 `download.dstack.org/os-images/mr_<hash>.tar.gz`. Some NEAR model enclaves run
