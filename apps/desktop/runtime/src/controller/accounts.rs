@@ -4,7 +4,7 @@ impl DesktopRuntime {
     pub(super) async fn cancel_pending(
         &self,
         pending: &mut crate::account_login::PendingLogin,
-    ) -> Result<(), String> {
+    ) -> Result<(), Error> {
         let key = self.load_profile_key(pending.profile_id())?;
         pending.protect_saved_key(key.as_deref()).await;
         pending.cancel().await
@@ -13,14 +13,14 @@ impl DesktopRuntime {
     pub async fn begin_account_login(
         self: &Arc<Self>,
         profile: ConfidentialProfileInput,
-    ) -> Result<desktop_core::account::LoginPresentation, String> {
+    ) -> Result<desktop_core::account::LoginPresentation, Error> {
         let mut slot = self.account_login.try_lock().map_err(|_| {
-            "Account: An account operation is in progress. Finish it before signing in again."
+            Error::account("Account: An account operation is in progress. Finish it before signing in again.")
         })?;
         if let Some(pending) = slot.as_mut() {
             if pending.is_active() && pending.profile_id() != profile.id {
                 return Err(
-                    "Account: Another sign-in is open. Finish or cancel it in the other window."
+                    Error::account("Account: Another sign-in is open. Finish or cancel it in the other window.")
                         .into(),
                 );
             }
@@ -36,7 +36,7 @@ impl DesktopRuntime {
     pub async fn poll_account_login(
         self: &Arc<Self>,
         id: String,
-    ) -> Result<Option<desktop_core::contracts::AccountLoginDetails>, String> {
+    ) -> Result<Option<desktop_core::contracts::AccountLoginDetails>, Error> {
         self.account_login
             .lock()
             .await
@@ -53,7 +53,7 @@ impl DesktopRuntime {
         profile: ConfidentialProfileInput,
         require_production_os: bool,
         workspace_id: Option<i64>,
-    ) -> Result<desktop_core::contracts::AccountSaveResult, String> {
+    ) -> Result<desktop_core::contracts::AccountSaveResult, Error> {
         use desktop_core::contracts::AccountSaveResult;
         uuid::Uuid::parse_str(&operation_id).map_err(|_| "Invalid save operation ID")?;
         let mut operation = self
@@ -84,7 +84,7 @@ impl DesktopRuntime {
                     state: Box::new(state),
                 },
                 Err(error) => AccountSaveResult::Failed {
-                    error: desktop_core::protocol::RpcError::operation(&error).message,
+                    error: desktop_core::protocol::Error::from(error).message,
                 },
             };
             sender.send_replace(result);
@@ -95,7 +95,7 @@ impl DesktopRuntime {
     pub fn account_save_result(
         &self,
         operation_id: &str,
-    ) -> Result<desktop_core::contracts::AccountSaveResult, String> {
+    ) -> Result<desktop_core::contracts::AccountSaveResult, Error> {
         let operation = self
             .account_save
             .lock()
@@ -104,7 +104,7 @@ impl DesktopRuntime {
             .as_ref()
             .filter(|(id, _)| id == operation_id)
             .ok_or(
-                "Account: Save outcome is unavailable. Check the saved profile before retrying.",
+                Error::account("Account: Save outcome is unavailable. Check the saved profile before retrying."),
             )?;
         let outcome = result.borrow().clone();
         if matches!(outcome, desktop_core::contracts::AccountSaveResult::Running)
@@ -124,7 +124,7 @@ impl DesktopRuntime {
         profile: ConfidentialProfileInput,
         require_production_os: bool,
         workspace_id: Option<i64>,
-    ) -> Result<AppState, String> {
+    ) -> Result<AppState, Error> {
         let mut slot = self.account_login.lock().await;
         let credential = slot
             .as_mut()
@@ -151,7 +151,7 @@ impl DesktopRuntime {
         &self,
         id: String,
         callback_url: String,
-    ) -> Result<(), String> {
+    ) -> Result<(), Error> {
         self.account_login
             .lock()
             .await
@@ -164,7 +164,7 @@ impl DesktopRuntime {
     pub async fn account_details(
         &self,
         profile_id: String,
-    ) -> Result<desktop_core::contracts::AccountLoginDetails, String> {
+    ) -> Result<desktop_core::contracts::AccountLoginDetails, Error> {
         use desktop_core::contracts::{ProfileAuth, ServiceProvider};
         let state = self.manager.snapshot()?;
         let profile = state
@@ -186,7 +186,7 @@ impl DesktopRuntime {
     pub async fn account_balance(
         &self,
         target: desktop_core::contracts::AccountBalanceTarget,
-    ) -> Result<Option<desktop_core::contracts::AccountBalance>, String> {
+    ) -> Result<Option<desktop_core::contracts::AccountBalance>, Error> {
         use desktop_core::contracts::{AccountBalanceTarget, ProfileAuth};
         match target {
             AccountBalanceTarget::Login { id } => {
@@ -227,7 +227,7 @@ impl DesktopRuntime {
         }
     }
 
-    pub async fn cancel_account_login(&self, id: String) -> Result<(), String> {
+    pub async fn cancel_account_login(&self, id: String) -> Result<(), Error> {
         let mut slot = self.account_login.lock().await;
         if let Some(pending) = slot
             .as_mut()

@@ -22,6 +22,8 @@ use tokio_util::sync::CancellationToken;
 
 pub use auth::Auth;
 #[cfg(feature = "web-ui")]
+pub(crate) use server::{routes, Gate};
+#[cfg(feature = "web-ui")]
 pub use throttle::Throttle;
 
 use desktop_core::listen::ResolvedListen;

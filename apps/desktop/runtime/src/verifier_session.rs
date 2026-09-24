@@ -19,6 +19,7 @@ use std::{
 
 use crate::endpoint_inventory::InventoryUpdater;
 use crate::usage::UsageStore;
+use crate::Error;
 use aci_protocol::types::ServiceCapabilities;
 use agent_bridge::catalog::{Catalog, EndpointInventory};
 use agent_bridge::proxy::{ProxyEvent, ProxyState, Session};
@@ -211,7 +212,7 @@ impl SessionManager {
         self.state_tx.subscribe()
     }
 
-    pub fn start(self: &Arc<Self>, config: StartConfig) -> Result<AppState, String> {
+    pub fn start(self: &Arc<Self>, config: StartConfig) -> Result<AppState, Error> {
         self.start_inner(config, false, false)
     }
 
@@ -219,7 +220,7 @@ impl SessionManager {
         self: &Arc<Self>,
         config: StartConfig,
         reset_catalog_history: bool,
-    ) -> Result<AppState, String> {
+    ) -> Result<AppState, Error> {
         self.start_inner(config, true, reset_catalog_history)
     }
 
@@ -228,16 +229,16 @@ impl SessionManager {
         config: StartConfig,
         verification_only: bool,
         reset_catalog_history: bool,
-    ) -> Result<AppState, String> {
+    ) -> Result<AppState, Error> {
         let config = settings_config::resolve_runtime_config(config)?;
         let remote_url = config.remote_url.clone();
 
         let mut runtime = self.lock()?;
         if let Some(error) = &runtime.state.endpoint_error {
-            return Err(format!("The local endpoint is unavailable: {error}"));
+            return Err(format!("The local endpoint is unavailable: {error}").into());
         }
         if runtime.task.is_some() {
-            return Err("Protection is already running".to_string());
+            return Err(Error::invalid_state("Protection is already running"));
         }
 
         runtime.generation = runtime.generation.wrapping_add(1);
@@ -315,7 +316,7 @@ impl SessionManager {
             Ok(task) => task,
             Err(error) => {
                 let _ = self.fail(generation, error.clone());
-                return Err(error);
+                return Err(error.into());
             }
         };
         if !verification_only {
@@ -325,14 +326,14 @@ impl SessionManager {
             {
                 let _ = task.stop();
                 let _ = self.fail(generation, error.clone());
-                return Err(error);
+                return Err(error.into());
             }
         }
         {
             let mut runtime = self.lock()?;
             if runtime.generation != generation {
                 let _ = task.stop();
-                return Err("Protection start was superseded".to_string());
+                return Err("Protection start was superseded".into());
             }
             if matches!(runtime.state.status.as_str(), "error" | "blocked") {
                 let _ = task.stop();
@@ -663,16 +664,18 @@ impl SessionManager {
     }
 
     /// Refresh discovery without revoking the current verified session.
-    pub async fn refresh_catalog(self: &Arc<Self>) -> Result<AppState, String> {
+    pub async fn refresh_catalog(self: &Arc<Self>) -> Result<AppState, Error> {
         let (generation, epoch) = {
             let runtime = self.lock()?;
             if !runtime.identity_ready {
-                return Err("Start protection and wait for verification first".to_string());
+                return Err(Error::invalid_state(
+                    "Start protection and wait for verification first",
+                ));
             }
             (runtime.generation, runtime.epoch)
         };
         self.load_catalog(generation, epoch).await?;
-        self.snapshot()
+        Ok(self.snapshot()?)
     }
 
     async fn load_catalog(self: &Arc<Self>, generation: u64, epoch: u64) -> Result<(), String> {

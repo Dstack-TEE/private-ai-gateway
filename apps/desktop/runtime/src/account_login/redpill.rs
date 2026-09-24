@@ -11,7 +11,7 @@ impl CallbackState {
     pub(super) async fn accept(&self, uri: &Uri, headers: &HeaderMap) -> Result<(), CallbackError> {
         let result = match callback_code(uri, headers, &self.expected) {
             Ok(code) => Ok(code),
-            Err(CallbackError::Declined) => Err("Account: Authorization was declined.".into()),
+            Err(CallbackError::Declined) => Err(Error::account("Account: Authorization was declined.").into()),
             Err(error) => return Err(error),
         };
         let declined = result.is_err();
@@ -38,14 +38,14 @@ pub(super) enum CallbackError {
 
 pub(super) struct CallbackState {
     pub(super) expected: String,
-    pub(super) sender: Mutex<Option<oneshot::Sender<Result<String, String>>>>,
+    pub(super) sender: Mutex<Option<oneshot::Sender<Result<String, Error>>>>,
 }
 
 pub(crate) async fn transition_credential(
     provider: &ServiceProvider,
     key: &str,
     action: &str,
-) -> Result<CredentialTransition, String> {
+) -> Result<CredentialTransition, Error> {
     if *provider != ServiceProvider::Redpill {
         return Ok(CredentialTransition::Applied);
     }
@@ -56,7 +56,7 @@ pub(super) async fn transition_at(
     key: &str,
     action: &str,
     base: &str,
-) -> Result<CredentialTransition, String> {
+) -> Result<CredentialTransition, Error> {
     let http = client()?;
     let request = match action {
         "activate" | "abort" => http.post(format!("{base}/{action}")),
@@ -68,7 +68,7 @@ pub(super) async fn transition_at(
         .bearer_auth(key)
         .send()
         .await
-        .map_err(|_| "Account: Credential update failed; retry the operation.")?;
+        .map_err(|_| Error::account("Account: Credential update failed; retry the operation."))?;
     if matches!(
         response.status(),
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
@@ -77,31 +77,31 @@ pub(super) async fn transition_at(
     }
     if !response.status().is_success() {
         return Err(
-            "Account: Credential update failed; retry or manage the key in your provider console."
+            Error::account("Account: Credential update failed; retry or manage the key in your provider console.")
                 .into(),
         );
     }
     Ok(CredentialTransition::Applied)
 }
 
-pub(super) fn installation_id(profile_id: &str) -> Result<Uuid, String> {
+pub(super) fn installation_id(profile_id: &str) -> Result<Uuid, Error> {
     // Profile IDs are already random and persist with the credential. Deriving a
     // UUID mixes the profile with the local installation identity.
     let data = desktop_core::paths::app_data_dir()?;
     let path = data.join("installation-id");
     let device = match private_fs::read_private_text(&path) {
         Ok(Some(value)) => uuid::Uuid::parse_str(value.trim())
-            .map_err(|_| "Account: Device identity needs repair.")?,
+            .map_err(|_| Error::account("Account: Device identity needs repair."))?,
         Ok(None) => {
             let id = Uuid::new_v4();
             // Owner-only and complete or absent, never over an existing identity.
             private_fs::publish(&path, private_fs::Publish::NoClobber, |file| {
                 std::io::Write::write_all(file, id.to_string().as_bytes())
             })
-            .map_err(|_| "Account: Cannot save device identity.")?;
+            .map_err(|_| Error::account("Account: Cannot save device identity."))?;
             id
         }
-        Err(_) => return Err("Account: Cannot read device identity.".into()),
+        Err(_) => return Err(Error::account("Account: Cannot read device identity.").into()),
     };
     let hash = Sha256::digest(format!("{device}:{profile_id}").as_bytes());
     let mut bytes = [0u8; 16];
@@ -114,7 +114,7 @@ pub(super) fn installation_id(profile_id: &str) -> Result<Uuid, String> {
 pub(super) type RedpillClient =
     BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet>;
 
-pub(super) fn redpill_client(authorize: Url, token: Url) -> Result<RedpillClient, String> {
+pub(super) fn redpill_client(authorize: Url, token: Url) -> Result<RedpillClient, Error> {
     Ok(BasicClient::new(ClientId::new(REDPILL_CLIENT_ID.into()))
         .set_auth_uri(AuthUrl::from_url(authorize))
         .set_token_uri(TokenUrl::from_url(token))
@@ -136,7 +136,7 @@ pub(super) fn authorization_request(oauth: &RedpillClient) -> (Url, CsrfToken, P
     (url, state, verifier)
 }
 
-pub(super) fn validate_discovery(data: &Value) -> Result<(), String> {
+pub(super) fn validate_discovery(data: &Value) -> Result<(), Error> {
     for (field, required) in [
         ("grant_types_supported", "authorization_code"),
         ("code_challenge_methods_supported", "S256"),
@@ -270,8 +270,8 @@ pub(super) async fn callback(
 pub(super) async fn receive_code(
     listener: TcpListener,
     state: Arc<CallbackState>,
-    receiver: oneshot::Receiver<Result<String, String>>,
-) -> Result<String, String> {
+    receiver: oneshot::Receiver<Result<String, Error>>,
+) -> Result<String, Error> {
     let shutdown = CancellationToken::new();
     let stop = shutdown.clone();
     let app = Router::new()
@@ -297,7 +297,7 @@ pub(super) async fn redpill(
     verifier: PkceCodeVerifier,
     userinfo_url: &str,
     account_url: &str,
-) -> Result<Authorization, String> {
+) -> Result<Authorization, Error> {
     let http = |request| oauth_http(client.clone(), request);
     let token = oauth
         .exchange_code(AuthorizationCode::new(code))
@@ -319,7 +319,7 @@ pub(super) async fn redpill(
 
 /// Token endpoint errors (RFC 6749 §5.2, HTTP 400) as account errors; a
 /// malformed response is never echoed.
-fn token_error(error: RequestTokenError<std::io::Error, BasicErrorResponse>) -> String {
+fn token_error(error: RequestTokenError<std::io::Error, BasicErrorResponse>) -> Error {
     // RFC 6749 §5.1 requires a 200 JSON body with `token_type`; name only the
     // offending field, never a value.
     if let RequestTokenError::Parse(error, _) = &error {
@@ -333,14 +333,14 @@ fn token_error(error: RequestTokenError<std::io::Error, BasicErrorResponse>) -> 
             StatusCode::BAD_REQUEST,
             &json!({ "error": response.error().as_ref() }),
         ),
-        RequestTokenError::Request(error) => error.to_string(),
+        RequestTokenError::Request(error) => error.to_string().into(),
         RequestTokenError::Parse(..) | RequestTokenError::Other(_) => {
             "Invalid account response".into()
         }
     }
 }
 
-pub(super) fn redpill_details(account: &Value) -> Result<AccountLoginDetails, String> {
+pub(super) fn redpill_details(account: &Value) -> Result<AccountLoginDetails, Error> {
     Ok(AccountLoginDetails {
         auth: ProfileAuth::OAuth {
             account_id: string(account, "user_id")?,
@@ -368,7 +368,7 @@ struct RedpillWorkspace {
     is_default: bool,
 }
 
-pub(super) fn parse_workspaces(account: &Value) -> Result<Vec<AccountWorkspace>, String> {
+pub(super) fn parse_workspaces(account: &Value) -> Result<Vec<AccountWorkspace>, Error> {
     let workspaces: Vec<RedpillWorkspace> = serde_json::from_value(
         account
             .get("workspaces")
@@ -388,7 +388,7 @@ pub(super) fn parse_workspaces(account: &Value) -> Result<Vec<AccountWorkspace>,
     Ok(workspaces)
 }
 
-pub(super) fn validate_workspaces(workspaces: &[AccountWorkspace]) -> Result<(), String> {
+pub(super) fn validate_workspaces(workspaces: &[AccountWorkspace]) -> Result<(), Error> {
     let mut ids = std::collections::HashSet::new();
     if workspaces.is_empty() {
         return Err("No accessible workspace is available".into());

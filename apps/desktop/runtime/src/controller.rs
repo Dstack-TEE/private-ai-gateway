@@ -1,6 +1,5 @@
 mod accounts;
 mod agents;
-pub use agents::AgentOperationError;
 mod credentials;
 mod endpoint;
 mod lifecycle;
@@ -38,6 +37,7 @@ use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
 
 use crate::{
     local_state::{LocalState, RetiredCredential},
+    Error,
     settings::{Credentials, Settings},
     usage::UsageStore,
     verifier_session::{SessionManager, VerifierLauncher},
@@ -100,7 +100,7 @@ struct ClientCredentialState {
 }
 
 impl ClientCredentials {
-    fn new() -> Result<Self, String> {
+    fn new() -> Result<Self, Error> {
         Ok(Self::from_files(TokenFiles::new(&app_data_dir()?)))
     }
 
@@ -111,14 +111,14 @@ impl ClientCredentials {
         }))
     }
 
-    fn token(&self) -> Result<String, String> {
-        self.active_token()?.ok_or_else(|| {
+    fn token(&self) -> Result<String, Error> {
+        Ok(self.active_token()?.ok_or_else(|| {
             "Client key rotation failed; generate a new client key before using the Local API"
                 .to_string()
-        })
+        })?)
     }
 
-    fn active_token(&self) -> Result<Option<String>, String> {
+    fn active_token(&self) -> Result<Option<String>, Error> {
         let state = self
             .0
             .lock()
@@ -126,10 +126,10 @@ impl ClientCredentials {
         if state.rotation_failed {
             return Ok(None);
         }
-        state.files.ensure(LOCAL_TOOLS_AGENT).map(Some)
+        Ok(state.files.ensure(LOCAL_TOOLS_AGENT).map(Some)?)
     }
 
-    fn rotate(&self) -> Result<String, String> {
+    fn rotate(&self) -> Result<String, Error> {
         let mut state = self
             .0
             .lock()
@@ -160,13 +160,13 @@ impl EndpointRuntime {
         proxy: Arc<ProxyState>,
         listener: std::net::TcpListener,
         config: ListenConfig,
-    ) -> Result<(), String> {
+    ) -> Result<(), Error> {
         let mut runtime = self
             .task
             .lock()
             .map_err(|_| "The Local API runtime is unavailable".to_string())?;
         if runtime.as_ref().is_some_and(|task| !task.is_finished()) {
-            return Err("The Local API runtime is already active".to_string());
+            return Err("The Local API runtime is already active".into());
         }
         *runtime = Some(self.task_runtime.spawn(async move {
             if let Err(error) = proxy::serve(proxy, listener).await {
@@ -176,7 +176,7 @@ impl EndpointRuntime {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), String> {
+    async fn stop(&self) -> Result<(), Error> {
         let previous = self
             .task
             .lock()
@@ -193,7 +193,7 @@ impl EndpointRuntime {
 impl DesktopRuntime {
     pub fn launch(options: RuntimeOptions) -> Result<Arc<Self>, String> {
         if !options.helper_path.is_absolute() {
-            return Err("The credential helper path must be absolute".to_string());
+            return Err("The credential helper path must be absolute".into());
         }
         // Establish ownership before settings, storage, or listeners.
         let data_dir = app_data_dir()?;
@@ -281,7 +281,7 @@ impl DesktopRuntime {
             settings_watcher: Mutex::new(None),
             local_state,
             data_dir,
-            credentials: ClientCredentials::new()?,
+            credentials: ClientCredentials::new().map_err(|error| error.to_string())?,
             account_login: tokio::sync::Mutex::new(None),
             account_save: Mutex::new(None),
             balances: crate::balance_cache::BalanceCache::default(),
@@ -308,12 +308,13 @@ impl DesktopRuntime {
                     proxy.clone(),
                     listener,
                     local.config.clone(),
-                )?;
+                )
+                .map_err(|error| error.to_string())?;
             }
             (None, Some(error)) => manager.set_endpoint(local.config.clone(), Err(error)),
             (None, None) => manager.set_endpoint(
                 local.config.clone(),
-                Err("The Local API listener was not created".to_string()),
+                Err("The Local API listener was not created".into()),
             ),
         }
         // The active key is loaded only when verification or protection uses it.
@@ -370,7 +371,7 @@ impl DesktopRuntime {
                     if let Err(error) = runtime.reconcile_agents() {
                         if runtime
                             .state()
-                            .is_ok_and(|state| state.error.as_deref() != Some(&error))
+                            .is_ok_and(|state| state.error != Some(error.to_string()))
                         {
                             runtime.report_error(error);
                         }
@@ -408,7 +409,7 @@ impl DesktopRuntime {
                 {
                     if let Ok(_operation) = runtime.lifecycle.try_lock() {
                         if let Err(error) = runtime.cleanup_retired().await {
-                            runtime.manager.report_error(error);
+                            runtime.manager.report_error(error.to_string());
                         }
                     }
                 }
@@ -434,48 +435,48 @@ impl DesktopRuntime {
             .ok_or_else(|| "The backend does not own its instance lock".to_string())
     }
 
-    pub fn state(&self) -> Result<AppState, String> {
-        self.manager.snapshot()
+    pub fn state(&self) -> Result<AppState, Error> {
+        Ok(self.manager.snapshot()?)
     }
 
-    pub fn report_error(&self, message: String) {
-        self.manager.report_error(message);
+    pub fn report_error(&self, error: impl std::fmt::Display) {
+        self.manager.report_error(error.to_string());
     }
 
-    pub fn query_usage(&self, query: UsageQuery) -> Result<UsagePage, String> {
-        self.usage.page(&query)
+    pub fn query_usage(&self, query: UsageQuery) -> Result<UsagePage, Error> {
+        Ok(self.usage.page(&query)?)
     }
 
-    pub fn export_profiles(&self, path: PathBuf) -> Result<(), String> {
-        desktop_core::maintenance::write_export(&path, &self.export_profiles_content()?)
+    pub fn export_profiles(&self, path: PathBuf) -> Result<(), Error> {
+        Ok(desktop_core::maintenance::write_export(&path, &self.export_profiles_content()?)?)
     }
 
-    pub fn export_profiles_content(&self) -> Result<String, String> {
+    pub fn export_profiles_content(&self) -> Result<String, Error> {
         let backup =
             desktop_core::maintenance::ProfileBackup::from_profiles(&self.state()?.profiles);
-        desktop_core::maintenance::json_content(&backup)
+        Ok(desktop_core::maintenance::json_content(&backup)?)
     }
 
-    pub fn export_diagnostics(&self, path: PathBuf, version: &str) -> Result<(), String> {
-        desktop_core::maintenance::write_export(&path, &self.export_diagnostics_content(version)?)
+    pub fn export_diagnostics(&self, path: PathBuf, version: &str) -> Result<(), Error> {
+        Ok(desktop_core::maintenance::write_export(&path, &self.export_diagnostics_content(version)?)?)
     }
 
-    pub fn export_diagnostics_content(&self, version: &str) -> Result<String, String> {
-        desktop_core::maintenance::json_content(&desktop_core::maintenance::diagnostics(
+    pub fn export_diagnostics_content(&self, version: &str) -> Result<String, Error> {
+        Ok(desktop_core::maintenance::json_content(&desktop_core::maintenance::diagnostics(
             &self.state()?,
             version,
-        ))
+        ))?)
     }
 
-    pub fn usage_record(&self, record_id: &str) -> Result<Option<RequestActivity>, String> {
-        self.usage.get(record_id)
+    pub fn usage_record(&self, record_id: &str) -> Result<Option<RequestActivity>, Error> {
+        Ok(self.usage.get(record_id)?)
     }
 
-    pub fn export_usage_csv(&self, query: UsageQuery, path: PathBuf) -> Result<usize, String> {
-        self.usage.export_csv(&query, &path)
+    pub fn export_usage_csv(&self, query: UsageQuery, path: PathBuf) -> Result<usize, Error> {
+        Ok(self.usage.export_csv(&query, &path)?)
     }
 
-    pub fn clear_usage(&self) -> Result<u64, String> {
+    pub fn clear_usage(&self) -> Result<u64, Error> {
         let changed = self.usage.clear()?;
         self.manager.clear_session_usage();
         Ok(changed)
@@ -493,7 +494,7 @@ fn agent_failures(failures: Vec<(String, String)>) -> String {
 fn with_client_token(
     mut tokens: TokenSet,
     credentials: &ClientCredentials,
-) -> Result<TokenSet, String> {
+) -> Result<TokenSet, Error> {
     if let Some(token) = credentials.active_token()? {
         tokens.insert(token, LOCAL_TOOLS_AGENT.to_string());
     }

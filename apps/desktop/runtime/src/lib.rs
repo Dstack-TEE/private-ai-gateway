@@ -7,10 +7,12 @@
 //! autostart integration; clients reach this crate only over IPC.
 
 pub mod account_login;
+mod api;
 mod balance_cache;
 pub mod controller;
 mod dispatch;
 mod endpoint_inventory;
+mod error;
 #[cfg(all(unix, not(all(target_os = "macos", feature = "mac-app-store"))))]
 mod helper_staging;
 pub mod local_state;
@@ -21,3 +23,5 @@ pub mod settings;
 pub mod usage;
 pub mod verifier_session;
 pub mod web_ui;
+
+pub use error::Error;

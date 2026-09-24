@@ -1,5 +1,7 @@
 use std::fmt;
 
+use desktop_core::protocol::{Error, ErrorCode};
+
 /// Only authored, credential-free diagnostics cross the management boundary.
 #[derive(Clone, Debug)]
 pub enum AgentError {
@@ -22,24 +24,24 @@ pub enum AgentError {
 }
 
 impl AgentError {
-    pub fn code(&self) -> &'static str {
+    pub fn code(&self) -> ErrorCode {
         match self {
-            Self::ConfigurationRead => "configuration_read_failed",
-            Self::InvalidConfiguration(_) => "invalid_configuration",
-            Self::ConfigurationConflict(_) => "configuration_conflict",
-            Self::AuthenticationConflict(_) => "authentication_conflict",
-            Self::CredentialStore => "credential_store_unavailable",
-            Self::ConfigurationWrite => "configuration_write_failed",
-            Self::ConfigurationLock => "configuration_lock_failed",
-            Self::RecordUnavailable => "connection_record_unavailable",
-            Self::RestorationFailed => "configuration_restore_failed",
-            Self::HelperUnavailable => "helper_unavailable",
-            Self::MetadataUnavailable(_) => "codex_metadata_unavailable",
-            Self::NoCompatibleModels => "no_compatible_models",
-            Self::IncompatibleModel => "incompatible_model",
-            Self::RevisionConflict => "revision_conflict",
-            Self::InvalidState => "invalid_state",
-            Self::Internal => "operation_failed",
+            Self::ConfigurationRead => ErrorCode::ConfigurationReadFailed,
+            Self::InvalidConfiguration(_) => ErrorCode::InvalidConfiguration,
+            Self::ConfigurationConflict(_) => ErrorCode::ConfigurationConflict,
+            Self::AuthenticationConflict(_) => ErrorCode::AuthenticationConflict,
+            Self::CredentialStore => ErrorCode::CredentialStoreUnavailable,
+            Self::ConfigurationWrite => ErrorCode::ConfigurationWriteFailed,
+            Self::ConfigurationLock => ErrorCode::ConfigurationLockFailed,
+            Self::RecordUnavailable => ErrorCode::ConnectionRecordUnavailable,
+            Self::RestorationFailed => ErrorCode::ConfigurationRestoreFailed,
+            Self::HelperUnavailable => ErrorCode::HelperUnavailable,
+            Self::MetadataUnavailable(_) => ErrorCode::CodexMetadataUnavailable,
+            Self::NoCompatibleModels => ErrorCode::NoCompatibleModels,
+            Self::IncompatibleModel => ErrorCode::IncompatibleModel,
+            Self::RevisionConflict => ErrorCode::RevisionConflict,
+            Self::InvalidState => ErrorCode::InvalidState,
+            Self::Internal => ErrorCode::OperationFailed,
         }
     }
 }
@@ -75,16 +77,15 @@ impl From<desktop_core::lock::ApplyLockError> for AgentError {
     }
 }
 
-impl From<AgentError> for desktop_core::protocol::RpcError {
+impl From<AgentError> for Error {
     fn from(error: AgentError) -> Self {
-        Self::new(error.code(), &error.to_string())
+        Self::new(error.code(), error.to_string())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use desktop_core::protocol::RpcError;
 
     #[test]
     fn agent_failures_keep_actionable_causes_without_internal_details() {
@@ -95,15 +96,15 @@ mod tests {
             (AgentError::ConfigurationWrite, "configuration_write_failed"),
             (AgentError::Internal, "operation_failed"),
         ] {
-            let public = RpcError::from(error);
-            assert_eq!(public.code, code);
+            let public = Error::from(error);
+            assert!(public.to_string().starts_with(&format!("{code}: ")));
             assert!(!public.message.contains("PRIVATE_OS_DETAIL"));
             assert!(!public.message.contains("sk-hidden"));
         }
         let diagnostic =
             "The app-owned Codex model catalog is invalid. Reinstall Private AI Proxy.";
         assert_eq!(
-            RpcError::from(AgentError::MetadataUnavailable(diagnostic.to_string())).message,
+            Error::from(AgentError::MetadataUnavailable(diagnostic.to_string())).message,
             diagnostic
         );
     }

@@ -608,7 +608,6 @@ pub fn validate_web_ui(
             "Web UI port {port} is reserved for account connection callbacks; choose another port"
         ));
     }
-    // The prefix keeps these messages through the management error allowlist.
     listen::resolve(config.listen()).map_err(|error| format!("Web UI: {error}"))
 }
 

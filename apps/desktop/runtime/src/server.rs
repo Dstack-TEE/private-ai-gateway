@@ -1,5 +1,10 @@
+//! The service's lifecycle around the management API: it serves the API on
+//! the private local endpoint until a client, a signal or the owning app's
+//! exit shuts it down, and admits each command.
+
 use std::{
-    io::BufReader,
+    future::IntoFuture,
+    io,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc,
@@ -11,17 +16,19 @@ use serde_json::Value;
 use tokio::{
     runtime::Handle,
     sync::{RwLock, Semaphore},
-    task::JoinSet,
 };
+use tokio_util::sync::CancellationToken;
 
-use crate::controller::DesktopRuntime;
+use crate::{
+    api::{self, Api, ServiceBackend, ServiceHost},
+    controller::DesktopRuntime,
+};
 
 use desktop_core::{
-    protocol::{self, rpc, Command, Hello, Outcome, Request, Response, RpcError, ShutdownMode},
-    transport::{Listener, Stream},
+    protocol::{self, rpc, Command, ErrorCode, ShutdownMode},
+    transport,
 };
 
-const MAX_CLIENTS: usize = 32;
 /// How long shutdown waits for running management commands (a slow account
 /// request, an export) before stopping without them.
 pub(crate) const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -34,12 +41,13 @@ pub const EXIT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_IN_PROGRESS: &str = "Shutdown is already in progress";
 
-/// Lifecycle admission shared by every management transport of one service.
+/// Lifecycle admission shared by every listener of one service.
 pub(crate) struct Admission {
     draining: AtomicBool,
     pub(crate) mutations: RwLock<()>,
-    watchers: Semaphore,
     exports: Semaphore,
+    /// Cancelled once a shutdown succeeded; the service then exits.
+    stopped: CancellationToken,
 }
 
 impl Default for Admission {
@@ -47,41 +55,20 @@ impl Default for Admission {
         Self {
             draining: AtomicBool::new(false),
             mutations: RwLock::new(()),
-            watchers: Semaphore::new(4),
             exports: Semaphore::new(1),
+            stopped: CancellationToken::new(),
         }
     }
 }
 
 pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
-    let listener = Listener::bind(runtime.instance_lock()?)
+    let listener = transport::Listener::bind(runtime.instance_lock()?)
         .map_err(|error| format!("Cannot bind the private management endpoint: {error}"))?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|error| format!("Cannot configure the management endpoint: {error}"))?;
-    let executable = std::env::current_exe().map_err(|_| "Cannot locate backend executable")?;
-    let hello = Hello {
-        protocol_version: protocol::VERSION,
-        product: desktop_core::brand::APP_IDENTIFIER.into(),
-        version: protocol::BUILD_VERSION.into(),
-        instance_id: format!(
-            "{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|_| "Invalid system clock")?
-                .as_nanos()
-        ),
-        executable: executable.to_string_lossy().into_owned(),
-        process_id: std::process::id(),
-    };
-    let stopping = Arc::new(AtomicBool::new(false));
-    let permits = Arc::new(Semaphore::new(MAX_CLIENTS));
     let admission = runtime.admission();
-    let mut tasks = JoinSet::new();
+    let stopped = admission.stopped.clone();
     let handle = Handle::current();
     let startup = runtime.clone();
-    tasks.spawn_blocking(move || {
+    let startup = tokio::task::spawn_blocking(move || {
         // Before connecting, which may need an imported key.
         startup.import_legacy_secrets();
         let connect_on_launch = match startup.settings() {
@@ -99,12 +86,25 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
             }
         }
     });
+    let api = api::router(Api {
+        backend: ServiceBackend(runtime.clone()),
+        host: ServiceHost::default(),
+        states: runtime.subscribe(),
+        shutdown: stopped.clone(),
+        listener: api::Listener::Local,
+    });
+    let server = tokio::spawn(
+        axum::serve(LocalListener(listener), api)
+            .with_graceful_shutdown(stopped.clone().cancelled_owned())
+            .into_future(),
+    );
     let owner = owner_exited();
     tokio::pin!(owner);
     let signal = shutdown_signal();
     tokio::pin!(signal);
-    while !stopping.load(Ordering::Acquire) {
+    loop {
         tokio::select! {
+            () = stopped.cancelled() => break,
             _ = &mut owner => {
                 // A sandboxed service belongs to its GUI parent. Restoration
                 // errors remain retryable on next launch, never keep it alive.
@@ -119,7 +119,6 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
                         "Cannot finish backend shutdown: {error}"
                     ),
                 }
-                stopping.store(true, Ordering::Release);
                 break;
             }
             result = &mut signal => {
@@ -130,60 +129,64 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
                 let gate = admission.clone();
                 let result = tokio::task::spawn_blocking(move || shutdown(&worker, &gate, &executor, ShutdownMode::Quit, true)).await.map_err(|_| "Shutdown task failed")?;
                 match result {
-                    Ok(()) => { stopping.store(true, Ordering::Release); break; },
+                    Ok(()) => break,
                     Err(error) => runtime.report_error(error),
                 }
                 signal.set(shutdown_signal());
             }
-            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
         }
-        match listener.accept() {
-            Ok(stream) => {
-                let Ok(permit) = permits.clone().try_acquire_owned() else {
-                    drop(stream);
-                    continue;
-                };
-                let runtime = runtime.clone();
-                let hello = hello.clone();
-                let stopping = stopping.clone();
-                let handle = handle.clone();
-                let admission = admission.clone();
-                tasks.spawn_blocking(move || {
-                    let _permit = permit;
-                    // Malformed/disconnected clients cannot tear down the service.
-                    let _ = connection(stream, runtime, hello, stopping, admission, handle);
-                });
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::PermissionDenied
-                        | std::io::ErrorKind::ConnectionAborted
-                        | std::io::ErrorKind::ConnectionReset
-                        | std::io::ErrorKind::BrokenPipe
-                        | std::io::ErrorKind::UnexpectedEof
-                ) => {}
-            Err(error) => return Err(format!("The management listener failed: {error}")),
-        }
-        while tasks.try_join_next().is_some() {}
     }
-    drop(listener);
-    // Idle clients have bounded read deadlines; watch clients observe stopping.
-    // A command blocked on the network is not waited for past the bound.
+    stopped.cancel();
+    drop(startup);
+    // Open connections finish their answer and close; event streams end at
+    // `stopped`. A command blocked on the network is not waited for past the bound.
     tracing::info!("Shutdown: closing management connections");
-    let drained = tokio::time::timeout(EXIT_DRAIN_TIMEOUT, async {
-        while tasks.join_next().await.is_some() {}
-    })
-    .await;
-    if drained.is_err() {
+    if tokio::time::timeout(EXIT_DRAIN_TIMEOUT, server).await.is_err() {
         tracing::warn!(
-            "Shutdown: {} management connections still open after {} s; closing without them",
-            tasks.len(),
+            "Shutdown: management connections still open after {} s; closing without them",
             EXIT_DRAIN_TIMEOUT.as_secs()
         );
     }
     Ok(())
+}
+
+/// The local endpoint as an axum listener. Accept errors never end the
+/// service: a peer of another user is refused, and a failure such as `EMFILE`
+/// waits a second before accepting again, as axum's own listeners (after
+/// hyper 0.14's `sleep_on_errors`) handle them.
+struct LocalListener(transport::Listener);
+
+impl axum::serve::Listener for LocalListener {
+    type Io = transport::Stream;
+    type Addr = ();
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            match self.0.accept().await {
+                Ok(stream) => return (stream, ()),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::PermissionDenied
+                            | io::ErrorKind::ConnectionAborted
+                            | io::ErrorKind::ConnectionRefused
+                            | io::ErrorKind::ConnectionReset
+                            | io::ErrorKind::BrokenPipe
+                    ) =>
+                {
+                    tracing::debug!("Refused a management connection: {error}");
+                }
+                Err(error) => {
+                    tracing::error!("Management endpoint accept error: {error}");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        Ok(())
+    }
 }
 
 async fn owner_exited() {
@@ -234,134 +237,47 @@ async fn shutdown_signal() -> Result<(), String> {
     }
 }
 
-fn connection(
-    mut stream: Stream,
-    runtime: Arc<DesktopRuntime>,
-    hello: Hello,
-    stopping: Arc<AtomicBool>,
-    admission: Arc<Admission>,
-    handle: Handle,
-) -> std::io::Result<()> {
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    protocol::write(&mut stream, &hello)?;
-    let mut reader = BufReader::new(stream);
-    let request: Request = protocol::read(&mut reader)?;
-    if request.version != protocol::VERSION {
-        return protocol::write(
-            reader.get_mut(),
-            &Response {
-                id: request.id,
-                outcome: Outcome::Error(RpcError::new(
-                    "incompatible_protocol",
-                    "Update PAP clients and backend together.",
-                )),
-            },
-        );
-    }
-    if stopping.load(Ordering::Acquire) {
-        return Ok(());
-    }
-    if matches!(request.command, Command::Watch) {
-        let Ok(_watcher) = admission.watchers.try_acquire() else {
-            return protocol::write(
-                reader.get_mut(),
-                &Response {
-                    id: request.id,
-                    outcome: Outcome::Error(RpcError::new(
-                        "busy",
-                        "The state subscription limit has been reached.",
-                    )),
-                },
-            );
-        };
-        let mut states = runtime.subscribe();
-        while !stopping.load(Ordering::Acquire) {
-            let result = protocol::encode::<rpc::Watch>(states.borrow_and_update().clone());
-            protocol::write(
-                reader.get_mut(),
-                &Response {
-                    id: request.id,
-                    outcome: outcome(result),
-                },
-            )?;
-            // A full snapshot heartbeat bounds disconnect detection and supports coalescing.
-            for _ in 0..10 {
-                if stopping.load(Ordering::Acquire) || states.has_changed().unwrap_or(false) {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-        }
-        return Ok(());
-    }
-    if let Command::Shutdown { instance_id, mode } = &request.command {
-        if instance_id != &hello.instance_id {
-            return protocol::write(
-                reader.get_mut(),
-                &Response {
-                    id: request.id,
-                    outcome: Outcome::Error(RpcError::new(
-                        "instance_changed",
-                        "The backend instance changed; reconnect before shutting down.",
-                    )),
-                },
-            );
-        }
-        tracing::info!("A client requested shutdown");
-        // A refusal's reason, which may name local paths, stays in the service log.
-        let result = shutdown(&runtime, &admission, &handle, *mode, true)
-            .map_err(|error| match error.as_str() {
-                SHUTDOWN_IN_PROGRESS => RpcError::operation(&error),
-                _ => RpcError::new(
-                    "shutdown_refused",
-                    "The backend did not stop and keeps running; the service log has the reason (`pap doctor` shows where).",
-                ),
-            })
-            .and_then(protocol::encode::<rpc::Shutdown>);
-        if result.is_ok() {
-            stopping.store(true, Ordering::Release);
-        }
-        return protocol::write(
-            reader.get_mut(),
-            &Response {
-                id: request.id,
-                outcome: outcome(result),
-            },
-        );
-    }
-    let result = execute(&runtime, &admission, &handle, request.command);
-    protocol::write(
-        reader.get_mut(),
-        &Response {
-            id: request.id,
-            outcome: outcome(result),
-        },
-    )
-}
-
-/// Admits and runs one management command. Both the IPC endpoint and the
-/// service-hosted web UI use this path.
+/// Admits and runs one management command, for every listener.
 pub(crate) fn execute(
     runtime: &Arc<DesktopRuntime>,
     admission: &Admission,
     handle: &Handle,
     command: Command,
-) -> Result<Value, RpcError> {
-    if matches!(command, Command::State) {
-        return handle.block_on(crate::dispatch::dispatch(runtime, command));
+) -> Result<Value, protocol::Error> {
+    match command {
+        Command::GetState {} => return handle.block_on(crate::dispatch::dispatch(runtime, command)),
+        Command::Shutdown { instance_id, mode } => {
+            if instance_id != api::version().instance_id {
+                return Err(protocol::Error::new(
+                    ErrorCode::InstanceChanged,
+                    "The backend instance changed; reconnect before shutting down.",
+                ));
+            }
+            tracing::info!("A client requested shutdown");
+            // A refusal's reason, which may name local paths, stays in the service log.
+            return shutdown(runtime, admission, handle, mode, true)
+                .map_err(|error| match error.as_str() {
+                    SHUTDOWN_IN_PROGRESS => protocol::Error::busy(),
+                    _ => protocol::Error::new(
+                        ErrorCode::ShutdownRefused,
+                        "The backend did not stop and keeps running; the service log has the reason (`pap doctor` shows where).",
+                    ),
+                })
+                .and_then(|()| protocol::encode::<rpc::Shutdown>(()));
+        }
+        _ => {}
     }
     let _operation = admission.mutations.blocking_read();
     if admission.draining.load(Ordering::Acquire) {
-        return Err(RpcError::new("busy", "The backend is shutting down."));
+        return Err(protocol::Error::new(
+            ErrorCode::Busy,
+            "The backend is shutting down.",
+        ));
     }
     let _export = if matches!(command, Command::ExportUsage { .. }) {
-        Some(
-            admission
-                .exports
-                .try_acquire()
-                .map_err(|_| RpcError::new("busy", "Another export is in progress."))?,
-        )
+        Some(admission.exports.try_acquire().map_err(|_| {
+            protocol::Error::new(ErrorCode::Busy, "Another export is in progress.")
+        })?)
     } else {
         None
     };
@@ -391,8 +307,12 @@ fn shutdown(
         Err(error) => {
             tracing::error!("Shutdown failed; exiting anyway: {error}");
             watchdog.keep_until_exit();
+            admission.stopped.cancel();
         }
-        Ok(()) => watchdog.keep_until_exit(),
+        Ok(()) => {
+            watchdog.keep_until_exit();
+            admission.stopped.cancel();
+        }
     }
     result
 }
@@ -413,7 +333,7 @@ pub(crate) async fn drain_and_stop(
                 DRAIN_TIMEOUT.as_secs()
             )
         });
-    runtime.shutdown(mode).await
+    runtime.shutdown(mode).await.map_err(|error| error.to_string())
 }
 
 /// Exits the process if it is still running [`SHUTDOWN_TIMEOUT`] after
@@ -445,9 +365,3 @@ impl Watchdog {
     }
 }
 
-fn outcome(result: Result<Value, RpcError>) -> Outcome {
-    match result {
-        Ok(value) => Outcome::Result(value),
-        Err(error) => Outcome::Error(error),
-    }
-}

@@ -402,7 +402,7 @@ fn shutdown_blocks_later_configuration_changes() {
                 ConnectOptions::default()
             )
             .unwrap_err(),
-        AgentOperationError::Runtime(message) if message == "The app is closing"
+        crate::Error::Internal(message) if message == "The app is closing"
     ));
 }
 

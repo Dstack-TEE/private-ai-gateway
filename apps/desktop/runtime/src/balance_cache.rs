@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-type BalanceResult = Result<Option<AccountBalance>, String>;
+type BalanceResult = Result<Option<AccountBalance>, crate::Error>;
 type Entry = Arc<tokio::sync::Mutex<Option<(Instant, BalanceResult)>>>;
 
 #[derive(Default)]

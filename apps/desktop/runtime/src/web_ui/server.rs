@@ -1,36 +1,34 @@
 use std::{
-    convert::Infallible,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
-    time::Duration,
 };
 
 use axum::{
-    body::Body,
-    extract::{ConnectInfo, Path, State},
-    http::{header, HeaderMap, HeaderValue, Method as HttpMethod, Request, StatusCode},
-    middleware::{self, Next},
-    response::{sse::Event as SseEvent, IntoResponse, Response, Sse},
+    body::{Body, Bytes},
+    extract::{ConnectInfo, Request, State},
+    http::{header, HeaderMap, HeaderValue, Method as HttpMethod, StatusCode},
+    middleware::Next,
+    response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
+    Extension, Json, Router,
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
-use serde_json::{json, Value};
-use tokio::{
-    runtime::Handle,
-    sync::{broadcast, watch, Semaphore},
-};
+use serde_json::json;
+use tokio::{runtime::Handle, sync::Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use super::{auth::SESSION_LIFETIME, throttle::THROTTLE_REFILL, Auth, Throttle};
-use crate::controller::DesktopRuntime;
+use crate::{
+    api::{self, Api, Caller, ServiceBackend, ServiceHost},
+    controller::DesktopRuntime,
+};
 use desktop_core::{
-    contracts::{AppState, DistributionCapabilities, DistributionChannel, WebBootstrap},
+    contracts::{DistributionCapabilities, DistributionChannel, WebBootstrap},
     listen::{self, url_host, ResolvedListen},
-    protocol::{Command, RpcError, BUILD_VERSION},
-    ui_api::{self, Backend, Event, Host, Method, StateEventProjection},
+    protocol::{self, ErrorCode, BUILD_VERSION},
+    ui_api::{self, Backend, Method},
 };
 
 /// Built by `npm run build:web`; a missing bundle only disables the web UI.
@@ -44,55 +42,20 @@ const SESSION_ENDED: &str = "This web UI session has ended or expired. Sign in a
 const SIGN_IN_FAILED: &str = "Sign-in failed. Check the password and try again.";
 const WRONG_CURRENT_PASSWORD: &str = "The current password is incorrect.";
 const THROTTLED: &str = "Too many sign-in attempts. Wait a few seconds and try again.";
-const SESSION_CHECK: Duration = Duration::from_secs(15);
 /// At most this many password checks run at once, across all clients. Each
 /// Argon2 verification holds 19 MiB, and the per-client throttle alone admits
 /// a burst from every address.
 const CONCURRENT_VERIFICATIONS: usize = 2;
 static VERIFICATIONS: Semaphore = Semaphore::const_new(CONCURRENT_VERIFICATIONS);
 
-/// Runs management commands through the same admission and dispatch as the IPC endpoint.
-#[derive(Clone)]
-struct ServiceBackend(Arc<DesktopRuntime>);
-
-impl Backend for ServiceBackend {
-    async fn execute(&self, command: Command) -> Result<Value, String> {
-        let runtime = self.0.clone();
-        tokio::task::spawn_blocking(move || {
-            let admission = runtime.admission();
-            crate::server::execute(&runtime, &admission, &Handle::current(), command)
-        })
-        .await
-        .map_err(|_| "Management request task failed".to_string())?
-        // Match the IPC client's rendering so both transports report identical errors.
-        .map_err(|error| format!("{}: {}", error.code, error.message))
-    }
-}
-
-#[derive(Clone)]
-struct WebHost {
-    events: broadcast::Sender<Event>,
-}
-
-impl Host for WebHost {
-    fn emit(&self, event: Event) -> Result<(), String> {
-        let _ = self.events.send(event);
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-struct WebState<B> {
-    backend: B,
-    host: WebHost,
+/// How the web UI listener admits browsers.
+pub(crate) struct Gate {
     auth: Arc<Auth>,
     throttle: Arc<Throttle>,
-    states: watch::Receiver<AppState>,
     /// Accepted `Host` values; see [`allowed_hosts`].
-    hosts: Arc<[String]>,
+    hosts: Vec<String>,
     /// Session cookie name; see [`cookie_name`].
-    cookie: Arc<str>,
-    shutdown: CancellationToken,
+    cookie: String,
 }
 
 pub(super) fn start(
@@ -109,23 +72,23 @@ pub(super) fn start(
     }
     let address = listen.bind;
     let listener = bind(address, reopening)?;
-    let state = WebState {
+    let router = api::router(Api {
         backend: ServiceBackend(runtime.clone()),
-        host: WebHost {
-            events: broadcast::channel(64).0,
-        },
-        auth,
-        throttle,
+        host: ServiceHost::default(),
         states: runtime.subscribe(),
-        hosts: allowed_hosts(listen).into(),
-        cookie: cookie_name(listen.bind.port()).into(),
         shutdown: shutdown.clone(),
-    };
+        listener: api::Listener::Web(Arc::new(Gate {
+            auth,
+            throttle,
+            hosts: allowed_hosts(listen),
+            cookie: cookie_name(listen.bind.port()),
+        })),
+    });
     handle.spawn(async move {
         let result = match tokio::net::TcpListener::from_std(listener) {
             Ok(listener) => axum::serve(
                 listener,
-                router(state).into_make_service_with_connect_info::<SocketAddr>(),
+                router.into_make_service_with_connect_info::<SocketAddr>(),
             )
             .with_graceful_shutdown(shutdown.cancelled_owned())
             .await
@@ -192,66 +155,82 @@ fn bind(address: SocketAddr, reopening: bool) -> Result<std::net::TcpListener, S
     Ok(listener)
 }
 
-fn router<B: Backend>(state: WebState<B>) -> Router {
-    Router::new()
-        .route("/api/session", post(session::<B>).delete(sign_out::<B>))
+/// The web UI's own routes around the shared API: sign-in, the bootstrap, a
+/// password change that proves the current password, and the page.
+pub(crate) fn routes<B: Backend>(routes: Router<Api<B>>) -> Router<Api<B>> {
+    routes
+        .route("/api/session", post(session).delete(sign_out))
         .route("/api/bootstrap", get(bootstrap))
-        .route("/api/events", get(events::<B>))
-        .route("/api/rpc/{method}", post(rpc::<B>))
+        .route(
+            &format!("{}{}", protocol::RPC_PATH, Method::SetWebUiPassword.name()),
+            post(change_password::<B>),
+        )
         .fallback(asset)
-        .layer(middleware::from_fn_with_state(state.clone(), security::<B>))
-        .with_state(state)
 }
 
-async fn security<B: Backend>(
-    State(state): State<WebState<B>>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    request: Request<Body>,
-    next: Next,
-) -> Response {
-    let headers = request.headers();
-    let Some(host) = valid_host(headers, &state.hosts) else {
-        return secure_response(status(StatusCode::FORBIDDEN, "Invalid request host"));
-    };
-    let path = request.uri().path();
-    if path.starts_with("/api/") {
-        if !valid_origin(headers, host, request.method()) {
-            return secure_response(status(StatusCode::FORBIDDEN, "Invalid request origin"));
-        }
-        // Only sign-in is reachable without a session, and both it and rejected
-        // requests draw from the client's throttle budget.
-        if path == "/api/session" && request.method() == HttpMethod::POST {
-            if !state.throttle.allow(peer.ip()) {
-                return secure_response(throttled());
+impl Gate {
+    /// Admits a browser request: an allowed host, the page's origin, a live
+    /// session (only sign-in goes without), JSON mutations; every answer gets
+    /// the security headers.
+    pub(crate) async fn authorize(self: &Arc<Self>, mut request: Request<Body>, next: Next) -> Response {
+        let peer = request
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED), |info| info.0.ip());
+        let headers = request.headers();
+        let Some(host) = valid_host(headers, &self.hosts) else {
+            return secure_response(status(ErrorCode::Forbidden, "Invalid request host"));
+        };
+        let path = request.uri().path();
+        let mut session = String::new();
+        if path.starts_with("/api/") {
+            if !valid_origin(headers, host, request.method()) {
+                return secure_response(status(ErrorCode::Forbidden, "Invalid request origin"));
             }
-        } else {
-            let jar = CookieJar::from_headers(headers);
-            if !session_token(&jar, &state.cookie).is_some_and(|token| state.auth.authorize(token))
+            // Only sign-in is reachable without a session, and both it and rejected
+            // requests draw from the client's throttle budget.
+            if path == "/api/session" && request.method() == HttpMethod::POST {
+                if !self.throttle.allow(peer) {
+                    return secure_response(throttled());
+                }
+            } else {
+                let jar = CookieJar::from_headers(headers);
+                match session_token(&jar, &self.cookie).filter(|token| self.auth.authorize(token)) {
+                    Some(token) => session = token.to_string(),
+                    None => {
+                        let response = if self.throttle.allow(peer) {
+                            status(ErrorCode::Unauthorized, SESSION_ENDED)
+                        } else {
+                            throttled()
+                        };
+                        // Expire a cookie whose session ended, however it ended.
+                        return secure_response(
+                            (expire_session(jar, &self.cookie), response).into_response(),
+                        );
+                    }
+                }
+            }
+            if request.method() == HttpMethod::POST
+                && headers
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .is_none_or(|value| !value.eq_ignore_ascii_case("application/json"))
             {
-                let response = if state.throttle.allow(peer.ip()) {
-                    status(StatusCode::UNAUTHORIZED, SESSION_ENDED)
-                } else {
-                    throttled()
-                };
-                // Expire a cookie whose session ended, however it ended.
-                return secure_response(
-                    (expire_session(jar, &state.cookie), response).into_response(),
-                );
+                return secure_response(status(
+                    ErrorCode::UnsupportedMediaType,
+                    "JSON body required",
+                ));
             }
         }
-        if request.method() == HttpMethod::POST
-            && headers
-                .get(header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .is_none_or(|value| !value.eq_ignore_ascii_case("application/json"))
-        {
-            return secure_response(status(
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "JSON body required",
-            ));
-        }
+        request.extensions_mut().insert(Caller::Browser { session });
+        request.extensions_mut().insert(self.clone());
+        secure_response(next.run(request).await)
     }
-    secure_response(next.run(request).await)
+
+    /// Whether a browser's session still lives; an open page counts as activity.
+    pub(crate) fn session_live(&self, session: &str) -> bool {
+        self.auth.authorize(session)
+    }
 }
 
 fn secure_response(mut response: Response) -> Response {
@@ -363,24 +342,27 @@ struct SessionRequest {
 }
 
 /// Signs in with the password and sets the session cookie.
-async fn session<B: Backend>(
-    State(state): State<WebState<B>>,
+async fn session(
+    Extension(gate): Extension<Arc<Gate>>,
     jar: CookieJar,
-    Json(request): Json<SessionRequest>,
+    body: Bytes,
 ) -> Response {
-    let auth = state.auth.clone();
+    let Ok(request) = serde_json::from_slice::<SessionRequest>(&body) else {
+        return api::error(protocol::Error::invalid_request());
+    };
+    let auth = gate.auth.clone();
     let Some(token) = verify(move || auth.sign_in(&request.password))
         .await
         .flatten()
     else {
-        return status(StatusCode::UNAUTHORIZED, SIGN_IN_FAILED);
+        return status(ErrorCode::Unauthorized, SIGN_IN_FAILED);
     };
     // A browser signing in again replaces its previous session.
-    if let Some(previous) = session_token(&jar, &state.cookie) {
-        state.auth.revoke(previous);
+    if let Some(previous) = session_token(&jar, &gate.cookie) {
+        gate.auth.revoke(previous);
     }
     (
-        jar.add(session_cookie(&state.cookie, &token)),
+        jar.add(session_cookie(&gate.cookie, &token)),
         StatusCode::NO_CONTENT,
     )
         .into_response()
@@ -397,50 +379,46 @@ struct PasswordChange {
 /// and draws from its client's throttle budget to do so. The change ends every
 /// session, so the caller receives a fresh session cookie.
 async fn change_password<B: Backend>(
-    state: WebState<B>,
-    peer: IpAddr,
+    State(api): State<Api<B>>,
+    Extension(gate): Extension<Arc<Gate>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     jar: CookieJar,
-    params: Value,
+    body: Bytes,
 ) -> Response {
-    let Ok(change) = serde_json::from_value::<PasswordChange>(params) else {
-        return rpc_error(ui_api::Error::InvalidRequest.rpc());
+    let Some(change) = api::parameters(&body)
+        .and_then(|params| serde_json::from_value::<PasswordChange>(params).ok())
+    else {
+        return api::error(protocol::Error::invalid_request());
     };
-    if !state.throttle.allow(peer) {
+    if !gate.throttle.allow(peer.ip()) {
         return throttled();
     }
-    if state.auth.has_password() {
-        let auth = state.auth.clone();
+    if gate.auth.has_password() {
+        let auth = gate.auth.clone();
         let current = change.current_password.unwrap_or_default();
         let verified = verify(move || auth.verify_password(&current))
             .await
             .unwrap_or(false);
         if !verified {
-            return rpc_error(RpcError::new("invalid_state", WRONG_CURRENT_PASSWORD));
+            return api::error(protocol::Error::invalid_state(WRONG_CURRENT_PASSWORD));
         }
     }
     let params = json!({ "password": change.password });
-    match ui_api::invoke(
-        &state.backend,
-        &state.host,
-        Method::SetWebUiPassword,
-        params,
-    )
-    .await
-    {
+    match ui_api::invoke(&api.backend, &api.host, Method::SetWebUiPassword, params).await {
         Ok(result) => {
-            let jar = set_session(jar, &state.cookie, state.auth.open_session().as_deref());
+            let jar = set_session(jar, &gate.cookie, gate.auth.open_session().as_deref());
             (jar, Json(json!({ "result": result }))).into_response()
         }
-        Err(error) => rpc_error(error.rpc()),
+        Err(error) => api::error(error.into_api()),
     }
 }
 
 /// Signs this browser out; other browser sessions stay open.
-async fn sign_out<B: Backend>(State(state): State<WebState<B>>, jar: CookieJar) -> Response {
-    if let Some(token) = session_token(&jar, &state.cookie) {
-        state.auth.revoke(token);
+async fn sign_out(Extension(gate): Extension<Arc<Gate>>, jar: CookieJar) -> Response {
+    if let Some(token) = session_token(&jar, &gate.cookie) {
+        gate.auth.revoke(token);
     }
-    (expire_session(jar, &state.cookie), StatusCode::NO_CONTENT).into_response()
+    (expire_session(jar, &gate.cookie), StatusCode::NO_CONTENT).into_response()
 }
 
 async fn bootstrap() -> Json<WebBootstrap> {
@@ -459,120 +437,13 @@ async fn bootstrap() -> Json<WebBootstrap> {
     })
 }
 
-/// Each connection starts with a full snapshot, so a client that falls behind
-/// or reconnects resynchronizes without replaying missed events.
-async fn events<B: Backend>(
-    State(state): State<WebState<B>>,
-    jar: CookieJar,
-) -> Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>> {
-    let token = session_token(&jar, &state.cookie)
-        .unwrap_or_default()
-        .to_string();
-    let mut states = state.states.clone();
-    let initial = states.borrow_and_update().clone();
-    let mut projection = StateEventProjection::new(&initial);
-    let mut receiver = state.host.events.subscribe();
-    let mut snapshot = vec![
-        Event::new(
-            ui_api::STATE_EVENT,
-            serde_json::to_value(&initial).unwrap_or(Value::Null),
-        ),
-        Event::new(
-            ui_api::CLIENT_KEY_CHANGED_EVENT,
-            json!(initial.client_key_available.unwrap_or(true)),
-        ),
-    ];
-    if let Ok((_, events)) = ui_api::preference_events(&state.backend, &state.host).await {
-        snapshot.extend(events);
-    }
-    let shutdown = state.shutdown.clone();
-    let auth = state.auth.clone();
-    let (backend, host) = (state.backend.clone(), state.host.clone());
-    let stream = async_stream::stream! {
-        for event in snapshot {
-            yield Ok(sse(&event));
-        }
-        let mut session = tokio::time::interval(SESSION_CHECK);
-        loop {
-            tokio::select! {
-                () = shutdown.cancelled() => break,
-                changed = states.changed() => {
-                    if changed.is_err() {
-                        break;
-                    }
-                    let current = states.borrow_and_update().clone();
-                    if projection.settings_changed(&current) {
-                        if let Ok((_, events)) = ui_api::preference_events(&backend, &host).await {
-                            for event in events {
-                                yield Ok(sse(&event));
-                            }
-                        }
-                    }
-                    for event in projection.project(&current) {
-                        yield Ok(sse(&event));
-                    }
-                }
-                received = receiver.recv() => match received {
-                    Ok(event) => yield Ok(sse(&event)),
-                    // End the stream; the client reconnects and receives a fresh snapshot.
-                    Err(_) => break,
-                },
-                // An open page counts as activity; revoked or expired sessions end here.
-                _ = session.tick() => if !auth.authorize(&token) {
-                    break;
-                },
-            }
-        }
-    };
-    Sse::new(stream).keep_alive(
-        axum::response::sse::KeepAlive::new()
-            .interval(Duration::from_secs(15))
-            .text("keep-alive"),
-    )
-}
-
-fn sse(event: &Event) -> SseEvent {
-    SseEvent::default()
-        .json_data(event)
-        .unwrap_or_else(|_| SseEvent::default().data("{}"))
-}
-
-async fn rpc<B: Backend>(
-    State(state): State<WebState<B>>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    Path(method): Path<String>,
-    jar: CookieJar,
-    Json(params): Json<Value>,
-) -> Response {
-    let Some(method) = Method::from_name(&method) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(
-                json!({ "error": RpcError::new("method_not_found", "Unknown management method") }),
-            ),
-        )
-            .into_response();
-    };
-    if method == Method::SetWebUiPassword {
-        return change_password(state, peer.ip(), jar, params).await;
-    }
-    match ui_api::invoke(&state.backend, &state.host, method, params).await {
-        Ok(result) => Json(json!({ "result": result })).into_response(),
-        Err(error) => rpc_error(error.rpc()),
-    }
-}
-
-fn rpc_error(error: RpcError) -> Response {
-    (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response()
-}
-
 async fn asset(request: Request<Body>) -> Response {
     if request.method() != HttpMethod::GET && request.method() != HttpMethod::HEAD {
-        return status(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed");
+        return status(ErrorCode::MethodNotAllowed, "Method not allowed");
     }
     let path = request.uri().path().trim_start_matches('/');
     if path == "api" || path.starts_with("api/") {
-        return status(StatusCode::NOT_FOUND, "Unknown API endpoint");
+        return status(ErrorCode::NotFound, "Unknown API endpoint");
     }
     // Unknown client routes render the single-page app.
     let path = if WebAssets::get(path).is_some() {
@@ -581,7 +452,7 @@ async fn asset(request: Request<Body>) -> Response {
         "index.html"
     };
     let Some(asset) = WebAssets::get(path) else {
-        return status(StatusCode::NOT_FOUND, "Web UI not found");
+        return status(ErrorCode::NotFound, "Web UI not found");
     };
     let content_type = match path.rsplit('.').next() {
         Some("js") => "text/javascript; charset=utf-8",
@@ -599,7 +470,7 @@ async fn asset(request: Request<Body>) -> Response {
 }
 
 fn throttled() -> Response {
-    let mut response = status(StatusCode::TOO_MANY_REQUESTS, THROTTLED);
+    let mut response = status(ErrorCode::TooManyRequests, THROTTLED);
     response.headers_mut().insert(
         header::RETRY_AFTER,
         HeaderValue::from(THROTTLE_REFILL.as_secs()),
@@ -607,12 +478,8 @@ fn throttled() -> Response {
     response
 }
 
-fn status(code: StatusCode, message: &'static str) -> Response {
-    (
-        code,
-        Json(json!({ "error": { "code": code.as_u16(), "message": message } })),
-    )
-        .into_response()
+fn status(code: ErrorCode, message: &'static str) -> Response {
+    api::error(protocol::Error::new(code, message))
 }
 
 #[cfg(test)]

@@ -99,10 +99,10 @@ impl LocalState {
         self.lock()?.clone()
     }
 
-    pub fn update(
+    pub fn update<E: From<String>>(
         &self,
-        change: impl FnOnce(&mut LocalSecrets) -> Result<(), String>,
-    ) -> Result<(), String> {
+        change: impl FnOnce(&mut LocalSecrets) -> Result<(), E>,
+    ) -> Result<(), E> {
         let mut current = self.lock()?;
         let saved = current.as_ref().map_err(Clone::clone)?;
         let mut next = saved.clone();

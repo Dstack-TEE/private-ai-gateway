@@ -41,6 +41,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use toml_edit::{DocumentMut, Item, TableLike};
+use crate::Error;
 
 const CREDENTIALS_HEADER: &str =
     "# Private AI Proxy credentials: provider API keys and the web UI password
@@ -239,11 +240,11 @@ impl Settings {
         self.import_error.is_none()
     }
 
-    fn writable(&self) -> Result<MutexGuard<'_, Applied>, String> {
+    fn writable(&self) -> Result<MutexGuard<'_, Applied>, Error> {
         if self.import_error.is_some() {
-            return Err(IMPORT_PENDING.to_string());
+            return Err(Error::invalid_state(IMPORT_PENDING));
         }
-        self.lock()
+        Ok(self.lock()?)
     }
 
     pub fn profile_key(&self, profile_id: &str) -> Result<Option<String>, String> {
@@ -273,12 +274,12 @@ impl Settings {
     /// Changes `config.toml`; returns the settings now in effect.
     pub fn update_config(
         &self,
-        change: impl FnOnce(&mut Config) -> Result<(), String>,
-    ) -> Result<Config, String> {
+        change: impl FnOnce(&mut Config) -> Result<(), Error>,
+    ) -> Result<Config, Error> {
         let mut applied = self.writable()?;
         let mut next = applied.current.config.clone();
         change(&mut next)?;
-        config::validate(&mut next).map_err(|invalid| invalid.message)?;
+        config::validate(&mut next).map_err(|invalid| Error::invalid_state(invalid.message))?;
         if next != applied.current.config {
             write(
                 &self.dir,
@@ -298,8 +299,8 @@ impl Settings {
     /// Changes `credentials.toml`, which is always left owner-only.
     pub fn update_credentials(
         &self,
-        change: impl FnOnce(&mut Credentials) -> Result<(), String>,
-    ) -> Result<(), String> {
+        change: impl FnOnce(&mut Credentials) -> Result<(), Error>,
+    ) -> Result<(), Error> {
         let mut applied = self.writable()?;
         let mut next = applied.current.credentials.clone();
         change(&mut next)?;
@@ -405,21 +406,24 @@ pub(crate) fn write<T: Serialize>(
     from: &T,
     to: &T,
     parse: fn(&str) -> Result<Parsed<T>, String>,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let path = dir.join(name);
     let encode =
         |value: &T| toml_edit::ser::to_document(value).map_err(|_| format!("Cannot encode {name}"));
     let (from, to) = (encode(from)?, encode(to)?);
     let current = read(&path, name == CREDENTIALS_FILE)
         .map_err(|error| format!("Cannot read {name}: {error}"))?;
+    // The file's own errors name it with a position; the user fixes them.
     let text =
         edit(current.as_deref().unwrap_or(header), &from, &to).map_err(|()| {
-            match current.as_deref().map(parse) {
+            Error::invalid_state(match current.as_deref().map(parse) {
                 Some(Err(error)) => format!("{error}. Fix {name} before changing settings."),
                 _ => format!("{name} is not valid TOML. Fix it before changing settings."),
-            }
+            })
         })?;
-    parse(&text).map_err(|error| format!("{error}. Fix {name} before changing settings."))?;
+    parse(&text).map_err(|error| {
+        Error::invalid_state(format!("{error}. Fix {name} before changing settings."))
+    })?;
     private_fs::create_private_dir(dir)
         .map_err(|error| format!("Cannot create the settings directory: {error}"))?;
     let private = name == CREDENTIALS_FILE;
@@ -430,9 +434,11 @@ pub(crate) fn write<T: Serialize>(
     };
     replace(&path, &text, Some(current.as_deref())).map_err(|error| {
         if private_fs::ChangedOnDisk::is(&error) {
-            format!("{name} changed on disk while saving; review it and retry")
+            Error::invalid_state(format!(
+                "{name} changed on disk while saving; review it and retry"
+            ))
         } else {
-            format!("Cannot save {name}: {error}")
+            format!("Cannot save {name}: {error}").into()
         }
     })?;
     Ok(())

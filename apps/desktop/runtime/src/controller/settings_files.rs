@@ -3,19 +3,19 @@ use crate::settings::Snapshot;
 
 impl DesktopRuntime {
     /// The settings in effect, as `config.toml` holds them.
-    pub fn settings(&self) -> Result<Config, String> {
-        self.settings.config()
+    pub fn settings(&self) -> Result<Config, Error> {
+        Ok(self.settings.config()?)
     }
 
     /// Saves one preference; clients apply it themselves.
     pub fn set_preference(
         &self,
         change: desktop_core::protocol::Preference,
-    ) -> Result<Config, String> {
-        self.update_config(|saved| {
+    ) -> Result<Config, Error> {
+        Ok(self.update_config(|saved| {
             change.apply(saved);
             Ok(())
-        })
+        })?)
     }
 
     /// Applies edits of `config.toml` or `credentials.toml` made outside the
@@ -76,7 +76,7 @@ impl DesktopRuntime {
         self: &Arc<Self>,
         previous: &Snapshot,
         current: &Snapshot,
-    ) -> Result<(), String> {
+    ) -> Result<(), Error> {
         let (old, new) = (&previous.config, &current.config);
         if old.local_api != new.local_api {
             self.apply_local_api(new.local_api.clone()).await?;

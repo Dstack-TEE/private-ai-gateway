@@ -4,7 +4,7 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use desktop_core::protocol::{encode, rpc, Call, Command, RpcError, BUILD_VERSION};
+use desktop_core::protocol::{self, encode, rpc, Call, Command, ErrorCode, BUILD_VERSION};
 use serde_json::Value;
 
 use crate::controller::DesktopRuntime;
@@ -13,14 +13,12 @@ use crate::controller::DesktopRuntime;
 pub(crate) async fn dispatch(
     runtime: &Arc<DesktopRuntime>,
     command: Command,
-) -> Result<Value, RpcError> {
+) -> Result<Value, protocol::Error> {
     match command {
-        Command::State => respond::<rpc::State, _>(runtime.state()),
-        // Streams run on their own connection in `server`.
-        Command::Watch => respond::<rpc::Watch, _>(Err("Subscription requires its own connection")),
-        Command::Start(config) => respond::<rpc::Start, _>(runtime.start(config)),
-        Command::Stop => respond::<rpc::Stop, _>(runtime.stop()),
-        // Answered by the connection under exclusive lifecycle admission.
+        Command::GetState {} => respond::<rpc::GetState, _>(runtime.state()),
+        Command::Start { config } => respond::<rpc::Start, _>(runtime.start(config)),
+        Command::Stop {} => respond::<rpc::Stop, _>(runtime.stop()),
+        // Answered by `server::shutdown` under exclusive lifecycle admission.
         Command::Shutdown { .. } => {
             respond::<rpc::Shutdown, _>(Err("Shutdown requires lifecycle admission"))
         }
@@ -50,13 +48,13 @@ pub(crate) async fn dispatch(
         Command::BeginAccountLogin { profile } => {
             respond::<rpc::BeginAccountLogin, _>(runtime.begin_account_login(profile).await)
         }
-        Command::SaveAccountLogin {
+        Command::BeginAccountSave {
             operation_id,
             id,
             profile,
             require_production_os,
             workspace_id,
-        } => respond::<rpc::SaveAccountLogin, _>(runtime.begin_account_save(
+        } => respond::<rpc::BeginAccountSave, _>(runtime.begin_account_save(
             operation_id,
             id,
             profile,
@@ -66,11 +64,11 @@ pub(crate) async fn dispatch(
         Command::AccountSaveResult { operation_id } => {
             respond::<rpc::AccountSaveResult, _>(runtime.account_save_result(&operation_id))
         }
-        Command::AccountDetails { profile_id } => {
-            respond::<rpc::AccountDetails, _>(runtime.account_details(profile_id).await)
+        Command::GetAccountDetails { profile_id } => {
+            respond::<rpc::GetAccountDetails, _>(runtime.account_details(profile_id).await)
         }
-        Command::AccountBalance { target } => {
-            respond::<rpc::AccountBalance, _>(runtime.account_balance(target).await)
+        Command::GetAccountBalance { target } => {
+            respond::<rpc::GetAccountBalance, _>(runtime.account_balance(target).await)
         }
         Command::PollAccountLogin { id } => {
             respond::<rpc::PollAccountLogin, _>(runtime.poll_account_login(id).await)
@@ -84,43 +82,48 @@ pub(crate) async fn dispatch(
         Command::DeleteProfile { profile_id } => {
             respond::<rpc::DeleteProfile, _>(runtime.delete_profile(profile_id).await)
         }
-        Command::ClearApiKey => respond::<rpc::ClearApiKey, _>(runtime.clear_api_key().await),
-        Command::ImportProfiles(backup) => {
+        Command::ClearApiKey {} => respond::<rpc::ClearApiKey, _>(runtime.clear_api_key().await),
+        Command::ImportProfiles { backup } => {
             respond::<rpc::ImportProfiles, _>(runtime.import_profiles(backup))
         }
         Command::ExportProfiles { path } => {
             respond::<rpc::ExportProfiles, _>(runtime.export_profiles(absolute(path)?))
         }
-        Command::ExportProfilesContent => {
+        Command::ExportProfilesContent {} => {
             respond::<rpc::ExportProfilesContent, _>(runtime.export_profiles_content())
         }
         Command::ExportDiagnostics { path } => respond::<rpc::ExportDiagnostics, _>(
             runtime.export_diagnostics(absolute(path)?, BUILD_VERSION),
         ),
-        Command::ExportDiagnosticsContent => respond::<rpc::ExportDiagnosticsContent, _>(
+        Command::ExportDiagnosticsContent {} => respond::<rpc::ExportDiagnosticsContent, _>(
             runtime.export_diagnostics_content(BUILD_VERSION),
         ),
-        Command::Usage(query) => respond::<rpc::Usage, _>(runtime.query_usage(query)),
-        Command::UsageRecord { record_id } => {
-            respond::<rpc::UsageRecord, _>(runtime.usage_record(&record_id))
-        }
+        Command::QueryUsage { query } => respond::<rpc::QueryUsage, _>(runtime.query_usage(query)),
+        Command::GetUsageRecord { record_id } => match runtime.usage_record(&record_id) {
+            Ok(Some(record)) => encode::<rpc::GetUsageRecord>(record),
+            Ok(None) => Err(protocol::Error::new(
+                ErrorCode::NotFound,
+                "Usage record not found",
+            )),
+            Err(error) => Err(crate::Error::from(error).into()),
+        },
         Command::ExportUsage { query, path } => {
             respond::<rpc::ExportUsage, _>(runtime.export_usage_csv(query, absolute(path)?))
         }
-        Command::ClearUsage => respond::<rpc::ClearUsage, _>(runtime.clear_usage()),
-        Command::ClientKey => respond::<rpc::ClientKey, _>(runtime.client_key()),
-        Command::RotateClientKey => respond::<rpc::RotateClientKey, _>(runtime.rotate_client_key()),
-        Command::SaveLocalApi(config) => {
-            respond::<rpc::SaveLocalApi, _>(runtime.save_local_api_config(config).await)
+        Command::ClearUsage {} => respond::<rpc::ClearUsage, _>(runtime.clear_usage()),
+        Command::GetClientKey {} => respond::<rpc::GetClientKey, _>(runtime.client_key()),
+        Command::RotateClientKey {} => respond::<rpc::RotateClientKey, _>(runtime.rotate_client_key()),
+        Command::SaveLocalApiConfig { config } => {
+            respond::<rpc::SaveLocalApiConfig, _>(runtime.save_local_api_config(config).await)
         }
-        Command::SaveWebUi(config) => respond::<rpc::SaveWebUi, _>(runtime.save_web_ui(config)),
+        Command::SaveWebUi { config } => respond::<rpc::SaveWebUi, _>(runtime.save_web_ui(config)),
         Command::SetWebUiPassword { password } => {
             respond::<rpc::SetWebUiPassword, _>(runtime.set_web_ui_password(password))
         }
-        Command::RefreshCatalog => {
+        Command::RefreshCatalog {} => {
             respond::<rpc::RefreshCatalog, _>(runtime.refresh_catalog().await)
         }
-        Command::Agents => respond::<rpc::Agents, _>(runtime.list_agents()),
+        Command::ListAgents {} => respond::<rpc::ListAgents, _>(runtime.list_agents()),
         Command::PreviewAgent {
             agent_id,
             connect,
@@ -134,19 +137,24 @@ pub(crate) async fn dispatch(
         } => {
             respond::<rpc::ApplyAgent, _>(runtime.apply_agent(agent_id, connect, revision, options))
         }
-        Command::DisconnectAllAgents => {
+        Command::DisconnectAllAgents {} => {
             respond::<rpc::DisconnectAllAgents, _>(runtime.disconnect_all_agents())
         }
-        Command::ResetSettings => respond::<rpc::ResetSettings, _>(runtime.reset_settings().await),
-        Command::Settings => respond::<rpc::Settings, _>(runtime.settings()),
-        Command::SetPreference(change) => {
+        Command::ResetSettings {} => respond::<rpc::ResetSettings, _>(runtime.reset_settings().await),
+        Command::Settings {} => respond::<rpc::Settings, _>(runtime.settings()),
+        Command::SetPreference { change } => {
             respond::<rpc::SetPreference, _>(runtime.set_preference(change))
         }
     }
 }
 
-fn respond<C: Call, E: Into<RpcError>>(result: Result<C::Response, E>) -> Result<Value, RpcError> {
-    encode::<C>(result.map_err(Into::into)?)
+fn respond<C: Call, E: Into<crate::Error>>(
+    result: Result<C::Response, E>,
+) -> Result<Value, protocol::Error> {
+    encode::<C>(result.map_err(|error| {
+        let error: crate::Error = error.into();
+        protocol::Error::from(error)
+    })?)
 }
 
 fn absolute(path: String) -> Result<PathBuf, String> {
