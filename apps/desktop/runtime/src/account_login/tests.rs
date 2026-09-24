@@ -188,9 +188,15 @@ fn workspace_and_balance_responses_are_validated() {
     );
 }
 
-// The paused clock skips the polling sleeps; loopback I/O stays ready.
-#[tokio::test(start_paused = true)]
-async fn phala_polling_uses_the_device_authorization_contract() {
+/// A Phala device authorization mock whose token endpoint answers `errors`
+/// in order (`detail.error`, as Phala nests them), then issues a key.
+async fn phala_mock(
+    errors: &'static [&'static str],
+) -> (
+    String,
+    Arc<std::sync::atomic::AtomicUsize>,
+    AbortOnDropHandle<std::io::Result<()>>,
+) {
     use axum::{routing::post, Json};
     use std::sync::atomic::{AtomicUsize, Ordering};
     let calls = Arc::new(AtomicUsize::new(0));
@@ -203,17 +209,15 @@ async fn phala_polling_uses_the_device_authorization_contract() {
                 body["grant_type"],
                 "urn:ietf:params:oauth:grant-type:device_code"
             );
-            let pending = ["authorization_pending", "slow_down"];
-            if let Some(error) = pending.get(calls.fetch_add(1, Ordering::SeqCst)) {
-                (
+            match errors.get(calls.fetch_add(1, Ordering::SeqCst)) {
+                Some(error) => (
                     StatusCode::BAD_REQUEST,
                     Json(json!({"detail":{"error":error}})),
-                )
-            } else {
-                (
+                ),
+                None => (
                     StatusCode::OK,
                     Json(json!({"access_token":"sk-test-credential"})),
-                )
+                ),
             }
         }
     });
@@ -231,18 +235,35 @@ async fn phala_polling_uses_the_device_authorization_contract() {
     let server = AbortOnDropHandle::new(tokio::spawn(
         async move { axum::serve(listener, app).await },
     ));
-    let started = Instant::now();
-    // Without client timeouts, which the paused clock would fire during I/O.
-    let credential = phala_at(Client::new(), "test-device".into(), 0, &base)
+    (base, calls, server)
+}
+
+#[tokio::test]
+async fn phala_polling_uses_the_device_authorization_contract() {
+    let (base, calls, _server) = phala_mock(&["authorization_pending"]).await;
+    let credential = phala_at(client().unwrap(), "test-device".into(), 0, &base)
         .await
         .unwrap();
-    assert_eq!(calls.load(Ordering::SeqCst), 3);
-    // slow_down adds five seconds to every later poll (RFC 8628 §3.5).
-    assert!(started.elapsed() >= Duration::from_secs(5));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     assert!(
         matches!(credential.auth, ProfileAuth::OAuth { ref account_id, .. } if account_id == "alice")
     );
-    server.abort();
+}
+
+// The paused clock skips the polling sleeps. Polling ends before the metadata
+// request and the client has no timeouts, so no timer can fire during I/O.
+#[tokio::test(start_paused = true)]
+async fn phala_slow_down_adds_five_seconds_to_later_polls() {
+    let (base, calls, _server) = phala_mock(&["slow_down", "access_denied"]).await;
+    let started = Instant::now();
+    let error = phala_at(Client::new(), "test-device".into(), 0, &base)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error, "Account: Authorization was declined.");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    // RFC 8628 §3.5.
+    assert!(started.elapsed() >= Duration::from_secs(5));
 }
 
 #[test]
