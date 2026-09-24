@@ -22,7 +22,6 @@ const repositoryRoot = path.resolve(appRoot, "../..");
 const wrapperTemplate = path.join(appRoot, "npm/private-ai-proxy");
 
 export const npmPackageName = "private-ai-proxy";
-export const npmPlatformScope = "@phala";
 export const npmPlatforms = {
   macos: "darwin",
   linux: "linux",
@@ -30,11 +29,18 @@ export const npmPlatforms = {
 };
 export const npmArchitectures = ["arm64", "x64"];
 
-// One scoped package per target, named like esbuild's `@esbuild/linux-x64`
-// and Biome's `@biomejs/cli-linux-x64`, with the product prefix because the
-// `@phala` scope is shared.
-export function platformPackageName(platform, arch) {
-  return `${npmPlatformScope}/${npmPackageName}-${platformTarget(platform, arch)}`;
+// Like @openai/codex (codex-cli/scripts/build_npm_package.py), every platform
+// payload is a version of the wrapper's own package name, such as
+// private-ai-proxy@1.2.3-linux-x64, so the release needs one npm package and
+// one trusted publisher. The wrapper depends on each payload through an npm
+// alias named after the target.
+export function platformPackageAlias(platform, arch) {
+  return `${npmPackageName}-${platformTarget(platform, arch)}`;
+}
+
+export function platformPackageVersion(version, platform, arch) {
+  validateNpmVersion(version);
+  return validateNpmVersion(`${version}-${platformTarget(platform, arch)}`);
 }
 
 function platformTarget(platform, arch) {
@@ -56,7 +62,10 @@ export function validateNpmVersion(version) {
 export function wrapperManifest(version) {
   validateNpmVersion(version);
   const optionalDependencies = Object.keys(npmPlatforms).flatMap((platform) =>
-    npmArchitectures.map((arch) => [platformPackageName(platform, arch), version]),
+    npmArchitectures.map((arch) => [
+      platformPackageAlias(platform, arch),
+      `npm:${npmPackageName}@${platformPackageVersion(version, platform, arch)}`,
+    ]),
   );
   return {
     name: npmPackageName,
@@ -85,14 +94,13 @@ export function wrapperManifest(version) {
 export function platformManifest({ platform, arch, version }) {
   const target = platformTarget(platform, arch);
   return {
-    name: platformPackageName(platform, arch),
-    version: validateNpmVersion(version),
+    name: npmPackageName,
+    version: platformPackageVersion(version, platform, arch),
     description: `Native Private AI Proxy binaries for ${target}`,
     license: "Apache-2.0",
     repository: {
       type: "git",
       url: "git+https://github.com/Dstack-TEE/private-ai-gateway.git",
-      directory: "apps/desktop/npm",
     },
     homepage: "https://github.com/Dstack-TEE/private-ai-gateway#readme",
     os: [npmPlatforms[platform]],
@@ -125,7 +133,7 @@ export async function buildPlatformPackage({ platform, arch, version, source, ou
     await writePackageFiles(
       scratch,
       manifest,
-      `# ${manifest.name}\n\nThe native ${platformTarget(platform, arch)} binaries of [private-ai-proxy](https://www.npmjs.com/package/private-ai-proxy). Install \`private-ai-proxy\` instead of this package.\n`,
+      `# private-ai-proxy ${manifest.version}\n\nThe native ${platformTarget(platform, arch)} binaries of [private-ai-proxy](https://www.npmjs.com/package/private-ai-proxy). Install \`private-ai-proxy\` instead of this version.\n`,
     );
     return packDirectory(scratch, output);
   } finally {

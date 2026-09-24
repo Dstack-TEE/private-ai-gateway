@@ -151,7 +151,8 @@ jobs:
           while read -r platform npm_platform arch extension binary_extension; do
             if [[ "$binary_extension" == none ]]; then binary_extension=""; fi
             target="${npm_platform}-${arch}"
-            tarball="npm-packages/phala-private-ai-proxy-${target}-${VERSION}.tgz"
+            package_version="${VERSION}-${target}"
+            tarball="npm-packages/private-ai-proxy-${package_version}.tgz"
             source="extracted/${platform}-${arch}/private-ai-proxy-cli-${VERSION}-${platform}-${arch}"
             destination="verified/${platform}-${arch}"
             mkdir -p "$destination"
@@ -166,7 +167,7 @@ jobs:
               import { readFile } from "node:fs/promises";
               const [file, version, platform, arch] = process.argv.slice(1);
               const manifest = JSON.parse(await readFile(file, "utf8"));
-              if (manifest.name !== `@phala/private-ai-proxy-${platform}-${arch}` || manifest.version !== version) {
+              if (manifest.name !== "private-ai-proxy" || manifest.version !== version) {
                 throw new Error("platform package identity mismatch");
               }
               if (JSON.stringify(manifest.os) !== JSON.stringify([platform])) throw new Error("platform package os mismatch");
@@ -174,7 +175,7 @@ jobs:
               const libc = platform === "linux" ? ["glibc"] : undefined;
               if (JSON.stringify(manifest.libc) !== JSON.stringify(libc)) throw new Error("platform package libc mismatch");
               if (manifest.scripts !== undefined) throw new Error("platform package must not have scripts");
-            ' "$destination/package/package.json" "$VERSION" "$npm_platform" "$arch"
+            ' "$destination/package/package.json" "$package_version" "$npm_platform" "$arch"
           done <<'TARGETS'
           macos darwin arm64 tar.gz none
           macos darwin x64 tar.gz none
@@ -203,7 +204,10 @@ jobs:
             "win32-arm64",
             "win32-x64",
           ];
-          const expected = Object.fromEntries(targets.map((target) => [`@phala/private-ai-proxy-${target}`, version]));
+          const expected = Object.fromEntries(targets.map((target) => [
+            `private-ai-proxy-${target}`,
+            `npm:private-ai-proxy@${version}-${target}`,
+          ]));
           if (JSON.stringify(manifest.optionalDependencies) !== JSON.stringify(expected)) {
             throw new Error("wrapper optional dependency map mismatch");
           }
@@ -216,7 +220,7 @@ jobs:
           set -euo pipefail
           prefix="$RUNNER_TEMP/private-ai-proxy-npm"
           npm install --global --prefix "$prefix" --ignore-scripts --no-audit --no-fund \
-            "file:$GITHUB_WORKSPACE/npm-packages/phala-private-ai-proxy-linux-x64-${VERSION}.tgz" \
+            "private-ai-proxy-linux-x64@file:$GITHUB_WORKSPACE/npm-packages/private-ai-proxy-${VERSION}-linux-x64.tgz" \
             "file:$GITHUB_WORKSPACE/npm-packages/private-ai-proxy-${VERSION}.tgz"
           test "$("$prefix/bin/private-ai-proxy" --version)" = "private-ai-proxy $VERSION"
           test "$("$prefix/bin/pap" --version)" = "private-ai-proxy $VERSION"
@@ -232,8 +236,8 @@ jobs:
 
   # Trusted publishing (OIDC) only authorizes `npm publish`; `npm dist-tag` is
   # not available to this job. The wrapper therefore moves the channel tag as it
-  # publishes, so it is published only after every platform package it pins is
-  # served by the public registry and a fresh install of the wrapper tarball
+  # publishes, so it is published only after every platform version it aliases
+  # is served by the public registry and a fresh install of the wrapper tarball
   # resolves them.
   publish:
     if: inputs.publish
@@ -262,9 +266,11 @@ jobs:
         with:
           name: private-ai-proxy-npm-${{ needs.package.outputs.version }}
           path: npm-packages
-      # The platform packages carry the same channel tag as the wrapper. Nothing
-      # resolves them by tag: the wrapper pins their exact version.
-      - name: Publish platform packages
+      # Like @openai/codex (.github/workflows/rust-release.yml), each platform
+      # version of the one package gets its own dist-tag, `<os>-<cpu>` or
+      # `beta-<os>-<cpu>`, so `latest` and `beta` only ever name the wrapper.
+      # Every tarball updates the same packument, so publish serially.
+      - name: Publish platform versions
         env:
           DIST_TAG: ${{ needs.package.outputs.dist_tag }}
           VERSION: ${{ needs.package.outputs.version }}
@@ -280,22 +286,26 @@ jobs:
             win32-arm64 \
             win32-x64
           do
-            tarball="$(realpath "npm-packages/phala-private-ai-proxy-${target}-${VERSION}.tgz")"
+            platform_tag="$target"
+            if [[ "$DIST_TAG" != latest ]]; then
+              platform_tag="${DIST_TAG}-${target}"
+            fi
+            tarball="$(realpath "npm-packages/private-ai-proxy-${VERSION}-${target}.tgz")"
             state="$(node "$REGISTRY_HELPER" state "$tarball")"
             if [[ "$state" == published ]]; then
-              echo "@phala/private-ai-proxy-${target}@${VERSION} already exists with matching contents; skipping"
+              echo "private-ai-proxy@${VERSION}-${target} already exists with matching contents; skipping"
             else
-              npm publish "$tarball" --access public --provenance --tag "$DIST_TAG"
+              npm publish "$tarball" --access public --provenance --tag "$platform_tag"
             fi
           done
-      - name: Wait for the registry to serve every platform package
+      - name: Wait for the registry to serve every platform version
         env:
           VERSION: ${{ needs.package.outputs.version }}
         run: |
           set -euo pipefail
           node "$REGISTRY_HELPER" wait --timeout-seconds "$REGISTRY_WAIT_SECONDS" \
-            npm-packages/phala-private-ai-proxy-*-"${VERSION}".tgz
-      - name: Install the wrapper against the public platform packages
+            npm-packages/private-ai-proxy-"${VERSION}"-*.tgz
+      - name: Install the wrapper against the public platform versions
         env:
           VERSION: ${{ needs.package.outputs.version }}
         run: |

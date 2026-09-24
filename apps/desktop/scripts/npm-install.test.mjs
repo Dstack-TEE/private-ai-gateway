@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -19,56 +19,44 @@ import {
   npmPlatforms,
 } from "./package-npm.mjs";
 
-const hostPlatform = Object.keys(npmPlatforms).find((platform) => npmPlatforms[platform] === process.platform);
 // The fake native executables are shell scripts.
 const supportedHost = ["linux", "darwin"].includes(process.platform) && npmArchitectures.includes(process.arch);
-const hostPackage = `@phala/private-ai-proxy-${process.platform}-${process.arch}`;
+const hostAlias = `private-ai-proxy-${process.platform}-${process.arch}`;
 const npm = "npm";
 // Installs must not block the event loop, which serves the local registry.
 const execFileAsync = promisify(execFile);
 const installTimeout = 120_000;
 
-test("npm, pnpm and bun install the wrapper with only the host platform package", { skip: !supportedHost }, async (t) => {
+test("npm, pnpm and bun install the wrapper with only the host platform version", { skip: !supportedHost }, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pap-npm-install-"));
   const registry = await startRegistry();
   try {
     const packages = path.join(root, "packages");
-    // A legacy release, published the way private-ai-proxy <= 0.1.7-beta.4
-    // was: the payloads are versions of the wrapper name behind npm aliases.
-    for (const [version, tag] of [["0.9.0", "latest"], ["1.0.0-beta.1", "beta"]]) {
-      for (const tarball of await buildLegacyRelease(root, version, packages)) {
-        const payload = !tarball.endsWith(`private-ai-proxy-${version}.tgz`);
-        // The owner checklist deprecates the payload versions.
-        await registry.publish(tarball, payload ? { deprecated: "internal platform payload" } : { tag });
-      }
-    }
+    // An earlier stable release, installed globally and upgraded below.
+    await publishRelease(registry, await buildRelease(root, "0.9.0", packages), "latest");
+    const installed = await npmInstall(root, "upgrade", ["private-ai-proxy"], registry.url);
+    assert.equal(run(installed.bin("pap"), "--version"), "private-ai-proxy 0.9.0");
 
-    // Before a release's platform packages are on the registry, the release
+    // Before a release's platform versions are on the registry, the release
     // job installs the local tarballs together, as the workflow smoke test
-    // does. The other platform packages do not exist yet.
+    // does.
     const beta = await buildRelease(root, "1.0.0-beta.2", packages);
     await installLocalTarballs(root, "unpublished-beta", beta, registry.url);
+    await publishRelease(registry, beta, "beta");
+    const channel = await npmInstall(root, "beta", ["private-ai-proxy@beta"], registry.url);
+    assert.equal(run(channel.bin("private-ai-proxy"), "--version"), "private-ai-proxy 1.0.0-beta.2");
+    assert.deepEqual(await readdir(channel.modules), [hostAlias]);
 
-    const legacy = await npmInstall(root, "upgrade", ["private-ai-proxy"], registry.url);
-    assert.equal(run(legacy.bin("pap"), "--version"), "private-ai-proxy 0.9.0");
-    assert.ok((await readdir(legacy.modules)).includes(`private-ai-proxy-${process.platform}-${process.arch}`));
-
-    for (const tarball of beta.tarballs) await registry.publish(tarball, { tag: "beta" });
-    // A prerelease range resolves to a wrapper, never to a platform payload.
-    const range = await npmInstall(root, "range", ["private-ai-proxy@^1.0.0-beta.1"], registry.url);
-    assert.equal(run(range.bin("private-ai-proxy"), "--version"), "private-ai-proxy 1.0.0-beta.2");
-    assert.deepEqual(await readdir(path.join(range.modules, "@phala")), [path.basename(hostPackage)]);
-
-    // Now the other platform packages exist, but not at this version.
     const stable = await buildRelease(root, "1.0.0", packages);
     await installLocalTarballs(root, "unpublished-stable", stable, registry.url);
-    for (const tarball of stable.tarballs) await registry.publish(tarball, { tag: "latest" });
+    await publishRelease(registry, stable, "latest");
     await npmInstall(root, "upgrade", ["private-ai-proxy@latest"], registry.url);
     for (const command of ["private-ai-proxy", "pap", "aci"]) {
-      assert.equal(run(legacy.bin(command), "--version"), "private-ai-proxy 1.0.0");
+      assert.equal(run(installed.bin(command), "--version"), "private-ai-proxy 1.0.0");
     }
-    assert.deepEqual(await readdir(path.join(legacy.modules, "@phala")), [path.basename(hostPackage)]);
-    assert.ok(!(await readdir(legacy.modules)).some((name) => name.startsWith("private-ai-proxy-")));
+    assert.deepEqual(await readdir(installed.modules), [hostAlias]);
+    const payload = JSON.parse(await readFile(path.join(installed.modules, hostAlias, "package.json"), "utf8"));
+    assert.equal(payload.version, `1.0.0-${process.platform}-${process.arch}`);
 
     await t.test("pnpm", { skip: !available("pnpm") }, async () => {
       const project = await projectWith(root, "pnpm", "1.0.0");
@@ -98,59 +86,23 @@ test("npm, pnpm and bun install the wrapper with only the host platform package"
 
 async function buildRelease(root, version, output) {
   const source = await fakeBinaries(root, version);
-  const platforms = {};
-  const tarballs = [];
+  const platforms = [];
   for (const platform of Object.keys(npmPlatforms)) {
-    platforms[platform] = {};
     for (const arch of npmArchitectures) {
       const tarball = await buildPlatformPackage({ platform, arch, version, source, output });
-      platforms[platform][arch] = tarball;
-      tarballs.push(tarball);
+      platforms.push({ target: `${npmPlatforms[platform]}-${arch}`, tarball });
     }
   }
   const wrapper = await buildWrapperPackage({ version, output });
-  // Platform packages are published before the wrapper.
-  return { version, platforms, wrapper, tarballs: [...tarballs, wrapper] };
+  return { version, platforms, wrapper };
 }
 
-async function buildLegacyRelease(root, version, output) {
-  const source = await fakeBinaries(root, version);
-  await mkdir(output, { recursive: true });
-  const tarballs = [];
-  const optionalDependencies = {};
-  for (const npmPlatform of Object.values(npmPlatforms)) {
-    for (const arch of npmArchitectures) {
-      const target = `${npmPlatform}-${arch}`;
-      optionalDependencies[`private-ai-proxy-${target}`] = `npm:private-ai-proxy@${version}-${target}`;
-      const directory = path.join(root, "legacy", version, target);
-      await mkdir(path.join(directory, "vendor"), { recursive: true });
-      await copyFile(path.join(source, "private-ai-proxy"), path.join(directory, "vendor/private-ai-proxy"));
-      await writeJson(path.join(directory, "package.json"), {
-        name: "private-ai-proxy",
-        version: `${version}-${target}`,
-        os: [npmPlatform],
-        cpu: [arch],
-      });
-      tarballs.push(pack(directory, output));
-    }
+// Publishes in the workflow's order and with its dist-tags.
+async function publishRelease(registry, release, channelTag) {
+  for (const { target, tarball } of release.platforms) {
+    await registry.publish(tarball, channelTag === "latest" ? target : `${channelTag}-${target}`);
   }
-  const directory = path.join(root, "legacy", version, "wrapper");
-  await mkdir(path.join(directory, "bin"), { recursive: true });
-  // The essential behavior of the legacy launcher.
-  await writeFile(path.join(directory, "bin/private-ai-proxy.cjs"), `#!/usr/bin/env node
-const path = require("node:path");
-const manifest = require.resolve(\`private-ai-proxy-\${process.platform}-\${process.arch}/package.json\`);
-const result = require("node:child_process").spawnSync(path.join(path.dirname(manifest), "vendor/private-ai-proxy"), process.argv.slice(2), { stdio: "inherit" });
-process.exitCode = result.status ?? 1;
-`);
-  await writeJson(path.join(directory, "package.json"), {
-    name: "private-ai-proxy",
-    version,
-    bin: { "private-ai-proxy": "bin/private-ai-proxy.cjs", pap: "bin/private-ai-proxy.cjs", aci: "bin/private-ai-proxy.cjs" },
-    optionalDependencies,
-  });
-  tarballs.push(pack(directory, output));
-  return tarballs;
+  await registry.publish(release.wrapper, channelTag);
 }
 
 async function fakeBinaries(root, version) {
@@ -184,8 +136,9 @@ async function npmInstall(root, name, specs, registry) {
 }
 
 async function installLocalTarballs(root, name, release, registry) {
+  const host = release.platforms.find(({ target }) => target === `${process.platform}-${process.arch}`);
   const installed = await npmInstall(root, name, [
-    `file:${release.platforms[hostPlatform][process.arch]}`,
+    `${hostAlias}@file:${host.tarball}`,
     `file:${release.wrapper}`,
   ], registry);
   assert.equal(run(installed.bin("private-ai-proxy"), "--version"), `private-ai-proxy ${release.version}`);
@@ -224,13 +177,6 @@ function run(executable, ...arguments_) {
   return execFileSync(executable, arguments_, { encoding: "utf8" }).trim();
 }
 
-function pack(directory, output) {
-  const [entry] = JSON.parse(execFileSync(npm, ["pack", directory, "--json", "--pack-destination", output], {
-    encoding: "utf8",
-  }));
-  return path.join(output, entry.filename);
-}
-
 async function writeJson(file, value) {
   await writeFile(file, `${JSON.stringify(value, null, 2)}\n`);
 }
@@ -257,7 +203,7 @@ async function startRegistry() {
   const url = `http://127.0.0.1:${server.address().port}`;
   return {
     url,
-    async publish(tarball, { tag, deprecated } = {}) {
+    async publish(tarball, tag) {
       const manifest = JSON.parse(execFileSync("tar", ["-xOzf", tarball, "package/package.json"], { encoding: "utf8" }));
       const contents = await readFile(tarball);
       const file = path.basename(tarball);
@@ -265,14 +211,13 @@ async function startRegistry() {
       const document = documents.get(manifest.name) ?? { name: manifest.name, "dist-tags": {}, versions: {} };
       document.versions[manifest.version] = {
         ...manifest,
-        ...(deprecated ? { deprecated } : {}),
         dist: {
           tarball: `${url}/-/${file}`,
           integrity: `sha512-${createHash("sha512").update(contents).digest("base64")}`,
           shasum: createHash("sha1").update(contents).digest("hex"),
         },
       };
-      if (tag) document["dist-tags"][tag] = manifest.version;
+      document["dist-tags"][tag] = manifest.version;
       documents.set(manifest.name, document);
     },
     close: () => new Promise((resolve) => server.close(resolve)),

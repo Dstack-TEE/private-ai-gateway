@@ -19,7 +19,7 @@ import {
   npmArchitectures,
   npmPlatforms,
   platformManifest,
-  platformPackageName,
+  platformPackageAlias,
   wrapperManifest,
 } from "./package-npm.mjs";
 import { binaries } from "./package-cli.mjs";
@@ -30,36 +30,38 @@ const version = "1.2.3-beta.4";
 const targets = Object.entries(npmPlatforms).flatMap(([platform, npmPlatform]) =>
   npmArchitectures.map((arch) => ({ platform, npmPlatform, arch })));
 
-test("pins one scoped platform package per target at the wrapper version", () => {
+test("aliases one platform version of the same package per target", () => {
   const wrapper = wrapperManifest(version);
   assert.deepEqual(wrapper.optionalDependencies, {
-    "@phala/private-ai-proxy-darwin-arm64": version,
-    "@phala/private-ai-proxy-darwin-x64": version,
-    "@phala/private-ai-proxy-linux-arm64": version,
-    "@phala/private-ai-proxy-linux-x64": version,
-    "@phala/private-ai-proxy-win32-arm64": version,
-    "@phala/private-ai-proxy-win32-x64": version,
+    "private-ai-proxy-darwin-arm64": `npm:private-ai-proxy@${version}-darwin-arm64`,
+    "private-ai-proxy-darwin-x64": `npm:private-ai-proxy@${version}-darwin-x64`,
+    "private-ai-proxy-linux-arm64": `npm:private-ai-proxy@${version}-linux-arm64`,
+    "private-ai-proxy-linux-x64": `npm:private-ai-proxy@${version}-linux-x64`,
+    "private-ai-proxy-win32-arm64": `npm:private-ai-proxy@${version}-win32-arm64`,
+    "private-ai-proxy-win32-x64": `npm:private-ai-proxy@${version}-win32-x64`,
   });
   assert.equal(wrapper.scripts, undefined, "the wrapper must not rely on install scripts");
 
   for (const { platform, npmPlatform, arch } of targets) {
     const manifest = platformManifest({ platform, arch, version });
-    assert.equal(manifest.name, `@phala/private-ai-proxy-${npmPlatform}-${arch}`);
-    assert.equal(manifest.version, version);
+    assert.equal(manifest.name, "private-ai-proxy");
+    assert.equal(manifest.version, `${version}-${npmPlatform}-${arch}`);
+    assert.equal(manifest.bin, undefined);
     assert.deepEqual(manifest.os, [npmPlatform]);
     assert.deepEqual(manifest.cpu, [arch]);
     assert.deepEqual(manifest.libc, platform === "linux" ? ["glibc"] : undefined);
     assert.equal(manifest.publishConfig.access, "public");
     assert.equal(manifest.scripts, undefined);
   }
-  assert.throws(() => platformPackageName("linux", "ia32"), /Unsupported npm package target/);
+  assert.throws(() => platformPackageAlias("linux", "ia32"), /Unsupported npm package target/);
   assert.throws(() => wrapperManifest("1.2.3+build"), /without build metadata/);
 });
 
-test("the launcher resolves the same package the wrapper pins for each target", () => {
+test("the launcher resolves the same alias the wrapper declares for each target", () => {
   for (const { platform, npmPlatform, arch } of targets) {
     assert.deepEqual(launcherModule.platformPackage(npmPlatform, arch), {
-      name: platformPackageName(platform, arch),
+      alias: platformPackageAlias(platform, arch),
+      target: `${npmPlatform}-${arch}`,
       executable: `vendor/private-ai-proxy${npmPlatform === "win32" ? ".exe" : ""}`,
     });
   }
@@ -88,7 +90,7 @@ test("packs a thin wrapper and a native package that execute together", {
 
     const platformTarball = await buildPlatformPackage({ platform: "linux", arch: "x64", version, source, output });
     const wrapperTarball = await buildWrapperPackage({ version, output });
-    assert.equal(path.basename(platformTarball), `phala-private-ai-proxy-linux-x64-${version}.tgz`);
+    assert.equal(path.basename(platformTarball), `private-ai-proxy-${version}-linux-x64.tgz`);
     assert.equal(path.basename(wrapperTarball), `private-ai-proxy-${version}.tgz`);
     assert.deepEqual(
       tarballFiles(platformTarball).sort(),
@@ -99,29 +101,30 @@ test("packs a thin wrapper and a native package that execute together", {
       ["package/LICENSE", "package/README.md", "package/bin/private-ai-proxy.cjs", "package/package.json"],
     );
 
-    // A wrapper installed with --omit=optional has no platform package.
+    // A wrapper installed with --omit=optional has no platform version.
     const modules = path.join(root, "node_modules");
     const wrapperDirectory = path.join(modules, "private-ai-proxy");
     await extractPackage(wrapperTarball, wrapperDirectory, root);
     const launcher = path.join(wrapperDirectory, "bin/private-ai-proxy.cjs");
     const missing = spawnSync(process.execPath, [launcher], { encoding: "utf8" });
     assert.equal(missing.status, 1);
-    assert.match(missing.stderr, /optional dependency @phala\/private-ai-proxy-linux-x64 is not installed/);
-    assert.match(missing.stderr, /without --omit=optional/);
+    assert.match(missing.stderr, /native binaries for linux-x64 \(private-ai-proxy@1\.2\.3-beta\.4-linux-x64\) are not installed/);
+    assert.match(missing.stderr, /Reinstall with: npm install --global private-ai-proxy@1\.2\.3-beta\.4 --include=optional/);
 
-    const platformDirectory = path.join(modules, "@phala/private-ai-proxy-linux-x64");
+    const platformDirectory = path.join(modules, "private-ai-proxy-linux-x64");
     await extractPackage(platformTarball, platformDirectory, root);
     assert.equal(execFileSync(process.execPath, [launcher, "hello", "world"], { encoding: "utf8" }), "native:hello world\n");
     const failed = spawnSync(process.execPath, [launcher, "--fail"], { encoding: "utf8" });
     assert.equal(failed.status, 7);
 
-    // A platform package from another release must not run.
+    // A platform version left behind by an incomplete update must not run.
     await rm(platformDirectory, { recursive: true });
     const otherTarball = await buildPlatformPackage({ platform: "linux", arch: "x64", version: "1.2.3", source, output });
     await extractPackage(otherTarball, platformDirectory, root);
     const mismatched = spawnSync(process.execPath, [launcher], { encoding: "utf8" });
     assert.equal(mismatched.status, 1);
-    assert.match(mismatched.stderr, /@phala\/private-ai-proxy-linux-x64@1\.2\.3 does not match private-ai-proxy@1\.2\.3-beta\.4/);
+    assert.match(mismatched.stderr, /private-ai-proxy@1\.2\.3-linux-x64, expected 1\.2\.3-beta\.4-linux-x64/);
+    assert.match(mismatched.stderr, /Stop any running private-ai-proxy processes, then reinstall/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
