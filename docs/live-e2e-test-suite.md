@@ -220,9 +220,6 @@ Checks:
   offline report, receipt, and attested-session auditing. The local gateway
   serves plain HTTP from a dstack simulator, so the suite does not require an
   online `pap verify` verdict.
-- Provider entries do not use `privatemode`: those deployments require
-  attested client E2EE v2, which the suite does not send. Verify them against
-  a deployed gateway as described in [deploy/README.md](../deploy/README.md).
 - The vendored `scripts/confidential_verifier` package exists, or
   `PRIVATE_AI_VERIFIER_DIR` points at an explicit verifier override.
 - `DSTACK_VERIFIER_URL` responds for NEAR AI and ACI service tests.

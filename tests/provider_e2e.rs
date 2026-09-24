@@ -256,7 +256,6 @@ async fn serve_privatemode_provider_fixture(
         .route("/v1/chat/completions", post(privatemode_chat_handler))
         .route("/v1/completions", post(privatemode_chat_handler))
         .route("/v1/embeddings", post(privatemode_chat_handler))
-        .route("/v1/messages", post(privatemode_chat_handler))
         .route(
             "/v1/models",
             get(privatemode_models_handler).post(privatemode_plaintext_path_handler),
@@ -345,7 +344,10 @@ async fn serve_privatemode_capacity_fixture() -> (
     let readiness_checks = state.readiness_checks.clone();
     let app = Router::new()
         .route("/v1/models", get(privatemode_capacity_models_handler))
-        .route("/v1/messages", post(privatemode_capacity_chat_handler))
+        .route(
+            "/v1/chat/completions",
+            post(privatemode_capacity_chat_handler),
+        )
         .with_state(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -1480,18 +1482,6 @@ async fn privatemode_runtime_config_binds_the_measured_sidecar_in_the_receipt() 
     for stream in [false, true] {
         let request = serde_json::to_vec(&json!({
             "model": "public-model",
-            "max_tokens": 16,
-            "messages": [{"role": "user", "content": "hello"}],
-            "stream": stream
-        }))
-        .unwrap();
-        let (status, _, body) = call(app.clone(), "POST", "/v1/messages", request).await;
-        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-        assert_eq!(body, CHAT_RESPONSE);
-    }
-    for stream in [false, true] {
-        let request = serde_json::to_vec(&json!({
-            "model": "public-model",
             "prompt": "hello",
             "stream": stream
         }))
@@ -1515,8 +1505,6 @@ async fn privatemode_runtime_config_binds_the_measured_sidecar_in_the_receipt() 
             .collect::<Vec<_>>(),
         [
             "/v1/chat/completions",
-            "/v1/messages",
-            "/v1/messages",
             "/v1/completions",
             "/v1/completions",
             "/v1/embeddings",
@@ -1524,13 +1512,6 @@ async fn privatemode_runtime_config_binds_the_measured_sidecar_in_the_receipt() 
     );
     for call in calls.iter() {
         assert!(call.authorization.is_none());
-    }
-    for call in &calls[1..3] {
-        assert_eq!(call.path, "/v1/messages");
-        let forwarded: Value = serde_json::from_slice(&call.body).unwrap();
-        assert_eq!(forwarded["model"], "provider-model");
-        assert_eq!(forwarded["max_tokens"], 16);
-        assert_eq!(forwarded["messages"][0]["content"], "hello");
     }
 
     let _ = std::fs::remove_file(config_path);
@@ -1568,7 +1549,7 @@ async fn privatemode_middleware_capacity_retry_reverifies_the_bound_native_route
                         user_model: Some("public-model".to_string()),
                         ..GatewayRequestContext::default()
                     },
-                    endpoint_path: "/v1/messages",
+                    endpoint_path: "/v1/chat/completions",
                     received_body: &request_body,
                     forwarded_body: None,
                     aci_required: true,
@@ -1580,7 +1561,7 @@ async fn privatemode_middleware_capacity_retry_reverifies_the_bound_native_route
                 vec![ForwardCandidate {
                     route_id: "privatemode-provider:public-model".to_string(),
                     body: request_body.clone(),
-                    path: "/v1/messages",
+                    path: "/v1/chat/completions",
                 }],
                 stream,
                 journal.clone(),
@@ -1640,7 +1621,7 @@ async fn privatemode_middleware_capacity_retry_reverifies_the_bound_native_route
         let calls = provider_calls.lock().unwrap();
         assert_eq!(calls.len(), 2);
         for call in calls.iter() {
-            assert_eq!(call.path, "/v1/messages");
+            assert_eq!(call.path, "/v1/chat/completions");
             assert!(call.authorization.is_none());
             let forwarded: Value = serde_json::from_slice(&call.body).unwrap();
             assert_eq!(forwarded["model"], "provider-model");

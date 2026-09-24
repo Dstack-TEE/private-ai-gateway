@@ -24,12 +24,7 @@ use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationRes
 
 const PROVIDER: &str = "privatemode";
 const DEFAULT_ENCRYPTED_PATH: &str = "/v1/chat/completions";
-const ENCRYPTED_PATHS: &[&str] = &[
-    DEFAULT_ENCRYPTED_PATH,
-    "/v1/completions",
-    "/v1/embeddings",
-    "/v1/messages",
-];
+const ENCRYPTED_PATHS: &[&str] = &[DEFAULT_ENCRYPTED_PATH, "/v1/completions", "/v1/embeddings"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum PrivatemodeDeploymentConfigError {
@@ -376,10 +371,6 @@ impl UpstreamBackend for PrivatemodeProviderBackend {
 
     fn url_origin(&self) -> Option<&str> {
         self.inner.url_origin()
-    }
-
-    fn preserves_chat_surface_path(&self) -> bool {
-        true
     }
 
     fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {

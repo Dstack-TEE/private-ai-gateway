@@ -21,7 +21,9 @@ use private_ai_gateway::aggregator::service::{
 use private_ai_gateway::aggregator::upstream_config::{
     UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
-use private_ai_gateway::http::{build_router_with_admin, build_router_with_admin_and_middleware};
+use private_ai_gateway::http::{
+    build_router_with_admin, build_router_with_admin_and_middleware, InferenceAccess,
+};
 use private_ai_gateway::middleware::{hash_api_key, Middleware, MiddlewareConfig};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
@@ -268,7 +270,7 @@ async fn relays_catalog_query_string_to_control() {
 #[tokio::test]
 async fn direct_mode_sub_catalogs_remain_not_found() {
     let (service, manager) = build_service();
-    let app = build_router_with_admin(service, manager, None, None);
+    let app = build_router_with_admin(service, manager, None, InferenceAccess::default());
 
     let (status, _) = get_json(app.clone(), "/v1/models/my-namespace").await;
     assert_eq!(status, StatusCode::NOT_FOUND);

@@ -4,7 +4,7 @@
 - **Session binding:** `proxy_image_sha256`
 - **Verifier:** official `privatemode-proxy` co-deployed in the gateway's
   measured dstack Compose
-- **Transport:** attested client E2EE v2 into the gateway, private Compose HTTP
+- **Transport:** the gateway's attested client channel, private Compose HTTP
   to the proxy, then Privatemode full-body E2EE to model workers
 - **Manifest mode:** dynamic
 - **Audit:** see [review.md](review.md)
@@ -28,9 +28,14 @@ using the CA. It calls `LatestSecret` before each encrypted inference attempt.
 An expired secret that cannot be refreshed fails the request.
 
 Phala's public HTTPS ingress terminates TLS outside the attested workload.
-Consequently a Privatemode deployment requires client E2EE v2 on inference
-requests; plaintext and legacy E2EE requests fail before the body is read.
-Clients must verify the quoted E2EE key, encrypt every content-bearing field,
+The sample deployment therefore sets `require_client_e2ee`: plaintext and
+legacy E2EE inference requests fail before the body is read. This is a property
+of the ingress, not of Privatemode, and applies to every route on that gateway.
+A deployment whose TLS terminates inside the workload, such as one behind
+dstack-ingress with an attested TLS binding, serves plaintext clients as it
+does for other providers.
+
+Clients of the sample deployment must verify the quoted E2EE key, encrypt every content-bearing field,
 and decrypt the response. `pap verify` correctly fails its TLS-channel check
 (`id-6`) against the public ingress; passing quote/keyset checks alone does not
 establish prompt privacy.
@@ -83,11 +88,10 @@ For inference, the gateway permits only the encrypted v1.48 handlers:
 - `/v1/chat/completions`
 - `/v1/completions`
 - `/v1/embeddings`
-- `/v1/messages`
 
-The current client E2EE v2 protocol does not define `/v1/messages`; it is
-therefore unavailable through the public Privatemode deployment. The proxy's
-internal handler allowlist is broader than the privacy-safe client surface.
+Like other OpenAI-compatible routes, `/v1/messages` requests reach the proxy
+through the gateway's chat bridge at `/v1/chat/completions`. The proxy's
+internal handler allowlist is broader than this surface.
 
 The gateway sends no internal Bearer token. The proxy applies its measured
 startup credential outbound. The forwarding client rejects redirects and

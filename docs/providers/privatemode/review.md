@@ -41,8 +41,9 @@ Deployment conditions:
   bound to the active inference secret.
 - Treat the proxy as part of the TCB. The gateway does not possess the provider
   E2EE secret.
-- Require attested client E2EE into the gateway: Phala's public TLS ends outside
-  the measured workload.
+- Protect the client hop like any other route. Behind Phala's public ingress,
+  whose TLS ends outside the measured workload, set `require_client_e2ee`;
+  behind dstack-ingress, the attested TLS binding suffices.
 
 ## Verified trust chain
 

@@ -40,19 +40,14 @@ class Provider:
     chutes_chute_ids: dict[str, str]
     chutes_e2ee_discovery_rounds: int | None
     chutes_e2ee_discovery_interval_seconds: int | None
+    privatemode_manifest_log_path: str | None
+    privatemode_proxy_image_digest: str | None
 
     @classmethod
     def from_json(cls, value: dict[str, Any]) -> "Provider":
-        provider = require_str(value, "provider")
-        if provider == "privatemode":
-            raise ValueError(
-                "privatemode deployments require attested client E2EE v2, which "
-                "this local suite does not send; verify them against a deployed "
-                "gateway as described in deploy/README.md"
-            )
         return cls(
             name=require_str(value, "name"),
-            provider=provider,
+            provider=require_str(value, "provider"),
             base_url=require_str(value, "base_url").rstrip("/"),
             public_model=require_str(value, "public_model"),
             upstream_model=require_str(value, "upstream_model"),
@@ -72,6 +67,12 @@ class Provider:
             ),
             chutes_e2ee_discovery_interval_seconds=optional_int(
                 value, "chutes_e2ee_discovery_interval_seconds"
+            ),
+            privatemode_manifest_log_path=optional_str(
+                value, "privatemode_manifest_log_path"
+            ),
+            privatemode_proxy_image_digest=optional_str(
+                value, "privatemode_proxy_image_digest"
             ),
         )
 

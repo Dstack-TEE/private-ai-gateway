@@ -44,7 +44,9 @@ use private_ai_gateway::aggregator::upstream_config::{
     UpstreamPullConfig, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
 use private_ai_gateway::dstack::{DstackAciProvider, DstackAciProviderConfig};
-use private_ai_gateway::http::{build_router_with_admin, build_router_with_admin_and_middleware};
+use private_ai_gateway::http::{
+    build_router_with_admin, build_router_with_admin_and_middleware, InferenceAccess,
+};
 use private_ai_gateway::middleware::{Middleware, MiddlewareConfig};
 use rand::Rng;
 use serde::Deserialize;
@@ -147,6 +149,23 @@ fn validate_inference_auth_policy(
     Ok(())
 }
 
+fn validate_client_e2ee_policy(
+    require_client_e2ee: bool,
+    enable_e2ee: bool,
+    middleware_configured: bool,
+) -> Result<(), String> {
+    if !require_client_e2ee {
+        return Ok(());
+    }
+    if !enable_e2ee {
+        return Err("require_client_e2ee requires enable_e2ee".to_string());
+    }
+    if middleware_configured {
+        return Err("require_client_e2ee applies only to direct mode".to_string());
+    }
+    Ok(())
+}
+
 fn invalid_input(message: impl Into<String>) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidInput, message.into())
 }
@@ -178,6 +197,9 @@ struct GatewayConfigFile {
     /// default to preserve the deployed v2 contract. Operators may disable it
     /// explicitly for a plaintext/TLS-only deployment.
     enable_e2ee: bool,
+    /// Reject direct-mode inference requests without E2EE v2. Set it when the
+    /// public TLS endpoint terminates outside the attested workload.
+    require_client_e2ee: bool,
     dstack_endpoint: Option<String>,
     middleware: Option<MiddlewareConfig>,
     /// Deployment-owned Privatemode sidecar policy. Unlike upstream routes,
@@ -211,6 +233,7 @@ impl Default for GatewayConfigFile {
             tls: GatewayTlsConfig::default(),
             direct_serving: false,
             enable_e2ee: true,
+            require_client_e2ee: false,
             dstack_endpoint: None,
             middleware: None,
             privatemode_proxy: None,
@@ -531,12 +554,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         inference_token_sha256,
     )
     .map_err(invalid_input)?;
-    if gateway_config.privatemode_proxy.is_some() && !gateway_config.enable_e2ee {
-        return Err(invalid_input(
-            "privatemode_proxy requires enable_e2ee: Privatemode inference accepts only E2EE v2 requests",
-        )
-        .into());
-    }
+    validate_client_e2ee_policy(
+        gateway_config.require_client_e2ee,
+        gateway_config.enable_e2ee,
+        gateway_config.middleware.is_some(),
+    )
+    .map_err(invalid_input)?;
+    let inference_access = InferenceAccess {
+        token_sha256: inference_token_sha256,
+        require_client_e2ee: gateway_config.require_client_e2ee,
+    };
     let source_provenance = resolve_source_provenance()?;
     let tls_public_keys = resolve_tls_public_keys(&gateway_config.tls)?;
     let dstack_endpoint = gateway_config.dstack_endpoint.clone();
@@ -742,12 +769,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         build_router_with_admin_and_middleware(service, upstream_config, admin_token, middleware)
     } else {
-        build_router_with_admin(
-            service,
-            upstream_config,
-            admin_token,
-            inference_token_sha256,
-        )
+        build_router_with_admin(service, upstream_config, admin_token, inference_access)
     };
 
     tracing::info!(%bind, "private-ai-gateway listening");
@@ -960,8 +982,8 @@ mod tests {
         env_file_non_empty, load_gateway_config, parse_sha256_policy, resolve_state_dir,
         resolve_tls_public_keys, seed_upstream_config_if_empty, session_log_path,
         source_provenance_from_git_launcher_config, upstream_config_path,
-        validate_inference_auth_policy, validate_pull_token_separation,
-        validate_sha256_secret_policy,
+        validate_client_e2ee_policy, validate_inference_auth_policy,
+        validate_pull_token_separation, validate_sha256_secret_policy,
     };
 
     const TEST_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
@@ -1112,6 +1134,20 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("pull-secret"));
         let _ = std::fs::remove_file(config_path);
+    }
+
+    #[test]
+    fn required_client_e2ee_needs_direct_mode_with_e2ee_enabled() {
+        assert!(validate_client_e2ee_policy(false, false, true).is_ok());
+        assert!(validate_client_e2ee_policy(true, true, false).is_ok());
+        assert_eq!(
+            validate_client_e2ee_policy(true, false, false).unwrap_err(),
+            "require_client_e2ee requires enable_e2ee"
+        );
+        assert_eq!(
+            validate_client_e2ee_policy(true, true, true).unwrap_err(),
+            "require_client_e2ee applies only to direct mode"
+        );
     }
 
     #[test]

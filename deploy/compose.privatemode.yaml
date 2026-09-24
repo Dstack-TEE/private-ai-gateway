@@ -81,6 +81,7 @@ configs:
         "admin_token_sha256": "${PRIVATE_AI_GATEWAY_ADMIN_TOKEN_SHA256:?set measured PRIVATE_AI_GATEWAY_ADMIN_TOKEN_SHA256}",
         "inference_token_sha256": "${PRIVATE_AI_GATEWAY_INFERENCE_TOKEN_SHA256:?set measured PRIVATE_AI_GATEWAY_INFERENCE_TOKEN_SHA256}",
         "dstack_endpoint": "unix:/var/run/dstack.sock",
+        "require_client_e2ee": true,
         "privatemode_proxy": {
           "base_url": "http://privatemode-proxy:8080",
           "manifest_log_path": "/run/privatemode-manifests/log.txt",

@@ -27,8 +27,7 @@ use private_ai_gateway::aci::receipt::{
 };
 use private_ai_gateway::aci::types::{ServiceCapabilities, TlsSpki};
 use private_ai_gateway::aci::upstream::{
-    PreparedUpstreamRequest, PrivatemodeProxyDeployment, UpstreamBackend, UpstreamError,
-    UpstreamRequest, UpstreamResponse,
+    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
 };
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore,
@@ -36,7 +35,7 @@ use private_ai_gateway::aggregator::service::{
 use private_ai_gateway::aggregator::upstream_config::{
     UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
-use private_ai_gateway::http::{build_router, build_router_with_admin};
+use private_ai_gateway::http::{build_router, build_router_with_admin, InferenceAccess};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tower::ServiceExt;
@@ -466,28 +465,18 @@ async fn chat_default_required_fails_closed_without_verifier() {
 }
 
 #[tokio::test]
-async fn privatemode_deployment_rejects_plaintext_before_reading_the_body() {
+async fn required_client_e2ee_rejects_plaintext_before_reading_the_body() {
     let h = make_harness();
-    let credential_path = std::env::temp_dir().join(format!(
-        "pag-privatemode-e2ee-test-{}-{}",
-        std::process::id(),
-        rand::random::<u64>()
-    ));
-    std::fs::write(&credential_path, b"secret").unwrap();
-    let deployment = PrivatemodeProxyDeployment::new(
-        "http://privatemode-proxy:8080",
-        credential_path.with_extension("manifest-log"),
-        &credential_path,
-        private_ai_gateway::aci::digest::sha256_hex(b"secret"),
-        format!("sha256:{}", "22".repeat(32)),
-    )
-    .unwrap();
-    std::fs::remove_file(credential_path).unwrap();
-
-    let mut options = upstream_runtime_options();
-    options.privatemode_proxy = Some(Arc::new(deployment));
-    let manager = load_manager_with_options("[]", options);
-    let app = build_router_with_admin(h.service, manager, None, None);
+    let manager = load_manager("[]");
+    let app = build_router_with_admin(
+        h.service,
+        manager,
+        None,
+        InferenceAccess {
+            require_client_e2ee: true,
+            ..InferenceAccess::default()
+        },
+    );
     let body_polled = Arc::new(AtomicBool::new(false));
     let body_polled_by_stream = body_polled.clone();
     let body = Body::from_stream(futures_util::stream::once(async move {
@@ -537,7 +526,15 @@ async fn configured_inference_token_blocks_unauthenticated_paid_forwarding() {
     let h = make_harness();
     let manager = load_manager("[]");
     let expected: [u8; 32] = Sha256::digest(b"client-inference-token").into();
-    let app = build_router_with_admin(h.service.clone(), manager, None, Some(expected));
+    let app = build_router_with_admin(
+        h.service.clone(),
+        manager,
+        None,
+        InferenceAccess {
+            token_sha256: Some(expected),
+            ..InferenceAccess::default()
+        },
+    );
 
     let body_polled = Arc::new(AtomicBool::new(false));
     let body_polled_by_stream = body_polled.clone();
@@ -1017,13 +1014,6 @@ fn upstream_runtime_options() -> UpstreamRuntimeOptions {
 }
 
 fn load_manager(config_json: &str) -> Arc<UpstreamConfigManager> {
-    load_manager_with_options(config_json, upstream_runtime_options())
-}
-
-fn load_manager_with_options(
-    config_json: &str,
-    options: UpstreamRuntimeOptions,
-) -> Arc<UpstreamConfigManager> {
     // Unique per call: a coarse system clock can hand concurrent tests the same
     // nanos, so an atomic counter guarantees distinct temp paths.
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1033,7 +1023,7 @@ fn load_manager_with_options(
         SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     ));
     std::fs::write(&path, config_json).unwrap();
-    Arc::new(UpstreamConfigManager::load(&path, options).unwrap())
+    Arc::new(UpstreamConfigManager::load(&path, upstream_runtime_options()).unwrap())
 }
 
 fn setup_with_config(config_json: &str) -> (Arc<AciService>, Router) {
@@ -1051,7 +1041,7 @@ fn setup_with_config(config_json: &str) -> (Arc<AciService>, Router) {
         )
         .unwrap(),
     );
-    let app = build_router_with_admin(service.clone(), manager, None, None);
+    let app = build_router_with_admin(service.clone(), manager, None, InferenceAccess::default());
     (service, app)
 }
 

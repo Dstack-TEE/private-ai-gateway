@@ -152,7 +152,7 @@ pub(super) fn is_connection_error(err: &std::io::Error) -> bool {
 }
 
 pub(super) fn enforce_inference(state: &AppState, headers: &HeaderMap) -> Option<Response> {
-    let expected = state.inference_token_sha256?;
+    let expected = state.inference_access.token_sha256?;
     let Some(token) = extract_bearer(headers) else {
         return Some(error_response(
             StatusCode::UNAUTHORIZED,

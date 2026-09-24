@@ -173,26 +173,37 @@ pub struct AppState {
     pub service: Arc<AciService>,
     pub upstream_config: Option<Arc<UpstreamConfigManager>>,
     pub admin_token: Option<String>,
-    pub inference_token_sha256: Option<[u8; 32]>,
-    require_client_e2ee: bool,
+    pub inference_access: InferenceAccess,
     middleware: Option<Arc<Middleware>>,
 }
 
+/// Direct-mode admission policy for the inference endpoints, applied before
+/// any request body is read.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct InferenceAccess {
+    /// SHA-256 of the bearer every inference request must present.
+    pub token_sha256: Option<[u8; 32]>,
+    /// Reject requests without E2EE v2. For deployments whose public TLS
+    /// terminates outside the attested workload, so prompts never cross that
+    /// hop in plaintext.
+    pub require_client_e2ee: bool,
+}
+
 pub fn build_router(service: Arc<AciService>) -> Router {
-    build_router_inner(service, None, None, None, None)
+    build_router_inner(service, None, None, InferenceAccess::default(), None)
 }
 
 pub fn build_router_with_admin(
     service: Arc<AciService>,
     upstream_config: Arc<UpstreamConfigManager>,
     admin_token: Option<String>,
-    inference_token_sha256: Option<[u8; 32]>,
+    inference_access: InferenceAccess,
 ) -> Router {
     build_router_inner(
         service,
         Some(upstream_config),
         admin_token,
-        inference_token_sha256,
+        inference_access,
         None,
     )
 }
@@ -209,7 +220,7 @@ pub fn build_router_with_admin_and_middleware(
         service,
         Some(upstream_config),
         admin_token,
-        None,
+        InferenceAccess::default(),
         Some(middleware),
     )
 }
@@ -218,18 +229,14 @@ fn build_router_inner(
     service: Arc<AciService>,
     upstream_config: Option<Arc<UpstreamConfigManager>>,
     admin_token: Option<String>,
-    inference_token_sha256: Option<[u8; 32]>,
+    inference_access: InferenceAccess,
     middleware: Option<Arc<Middleware>>,
 ) -> Router {
-    let require_client_e2ee = upstream_config
-        .as_ref()
-        .is_some_and(|config| config.requires_client_e2ee());
     let state = AppState {
         service,
         upstream_config,
         admin_token,
-        inference_token_sha256,
-        require_client_e2ee,
+        inference_access,
         middleware,
     };
     Router::new()
@@ -292,7 +299,7 @@ async fn inference_auth_middleware(
     if let Some(response) = enforce_inference(&state, req.headers()) {
         return response;
     }
-    if state.require_client_e2ee
+    if state.inference_access.require_client_e2ee
         && (req
             .headers()
             .get("x-e2ee-version")
@@ -303,7 +310,7 @@ async fn inference_auth_middleware(
         return error_responses::error_response(
             StatusCode::BAD_REQUEST,
             "e2ee_required",
-            "Privatemode inference requires attested client E2EE v2",
+            "this deployment requires attested client E2EE v2",
         );
     }
     next.run(req).await

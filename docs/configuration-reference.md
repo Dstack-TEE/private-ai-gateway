@@ -53,9 +53,10 @@ This is the smallest practical container config.
 | `admin_token_sha256` | unset | Optional SHA-256 policy for the admin token supplied by config or `PRIVATE_AI_GATEWAY_ADMIN_TOKEN`. Startup fails on a missing or mismatched token. |
 | `inference_token_sha256` | unset | SHA-256 of the downstream bearer accepted by direct-mode inference POST endpoints; required when `privatemode_proxy` is configured without middleware and forbidden when middleware is enabled. The high-entropy bearer remains client-side. Missing or mismatched credentials are rejected before request parsing or forwarding. |
 | `dstack_endpoint` | dstack SDK default | dstack SDK endpoint, such as `unix:/var/run/dstack.sock`. |
-| `enable_e2ee` | `true` | Advertise and terminate the [E2EE v2 compatibility extension](../spec/e2ee-v2.md). Set to `false` only for an explicit TLS-only deployment; the attestation then reports `supported_e2ee_versions: []` and v2 requests fail with `e2ee_invalid_version`. Startup fails when `privatemode_proxy` is configured with `false`. |
+| `enable_e2ee` | `true` | Advertise and terminate the [E2EE v2 compatibility extension](../spec/e2ee-v2.md). Set to `false` only for an explicit TLS-only deployment; the attestation then reports `supported_e2ee_versions: []` and v2 requests fail with `e2ee_invalid_version`. |
+| `require_client_e2ee` | `false` | Direct mode only. Reject inference requests without E2EE v2 (`e2ee_required`) before reading the body. Set it when the public TLS endpoint terminates outside the attested workload, such as Phala's public ingress; deployments whose TLS terminates inside the workload (dstack-ingress) do not need it. Requires `enable_e2ee`. |
 | `middleware` | unset | Optional middleware section. When present, the gateway consults a control plane to route and authorize each request and applies request/response transforms; when unset it serves directly. See [Middleware](#middleware). |
-| `privatemode_proxy` | unset | Static policy for an official Privatemode proxy co-deployed in the same measured dstack Compose. The proxy uses dynamic manifests. Required before a `privatemode` route can load. Inference then accepts only E2EE v2 requests and rejects others with `e2ee_required`. |
+| `privatemode_proxy` | unset | Static policy for an official Privatemode proxy co-deployed in the same measured dstack Compose. The proxy uses dynamic manifests. Required before a `privatemode` route can load. |
 
 ### Privatemode proxy
 

@@ -184,8 +184,9 @@ jq -e '
 ```
 
 Do **not** send a plaintext inference request to this public URL. Its TLS
-terminates outside the attested workload; the gateway now rejects such
-requests with `e2ee_required`. Use a client implementing
+terminates outside the attested workload, so this Compose sets
+`require_client_e2ee` and the gateway rejects such requests with
+`e2ee_required`. Use a client implementing
 [ACI E2EE v2](../spec/e2ee-v2.md) to verify the quoted keyset, encrypt every
 content-bearing request field, and decrypt the response. For the receipt audit,
 save the request body as reconstructed by the gateway after E2EE decryption in
