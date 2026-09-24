@@ -50,8 +50,10 @@ test("rpm orders prereleases before their release and after earlier packages", {
   assert.equal(rpmCompare(beta, stable), -1);
 });
 
-const nfpmAvailable = available("nfpm") && available("dpkg-deb") && available("zstd");
-const pkginfo = (file) => execFileSync("tar", ["--zstd", "-xOf", file, ".PKGINFO"], { encoding: "utf8" });
+const nfpmAvailable = available("nfpm") && available("dpkg-deb") && available("bsdtar");
+// libarchive reads RPM and Arch packages alike.
+const member = (file, name) => execFileSync("bsdtar", ["-xOf", file, name], { encoding: "utf8" });
+const pkginfo = (file) => member(file, ".PKGINFO");
 const debListing = (file) => output("dpkg-deb", ["-c", file]);
 
 test("the Tauri payload ships as DEB, RPM and Arch packages with signed updater packages", { skip: !nfpmAvailable }, async () => {
@@ -115,8 +117,8 @@ test("the Tauri payload ships as DEB, RPM and Arch packages with signed updater 
     assert.match(info, /^conflict = private-ai-proxy-cli$/m);
     assert.match(info, /^depend = webkit2gtk-4\.1$/m);
     assert.doesNotMatch(info, /^replaces/m);
-    assert.equal(execFileSync("tar", ["--zstd", "-xOf", arch, "usr/share/private-ai-proxy/package-manager"], { encoding: "utf8" }), "pacman\n");
-    assert.doesNotMatch(execFileSync("tar", ["--zstd", "-tf", arch], { encoding: "utf8" }), /\.INSTALL/);
+    assert.equal(member(arch, "usr/share/private-ai-proxy/package-manager"), "pacman\n");
+    assert.doesNotMatch(execFileSync("bsdtar", ["-tf", arch], { encoding: "utf8" }), /\.INSTALL/);
     for (const file of [deb, rpm]) {
       const signature = Buffer.from(await readFile(`${file}.sig`, "utf8"), "base64").toString("utf8");
       assert.match(signature, new RegExp(`trusted comment: timestamp:\\d+\\tfile:${path.basename(file).replaceAll(".", "\\.")}\\tversion:1\\.2\\.3-beta\\.4`));
@@ -152,11 +154,11 @@ test("CLI packages keep executables in libexec, alias symlinks and their package
       const files = output("rpm", ["-qp", "--qf", "[%{FILENAMES}|%{FILEMODES:perms}\n]", rpm]);
       assert.match(files, /^\/usr\/libexec\/private-ai-proxy\|drwxr-xr-x$/m);
       assert.match(files, /^\/usr\/share\/private-ai-proxy\|drwxr-xr-x$/m);
-      assert.equal(execFileSync("sh", ["-c", 'rpm2cpio "$1" | cpio -i --quiet --to-stdout "*/package-manager"', "sh", rpm], { encoding: "utf8" }), "rpm\n");
+      assert.equal(member(rpm, "/usr/share/private-ai-proxy/package-manager"), "rpm\n");
     }
     assert.match(pkginfo(arch), /^depend = glibc$/m);
     assert.match(pkginfo(arch), /^arch = aarch64$/m);
-    assert.equal(execFileSync("tar", ["--zstd", "-xOf", arch, "usr/share/private-ai-proxy/package-manager"], { encoding: "utf8" }), "pacman\n");
+    assert.equal(member(arch, "usr/share/private-ai-proxy/package-manager"), "pacman\n");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

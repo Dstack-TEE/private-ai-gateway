@@ -136,7 +136,7 @@ jobs:
       - name: Install Linux desktop dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev gnome-keyring dbus-x11 libsecret-tools rpm cpio
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev gnome-keyring dbus-x11 libsecret-tools rpm libarchive-tools
       # nfpm (GoReleaser's packager) builds every Linux package.
       - &install-nfpm
         name: Install nfpm
@@ -311,7 +311,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev gnome-keyring dbus-x11 binutils rpm cpio xvfb x11-utils
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev gnome-keyring dbus-x11 binutils libarchive-tools xvfb x11-utils
       - *install-nfpm
       - name: Install desktop dependencies
         working-directory: apps/desktop
@@ -564,8 +564,7 @@ jobs:
             mkdir "$scratch/$2"
             case "$1" in
               *.deb) dpkg-deb -x "$1" "$scratch/$2" ;;
-              *.rpm) (cd "$scratch/$2" && rpm2cpio "$GITHUB_WORKSPACE/apps/desktop/$1" | cpio -idm --quiet) ;;
-              *.pkg.tar.zst) tar --zstd -xf "$1" -C "$scratch/$2" ;;
+              *) bsdtar -xf "$1" -C "$scratch/$2" ;;
             esac
           }
           for suffix in deb rpm pkg.tar.zst; do
