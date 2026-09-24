@@ -1,5 +1,6 @@
 //! Owner-only files and atomic replacement, shared by every process that
-//! writes app state: preferences, profiles, locks, tokens and agent configs.
+//! writes app state and settings: credentials, local state, locks, tokens and
+//! agent configs.
 
 use std::{fs, io, path::Path};
 
@@ -89,9 +90,12 @@ pub fn read_private_text(path: &Path) -> io::Result<Option<String>> {
     }
 }
 
-/// Restore owner-only permissions on an existing private file, through an
-/// `O_NOFOLLOW` descriptor so the path cannot be swapped for a symlink
-/// between check and change. Missing files are fine.
+/// Restore owner-only permissions on an existing private file. On Unix this
+/// goes through an `O_NOFOLLOW` descriptor so the path cannot be swapped for a
+/// symlink between check and change. On Windows the file gets a protected
+/// DACL for the current user (and LocalSystem and Administrators), so it is
+/// owner-only wherever it lives, not only under the profile's inherited ACL.
+/// Missing files are fine.
 pub fn tighten_private(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     if let Some(file) = open_private(path)? {
@@ -101,9 +105,37 @@ pub fn tighten_private(path: &Path) -> io::Result<()> {
             file.set_permissions(fs::Permissions::from_mode(0o600))?;
         }
     }
-    #[cfg(not(unix))]
-    let _ = path;
+    #[cfg(windows)]
+    if open_private(path)?.is_some() {
+        crate::windows_acl::restrict_to_current_user(path)?;
+    }
     Ok(())
+}
+
+/// Whether other users can read an existing private file: group or other
+/// permission bits on Unix, an allow entry for anyone but the current user,
+/// LocalSystem and Administrators on Windows. `Ok(None)` when it is absent.
+pub fn readable_by_others(path: &Path) -> io::Result<Option<bool>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => Ok(Some(metadata.permissions().mode() & 0o077 != 0)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+    #[cfg(windows)]
+    {
+        let handle = match crate::windows_acl::open_for_inspection(path) {
+            Ok(handle) => handle,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        crate::windows_acl::read(&handle)
+            .map(|acl| Some(acl.readable_by_others()))
+            .map_err(io::Error::other)
+    }
 }
 
 /// Persist Unix directory entries through an O_DIRECTORY, O_NOFOLLOW handle.

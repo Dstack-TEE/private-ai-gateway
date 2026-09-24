@@ -611,6 +611,7 @@ jobs:
         run: |
           cargo test --release --locked --package private-ai-proxy-core --target "$(rustc -vV | sed -n 's/^host: //p')" --lib
           cargo test --release --locked --package private-ai-proxy-runtime --target "$(rustc -vV | sed -n 's/^host: //p')" --lib
+          cargo test --release --locked --package private-ai-proxy-runtime --target "$(rustc -vV | sed -n 's/^host: //p')" --lib -- --ignored legacy_keychain_import_round_trip
 
       - name: Test Windows desktop libraries
         if: runner.os == 'Windows'

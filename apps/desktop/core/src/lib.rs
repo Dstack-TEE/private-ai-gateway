@@ -24,6 +24,8 @@ pub mod transport;
 pub mod ui_api;
 pub mod updates;
 pub mod usage;
+#[cfg(windows)]
+pub mod windows_acl;
 
 /// Seconds since the Unix epoch; 0 if the system clock is set before it.
 pub fn now_secs() -> u64 {

@@ -96,6 +96,7 @@ fn test_runtime(
         settings: Arc::new(Settings::open(directory.join("settings"), directory).0),
         settings_watcher: Mutex::new(None),
         local_state: Arc::new(LocalState::open(directory)),
+        data_dir: directory.to_path_buf(),
         credentials: ClientCredentials::from_files(TokenFiles::new(directory)),
         account_login: tokio::sync::Mutex::new(None),
         account_save: Mutex::new(None),

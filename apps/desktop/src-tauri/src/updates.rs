@@ -6,7 +6,7 @@ use desktop_core::{
     protocol::{rpc, Preference},
     updates::{self, Installation, UpdateInfo},
 };
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 pub(crate) struct DownloadedUpdate {
@@ -71,10 +71,22 @@ pub async fn prepare_update(
         .try_lock()
         .map_err(|_| "An update operation is already in progress")?;
     let current_version = app.package_info().version.to_string();
-    let build_version = current_version.clone();
+    let default = updates::build_channel(&current_version);
+    // The backend's settings, like every other preference the app reads, so
+    // the app and the backend always agree on the file in effect.
+    let client = app.state::<Arc<Client>>().inner().clone();
     let (channel, system_managed) = crate::run_blocking(move || {
+        let channel = match client.call(rpc::Settings) {
+            Ok(saved) => saved.update_channel.unwrap_or(default),
+            Err(error) => {
+                desktop_core::diagnostic!(
+                    "Could not read the update channel; using the build channel: {error}"
+                );
+                default
+            }
+        };
         Ok((
-            updates::selected_channel(&build_version),
+            channel,
             updates::installation() == Installation::DesktopPacman,
         ))
     })

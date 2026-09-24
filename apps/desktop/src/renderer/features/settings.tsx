@@ -120,6 +120,10 @@ export function SettingsView({
         <AlertDescription className="whitespace-pre-wrap font-mono text-xs">{state.configFiles.error}</AlertDescription>
         <AlertDescription>The previous settings stay in effect until the file is fixed.</AlertDescription>
       </Alert>}
+      {state.configFiles.warnings.length > 0 && <Alert className="mb-5">
+        <AlertTitle>Check your settings</AlertTitle>
+        <AlertDescription className="whitespace-pre-wrap font-mono text-xs">{state.configFiles.warnings.join("\n")}</AlertDescription>
+      </Alert>}
 
       <SettingsSection title="General">
           {distribution.launchAtLogin && <SettingsToggle label="Open at Login" checked={launchPreferences?.openAtLogin ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("openAtLogin", !launchPreferences?.openAtLogin)} />}

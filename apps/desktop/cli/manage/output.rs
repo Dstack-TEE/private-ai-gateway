@@ -119,7 +119,7 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
         } => "Backend settings reset. Profiles, keys and usage kept; protection is off.".into(),
         Action::Settings {
             command: Settings::Set { key, .. },
-        } => format!("Updated {}.", safe(&key.to_string())),
+        } => format!("Updated {}.", safe(&key.key.to_string())),
         Action::Token {
             command: Token::Show,
         } => text(&value["token"]),
@@ -231,6 +231,14 @@ fn status(value: &Value) -> String {
             "Settings file not applied (previous settings in effect): {}",
             safe(error)
         ));
+    }
+    for warning in state["configFiles"]["warnings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        lines.push(format!("Settings warning: {}", safe(warning)));
     }
     if let Some(required) = state["config"]["requireProductionOs"].as_bool() {
         lines.push(format!(

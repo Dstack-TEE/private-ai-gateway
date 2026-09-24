@@ -294,6 +294,7 @@ impl RpcError {
             "The connection preview",
             "config.toml",
             "credentials.toml",
+            "Settings from 0.1",
         ] {
             if message.starts_with(prefix) && message.len() < 512 {
                 return Self::new("invalid_state", message);

@@ -179,7 +179,7 @@ It is off by default and binds `127.0.0.1` unless network access is explicitly
 allowed; its listener settings share `ListenConfig` and `listen::resolve` with
 the Local API, so non-loopback addresses fail closed without confirmation.
 Setting changes apply live and bind failures are reported in state. It requires
-a sign-in password, stored only as an Argon2id hash in the preferences and set
+a sign-in password, stored only as an Argon2id hash in `credentials.toml` and set
 over the IPC endpoint (its root of trust) or by a signed-in browser that proves
 the current password. Signing in sets an `HttpOnly`, `SameSite=Strict` cookie
 for an idle-expiring server-side session; mutations also need an exact

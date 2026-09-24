@@ -5,22 +5,27 @@
 //!
 //! The layout follows Cargo's and Codex's `config.toml`: every key is
 //! optional, `[profiles.<id>]` tables name the saved profiles and
-//! `activeProfile` selects one. Keys are camelCase like the management
-//! contracts, as in `Tauri.toml`. Clients only read this file; the backend
-//! applies external edits and performs every write (see
-//! `desktop_runtime::settings`).
+//! `active-profile` selects one. Keys are kebab-case, as in `Cargo.toml`,
+//! Cargo's `config.toml`, `Tauri.toml` and Helix's `config.toml`; the
+//! management contracts keep their camelCase JSON names, so the nested
+//! contract types are (de)serialized here through serde remote definitions
+//! (<https://serde.rs/remote-derive.html>) that the compiler keeps in step
+//! with them. Unknown keys are ignored and reported, as Cargo reports an
+//! "unused config key", so a file written by a newer version still loads.
+//! Clients only read this file; the backend applies external edits and
+//! performs every write (see `desktop_runtime::settings`).
 
 use std::{fs, path::PathBuf};
 
 use indexmap::IndexMap;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize, Serializer};
 use url::Url;
 
 use crate::{
     contracts::{
-        ConfidentialProfile, ConfidentialProfileInput, ListenConfig, ProfileAuth, ServiceProvider,
-        StartConfig,
+        AccountImages, AccountScope, ConfidentialProfile, ConfidentialProfileInput, ListenConfig,
+        ProfileAuth, ServiceProvider, StartConfig,
     },
     listen::{self, ResolvedListen},
     paths::config_dir,
@@ -47,7 +52,7 @@ pub const CONFIG_HEADER: &str = "#:schema ./config.schema.json
 
 /// Private AI Proxy settings (`config.toml`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+#[serde(default, rename_all = "kebab-case")]
 pub struct Config {
     /// The profile protection uses. Defaults to the first profile.
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -63,10 +68,13 @@ pub struct Config {
     /// Register the `pap` command when the desktop app starts (macOS). Defaults to true.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_cli_registration: Option<bool>,
+    #[serde(with = "NotificationsTable")]
     pub notifications: NotificationPreferences,
     /// The machine-local inference API that agents use.
+    #[serde(with = "ListenTable")]
     pub local_api: ListenConfig,
     /// The browser UI hosted by the backend.
+    #[serde(with = "WebUiTable")]
     pub web_ui: WebUiConfig,
     /// Confidential AI service profiles by ID. Their API keys are in credentials.toml.
     #[serde(skip_serializing_if = "IndexMap::is_empty")]
@@ -92,14 +100,18 @@ impl Default for Config {
 
 /// A saved Confidential AI service profile.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "kebab-case")]
 pub struct Profile {
     pub name: String,
     pub provider: ServiceProvider,
     /// The service's HTTPS URL (HTTP only for loopback development).
     pub remote_url: String,
     /// How the credential was obtained. Defaults to a manually entered API key.
-    #[serde(default, skip_serializing_if = "ProfileAuth::is_api_key")]
+    #[serde(
+        default,
+        skip_serializing_if = "ProfileAuth::is_api_key",
+        with = "ProfileAuthTable"
+    )]
     pub auth: ProfileAuth,
     /// Unix seconds of the last successful verification from Settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -125,7 +137,7 @@ pub enum Appearance {
 }
 
 /// Desktop notifications. The OS permission is managed by the desktop app.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ts_rs::TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct NotificationPreferences {
     pub enabled: bool,
@@ -147,8 +159,8 @@ impl Default for NotificationPreferences {
 
 /// The service-hosted browser UI. It is off until the user enables it and
 /// listens on loopback unless network access is explicitly allowed. It
-/// cannot turn on without a sign-in password (`pap settings set webUiPassword`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ts_rs::TS)]
+/// cannot turn on without a sign-in password (`pap settings set web-ui.password`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 #[ts(optional_fields)]
 pub struct WebUiConfig {
@@ -180,6 +192,126 @@ impl Default for WebUiConfig {
             port: WEB_UI_DEFAULT_PORT,
             client_host: None,
         }
+    }
+}
+
+// The file's names for the management contract types it embeds. Each mirrors
+// its remote type field for field (serde checks this at compile time) and
+// only renames the keys; unknown keys are allowed, unlike in the contracts.
+
+/// Desktop notifications. The OS permission is managed by the desktop app.
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(
+    remote = "NotificationPreferences",
+    default = "NotificationPreferences::default",
+    rename_all = "kebab-case"
+)]
+#[schemars(rename = "Notifications")]
+struct NotificationsTable {
+    enabled: bool,
+    gateway: bool,
+    local_api: bool,
+    verification: bool,
+}
+
+/// A TCP listener. Non-loopback addresses require `allow-network-access`.
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(
+    remote = "ListenConfig",
+    default = "ListenConfig::default",
+    rename_all = "kebab-case"
+)]
+#[schemars(rename = "Listener")]
+struct ListenTable {
+    listen_address: String,
+    allow_network_access: bool,
+    port: u16,
+    /// The host name clients use when listening on every interface.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_host: Option<String>,
+}
+
+/// The service-hosted browser UI. It is off until the user enables it and
+/// listens on loopback unless network access is explicitly allowed. It
+/// cannot turn on without a sign-in password (`pap settings set web-ui.password`).
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(
+    remote = "WebUiConfig",
+    default = "WebUiConfig::default",
+    rename_all = "kebab-case"
+)]
+#[schemars(rename = "WebUi")]
+struct WebUiTable {
+    enabled: bool,
+    listen_address: String,
+    allow_network_access: bool,
+    port: u16,
+    /// The host name clients use when listening on every interface.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_host: Option<String>,
+}
+
+/// How a profile's credential was obtained.
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(remote = "ProfileAuth", tag = "kind", rename_all = "kebab-case")]
+#[schemars(rename = "ProfileAuth")]
+enum ProfileAuthTable {
+    /// An API key entered manually.
+    ApiKey,
+    /// A key created by signing in to the provider account.
+    #[serde(rename = "oauth", rename_all = "kebab-case")]
+    OAuth {
+        account_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        images: Option<AccountImages>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "AccountScopeTable"
+        )]
+        scope: Option<Box<AccountScope>>,
+    },
+}
+
+/// The account organization and workspace the key belongs to.
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(remote = "AccountScope", rename_all = "kebab-case")]
+#[schemars(rename = "AccountScope")]
+struct AccountScopeFields {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    organization_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    organization_slug: Option<String>,
+    organization: Option<String>,
+    workspace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace_slug: Option<String>,
+    workspace_id: Option<i64>,
+}
+
+// `Option<Box<AccountScope>>` through `AccountScopeFields`: the wrapper
+// serde's remote derive needs for a remote type inside a container.
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+struct AccountScopeTable(#[serde(with = "AccountScopeFields")] AccountScope);
+
+impl AccountScopeTable {
+    fn serialize<S: Serializer>(
+        scope: &Option<Box<AccountScope>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        scope
+            .as_deref()
+            .map(|scope| Self(scope.clone()))
+            .serialize(serializer)
+    }
+
+    fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Box<AccountScope>>, D::Error> {
+        Ok(Option::<Self>::deserialize(deserializer)?.map(|scope| Box::new(scope.0)))
     }
 }
 
@@ -238,7 +370,7 @@ impl Config {
 pub fn load() -> Result<Config, String> {
     let path = config_path()?;
     match fs::read_to_string(&path) {
-        Ok(text) => parse(&text),
+        Ok(text) => parse(&text).map(|parsed| parsed.value),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
         Err(error) => Err(format!("Cannot read {}: {error}", path.display())),
     }
@@ -252,18 +384,38 @@ pub fn credentials_path() -> Result<PathBuf, String> {
     Ok(config_dir()?.join(CREDENTIALS_FILE))
 }
 
-/// Parses and validates `config.toml` text. Errors name the file, line and
-/// column: `config.toml:3:8: invalid type: string "x", expected u16`.
-pub fn parse(text: &str) -> Result<Config, String> {
-    let mut config: Config = parse_toml(CONFIG_FILE, text)?;
-    validate(&mut config).map_err(|invalid| invalid.located(CONFIG_FILE, text))?;
-    Ok(config)
+/// A settings file that loaded, with a warning for each key it does not know.
+#[derive(Debug, Default)]
+pub struct Parsed<T> {
+    pub value: T,
+    /// `file:line:column: key.path: unknown key, ignored`.
+    pub unknown: Vec<String>,
 }
 
-/// Deserializes a settings file, reporting syntax and type errors with their position.
-pub fn parse_toml<T: serde::de::DeserializeOwned>(file: &str, text: &str) -> Result<T, String> {
-    toml_edit::de::from_str(text).map_err(|error| {
-        let message = error.message().trim_end();
+/// Parses and validates `config.toml` text. Errors name the file, line and
+/// column: `config.toml:3:8: invalid type: string "x", expected u16`.
+pub fn parse(text: &str) -> Result<Parsed<Config>, String> {
+    let mut parsed: Parsed<Config> = parse_toml(CONFIG_FILE, text, true)?;
+    validate(&mut parsed.value).map_err(|invalid| invalid.located(CONFIG_FILE, text))?;
+    Ok(parsed)
+}
+
+/// Deserializes a settings file, reporting syntax and type errors with their
+/// position. `describe` includes the parser's message, which can quote a
+/// value; files holding secrets leave it out. A key the file's type does not
+/// know is skipped and reported instead of failing the file, like Cargo's
+/// "unused config key" warning (collected with `serde_ignored`, as Cargo does).
+pub fn parse_toml<T: DeserializeOwned>(
+    file: &str,
+    text: &str,
+    describe: bool,
+) -> Result<Parsed<T>, String> {
+    let located = |error: toml_edit::de::Error| {
+        let message = if describe {
+            error.message().trim_end().to_string()
+        } else {
+            "invalid entry".to_string()
+        };
         match error.span() {
             Some(span) => {
                 let (line, column) = line_column(text, span.start);
@@ -271,7 +423,44 @@ pub fn parse_toml<T: serde::de::DeserializeOwned>(file: &str, text: &str) -> Res
             }
             None => format!("{file}: {message}"),
         }
+    };
+    let deserializer = toml_edit::de::Deserializer::parse(text).map_err(located)?;
+    let mut unknown = Vec::new();
+    let value = serde_ignored::deserialize(deserializer, |path| {
+        let mut keys = Vec::new();
+        key_path(&path, &mut keys);
+        unknown.push(keys);
     })
+    .map_err(located)?;
+    let unknown = unknown
+        .into_iter()
+        .map(|path| {
+            Invalid {
+                path,
+                message: "unknown key, ignored".into(),
+            }
+            .located(file, text)
+        })
+        .collect();
+    Ok(Parsed { value, unknown })
+}
+
+fn key_path(path: &serde_ignored::Path<'_>, keys: &mut Vec<String>) {
+    use serde_ignored::Path;
+    match path {
+        Path::Root => {}
+        Path::Seq { parent, index } => {
+            key_path(parent, keys);
+            keys.push(index.to_string());
+        }
+        Path::Map { parent, key } => {
+            key_path(parent, keys);
+            keys.push(key.clone());
+        }
+        Path::Some { parent }
+        | Path::NewtypeStruct { parent }
+        | Path::NewtypeVariant { parent } => key_path(parent, keys),
+    }
 }
 
 /// A setting that parsed but is not allowed, at its key path.
@@ -352,7 +541,7 @@ pub fn validate(config: &mut Config) -> Result<(), Invalid> {
             } else if message.starts_with("Profile name") {
                 Some("name")
             } else {
-                Some("remoteUrl")
+                Some("remote-url")
             };
             let mut path = vec!["profiles", id.as_str()];
             path.extend(field);
@@ -361,7 +550,7 @@ pub fn validate(config: &mut Config) -> Result<(), Invalid> {
         if let ProfileAuth::OAuth { account_id, .. } = &profile.auth {
             if account_id.trim().is_empty() {
                 return Err(Invalid::at(
-                    &["profiles", id, "auth", "accountId"],
+                    &["profiles", id, "auth", "account-id"],
                     "OAuth profiles must identify an account",
                 ));
             }
@@ -373,15 +562,15 @@ pub fn validate(config: &mut Config) -> Result<(), Invalid> {
         config.active_profile = config.profiles.keys().next().cloned().unwrap_or_default();
     } else if !config.profiles.contains_key(&config.active_profile) {
         return Err(Invalid::at(
-            &["activeProfile"],
+            &["active-profile"],
             "The active profile does not exist",
         ));
     }
     config.local_api = resolve_local_api(config.local_api.clone())
-        .map_err(|message| Invalid::at(&["localApi"], message))?
+        .map_err(|message| Invalid::at(&["local-api"], message))?
         .config;
     let web_ui = validate_web_ui(&config.web_ui, config.local_api.port)
-        .map_err(|message| Invalid::at(&["webUi"], message))?;
+        .map_err(|message| Invalid::at(&["web-ui"], message))?;
     config.web_ui.listen_address = web_ui.config.listen_address;
     config.web_ui.client_host = web_ui.config.client_host;
     Ok(())
@@ -481,7 +670,9 @@ pub fn validate_profile_id(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn normalize_url(value: &str) -> Result<String, String> {
+/// A service URL in the form profiles store: HTTPS (HTTP only for loopback),
+/// no credentials, query or trailing slash.
+pub fn normalize_url(value: &str) -> Result<String, String> {
     let mut url = Url::parse(value.trim())
         .map_err(|_| "Gateway URL must be a valid HTTP or HTTPS URL".to_string())?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
@@ -574,7 +765,7 @@ mod tests {
 
     #[test]
     fn an_empty_file_is_the_default_settings() {
-        let config = parse("").unwrap();
+        let config = parse("").unwrap().value;
         assert_eq!(config, Config::default());
         assert!(config.require_production_os);
         assert!(config.profiles.is_empty());
@@ -592,25 +783,26 @@ mod tests {
             r#"
 appearance = "dark"
 
-[localApi]
+[local-api]
 port = 5180
 
-[webUi]
+[web-ui]
 enabled = true
 
 [profiles.work]
 name = "Work"
 provider = "custom"
-remoteUrl = "https://private.example.com/"
+remote-url = "https://private.example.com/"
 
 [profiles.home]
 name = "Home"
 provider = "redpill"
-remoteUrl = "https://tee.redpill.ai"
-auth = { kind = "oauth", accountId = "user_1" }
+remote-url = "https://tee.redpill.ai"
+auth = { kind = "oauth", account-id = "user_1", scope = { organization-id = "org_1", workspace-id = 7 } }
 "#,
         )
-        .unwrap();
+        .unwrap()
+        .value;
         assert_eq!(config.appearance, Appearance::Dark);
         assert_eq!(config.local_api.port, 5180);
         assert_eq!(config.local_api.listen_address, "127.0.0.1");
@@ -620,7 +812,16 @@ auth = { kind = "oauth", accountId = "user_1" }
             config.profiles["work"].remote_url,
             "https://private.example.com"
         );
-        assert!(config.profiles["home"].auth != ProfileAuth::ApiKey);
+        let ProfileAuth::OAuth {
+            account_id, scope, ..
+        } = &config.profiles["home"].auth
+        else {
+            panic!("expected an account profile");
+        };
+        assert_eq!(account_id, "user_1");
+        let scope = scope.as_deref().unwrap();
+        assert_eq!(scope.organization_id.as_deref(), Some("org_1"));
+        assert_eq!(scope.workspace_id, Some(7));
         let views = config.profile_views(|id| (id == "home").then(|| "ref".to_string()));
         assert_eq!(views[0].id, "work");
         assert!(!views[0].credential_saved);
@@ -629,37 +830,68 @@ auth = { kind = "oauth", accountId = "user_1" }
 
     #[test]
     fn errors_name_the_line_column_and_key() {
-        let error = parse("appearance = \"dark\"\n[localApi]\nport = \"x\"\n").unwrap_err();
+        let error = parse("appearance = \"dark\"\n[local-api]\nport = \"x\"\n").unwrap_err();
         assert!(error.starts_with("config.toml:3:8: "), "{error}");
-        let error = parse("apperance = \"dark\"\n").unwrap_err();
-        assert!(error.starts_with("config.toml:1:1: "), "{error}");
-        assert!(error.contains("apperance"), "{error}");
-        let error = parse("[localApi]\nlistenAddress = \"0.0.0.0\"\n").unwrap_err();
+        let error = parse("appearance = \"dusk\"\n").unwrap_err();
+        assert!(error.starts_with("config.toml:1:14: "), "{error}");
+        let error = parse("[local-api]\nlisten-address = \"0.0.0.0\"\n").unwrap_err();
         assert_eq!(
             error,
-            "config.toml:1:1: localApi: Network listening requires explicit confirmation"
+            "config.toml:1:1: local-api: Network listening requires explicit confirmation"
         );
         let error = parse(
-            "\n[profiles.work]\nname = \"Work\"\nprovider = \"custom\"\nremoteUrl = \"http://example.com\"\n",
+            "\n[profiles.work]\nname = \"Work\"\nprovider = \"custom\"\nremote-url = \"http://example.com\"\n",
         )
         .unwrap_err();
         assert!(
             error.starts_with(
-                "config.toml:5:13: profiles.work.remoteUrl: Gateway URL must use HTTPS"
+                "config.toml:5:14: profiles.work.remote-url: Gateway URL must use HTTPS"
             ),
             "{error}"
         );
-        let error = parse("activeProfile = \"missing\"\n").unwrap_err();
+        let error = parse("active-profile = \"missing\"\n").unwrap_err();
         assert!(
-            error.starts_with("config.toml:1:17: activeProfile:"),
+            error.starts_with("config.toml:1:18: active-profile:"),
             "{error}"
         );
-        assert!(parse("[webUi]\nport = 4180\n")
+        assert!(parse("[web-ui]\nport = 4180\n")
             .unwrap_err()
             .contains("Local API"));
-        assert!(parse("[profiles.\"a b\"]\nname = \"A\"\nprovider = \"custom\"\nremoteUrl = \"https://a.example\"\n")
+        assert!(parse("[profiles.\"a b\"]\nname = \"A\"\nprovider = \"custom\"\nremote-url = \"https://a.example\"\n")
             .unwrap_err()
             .contains("Profile ID"));
+    }
+
+    #[test]
+    fn unknown_keys_are_reported_but_never_reject_the_file() {
+        // A typo, a key from a newer version and the 0.2 pre-release camelCase
+        // names load with the defaults for those keys, each reported where it is.
+        let parsed = parse(
+            "apperance = \"dark\"\n\
+             [web-ui]\n\
+             enabled = true\n\
+             listenAddress = \"0.0.0.0\"\n\
+             [profiles.work]\n\
+             name = \"Work\"\n\
+             provider = \"custom\"\n\
+             remote-url = \"https://private.example.com\"\n\
+             future = { nested = 1 }\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.value.appearance, Appearance::System);
+        assert!(parsed.value.web_ui.enabled);
+        assert_eq!(parsed.value.web_ui.listen_address, "127.0.0.1");
+        assert_eq!(parsed.value.active_profile, "work");
+        assert_eq!(
+            parsed.unknown,
+            [
+                "config.toml:1:13: apperance: unknown key, ignored",
+                "config.toml:4:17: web-ui.listenAddress: unknown key, ignored",
+                "config.toml:9:10: profiles.work.future: unknown key, ignored",
+            ]
+        );
+        // Type errors and invalid values still reject the file.
+        assert!(parse("[web-ui]\nenabled = \"yes\"\n").is_err());
     }
 
     #[test]
@@ -711,14 +943,32 @@ auth = { kind = "oauth", accountId = "user_1" }
         let schema: serde_json::Value = serde_json::from_str(&schema()).unwrap();
         let properties = schema["properties"].as_object().unwrap();
         for key in [
-            "activeProfile",
-            "localApi",
-            "webUi",
+            "active-profile",
+            "local-api",
+            "web-ui",
             "profiles",
             "notifications",
         ] {
             assert!(properties.contains_key(key), "{key}");
         }
-        assert_eq!(schema["additionalProperties"], false);
+        let definitions = schema["$defs"].as_object().unwrap();
+        for (definition, key) in [
+            ("Listener", "listen-address"),
+            ("WebUi", "allow-network-access"),
+            ("Notifications", "local-api"),
+            ("Profile", "remote-url"),
+        ] {
+            assert!(
+                definitions[definition]["properties"]
+                    .as_object()
+                    .unwrap()
+                    .contains_key(key),
+                "{definition}.{key}"
+            );
+        }
+        // Unknown keys are reported, not rejected, so editors must not flag them as errors.
+        assert!(!schema
+            .to_string()
+            .contains("\"additionalProperties\":false"));
     }
 }

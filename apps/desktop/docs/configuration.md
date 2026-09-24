@@ -6,15 +6,46 @@ directory, which holds nothing else:
 | File | Holds | Permissions |
 | --- | --- | --- |
 | `config.toml` | Profiles (without keys), the active profile, the Local API and web UI listeners, appearance, notifications, update channel, connect on launch, command registration | Owner-only when created; never holds a secret |
-| `credentials.toml` | The user's credentials: provider API keys (manual and account sign-in) and the web UI password hash | Always owner-only (`0600`) on macOS and Linux |
+| `credentials.toml` | The user's credentials: provider API keys (manual and account sign-in) and the web UI password hash | Always owner-only: `0600` on macOS and Linux, a protected owner-only DACL on Windows |
 | `config.schema.json` | The JSON Schema of `config.toml`, rewritten by each version | Generated |
 
 The layout follows established tools: one `config.toml` like Cargo
 (`~/.cargo/config.toml`) and Codex (`~/.codex/config.toml`), with named
-`[profiles.<id>]` tables selected by `activeProfile` as in Codex; secrets in a
+`[profiles.<id>]` tables selected by `active-profile` as in Codex; secrets in a
 separate owner-only `credentials.toml` like Cargo's `credentials.toml` and the
-AWS CLI's `credentials`. Keys use the same camelCase names as the management
-API and `pap settings set`, as `Tauri.toml` does.
+AWS CLI's `credentials`. Keys are kebab-case, like
+[Cargo's configuration](https://doc.rust-lang.org/cargo/reference/config.html),
+[`Tauri.toml`](https://v2.tauri.app/develop/configuration-files/) and
+[Helix](https://docs.helix-editor.com/configuration.html). `pap settings set`
+names a key by its dotted path in the file (`web-ui.port`), as `git config`
+and `cargo config get` do, and `pap settings show` prints the same names.
+
+```toml
+#:schema ./config.schema.json
+active-profile = "work"
+appearance = "dark"
+
+[local-api]
+port = 4180
+
+[web-ui]
+enabled = true
+listen-address = "127.0.0.1"
+
+[profiles.work]
+name = "Work"
+provider = "custom"
+remote-url = "https://gateway.example"
+```
+
+```toml
+# credentials.toml
+[profiles.work]
+api-key = "sk-..."
+
+[web-ui]
+password-hash = "$argon2id$..."
+```
 
 Usage history, agent connection records, agent tokens, caches, locks and logs
 are state, not settings; they stay in the app data directory. So does
@@ -34,7 +65,9 @@ beside it, it must not be copied to another device.
 | Windows | `%APPDATA%\org.dstack.private-ai-proxy\Config` | `%APPDATA%\org.dstack.private-ai-proxy` |
 
 The settings directory is always separate from state, so it can be synced as a
-whole. Linux follows the [XDG base directories](https://specifications.freedesktop.org/basedir/latest/).
+whole. Linux follows the [XDG base directories](https://specifications.freedesktop.org/basedir/latest/);
+as the specification requires, a relative `XDG_CONFIG_HOME` or `XDG_DATA_HOME`
+is ignored.
 macOS and Windows keep one directory per app (Tauri's `app_data_dir`); settings
 get their own `Config` subdirectory in it, as VS Code keeps its settings in
 `~/Library/Application Support/Code/User` and `%APPDATA%\Code\User`, the
@@ -65,6 +98,14 @@ edits immediately, the same way the matching command would: a changed Local
 API listener rebinds, a changed active profile, service URL, policy or active
 key restarts protection, web UI changes reopen its listener, and the desktop
 app reapplies appearance and notification preferences.
+
+A key the app does not know (a typo, or a key from a newer version) is
+ignored and reported as a warning with its position
+(`config.toml:4:17: web-ui.listenAddress: unknown key, ignored`) in Settings,
+`pap settings show`, `pap status` and `pap doctor`; the rest of the file
+applies. This is Cargo's "unused config key" warning, collected the same way
+(with `serde_ignored`), and matches Alacritty and VS Code, which also warn about
+unknown settings instead of rejecting the file.
 
 An edit that does not parse or validate is not applied: the previous settings
 stay in effect, and the error, with file, line and column
@@ -105,10 +146,13 @@ The settings directory contains only settings, so it can be synced as a whole
 
 `credentials.toml` is plaintext protected by file permissions, like Cargo's and
 the AWS CLI's credential files: owner-only (`0600`) in an owner-only (`0700`)
-directory on macOS and Linux, and the per-user profile ACL on Windows, like
-every other private file of the app. Every write restores `0600`; `pap doctor`
-warns when the file is readable by others. `local-state.json` in the app data
-directory gets the same treatment. Neither file is ever shown by the app:
+directory on macOS and Linux. On Windows every write gives it a protected DACL
+granting access only to you, LocalSystem and Administrators (what
+`icacls /inheritance:r` sets and OpenSSH for Windows requires of private keys),
+so it stays owner-only even when `PRIVATE_AI_PROXY_CONFIG_DIR` points outside
+your profile. Every write restores these permissions; `pap doctor` warns when
+another user can read the file, on every platform. `local-state.json` in the
+app data directory gets the same treatment. Neither file is ever shown by the app:
 `settings show`, `status`, diagnostics and logs omit their contents.
 Anyone who can read your files as you can read it, which is also true of an
 unlocked OS keychain for a process running as you.
@@ -118,33 +162,63 @@ unlocked OS keychain for a process running as you.
 0.1 stored settings in `confidential-ai.json`, `local-api.json` and
 `preferences.json` in the app data directory, and API keys, account keys and
 agent restore values in the OS credential store (macOS Keychain, Windows
-Credential Manager, Secret Service). On the first start of 0.2 the backend
-imports them once:
+Credential Manager, Secret Service). 0.2 imports this device's copy in two
+steps (`runtime/src/settings/legacy.rs`):
 
-1. It reads the old files and every credential store entry they reference
-   (nothing else in the credential store is touched), writes
-   `credentials.toml` (user credentials) and `local-state.json` (device-local
-   secrets), syncs them to disk and reads them back.
-2. Only then does it delete the imported credential store entries.
-3. It writes `config.toml`, which marks the import as done.
-4. It moves the old files to `migrated-0.1/` in the app data directory as a
-   one-time backup. They contain no API keys; `preferences.json` contains the
-   web UI password hash. Delete the backup once you are satisfied.
+1. **Settings**, while the backend starts: the old files become `config.toml`
+   and the web UI password hash goes to `credentials.toml`. The old files then
+   move to `migrated-0.1/` in the app data directory, which records the step.
+2. **Saved credentials**, once the backend is listening, so a slow or
+   prompting credential store never delays startup: every credential store
+   entry the old files and `agent-connections.json` reference goes to
+   `credentials.toml` (API keys) or `local-state.json` (agent restore values,
+   pending key revocations). Both are synced to disk and read back, and only
+   then are the imported entries deleted from the store.
+   `migrated-0.1/import-complete` records the step. Each store operation may
+   take at most 60 seconds, which leaves time to answer a macOS Keychain
+   prompt; while the step runs, disconnecting an agent whose original key is
+   still being imported waits instead of dropping that key.
 
-An interrupted import reruns on the next start and keeps whatever it already
-moved. If the credential store is locked or unavailable (for example Linux
-without a Secret Service, or a denied macOS prompt), startup continues: the
-settings are imported, Settings and `pap status` show which profiles need their
-API key re-entered, and `pap doctor` lists profiles without a saved key. The
-credential store is asked at most once.
+Progress is recorded in the app data directory, never by the existence of
+`config.toml`, because the settings directory may have been synced from
+another device that upgraded first. Values already in the files win:
 
-The credential store reader exists only for this import and will be removed in
-a later release (planned for 0.3), together with the `keyring` dependency.
+- `config.toml`: if it exists, its settings stay as they are; only this
+  device's 0.1 profiles whose IDs it lacks are added. Otherwise it is created
+  from the 0.1 settings. Settings not taken over are listed in a notice and
+  kept in `migrated-0.1/`.
+- `credentials.toml`: an existing API key or password hash stays. A 0.1 API
+  key is imported only for a profile that has none and uses the same service
+  URL as this device's 0.1 profile of that ID.
+- `local-state.json`: always this device's; existing entries stay.
 
-### Tracking: Mac App Store keychain entitlement
+A step that fails writes nothing that records it: the old files and the
+credential store entries stay where they are, the error stays in Settings,
+`pap status` and `pap doctor`, and the step runs again on the next start. While
+step 1 has not succeeded, settings cannot be changed, so nothing can be saved
+that the import would then have to merge with. If the credential store is
+locked, unavailable (for example Linux without a Secret Service) or a macOS
+prompt is denied or left unanswered, the settings are still in effect,
+Settings and `pap doctor` name the profiles whose API key to re-enter, and the
+next start tries the store again. Keys you entered in the meantime are kept.
 
-The Mac App Store build keeps its Keychain access group entitlement only so the
-backend can import and delete what 0.1 saved in the Keychain. Remove it from
-the App Store entitlements (see [Mac App Store](mac-app-store.md)) in the same
-release that removes `runtime/src/settings/legacy.rs` and `keyring` (planned
-for 0.3).
+The backup contains no API keys; `preferences.json` contains the web UI
+password hash. Delete `migrated-0.1/` once you are satisfied (keep
+`import-complete`, or the next start looks for credentials to import once
+more, which is harmless).
+
+## Removal in 0.3
+
+Compatibility code for upgrades from 0.1, to be removed together once
+upgrading from 0.1 directly to 0.3 is no longer supported:
+
+- `runtime/src/settings/legacy.rs` (with its tests) and the `keyring`
+  dependency, the only remaining users of the OS credential store.
+- The Keychain access group entitlement of the Mac App Store build (see
+  [Mac App Store](mac-app-store.md)), kept only so the backend can import and
+  delete what 0.1 saved in the Keychain.
+- The deprecated flat `pap settings set` names (`webUi`, `connectOnLaunch`,
+  `notifications` as JSON, and so on) in `cli/manage/args.rs`.
+- `src-tauri/src/autostart/migration.rs`, the bridge from the
+  tauri-plugin-autostart login item.
+- The legacy default window size shim in `src-tauri/src/window_state.rs`.

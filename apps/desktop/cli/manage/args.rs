@@ -362,65 +362,121 @@ pub(super) enum Usage {
     Clear,
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
+/// A `settings set` key: the dotted path of the setting in `config.toml`
+/// (`git config` and `cargo config get` name keys the same way).
+/// `web-ui.password` sets the hash kept in `credentials.toml`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub(super) enum SettingsKey {
-    #[value(name = "autoCliRegistration")]
+    #[value(name = "auto-cli-registration", alias = "autoCliRegistration")]
     AutoCliRegistration,
-    #[value(name = "notifications")]
+    #[value(name = "notifications.enabled")]
+    NotificationsEnabled,
+    #[value(name = "notifications.gateway")]
+    NotificationsGateway,
+    #[value(name = "notifications.local-api")]
+    NotificationsLocalApi,
+    #[value(name = "notifications.verification")]
+    NotificationsVerification,
+    /// Deprecated: all notification settings as one JSON object.
+    #[value(name = "notifications", hide = true)]
     Notifications,
-    #[value(name = "connectOnLaunch")]
+    #[value(name = "connect-on-launch", alias = "connectOnLaunch")]
     ConnectOnLaunch,
     #[value(name = "appearance")]
     Appearance,
-    #[value(name = "updateChannel")]
+    #[value(name = "update-channel", alias = "updateChannel")]
     UpdateChannel,
-    #[value(name = "listenAddress")]
+    #[value(name = "local-api.listen-address", alias = "listenAddress")]
     ListenAddress,
-    #[value(name = "allowNetworkAccess")]
+    #[value(name = "local-api.allow-network-access", alias = "allowNetworkAccess")]
     AllowNetworkAccess,
-    #[value(name = "port")]
+    #[value(name = "local-api.port", alias = "port")]
     Port,
-    #[value(name = "clientHost")]
+    #[value(name = "local-api.client-host", alias = "clientHost")]
     ClientHost,
-    #[value(name = "webUi")]
+    #[value(name = "web-ui.enabled", alias = "webUi")]
     WebUi,
-    #[value(name = "webUiPort")]
+    #[value(name = "web-ui.port", alias = "webUiPort")]
     WebUiPort,
-    #[value(name = "webUiListenAddress")]
+    #[value(name = "web-ui.listen-address", alias = "webUiListenAddress")]
     WebUiListenAddress,
-    #[value(name = "webUiAllowNetworkAccess")]
+    #[value(
+        name = "web-ui.allow-network-access",
+        alias = "webUiAllowNetworkAccess"
+    )]
     WebUiAllowNetworkAccess,
-    #[value(name = "webUiClientHost")]
+    #[value(name = "web-ui.client-host", alias = "webUiClientHost")]
     WebUiClientHost,
-    #[value(name = "webUiPassword")]
+    #[value(name = "web-ui.password", alias = "webUiPassword")]
     WebUiPassword,
 }
 
 impl SettingsKey {
-    pub(super) const fn as_str(self) -> &'static str {
-        match self {
-            Self::AutoCliRegistration => "autoCliRegistration",
-            Self::Notifications => "notifications",
-            Self::ConnectOnLaunch => "connectOnLaunch",
-            Self::Appearance => "appearance",
-            Self::UpdateChannel => "updateChannel",
-            Self::ListenAddress => "listenAddress",
-            Self::AllowNetworkAccess => "allowNetworkAccess",
-            Self::Port => "port",
-            Self::ClientHost => "clientHost",
-            Self::WebUi => "webUi",
-            Self::WebUiPort => "webUiPort",
-            Self::WebUiListenAddress => "webUiListenAddress",
-            Self::WebUiAllowNetworkAccess => "webUiAllowNetworkAccess",
-            Self::WebUiClientHost => "webUiClientHost",
-            Self::WebUiPassword => "webUiPassword",
-        }
+    pub(super) fn as_str(self) -> String {
+        self.to_possible_value()
+            .map(|value| value.get_name().to_string())
+            .unwrap_or_default()
     }
 }
 
 impl fmt::Display for SettingsKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
+        formatter.write_str(&self.as_str())
+    }
+}
+
+/// A key as typed. The flat camelCase names of 0.1 still work as hidden
+/// aliases and print a deprecation warning, as `git config` keeps accepting
+/// renamed keys; they are removed in 0.3.
+#[derive(Clone, Debug)]
+pub(super) struct SettingsKeyArg {
+    pub(super) key: SettingsKey,
+    typed: String,
+}
+
+impl SettingsKeyArg {
+    /// The warning for a deprecated spelling, if this is one.
+    pub(super) fn deprecation(&self) -> Option<String> {
+        let replacement = match self.key {
+            SettingsKey::Notifications => "`notifications.enabled`, `notifications.gateway`, `notifications.local-api` or `notifications.verification`".to_string(),
+            key if key.as_str() != self.typed => format!("`{key}`"),
+            _ => return None,
+        };
+        Some(format!(
+            "warning: `{}` is deprecated and will be removed in 0.3; use {replacement}",
+            self.typed
+        ))
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct SettingsKeyParser;
+
+impl clap::builder::TypedValueParser for SettingsKeyParser {
+    type Value = SettingsKeyArg;
+
+    fn parse_ref(
+        &self,
+        command: &clap::Command,
+        argument: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<SettingsKeyArg, clap::Error> {
+        let key = clap::builder::EnumValueParser::<SettingsKey>::new()
+            .parse_ref(command, argument, value)?;
+        Ok(SettingsKeyArg {
+            key,
+            typed: value.to_string_lossy().into_owned(),
+        })
+    }
+
+    fn possible_values(
+        &self,
+    ) -> Option<Box<dyn Iterator<Item = clap::builder::PossibleValue> + '_>> {
+        Some(Box::new(
+            SettingsKey::value_variants()
+                .iter()
+                .filter_map(ValueEnum::to_possible_value),
+        ))
     }
 }
 
@@ -434,11 +490,12 @@ pub(super) enum Settings {
     Schema,
     /// Change one setting. This may restart the Local API or protection.
     Set {
-        #[arg(value_enum)]
-        key: SettingsKey,
-        /// Boolean keys use true/false; appearance uses system/light/dark; updateChannel uses beta/stable; notifications is a JSON object with boolean fields. webUiPassword takes no value (use --value-stdin or the hidden prompt); "" removes it.
+        /// The setting's dotted path in config.toml, for example web-ui.enabled.
+        #[arg(value_parser = SettingsKeyParser)]
+        key: SettingsKeyArg,
+        /// Boolean keys use true/false; appearance uses system/light/dark; update-channel uses beta/stable. web-ui.password takes no value (use --value-stdin or the hidden prompt); "" removes it.
         value: Option<String>,
-        /// Read the webUiPassword value from stdin instead of a hidden terminal prompt.
+        /// Read the web-ui.password value from stdin instead of a hidden terminal prompt.
         #[arg(long)]
         value_stdin: bool,
     },

@@ -176,7 +176,7 @@ pub enum AccountSaveResult {
     Failed { error: String },
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountScope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -233,7 +233,7 @@ pub struct AccountImages {
     pub organization: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind")]
 pub enum ProfileAuth {
     #[default]
@@ -373,6 +373,10 @@ pub struct ConfigFiles {
     /// stay in effect), with the file, line and column.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Problems that do not stop the files from applying: unknown keys, which
+    /// are ignored, and what the 0.1 import could not bring over.
+    #[serde(default)]
+    pub warnings: Vec<String>,
     /// Changes whenever applied settings change, including external edits.
     pub revision: u64,
 }
@@ -469,7 +473,7 @@ impl Default for AppState {
 
 /// A TCP listener shared by the Local API and the web UI. Non-loopback
 /// addresses require `allow_network_access`; see [`crate::listen::resolve`].
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 #[ts(optional_fields)]
 pub struct ListenConfig {

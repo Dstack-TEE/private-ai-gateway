@@ -44,14 +44,19 @@ pub fn belongs_to_feed(version: &str, feed: UpdateChannel) -> bool {
     }
 }
 
-/// The saved channel, defaulting to the channel of the running build.
+/// The channel of the running build, used until one is saved.
+pub fn build_channel(current_version: &str) -> UpdateChannel {
+    if semver::Version::parse(current_version).is_ok_and(|version| !version.pre.is_empty()) {
+        UpdateChannel::Beta
+    } else {
+        UpdateChannel::Stable
+    }
+}
+
+/// The saved channel as `config.toml` holds it, for processes that may run
+/// without the backend (the CLI). The desktop app asks the backend instead.
 pub fn selected_channel(current_version: &str) -> UpdateChannel {
-    let default =
-        if semver::Version::parse(current_version).is_ok_and(|version| !version.pre.is_empty()) {
-            UpdateChannel::Beta
-        } else {
-            UpdateChannel::Stable
-        };
+    let default = build_channel(current_version);
     match config::load() {
         Ok(saved) => saved.update_channel.unwrap_or(default),
         Err(error) => {

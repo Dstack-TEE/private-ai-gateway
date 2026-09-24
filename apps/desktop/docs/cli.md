@@ -68,15 +68,28 @@ Settings live in `config.toml` and the user's credentials in `credentials.toml`;
 syncing and the upgrade from 0.1.
 
 ```sh
-pap settings show                  # settings in effect and both file paths; never secrets
-pap settings set appearance dark   # edits config.toml in place, keeping comments
+pap settings show                          # settings in effect and both file paths; never secrets
+pap settings set appearance dark           # edits config.toml in place, keeping comments
+pap settings set local-api.port 4190       # a key is its dotted path in config.toml
 pap settings schema > config.schema.json
 ```
+
+A `settings set` key is the setting's dotted path in `config.toml`, the way
+`git config` and `cargo config get` name keys: `appearance`,
+`connect-on-launch`, `update-channel`, `auto-cli-registration`,
+`notifications.enabled` (and `.gateway`, `.local-api`, `.verification`),
+`local-api.listen-address`, `local-api.allow-network-access`, `local-api.port`,
+`local-api.client-host`, the same four under `web-ui.`, `web-ui.enabled` and
+`web-ui.password`. `settings show` prints the settings under the same names.
+The flat camelCase names of 0.1 (`connectOnLaunch`, `port`, `webUi`,
+`webUiPort` and so on, and `notifications` with a JSON object) still work,
+print a deprecation warning naming the new key, and are removed in 0.3.
 
 `settings set` changes go through the backend like the desktop Settings page.
 Hand edits of either file apply as soon as they are saved; an invalid edit is
 reported with its line and column in `settings show`, `status` and `doctor`
-while the previous settings stay in effect.
+while the previous settings stay in effect. An unknown key is ignored and
+reported as a warning in the same places.
 
 ## Web UI
 
@@ -88,19 +101,19 @@ Settings > Web UI, or with the settings command; changes apply immediately
 without restarting the service:
 
 ```sh
-printf '%s\n' "$PASSWORD" | pap settings set webUiPassword --value-stdin --yes
-pap settings set webUiPassword    # or type it twice at a hidden prompt
-pap settings set webUi true
-pap settings set webUiPort 4182   # default; must differ from the Local API (4180) and 4181
-pap settings show                 # settings, file paths, the web UI address or bind error, and passwordSet
-pap settings set webUi false      # closes the listener and ends every browser session
+printf '%s\n' "$PASSWORD" | pap settings set web-ui.password --value-stdin --yes
+pap settings set web-ui.password      # or type it twice at a hidden prompt
+pap settings set web-ui.enabled true
+pap settings set web-ui.port 4182     # default; must differ from the Local API (4180) and 4181
+pap settings show                     # settings, file paths, the web UI address or bind error, and passwordSet
+pap settings set web-ui.enabled false # closes the listener and ends every browser session
 ```
 
 The password must be at least 12 characters (at most 256); there are no other
 composition rules. It is never accepted as a command-line argument: pass it on
 stdin with `--value-stdin` (one trailing newline is dropped) or at the hidden
 prompt. Changing it ends every browser session. While the web UI is off,
-`pap settings set webUiPassword ""` removes it. Turning the web UI on without a
+`pap settings set web-ui.password ""` removes it. Turning the web UI on without a
 password fails with a hint to set one, and settings that turn it on without a
 password (for example a hand edit of `config.toml`) leave the listener closed
 until one is set.
@@ -109,15 +122,15 @@ Its port may be any of 1–65535, while the Local API requires 1024 or above: th
 Local API port is written into every connected agent's configuration and must
 bind for protection to work, whereas a web UI bind failure is only reported in
 its status. The listener otherwise uses the same rules as the Local API's
-`listenAddress`, `allowNetworkAccess` and `clientHost`, under `webUi`-prefixed
-keys:
+`local-api.listen-address`, `local-api.allow-network-access` and
+`local-api.client-host`, under `web-ui.` keys:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `webUiPassword` | unset | Sign-in password; required before `webUi` can be `true`. Read from stdin or a hidden prompt, stored only as an Argon2id hash. |
-| `webUiListenAddress` | `127.0.0.1` | IPv4 or IPv6 address to bind. |
-| `webUiAllowNetworkAccess` | `false` | Required before binding any non-loopback address. |
-| `webUiClientHost` | unset | Hostname or IP in the printed address and accepted as `Host`. Required when listening on `0.0.0.0` or `::`. |
+| `web-ui.password` | unset | Sign-in password; required before `web-ui.enabled` can be `true`. Read from stdin or a hidden prompt, stored only as an Argon2id hash in `credentials.toml`. |
+| `web-ui.listen-address` | `127.0.0.1` | IPv4 or IPv6 address to bind. |
+| `web-ui.allow-network-access` | `false` | Required before binding any non-loopback address. |
+| `web-ui.client-host` | unset | Hostname or IP in the printed address and accepted as `Host`. Required when listening on `0.0.0.0` or `::`. |
 
 Changing the address, port or client host moves the listener at once and ends
 every browser session. If the address cannot be opened (for example, `Port 4182
@@ -138,7 +151,7 @@ web UI address in a browser in a local graphical session (never a terminal
 browser) and prints it. The address carries no secret. When the web UI is off
 but has a password, it asks `Web UI is off. Enable it on <address>:<port>?
 [y/N]`; `--yes` enables it without prompting, and `--non-interactive` without
-`--yes` fails with a hint to run `pap settings set webUi true`.
+`--yes` fails with a hint to run `pap settings set web-ui.enabled true`.
 
 Signing in sets a session cookie, so reloading and other tabs of the same
 browser share the session until it ends. Sessions end
@@ -169,7 +182,7 @@ Security model:
   without knowing the old one. A browser must already be signed in and enter
   the current password to change it.
 - The listener binds `127.0.0.1` by default. A non-loopback address fails
-  closed unless `webUiAllowNetworkAccess` is `true`.
+  closed unless `web-ui.allow-network-access` is `true`.
 - Requests must carry an allowed `Host`: the bound `IP:PORT`, the client
   `HOST:PORT`, `127.0.0.1:PORT` (or `[::1]:PORT`) when bound to every
   interface, and `localhost:PORT` when loopback reaches the listener. Browsers
@@ -217,13 +230,13 @@ The browser UI degrades desktop-only integration:
 ### Remote Access
 
 Prefer these options, in order. Each needs a password first
-(`pap settings set webUiPassword`).
+(`pap settings set web-ui.password`).
 
 1. **SSH tunnel.** Keep the listener on loopback and forward it:
 
    ```sh
    # Remote shell
-   pap settings set webUi true --yes
+   pap settings set web-ui.enabled true --yes
 
    # Local shell
    ssh -N -L 4182:127.0.0.1:4182 user@example-host
@@ -239,8 +252,8 @@ Prefer these options, in order. Each needs a password first
 
    ```sh
    tailscale serve --bg --tcp 4182 tcp://127.0.0.1:4182
-   pap settings set webUiClientHost example-host.tailnet-name.ts.net --yes
-   pap settings set webUi true --yes
+   pap settings set web-ui.client-host example-host.tailnet-name.ts.net --yes
+   pap settings set web-ui.enabled true --yes
    pap app open --web    # http://example-host.tailnet-name.ts.net:4182
    ```
 
@@ -251,11 +264,11 @@ Prefer these options, in order. Each needs a password first
 3. **Direct LAN listening.** Bind a LAN address only on a network you trust:
 
    ```sh
-   pap settings set webUiAllowNetworkAccess true --yes
-   pap settings set webUiListenAddress 192.168.1.20 --yes
+   pap settings set web-ui.allow-network-access true --yes
+   pap settings set web-ui.listen-address 192.168.1.20 --yes
    # or every interface, with the name clients use:
-   # pap settings set webUiClientHost studio.local --yes
-   # pap settings set webUiListenAddress 0.0.0.0 --yes
+   # pap settings set web-ui.client-host studio.local --yes
+   # pap settings set web-ui.listen-address 0.0.0.0 --yes
    pap app open --web    # http://192.168.1.20:4182
    ```
 
@@ -371,7 +384,7 @@ directory with the home directory shown as `~`.
 | Core capability | CLI |
 | --- | --- |
 | Backend and protection lifecycle | `service`, `start`, `stop`, `status --watch` |
-| Browser management UI | `settings set webUiPassword --value-stdin`, `settings set webUi true`, `webUiListenAddress`/`webUiAllowNetworkAccess`/`webUiClientHost`, `app open --web` |
+| Browser management UI | `settings set web-ui.password --value-stdin`, `settings set web-ui.enabled true`, `web-ui.listen-address`/`web-ui.allow-network-access`/`web-ui.client-host`, `app open --web` |
 | Profile inspection, verification and selection | `profiles list/show/add/edit/verify/use/remove` |
 | Credential replacement and removal | `profiles verify --key-stdin`, `token clear-credential` |
 | Agent configuration review and restoration | `agents list/connect/disconnect/disconnect-all` |
@@ -389,7 +402,7 @@ currently displayed page. Exports refuse existing destination files.
 
 OS login startup, notification permissions and installer-based app updates stay
 in the desktop UI or OS installer. `doctor` also reports whether the saved update
-channel (`settings set updateChannel beta|stable`) has a newer release and the
+channel (`settings set update-channel beta|stable`) has a newer release and the
 exact upgrade steps for this installation; see
 [Updates by installation](distribution.md#updates-by-installation). Shared notification preferences are available
 through `settings`; they do not grant OS notification permission.

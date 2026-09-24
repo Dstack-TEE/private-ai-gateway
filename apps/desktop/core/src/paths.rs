@@ -37,10 +37,13 @@ pub fn app_data_dir() -> Result<PathBuf, String> {
     } else if cfg!(windows) {
         env_path("APPDATA").ok_or_else(|| "APPDATA is not set".to_string())?
     } else {
-        env_path("XDG_DATA_HOME").map_or_else(
-            || home_dir().map(|home| home.join(".local").join("share")),
-            Ok,
-        )?
+        // The XDG base directory spec: a relative path is invalid and ignored.
+        env_path("XDG_DATA_HOME")
+            .filter(|path| path.is_absolute())
+            .map_or_else(
+                || home_dir().map(|home| home.join(".local").join("share")),
+                Ok,
+            )?
     };
     Ok(base.join(APP_IDENTIFIER))
 }
@@ -73,6 +76,7 @@ pub fn config_dir() -> Result<PathBuf, String> {
     {
         return Ok(app_data_dir()?.join(CONFIG_SUBDIR));
     }
+    // The XDG base directory spec: a relative path is invalid and ignored.
     let base = env_path("XDG_CONFIG_HOME")
         .filter(|path| path.is_absolute())
         .map_or_else(|| home_dir().map(|home| home.join(".config")), Ok)?;

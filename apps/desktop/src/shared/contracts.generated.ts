@@ -111,7 +111,7 @@ export type ListenConfig = { listenAddress: string, allowNetworkAccess: boolean,
 /**
  * The service-hosted browser UI. It is off until the user enables it and
  * listens on loopback unless network access is explicitly allowed. It
- * cannot turn on without a sign-in password (`pap settings set webUiPassword`).
+ * cannot turn on without a sign-in password (`pap settings set web-ui.password`).
  */
 export type WebUiConfig = { enabled: boolean, listenAddress: string, allowNetworkAccess: boolean, port: number, clientHost?: string, };
 /**
@@ -135,6 +135,11 @@ export type ConfigFiles = { configPath: string, credentialsPath: string,
  * stay in effect), with the file, line and column.
  */
 error?: string,
+/**
+ * Problems that do not stop the files from applying: unknown keys, which
+ * are ignored, and what the 0.1 import could not bring over.
+ */
+warnings: Array<string>,
 /**
  * Changes whenever applied settings change, including external edits.
  */

@@ -101,6 +101,8 @@ jobs:
           npm run build:sidecars:debug
           cargo clippy --locked --all-targets --package private-ai-proxy-desktop -- -D warnings
           cargo test --locked --package private-ai-proxy-desktop autostart
+          # The 0.1 Keychain import, through the real login keychain and its deadline.
+          cargo test --locked --package private-ai-proxy-runtime --lib -- --ignored legacy_keychain_import_round_trip
       - name: Stage Tauri sidecars
         working-directory: apps/desktop
         env:

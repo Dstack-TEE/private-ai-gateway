@@ -68,6 +68,7 @@ pub struct DesktopRuntime {
     settings: Arc<Settings>,
     settings_watcher: Mutex<Option<crate::settings::Watcher>>,
     local_state: Arc<LocalState>,
+    data_dir: PathBuf,
     credentials: ClientCredentials,
     endpoint: EndpointRuntime,
     agent_policy: Mutex<()>,
@@ -218,6 +219,10 @@ impl DesktopRuntime {
         let settings = Arc::new(settings);
         let local_state = Arc::new(LocalState::open(&data_dir));
         settings_problems.extend(local_state.read().err());
+        // The credential store import runs once the service is listening.
+        local_state.set_importing(
+            settings.import_ready() && crate::settings::legacy::secrets_pending(&data_dir),
+        );
         let snapshot = settings.snapshot()?;
         let runtime_config = snapshot.config.runtime_config();
         let profiles = settings.profile_views(&snapshot);
@@ -276,6 +281,7 @@ impl DesktopRuntime {
             settings,
             settings_watcher: Mutex::new(None),
             local_state,
+            data_dir,
             credentials: ClientCredentials::new()?,
             account_login: tokio::sync::Mutex::new(None),
             account_save: Mutex::new(None),

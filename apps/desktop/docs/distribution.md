@@ -52,7 +52,7 @@ remains optional and does not block the coordinated release.
 ## Updates by installation
 
 Every Direct installation follows the saved update channel (desktop **Update
-channel** toggle, or `pap settings set updateChannel beta|stable`); without a saved
+channel** toggle, or `pap settings set update-channel beta|stable`); without a saved
 choice it follows the channel of the running build. The beta channel reads both
 the beta and the stable feed and offers whichever release is newer, so beta users
 also receive stable releases. The stable channel never offers a beta. Switching

@@ -34,7 +34,7 @@ fn programmatic_writes_keep_comments_order_and_untouched_keys() {
         appearance = \"dark\" # night owl\n\
         \n\
         # The listener agents use.\n\
-        [localApi]\n\
+        [local-api]\n\
         port = 4190 # moved off the default\n";
     fs::write(dir.path().join("config").join(CONFIG_FILE), original).unwrap();
     settings.reload().unwrap();
@@ -53,10 +53,10 @@ fn programmatic_writes_keep_comments_order_and_untouched_keys() {
          appearance = \"light\" # night owl\n\
          \n\
          # The listener agents use.\n\
-         [localApi]\n\
+         [local-api]\n\
          port = 4190 # moved off the default\n\
          \n\
-         [webUi]\n\
+         [web-ui]\n\
          enabled = true\n"
     );
     // A no-op change does not rewrite the file.
@@ -82,7 +82,7 @@ fn profiles_are_added_and_removed_as_tables() {
         })
         .unwrap();
     let text = config_text(dir.path());
-    assert!(text.contains("activeProfile = \"work\""), "{text}");
+    assert!(text.contains("active-profile = \"work\""), "{text}");
     assert!(text.contains("[profiles.work]\nname = \"Work\""), "{text}");
     assert!(text.contains("[profiles.home]"), "{text}");
     settings
@@ -94,8 +94,11 @@ fn profiles_are_added_and_removed_as_tables() {
         .unwrap();
     let text = config_text(dir.path());
     assert!(!text.contains("[profiles.work]"), "{text}");
-    assert!(text.contains("activeProfile = \"home\""), "{text}");
-    assert_eq!(config::parse(&text).unwrap(), settings.config().unwrap());
+    assert!(text.contains("active-profile = \"home\""), "{text}");
+    assert_eq!(
+        config::parse(&text).unwrap().value,
+        settings.config().unwrap()
+    );
 }
 
 #[test]
@@ -103,11 +106,11 @@ fn an_invalid_edit_keeps_the_last_good_settings_and_blocks_writes() {
     let dir = tempfile::tempdir().unwrap();
     let settings = open(dir.path());
     let path = dir.path().join("config").join(CONFIG_FILE);
-    fs::write(&path, "[localApi]\nport = 5180\n").unwrap();
+    fs::write(&path, "[local-api]\nport = 5180\n").unwrap();
     let (_, current) = settings.reload().unwrap();
     assert_eq!(current.config.local_api.port, 5180);
 
-    fs::write(&path, "[localApi]\nport = \"oops\"\n").unwrap();
+    fs::write(&path, "[local-api]\nport = \"oops\"\n").unwrap();
     let (previous, current) = settings.reload().unwrap();
     assert_eq!(previous, current);
     assert_eq!(settings.config().unwrap().local_api.port, 5180);
@@ -122,11 +125,11 @@ fn an_invalid_edit_keeps_the_last_good_settings_and_blocks_writes() {
     assert!(refused.contains("Fix config.toml"), "{refused}");
     assert_eq!(
         fs::read_to_string(&path).unwrap(),
-        "[localApi]\nport = \"oops\"\n"
+        "[local-api]\nport = \"oops\"\n"
     );
     assert!(settings.reload().is_none(), "nothing new to apply");
 
-    fs::write(&path, "[localApi]\nport = 5181\n").unwrap();
+    fs::write(&path, "[local-api]\nport = 5181\n").unwrap();
     let (_, current) = settings.reload().unwrap();
     assert_eq!(current.config.local_api.port, 5181);
     assert_eq!(settings.files().error, None);
@@ -151,7 +154,7 @@ fn a_concurrent_edit_is_never_overwritten() {
         .unwrap();
     assert_eq!(
         fs::read_to_string(&path).unwrap(),
-        "appearance = \"dark\"\nconnectOnLaunch = true\n"
+        "appearance = \"dark\"\nconnect-on-launch = true\n"
     );
     let (_, current) = settings.reload().unwrap();
     assert_eq!(current.config.appearance, Appearance::Dark);
@@ -176,7 +179,7 @@ fn credentials_stay_owner_only_and_errors_never_quote_values() {
     let text = fs::read_to_string(&path).unwrap();
     assert!(text.starts_with(CREDENTIALS_HEADER));
     assert!(
-        text.ends_with("[profiles.work]\napiKey = \"sk-first\"\n"),
+        text.ends_with("[profiles.work]\napi-key = \"sk-first\"\n"),
         "{text}"
     );
     #[cfg(unix)]
@@ -204,11 +207,11 @@ fn credentials_stay_owner_only_and_errors_never_quote_values() {
         settings.profile_key("work").unwrap().as_deref(),
         Some("sk-first")
     );
-    fs::write(&path, "[profiles.work]\napiKey = \"sk two\"\n").unwrap();
+    fs::write(&path, "[profiles.work]\napi-key = \"sk two\"\n").unwrap();
     settings.reload();
     let error = settings.files().error.unwrap();
     assert!(!error.contains("sk two"), "{error}");
-    assert!(error.contains("profiles.work.apiKey"), "{error}");
+    assert!(error.contains("profiles.work.api-key"), "{error}");
 }
 
 #[test]
@@ -243,4 +246,48 @@ fn credential_identities_change_with_the_key_and_hide_it() {
     assert!(!identity.contains("sk-first"));
     assert_eq!(with_key("sk-first").credential_ref.unwrap(), identity);
     assert_ne!(with_key("sk-second").credential_ref.unwrap(), identity);
+}
+
+#[test]
+fn unknown_keys_warn_and_the_rest_of_the_file_applies() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = open(dir.path());
+    let config_dir = dir.path().join("config");
+    fs::write(
+        config_dir.join(CONFIG_FILE),
+        "appearance = \"dark\"\nfuture-option = true\n[local-api]\nport = 5180\n",
+    )
+    .unwrap();
+    fs::write(
+        config_dir.join(CREDENTIALS_FILE),
+        "[profiles.work]\napi-key = \"sk-work\"\nlabel = \"secret-looking\"\n",
+    )
+    .unwrap();
+    let (_, current) = settings.reload().unwrap();
+    assert_eq!(current.config.appearance, Appearance::Dark);
+    assert_eq!(current.config.local_api.port, 5180);
+    assert_eq!(
+        settings.profile_key("work").unwrap().as_deref(),
+        Some("sk-work")
+    );
+    let files = settings.files();
+    assert_eq!(files.error, None);
+    assert_eq!(
+        files.warnings,
+        [
+            "config.toml:2:17: future-option: unknown key, ignored",
+            "credentials.toml:3:9: profiles.work.label: unknown key, ignored",
+        ]
+    );
+    // Writes keep the unknown keys, like every other line the app did not change.
+    settings
+        .update_config(|config| {
+            config.appearance = Appearance::Light;
+            Ok(())
+        })
+        .unwrap();
+    assert!(config_text(dir.path()).contains("future-option = true"));
+    fs::write(config_dir.join(CONFIG_FILE), "appearance = \"dark\"\n").unwrap();
+    settings.reload().unwrap();
+    assert_eq!(settings.files().warnings.len(), 1);
 }

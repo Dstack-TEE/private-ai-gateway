@@ -1,7 +1,6 @@
 use std::{cell::RefCell, collections::BTreeMap};
 
 use super::*;
-use crate::settings::Settings;
 
 /// A credential store holding what 0.1 saved; it can be made unavailable.
 #[derive(Default)]
@@ -140,8 +139,33 @@ fn write_legacy(data: &Path) {
     .unwrap();
 }
 
+/// One start of 0.2: step 1 while the settings open, then step 2 as the
+/// service does once it is listening.
+fn start(config_dir: &Path, data: &Path, keychain: &FakeKeychain) -> (Settings, Vec<String>) {
+    let (settings, mut problems) = Settings::open(config_dir.to_path_buf(), data);
+    if settings.import_ready() && secrets_pending(data) {
+        let local = LocalState::open(data);
+        let notices = import_secrets(&settings, &local, data, keychain).unwrap();
+        settings.add_import_notices(&notices);
+        problems.extend(notices);
+    }
+    (settings, problems)
+}
+
+fn read_config(config_dir: &Path) -> Config {
+    config::parse(&fs::read_to_string(config_dir.join(CONFIG_FILE)).unwrap())
+        .unwrap()
+        .value
+}
+
+fn read_credentials(config_dir: &Path) -> Credentials {
+    parse_credentials(&fs::read_to_string(config_dir.join(CREDENTIALS_FILE)).unwrap())
+        .unwrap()
+        .value
+}
+
 fn assert_fully_migrated(config_dir: &Path, data: &Path, keychain: &FakeKeychain) {
-    let config = config::parse(&fs::read_to_string(config_dir.join(CONFIG_FILE)).unwrap()).unwrap();
+    let config = read_config(config_dir);
     assert_eq!(config.active_profile, "home");
     assert!(!config.require_production_os);
     assert!(config.connect_on_launch);
@@ -159,7 +183,7 @@ fn assert_fully_migrated(config_dir: &Path, data: &Path, keychain: &FakeKeychain
     assert!(!config.profiles["work"].auth.is_api_key());
 
     let text = fs::read_to_string(config_dir.join(CREDENTIALS_FILE)).unwrap();
-    let credentials = parse_credentials(&text).unwrap();
+    let credentials = parse_credentials(&text).unwrap().value;
     assert_eq!(credentials.profiles["work"].api_key, "sk-work");
     assert_eq!(credentials.profiles["home"].api_key, "sk-home");
     assert!(!credentials.profiles.contains_key("spare"));
@@ -201,15 +225,16 @@ fn assert_fully_migrated(config_dir: &Path, data: &Path, keychain: &FakeKeychain
     );
     let config_text = fs::read_to_string(config_dir.join(CONFIG_FILE)).unwrap();
     assert!(config_text.starts_with(CONFIG_HEADER));
-    for secret in ["sk-", "argon2", "credentialRef", "credentialSaved"] {
+    for secret in ["sk-", "argon2", "credential-ref", "credential-saved"] {
         assert!(!config_text.contains(secret), "{secret} in {config_text}");
     }
-    // The old files are moved to the one-time backup; state stays.
+    // The old files are moved to the backup, which records the import; state stays.
     for name in LEGACY_FILES {
         assert!(!data.join(name).exists(), "{name}");
         assert!(data.join(BACKUP_DIR).join(name).exists(), "{name}");
     }
     assert!(data.join(AGENTS_FILE).exists());
+    assert!(!secrets_pending(data));
 }
 
 #[test]
@@ -218,14 +243,20 @@ fn a_linux_layout_moves_settings_to_the_config_directory() {
     let (config_dir, data) = (root.path().join("config"), root.path().join("data"));
     write_legacy(&data);
     let keychain = keychain();
-    let notices = migrate(&config_dir, &data, &keychain).unwrap();
-    assert!(notices.is_empty(), "{notices:?}");
+    let (settings, problems) = start(&config_dir, &data, &keychain);
+    assert!(problems.is_empty(), "{problems:?}");
     assert_fully_migrated(&config_dir, &data, &keychain);
+    assert_eq!(
+        settings.profile_key("home").unwrap().as_deref(),
+        Some("sk-home")
+    );
+    assert_eq!(settings.files().error, None);
 
-    // Idempotent: a second start neither reads the store nor rewrites anything.
+    // Done: a second start neither reads the store nor rewrites anything.
     let before = fs::read_to_string(config_dir.join(CONFIG_FILE)).unwrap();
     keychain.reads.borrow_mut().clear();
-    assert!(migrate(&config_dir, &data, &keychain).unwrap().is_empty());
+    let (_, problems) = start(&config_dir, &data, &keychain);
+    assert!(problems.is_empty(), "{problems:?}");
     assert!(keychain.reads.borrow().is_empty());
     assert_eq!(
         fs::read_to_string(config_dir.join(CONFIG_FILE)).unwrap(),
@@ -244,9 +275,8 @@ fn macos_windows_and_mac_app_store_layouts_use_a_config_subdirectory() {
     let settings_dir = container.join("Config");
     write_legacy(&container);
     let keychain = keychain();
-    assert!(migrate(&settings_dir, &container, &keychain)
-        .unwrap()
-        .is_empty());
+    let (settings, problems) = start(&settings_dir, &container, &keychain);
+    assert!(problems.is_empty(), "{problems:?}");
     assert_fully_migrated(&settings_dir, &container, &keychain);
     let mut names: Vec<_> = fs::read_dir(&settings_dir)
         .unwrap()
@@ -255,11 +285,9 @@ fn macos_windows_and_mac_app_store_layouts_use_a_config_subdirectory() {
     names.sort();
     assert_eq!(
         names,
-        [CONFIG_FILE, CREDENTIALS_FILE],
+        [config::SCHEMA_FILE, CONFIG_FILE, CREDENTIALS_FILE],
         "state never lands in Config"
     );
-    let (settings, problems) = Settings::open(settings_dir, &container);
-    assert!(problems.is_empty(), "{problems:?}");
     assert_eq!(
         settings.profile_key("work").unwrap().as_deref(),
         Some("sk-work")
@@ -273,6 +301,7 @@ fn partial_layouts_import_what_exists() {
         &[LOCAL_API_FILE],
         &[SERVICE_FILE],
         &[SERVICE_FILE, LOCAL_API_FILE],
+        &[CLEANUP_FILE],
     ] {
         let root = tempfile::tempdir().unwrap();
         let (config_dir, data) = (root.path().join("config"), root.path().join("data"));
@@ -283,9 +312,9 @@ fn partial_layouts_import_what_exists() {
             }
         }
         let keychain = keychain();
-        assert!(migrate(&config_dir, &data, &keychain).unwrap().is_empty());
-        let config =
-            config::parse(&fs::read_to_string(config_dir.join(CONFIG_FILE)).unwrap()).unwrap();
+        let (_, problems) = start(&config_dir, &data, &keychain);
+        assert!(problems.is_empty(), "{present:?}: {problems:?}");
+        let config = read_config(&config_dir);
         assert_eq!(
             config.local_api.port,
             if present.contains(&LOCAL_API_FILE) {
@@ -307,9 +336,8 @@ fn partial_layouts_import_what_exists() {
                 0
             }
         );
-        let credentials = config_dir.join(CREDENTIALS_FILE);
-        if present == [LOCAL_API_FILE] {
-            // No secrets to import: the credential store is never touched.
+        if !present.contains(&SERVICE_FILE) && !present.contains(&CLEANUP_FILE) {
+            // No keys to import: the store is asked only for agent restore values.
             assert!(keychain
                 .reads
                 .borrow()
@@ -317,96 +345,291 @@ fn partial_layouts_import_what_exists() {
                 .all(|entry| entry.starts_with("restore:")));
         }
         if present.contains(&SERVICE_FILE) {
-            let saved = parse_credentials(&fs::read_to_string(&credentials).unwrap()).unwrap();
-            assert_eq!(saved.profiles["home"].api_key, "sk-home");
+            assert_eq!(
+                read_credentials(&config_dir).profiles["home"].api_key,
+                "sk-home"
+            );
         }
         for name in present {
             assert!(data.join(BACKUP_DIR).join(name).exists());
         }
+        assert!(!secrets_pending(&data));
     }
 }
 
 #[test]
 fn a_fresh_install_imports_nothing_and_never_asks_the_credential_store() {
     let root = tempfile::tempdir().unwrap();
+    let (config_dir, data) = (root.path().join("config"), root.path().join("data"));
     let keychain = FakeKeychain {
         unavailable: true,
         ..FakeKeychain::default()
     };
-    let notices = migrate(
-        &root.path().join("config"),
-        &root.path().join("data"),
-        &keychain,
-    )
-    .unwrap();
-    assert!(notices.is_empty());
+    let (settings, problems) = start(&config_dir, &data, &keychain);
+    assert!(problems.is_empty(), "{problems:?}");
     assert!(keychain.reads.borrow().is_empty());
-    assert!(!root.path().join("config").join(CONFIG_FILE).exists());
+    assert!(!data.join(BACKUP_DIR).exists());
+    assert_eq!(read_config(&config_dir), Config::default());
+    assert!(settings.files().warnings.is_empty());
 }
 
 #[test]
-fn an_unavailable_credential_store_imports_settings_and_asks_to_reenter_keys() {
+fn an_unavailable_credential_store_imports_settings_and_retries_the_keys() {
     let root = tempfile::tempdir().unwrap();
     let (config_dir, data) = (root.path().join("config"), root.path().join("data"));
     write_legacy(&data);
-    let keychain = FakeKeychain {
+    let locked = FakeKeychain {
         unavailable: true,
         ..keychain()
     };
-    let notices = migrate(&config_dir, &data, &keychain).unwrap();
-    assert_eq!(
-        keychain.reads.borrow().len(),
-        1,
-        "asked once, not per entry"
-    );
-    assert_eq!(notices.len(), 1);
-    assert!(notices[0].contains("locked"), "{}", notices[0]);
+    let (settings, problems) = start(&config_dir, &data, &locked);
+    assert_eq!(locked.reads.borrow().len(), 1, "asked once, not per entry");
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("locked"), "{}", problems[0]);
     assert!(
-        notices[0].contains("Re-enter the API key for: Work, Home"),
+        problems[0].contains("Re-enter the API key for: Work, Home"),
         "{}",
-        notices[0]
+        problems[0]
     );
-    let config = config::parse(&fs::read_to_string(config_dir.join(CONFIG_FILE)).unwrap()).unwrap();
-    assert_eq!(config.profiles.len(), 3);
-    // The web UI password hash was never in the credential store.
-    let credentials =
-        parse_credentials(&fs::read_to_string(config_dir.join(CREDENTIALS_FILE)).unwrap()).unwrap();
+    assert!(problems[0].contains("retried on the next start"));
+    // The settings are in effect; the web UI password hash was never in the store.
+    assert_eq!(read_config(&config_dir).profiles.len(), 3);
+    let credentials = read_credentials(&config_dir);
     assert!(credentials.profiles.is_empty());
     assert_eq!(
         credentials.web_ui.password_hash.as_deref(),
         Some(PASSWORD_HASH)
     );
-    // Nothing was deleted from the store.
-    assert_eq!(keychain.entries.borrow().len(), 5);
+    assert_eq!(settings.files().error, None);
+    // Nothing was deleted from the store and the step is still pending.
+    assert_eq!(locked.entries.borrow().len(), 5);
+    assert!(secrets_pending(&data));
+
+    // Meanwhile the user re-enters one key; the next start imports the rest
+    // and keeps what the user entered.
+    settings
+        .update_credentials(|credentials| {
+            credentials.profiles.insert(
+                "home".into(),
+                ProfileCredential {
+                    api_key: "sk-home-new".into(),
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
+    drop(settings);
+    let unlocked = FakeKeychain {
+        entries: RefCell::new(locked.entries.borrow().clone()),
+        ..FakeKeychain::default()
+    };
+    let (settings, problems) = start(&config_dir, &data, &unlocked);
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(
+        settings.profile_key("home").unwrap().as_deref(),
+        Some("sk-home-new")
+    );
+    assert_eq!(
+        settings.profile_key("work").unwrap().as_deref(),
+        Some("sk-work")
+    );
+    assert!(!secrets_pending(&data));
+    // The home entry was not needed, so it stays; everything imported is gone.
+    assert_eq!(
+        unlocked.entries.borrow().keys().collect::<Vec<_>>(),
+        ["service-profile-home-api-key"]
+    );
 }
 
 #[test]
-fn an_interrupted_import_resumes_without_losing_secrets() {
+fn a_failed_import_writes_nothing_and_is_retried_on_the_next_start() {
     let root = tempfile::tempdir().unwrap();
     let (config_dir, data) = (root.path().join("config"), root.path().join("data"));
     write_legacy(&data);
-    // Crash after credentials.toml was written and the store entries deleted,
-    // before config.toml: the rerun must keep the secrets it already moved.
+    // An old file that cannot be read fails step 1.
+    let preferences = data.join(PREFERENCES_FILE);
+    fs::remove_file(&preferences).unwrap();
+    fs::create_dir(&preferences).unwrap();
     let keychain = keychain();
-    migrate(&config_dir, &data, &keychain).unwrap();
-    fs::remove_file(config_dir.join(CONFIG_FILE)).unwrap();
-    for name in LEGACY_FILES {
-        fs::rename(data.join(BACKUP_DIR).join(name), data.join(name)).unwrap();
+    let (settings, problems) = start(&config_dir, &data, &keychain);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains(PREFERENCES_FILE), "{}", problems[0]);
+    // Nothing that looks like a finished import: no config.toml, no backup,
+    // the old files and store entries untouched, the store never asked.
+    assert!(!config_dir.join(CONFIG_FILE).exists());
+    assert!(!config_dir.join(CREDENTIALS_FILE).exists());
+    assert!(!data.join(BACKUP_DIR).exists());
+    for name in [SERVICE_FILE, LOCAL_API_FILE, CLEANUP_FILE] {
+        assert!(data.join(name).exists(), "{name}");
     }
-    assert!(keychain.entries.borrow().is_empty());
-    assert!(migrate(&config_dir, &data, &keychain).unwrap().is_empty());
-    assert_fully_migrated(&config_dir, &data, &keychain);
+    assert!(keychain.reads.borrow().is_empty());
+    assert_eq!(keychain.entries.borrow().len(), 5);
+    // The error stays in the state (and `pap doctor`), and nothing can be
+    // saved that would make the next start think the import happened.
+    let error = settings.files().error.unwrap();
+    assert!(error.contains("could not be imported"), "{error}");
+    let refused = settings
+        .update_config(|config| {
+            config.appearance = Appearance::Light;
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(
+        refused.starts_with("Settings from 0.1 are not imported yet"),
+        "{refused}"
+    );
+    assert!(settings.update_credentials(|_| Ok(())).is_err());
+    assert!(!config_dir.join(CONFIG_FILE).exists());
+    drop(settings);
 
-    // Crash after config.toml, before the backup: the next start only moves files.
+    // Fixed: the next start imports everything.
+    fs::remove_dir(&preferences).unwrap();
+    fs::write(&preferences, preferences_json()).unwrap();
+    let (settings, problems) = start(&config_dir, &data, &keychain);
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_fully_migrated(&config_dir, &data, &keychain);
+    assert_eq!(settings.files().error, None);
+}
+
+#[test]
+fn a_synced_config_on_a_second_device_keeps_its_values_and_gets_this_devices_secrets() {
+    let root = tempfile::tempdir().unwrap();
+    let (config_dir, data) = (root.path().join("config"), root.path().join("data"));
+    write_legacy(&data);
+    // Another device already upgraded and synced the settings directory. Its
+    // `work` profile is the same service, `home` points elsewhere, and it has
+    // a password but no API keys.
+    fs::create_dir_all(&config_dir).unwrap();
+    let synced = "# Synced from my laptop\n\
+        active-profile = \"work\"\n\
+        appearance = \"light\"\n\
+        \n\
+        [profiles.work]\n\
+        name = \"Work laptop\"\n\
+        provider = \"redpill\"\n\
+        remote-url = \"https://tee.redpill.ai\"\n\
+        \n\
+        [profiles.home]\n\
+        name = \"Home\"\n\
+        provider = \"custom\"\n\
+        remote-url = \"https://other.example\"\n";
+    fs::write(config_dir.join(CONFIG_FILE), synced).unwrap();
+    let laptop_hash = crate::web_ui::password::hash("laptop password").unwrap();
+    fs::write(
+        config_dir.join(CREDENTIALS_FILE),
+        format!("[web-ui]\npassword-hash = \"{laptop_hash}\"\n"),
+    )
+    .unwrap();
+    let keychain = keychain();
+    let (settings, problems) = start(&config_dir, &data, &keychain);
+
+    // config.toml: every synced value stays; only this device's missing profile is added.
+    let config = read_config(&config_dir);
+    assert_eq!(config.active_profile, "work");
+    assert_eq!(config.appearance, Appearance::Light);
+    assert_eq!(config.local_api.port, 4180);
+    assert!(!config.connect_on_launch);
+    assert_eq!(config.profiles["work"].name, "Work laptop");
+    assert_eq!(config.profiles["home"].remote_url, "https://other.example");
+    assert_eq!(
+        config.profiles.keys().collect::<Vec<_>>(),
+        ["work", "home", "spare"]
+    );
+    let text = fs::read_to_string(config_dir.join(CONFIG_FILE)).unwrap();
+    assert!(text.starts_with(synced), "{text}");
+    // credentials.toml: the synced password stays; this device's key for the
+    // same service is imported, the one for a different service is not.
+    let credentials = read_credentials(&config_dir);
+    assert_eq!(
+        credentials.web_ui.password_hash.as_deref(),
+        Some(laptop_hash.as_str())
+    );
+    assert_eq!(credentials.profiles["work"].api_key, "sk-work");
+    assert!(!credentials.profiles.contains_key("home"));
+    assert_eq!(
+        settings.profile_key("work").unwrap().as_deref(),
+        Some("sk-work")
+    );
+    // Device-local state is always this device's.
+    let local = local_state::load(&data.join(LOCAL_STATE_FILE)).unwrap();
+    assert_eq!(
+        local.agent_restore["restore:claude-code:ab12"],
+        "sk-ant-original"
+    );
+    assert!(local.account_cleanup.contains_key("7f3e"));
+    assert_eq!(problems.len(), 2, "{problems:?}");
+    assert!(problems[0].contains("already existed"), "{}", problems[0]);
+    assert!(problems[1].contains("Home"), "{}", problems[1]);
+    assert_eq!(settings.files().warnings, problems);
+    assert!(!secrets_pending(&data));
+    for name in LEGACY_FILES {
+        assert!(data.join(BACKUP_DIR).join(name).exists(), "{name}");
+    }
+    // The key that was not imported stays in the store.
+    assert_eq!(
+        keychain.entries.borrow().keys().collect::<Vec<_>>(),
+        ["service-profile-home-api-key"]
+    );
+}
+
+#[test]
+fn a_crash_between_steps_resumes_without_losing_anything() {
+    let root = tempfile::tempdir().unwrap();
+    let (config_dir, data) = (root.path().join("config"), root.path().join("data"));
+    write_legacy(&data);
+    let keychain = keychain();
+
+    // Crash in step 1 after the settings files were written, before the old
+    // files moved. The user changed a setting before the next start.
+    let (settings, _) = Settings::open(config_dir.clone(), &data);
+    settings
+        .update_config(|config| {
+            config.appearance = Appearance::Light;
+            Ok(())
+        })
+        .unwrap();
+    drop(settings);
     for name in LEGACY_FILES {
         fs::rename(data.join(BACKUP_DIR).join(name), data.join(name)).unwrap();
     }
+    let (_, problems) = start(&config_dir, &data, &keychain);
+    assert!(problems[0].contains("already existed"), "{problems:?}");
+    let config = read_config(&config_dir);
+    assert_eq!(
+        config.appearance,
+        Appearance::Light,
+        "the user's change stays"
+    );
+    assert_eq!(config.profiles.len(), 3);
+    assert_eq!(
+        read_credentials(&config_dir).profiles["work"].api_key,
+        "sk-work"
+    );
+    assert!(!secrets_pending(&data));
+
+    // Crash in step 2 after the secrets were written, before the store
+    // entries were deleted and the step was recorded.
+    fs::remove_file(data.join(BACKUP_DIR).join(COMPLETE_FILE)).unwrap();
+    let restored = self::keychain();
     let before = fs::read_to_string(config_dir.join(CREDENTIALS_FILE)).unwrap();
-    assert!(migrate(&config_dir, &data, &keychain).unwrap().is_empty());
-    assert_fully_migrated(&config_dir, &data, &keychain);
+    let (_, problems) = start(&config_dir, &data, &restored);
+    assert!(problems.is_empty(), "{problems:?}");
+    assert!(restored.reads.borrow().is_empty(), "already imported");
     assert_eq!(
         fs::read_to_string(config_dir.join(CREDENTIALS_FILE)).unwrap(),
         before
+    );
+    assert!(!secrets_pending(&data));
+
+    // Crash after the entries were deleted, before the step was recorded.
+    fs::remove_file(data.join(BACKUP_DIR).join(COMPLETE_FILE)).unwrap();
+    let empty = FakeKeychain::default();
+    let (_, problems) = start(&config_dir, &data, &empty);
+    assert!(problems.is_empty(), "{problems:?}");
+    assert!(!secrets_pending(&data));
+    assert_eq!(
+        read_credentials(&config_dir).profiles["home"].api_key,
+        "sk-home"
     );
 }
 
@@ -416,20 +639,37 @@ fn unreadable_old_files_are_reported_and_kept() {
     let (config_dir, data) = (root.path().join("config"), root.path().join("data"));
     write_legacy(&data);
     fs::write(data.join(SERVICE_FILE), "{ not json").unwrap();
-    let notices = migrate(&config_dir, &data, &keychain()).unwrap();
-    assert_eq!(notices.len(), 1);
-    assert!(notices[0].contains(SERVICE_FILE), "{}", notices[0]);
+    let (_, problems) = start(&config_dir, &data, &keychain());
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains(SERVICE_FILE), "{}", problems[0]);
     assert_eq!(
         fs::read_to_string(data.join(BACKUP_DIR).join(SERVICE_FILE)).unwrap(),
         "{ not json"
     );
-    let config = config::parse(&fs::read_to_string(config_dir.join(CONFIG_FILE)).unwrap()).unwrap();
+    let config = read_config(&config_dir);
     assert!(config.profiles.is_empty());
     assert_eq!(config.appearance, Appearance::Dark);
 }
 
-/// Real OS credential store round trip; run explicitly on a desktop OS (CI
-/// runs it on every packaged platform).
+#[test]
+fn restore_values_still_importing_are_never_read_as_absent() {
+    use agent_bridge::secrets::SecretStore;
+    let root = tempfile::tempdir().unwrap();
+    let local = LocalState::open(root.path());
+    local.set_importing(true);
+    assert!(local.get("restore:codex:1").is_err());
+    local.set("restore:codex:2", "sk-new").unwrap();
+    assert_eq!(
+        local.get("restore:codex:2").unwrap().as_deref(),
+        Some("sk-new")
+    );
+    local.set_importing(false);
+    assert_eq!(local.get("restore:codex:1").unwrap(), None);
+}
+
+/// Real OS credential store round trip, including the deadline every store
+/// operation runs under. Run explicitly on a desktop OS; CI runs it on
+/// Linux (Secret Service), Windows (Credential Manager) and macOS (Keychain).
 #[test]
 #[ignore = "touches the OS credential store"]
 fn legacy_keychain_import_round_trip() {
@@ -437,8 +677,9 @@ fn legacy_keychain_import_round_trip() {
         "service-profile-import-check-{}-api-key",
         std::process::id()
     );
-    OsKeychain::run(|| {
-        OsKeychain::entry(&entry)?
+    let name = entry.clone();
+    OsKeychain::run(move || {
+        OsKeychain::entry(&name)?
             .set_password("sk-import-check")
             .map_err(store_error)
     })

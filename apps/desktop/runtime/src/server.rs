@@ -82,6 +82,8 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
     let handle = Handle::current();
     let startup = runtime.clone();
     tasks.spawn_blocking(move || {
+        // Before connecting, which may need an imported key.
+        startup.import_legacy_secrets();
         let connect_on_launch = match startup.settings() {
             Ok(saved) => saved.connect_on_launch,
             Err(error) => {

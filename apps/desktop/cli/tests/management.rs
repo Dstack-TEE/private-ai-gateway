@@ -55,18 +55,22 @@ fn command_discovery_is_detailed() {
     assert_success(&settings);
     let settings = String::from_utf8(settings.stdout).unwrap();
     for key in [
-        "autoCliRegistration",
-        "connectOnLaunch",
-        "allowNetworkAccess",
-        "clientHost",
-        "webUi",
-        "webUiPort",
-        "webUiListenAddress",
-        "webUiAllowNetworkAccess",
-        "webUiClientHost",
+        "auto-cli-registration",
+        "connect-on-launch",
+        "notifications.local-api",
+        "local-api.allow-network-access",
+        "local-api.client-host",
+        "web-ui.enabled",
+        "web-ui.port",
+        "web-ui.listen-address",
+        "web-ui.allow-network-access",
+        "web-ui.client-host",
+        "web-ui.password",
     ] {
         assert!(settings.contains(key), "missing settings key {key}");
     }
+    // The deprecated flat names still parse but are never offered.
+    assert!(!settings.contains("webUi"), "{settings}");
 
     let usage = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
         .args(["usage", "export", "--help"])
@@ -239,7 +243,7 @@ impl Backend {
             .port();
         desktop_core::private_fs::write_private(
             &settings.join("config.toml"),
-            &format!("# Kept by every write.\n\n[localApi]\nport = {port}\n"),
+            &format!("# Kept by every write.\n\n[local-api]\nport = {port}\n"),
         )
         .unwrap();
         let child = Command::new(binary("private-ai-proxy-service"))
@@ -329,19 +333,26 @@ fn web_ui_requires_a_password_that_never_leaves_the_service() {
         .output()
         .unwrap();
     assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("pap settings set webUiPassword"));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("pap settings set web-ui.password"));
     let refused = backend
-        .command(&["settings", "set", "webUi", "true", "--yes", "--json"])
+        .command(&[
+            "settings",
+            "set",
+            "web-ui.enabled",
+            "true",
+            "--yes",
+            "--json",
+        ])
         .output()
         .unwrap();
     assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("pap settings set webUiPassword"));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("pap settings set web-ui.password"));
     // Passwords never travel in arguments.
     let refused = backend
         .command(&[
             "settings",
             "set",
-            "webUiPassword",
+            "web-ui.password",
             WEB_PASSWORD,
             "--yes",
             "--json",
@@ -364,7 +375,7 @@ fn web_ui_requires_a_password_that_never_leaves_the_service() {
         .path()
         .join("home/.private-ai-proxy/Config");
     let saved = fs::read_to_string(data.join("credentials.toml")).unwrap();
-    assert!(saved.contains("[webUi]\npasswordHash = \"$argon2id$"));
+    assert!(saved.contains("[web-ui]\npassword-hash = \"$argon2id$"));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -398,7 +409,7 @@ fn web_ui_requires_a_password_that_never_leaves_the_service() {
 
     let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = occupied.local_addr().unwrap().port().to_string();
-    backend.run(&["settings", "set", "webUiPort", &port, "--yes"]);
+    backend.run(&["settings", "set", "web-ui.port", &port, "--yes"]);
     // --yes enables the web UI through the same setting; the bind conflict stays in state.
     let failed = backend.web(&["app", "open", "--web", "--yes", "--json"]);
     assert!(!failed.status.success());
@@ -412,7 +423,7 @@ fn web_ui_requires_a_password_that_never_leaves_the_service() {
     assert_eq!(error, format!("Port {port} is already in use on 127.0.0.1"));
     drop(occupied);
 
-    let state = backend.run(&["settings", "set", "webUi", "true", "--yes"]);
+    let state = backend.run(&["settings", "set", "web-ui.enabled", "true", "--yes"]);
     let url = format!("http://127.0.0.1:{port}");
     assert_eq!(state["webUi"]["url"], url);
     let opened = backend.web(&["app", "open", "--web", "--json"]);
@@ -450,12 +461,12 @@ fn web_ui_requires_a_password_that_never_leaves_the_service() {
     // The password stays while the web UI is on; turning it off ends sessions.
     let clear = |backend: &Backend| {
         backend
-            .command(&["settings", "set", "webUiPassword", "", "--yes", "--json"])
+            .command(&["settings", "set", "web-ui.password", "", "--yes", "--json"])
             .output()
             .unwrap()
     };
     assert!(!clear(&backend).status.success());
-    backend.run(&["settings", "set", "webUi", "false", "--yes"]);
+    backend.run(&["settings", "set", "web-ui.enabled", "false", "--yes"]);
     let deadline = Instant::now() + Duration::from_secs(5);
     while TcpStream::connect(&authority).is_ok() {
         assert!(Instant::now() < deadline, "the web UI listener stayed open");
@@ -541,23 +552,23 @@ fn web_ui_listener_fails_closed_and_rebinds_with_fresh_sessions() {
         let free = TcpListener::bind("127.0.0.1:0").unwrap();
         free.local_addr().unwrap().port().to_string()
     };
-    backend.run(&["settings", "set", "webUiPort", &port, "--yes"]);
+    backend.run(&["settings", "set", "web-ui.port", &port, "--yes"]);
     let set = |key: &str, value: &str| {
         backend
             .command(&["settings", "set", key, value, "--yes", "--json"])
             .output()
             .unwrap()
     };
-    let refused = set("webUiListenAddress", "0.0.0.0");
+    let refused = set("web-ui.listen-address", "0.0.0.0");
     assert!(!refused.status.success());
     assert!(String::from_utf8_lossy(&refused.stderr).contains("explicit confirmation"));
-    assert_success(&set("webUiAllowNetworkAccess", "true"));
-    let refused = set("webUiListenAddress", "0.0.0.0");
+    assert_success(&set("web-ui.allow-network-access", "true"));
+    let refused = set("web-ui.listen-address", "0.0.0.0");
     assert!(String::from_utf8_lossy(&refused.stderr).contains("Client host is required"));
-    assert_success(&set("webUiAllowNetworkAccess", "false"));
+    assert_success(&set("web-ui.allow-network-access", "false"));
 
     assert_success(&backend.set_web_ui_password(WEB_PASSWORD));
-    let state = backend.run(&["settings", "set", "webUi", "true", "--yes"]);
+    let state = backend.run(&["settings", "set", "web-ui.enabled", "true", "--yes"]);
     if state["webUi"]["error"]
         .as_str()
         .is_some_and(|error| error.contains("assets are not built"))
@@ -574,7 +585,7 @@ fn web_ui_listener_fails_closed_and_rebinds_with_fresh_sessions() {
     let state = backend.run(&[
         "settings",
         "set",
-        "webUiListenAddress",
+        "web-ui.listen-address",
         "127.0.0.2",
         "--yes",
     ]);
@@ -632,7 +643,7 @@ impl Backend {
             .command(&[
                 "settings",
                 "set",
-                "webUiPassword",
+                "web-ui.password",
                 "--value-stdin",
                 "--yes",
                 "--json",
@@ -703,7 +714,7 @@ fn reset_settings_preserves_user_data_and_requires_explicit_consent() {
     fs::write(&backup, r#"{"version":1,"profiles":[{"name":"Work","provider":"phala","remoteUrl":"https://inference.phala.com"}]}"#).unwrap();
     backend.run(&["profiles", "import", backup.to_str().unwrap(), "--yes"]);
     backend.run(&["settings", "set", "appearance", "dark", "--yes"]);
-    backend.run(&["settings", "set", "connectOnLaunch", "true", "--yes"]);
+    backend.run(&["settings", "set", "connect-on-launch", "true", "--yes"]);
     assert_success(&backend.set_web_ui_password(WEB_PASSWORD));
     backend.run(&["agents", "connect", "codex", "--yes"]);
     let key = backend.run(&["token", "show", "--yes"]);
@@ -741,7 +752,7 @@ fn reset_settings_preserves_user_data_and_requires_explicit_consent() {
         .all(|agent| agent["recorded"] == false));
     let settings = backend.run(&["settings", "show"]);
     assert_eq!(settings["settings"]["appearance"], "system");
-    assert_eq!(settings["settings"]["connectOnLaunch"], false);
+    assert_eq!(settings["settings"]["connect-on-launch"], false);
     assert_eq!(settings["settings"]["notifications"]["enabled"], true);
     assert_eq!(settings["webUi"]["passwordSet"], false);
 }
@@ -791,19 +802,29 @@ fn two_cli_clients_share_state_and_disconnect_does_not_stop_service() {
         backend.run(&["settings", "show"])["settings"]["appearance"],
         "dark"
     );
-    backend.run(&[
-        "settings",
-        "set",
-        "notifications",
-        r#"{"enabled":false}"#,
-        "--yes",
-    ]);
+    backend.run(&["settings", "set", "notifications.enabled", "false", "--yes"]);
     let settings = backend.run(&["settings", "show"]);
     assert_eq!(settings["settings"]["notifications"]["enabled"], false);
+    assert_eq!(settings["settings"]["notifications"]["local-api"], true);
     assert_eq!(settings["settings"]["appearance"], "dark");
-    backend.run(&["settings", "set", "autoCliRegistration", "false", "--yes"]);
+    // A deprecated flat name still works and says what replaces it.
+    let deprecated = backend
+        .command(&[
+            "settings",
+            "set",
+            "autoCliRegistration",
+            "false",
+            "--yes",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_success(&deprecated);
+    assert!(String::from_utf8_lossy(&deprecated.stderr).contains(
+        "`autoCliRegistration` is deprecated and will be removed in 0.3; use `auto-cli-registration`"
+    ));
     assert_eq!(
-        backend.run(&["settings", "show"])["settings"]["autoCliRegistration"],
+        backend.run(&["settings", "show"])["settings"]["auto-cli-registration"],
         false
     );
     backend.run(&["token", "rotate", "--yes"]);
@@ -888,15 +909,40 @@ fn settings_files_are_edited_in_place_and_hand_edits_apply_live() {
             1,
         )
     };
-    fs::write(&config, edited("connectOnLaunch = true")).unwrap();
-    wait(&|show| show["settings"]["connectOnLaunch"] == true);
+    fs::write(&config, edited("connect-on-launch = true")).unwrap();
+    wait(&|show| show["settings"]["connect-on-launch"] == true);
+
+    // An unknown key warns but never rejects the file.
+    fs::write(
+        &config,
+        edited("connect-on-launch = true\nfuture-option = 1"),
+    )
+    .unwrap();
+    let show = wait(&|show| {
+        show["files"]["warnings"]
+            .as_array()
+            .is_some_and(|warnings| !warnings.is_empty())
+    });
+    assert!(show["files"]["error"].is_null(), "{show}");
+    assert_eq!(show["settings"]["connect-on-launch"], true);
+    assert!(show["files"]["warnings"][0]
+        .as_str()
+        .unwrap()
+        .contains("future-option: unknown key, ignored"));
+    let doctor = backend.command(&["doctor", "--json"]).output().unwrap();
+    let doctor: Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    assert_eq!(
+        doctor["warnings"]["settingsFiles"],
+        show["files"]["warnings"]
+    );
+    assert!(doctor["errors"]["settings"].is_null(), "{doctor}");
 
     // A broken edit keeps the last good settings and names the position.
-    fs::write(&config, edited("connectOnLaunch = \"yes\"")).unwrap();
+    fs::write(&config, edited("connect-on-launch = \"yes\"")).unwrap();
     let show = wait(&|show| show["files"]["error"].is_string());
     let error = show["files"]["error"].as_str().unwrap();
     assert!(error.starts_with("config.toml:"), "{error}");
-    assert_eq!(show["settings"]["connectOnLaunch"], true);
+    assert_eq!(show["settings"]["connect-on-launch"], true);
     let doctor = backend.command(&["doctor", "--json"]).output().unwrap();
     let doctor: Value = serde_json::from_slice(&doctor.stdout).unwrap();
     assert_eq!(doctor["errors"]["settings"], error);
@@ -909,7 +955,7 @@ fn settings_files_are_edited_in_place_and_hand_edits_apply_live() {
 
     fs::write(&config, &text).unwrap();
     let show = wait(&|show| show["files"]["error"].is_null());
-    assert_eq!(show["settings"]["connectOnLaunch"], false);
+    assert_eq!(show["settings"]["connect-on-launch"], false);
 
     #[cfg(unix)]
     {
@@ -928,7 +974,7 @@ fn settings_files_are_edited_in_place_and_hand_edits_apply_live() {
     let schema = backend.command(&["settings", "schema"]).output().unwrap();
     assert_success(&schema);
     let schema: Value = serde_json::from_slice(&schema.stdout).unwrap();
-    assert!(schema["properties"]["localApi"].is_object());
+    assert!(schema["properties"]["local-api"].is_object());
     assert_eq!(
         fs::read_to_string(data.join("config.schema.json"))
             .unwrap()

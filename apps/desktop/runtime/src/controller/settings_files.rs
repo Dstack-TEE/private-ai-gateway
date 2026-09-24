@@ -22,16 +22,46 @@ impl DesktopRuntime {
     /// app, the way the matching management commands would. An invalid file
     /// changes nothing; its error is published with the file status.
     pub(crate) async fn apply_settings_files(self: &Arc<Self>) {
-        // The app's own writes change nothing and need no lock.
-        let Some((previous, current)) = self.settings.reload() else {
-            return;
-        };
+        // Under the lifecycle lock, so switching the settings in effect and
+        // applying them is one step for every other operation.
         let _operation = self.lifecycle.lock().await;
         if self.exiting.load(Ordering::Acquire) {
             return;
         }
+        let Some((previous, current)) = self.settings.reload() else {
+            return;
+        };
         if let Err(error) = self.apply_settings(&previous, &current).await {
             self.report_error(format!("Settings: {error}"));
+        }
+        self.manager.set_config_files(self.settings.files());
+    }
+
+    /// Imports this device's 0.1 credential store entries (see
+    /// `settings::legacy`). Called once the service is listening, so a slow
+    /// or prompting credential store never delays its readiness.
+    pub(crate) fn import_legacy_secrets(&self) {
+        if !self.local_state.importing() {
+            return;
+        }
+        let result = crate::settings::legacy::import_secrets(
+            &self.settings,
+            &self.local_state,
+            &self.data_dir,
+            &crate::settings::legacy::OsKeychain,
+        );
+        self.local_state.set_importing(false);
+        let notices = result.unwrap_or_else(|error| {
+            vec![format!(
+                "Settings: Saved credentials could not be imported from 0.1: {error}. The import is retried on the next start."
+            )]
+        });
+        self.settings.add_import_notices(&notices);
+        for notice in notices {
+            self.report_error(notice);
+        }
+        if let Err(error) = self.publish_profiles() {
+            self.report_error(error);
         }
         self.manager.set_config_files(self.settings.files());
     }
