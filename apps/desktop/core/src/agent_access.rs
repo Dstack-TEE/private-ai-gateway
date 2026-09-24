@@ -17,9 +17,9 @@ mod mac_app_store {
     };
     use std::{
         ffi::{CStr, OsStr},
-        fs::{self, File},
+        fs,
         io::Write,
-        os::unix::{ffi::OsStrExt, fs::PermissionsExt},
+        os::unix::ffi::OsStrExt,
         path::{Path, PathBuf},
         sync::{Mutex, OnceLock},
     };
@@ -285,22 +285,10 @@ mod mac_app_store {
         if fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.is_file()) {
             return Err("Agent Home access could not be saved".to_string());
         }
-        let mut temporary = tempfile::NamedTempFile::new_in(directory)
-            .map_err(|_| "Agent Home access could not be saved".to_string())?;
-        temporary
-            .as_file()
-            .set_permissions(fs::Permissions::from_mode(0o600))
-            .and_then(|()| temporary.write_all(bytes))
-            .and_then(|()| temporary.as_file().sync_all())
-            .map_err(|_| "Agent Home access could not be saved".to_string())?;
-        temporary
-            .into_temp_path()
-            .persist(path)
-            .map_err(|_| "Agent Home access could not be saved".to_string())?;
-        File::open(directory)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|_| "Agent Home access could not be saved".to_string())?;
-        Ok(())
+        crate::private_fs::publish(path, crate::private_fs::Publish::Replace, |file| {
+            file.write_all(bytes)
+        })
+        .map_err(|_| "Agent Home access could not be saved".to_string())
     }
 }
 

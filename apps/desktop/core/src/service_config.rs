@@ -1,9 +1,4 @@
-use std::{
-    collections::HashSet,
-    fs,
-    path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{collections::HashSet, fs, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -177,13 +172,6 @@ pub fn profile_credential_entry(profile: &ConfidentialProfile) -> Result<String,
 pub fn credential_entry(profile_id: &str) -> Result<String, String> {
     validate_profile_id(profile_id)?;
     Ok(format!("service-profile-{profile_id}-api-key"))
-}
-
-pub fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
 }
 
 fn resolve_settings(mut settings: ServiceSettings) -> Result<ServiceSettings, String> {

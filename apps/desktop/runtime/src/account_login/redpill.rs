@@ -130,8 +130,9 @@ pub(super) fn callback_code(
     headers: &HeaderMap,
     expected: &str,
 ) -> Result<String, CallbackError> {
-    if uri.path() != "/oauth/callback"
-        || headers.get("host").and_then(|v| v.to_str().ok()) != Some("127.0.0.1:4181")
+    if uri.path() != CALLBACK_PATH
+        || headers.get("host").and_then(|v| v.to_str().ok())
+            != Some(CALLBACK_ADDRESS.to_string().as_str())
     {
         return Err(CallbackError::Invalid);
     }
@@ -261,7 +262,7 @@ pub(super) async fn redpill(
         ("client_id", REDPILL_CLIENT_ID),
         ("code", &code),
         ("code_verifier", &verifier),
-        ("redirect_uri", CALLBACK),
+        ("redirect_uri", &callback_url()),
     ]))
     .await?;
     let access_token = string(&token, "access_token")?;

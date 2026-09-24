@@ -519,18 +519,14 @@ fn revision(
             .unwrap_or_default()
             .as_bytes(),
     );
-    hex(&hasher.finalize())
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    hex::encode(hasher.finalize())
 }
 
 fn secret_entry(agent: Agent, path: &[String]) -> String {
     format!(
         "restore:{}:{}",
         agent.id(),
-        hex(&Sha256::digest(path.join("\u{1f}")))
+        hex::encode(Sha256::digest(path.join("\u{1f}")))
     )
 }
 

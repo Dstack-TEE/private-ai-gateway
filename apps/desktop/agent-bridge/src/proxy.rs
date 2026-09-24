@@ -26,7 +26,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc, PoisonError, RwLock, RwLockReadGuard,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use axum::{
@@ -47,6 +47,7 @@ use tokio_util::sync::CancellationToken;
 use desktop_core::{
     agents::Agent,
     brand::{PRODUCT_NAME, SERVICE_NAME},
+    now_secs,
 };
 
 use crate::{
@@ -991,14 +992,7 @@ fn model_of(bytes: &[u8]) -> Option<String> {
 fn new_id() -> String {
     let mut bytes = [0u8; 16];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    hex::encode(bytes)
 }
 
 #[cfg(test)]

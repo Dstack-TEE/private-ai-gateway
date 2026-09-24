@@ -1,5 +1,6 @@
 use crate::{
     contracts::{AppState, ConfidentialProfile, ConfidentialProfileInput, ServiceProvider},
+    private_fs::{self, Publish},
     service_config::{self, ServiceSettings},
 };
 use serde::{Deserialize, Serialize};
@@ -122,21 +123,11 @@ pub fn write_json(path: &Path, data: &impl Serialize) -> Result<(), String> {
 
 pub fn write_export(path: &Path, text: &str) -> Result<(), String> {
     use std::io::Write;
-    let write = || -> std::io::Result<()> {
-        let parent = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        let mut file = tempfile::NamedTempFile::new_in(parent)?;
-        file.write_all(text.as_bytes())?;
-        file.as_file().sync_all()?;
-        // Publish only the completed file, and atomically refuse any existing destination.
-        file.persist_noclobber(path).map_err(|error| error.error)?;
-        #[cfg(unix)]
-        std::fs::File::open(parent)?.sync_all()?;
-        Ok(())
-    };
-    write().map_err(|error| {
+    // Publish only the completed file, and atomically refuse any existing destination.
+    private_fs::publish(path, Publish::NoClobber, |file| {
+        file.write_all(text.as_bytes())
+    })
+    .map_err(|error| {
         if error.kind() == std::io::ErrorKind::AlreadyExists {
             "Export target already exists; choose a new path.".to_string()
         } else {

@@ -596,6 +596,7 @@ fn open_web_ui(cli: &Cli, client: &Client) -> Result<Value, String> {
     }))
 }
 
+/// Open `url` in the user's browser without waiting for it.
 fn open_browser(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let mut command = std::process::Command::new("open");
@@ -610,13 +611,17 @@ fn open_browser(url: &str) -> Result<(), String> {
     #[cfg(not(any(target_os = "macos", windows)))]
     command.arg(url);
     // Without a terminal, a text-mode fallback browser cannot take over this shell.
-    command
+    let mut child = command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .map(drop)
-        .map_err(|_| "Cannot open a browser".to_string())
+        .map_err(|_| "Cannot open a browser".to_string())?;
+    // Reap the short-lived OS launcher without blocking the caller.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 fn new_export_path(path: &std::path::Path) -> Result<PathBuf, String> {

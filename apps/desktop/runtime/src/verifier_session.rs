@@ -14,7 +14,7 @@ use events::*;
 use std::{
     collections::BTreeSet,
     sync::{Arc, Mutex, MutexGuard},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use crate::endpoint_inventory::InventoryUpdater;
@@ -28,6 +28,7 @@ use desktop_core::contracts::{
 };
 use desktop_core::listen::ResolvedListen;
 use desktop_core::local_api;
+use desktop_core::now_secs;
 use desktop_core::service_config;
 use serde_json::{Map, Value};
 use tokio::{runtime::Handle, sync::watch};
@@ -883,13 +884,6 @@ impl SessionManager {
             .lock()
             .map_err(|_| "Gateway runtime state is unavailable".to_string())
     }
-}
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 /// Summarizes a verified catalog for clients, carrying forward removed ids.

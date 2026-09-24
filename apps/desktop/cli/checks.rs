@@ -16,8 +16,6 @@
 //! `validate_aci_report_binding` composes, step by step, so every check gets
 //! its own honest status instead of stopping at the first failure.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use crate::aci::digest::{jcs_bytes, sha256_hex, sha256_raw};
 use crate::aci::identity;
 use crate::aci::keys::verify_receipt_signature;
@@ -70,13 +68,6 @@ pub struct ReportCheckContext<'a> {
     /// bind that hash to MRTD/RTMR0-2 for the same evidence.
     pub require_production_os: bool,
     pub explain: bool,
-}
-
-pub fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default()
 }
 
 /// The workload identity a verified report establishes (§9.1): the keyset

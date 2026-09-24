@@ -571,7 +571,7 @@ async fn proxy_request(
     // changed the service identity must not carry this request either: it
     // was admitted upstream against the old identity, so it is refused with a
     // retryable status until the desktop publishes the new identity.
-    if crate::checks::now_secs() >= state.snapshot().not_after {
+    if desktop_core::now_secs() >= state.snapshot().not_after {
         state.blocked.store(true, Ordering::SeqCst);
         state.revoke_deliveries();
     }
@@ -822,7 +822,7 @@ async fn proxy_inference(
                 response,
                 delivery: delivery.clone(),
                 pinned_sessions,
-                at: crate::checks::now_secs(),
+                at: desktop_core::now_secs(),
                 verified: None,
                 context: context.clone(),
                 local_policy_applied,

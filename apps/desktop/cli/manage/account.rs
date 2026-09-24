@@ -1,5 +1,5 @@
 //! CLI account authorization uses the same runtime session as the desktop UI.
-use super::{args::AccountLoginOptions, service_provider, value, Cli};
+use super::{args::AccountLoginOptions, open_browser, service_provider, value, Cli};
 use desktop_core::{client::Client, contracts::*, protocol::rpc};
 use serde_json::Value;
 use std::{
@@ -179,33 +179,6 @@ fn read_callback() -> Result<String, String> {
         return Err("Callback URL is too long".into());
     }
     String::from_utf8(bytes).map_err(|_| "Callback URL must be UTF-8".into())
-}
-
-fn open_browser(url: &str) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    let result = std::process::Command::new("open")
-        .arg(url)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-    #[cfg(target_os = "windows")]
-    let result = std::process::Command::new("rundll32.exe")
-        .args(["url.dll,FileProtocolHandler", url])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let result = std::process::Command::new("xdg-open")
-        .arg(url)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-    let mut child = result.map_err(|_| "Cannot open browser")?;
-    // Reap the short-lived OS launcher independently of authorization polling.
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
 }
 
 #[cfg(test)]

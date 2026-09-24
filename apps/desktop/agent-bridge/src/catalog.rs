@@ -288,11 +288,7 @@ impl Catalog {
                 agent_surfaces: None,
             });
         }
-        let revision = hasher
-            .finalize()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
+        let revision = hex::encode(hasher.finalize());
         Ok(Self {
             revision,
             fetched_at,

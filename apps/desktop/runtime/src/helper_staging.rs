@@ -5,6 +5,8 @@ use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use desktop_core::private_fs::{self, Publish};
+
 pub fn stage(bundled: &Path, app_data: &Path) -> io::Result<PathBuf> {
     let uid = rustix::process::getuid().as_raw();
     let mut source = File::open(bundled)?;
@@ -17,7 +19,7 @@ pub fn stage(bundled: &Path, app_data: &Path) -> io::Result<PathBuf> {
     }
 
     let directory = app_data.join("helpers");
-    desktop_core::private_fs::create_private_dir(&directory)?;
+    private_fs::create_private_dir(&directory)?;
     let metadata = fs::symlink_metadata(&directory)?;
     if !metadata.is_dir() || metadata.permissions().mode() & 0o077 != 0 || metadata.uid() != uid {
         return Err(io::Error::new(
@@ -38,24 +40,19 @@ pub fn stage(bundled: &Path, app_data: &Path) -> io::Result<PathBuf> {
         Err(error) => return Err(error),
     }
 
-    // One same-filesystem temporary file, removed on failure by RAII. Rename
-    // also lets an already-running helper finish using the previous inode.
-    let mut temporary = tempfile::NamedTempFile::new_in(&directory)?;
-    if temporary.as_file().metadata()?.uid() != uid {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "the staged helper must be owned by the current user",
-        ));
-    }
-    io::copy(&mut source, temporary.as_file_mut())?;
-    temporary
-        .as_file()
-        .set_permissions(fs::Permissions::from_mode(0o700))?;
-    temporary.as_file().sync_all()?;
-    // Close the writable handle before publishing an executable. Otherwise a
-    // concurrent launch can observe the destination while it is still writable.
-    temporary.into_temp_path().persist(&destination)?;
-    File::open(&directory)?.sync_all()?;
+    // One same-filesystem temporary file, removed on failure. Rename also
+    // lets an already-running helper finish using the previous inode, and the
+    // executable is published only after its writable handle is closed.
+    private_fs::publish(&destination, Publish::Replace, |file| {
+        if file.metadata()?.uid() != uid {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the staged helper must be owned by the current user",
+            ));
+        }
+        io::copy(&mut source, file)?;
+        file.set_permissions(fs::Permissions::from_mode(0o700))
+    })?;
     Ok(destination)
 }
 

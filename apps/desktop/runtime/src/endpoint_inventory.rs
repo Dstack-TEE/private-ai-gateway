@@ -1,12 +1,13 @@
 use std::{
     fs::File,
-    io::{Read, Write},
+    io::Read,
     path::PathBuf,
     sync::{Mutex, PoisonError},
     time::Duration,
 };
 
 use agent_bridge::catalog::EndpointInventory;
+use desktop_core::private_fs::{self, Publish};
 use reqwest::{
     header::{ETAG, IF_NONE_MATCH},
     Client, StatusCode,
@@ -169,15 +170,9 @@ fn read_cache(path: &std::path::Path) -> Option<CachedInventory> {
 }
 
 fn persist(path: &std::path::Path, cache: &CachedInventory) -> std::io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| std::io::Error::other("Missing cache directory"))?;
-    let mut file = tempfile::NamedTempFile::new_in(parent)?;
-    serde_json::to_writer(&mut file, cache)?;
-    file.flush()?;
-    file.as_file().sync_all()?;
-    file.persist(path).map_err(|error| error.error)?;
-    Ok(())
+    private_fs::publish(path, Publish::Replace, |file| {
+        serde_json::to_writer(file, cache).map_err(std::io::Error::from)
+    })
 }
 
 #[cfg(test)]

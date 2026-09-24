@@ -62,7 +62,7 @@ impl DesktopRuntime {
             .find(|entry| entry.id == profile.id)
             .cloned();
         let mut candidate =
-            service_config::resolve_profile(profile, verify.then(service_config::now_secs))?;
+            service_config::resolve_profile(profile, verify.then(desktop_core::now_secs))?;
         if let Some(auth) = auth {
             candidate.auth = auth;
         } else if key.is_none() {

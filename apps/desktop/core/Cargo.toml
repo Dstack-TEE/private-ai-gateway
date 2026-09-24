@@ -17,7 +17,6 @@ path = "src/lib.rs"
 [dependencies]
 fd-lock = "4"
 if-addrs = "0.15"
-rand = "0.8"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
 semver = "1"
 serde = { version = "1.0", features = ["derive"] }

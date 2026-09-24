@@ -9,9 +9,10 @@
 use serde_json::{json, Value};
 
 use crate::args::SessionsArgs;
-use crate::checks::{now_secs, unmet_claims, RequiredClaim, SessionAudit};
+use crate::checks::{unmet_claims, RequiredClaim, SessionAudit};
 use crate::client::AciClient;
 use crate::verify::verify_service;
+use desktop_core::now_secs;
 
 pub async fn run(args: SessionsArgs, require_production_os: bool) -> Result<i32, String> {
     let verification = verify_service(

@@ -26,6 +26,14 @@ pub mod ui_api;
 pub mod updates;
 pub mod usage;
 
+/// Seconds since the Unix epoch; 0 if the system clock is set before it.
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
 /// Write a best-effort diagnostic line to stderr, formatted like `eprintln!`.
 ///
 /// Unlike `eprintln!`, a closed or detached stderr (a GUI process, a service

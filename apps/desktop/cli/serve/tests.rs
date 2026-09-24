@@ -538,7 +538,7 @@ async fn a_412_refusal_refreshes_policy_pins_and_retries() {
     // A currently-valid session: the fixture record with its validity
     // window moved to now (the id is content-addressed, so it changes).
     let mut record: Value = serde_json::from_slice(&vector_session_bytes()).unwrap();
-    let now = crate::checks::now_secs();
+    let now = desktop_core::now_secs();
     record["established_at"] = json!(now - 10);
     record["expires_at"] = json!(now + 3600);
     let session_bytes = crate::aci::digest::jcs_bytes(&record).unwrap();

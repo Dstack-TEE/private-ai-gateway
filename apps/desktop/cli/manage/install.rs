@@ -384,7 +384,7 @@ mod platform {
         if !metadata.is_dir() {
             return Err(format!("{} is not a directory", directory.display()));
         }
-        if metadata.uid() != effective_user_id() {
+        if metadata.uid() != rustix::process::geteuid().as_raw() {
             return Err(format!(
                 "Command directory {} is not owned by the current user",
                 directory.display()
@@ -457,14 +457,6 @@ mod platform {
         File::open(directory)
             .and_then(|file| file.sync_all())
             .map_err(|_| format!("Cannot persist changes in {}", directory.display()))
-    }
-
-    fn effective_user_id() -> u32 {
-        unsafe extern "C" {
-            fn geteuid() -> u32;
-        }
-        // SAFETY: geteuid takes no arguments and has no failure mode.
-        unsafe { geteuid() }
     }
 
     #[cfg(test)]
