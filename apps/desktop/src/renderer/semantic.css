@@ -24,7 +24,6 @@
   --warning: var(--color-amber-700);
   --warning-bg: color-mix(in oklch, var(--warning) 10%, transparent);
   --danger-bg: color-mix(in oklch, var(--destructive) 10%, transparent);
-  --backdrop: color-mix(in oklch, var(--color-black) 32%, transparent);
 }
 :root.dark {
   color-scheme: dark;

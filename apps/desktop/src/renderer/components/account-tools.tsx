@@ -19,6 +19,8 @@ type Props = {
   credentialRef?: string;
   images?: AccountImages;
   onSignIn?(): void;
+  /** Presents a failure to open an account page. */
+  onError(error: unknown): void;
   disabled?: boolean;
 };
 
@@ -51,7 +53,7 @@ function useAccountBalance({ api, provider, target, credentialRef, enabled = tru
 /** Compact account balance for a profile whose credential is already in active use. */
 export function AccountBalanceValue(props: BalanceProps) {
   const { data: balance, isFetching, refetch } = useAccountBalance(props);
-  const { opening, openPage } = useAccountPage("Could not open billing", refetch);
+  const { opening, openPage } = useAccountPage((error) => toastError("Could not open billing", error), refetch);
   if (!balance) return null;
   return <BillingBalanceButton balance={balance} provider={props.provider} busy={isFetching || opening} disabled={opening}
     onOpen={(scopeSlug) => openPage(() => props.api.openTopUp(props.provider, scopeSlug))} />;
@@ -63,9 +65,9 @@ export function AccountTools(props: Props) {
   return <AccountDetailsView key={cacheKey} {...props} />;
 }
 
-function AccountDetailsView({ api, provider, target, scope, credentialRef, images, onSignIn, disabled = false }: Props) {
+function AccountDetailsView({ api, provider, target, scope, credentialRef, images, onSignIn, onError, disabled = false }: Props) {
   const { data: balance, isFetching: busy, refetch } = useAccountBalance({ api, provider, target, credentialRef });
-  const { opening, openPage } = useAccountPage("Could not open account", refetch, disabled);
+  const { opening, openPage } = useAccountPage(onError, refetch, disabled);
   const organizationSlug = balance?.scope.organizationSlug ?? scope?.organizationSlug;
   const manage = distributionCapabilities.accountPortalLinks && provider === "redpill" && organizationSlug ? () => void openPage(() => api.openOrganization(organizationSlug)) : undefined;
   const displayScope = provider === "redpill" ? scope ?? balance?.scope : balance?.scope ?? scope;
@@ -103,7 +105,7 @@ function BillingBalanceButton({ balance, provider, busy, disabled = false, onOpe
     onClick={() => { if (scopeSlug) onOpen(scopeSlug); }}>{amount}</Button>;
 }
 
-function useAccountPage(title: string, refetch: () => Promise<unknown>, disabled = false) {
+function useAccountPage(onError: (error: unknown) => void, refetch: () => Promise<unknown>, disabled = false) {
   const [opening, setOpening] = useState(false);
   const openingRef = useRef(false);
   const returningFromAccountPage = useRef(false);
@@ -127,9 +129,9 @@ function useAccountPage(title: string, refetch: () => Promise<unknown>, disabled
     setOpening(true);
     returningFromAccountPage.current = true;
     try { await action(); }
-    catch (error) { toastError(title, error); returningFromAccountPage.current = false; }
+    catch (error) { onError(error); returningFromAccountPage.current = false; }
     finally { openingRef.current = false; setOpening(false); }
-  }, [disabled, title]);
+  }, [disabled, onError]);
   return { opening, openPage };
 }
 

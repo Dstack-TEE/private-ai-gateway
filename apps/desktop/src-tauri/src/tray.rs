@@ -174,15 +174,10 @@ fn perform_action(app: &AppHandle, id: String) {
             }
             Ok(())
         })();
+        // Like other tray apps, a failed menu action is logged; the menu and the
+        // window show the state that actually applies.
         if let Err(error) = result {
-            let title = if id.starts_with("agent:") {
-                "Agent connection not changed"
-            } else if id.starts_with("profile:") {
-                "Profile not switched"
-            } else {
-                "Nothing copied"
-            };
-            crate::notifications::report_failure(&app, title, error);
+            desktop_core::diagnostic!("Tray action {id} failed: {error}");
         }
         let state = client.state().unwrap_or_else(|_| client.cached_state());
         sync(&app, &state);
@@ -295,7 +290,7 @@ fn toggle_or_open_settings(app: &AppHandle) {
             return;
         }
         if let Err(error) = client.toggle() {
-            crate::notifications::report_failure(&app, "Protection not changed", error);
+            desktop_core::diagnostic!("Tray protection toggle failed: {error}");
         }
         let state = client.state().unwrap_or_else(|_| client.cached_state());
         sync(&app, &state);
@@ -319,11 +314,7 @@ fn sync_autostart(app: &AppHandle) {
         if let Err(error) = result {
             let menu = app.state::<TrayMenu>();
             let _ = menu.autostart.set_checked(!checked);
-            crate::notifications::report_failure(
-                &app,
-                "Open at Login not changed",
-                error.message(),
-            );
+            desktop_core::diagnostic!("Open at Login could not be changed: {}", error.message());
             // Keep open windows in sync with the preference that actually applies.
             if let Ok(preferences) = desktop_core::ui_api::launch_preferences(&client, &host).await
             {
@@ -482,6 +473,8 @@ pub fn show_window(app: &AppHandle) {
             return;
         };
         set_dock_visibility(&handle, true);
+        // Focusing skips a minimized window, so restore it first.
+        let _ = window.unminimize();
         let _ = window.show();
         // On macOS this also activates the app.
         let _ = window.set_focus();

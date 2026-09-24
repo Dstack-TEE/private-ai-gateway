@@ -364,7 +364,7 @@ export function ProfileEditorDialog({
                   <AccountTools key={login?.id ?? draft.id} api={desktopApi} provider={draft.provider}
                     target={authorized && login ? { kind: "login", id: login.id } : { kind: "profile", profileId: draft.id }}
                     scope={accountScope} images={selectedAccount.images} onSignIn={() => void signIn()}
-                    credentialRef={profile?.credentialRef} disabled={working || frozen} />
+                    credentialRef={profile?.credentialRef} onError={reportError} disabled={working || frozen} />
                   {draft.provider === "redpill" && Boolean(workspaces?.length || accountScope?.workspace) && <FormField id="profile-workspace" label="Workspace">
                     <ChoiceSelect id="profile-workspace" label="Workspace" className="w-full" value={workspaceId === undefined ? "" : String(workspaceId)} options={[
                       { value: "", label: "Select workspace", disabled: true },

@@ -52,9 +52,6 @@ const platform: UiPlatform = {
     });
     if (path) await invoke("export_diagnostics", { path });
   },
-  readProfileBackup: (path) => invoke("read_profile_backup", { path }),
-  exportProfiles: (path) => invoke("export_profiles", { path }),
-  exportDiagnostics: (path) => invoke("export_diagnostics", { path }),
   requestNotificationPermission: () => invoke("request_notification_permission"),
   openNotificationSettings: () => invoke("open_notification_settings"),
   mainWindowReady: () => invoke("main_window_ready"),

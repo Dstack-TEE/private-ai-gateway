@@ -78,15 +78,6 @@ function createPlatform(bootstrap: WebBootstrap): UiPlatform {
       "private-ai-proxy-diagnostics.json",
       await rpc<string>("exportDiagnosticsContent"),
     ),
-    readProfileBackup: async () => {
-      throw new Error("Browser imports use a local file picker");
-    },
-    exportProfiles: async () => {
-      throw new Error("Browser exports download directly");
-    },
-    exportDiagnostics: async () => {
-      throw new Error("Browser exports download directly");
-    },
     requestNotificationPermission: async () => ({ permission: "unsupported", alertsEnabled: false }),
     openNotificationSettings: async () => undefined,
     mainWindowReady: async () => undefined,

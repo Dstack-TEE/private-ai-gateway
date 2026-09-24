@@ -8,7 +8,8 @@
 
 use tauri::AppHandle;
 
-/// Emitted to the window when a menu item asks it to show a page or dialog.
+/// Emitted to the window when a menu item asks it to show a page or dialog, or
+/// to open a documentation link the way Settings does.
 pub const NAVIGATE_EVENT: &str = "pap://navigate";
 
 #[cfg(target_os = "macos")]
@@ -99,15 +100,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             let _ = app.emit(NAVIGATE_EVENT, "settings");
         }
         "documentation" | "github" => {
-            let app = app.clone();
-            let target = event.id().as_ref().to_string();
-            tauri::async_runtime::spawn(async move {
-                if let Err(error) =
-                    crate::commands::desktop::open_about_link(app.clone(), target).await
-                {
-                    crate::notifications::report_failure(&app, "Link not opened", error);
-                }
-            });
+            let _ = app.emit(NAVIGATE_EVENT, event.id().as_ref());
         }
         _ => {}
     });

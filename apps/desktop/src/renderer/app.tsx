@@ -8,7 +8,7 @@ import { useWindowReady } from "./lib/use-window-ready";
 import { errorMessage, toastError } from "./lib/error-message";
 import { brand } from "./generated/brand";
 import { useUpdates } from "./updates";
-import type { AgentStatus, ConfidentialProfile, AppState, LaunchPreferences, RequestActivity } from "../shared/contracts";
+import type { AgentStatus, ConfidentialProfile, AppState, LaunchPreferences, NavigationTarget, RequestActivity } from "../shared/contracts";
 import { PageHeader, Sidebar, useView } from "./components/navigation";
 import type { SettingsTarget } from "./components/navigation";
 import { desktopApi, distributionCapabilities } from "./lib/environment";
@@ -119,9 +119,10 @@ export function App(): React.JSX.Element {
   const openProfileSetup = () => {
     openDialog(state.profiles.length === 0 ? { kind: "setup-profile" } : { kind: "profiles", repair: state.profiles.some((profile) => profile.id === state.activeProfileId) });
   };
-  const showRequested = useEffectEvent((target: "settings" | "agents" | "profiles" | "profile-setup") => {
+  const showRequested = useEffectEvent((target: NavigationTarget) => {
     if (target === "profiles") openDialog({ kind: "profiles", repair: false });
     else if (target === "profile-setup") openProfileSetup();
+    else if (target === "documentation" || target === "github") openAboutLink(target);
     else void navigate({ to: `/${target}` as const });
   });
   useEffect(() => desktopApi.onNavigate((target) => showRequested(target)), []);
@@ -181,7 +182,8 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
       if (event.key !== "," || !(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
-      if (document.querySelector("[role=dialog], [role=alertdialog]")) return;
+      // Only a modal dialog blocks it, not a popover such as the date picker.
+      if (document.querySelector("[data-slot=dialog-content], [data-slot=alert-dialog-content]")) return;
       event.preventDefault();
       void navigate({ to: "/settings" });
     };
@@ -241,18 +243,19 @@ export function App(): React.JSX.Element {
     }
   };
 
-  const copy = async (label: string, value: string) => {
-    await runAction(`Could not copy ${label.toLowerCase()}`, async () => {
-      await desktopApi.copyText(value);
-      setCopied(label);
-      notify(`${label} copied`);
-      if (copyTimer.current !== undefined) window.clearTimeout(copyTimer.current);
-      copyTimer.current = window.setTimeout(
-        () => setCopied((current) => (current === label ? undefined : current)),
-        1_400,
-      );
-    });
+  /** Copies a value and marks it copied; the caller presents a failure. */
+  const copyValue = async (label: string, value: string) => {
+    await desktopApi.copyText(value);
+    setCopied(label);
+    notify(`${label} copied`);
+    if (copyTimer.current !== undefined) window.clearTimeout(copyTimer.current);
+    copyTimer.current = window.setTimeout(
+      () => setCopied((current) => (current === label ? undefined : current)),
+      1_400,
+    );
   };
+  const copy = (label: string, value: string) => runAction(`Could not copy ${label.toLowerCase()}`, () => copyValue(label, value));
+  const openAboutLink = (target: "documentation" | "github") => void runAction("Could not open the link", () => desktopApi.openAboutLink(target));
 
   const resetSettings = async () => {
     let confirmed: boolean;
@@ -378,7 +381,7 @@ export function App(): React.JSX.Element {
             locked={locked || Object.keys(pendingAgentChanges).length > 0}
             onPolicy={(value) => void changeDevelopmentOs(value)}
             onResetSettings={() => void resetSettings()}
-            onAboutLink={(target) => void runAction("Could not open the link", () => desktopApi.openAboutLink(target))}
+            onAboutLink={openAboutLink}
             onOpen={openSettings}
             launchPreferences={launchPreferences}
             savingPreference={savingPreference}
@@ -410,7 +413,7 @@ export function App(): React.JSX.Element {
       {dialog?.kind === "privacy" && <PrivacyDialog state={state} onClose={closeDialog} />}
       {dialog?.kind === "local-api" && <LocalApiDialog
         state={state} frozen={busy} clientKey={clientKey} clientKeyVisible={clientKeyVisible} copied={copied}
-        onCopy={copy} onToggleKey={() => setClientKeyVisible((visible) => !visible)}
+        onCopy={copyValue} onToggleKey={() => setClientKeyVisible((visible) => !visible)}
         onRotate={rotateClientKey}
         onSave={(config) => applyStateAction(() => desktopApi.saveLocalApiConfig(config))}
         onClose={closeDialog}
@@ -429,5 +432,5 @@ export function App(): React.JSX.Element {
       {dialog?.kind === "usage-proof" && <UsageProofDialog activity={dialog.activity} onClose={closeDialog} />}
     </main>
   );
-  return <div className="native-host w-full h-full">{windowContent}</div>;
+  return <div className="w-full h-full">{windowContent}</div>;
 }

@@ -106,6 +106,7 @@ export function LocalApiDialog({
   clientKey: string;
   clientKeyVisible: boolean;
   copied?: string;
+  /** Rejects when the value was not copied. */
   onCopy(label: string, value: string): Promise<void>;
   onToggleKey(): void;
   onRotate(): Promise<string | undefined>;
@@ -133,6 +134,11 @@ export function LocalApiDialog({
     } finally {
       setSaving(false);
     }
+  };
+  const copyKey = async () => {
+    setError(undefined);
+    try { await onCopy("Client key", clientKey); }
+    catch (failure) { setError(errorMessage(failure)); }
   };
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -170,7 +176,7 @@ export function LocalApiDialog({
               <InputGroupInput id="local-client-key" className="mono font-mono text-xs" type={clientKeyVisible ? "text" : "password"} value={clientKey} readOnly />
               <InputGroupAddon align="inline-end">
                 <Hint content={clientKeyVisible ? "Hide client key" : "Reveal client key"}><InputGroupButton size="icon-xs" aria-label={clientKeyVisible ? "Hide client key" : "Reveal client key"} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff /> : <Eye />}</InputGroupButton></Hint>
-                <Hint content="Copy client key"><InputGroupButton size="icon-xs" aria-label="Copy client key" disabled={saving || !clientKey} onClick={() => void onCopy("Client key", clientKey)}>{copied === "Client key" ? <Check /> : <Copy />}</InputGroupButton></Hint>
+                <Hint content="Copy client key"><InputGroupButton size="icon-xs" aria-label="Copy client key" disabled={saving || !clientKey} onClick={() => void copyKey()}>{copied === "Client key" ? <Check /> : <Copy />}</InputGroupButton></Hint>
                 <Hint content="Rotate key"><InputGroupButton size="icon-xs" aria-label="Rotate key" disabled={frozen || saving} onClick={() => void rotateKey()}><RefreshCw /></InputGroupButton></Hint>
               </InputGroupAddon>
             </InputGroup>

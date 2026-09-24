@@ -84,9 +84,10 @@ protection problems, is stored under that key.
   binding. Features never import the app.
 - Dialogs are shadcn `Dialog`s in the one window, in the desktop app and the web
   UI alike; decisions use `AlertDialog`. Tray and menu items show the window and
-  send `pap://navigate` for the page or dialog. Failures show inline in their form
-  or page, as a toast for other in-window actions, and as a system notification
-  for tray and menu actions.
+  send `pap://navigate` for the page, dialog or documentation link. Failures show
+  inline in their dialog, form or page, and as a toast for other in-window
+  actions, including app-menu items. Failed tray actions are only logged, like
+  other tray apps; the tray and the window show the state that applies.
 - Runtime `controller.rs` owns shared state and launch; its private modules group
   lifecycle, profiles, account login, credentials, agents and local endpoints.
   The same locks and transaction guards span these implementation modules.

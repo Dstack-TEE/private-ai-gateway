@@ -40,9 +40,6 @@ export interface UiPlatform {
   selectProfileBackup(): Promise<ProfileBackup | null>;
   saveProfileExport(): Promise<void>;
   saveDiagnosticsExport(): Promise<void>;
-  readProfileBackup(path: string): Promise<ProfileBackup>;
-  exportProfiles(path: string): Promise<void>;
-  exportDiagnostics(path: string): Promise<void>;
   requestNotificationPermission(): Promise<Pick<NotificationConfiguration, "permission" | "alertsEnabled">>;
   openNotificationSettings(): Promise<void>;
   mainWindowReady(): Promise<void>;
@@ -87,10 +84,7 @@ export function createDesktopApi(transport: UiTransport, platform: UiPlatform): 
     selectProfileBackup: platform.selectProfileBackup,
     saveProfileExport: platform.saveProfileExport,
     saveDiagnosticsExport: platform.saveDiagnosticsExport,
-    readProfileBackup: platform.readProfileBackup,
     importProfiles: (backup) => call("importProfiles", { backup }),
-    exportProfiles: platform.exportProfiles,
-    exportDiagnostics: platform.exportDiagnostics,
     saveNotificationSettings: (config: NotificationPreferences) => call("saveNotificationSettings", { config }),
     requestNotificationPermission: platform.requestNotificationPermission,
     openNotificationSettings: platform.openNotificationSettings,

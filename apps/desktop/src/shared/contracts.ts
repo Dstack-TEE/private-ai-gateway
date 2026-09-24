@@ -39,6 +39,9 @@ export interface NotificationConfiguration {
   alertsEnabled?: boolean;
 }
 
+/** What a tray or menu item asks the main window to show or open. */
+export type NavigationTarget = "settings" | "agents" | "profiles" | "profile-setup" | "documentation" | "github";
+
 export interface DesktopApi {
   startBackendService(): Promise<AppState>;
   showEditMenu(editable: boolean): Promise<void>;
@@ -70,10 +73,7 @@ export interface DesktopApi {
   selectProfileBackup(): Promise<ProfileBackup | null>;
   saveProfileExport(): Promise<void>;
   saveDiagnosticsExport(): Promise<void>;
-  readProfileBackup(path: string): Promise<ProfileBackup>;
   importProfiles(backup: ProfileBackup): Promise<ImportResult>;
-  exportProfiles(path: string): Promise<void>;
-  exportDiagnostics(path: string): Promise<void>;
   saveNotificationSettings(config: NotificationPreferences): Promise<void>;
   requestNotificationPermission(): Promise<Pick<NotificationConfiguration, "permission" | "alertsEnabled">>;
   openNotificationSettings(): Promise<void>;
@@ -81,11 +81,7 @@ export interface DesktopApi {
   resetSettings(): Promise<AppState>;
   onSettingsReset(listener: () => void): () => void;
   onStateChange(listener: (state: AppState) => void): () => void;
-  /**
-   * A tray or menu item asked the main window to show a page, the Profiles
-   * dialog, or the profile setup that protection needs first.
-   */
-  onNavigate(listener: (target: "settings" | "agents" | "profiles" | "profile-setup") => void): () => void;
+  onNavigate(listener: (target: NavigationTarget) => void): () => void;
   onAgentsChange(listener: () => void): () => void;
   onClientKeyChange(listener: (available: boolean) => void): () => void;
   mainWindowReady(): Promise<void>;
