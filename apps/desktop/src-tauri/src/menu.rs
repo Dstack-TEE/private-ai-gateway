@@ -29,6 +29,8 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         authors: Some(vec![ORGANIZATION_NAME.to_string()]),
         ..AboutMetadata::default()
     };
+    // The accelerator sends the same navigate request as the renderer's
+    // shortcut elsewhere; the window ignores it while a modal dialog is open.
     let settings = MenuItem::with_id(app, "settings", "Settings…", true, Some("CmdOrCtrl+,"))?;
     let application = Submenu::with_items(
         app,
@@ -100,6 +102,8 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             let _ = app.emit(NAVIGATE_EVENT, "settings");
         }
         "documentation" | "github" => {
+            // A failure shows in the window, which may be minimized.
+            crate::tray::show_window(app);
             let _ = app.emit(NAVIGATE_EVENT, event.id().as_ref());
         }
         _ => {}

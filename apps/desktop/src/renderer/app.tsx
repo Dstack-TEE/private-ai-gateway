@@ -32,6 +32,15 @@ type AppDialog =
   | { kind: "setup-profile" | "privacy" | "local-api" | "local-api-example" | "notifications" | "web-ui" }
   | { kind: "usage-proof"; activity: RequestActivity };
 
+/**
+ * Whether a modal dialog, confirmation or sheet is open. Requests to show a
+ * page, from the Settings shortcut, the macOS menu accelerator or the tray,
+ * wait until it closes; popovers such as the date picker do not block them.
+ */
+function modalOpen(): boolean {
+  return Boolean(document.querySelector("[data-slot=dialog-content], [data-slot=alert-dialog-content], [data-slot=sheet-content]"));
+}
+
 export function App(): React.JSX.Element {
   const updates = useUpdates(desktopApi, distributionCapabilities.nativeUpdates || distributionCapabilities.channel === "web");
   const view = useView();
@@ -123,7 +132,7 @@ export function App(): React.JSX.Element {
     if (target === "profiles") openDialog({ kind: "profiles", repair: false });
     else if (target === "profile-setup") openProfileSetup();
     else if (target === "documentation" || target === "github") openAboutLink(target);
-    else void navigate({ to: `/${target}` as const });
+    else if (!modalOpen()) void navigate({ to: `/${target}` as const });
   });
   useEffect(() => desktopApi.onNavigate((target) => showRequested(target)), []);
 
@@ -182,8 +191,7 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
       if (event.key !== "," || !(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
-      // Only a modal dialog blocks it, not a popover such as the date picker.
-      if (document.querySelector("[data-slot=dialog-content], [data-slot=alert-dialog-content]")) return;
+      if (modalOpen()) return;
       event.preventDefault();
       void navigate({ to: "/settings" });
     };
