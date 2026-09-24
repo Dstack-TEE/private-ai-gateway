@@ -253,15 +253,14 @@ impl PrivatemodeProxyDeployment {
         &self.credential_sha256
     }
 
+    /// Streams may idle between tokens, so forwarding bounds reads, not the
+    /// whole response.
     pub(crate) fn forwarding_client(
         &self,
         connect_timeout_seconds: u64,
         read_timeout_seconds: u64,
     ) -> Result<reqwest::Client, UpstreamError> {
-        reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(connect_timeout_seconds))
+        sidecar_client(connect_timeout_seconds)
             .read_timeout(Duration::from_secs(read_timeout_seconds))
             .build()
             .map_err(|err| UpstreamError::Transport(err.to_string()))
@@ -272,14 +271,20 @@ impl PrivatemodeProxyDeployment {
         connect_timeout_seconds: u64,
         request_timeout_seconds: u64,
     ) -> Result<reqwest::Client, UpstreamError> {
-        reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(connect_timeout_seconds))
+        sidecar_client(connect_timeout_seconds)
             .timeout(Duration::from_secs(request_timeout_seconds))
             .build()
             .map_err(|err| UpstreamError::Transport(err.to_string()))
     }
+}
+
+/// Plaintext goes only to the pinned sidecar: never through an ambient HTTP
+/// proxy and never to a redirect target.
+fn sidecar_client(connect_timeout_seconds: u64) -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(connect_timeout_seconds))
 }
 
 pub struct PrivatemodeProviderBackend {

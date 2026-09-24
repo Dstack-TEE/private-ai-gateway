@@ -89,10 +89,6 @@ For inference, the gateway permits only the encrypted v1.48 handlers:
 - `/v1/completions`
 - `/v1/embeddings`
 
-Like other OpenAI-compatible routes, `/v1/messages` requests reach the proxy
-through the gateway's chat bridge at `/v1/chat/completions`. The proxy's
-internal handler allowlist is broader than this surface.
-
 The gateway sends no internal Bearer token. The proxy applies its measured
 startup credential outbound. The forwarding client rejects redirects and
 ignores HTTP proxy environment variables.
@@ -145,7 +141,6 @@ The route fails closed when:
 - the manifest log is malformed or its latest file is missing or unreadable;
 - forwarding targets a handler outside the encrypted allowlist; or
 - the verified proxy-image binding differs from the active deployment.
-- client inference omits E2EE v2 or selects legacy E2EE.
 
 There is no fallback to the public Privatemode API, another proxy, an HTTP
 redirect, or an ambient HTTP proxy.

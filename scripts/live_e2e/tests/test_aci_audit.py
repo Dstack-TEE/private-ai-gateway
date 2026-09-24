@@ -20,10 +20,8 @@ REQUIRED = (
 
 
 class AuditTests(unittest.TestCase):
-    def audit(self, transcript: dict, exit_code: int = 1) -> dict:
-        result = subprocess.CompletedProcess(
-            ["pap", "audit"], exit_code, json.dumps(transcript).encode(), b""
-        )
+    def audit(self, stdout: bytes, stderr: bytes = b"") -> dict:
+        result = subprocess.CompletedProcess(["pap", "audit"], 1, stdout, stderr)
         with patch("scripts.live_e2e.common.run_cmd", return_value=result):
             return audit_aci_artifacts(
                 report=Path("report.json"),
@@ -40,22 +38,11 @@ class AuditTests(unittest.TestCase):
             "checks": [{"id": "id-1", "status": "skip"}]
             + [{"id": check, "status": "pass"} for check in REQUIRED],
         }
-        self.assertEqual(self.audit(transcript), transcript)
+        self.assertEqual(self.audit(json.dumps(transcript).encode()), transcript)
         transcript["checks"][-1]["status"] = "skip"
         with self.assertRaisesRegex(RuntimeError, "did not pass"):
-            self.audit(transcript)
+            self.audit(json.dumps(transcript).encode())
 
     def test_invalid_transcript_surfaces_cli_stderr(self) -> None:
-        result = subprocess.CompletedProcess(
-            ["pap", "audit"], 1, b"", b"receipt.json: no such file"
-        )
-        with patch("scripts.live_e2e.common.run_cmd", return_value=result):
-            with self.assertRaisesRegex(RuntimeError, "no such file"):
-                audit_aci_artifacts(
-                    report=Path("report.json"),
-                    receipt=Path("receipt.json"),
-                    session=Path("session.json"),
-                    nonce="a" * 64,
-                    request_body=Path("request.json"),
-                    response_body=Path("response.json"),
-                )
+        with self.assertRaisesRegex(RuntimeError, "no such file"):
+            self.audit(b"", b"receipt.json: no such file")

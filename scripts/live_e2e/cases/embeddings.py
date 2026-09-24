@@ -13,6 +13,7 @@ from ..common import (
     write_json,
 )
 from .attested_sessions import assert_upstream_attested_sessions
+from .lifecycle import assert_receipt_log
 
 
 PROBE_INPUT = "Reply with exactly one short sentence confirming ACI embeddings lifecycle."
@@ -151,33 +152,4 @@ def assert_embeddings_receipt_log(provider: Provider, receipt: dict[str, Any]) -
         raise RuntimeError(
             f"{provider.name} receipt endpoint must be /v1/embeddings, got {receipt.get('endpoint')!r}"
         )
-    events = receipt.get("event_log")
-    if not isinstance(events, list):
-        raise RuntimeError(f"{provider.name} receipt missing event_log")
-    upstream = [
-        event
-        for event in events
-        if isinstance(event, dict) and event.get("type") == "upstream.verified"
-    ]
-    if not upstream:
-        raise RuntimeError(f"{provider.name} receipt missing upstream.verified event")
-    verified = [event for event in upstream if event.get("result") == "verified"]
-    if not verified:
-        raise RuntimeError(f"{provider.name} receipt has no verified upstream event")
-    for event in verified:
-        session_id = event.get("session_id")
-        if not isinstance(session_id, str) or len(session_id) != 64:
-            raise RuntimeError(f"{provider.name} upstream event missing session_id")
-    if provider.public_model != provider.upstream_model:
-        hashes = {
-            event.get("type"): event.get("body_hash")
-            for event in events
-            if isinstance(event, dict)
-            and event.get("type") in {"request.received", "request.forwarded"}
-        }
-        if not hashes.get("request.forwarded") or hashes.get(
-            "request.received"
-        ) == hashes.get("request.forwarded"):
-            raise RuntimeError(
-                f"{provider.name} receipt did not record the model rewrite"
-            )
+    assert_receipt_log(provider, receipt)

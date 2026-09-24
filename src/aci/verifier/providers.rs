@@ -373,63 +373,50 @@ impl PrivatemodeProviderVerifier {
         &self,
         request: UpstreamVerificationRequest,
     ) -> UpstreamVerifiedEvent {
-        if let Err(err) = self.probe().await {
-            return UpstreamVerifiedEvent {
-                upstream_name: request.upstream_name,
-                provider_type: Some("privatemode".to_string()),
-                model_id: request.model_id,
-                url_origin: Some(self.deployment.base_url().to_string()),
-                verifier_id: "privatemode-proxy/co-deployed-contrast/v1".to_string(),
-                result: VerificationResult::Failed,
-                required: request.required,
-                reason: Some(err.to_string()),
-                ..Default::default()
-            };
-        }
-        let manifest = match self.deployment.latest_observed_manifest() {
-            Ok(manifest) => manifest,
-            Err(err) => {
-                return UpstreamVerifiedEvent {
-                    upstream_name: request.upstream_name,
-                    provider_type: Some("privatemode".to_string()),
-                    model_id: request.model_id,
-                    url_origin: Some(self.deployment.base_url().to_string()),
-                    verifier_id: "privatemode-proxy/co-deployed-contrast/v1".to_string(),
-                    result: VerificationResult::Failed,
-                    required: request.required,
-                    reason: Some(err.to_string()),
-                    ..Default::default()
-                };
-            }
-        };
-        UpstreamVerifiedEvent {
+        let mut event = UpstreamVerifiedEvent {
             upstream_name: request.upstream_name,
             provider_type: Some("privatemode".to_string()),
             model_id: request.model_id,
             url_origin: Some(self.deployment.base_url().to_string()),
             verifier_id: "privatemode-proxy/co-deployed-contrast/v1".to_string(),
-            result: VerificationResult::Verified,
+            result: VerificationResult::Failed,
             required: request.required,
-            evidence: Some(self.deployment.manifest_evidence(&manifest)),
-            channel_bindings: vec![ChannelBinding::ProxyImageSha256 {
-                provider: "privatemode".to_string(),
-                proxy_image_digest: self.deployment.proxy_image_digest().to_string(),
-                credential_sha256: self.deployment.credential_sha256().to_string(),
-            }],
-            provider_claims: Some(serde_json::json!({
-                "trust_boundary": "attested-compose-privatemode-proxy",
-                "attestation_scope": "contrast-attested-e2ee-secret",
-                "request_encryption": "privatemode-oae",
-                "success_response_authentication": "privatemode-oae",
-                "inference_secret_policy": "latest-per-attempt-fail-closed",
-                "manifest_mode": "dynamic",
-                "observed_manifest_sha256": manifest.sha256,
-                "manifest_observed_at": manifest.observed_at,
-                "manifest_observation": "latest-proxy-fetch-log",
-                "manifest_bound_to_active_secret": false,
-            })),
-            reason: None,
-        }
+            ..Default::default()
+        };
+        let observed = match self.probe().await {
+            Ok(()) => self
+                .deployment
+                .latest_observed_manifest()
+                .map_err(|err| err.to_string()),
+            Err(err) => Err(err.to_string()),
+        };
+        let manifest = match observed {
+            Ok(manifest) => manifest,
+            Err(reason) => {
+                event.reason = Some(reason);
+                return event;
+            }
+        };
+        event.result = VerificationResult::Verified;
+        event.evidence = Some(self.deployment.manifest_evidence(&manifest));
+        event.channel_bindings = vec![ChannelBinding::ProxyImageSha256 {
+            provider: "privatemode".to_string(),
+            proxy_image_digest: self.deployment.proxy_image_digest().to_string(),
+            credential_sha256: self.deployment.credential_sha256().to_string(),
+        }];
+        event.provider_claims = Some(serde_json::json!({
+            "trust_boundary": "attested-compose-privatemode-proxy",
+            "attestation_scope": "contrast-attested-e2ee-secret",
+            "request_encryption": "privatemode-oae",
+            "success_response_authentication": "privatemode-oae",
+            "inference_secret_policy": "latest-per-attempt-fail-closed",
+            "manifest_mode": "dynamic",
+            "observed_manifest_sha256": manifest.sha256,
+            "manifest_observed_at": manifest.observed_at,
+            "manifest_observation": "latest-proxy-fetch-log",
+            "manifest_bound_to_active_secret": false,
+        }));
+        event
     }
 
     async fn probe(&self) -> Result<(), UpstreamError> {

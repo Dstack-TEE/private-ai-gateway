@@ -31,7 +31,6 @@ class AggregatorProcess:
         dstack_endpoint: str = DEFAULT_DSTACK_ENDPOINT,
         env: dict[str, str] | None = None,
         artifact_dir: Path | None = None,
-        inference_token: str | None = None,
     ) -> None:
         self.providers = providers
         self.port = port
@@ -39,13 +38,9 @@ class AggregatorProcess:
         self.dstack_endpoint = dstack_endpoint
         self.env = {**os.environ, **(env or {})}
         self.artifact_dir = artifact_dir
-        if inference_token is None:
-            inference_token = secrets.token_urlsafe(32)
-        if not inference_token or inference_token != inference_token.strip():
-            raise ValueError(
-                "inference_token must be non-empty and have no surrounding whitespace"
-            )
-        self.inference_token = inference_token
+        # A per-run bearer owns this run's receipts; Privatemode runs also
+        # require it for inference.
+        self.inference_token = secrets.token_urlsafe(32)
         self._tmp: tempfile.TemporaryDirectory[str] | None = None
         self._process: subprocess.Popen[bytes] | None = None
         self.gateway_config_path: Path | None = None
@@ -67,19 +62,7 @@ class AggregatorProcess:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         config = build_upstream_config(self.providers, self.env)
         write_json(self.upstream_seed_path, config, mode=0o600)
-        privatemode_credential_path = None
-        privatemode = [
-            provider for provider in self.providers if provider.provider == "privatemode"
-        ]
-        if privatemode:
-            credential = self.env.get(privatemode[0].api_key_env)
-            if not credential:
-                raise RuntimeError(
-                    f"missing API key env var {privatemode[0].api_key_env}"
-                )
-            privatemode_credential_path = tmp_dir / "privatemode-api-key"
-            privatemode_credential_path.write_text(credential, encoding="utf-8")
-            privatemode_credential_path.chmod(0o600)
+        privatemode_credential_path = tmp_dir / "privatemode-api-key"
         gateway_config = build_gateway_config(
             self.providers,
             self.env,
@@ -91,6 +74,11 @@ class AggregatorProcess:
             privatemode_credential_path=privatemode_credential_path,
         )
         write_json(self.gateway_config_path, gateway_config, mode=0o600)
+        if "privatemode_proxy" in gateway_config:
+            first = next(p for p in self.providers if p.provider == "privatemode")
+            privatemode_credential_path.write_text(
+                self.env[first.api_key_env], encoding="utf-8"
+            )
         if self.artifact_dir:
             write_json(
                 self.artifact_dir / "aggregator-upstreams.redacted.json",
@@ -174,7 +162,7 @@ def build_gateway_config(
     upstream_seed_path: Path,
     dstack_endpoint: str,
     inference_token: str,
-    privatemode_credential_path: Path | None,
+    privatemode_credential_path: Path,
 ) -> dict[str, Any]:
     gateway_config: dict[str, Any] = {
         "bind": f"127.0.0.1:{port}",
@@ -194,9 +182,7 @@ def build_gateway_config(
         raise RuntimeError(f"missing API key env var {first.api_key_env}")
     required = {
         "manifest_log_path": first.privatemode_manifest_log_path,
-        "credential_path": str(privatemode_credential_path)
-        if privatemode_credential_path is not None
-        else None,
+        "credential_path": str(privatemode_credential_path),
         "credential_sha256": hashlib.sha256(
             credential.encode("utf-8")
         ).hexdigest(),

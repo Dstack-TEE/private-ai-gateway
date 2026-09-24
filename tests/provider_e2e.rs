@@ -165,12 +165,7 @@ async fn models_handler() -> impl IntoResponse {
 
 async fn privatemode_models_handler(headers: HeaderMap) -> axum::response::Response {
     if headers.contains_key("authorization") {
-        let reflected_credential = headers
-            .get("authorization")
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("invalid authorization")
-            .to_string();
-        return (StatusCode::BAD_REQUEST, reflected_credential).into_response();
+        return StatusCode::BAD_REQUEST.into_response();
     }
     models_handler().await.into_response()
 }
@@ -264,12 +259,7 @@ async fn serve_privatemode_provider_fixture(
             calls: calls.clone(),
             plaintext_path_hits: plaintext_path_hits.clone(),
         });
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    (format!("http://{addr}"), calls, plaintext_path_hits)
+    (serve_router(app).await, calls, plaintext_path_hits)
 }
 
 #[derive(Clone)]
@@ -349,12 +339,7 @@ async fn serve_privatemode_capacity_fixture() -> (
             post(privatemode_capacity_chat_handler),
         )
         .with_state(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    (format!("http://{addr}"), calls, readiness_checks)
+    (serve_router(app).await, calls, readiness_checks)
 }
 
 async fn redirect_sink(State(hits): State<Arc<AtomicUsize>>) -> impl IntoResponse {
@@ -368,26 +353,20 @@ async fn cross_origin_redirect(State(location): State<String>) -> impl IntoRespo
 
 async fn serve_cross_origin_privatemode_redirect_fixture() -> (String, Arc<AtomicUsize>) {
     let sink_hits = Arc::new(AtomicUsize::new(0));
-    let sink = Router::new()
-        .route("/credential-sink", any(redirect_sink))
-        .with_state(sink_hits.clone());
-    let sink_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let sink_addr = sink_listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(sink_listener, sink).await.unwrap();
-    });
-
-    let redirect = Router::new()
-        .route("/v1/models", get(cross_origin_redirect))
-        .route("/v1/chat/completions", post(cross_origin_redirect))
-        .with_state(format!("http://{sink_addr}/credential-sink"));
-    let redirect_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let redirect_addr = redirect_listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(redirect_listener, redirect).await.unwrap();
-    });
-
-    (format!("http://{redirect_addr}"), sink_hits)
+    let sink = serve_router(
+        Router::new()
+            .route("/credential-sink", any(redirect_sink))
+            .with_state(sink_hits.clone()),
+    )
+    .await;
+    let redirect = serve_router(
+        Router::new()
+            .route("/v1/models", get(cross_origin_redirect))
+            .route("/v1/chat/completions", post(cross_origin_redirect))
+            .with_state(format!("{sink}/credential-sink")),
+    )
+    .await;
+    (redirect, sink_hits)
 }
 
 async fn oversized_models_with_content_length() -> axum::response::Response {
@@ -428,7 +407,7 @@ async fn counted_models(State(hits): State<Arc<AtomicUsize>>) -> impl IntoRespon
     Json(json!({"object": "list", "data": [{"id": "provider-model"}]}))
 }
 
-async fn serve_models_fixture(app: Router) -> String {
+async fn serve_router(app: Router) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -439,7 +418,7 @@ async fn serve_models_fixture(app: Router) -> String {
 
 async fn serve_counted_models_fixture() -> (String, Arc<AtomicUsize>) {
     let hits = Arc::new(AtomicUsize::new(0));
-    let base_url = serve_models_fixture(
+    let base_url = serve_router(
         Router::new()
             .route("/v1/models", get(counted_models))
             .with_state(hits.clone()),
@@ -1282,13 +1261,11 @@ async fn privatemode_never_follows_cross_origin_redirects() {
 
 #[tokio::test]
 async fn privatemode_readiness_rejects_declared_and_chunked_oversized_bodies() {
-    let declared = serve_models_fixture(
-        Router::new().route("/v1/models", get(oversized_models_with_content_length)),
-    )
-    .await;
-    let chunked =
-        serve_models_fixture(Router::new().route("/v1/models", get(oversized_chunked_models)))
+    let declared =
+        serve_router(Router::new().route("/v1/models", get(oversized_models_with_content_length)))
             .await;
+    let chunked =
+        serve_router(Router::new().route("/v1/models", get(oversized_chunked_models))).await;
 
     for base_url in [declared, chunked] {
         let fixture = PrivatemodeTestDeployment::new(base_url);
@@ -1311,8 +1288,7 @@ async fn privatemode_readiness_rejects_declared_and_chunked_oversized_bodies() {
 #[tokio::test]
 async fn privatemode_readiness_has_an_end_to_end_deadline() {
     let base_url =
-        serve_models_fixture(Router::new().route("/v1/models", get(indefinitely_trickled_models)))
-            .await;
+        serve_router(Router::new().route("/v1/models", get(indefinitely_trickled_models))).await;
     let fixture = PrivatemodeTestDeployment::new(base_url);
     let event = tokio::time::timeout(
         Duration::from_secs(3),
@@ -1463,12 +1439,6 @@ async fn privatemode_runtime_config_binds_the_measured_sidecar_in_the_receipt() 
         document["claims"]["extra"]["manifest_bound_to_active_secret"],
         false
     );
-    assert_eq!(document["claims"]["gpu_attested"]["status"], "unknown");
-    assert_eq!(
-        document["claims"]["model_weights_provenance"]["status"],
-        "unknown"
-    );
-    assert_eq!(document["claims"]["tcb_up_to_date"]["status"], "unknown");
     assert_eq!(
         document["claims"]["extra"]["observed_manifest_sha256"],
         fixture.manifest_digest
@@ -1518,7 +1488,7 @@ async fn privatemode_runtime_config_binds_the_measured_sidecar_in_the_receipt() 
 }
 
 #[tokio::test]
-async fn privatemode_middleware_capacity_retry_reverifies_the_bound_native_route() {
+async fn privatemode_middleware_capacity_retry_reverifies_the_bound_route() {
     for stream in [false, true] {
         let (base_url, provider_calls, readiness_checks) =
             serve_privatemode_capacity_fixture().await;

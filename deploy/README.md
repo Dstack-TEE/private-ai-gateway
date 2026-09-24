@@ -69,30 +69,21 @@ phala deploy -n private-ai-gateway \
   --wait
 ```
 
-Render before deployment so the credential digest, admin-token digest,
-downstream inference-token digest, image digest, and git commit are part of the
-measured Compose. The admin token
-itself is deliberately absent from the rendered file and is passed through
-Phala's encrypted environment instead. The downstream inference token remains
-client-side and is not passed to the deployment; callers send it as the Bearer
-credential on inference requests. The
-Privatemode API key follows the same path into one Compose-managed secret
-mounted into both services. The proxy reads it through its official
-`--apiKey @<file>` interface; the gateway reads it only at startup to verify the
-renderer-derived measured digest. `PrivatemodeProxyDeployment` neither retains
-the credential nor forwards it over the internal hop.
+Rendering puts the git commit, image digest, and the digests of the admin
+token, inference token, and Privatemode API key into the measured Compose; the
+secrets themselves are not in it. The admin token and API key travel through
+Phala's encrypted environment. The inference token stays with clients, who send
+it as the Bearer credential. The API key becomes one Compose secret mounted
+into both services: the proxy reads it through `--apiKey @<file>`, and the
+gateway only checks it against the measured digest at startup and never
+forwards it.
 
-That compose pins
-`ghcr.io/edgelesssys/privatemode/privatemode-proxy` at OCI digest
-`sha256:ff900b263a51a437633d15da809e7893a31fa4b1f4acfa4e526c075682d84307`,
-runs the proxy in dynamic manifest mode, shares its public manifest history
-read-only with the gateway, mounts the credential secret into both services,
-and does not publish the proxy port. Add only the mutable model route through
-the admin API after boot; `bearer_token` is forbidden for Privatemode. The
-official proxy loads one credential at startup, so rotating it requires
-rerendering with the new `PRIVATEMODE_API_KEY` and redeploying the gateway and
-proxy together. A gateway-only restart with a secret that does not match
-measured policy fails closed.
+The Compose pins the official proxy image by digest, runs it in dynamic
+manifest mode, shares its manifest history read-only with the gateway, and
+publishes no proxy port. After boot, add only the model route through the admin
+API; `bearer_token` is forbidden for Privatemode. To rotate the API key,
+rerender with the new `PRIVATEMODE_API_KEY` and redeploy both services; a
+mismatched secret fails closed.
 
 For local/dev deploys, you can also copy
 [`gateway.env.example`](./gateway.env.example), fill in its values, and pass it

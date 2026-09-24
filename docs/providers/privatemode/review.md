@@ -113,9 +113,9 @@ On 2026-09-23, the same pinned image again verified a live Coordinator SNP
 quote, exchanged a secret, and returned a real `gpt-oss-120b` completion
 through a fresh Phala deployment. A client E2EE v2 request over public ingress
 returned an encrypted response that decrypted to `private-ok`; the signed
-receipt/session audit had zero failures. Plaintext also worked before the new
-gateway guard, exposing the ingress trust-boundary gap. The guard now rejects
-plaintext and legacy E2EE for this deployment. `pap verify` passed quote,
+receipt/session audit had zero failures. Plaintext was also accepted, which
+exposed the ingress trust-boundary gap; the deployment now sets
+`require_client_e2ee`, which rejects plaintext and legacy E2EE. `pap verify` passed quote,
 keyset, expiry, and measured-Compose checks but correctly failed `id-6` because
 the public TLS key is not in the attested keyset.
 

@@ -2,16 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sys
 import unittest
 from pathlib import Path
 
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
-from live_e2e.common import Provider  # noqa: E402
-from live_e2e.launch_aggregator import (  # noqa: E402
-    AggregatorProcess,
+from scripts.live_e2e.common import Provider
+from scripts.live_e2e.launch_aggregator import (
     build_gateway_config,
     build_upstream_config,
     redact_upstream_config,
@@ -67,13 +62,6 @@ class LaunchAggregatorTests(unittest.TestCase):
         )
         self.assertNotIn("bearer_token", upstream[0])
         self.assertNotIn("bearer_token", redact_upstream_config(upstream)[0])
-
-    def test_process_generates_a_distinct_high_entropy_token_per_run(self) -> None:
-        first = AggregatorProcess([], port=18086, env={})
-        second = AggregatorProcess([], port=18087, env={})
-
-        self.assertNotEqual(first.inference_token, second.inference_token)
-        self.assertGreaterEqual(len(first.inference_token), 32)
 
 
 if __name__ == "__main__":

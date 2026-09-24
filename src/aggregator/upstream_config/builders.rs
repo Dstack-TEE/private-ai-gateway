@@ -11,7 +11,8 @@ use super::{
 use crate::aci::digest;
 use crate::aci::upstream::{
     ChutesProviderBackend, ChutesSessionStore, ModelRoute, ModelRouterBackend,
-    OpenAICompatibleBackend, PrivatemodeProviderBackend, UpstreamBackend,
+    OpenAICompatibleBackend, PrivatemodeProviderBackend, PrivatemodeProxyDeployment,
+    UpstreamBackend,
 };
 use crate::aci::verifier::{
     AciServiceUpstreamVerifier, AciServiceVerifierPolicy, ChutesProviderVerifier,
@@ -111,15 +112,8 @@ fn build_provider_backend(
             )?))
         }
         UpstreamProvider::Privatemode => {
-            let deployment = options.privatemode_proxy.clone().ok_or_else(|| {
-                UpstreamConfigError::InvalidConfig(format!(
-                    "Privatemode upstream {:?} requires static privatemode_proxy gateway config",
-                    cfg.name
-                ))
-            })?;
-            enforce_privatemode_deployment(cfg, &deployment)?;
             let backend = PrivatemodeProviderBackend::new_with_timeouts(
-                deployment,
+                privatemode_deployment(cfg, options)?,
                 connect_timeout_seconds,
                 read_timeout_seconds,
             )
@@ -285,25 +279,16 @@ fn build_provider_verifier(
                 .with_accepted_subjects(cfg.accepted_subjects.clone().unwrap_or_default());
                 Some(Arc::new(verifier))
             }
-            UpstreamProvider::Privatemode => {
-                let deployment = options.privatemode_proxy.clone().ok_or_else(|| {
-                    UpstreamConfigError::InvalidConfig(format!(
-                        "Privatemode upstream {:?} requires static privatemode_proxy gateway config",
-                        cfg.name
-                    ))
-                })?;
-                enforce_privatemode_deployment(cfg, &deployment)?;
-                Some(Arc::new(
-                    PrivatemodeProviderVerifier::new(
-                        deployment,
-                        cfg.connect_timeout_seconds
-                            .unwrap_or(options.connect_timeout_seconds),
-                        request_timeout_seconds,
-                        cache_seconds,
-                    )
-                    .map_err(|err| UpstreamConfigError::InvalidConfig(err.to_string()))?,
-                ))
-            }
+            UpstreamProvider::Privatemode => Some(Arc::new(
+                PrivatemodeProviderVerifier::new(
+                    privatemode_deployment(cfg, options)?,
+                    cfg.connect_timeout_seconds
+                        .unwrap_or(options.connect_timeout_seconds),
+                    request_timeout_seconds,
+                    cache_seconds,
+                )
+                .map_err(|err| UpstreamConfigError::InvalidConfig(err.to_string()))?,
+            )),
             UpstreamProvider::PhalaDirect => {
                 let mut verifier = PhalaDirectProviderVerifier::new_with_cache(
                     request_timeout_seconds,
@@ -326,10 +311,18 @@ fn build_provider_verifier(
     Ok(Some(Arc::new(router)))
 }
 
-fn enforce_privatemode_deployment(
+/// The static, measured sidecar a Privatemode route may select. Mutable route
+/// config names it by origin but cannot replace it.
+fn privatemode_deployment(
     cfg: &UpstreamConfig,
-    deployment: &crate::aci::upstream::PrivatemodeProxyDeployment,
-) -> Result<(), UpstreamConfigError> {
+    options: &UpstreamRuntimeOptions,
+) -> Result<Arc<PrivatemodeProxyDeployment>, UpstreamConfigError> {
+    let deployment = options.privatemode_proxy.clone().ok_or_else(|| {
+        UpstreamConfigError::InvalidConfig(format!(
+            "Privatemode upstream {:?} requires static privatemode_proxy gateway config",
+            cfg.name
+        ))
+    })?;
     if cfg.base_url.trim_end_matches('/') != deployment.base_url() {
         return Err(UpstreamConfigError::InvalidConfig(format!(
             "Privatemode upstream {:?} base_url {:?} does not match static proxy endpoint {:?}",
@@ -338,7 +331,7 @@ fn enforce_privatemode_deployment(
             deployment.base_url()
         )));
     }
-    Ok(())
+    Ok(deployment)
 }
 
 fn build_global_verifier_for_config(

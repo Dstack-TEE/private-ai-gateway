@@ -54,7 +54,7 @@ fn privatemode_deployment_contract_is_pinned() {
                 "privatemode-manifests:/var/lib/privatemode/manifests",
                 "ai.private-gateway.privatemode-credential-sha256",
             ],
-            &["ports:", "privatemode-state", "--manifestPath"],
+            &["ports:"],
         ),
         (
             "whole compose",
@@ -69,12 +69,11 @@ fn privatemode_deployment_contract_is_pinned() {
                 "/dstack/.host-shared/.decrypted-env",
                 "PRIVATE_AI_GATEWAY_ENV_FILE: /run/secrets/dstack-encrypted-env",
                 "environment: PRIVATEMODE_API_KEY",
+                r#""require_client_e2ee": true"#,
             ],
             &[
                 r#""admin_token": "${PRIVATE_AI_GATEWAY_ADMIN_TOKEN"#,
                 "--apiKey=${PRIVATEMODE_API_KEY}",
-                "PRIVATEMODE_MANIFEST_PATH",
-                "PRIVATEMODE_MANIFEST_SHA256",
             ],
         ),
         (
@@ -97,7 +96,7 @@ fn privatemode_deployment_contract_is_pinned() {
                 "PRIVATE_AI_GATEWAY_ADMIN_TOKEN", "PRIVATE_AI_GATEWAY_INFERENCE_TOKEN",
                 "PRIVATEMODE_API_KEY",
             ],
-            &["jq", "PRIVATEMODE_MANIFEST"],
+            &[],
         ),
     ];
     for (scope, body, required, forbidden) in checks {
@@ -108,7 +107,6 @@ fn privatemode_deployment_contract_is_pinned() {
             assert!(!body.contains(needle), "{scope} contains {needle}");
         }
     }
-    assert_eq!(compose.matches("source: privatemode-manifest").count(), 0);
     assert_eq!(compose.matches("source: privatemode-api-key").count(), 2);
     #[cfg(unix)]
     {

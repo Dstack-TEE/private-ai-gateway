@@ -464,6 +464,18 @@ async fn chat_default_required_fails_closed_without_verifier() {
     );
 }
 
+/// A request body that records whether any handler polled it, to prove that
+/// admission checks reject before the body is read.
+fn body_with_poll_probe() -> (Body, Arc<AtomicBool>) {
+    let polled = Arc::new(AtomicBool::new(false));
+    let polled_by_stream = polled.clone();
+    let body = Body::from_stream(futures_util::stream::once(async move {
+        polled_by_stream.store(true, Ordering::SeqCst);
+        Ok::<_, Infallible>(br#"{"model":"x","messages":[]}"#.to_vec())
+    }));
+    (body, polled)
+}
+
 #[tokio::test]
 async fn required_client_e2ee_rejects_plaintext_before_reading_the_body() {
     let h = make_harness();
@@ -477,12 +489,7 @@ async fn required_client_e2ee_rejects_plaintext_before_reading_the_body() {
             ..InferenceAccess::default()
         },
     );
-    let body_polled = Arc::new(AtomicBool::new(false));
-    let body_polled_by_stream = body_polled.clone();
-    let body = Body::from_stream(futures_util::stream::once(async move {
-        body_polled_by_stream.store(true, Ordering::SeqCst);
-        Ok::<_, Infallible>(br#"{"model":"x","messages":[]}"#.to_vec())
-    }));
+    let (body, body_polled) = body_with_poll_probe();
     let response = app
         .clone()
         .oneshot(
@@ -536,12 +543,7 @@ async fn configured_inference_token_blocks_unauthenticated_paid_forwarding() {
         },
     );
 
-    let body_polled = Arc::new(AtomicBool::new(false));
-    let body_polled_by_stream = body_polled.clone();
-    let body = Body::from_stream(futures_util::stream::once(async move {
-        body_polled_by_stream.store(true, Ordering::SeqCst);
-        Ok::<_, Infallible>(br#"{"model":"x","messages":[]}"#.to_vec())
-    }));
+    let (body, body_polled) = body_with_poll_probe();
     let response = app
         .clone()
         .oneshot(
@@ -561,20 +563,17 @@ async fn configured_inference_token_blocks_unauthenticated_paid_forwarding() {
     );
 
     for (token, expected_status) in [
-        (Some("wrong-token"), StatusCode::FORBIDDEN),
-        (Some("client-inference-token"), StatusCode::OK),
+        ("wrong-token", StatusCode::FORBIDDEN),
+        ("client-inference-token", StatusCode::OK),
     ] {
-        let mut request = Request::builder()
-            .method("POST")
-            .uri("/v1/chat/completions")
-            .header("content-type", "application/json");
-        if let Some(token) = token {
-            request = request.header("authorization", format!("Bearer {token}"));
-        }
         let response = app
             .clone()
             .oneshot(
-                request
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
                     .body(Body::from(br#"{"model":"x","messages":[]}"#.to_vec()))
                     .unwrap(),
             )
