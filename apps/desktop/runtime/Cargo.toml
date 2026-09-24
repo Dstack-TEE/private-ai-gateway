@@ -9,7 +9,7 @@ rust-version = "1.98"
 [features]
 default = []
 mac-app-store = ["desktop-core/mac-app-store"]
-web-ui = ["dep:async-stream", "dep:futures-core", "dep:rust-embed"]
+web-ui = ["dep:async-stream", "dep:futures-core", "dep:governor", "dep:rust-embed"]
 
 [lib]
 name = "desktop_runtime"
@@ -23,9 +23,11 @@ axum = "0.8"
 async-stream = { version = "0.3", optional = true }
 base64 = "0.23"
 futures-core = { version = "0.3", optional = true }
+governor = { version = "0.10", default-features = false, features = ["std", "dashmap"], optional = true }
 rand = "0.8"
 rust-embed = { version = "8", optional = true }
 sha2 = "0.10"
+subtle = "2.6"
 reqwest = { version = "0.13", default-features = false, features = ["form", "json", "rustls-no-provider"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tempfile = "3"

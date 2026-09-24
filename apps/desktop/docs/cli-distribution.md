@@ -27,7 +27,8 @@ lookup.
 Windows install, upgrade, and uninstall hooks call `private-ai-proxy --yes service stop`
 before replacing or removing files. The installer holds the same `startup.lock`
 as CLI startup across stop and file replacement, including after the updater UI
-exits. They never use `setx`, rewrite an unrelated
+exits. A client that finds the lock held waits out another client's backend
+start, but reports an installer or update holding it within a few seconds. They never use `setx`, rewrite an unrelated
 PATH entry, kill processes by image name, or elevate themselves. A conflicting
 unrelated `private-ai-proxy.exe` aborts installation. The Windows workflow contains native
 install/status/uninstall checks, but successful execution on the Windows CI

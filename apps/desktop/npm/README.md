@@ -9,6 +9,8 @@ The wrapper declares six optional dependencies through npm aliases such as `priv
 
 This keeps ownership, trusted publishing, provenance, and package discovery on one npm package while preserving npm's platform selection.
 
+Because the platform versions share the package name, users must install `private-ai-proxy`, `private-ai-proxy@beta`, or an exact version. A prerelease range such as `^0.1.7-beta.2` also matches platform versions like `0.1.7-linux-x64`, so npm can resolve it to a payload instead of the wrapper. The shipped package README says the same. Moving the platform payloads to scoped per-platform packages is planned future work that would remove this restriction.
+
 ## Build locally
 
 Extract a CLI archive from a `desktop-v*` GitHub release, then run:

@@ -7,7 +7,7 @@ use std::{
 
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::{ConnectInfo, Path, State},
     http::{header, HeaderMap, HeaderValue, Method as HttpMethod, Request, StatusCode},
     middleware::{self, Next},
     response::{sse::Event as SseEvent, IntoResponse, Response, Sse},
@@ -23,7 +23,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::{auth::THROTTLE_REFILL, Auth, Throttle};
+use super::{throttle::THROTTLE_REFILL, Auth, Throttle};
 use crate::controller::DesktopRuntime;
 use desktop_core::{
     contracts::GatewayState,
@@ -40,6 +40,8 @@ struct WebAssets;
 
 const EXPIRED_LINK: &str =
     "This sign-in link has expired or was already used. Run `pap app open --web` for a new link.";
+const SESSION_ENDED: &str =
+    "This web UI session has ended or expired. Run `pap app open --web` for a new link.";
 const THROTTLED: &str = "Too many sign-in attempts. Wait a few seconds and try again.";
 const SESSION_CHECK: Duration = Duration::from_secs(15);
 
@@ -112,10 +114,13 @@ pub(super) fn start(
     };
     handle.spawn(async move {
         let result = match tokio::net::TcpListener::from_std(listener) {
-            Ok(listener) => axum::serve(listener, router(state))
-                .with_graceful_shutdown(shutdown.cancelled_owned())
-                .await
-                .map_err(|_| ()),
+            Ok(listener) => axum::serve(
+                listener,
+                router(state).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown.cancelled_owned())
+            .await
+            .map_err(|_| ()),
             Err(_) => Err(()),
         };
         if result.is_err() {
@@ -168,7 +173,7 @@ fn bind(address: SocketAddr, reopening: bool) -> Result<std::net::TcpListener, S
 
 fn router<B: Backend>(state: WebState<B>) -> Router {
     Router::new()
-        .route("/api/session", post(session::<B>))
+        .route("/api/session", post(session::<B>).delete(sign_out::<B>))
         .route("/api/bootstrap", get(bootstrap))
         .route("/api/events", get(events::<B>))
         .route("/api/rpc/{method}", post(rpc::<B>))
@@ -179,6 +184,7 @@ fn router<B: Backend>(state: WebState<B>) -> Router {
 
 async fn security<B: Backend>(
     State(state): State<WebState<B>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     request: Request<Body>,
     next: Next,
 ) -> Response {
@@ -192,14 +198,14 @@ async fn security<B: Backend>(
             return secure_response(status(StatusCode::FORBIDDEN, "Invalid request origin"));
         }
         // Only the code exchange is reachable without a session, and both it and
-        // rejected requests draw from the throttle.
-        if path == "/api/session" {
-            if !state.throttle.allow() {
+        // rejected requests draw from the client's throttle budget.
+        if path == "/api/session" && request.method() == HttpMethod::POST {
+            if !state.throttle.allow(peer.ip()) {
                 return secure_response(throttled());
             }
         } else if !bearer(headers).is_some_and(|token| state.auth.authorize(token)) {
-            return secure_response(if state.throttle.allow() {
-                status(StatusCode::UNAUTHORIZED, EXPIRED_LINK)
+            return secure_response(if state.throttle.allow(peer.ip()) {
+                status(StatusCode::UNAUTHORIZED, SESSION_ENDED)
             } else {
                 throttled()
             });
@@ -296,6 +302,14 @@ async fn session<B: Backend>(
         Some(token) => Json(json!({ "token": token })).into_response(),
         None => status(StatusCode::UNAUTHORIZED, EXPIRED_LINK),
     }
+}
+
+/// Signs this page out; other browser sessions stay open.
+async fn sign_out<B: Backend>(State(state): State<WebState<B>>, headers: HeaderMap) -> StatusCode {
+    if let Some(token) = bearer(&headers) {
+        state.auth.revoke(token);
+    }
+    StatusCode::NO_CONTENT
 }
 
 async fn bootstrap() -> Json<Value> {
@@ -458,6 +472,7 @@ fn status(code: StatusCode, message: &'static str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::extract::connect_info::MockConnectInfo;
     use tower::ServiceExt;
 
     const HOST: &str = "127.0.0.1:3210";
@@ -507,7 +522,11 @@ mod tests {
             states: receiver,
             hosts: allowed_hosts(&listen).into(),
             shutdown: shutdown.clone(),
-        });
+        })
+        .layer(MockConnectInfo(SocketAddr::from((
+            [192, 168, 1, 30],
+            50000,
+        ))));
         Fixture {
             router,
             auth,
@@ -791,26 +810,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unauthenticated_requests_are_throttled_but_sessions_are_not() {
+    async fn unauthenticated_requests_are_throttled_per_client_but_sessions_are_not() {
         let fixture = fixture_on("192.168.1.20", None);
         let token = fixture.auth.exchange(&fixture.auth.mint_code()).unwrap();
-        let exchange = |code: &'static str| {
-            send(
-                &fixture.router,
-                Request::builder()
-                    .method(HttpMethod::POST)
-                    .uri("/api/session")
-                    .header(header::HOST, "192.168.1.20:3210")
-                    .header(header::ORIGIN, "http://192.168.1.20:3210")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(json!({ "code": code }).to_string()))
-                    .unwrap(),
-            )
+        let exchange = |client: Option<[u8; 4]>, code: String| {
+            let mut request = Request::builder()
+                .method(HttpMethod::POST)
+                .uri("/api/session")
+                .header(header::HOST, "192.168.1.20:3210")
+                .header(header::ORIGIN, "http://192.168.1.20:3210")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "code": code }).to_string()))
+                .unwrap();
+            if let Some(client) = client {
+                request
+                    .extensions_mut()
+                    .insert(ConnectInfo(SocketAddr::from((client, 50000))));
+            }
+            send(&fixture.router, request)
         };
-        for _ in 0..super::super::auth::THROTTLE_BURST {
-            assert_eq!(exchange("guess").await.status(), StatusCode::UNAUTHORIZED);
+        for _ in 0..super::super::throttle::THROTTLE_BURST.get() {
+            assert_eq!(
+                exchange(None, "guess".into()).await.status(),
+                StatusCode::UNAUTHORIZED
+            );
         }
-        let throttled = exchange("guess").await;
+        let throttled = exchange(None, "guess".into()).await;
         assert_eq!(throttled.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(
             throttled.headers().get(header::RETRY_AFTER),
@@ -836,6 +861,32 @@ mod tests {
             .await,
             StatusCode::OK
         );
+        // The throttled client cannot lock another client out of signing in.
+        let other = exchange(Some([192, 168, 1, 31]), fixture.auth.mint_code()).await;
+        assert_eq!(other.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn signing_out_ends_only_that_session() {
+        let fixture = fixture();
+        let token = fixture.auth.exchange(&fixture.auth.mint_code()).unwrap();
+        let other = fixture.auth.exchange(&fixture.auth.mint_code()).unwrap();
+        let sign_out = |token: &str| {
+            send(
+                &fixture.router,
+                request(HttpMethod::DELETE, "/api/session")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+        };
+        assert_eq!(sign_out(&token).await.status(), StatusCode::NO_CONTENT);
+        let ended = stop(&fixture.router, &token).await;
+        assert_eq!(ended.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(json_body(ended).await["error"]["message"], SESSION_ENDED);
+        assert_eq!(stop(&fixture.router, &other).await.status(), StatusCode::OK);
+        // Signing out needs the session it ends.
+        assert_eq!(sign_out(&token).await.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

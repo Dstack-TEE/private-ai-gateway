@@ -129,7 +129,7 @@ fn detach(command: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
         command.creation_flags(CREATE_NEW_PROCESS_GROUP);
     }
 }

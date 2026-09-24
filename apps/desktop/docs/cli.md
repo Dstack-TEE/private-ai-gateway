@@ -102,8 +102,10 @@ address bar before its first request and exchanges it for a session token that
 stays in the tab's `sessionStorage`, so reloading keeps the session. Opening the
 same link again, or in another tab, shows "This sign-in link has expired or was
 already used"; run `pap app open --web` for a new link. Sessions end after an
-hour without requests or an open page, when the web UI is turned off, and when
-the service restarts.
+hour without requests or an open page, 12 hours after sign-in even while a page
+stays open, when the page signs out (Settings > Connections > Sign Out), when the
+web UI is turned off, and when the service restarts. The page then says the
+session has ended; run `pap app open --web` for a new link.
 
 Security model:
 
@@ -123,11 +125,13 @@ Security model:
   name that same host; every `POST` carries `Origin`. Mutations are JSON
   `POST` requests; cross-origin pages cannot add the `Authorization` header
   because no CORS preflight is ever granted.
-- Code exchanges and rejected API requests share a small token bucket: a burst
-  of 10, then one every 3 seconds, answered with `429` and `Retry-After`.
-  Codes are 256-bit, so this bounds request volume rather than guessing odds.
-  Signed-in requests never draw from it. The bucket is shared by all clients,
-  so a flood can briefly delay new sign-ins but not open sessions.
+- Code exchanges and rejected API requests draw from a per-client rate limit:
+  a burst of 10, then one every 3 seconds, answered with `429` and
+  `Retry-After`. Codes are 256-bit, so this bounds request volume rather than
+  guessing odds. Signed-in requests never draw from it. Each IPv4 address and
+  IPv6 /64 has its own budget, so one client cannot delay sign-ins from others.
+  Clients reaching a loopback listener through a TCP forwarder all appear as
+  that forwarder and share its budget.
 - Browser requests run through the same command admission and dispatch as the
   management endpoint, and errors carry the same sanitized messages as the
   desktop app. Responses set a restrictive CSP, `nosniff`, `no-store` and

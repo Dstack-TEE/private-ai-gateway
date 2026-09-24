@@ -203,8 +203,9 @@ fn generate() -> String {
 fn neutralize_private(path: &Path) -> io::Result<bool> {
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
+    };
 
     let file = match fs::OpenOptions::new()
         .write(true)

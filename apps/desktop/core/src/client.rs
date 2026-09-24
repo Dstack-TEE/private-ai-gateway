@@ -1,6 +1,6 @@
 use std::{
     io::{self, BufReader},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
@@ -20,6 +20,15 @@ use crate::{
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+/// Bounds a live but slow backend start, such as the first launch after an
+/// update while the OS scans the new binaries on a busy machine.
+const BACKEND_START_TIMEOUT: Duration = Duration::from_secs(60);
+/// Bounds waiting for a replaced backend to exit before starting its successor.
+const BACKEND_EXIT_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long an installer or updater may hold the startup gate before a client
+/// reports it instead of waiting.
+const STARTUP_GATE_WAIT: Duration = Duration::from_secs(5);
+const STARTUP_IN_PROGRESS: &str = "Backend startup or an update is already in progress.";
 
 pub struct Client {
     states: watch::Sender<GatewayState>,
@@ -62,18 +71,11 @@ impl Client {
             }
         }
         let data = crate::paths::app_data_dir()?;
-        let deadline = Instant::now() + Duration::from_secs(15);
-        let _startup = loop {
-            if let Some(lock) = crate::lock::startup(&data)
-                .map_err(|error| format!("Cannot acquire backend startup lock: {error}"))?
-            {
-                break lock;
-            }
-            if Instant::now() >= deadline {
-                return Err("Backend startup or an update is already in progress.".into());
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        };
+        let _startup = acquire_startup(
+            &data,
+            STARTUP_GATE_WAIT,
+            BACKEND_EXIT_TIMEOUT + BACKEND_START_TIMEOUT,
+        )?;
         match open() {
             Ok((_, hello)) if hello.version == protocol::BUILD_VERSION => return Ok(()),
             Ok((_, hello)) => {
@@ -90,9 +92,8 @@ impl Client {
         }
         let mut child = crate::launch::spawn_background()?;
         // A backend that exits is reported immediately below; this only bounds a
-        // live but slow start, such as the first launch after an update while
-        // the OS scans the new binaries on a busy machine.
-        let deadline = Instant::now() + Duration::from_secs(60);
+        // live but slow start.
+        let deadline = Instant::now() + BACKEND_START_TIMEOUT;
         loop {
             match open() {
                 Ok((_, hello)) if hello.version == protocol::BUILD_VERSION => {
@@ -339,7 +340,7 @@ impl Client {
             .map_err(connection_error)?;
             decode::<()>(&mut reader, id)?;
             drop(reader);
-            crate::launch::wait_for_exit(before.process_id, Duration::from_secs(15))?;
+            crate::launch::wait_for_exit(before.process_id, BACKEND_EXIT_TIMEOUT)?;
             match open() {
                 Err(error) if absent(&error) => Ok(()),
                 Err(error) => Err(connection_error(error)),
@@ -394,6 +395,35 @@ impl Client {
                 }
             },
         }
+    }
+}
+
+/// Take the startup lock to start the backend. Another client's start is
+/// waited out for as long as that start is bounded; an installer or updater
+/// holding the gate is reported after `gate_wait`.
+fn acquire_startup(
+    data: &Path,
+    gate_wait: Duration,
+    start_wait: Duration,
+) -> Result<(crate::lock::StartupLock, crate::lock::StartingLock), String> {
+    let lock_error = |error: io::Error| format!("Cannot acquire backend startup lock: {error}");
+    let started = Instant::now();
+    let mut gated_since = None;
+    loop {
+        if let Some(startup) = crate::lock::startup(data).map_err(lock_error)? {
+            let starting = crate::lock::starting(data).map_err(lock_error)?;
+            return Ok((startup, starting));
+        }
+        let now = Instant::now();
+        if crate::lock::start_in_progress(data).map_err(lock_error)? {
+            gated_since = None;
+            if now.duration_since(started) >= start_wait {
+                return Err(STARTUP_IN_PROGRESS.into());
+            }
+        } else if now.duration_since(*gated_since.get_or_insert(now)) >= gate_wait {
+            return Err(STARTUP_IN_PROGRESS.into());
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -477,6 +507,46 @@ fn connection_error(error: io::Error) -> String {
 
 #[cfg(all(test, unix))]
 mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::{acquire_startup, STARTUP_IN_PROGRESS};
+
+    #[test]
+    fn startup_reports_an_installer_gate_without_waiting_out_a_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let gate = crate::lock::startup(dir.path()).unwrap().unwrap();
+        let started = Instant::now();
+        let result = acquire_startup(
+            dir.path(),
+            Duration::from_millis(200),
+            Duration::from_secs(30),
+        );
+        assert_eq!(result.err().as_deref(), Some(STARTUP_IN_PROGRESS));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        drop(gate);
+    }
+
+    #[test]
+    fn startup_waits_for_another_clients_slow_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = acquire_startup(dir.path(), Duration::ZERO, Duration::ZERO).unwrap();
+        let holder = std::thread::spawn(move || {
+            // Well past the gate wait below: only the start marker keeps the waiter waiting.
+            std::thread::sleep(Duration::from_millis(600));
+            drop(first);
+        });
+        let started = Instant::now();
+        let second = acquire_startup(
+            dir.path(),
+            Duration::from_millis(100),
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(500));
+        holder.join().unwrap();
+        drop(second);
+    }
+
     #[test]
     fn attach_keeps_a_disconnected_client_when_backend_startup_fails() {
         const CHILD: &str = "PAP_TEST_ATTACH_FAILURE";

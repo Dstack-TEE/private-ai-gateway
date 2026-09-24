@@ -182,6 +182,27 @@ jobs:
           path: *rust-cache-paths
           key: ${{ job.status == 'success' && steps.rust-cache.outputs.cache-primary-key || format('{0}-partial-{1}-{2}', steps.rust-cache.outputs.cache-primary-key, github.run_id, github.run_attempt) }}
 
+  # Native Linux arm64 library tests: libc constants and syscall behaviour
+  # differ from x86_64, and nothing else runs these crates' tests on arm64.
+  verify-linux-arm64:
+    name: Verify libraries (linux-arm64)
+    if: ${{ inputs.package_only != true }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        id: rust
+        with:
+          toolchain: stable
+      - *restore-rust-cache
+      - name: Test desktop libraries
+        working-directory: apps/desktop
+        run: cargo test --locked --package private-ai-proxy-core --package private-ai-proxy-runtime --package private-ai-proxy-agent-bridge --lib
+      - *save-rust-cache
+
   select-platforms:
     name: Select release platforms
     if: ${{ github.event_name == 'workflow_dispatch' || inputs.release_version != '' }}
@@ -237,8 +258,8 @@ jobs:
 
   package:
     name: Package (${{ matrix.platform }})
-    needs: [verify, select-platforms]
-    if: ${{ always() && needs.select-platforms.result == 'success' && (needs.verify.result == 'success' || inputs.package_only == true) && (github.event_name == 'workflow_dispatch' || inputs.release_version != '') }}
+    needs: [verify, verify-linux-arm64, select-platforms]
+    if: ${{ always() && needs.select-platforms.result == 'success' && ((needs.verify.result == 'success' && needs.verify-linux-arm64.result == 'success') || inputs.package_only == true) && (github.event_name == 'workflow_dispatch' || inputs.release_version != '') }}
     environment:
       name: ${{ inputs.release_version != '' && 'desktop-release' || 'desktop-build' }}
     env:

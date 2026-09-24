@@ -42,6 +42,32 @@ pub fn startup(data_dir: &Path) -> io::Result<Option<StartupLock>> {
     }
 }
 
+/// Held beside the startup lock by a client that is starting the backend, so
+/// clients waiting on the startup lock can tell a slow start (worth waiting
+/// for) from an installer or updater holding the gate (reported at once).
+pub struct StartingLock {
+    _file: fs::File,
+}
+
+/// Mark this startup-lock holder as starting the backend. Blocks only while
+/// another client briefly probes `start_in_progress`.
+pub fn starting(data_dir: &Path) -> io::Result<StartingLock> {
+    let file = open(data_dir, "starting.lock")?;
+    file.lock()?;
+    Ok(StartingLock { _file: file })
+}
+
+/// Whether the startup lock is held by a client starting the backend rather
+/// than by an installer or updater, which never take `starting`.
+pub fn start_in_progress(data_dir: &Path) -> io::Result<bool> {
+    let file = open(data_dir, "starting.lock")?;
+    match file.try_lock_shared() {
+        Ok(()) => Ok(false),
+        Err(fs::TryLockError::WouldBlock) => Ok(true),
+        Err(fs::TryLockError::Error(error)) => Err(error),
+    }
+}
+
 /// Try to become the primary instance; `None` when another process holds it.
 /// Closing the owned file releases the lock, including on initialization failure.
 pub fn instance(data_dir: &Path) -> io::Result<Option<InstanceLock>> {
@@ -103,6 +129,19 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn starting_marks_only_client_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let gate = startup(dir.path()).unwrap().unwrap();
+        assert!(!start_in_progress(dir.path()).unwrap());
+        let marker = starting(dir.path()).unwrap();
+        assert!(start_in_progress(dir.path()).unwrap());
+        // Probes are shared, so they never block each other.
+        assert!(start_in_progress(dir.path()).unwrap());
+        drop(marker);
+        drop(gate);
     }
 
     #[test]

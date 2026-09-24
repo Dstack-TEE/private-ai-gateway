@@ -8,6 +8,8 @@
 mod auth;
 #[cfg(feature = "web-ui")]
 mod server;
+#[cfg(feature = "web-ui")]
+mod throttle;
 
 use std::{
     net::SocketAddr,
@@ -17,7 +19,9 @@ use std::{
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 
-pub use auth::{Auth, Throttle};
+pub use auth::Auth;
+#[cfg(feature = "web-ui")]
+pub use throttle::Throttle;
 
 use desktop_core::{
     contracts::WebUiLogin,
@@ -49,7 +53,7 @@ pub fn validate(config: &WebUiConfig, local_api_port: u16) -> Result<ResolvedLis
 
 pub struct WebUi {
     auth: Arc<Auth>,
-    #[cfg_attr(not(feature = "web-ui"), allow(dead_code))]
+    #[cfg(feature = "web-ui")]
     throttle: Arc<Throttle>,
     running: Mutex<Option<(SocketAddr, CancellationToken)>>,
     #[cfg_attr(not(feature = "web-ui"), allow(dead_code))]
@@ -60,6 +64,7 @@ impl WebUi {
     pub(crate) fn new(handle: Handle) -> Self {
         Self {
             auth: Arc::default(),
+            #[cfg(feature = "web-ui")]
             throttle: Arc::default(),
             running: Mutex::new(None),
             handle,
