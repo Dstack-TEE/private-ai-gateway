@@ -3,8 +3,8 @@ use std::sync::Arc;
 use desktop_core::{
     agent_access::AgentAccessStatus,
     client::Client,
+    config::{Appearance, NotificationPreferences},
     contracts::{AgentStatus, AppState},
-    preferences::{Appearance, NotificationPreferences},
     protocol::rpc,
     ui_api::{self as shared, Backend, Event, Host, Method},
 };

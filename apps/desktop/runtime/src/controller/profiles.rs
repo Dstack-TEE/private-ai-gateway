@@ -51,18 +51,18 @@ impl DesktopRuntime {
         }
         let reconnect = initial.session_active
             || (self.manager.is_running()? && !initial.configuration_verification);
-        let initial_settings = service_config::settings_from_state(
-            initial.profiles.clone(),
-            initial.active_profile_id.clone(),
-            initial.config.require_production_os,
-        )?;
-        let existing = initial_settings
-            .profiles
-            .iter()
-            .find(|entry| entry.id == profile.id)
-            .cloned();
-        let mut candidate =
-            service_config::resolve_profile(profile, verify.then(desktop_core::now_secs))?;
+        let saved = self.settings.snapshot()?;
+        let existing = saved.config.profiles.get(&profile.id).cloned();
+        let resolved =
+            settings_config::resolve_profile(profile, verify.then(desktop_core::now_secs))?;
+        let id = resolved.id;
+        let mut candidate = settings_config::Profile {
+            name: resolved.name,
+            provider: resolved.provider,
+            remote_url: resolved.remote_url,
+            auth: resolved.auth,
+            verified_at: resolved.verified_at,
+        };
         if let Some(auth) = auth {
             candidate.auth = auth;
         } else if key.is_none() {
@@ -76,41 +76,22 @@ impl DesktopRuntime {
                 || existing.auth != candidate.auth
         });
         let replace_key = key.is_some();
-        candidate.credential_ref = if replace_key {
-            Some(format!("credential-{}", uuid::Uuid::new_v4()))
-        } else {
-            existing.as_ref().and_then(|p| p.credential_ref.clone())
-        };
-        let candidate_entry = service_config::profile_credential_entry(&candidate)?;
-        let previous_entry = existing
-            .as_ref()
-            .map(service_config::profile_credential_entry)
-            .transpose()?;
-        let stored_candidate_key = match &previous_entry {
-            Some(entry) => self.secrets.get(entry)?,
-            None => None,
-        };
+        let stored_key = saved
+            .credentials
+            .profiles
+            .get(&id)
+            .map(|credential| credential.api_key.clone());
         let candidate_key = match key {
-            Some(key) => service_config::validate_api_key(&key)?,
-            None if !profile_changed => stored_candidate_key
+            Some(key) => settings_config::validate_api_key(&key)?,
+            None if !profile_changed => stored_key
                 .clone()
                 .ok_or_else(|| "Enter an API key".to_string())?,
             None => return Err("Enter an API key for this profile".to_string()),
         };
-        let current = self.manager.snapshot()?;
-        let mut settings = service_config::settings_from_state(
-            current.profiles,
-            current.active_profile_id,
-            current.config.require_production_os,
-        )?;
         let config = StartConfig {
             remote_url: candidate.remote_url.clone(),
             require_production_os,
         };
-        candidate.credential_saved = true;
-        settings.upsert(candidate.clone())?;
-        settings.active_profile_id = candidate.id.clone();
-        settings.require_production_os = require_production_os;
 
         if reconnect {
             self.stop_with_reconnect(true)?;
@@ -164,15 +145,14 @@ impl DesktopRuntime {
 
         let retiring = existing
             .as_ref()
-            .zip(stored_candidate_key.as_ref())
+            .zip(stored_key.as_ref())
             .filter(|_| replace_key);
         if let Some((old, old_key)) = retiring {
             if let Err(error) = self.queue_retired(RetiredCredential {
-                profile_id: candidate.id.clone(),
+                profile_id: id.clone(),
                 action: "revoke".into(),
                 provider: old.provider,
                 key: old_key.clone(),
-                entry: service_config::profile_credential_entry(old)?,
                 revoke: old.provider == ServiceProvider::Redpill
                     && old_key != &candidate_key
                     && matches!(old.auth, desktop_core::contracts::ProfileAuth::OAuth { .. }),
@@ -183,7 +163,7 @@ impl DesktopRuntime {
             }
         }
         if replace_key {
-            if let Err(error) = self.secrets.set(&candidate_entry, &candidate_key) {
+            if let Err(error) = self.set_profile_key(&id, Some(&candidate_key)) {
                 self.proxy.set_api_key(None);
                 self.manager.restore_snapshot(previous);
                 return Err(error);
@@ -197,45 +177,41 @@ impl DesktopRuntime {
             )
         {
             if let Err(error) = self.queue_retired(RetiredCredential {
-                profile_id: candidate.id.clone(),
+                profile_id: id.clone(),
                 action: "activate".into(),
                 provider: candidate.provider,
                 key: candidate_key.clone(),
-                entry: candidate_entry.clone(),
                 revoke: true,
             }) {
-                let cleanup = self.secrets.delete(&candidate_entry);
+                let restore = self.set_profile_key(&id, stored_key.as_deref());
                 self.proxy.set_api_key(None);
                 self.manager.restore_snapshot(previous);
-                return Err(cleanup.err().unwrap_or(error));
+                return Err(restore.err().unwrap_or(error));
             }
         }
-        let settings = match service_config::save(settings) {
-            Ok(settings) => settings,
-            Err(error) => {
-                let restore_error = if replace_key {
-                    self.secrets.delete(&candidate_entry).err()
-                } else {
-                    None
-                };
-                self.proxy.set_api_key(None);
-                self.manager.restore_snapshot(previous);
-                return Err(match restore_error {
-                    Some(restore_error) => format!(
-                        "{error}. The previous credential could not be restored: {restore_error}"
-                    ),
-                    None => error,
-                });
-            }
-        };
+        let saved = self.update_config(|settings| {
+            settings.upsert(id.clone(), candidate)?;
+            settings.active_profile = id.clone();
+            settings.require_production_os = require_production_os;
+            Ok(())
+        });
+        if let Err(error) = saved {
+            let restore_error = if replace_key {
+                self.set_profile_key(&id, stored_key.as_deref()).err()
+            } else {
+                None
+            };
+            self.proxy.set_api_key(None);
+            self.manager.restore_snapshot(previous);
+            return Err(match restore_error {
+                Some(restore_error) => format!(
+                    "{error}. The previous credential could not be restored: {restore_error}"
+                ),
+                None => error,
+            });
+        }
         self.recovery.cancel();
-        self.manager.set_service_configuration(
-            config.clone(),
-            settings.profiles,
-            settings.active_profile_id,
-            true,
-            verify,
-        );
+        self.publish_service_configuration(verify)?;
         if let Err(error) = self.cleanup_retired().await {
             self.manager.report_error(error);
         }
@@ -257,36 +233,20 @@ impl DesktopRuntime {
         }
         let reconnect = previous.session_active
             || (self.manager.is_running()? && !previous.configuration_verification);
-        let mut settings = service_config::settings_from_state(
-            previous.profiles,
-            previous.active_profile_id,
-            previous.config.require_production_os,
-        )?;
-        let profile = settings
-            .profiles
-            .iter()
-            .find(|profile| profile.id == profile_id)
-            .cloned()
-            .ok_or_else(|| "Confidential AI profile not found".to_string())?;
+        if !self.settings.config()?.profiles.contains_key(&profile_id) {
+            return Err("Confidential AI profile not found".to_string());
+        }
         if reconnect {
             self.stop_with_reconnect(true)?;
             self.manager.cancel_reconnection();
         }
-        settings.active_profile_id = profile.id;
-        let settings = service_config::save(settings)?;
-        let config = settings.runtime_config()?;
-        let credential_saved = settings
-            .active_profile()
-            .is_ok_and(|profile| profile.credential_saved);
+        self.update_config(|settings| {
+            settings.active_profile = profile_id;
+            Ok(())
+        })?;
         self.proxy.set_api_key(None);
         self.recovery.cancel();
-        self.manager.set_service_configuration(
-            config.clone(),
-            settings.profiles,
-            settings.active_profile_id,
-            credential_saved,
-            false,
-        );
+        let config = self.publish_service_configuration(false)?;
         if reconnect {
             self.start_inner(config)
         } else {
@@ -301,19 +261,17 @@ impl DesktopRuntime {
         }
         let previous = self.manager.snapshot()?;
         let affects_active = previous.active_profile_id == profile_id;
-        let mut settings = service_config::settings_from_state(
-            previous.profiles,
-            previous.active_profile_id,
-            previous.config.require_production_os,
-        )?;
-        let removed = settings
+        let saved = self.settings.snapshot()?;
+        let removed = saved
+            .config
             .profiles
-            .iter()
-            .find(|profile| profile.id == profile_id)
-            .cloned()
+            .get(&profile_id)
             .ok_or_else(|| "Confidential AI profile not found".to_string())?;
-        let entry = service_config::profile_credential_entry(&removed)?;
-        let removed_key = self.secrets.get(&entry)?;
+        let removed_key = saved
+            .credentials
+            .profiles
+            .get(&profile_id)
+            .map(|credential| credential.api_key.clone());
         if removed.provider == ServiceProvider::Redpill
             && matches!(
                 removed.auth,
@@ -322,50 +280,37 @@ impl DesktopRuntime {
         {
             if let Some(key) = &removed_key {
                 self.queue_retired(RetiredCredential {
-                    profile_id: removed.id.clone(),
+                    profile_id: profile_id.clone(),
                     action: "revoke".into(),
                     provider: removed.provider,
                     key: key.clone(),
-                    entry: entry.clone(),
                     revoke: true,
                 })?;
             }
         }
-        self.secrets.delete(&entry)?;
-        settings.profiles.retain(|profile| profile.id != profile_id);
-        if settings.profiles.is_empty() {
-            settings.active_profile_id.clear();
-        } else if settings.active_profile_id == profile_id {
-            settings.active_profile_id = settings.profiles[0].id.clone();
-        }
-        let settings = match service_config::save(settings) {
-            Ok(settings) => settings,
-            Err(error) => {
-                let restore_error =
-                    restore_secret_entry(&*self.secrets, &entry, removed_key.as_deref()).err();
-                return Err(match restore_error {
-                    Some(restore_error) => format!(
+        self.set_profile_key(&profile_id, None)?;
+        let deleted = self.update_config(|settings| {
+            settings.profiles.shift_remove(&profile_id);
+            if settings.active_profile == profile_id {
+                settings.active_profile.clear();
+            }
+            Ok(())
+        });
+        if let Err(error) = deleted {
+            return Err(
+                match self.set_profile_key(&profile_id, removed_key.as_deref()) {
+                    Ok(()) => error,
+                    Err(restore_error) => format!(
                         "{error}. The deleted credential could not be restored: {restore_error}"
                     ),
-                    None => error,
-                });
-            }
-        };
-        let config = settings.runtime_config()?;
-        let credential_saved = settings
-            .active_profile()
-            .is_ok_and(|profile| profile.credential_saved);
+                },
+            );
+        }
         self.proxy.set_api_key(None);
         if affects_active {
             self.recovery.cancel();
         }
-        self.manager.set_service_configuration(
-            config,
-            settings.profiles,
-            settings.active_profile_id,
-            credential_saved,
-            false,
-        );
+        self.publish_service_configuration(false)?;
         self.manager.snapshot()
     }
 
@@ -383,57 +328,27 @@ impl DesktopRuntime {
             .iter()
             .find(|p| p.id == state.active_profile_id)
             .ok_or("Profile not found")?;
-        let entry = service_config::profile_credential_entry(profile)?;
-        let previous_key = self.secrets.get(&entry)?;
-        if let Some(profile) = state
-            .profiles
-            .iter()
-            .find(|p| p.id == state.active_profile_id)
+        let previous_key = self.load_profile_key(&profile.id)?;
+        if profile.provider == ServiceProvider::Redpill
+            && matches!(
+                profile.auth,
+                desktop_core::contracts::ProfileAuth::OAuth { .. }
+            )
         {
-            if profile.provider == ServiceProvider::Redpill
-                && matches!(
-                    profile.auth,
-                    desktop_core::contracts::ProfileAuth::OAuth { .. }
-                )
-            {
-                if let Some(key) = &previous_key {
-                    self.queue_retired(RetiredCredential {
-                        profile_id: profile.id.clone(),
-                        action: "revoke".into(),
-                        provider: profile.provider,
-                        key: key.clone(),
-                        entry: entry.clone(),
-                        revoke: true,
-                    })?;
-                }
+            if let Some(key) = &previous_key {
+                self.queue_retired(RetiredCredential {
+                    profile_id: profile.id.clone(),
+                    action: "revoke".into(),
+                    provider: profile.provider,
+                    key: key.clone(),
+                    revoke: true,
+                })?;
             }
         }
-        self.secrets.delete(&entry)?;
-        let mut settings = service_config::settings_from_state(
-            state.profiles,
-            state.active_profile_id.clone(),
-            state.config.require_production_os,
-        )?;
-        if let Some(profile) = settings
-            .profiles
-            .iter_mut()
-            .find(|profile| profile.id == state.active_profile_id)
-        {
-            profile.credential_saved = false;
-        }
-        if let Err(error) = service_config::save(settings) {
-            let restore = restore_secret_entry(&*self.secrets, &entry, previous_key.as_deref());
-            return Err(match restore {
-                Ok(()) => error,
-                Err(restore_error) => {
-                    format!("{error}. The credential could not be restored: {restore_error}")
-                }
-            });
-        }
+        self.set_profile_key(&profile.id, None)?;
         self.proxy.set_api_key(None);
         self.recovery.cancel();
-        self.manager
-            .set_profile_credential_saved(&state.active_profile_id, false);
+        self.publish_profiles()?;
         self.manager.snapshot()
     }
 
@@ -442,18 +357,14 @@ impl DesktopRuntime {
         backup: desktop_core::maintenance::ProfileBackup,
     ) -> Result<desktop_core::maintenance::ImportResult, String> {
         let _operation = self.configuration_change()?;
-        let state = self.manager.snapshot()?;
-        let mut settings = service_config::settings_from_state(
-            state.profiles,
-            state.active_profile_id,
-            state.config.require_production_os,
-        )?;
-        let result = backup.merge(&mut settings)?;
+        let mut result = None;
+        self.update_config(|settings| {
+            result = Some(backup.merge(settings)?);
+            Ok(())
+        })?;
+        let result = result.ok_or("The profile import did not run")?;
         if result.imported > 0 {
-            let settings = service_config::save(settings)?;
-            let config = settings.runtime_config()?;
-            self.manager
-                .update_profile_list(settings.profiles, settings.active_profile_id, config);
+            self.publish_profiles()?;
         }
         Ok(result)
     }

@@ -40,7 +40,7 @@ prints a one-line note toward `pap` only on an interactive terminal outside
 JSON modes, so scripted use keeps identical output.
 
 `pap verify/audit/sessions/send` do not initialize the managed backend or
-credential store. `pap serve` streams responses immediately and audits receipts
+read the settings files. `pap serve` streams responses immediately and audits receipts
 afterward by default. Receipt checks never gate streaming. `pap --json serve`
 emits lifecycle JSON events.
 
@@ -57,15 +57,15 @@ service. No distribution contains an independent `aci` executable.
 | Crate | Package | Responsibility |
 | --- | --- | --- |
 | `cli` | `private-ai-proxy` | Every command-line surface, the ACI verifier, `pap serve`, and the `private-ai-proxy-service` entry point that injects the verifier into the backend |
-| `core` | `private-ai-proxy-core` | Client side shared by every process: renderer and IPC contracts, the management command table and client, IPC transport, backend launch, shared UI API, release-channel update checks, preferences and profile settings files, app paths, locks and owner-only file primitives |
-| `runtime` | `private-ai-proxy-runtime` | The backend: controller, management server and command dispatch, verifier session state machine (`verifier_session`), usage store, account login, web UI, wake monitoring |
-| `agent-bridge` | `private-ai-proxy-agent-bridge` | Loopback Local API proxy, agent tokens, verified catalog, OS secrets, reversible agent configuration, and `private-ai-proxy-helper` |
+| `core` | `private-ai-proxy-core` | Client side shared by every process: renderer and IPC contracts, the management command table and client, IPC transport, backend launch, shared UI API, release-channel update checks, the `config.toml` model, its validation and JSON Schema, app paths, locks and owner-only file primitives |
+| `runtime` | `private-ai-proxy-runtime` | The backend: controller, the settings files (`config.toml`, `credentials.toml`: in-place edits, live reload, the one-time 0.1 import), device-local secrets (`local_state`), management server and command dispatch, verifier session state machine (`verifier_session`), usage store, account login, web UI, wake monitoring |
+| `agent-bridge` | `private-ai-proxy-agent-bridge` | Loopback Local API proxy, agent tokens, verified catalog, reversible agent configuration, and `private-ai-proxy-helper` |
 | `src-tauri` | `private-ai-proxy-desktop` | Tauri shell: windows, tray, menus, notifications, updates |
 
 Dependencies point one way: `src-tauri` → `core`; `agent-bridge` → `core`;
 `runtime` → `agent-bridge`, `core`; `cli` → all three. The desktop shell only
 talks to the backend over IPC, so it links neither the backend nor the agent
-bridge (no HTTP server, SQLite, keyring, config editors or CLI parser). The
+bridge (no HTTP server, SQLite, keyring, agent config editors or CLI parser). The
 backend binary lives in `cli` because it injects the in-process verifier, which
 `cli` owns, into `runtime` through `VerifierLauncher`.
 
@@ -188,9 +188,9 @@ stream is fed from the controller's state channel. Mac App Store builds omit it.
 
 Agent changes retain preview/revision/apply validation. CSV exports are streamed
 one row at a time into a newly created private file; existing targets and symlinks
-are not overwritten. OS credential stores remain the only persistent provider
-credential store. UI-free operation does not imply an unlocked credential store
-on an unattended machine; there is no plaintext fallback.
+are not overwritten. Provider credentials persist only in the owner-only
+`credentials.toml` ([Settings files](configuration.md)), so UI-free operation
+on an unattended machine needs no unlocked OS keychain.
 
 ## Application identity
 

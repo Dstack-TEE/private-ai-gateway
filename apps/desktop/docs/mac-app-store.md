@@ -84,7 +84,12 @@ versions, exact executable inventory, both architectures, profile validity and
 Keychain group before signing children, app, then installer. The app receives
 App Sandbox, network client/server, user-selected read/write, app-scoped bookmark
 and profile-derived identity/Keychain entitlements. Children receive only sandbox
-and inherit entitlements. No temporary sandbox exception is used.
+and inherit entitlements. No temporary sandbox exception is used. Settings and
+credentials live in `config.toml` and `credentials.toml` inside the app
+container ([Settings files](configuration.md)); the Keychain group remains only
+so the backend can import and delete what 0.1 saved there. Remove it together
+with that import (planned for 0.3; see
+[the tracking note](configuration.md#tracking-mac-app-store-keychain-entitlement)).
 
 Apple does not allow a Mac App Store distribution-signed app to launch before
 App Store processing. The workflow therefore smoke-tests a temporary ad-hoc
@@ -164,7 +169,8 @@ References: [SDK requirements](https://developer.apple.com/support/third-party-S
 - Quit and crash the GUI with protection active. Verify the service exits, the
   Local API port closes, and no external Agent restarts the backend.
   Disabling protection must withdraw authority and restore owned configuration.
-- Verify OAuth callback/Keychain behavior, balance-button eligibility, external
+- Verify the upgrade from 0.1 imports its Keychain entries into
+  `credentials.toml` and deletes them, OAuth callback behavior, balance-button eligibility, external
   browser routing to the correct scoped provider account, blocked general account
   portals, and absence of updater network calls.
 - Upload to TestFlight, complete beta review as required, and repeat against the

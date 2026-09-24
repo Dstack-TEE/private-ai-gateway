@@ -217,15 +217,16 @@ impl Backend {
         }
         let home = directory.path().join("home");
         let data = home.join(".private-ai-proxy");
-        desktop_core::private_fs::create_private_dir(&data).unwrap();
+        let settings = data.join("Config");
+        desktop_core::private_fs::create_private_dir(&settings).unwrap();
         let port = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
             .unwrap()
             .port();
         desktop_core::private_fs::write_private(
-            &data.join("local-api.json"),
-            &format!(r#"{{"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":{port}}}"#),
+            &settings.join("config.toml"),
+            &format!("# Kept by every write.\n\n[localApi]\nport = {port}\n"),
         )
         .unwrap();
         let child = Command::new(binary("private-ai-proxy-service"))
@@ -345,30 +346,36 @@ fn web_ui_requires_a_password_that_never_leaves_the_service() {
     backend.run(&["diagnostics", "--output", diagnostics.to_str().unwrap()]);
     let show = backend.run(&["settings", "show"]);
     assert_eq!(show["webUi"]["passwordSet"], true);
-    let data = backend.directory.path().join("home/.private-ai-proxy");
-    let saved = fs::read_to_string(data.join("preferences.json")).unwrap();
-    assert!(saved.contains("\"webUiPasswordHash\": \"$argon2id$"));
+    let data = backend
+        .directory
+        .path()
+        .join("home/.private-ai-proxy/Config");
+    let saved = fs::read_to_string(data.join("credentials.toml")).unwrap();
+    assert!(saved.contains("[webUi]\npasswordHash = \"$argon2id$"));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = fs::metadata(data.join("preferences.json"))
+        let mode = fs::metadata(data.join("credentials.toml"))
             .unwrap()
             .permissions()
             .mode();
         assert_eq!(mode & 0o077, 0);
     }
+    let config = fs::read_to_string(data.join("config.toml")).unwrap();
+    assert!(config.starts_with("# Kept by every write.\n"), "{config}");
     for (name, text) in [
         ("settings show", show.to_string()),
         ("status", backend.run(&["status"]).to_string()),
         ("diagnostics", fs::read_to_string(&diagnostics).unwrap()),
-        ("preferences.json", saved),
+        ("credentials.toml", saved),
+        ("config.toml", config),
         (
             "backend log",
             fs::read_to_string(backend.directory.path().join("backend.log")).unwrap(),
         ),
     ] {
         assert!(!text.contains(WEB_PASSWORD), "{name} contains the password");
-        if name != "preferences.json" {
+        if name != "credentials.toml" {
             assert!(
                 !text.contains("$argon2"),
                 "{name} contains the password hash"
@@ -678,9 +685,9 @@ fn reset_settings_preserves_user_data_and_requires_explicit_consent() {
         .iter()
         .all(|agent| agent["recorded"] == false));
     let settings = backend.run(&["settings", "show"]);
-    assert_eq!(settings["preferences"]["appearance"], "system");
-    assert_eq!(settings["preferences"]["connectOnLaunch"], false);
-    assert_eq!(settings["preferences"]["notifications"]["enabled"], true);
+    assert_eq!(settings["settings"]["appearance"], "system");
+    assert_eq!(settings["settings"]["connectOnLaunch"], false);
+    assert_eq!(settings["settings"]["notifications"]["enabled"], true);
     assert_eq!(settings["webUi"]["passwordSet"], false);
 }
 
@@ -726,7 +733,7 @@ fn two_cli_clients_share_state_and_disconnect_does_not_stop_service() {
     assert_eq!(first["backend"]["instanceId"], second["instanceId"]);
     backend.run(&["settings", "set", "appearance", "dark", "--yes"]);
     assert_eq!(
-        backend.run(&["settings", "show"])["preferences"]["appearance"],
+        backend.run(&["settings", "show"])["settings"]["appearance"],
         "dark"
     );
     backend.run(&[
@@ -737,11 +744,11 @@ fn two_cli_clients_share_state_and_disconnect_does_not_stop_service() {
         "--yes",
     ]);
     let settings = backend.run(&["settings", "show"]);
-    assert_eq!(settings["preferences"]["notifications"]["enabled"], false);
-    assert_eq!(settings["preferences"]["appearance"], "dark");
+    assert_eq!(settings["settings"]["notifications"]["enabled"], false);
+    assert_eq!(settings["settings"]["appearance"], "dark");
     backend.run(&["settings", "set", "autoCliRegistration", "false", "--yes"]);
     assert_eq!(
-        backend.run(&["settings", "show"])["preferences"]["autoCliRegistration"],
+        backend.run(&["settings", "show"])["settings"]["autoCliRegistration"],
         false
     );
     backend.run(&["token", "rotate", "--yes"]);
@@ -785,6 +792,93 @@ fn two_cli_clients_share_state_and_disconnect_does_not_stop_service() {
     assert_eq!(
         backend.run(&["status"])["backend"]["instanceId"],
         first["backend"]["instanceId"]
+    );
+}
+
+#[test]
+fn settings_files_are_edited_in_place_and_hand_edits_apply_live() {
+    let backend = Backend::start();
+    let data = backend
+        .directory
+        .path()
+        .join("home/.private-ai-proxy/Config");
+    let config = data.join("config.toml");
+    let show = backend.run(&["settings", "show"]);
+    assert_eq!(show["files"]["config"], config.to_str().unwrap());
+    assert!(show["files"]["error"].is_null());
+
+    backend.run(&["settings", "set", "appearance", "dark", "--yes"]);
+    let text = fs::read_to_string(&config).unwrap();
+    assert!(
+        text.starts_with("# Kept by every write.\n\nappearance = \"dark\"\n"),
+        "{text}"
+    );
+    assert!(text.contains("appearance = \"dark\""), "{text}");
+
+    let wait = |check: &dyn Fn(&Value) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let show = backend.run(&["settings", "show"]);
+            if check(&show) {
+                return show;
+            }
+            assert!(Instant::now() < deadline, "not applied: {show}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    let edited = |line: &str| {
+        text.replacen(
+            "appearance = \"dark\"\n",
+            &format!("appearance = \"dark\"\n{line}\n"),
+            1,
+        )
+    };
+    fs::write(&config, edited("connectOnLaunch = true")).unwrap();
+    wait(&|show| show["settings"]["connectOnLaunch"] == true);
+
+    // A broken edit keeps the last good settings and names the position.
+    fs::write(&config, edited("connectOnLaunch = \"yes\"")).unwrap();
+    let show = wait(&|show| show["files"]["error"].is_string());
+    let error = show["files"]["error"].as_str().unwrap();
+    assert!(error.starts_with("config.toml:"), "{error}");
+    assert_eq!(show["settings"]["connectOnLaunch"], true);
+    let doctor = backend.command(&["doctor", "--json"]).output().unwrap();
+    let doctor: Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    assert_eq!(doctor["errors"]["settings"], error);
+    let refused = backend
+        .command(&["settings", "set", "appearance", "light", "--yes", "--json"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("config.toml:"));
+
+    fs::write(&config, &text).unwrap();
+    let show = wait(&|show| show["files"]["error"].is_null());
+    assert_eq!(show["settings"]["connectOnLaunch"], false);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_success(&backend.set_web_ui_password(WEB_PASSWORD));
+        let credentials = data.join("credentials.toml");
+        fs::set_permissions(&credentials, fs::Permissions::from_mode(0o644)).unwrap();
+        let doctor = backend.command(&["doctor", "--json"]).output().unwrap();
+        let doctor: Value = serde_json::from_slice(&doctor.stdout).unwrap();
+        assert!(doctor["warnings"]["credentials"]
+            .as_str()
+            .unwrap()
+            .contains("chmod 600"));
+    }
+
+    let schema = backend.command(&["settings", "schema"]).output().unwrap();
+    assert_success(&schema);
+    let schema: Value = serde_json::from_slice(&schema.stdout).unwrap();
+    assert!(schema["properties"]["localApi"].is_object());
+    assert_eq!(
+        fs::read_to_string(data.join("config.schema.json"))
+            .unwrap()
+            .trim_end(),
+        serde_json::to_string_pretty(&schema).unwrap()
     );
 }
 

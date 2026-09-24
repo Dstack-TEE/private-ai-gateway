@@ -186,7 +186,7 @@ fn status(value: &Value) -> String {
         lines.push(format!(
             "Service credential: {}",
             if saved {
-                "Saved (OS credential store)"
+                "Saved (credentials.toml)"
             } else {
                 "Not saved"
             }
@@ -225,6 +225,12 @@ fn status(value: &Value) -> String {
                 if network { "Allowed" } else { "Loopback only" }
             ));
         }
+    }
+    if let Some(error) = state["configFiles"]["error"].as_str() {
+        lines.push(format!(
+            "Settings file not applied (previous settings in effect): {}",
+            safe(error)
+        ));
     }
     if let Some(required) = state["config"]["requireProductionOs"].as_bool() {
         lines.push(format!(

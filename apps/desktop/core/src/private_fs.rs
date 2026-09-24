@@ -150,9 +150,7 @@ pub fn write_atomic(path: &Path, content: &str, expected: Option<Option<&str>>) 
             Err(error) => return Err(error),
         };
         if current.as_deref() != expected {
-            return Err(io::Error::other(
-                "the file changed on disk since it was read",
-            ));
+            return Err(io::Error::other(ChangedOnDisk));
         }
     }
     publish(path, Publish::Replace, |file| {
@@ -163,6 +161,24 @@ pub fn write_atomic(path: &Path, content: &str, expected: Option<Option<&str>>) 
         }
         Ok(())
     })
+}
+
+/// [`write_atomic`] found other content than expected: someone else wrote the file.
+#[derive(Debug)]
+pub struct ChangedOnDisk;
+
+impl std::fmt::Display for ChangedOnDisk {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("the file changed on disk since it was read")
+    }
+}
+
+impl std::error::Error for ChangedOnDisk {}
+
+impl ChangedOnDisk {
+    pub fn is(error: &io::Error) -> bool {
+        error.get_ref().is_some_and(|inner| inner.is::<Self>())
+    }
 }
 
 /// What [`publish`] does when the destination already exists.

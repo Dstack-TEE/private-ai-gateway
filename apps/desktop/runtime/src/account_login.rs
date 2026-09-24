@@ -54,7 +54,8 @@ use desktop_core::contracts::{
 const REDPILL_CLIENT_ID: &str = "cGrHCOWG3S91oa0A";
 const ISSUER: &str = "https://clerk.redpill.ai";
 /// Where RedPill redirects the OAuth callback; the web UI may not take its port.
-pub(crate) const CALLBACK_ADDRESS: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 4181);
+pub(crate) const CALLBACK_ADDRESS: SocketAddrV4 =
+    SocketAddrV4::new(Ipv4Addr::LOCALHOST, desktop_core::account::CALLBACK_PORT);
 const CALLBACK_PATH: &str = "/oauth/callback";
 const KEY_URL: &str = "https://service.redpill.ai/api/oauth/key";
 const PHALA_API: &str = "https://cloud-api.phala.com";
@@ -124,9 +125,7 @@ impl Authorization {
                 }
                 let organization = string(&result, "account_name")?;
                 Ok(Credential {
-                    key: desktop_core::service_config::validate_api_key(&string(
-                        &result, "api_key",
-                    )?)?,
+                    key: desktop_core::config::validate_api_key(&string(&result, "api_key")?)?,
                     auth: ProfileAuth::OAuth {
                         account_id: string(&result, "account_id")?,
                         account_name: match &details.auth {
@@ -255,7 +254,7 @@ impl PendingLogin {
         workspace_id: Option<i64>,
     ) -> Result<Credential, String> {
         self.validate(id)?;
-        let candidate = desktop_core::service_config::resolve_profile(profile.clone(), None)?;
+        let candidate = desktop_core::config::resolve_profile(profile.clone(), None)?;
         if candidate.id != self.profile.id
             || candidate.provider != self.profile.provider
             || candidate.remote_url != self.profile.remote_url
@@ -362,8 +361,7 @@ pub(crate) enum CredentialTransition {
 }
 
 pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<PendingLogin, String> {
-    profile.remote_url =
-        desktop_core::service_config::resolve_profile(profile.clone(), None)?.remote_url;
+    profile.remote_url = desktop_core::config::resolve_profile(profile.clone(), None)?.remote_url;
     let client = client()?;
     let id = Uuid::new_v4().to_string();
     let (url, user_code, worker, callback_state) = match profile.provider {

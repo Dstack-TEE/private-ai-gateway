@@ -24,7 +24,7 @@ bundled credential helper. MAS uses `/bin/cat` with a separate absolute-path
 argument to read `~/.org.dstack.private-ai-proxy-agents/agent-tokens/codex`.
 This is a revocable, agent-scoped local proxy token, separate from the catalog;
 it is not an upstream API key or OAuth credential. Upstream secrets stay in the
-OS credential store in both distributions. See [Agent credentials](distribution.md#agent-access-and-credentials)
+backend's owner-only `credentials.toml` in both distributions. See [Agent credentials](distribution.md#agent-access-and-credentials)
 for file permissions, rotation and revocation.
 
 ## Explicit refresh

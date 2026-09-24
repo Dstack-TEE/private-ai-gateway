@@ -1,9 +1,9 @@
 //! The web UI sign-in password.
 //!
 //! Only an Argon2id PHC string (the crate defaults: 19 MiB, 2 passes, 1 lane,
-//! the OWASP-recommended minimum) is kept, in the owner-only preferences file.
-//! It never leaves the service: preference reads, state snapshots and
-//! diagnostics omit it. Length is the only rule (NIST SP 800-63B); the upper
+//! the OWASP-recommended minimum) is kept, in the owner-only
+//! `credentials.toml`. It never leaves the service: settings reads, state
+//! snapshots and diagnostics omit it. Length is the only rule (NIST SP 800-63B); the upper
 //! bound only caps hashing work.
 
 use argon2::{
@@ -33,6 +33,11 @@ pub fn hash(password: &str) -> Result<String, String> {
         .map_err(|_| "Web UI password could not be saved".into())
 }
 
+/// Whether `hash` is an Argon2id PHC string this module could verify against.
+pub fn is_hash(hash: &str) -> bool {
+    PasswordHash::new(hash).is_ok_and(|parsed| parsed.algorithm.as_str() == "argon2id")
+}
+
 /// Checks `password` against a stored hash in constant time; malformed hashes never match.
 pub fn verify(hash: &str, password: &str) -> bool {
     password.chars().count() <= MAX_LENGTH
@@ -55,6 +60,7 @@ mod tests {
         assert!(verify(&hash, "correct horse battery"));
         assert!(!verify(&hash, "correct horse battery "));
         assert!(!verify("not a hash", "correct horse battery"));
+        assert!(is_hash(&hash) && !is_hash("not a hash"));
     }
 
     #[test]

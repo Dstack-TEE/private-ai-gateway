@@ -35,12 +35,20 @@ impl DesktopRuntime {
         if self.instance.is_none() {
             return Err("Change Local API settings in the primary app instance".to_string());
         }
-        let previous = self.manager.snapshot()?;
-        if previous.status == "verifying" {
+        if self.manager.snapshot()?.status == "verifying" {
             return Err("Wait for the current verification to finish".to_string());
         }
+        self.apply_local_api(config).await
+    }
+
+    /// Saves and rebinds the Local API, pausing protection around the change.
+    pub(super) async fn apply_local_api(
+        self: &Arc<Self>,
+        config: ListenConfig,
+    ) -> Result<AppState, String> {
+        let previous = self.manager.snapshot()?;
         let current = self.manager.local_api()?;
-        let resolved = local_api::resolve(config.clone())?;
+        let resolved = settings_config::resolve_local_api(config.clone())?;
         if current.config == resolved.config && previous.endpoint_error.is_none() {
             return Ok(previous);
         }
@@ -81,7 +89,7 @@ impl DesktopRuntime {
         let needs_bind =
             current.bind != resolved.bind || self.manager.snapshot()?.proxy_url.is_none();
         if !needs_bind {
-            let resolved = local_api::save(config)?;
+            let resolved = self.save_local_api(config)?;
             self.manager
                 .set_endpoint(resolved.config, Ok(resolved.endpoint));
             return self.manager.snapshot();
@@ -106,7 +114,7 @@ impl DesktopRuntime {
                 return Err(error);
             }
         };
-        let resolved = match local_api::save(config) {
+        let resolved = match self.save_local_api(config) {
             Ok(resolved) => resolved,
             Err(error) => {
                 drop(listener);
@@ -132,6 +140,15 @@ impl DesktopRuntime {
         self.manager
             .set_endpoint(resolved.config, Ok(resolved.endpoint));
         self.manager.snapshot()
+    }
+
+    fn save_local_api(&self, config: ListenConfig) -> Result<ResolvedListen, String> {
+        let resolved = settings_config::resolve_local_api(config)?;
+        self.update_config(|settings| {
+            settings.local_api = resolved.config.clone();
+            Ok(())
+        })?;
+        Ok(resolved)
     }
 
     pub(super) fn restore_endpoint(
@@ -163,26 +180,24 @@ impl DesktopRuntime {
         }
         let current = self.manager.local_api()?;
         let defaults = ListenConfig::default();
-        let resolved = local_api::resolve(defaults.clone())?;
+        let resolved = settings_config::resolve_local_api(defaults.clone())?;
         self.rebind_local_api(defaults, current, resolved).await?;
-        let state = self.manager.snapshot()?;
-        let settings =
-            service_config::settings_from_state(state.profiles, state.active_profile_id, true)?;
-        let settings = service_config::save(settings)?;
-        let config = settings.runtime_config()?;
-        let credential_saved = settings
-            .active_profile()
-            .is_ok_and(|profile| profile.credential_saved);
-        self.manager.set_service_configuration(
-            config,
-            settings.profiles,
-            settings.active_profile_id,
-            credential_saved,
-            false,
-        );
-        desktop_core::preferences::reset()?;
+        // Profiles and keys are kept; everything else returns to its default.
+        self.update_config(|settings| {
+            *settings = Config {
+                active_profile: std::mem::take(&mut settings.active_profile),
+                profiles: std::mem::take(&mut settings.profiles),
+                ..Config::default()
+            };
+            Ok(())
+        })?;
+        self.update_credentials(|credentials| {
+            credentials.web_ui = Default::default();
+            Ok(())
+        })?;
+        self.publish_service_configuration(false)?;
         self.web_ui.set_password(None);
-        self.apply_web_ui(&desktop_core::preferences::WebUiConfig::default());
+        self.apply_web_ui(&desktop_core::config::WebUiConfig::default());
         self.manager.snapshot()
     }
 }

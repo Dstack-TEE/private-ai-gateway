@@ -1,7 +1,7 @@
 use crate::{
+    config::{self, Config, Profile},
     contracts::{AppState, ConfidentialProfile, ConfidentialProfileInput, ServiceProvider},
     private_fs::{self, Publish},
-    service_config::{self, ServiceSettings},
 };
 use serde::{Deserialize, Serialize};
 use std::{fs::File, io::Read, path::Path};
@@ -75,7 +75,7 @@ impl ProfileBackup {
         Ok(backup)
     }
 
-    pub fn merge(&self, settings: &mut ServiceSettings) -> Result<ImportResult, String> {
+    pub fn merge(&self, settings: &mut Config) -> Result<ImportResult, String> {
         self.validate()?;
         let mut candidate = settings.clone();
         let mut result = ImportResult {
@@ -83,8 +83,8 @@ impl ProfileBackup {
             skipped: 0,
         };
         for profile in &self.profiles {
-            let mut resolved = resolve(profile)?;
-            if candidate.profiles.iter().any(|existing| {
+            let resolved = resolve(profile)?;
+            if candidate.profiles.values().any(|existing| {
                 existing.name == resolved.name
                     && existing.provider == resolved.provider
                     && existing.remote_url == resolved.remote_url
@@ -92,12 +92,20 @@ impl ProfileBackup {
                 result.skipped += 1;
                 continue;
             }
-            resolved.id = format!("profile-{}", uuid::Uuid::new_v4());
-            resolved.credential_saved = false;
+            let id = format!("profile-{}", uuid::Uuid::new_v4());
             if candidate.profiles.is_empty() {
-                candidate.active_profile_id = resolved.id.clone();
+                candidate.active_profile = id.clone();
             }
-            candidate.upsert(resolved)?;
+            candidate.upsert(
+                id,
+                Profile {
+                    name: resolved.name,
+                    provider: resolved.provider,
+                    remote_url: resolved.remote_url,
+                    auth: resolved.auth,
+                    verified_at: None,
+                },
+            )?;
             result.imported += 1;
         }
         *settings = candidate;
@@ -106,7 +114,7 @@ impl ProfileBackup {
 }
 
 fn resolve(profile: &ProfileConfiguration) -> Result<ConfidentialProfile, String> {
-    service_config::resolve_profile(
+    config::resolve_profile(
         ConfidentialProfileInput {
             id: "import-validation".into(),
             name: profile.name.clone(),
@@ -201,13 +209,13 @@ mod tests {
     }
     #[test]
     fn imports_are_untrusted_additive_and_idempotent() {
-        let mut settings = ServiceSettings::default();
+        let mut settings = Config::default();
         assert_eq!(backup().merge(&mut settings).unwrap().imported, 1);
         assert_eq!(settings.profiles[0].verified_at, None);
-        assert!(!settings.profiles[0].credential_saved);
-        let id = settings.active_profile_id.clone();
+        let id = settings.active_profile.clone();
+        assert!(settings.profiles.contains_key(&id));
         assert_eq!(backup().merge(&mut settings).unwrap().skipped, 1);
-        assert_eq!(settings.active_profile_id, id);
+        assert_eq!(settings.active_profile, id);
         let mut invalid = backup();
         invalid.profiles[0].remote_url = "http://untrusted.example".into();
         assert!(invalid.merge(&mut settings).is_err());
@@ -215,7 +223,7 @@ mod tests {
     }
     #[test]
     fn import_capacity_and_file_limits_fail_without_partial_changes() {
-        let mut settings = ServiceSettings::default();
+        let mut settings = Config::default();
         for index in 0..49 {
             let mut item = backup();
             item.profiles[0].name = format!("Profile {index}");
@@ -235,7 +243,7 @@ mod tests {
         assert!(ProfileBackup::read(&path)
             .unwrap_err()
             .contains("too large"));
-        let exported = ProfileBackup::from_profiles(&settings.profiles);
+        let exported = ProfileBackup::from_profiles(&settings.profile_views(|_| None));
         let text = serde_json::to_string(&exported).unwrap();
         for excluded in ["credential", "verified", "auth", "activeProfileId"] {
             assert!(!text.contains(excluded));

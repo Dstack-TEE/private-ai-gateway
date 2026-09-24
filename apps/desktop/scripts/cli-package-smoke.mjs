@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
-import { access, chmod, constants, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { access, chmod, constants, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -102,13 +102,10 @@ try {
   const port = await reserveLoopbackPort();
   await mkdir(data, { recursive: true, mode: 0o700 });
   await chmod(data, 0o700);
-  const localApi = path.join(data, "local-api.json");
-  await writeFile(localApi, `${JSON.stringify({
-    listenAddress: "127.0.0.1",
-    allowNetworkAccess: false,
-    port,
-  }, null, 2)}\n`, { mode: 0o600 });
-  await chmod(localApi, 0o600);
+  await mkdir(path.join(data, "Config"), { mode: 0o700 });
+  const config = path.join(data, "Config", "config.toml");
+  await writeFile(config, `[localApi]\nport = ${port}\n`, { mode: 0o600 });
+  await chmod(config, 0o600);
 
   assert.equal((await runJson(["service", "status"])).status, "not_running");
   startAttempted = true;
@@ -124,10 +121,14 @@ try {
   const changed = await runJson(["--yes", "settings", "set", "appearance", "dark"]);
   assert.equal(changed.appearance, "dark");
   const settings = await runJson(["settings", "show"]);
-  assert.equal(settings.preferences.appearance, "dark");
-  assert.equal(settings.localApi.port, port);
-  assert.equal(settings.localApi.listenAddress, "127.0.0.1");
-  assert.equal(settings.localApi.allowNetworkAccess, false);
+  assert.equal(settings.settings.appearance, "dark");
+  assert.equal(settings.settings.localApi.port, port);
+  assert.equal(settings.settings.localApi.listenAddress, "127.0.0.1");
+  assert.equal(settings.settings.localApi.allowNetworkAccess, false);
+  assert.equal(settings.files.config, config);
+  // Written in place: the hand-written table is kept as it was.
+  const saved = await readFile(config, "utf8");
+  assert.ok(saved.includes('appearance = "dark"\n') && saved.includes(`[localApi]\nport = ${port}\n`), saved);
 
   assert.equal((await runJson(["--yes", "service", "stop"])).status, "stopped");
   assert.equal((await waitForNotRunning(10_000)).status, "not_running");

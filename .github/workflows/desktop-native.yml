@@ -665,8 +665,8 @@ jobs:
             $env:PAP_TEST_HELPER_PATH = "$installDir/private-ai-proxy-helper.exe"
             cargo test --release --locked --package private-ai-proxy-agent-bridge --lib -- --ignored hermes_windows_installed_command_round_trip
             if ($LASTEXITCODE -ne 0) { throw 'Hermes credential command failed' }
-            cargo test --release --locked --package private-ai-proxy-agent-bridge --lib -- --ignored keyring_round_trip
-            if ($LASTEXITCODE -ne 0) { throw 'Credential Manager check failed' }
+            cargo test --release --locked --package private-ai-proxy-runtime --lib -- --ignored legacy_keychain_import_round_trip
+            if ($LASTEXITCODE -ne 0) { throw 'Credential Manager import check failed' }
           } finally {
             if (Test-Path "$installDir/uninstall.exe") {
               Run-Installer "$installDir/uninstall.exe" "/S _?=$installDir"
@@ -719,7 +719,7 @@ jobs:
             keyring_pid=$!
             trap "kill $keyring_pid 2>/dev/null || true; wait $keyring_pid || true" EXIT
             gdbus wait --session --timeout 10 org.freedesktop.secrets
-            cargo test --release --locked --package private-ai-proxy-agent-bridge --lib -- --ignored keyring_round_trip
+            cargo test --release --locked --package private-ai-proxy-runtime --lib -- --ignored legacy_keychain_import_round_trip
           '
           xvfb-run -a dbus-run-session -- node scripts/native-backend-smoke.mjs /usr/bin
       - name: Stage and inspect macOS package

@@ -3,7 +3,7 @@
 //! Coding agents talk to a stable loopback HTTP endpoint, authenticate with
 //! machine-local tokens, and are relayed unchanged to the in-process ACI
 //! verifier after the agent token is swapped for the active Confidential AI
-//! profile credential held in the OS credential store. The verified remote
+//! profile credential held in `credentials.toml`. The verified remote
 //! catalog is the single source
 //! of model truth; agent configs are projected
 //! from it and restored field by field.

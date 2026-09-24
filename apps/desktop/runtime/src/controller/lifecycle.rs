@@ -79,7 +79,7 @@ impl DesktopRuntime {
         }
         let resumed = (|| {
             if state.endpoint_error.is_some() {
-                let resolved = local_api::resolve(state.local_api)?;
+                let resolved = settings_config::resolve_local_api(state.local_api)?;
                 self.restore_endpoint(resolved.clone())?;
                 self.manager
                     .set_endpoint(resolved.config, Ok(resolved.endpoint));
@@ -120,7 +120,7 @@ impl DesktopRuntime {
             .agent_policy
             .lock()
             .map_err(|_| "Agent state unavailable")?;
-        let config = service_config::resolve_runtime_config(config)?;
+        let config = settings_config::resolve_runtime_config(config)?;
         let state = self.manager.snapshot()?;
         if config.remote_url != state.config.remote_url {
             return Err("Select or verify the Confidential AI profile before starting".to_string());

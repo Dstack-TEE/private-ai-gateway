@@ -1,7 +1,7 @@
 [package]
 name = "private-ai-proxy-agent-bridge"
 version = "0.1.0"
-description = "Coding-agent bridge: the loopback Local API proxy, agent tokens, catalog, secrets, and agent config projections"
+description = "Coding-agent bridge: the loopback Local API proxy, agent tokens, catalog, and agent config projections"
 license = "Apache-2.0"
 edition = "2021"
 rust-version = "1.98"
@@ -23,7 +23,6 @@ chrono = { version = "0.4", default-features = false, features = ["std", "serde"
 futures-util = "0.3"
 hex = "0.4"
 jsonc-parser = { version = "0.33.1", features = ["serde", "cst"] }
-keyring = "4"
 rand = "0.8"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
 serde = { version = "1", features = ["derive"] }

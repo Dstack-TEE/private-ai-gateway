@@ -13,7 +13,6 @@ use tokio::{runtime::Handle, sync::Semaphore, task::JoinSet};
 use crate::controller::DesktopRuntime;
 
 use desktop_core::{
-    preferences,
     protocol::{self, rpc, Command, Hello, Outcome, Request, Response, RpcError, ShutdownMode},
     transport::{Listener, Stream},
 };
@@ -68,7 +67,7 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
     let handle = Handle::current();
     let startup = runtime.clone();
     tasks.spawn_blocking(move || {
-        let connect_on_launch = match preferences::load() {
+        let connect_on_launch = match startup.settings() {
             Ok(saved) => saved.connect_on_launch,
             Err(error) => {
                 startup.report_error(error);

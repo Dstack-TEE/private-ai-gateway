@@ -8,12 +8,12 @@ use serde_json::{json, Value};
 use crate::{
     agent_access,
     client::Client,
+    config::{Appearance, Config, NotificationPreferences, WebUiConfig},
     contracts::{
         AccountBalanceTarget, AccountSaveResult, AgentStatus, AppState, ConfidentialProfileInput,
         ConnectOptions, ListenConfig, ServiceProvider, StartConfig,
     },
     maintenance::ProfileBackup,
-    preferences::{Appearance, NotificationPreferences, Preferences, WebUiConfig},
     protocol::{rpc, Call, Command, Preference, RpcError},
     usage::UsageQuery,
 };
@@ -111,6 +111,7 @@ impl Event {
 pub struct StateEventProjection {
     client_key_revision: u64,
     backend_instance: Option<String>,
+    settings_revision: u64,
 }
 
 impl StateEventProjection {
@@ -118,7 +119,16 @@ impl StateEventProjection {
         Self {
             client_key_revision: state.client_key_revision,
             backend_instance: state.backend_instance.clone(),
+            settings_revision: state.config_files.revision,
         }
+    }
+
+    /// Whether applied settings changed since the last call, for example by an
+    /// edit of `config.toml`; the host then reapplies preferences.
+    pub fn settings_changed(&mut self, state: &AppState) -> bool {
+        let changed = state.config_files.revision != self.settings_revision;
+        self.settings_revision = state.config_files.revision;
+        changed
     }
 
     pub fn project(&mut self, state: &AppState) -> Vec<Event> {
@@ -497,8 +507,8 @@ async fn save_account_login(
     }
 }
 
-async fn preferences(backend: &impl Backend) -> Result<Preferences, String> {
-    call(backend, rpc::Preferences).await
+async fn preferences(backend: &impl Backend) -> Result<Config, String> {
+    call(backend, rpc::Settings).await
 }
 
 async fn set_preference(backend: &impl Backend, change: Preference) -> Result<(), String> {
@@ -511,7 +521,7 @@ async fn set_preference(backend: &impl Backend, change: Preference) -> Result<()
 pub async fn preference_events(
     backend: &impl Backend,
     host: &impl Host,
-) -> Result<(Preferences, Vec<Event>), String> {
+) -> Result<(Config, Vec<Event>), String> {
     let preferences = preferences(backend).await?;
     let launch = launch_preferences(backend, host).await?;
     let events = vec![

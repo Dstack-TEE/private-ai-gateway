@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::contracts::ServiceProvider;
 
+/// The loopback port of the account connection callback listener.
+pub const CALLBACK_PORT: u16 = 4181;
+
 #[derive(Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct LoginPresentation {

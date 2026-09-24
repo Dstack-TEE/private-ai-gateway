@@ -1,7 +1,7 @@
 [package]
 name = "private-ai-proxy-core"
 version = "0.1.0"
-description = "Private AI Proxy client side: contracts, management protocol and client, IPC transport, preferences and paths"
+description = "Private AI Proxy client side: contracts, management protocol and client, IPC transport, the settings file and paths"
 license = "Apache-2.0"
 edition = "2021"
 rust-version = "1.98"
@@ -17,12 +17,15 @@ path = "src/lib.rs"
 [dependencies]
 fd-lock = "4"
 if-addrs = "0.15"
+indexmap = { version = "2", features = ["serde"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
+schemars = { version = "1", features = ["indexmap2"] }
 semver = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
+toml_edit = { version = "0.25", features = ["serde"] }
 ts-rs = "12"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
