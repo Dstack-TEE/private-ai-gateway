@@ -9,7 +9,9 @@ use crate::{
     agent_access,
     client::{CallError, Client},
     config::{Appearance, Config, NotificationPreferences},
-    contracts::{AccountSaveResult, AgentStatus, AppState, ConfidentialProfileInput, ServiceProvider},
+    contracts::{
+        AccountSaveResult, AgentStatus, AppState, ConfidentialProfileInput, ServiceProvider,
+    },
     protocol::{self, rpc, Call, Command, Preference},
 };
 
@@ -573,7 +575,8 @@ mod tests {
             assert!(names.insert(method.name()), "{}", method.name());
             assert_eq!(Method::from_name(method.name()), Some(*method));
             let decoded = Command::decode(method.name(), json!({}));
-            let unknown = decoded.err().map(|error| error.code) == Some(protocol::ErrorCode::MethodNotFound);
+            let unknown =
+                decoded.err().map(|error| error.code) == Some(protocol::ErrorCode::MethodNotFound);
             // Host methods may share a command's name (`reset_settings`); command methods must.
             if method.is_command() {
                 assert!(!unknown, "{} is not a command", method.name());

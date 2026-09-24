@@ -172,7 +172,11 @@ impl Gate {
     /// Admits a browser request: an allowed host, the page's origin, a live
     /// session (only sign-in goes without), JSON mutations; every answer gets
     /// the security headers.
-    pub(crate) async fn authorize(self: &Arc<Self>, mut request: Request<Body>, next: Next) -> Response {
+    pub(crate) async fn authorize(
+        self: &Arc<Self>,
+        mut request: Request<Body>,
+        next: Next,
+    ) -> Response {
         let peer = request
             .extensions()
             .get::<ConnectInfo<SocketAddr>>()
@@ -342,11 +346,7 @@ struct SessionRequest {
 }
 
 /// Signs in with the password and sets the session cookie.
-async fn session(
-    Extension(gate): Extension<Arc<Gate>>,
-    jar: CookieJar,
-    body: Bytes,
-) -> Response {
+async fn session(Extension(gate): Extension<Arc<Gate>>, jar: CookieJar, body: Bytes) -> Response {
     let Ok(request) = serde_json::from_slice::<SessionRequest>(&body) else {
         return api::error(protocol::Error::invalid_request());
     };
@@ -486,6 +486,9 @@ fn status(code: ErrorCode, message: &'static str) -> Response {
 mod tests {
     use super::*;
     use axum::extract::connect_info::MockConnectInfo;
+    use desktop_core::{client::CallError, contracts::AppState, protocol::Command};
+    use serde_json::Value;
+    use tokio::sync::watch;
     use tower::ServiceExt;
 
     const HOST: &str = "127.0.0.1:3210";
@@ -498,17 +501,19 @@ mod tests {
     struct FakeBackend(Arc<Auth>);
 
     impl Backend for FakeBackend {
-        async fn execute(&self, command: Command) -> Result<Value, String> {
+        async fn execute(&self, command: Command) -> Result<Value, CallError> {
+            let invalid = |message: String| CallError::Api(protocol::Error::invalid_state(message));
             match command {
-                Command::Stop => Ok(serde_json::to_value(AppState::default()).unwrap()),
+                Command::Stop {} => Ok(serde_json::to_value(AppState::default()).unwrap()),
                 Command::SetWebUiPassword { password } => {
                     let hash = password
                         .map(|password| super::super::password::hash(&password))
-                        .transpose()?;
+                        .transpose()
+                        .map_err(invalid)?;
                     self.0.set_password(hash);
                     Ok(serde_json::to_value(AppState::default()).unwrap())
                 }
-                _ => Err("invalid_state: Stop protection before changing this".into()),
+                _ => Err(invalid("Stop protection before changing this".into())),
             }
         }
     }
@@ -535,17 +540,17 @@ mod tests {
         let auth = Arc::new(Auth::default());
         let shutdown = CancellationToken::new();
         let (states, receiver) = watch::channel(AppState::default());
-        let router = router(WebState {
+        let router = api::router(Api {
             backend: FakeBackend(auth.clone()),
-            host: WebHost {
-                events: broadcast::channel(4).0,
-            },
-            auth: auth.clone(),
-            throttle: Arc::default(),
+            host: ServiceHost::default(),
             states: receiver,
-            hosts: allowed_hosts(&listen).into(),
-            cookie: cookie_name(3210).into(),
             shutdown: shutdown.clone(),
+            listener: api::Listener::Web(Arc::new(Gate {
+                auth: auth.clone(),
+                throttle: Arc::default(),
+                hosts: allowed_hosts(&listen),
+                cookie: cookie_name(3210),
+            })),
         })
         .layer(MockConnectInfo(SocketAddr::from((
             [192, 168, 1, 30],
@@ -585,7 +590,7 @@ mod tests {
     async fn change_password(router: &Router, token: &str, body: Value) -> Response {
         send(
             router,
-            request(HttpMethod::POST, "/api/rpc/setWebUiPassword")
+            request(HttpMethod::POST, "/api/rpc/set_web_ui_password")
                 .header(header::COOKIE, cookie(token))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(body.to_string()))
@@ -721,8 +726,8 @@ mod tests {
         for (method, path) in [
             (HttpMethod::GET, "/api/bootstrap"),
             (HttpMethod::GET, "/api/events"),
-            (HttpMethod::POST, "/api/rpc/getState"),
-            (HttpMethod::POST, "/api/rpc/setWebUiPassword"),
+            (HttpMethod::POST, "/api/rpc/get_state"),
+            (HttpMethod::POST, "/api/rpc/set_web_ui_password"),
             (HttpMethod::DELETE, "/api/session"),
         ] {
             let response = send(
@@ -797,7 +802,7 @@ mod tests {
                 json!({ "password": next, "currentPassword": current }),
             )
             .await;
-            assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(refused.status(), StatusCode::CONFLICT);
             assert_eq!(
                 json_body(refused).await["error"]["message"],
                 WRONG_CURRENT_PASSWORD
@@ -809,7 +814,7 @@ mod tests {
             json!({ "password": "short", "currentPassword": PASSWORD }),
         )
         .await;
-        assert_eq!(short.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(short.status(), StatusCode::CONFLICT);
         assert!(fixture.auth.authorize(&other));
 
         let changed = change_password(
@@ -955,7 +960,11 @@ mod tests {
             )
             .await;
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
-            assert_eq!(json_body(response).await["error"]["code"], 404, "{uri}");
+            assert_eq!(
+                json_body(response).await["error"]["code"],
+                "not_found",
+                "{uri}"
+            );
         }
     }
 
@@ -1196,23 +1205,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn operation_errors_match_the_desktop_transport() {
+    async fn browsers_get_typed_errors_and_only_renderer_methods() {
         let fixture = fixture();
         let token = fixture.auth.open_session().unwrap();
-        let response = send(
-            &fixture.router,
-            request(HttpMethod::POST, "/api/rpc/activateProfile")
-                .header(header::COOKIE, cookie(&token))
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(json!({ "profileId": "missing" }).to_string()))
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let call = |name: &str, body: Value| {
+            send(
+                &fixture.router,
+                request(HttpMethod::POST, &format!("/api/rpc/{name}"))
+                    .header(header::COOKIE, cookie(&token))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+        };
+        let response = call("activate_profile", json!({ "profileId": "missing" })).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
         assert_eq!(
-            json_body(response).await["error"]["message"],
-            "invalid_state: Stop protection before changing this"
+            json_body(response).await["error"],
+            json!({ "code": "invalid_state", "message": "Stop protection before changing this" })
         );
+        // Commands only the local endpoint's owner may run are unknown here.
+        for name in ["shutdown", "export_profiles", "clear_usage", "notACommand"] {
+            let response = call(name, json!({})).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{name}");
+            assert_eq!(
+                json_body(response).await["error"]["code"],
+                "method_not_found"
+            );
+        }
+        let invalid = call("activate_profile", json!({ "profile_id": "p" })).await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(invalid).await["error"]["code"], "invalid_request");
     }
 
     #[tokio::test(start_paused = true)]
@@ -1235,7 +1258,7 @@ mod tests {
                 fixture.shutdown.cancel();
             }
             let body = tokio::time::timeout(
-                SESSION_CHECK * 2,
+                api::SESSION_CHECK * 2,
                 axum::body::to_bytes(response.into_body(), usize::MAX),
             )
             .await

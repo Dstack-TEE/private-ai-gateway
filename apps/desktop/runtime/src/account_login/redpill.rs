@@ -11,7 +11,9 @@ impl CallbackState {
     pub(super) async fn accept(&self, uri: &Uri, headers: &HeaderMap) -> Result<(), CallbackError> {
         let result = match callback_code(uri, headers, &self.expected) {
             Ok(code) => Ok(code),
-            Err(CallbackError::Declined) => Err(Error::account("Account: Authorization was declined.").into()),
+            Err(CallbackError::Declined) => {
+                Err(Error::account("Account: Authorization was declined."))
+            }
             Err(error) => return Err(error),
         };
         let declined = result.is_err();
@@ -76,10 +78,9 @@ pub(super) async fn transition_at(
         return Ok(CredentialTransition::Unavailable);
     }
     if !response.status().is_success() {
-        return Err(
-            Error::account("Account: Credential update failed; retry or manage the key in your provider console.")
-                .into(),
-        );
+        return Err(Error::account(
+            "Account: Credential update failed; retry or manage the key in your provider console.",
+        ));
     }
     Ok(CredentialTransition::Applied)
 }
@@ -101,7 +102,7 @@ pub(super) fn installation_id(profile_id: &str) -> Result<Uuid, Error> {
             .map_err(|_| Error::account("Account: Cannot save device identity."))?;
             id
         }
-        Err(_) => return Err(Error::account("Account: Cannot read device identity.").into()),
+        Err(_) => return Err(Error::account("Account: Cannot read device identity.")),
     };
     let hash = Sha256::digest(format!("{device}:{profile_id}").as_bytes());
     let mut bytes = [0u8; 16];

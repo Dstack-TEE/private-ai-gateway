@@ -7,7 +7,7 @@ use std::fmt;
 
 use desktop_core::protocol::{self, ErrorCode};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Error {
     /// Authored for the caller, answered as it is.
     Api(protocol::Error),

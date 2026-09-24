@@ -474,8 +474,14 @@ fn a_failed_import_writes_nothing_and_is_retried_on_the_next_start() {
             Ok(())
         })
         .unwrap_err();
+    assert_eq!(
+        refused.code(),
+        desktop_core::protocol::ErrorCode::InvalidState
+    );
     assert!(
-        refused.starts_with("Settings from 0.1 are not imported yet"),
+        refused
+            .to_string()
+            .starts_with("Settings from 0.1 are not imported yet"),
         "{refused}"
     );
     assert!(settings.update_credentials(|_| Ok(())).is_err());
@@ -732,7 +738,7 @@ fn a_disconnect_before_the_credential_import_fails_instead_of_dropping_the_key()
     local
         .update(|secrets| {
             secrets.agent_restore.clear();
-            Ok(())
+            Ok::<_, String>(())
         })
         .unwrap();
     fs::write(data.join(PREFERENCES_FILE), "{}").unwrap();

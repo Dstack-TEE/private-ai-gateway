@@ -105,14 +105,16 @@ pub(crate) async fn dispatch(
                 ErrorCode::NotFound,
                 "Usage record not found",
             )),
-            Err(error) => Err(crate::Error::from(error).into()),
+            Err(error) => Err(error.into()),
         },
         Command::ExportUsage { query, path } => {
             respond::<rpc::ExportUsage, _>(runtime.export_usage_csv(query, absolute(path)?))
         }
         Command::ClearUsage {} => respond::<rpc::ClearUsage, _>(runtime.clear_usage()),
         Command::GetClientKey {} => respond::<rpc::GetClientKey, _>(runtime.client_key()),
-        Command::RotateClientKey {} => respond::<rpc::RotateClientKey, _>(runtime.rotate_client_key()),
+        Command::RotateClientKey {} => {
+            respond::<rpc::RotateClientKey, _>(runtime.rotate_client_key())
+        }
         Command::SaveLocalApiConfig { config } => {
             respond::<rpc::SaveLocalApiConfig, _>(runtime.save_local_api_config(config).await)
         }
@@ -140,7 +142,9 @@ pub(crate) async fn dispatch(
         Command::DisconnectAllAgents {} => {
             respond::<rpc::DisconnectAllAgents, _>(runtime.disconnect_all_agents())
         }
-        Command::ResetSettings {} => respond::<rpc::ResetSettings, _>(runtime.reset_settings().await),
+        Command::ResetSettings {} => {
+            respond::<rpc::ResetSettings, _>(runtime.reset_settings().await)
+        }
         Command::Settings {} => respond::<rpc::Settings, _>(runtime.settings()),
         Command::SetPreference { change } => {
             respond::<rpc::SetPreference, _>(runtime.set_preference(change))

@@ -79,9 +79,9 @@ pub(crate) async fn set_cli_registration(
     if !installed {
         let writer = client.clone();
         run_blocking(move || {
-            writer.call(rpc::SetPreference {
+            Ok(writer.call(rpc::SetPreference {
                 change: Preference::AutoCliRegistration(false),
-            })
+            })?)
         })
         .await?;
     }
@@ -92,9 +92,9 @@ pub(crate) async fn set_cli_registration(
     }?;
     if installed {
         run_blocking(move || {
-            client.call(rpc::SetPreference {
+            Ok(client.call(rpc::SetPreference {
                 change: Preference::AutoCliRegistration(true),
-            })
+            })?)
         })
         .await?;
     }

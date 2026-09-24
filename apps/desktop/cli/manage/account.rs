@@ -135,7 +135,7 @@ pub(super) fn login(
         Some(id)
     };
     let operation_id = uuid::Uuid::new_v4().to_string();
-    let initial = client.call(rpc::SaveAccountLogin {
+    let initial = client.call(rpc::BeginAccountSave {
         operation_id: operation_id.clone(),
         id: login.id,
         profile,

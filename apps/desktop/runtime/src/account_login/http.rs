@@ -96,7 +96,9 @@ pub(super) fn account_error(status: StatusCode, data: &Value) -> Error {
 
     match protocol_error(data) {
         Some("access_denied") => Error::account("Account: Authorization was declined."),
-        Some("expired_token") => Error::account("Account: Authorization expired; reconnect the account."),
+        Some("expired_token") => {
+            Error::account("Account: Authorization expired; reconnect the account.")
+        }
         _ => Error::account(format!(
             "Account: Service rejected the request (HTTP {}). Retry or contact support.",
             status.as_u16()

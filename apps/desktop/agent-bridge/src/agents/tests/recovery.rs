@@ -113,7 +113,7 @@ fn native_model_settings_edits_invalidate_preview_and_survive_disconnect() {
             .apply(agent, true, &preview.revision, Some(&catalog), &options)
             .unwrap_err()
             .code()
-            == "revision_conflict"
+            == desktop_core::protocol::ErrorCode::RevisionConflict
     );
     let preview = sandbox
         .projector
@@ -825,7 +825,10 @@ fn disconnect_fails_closed_when_revocation_cannot_be_persisted() {
         .projector
         .apply(Agent::ClaudeCode, false, &preview.revision, None, &options)
         .unwrap_err();
-    assert_eq!(error.code(), "configuration_restore_failed");
+    assert_eq!(
+        error.code(),
+        desktop_core::protocol::ErrorCode::ConfigurationRestoreFailed
+    );
     // The removal happened before the failed sync stopped everything…
     assert!(sandbox
         .projector

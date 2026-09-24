@@ -37,10 +37,10 @@ use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
 
 use crate::{
     local_state::{LocalState, RetiredCredential},
-    Error,
     settings::{Credentials, Settings},
     usage::UsageStore,
     verifier_session::{SessionManager, VerifierLauncher},
+    Error,
 };
 
 pub struct RuntimeOptions {
@@ -303,13 +303,15 @@ impl DesktopRuntime {
         match (listener, launch_error) {
             (Some(listener), _) => {
                 manager.set_endpoint(local.config.clone(), Ok(local.endpoint.clone()));
-                runtime.endpoint.start(
-                    manager.clone(),
-                    proxy.clone(),
-                    listener,
-                    local.config.clone(),
-                )
-                .map_err(|error| error.to_string())?;
+                runtime
+                    .endpoint
+                    .start(
+                        manager.clone(),
+                        proxy.clone(),
+                        listener,
+                        local.config.clone(),
+                    )
+                    .map_err(|error| error.to_string())?;
             }
             (None, Some(error)) => manager.set_endpoint(local.config.clone(), Err(error)),
             (None, None) => manager.set_endpoint(
@@ -448,7 +450,10 @@ impl DesktopRuntime {
     }
 
     pub fn export_profiles(&self, path: PathBuf) -> Result<(), Error> {
-        Ok(desktop_core::maintenance::write_export(&path, &self.export_profiles_content()?)?)
+        Ok(desktop_core::maintenance::write_export(
+            &path,
+            &self.export_profiles_content()?,
+        )?)
     }
 
     pub fn export_profiles_content(&self) -> Result<String, Error> {
@@ -458,14 +463,16 @@ impl DesktopRuntime {
     }
 
     pub fn export_diagnostics(&self, path: PathBuf, version: &str) -> Result<(), Error> {
-        Ok(desktop_core::maintenance::write_export(&path, &self.export_diagnostics_content(version)?)?)
+        Ok(desktop_core::maintenance::write_export(
+            &path,
+            &self.export_diagnostics_content(version)?,
+        )?)
     }
 
     pub fn export_diagnostics_content(&self, version: &str) -> Result<String, Error> {
-        Ok(desktop_core::maintenance::json_content(&desktop_core::maintenance::diagnostics(
-            &self.state()?,
-            version,
-        ))?)
+        Ok(desktop_core::maintenance::json_content(
+            &desktop_core::maintenance::diagnostics(&self.state()?, version),
+        )?)
     }
 
     pub fn usage_record(&self, record_id: &str) -> Result<Option<RequestActivity>, Error> {

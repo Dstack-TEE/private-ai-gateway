@@ -316,10 +316,7 @@ pub fn run() {
                         if let Err(error) =
                             desktop_core::ui_api::refresh_preferences(&client, &host).await
                         {
-                            tracing::warn!(
-                                "Cannot refresh desktop preferences: {}",
-                                error.message()
-                            );
+                            tracing::warn!("Cannot refresh desktop preferences: {}", error);
                         }
                     });
                 }
@@ -357,10 +354,7 @@ pub fn run() {
                             if let Err(error) =
                                 desktop_core::ui_api::refresh_preferences(&client, &host).await
                             {
-                                tracing::warn!(
-                                    "Cannot refresh desktop preferences: {}",
-                                    error.message()
-                                );
+                                tracing::warn!("Cannot refresh desktop preferences: {}", error);
                             }
                         });
                     }

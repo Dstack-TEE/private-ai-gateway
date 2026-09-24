@@ -494,12 +494,18 @@ mod tests {
     #[test]
     fn unknown_commands_and_invalid_parameters_differ() {
         let code = |name, params| Command::decode(name, params).err().map(|error| error.code);
-        assert_eq!(code("notACommand", json!({})), Some(ErrorCode::MethodNotFound));
+        assert_eq!(
+            code("notACommand", json!({})),
+            Some(ErrorCode::MethodNotFound)
+        );
         assert_eq!(
             code("activate_profile", json!({"profile_id": "p"})),
             Some(ErrorCode::InvalidRequest)
         );
-        assert_eq!(code("get_state", json!({"extra": 1})), Some(ErrorCode::InvalidRequest));
+        assert_eq!(
+            code("get_state", json!({"extra": 1})),
+            Some(ErrorCode::InvalidRequest)
+        );
     }
 
     #[test]

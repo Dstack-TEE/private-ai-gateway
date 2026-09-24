@@ -284,15 +284,14 @@ impl PendingLogin {
 
     pub async fn complete_callback(&self, id: &str, value: &str) -> Result<(), Error> {
         self.validate(id)?;
-        let state = self
-            .callback
-            .as_ref()
-            .ok_or(Error::account("Account: This provider uses a device code, not a callback link."))?;
+        let state = self.callback.as_ref().ok_or(Error::account(
+            "Account: This provider uses a device code, not a callback link.",
+        ))?;
         if value.len() > 16384 {
-            return Err(Error::account("Account: Callback link is too long.").into());
+            return Err(Error::account("Account: Callback link is too long."));
         }
-        let url =
-            Url::parse(value.trim()).map_err(|_| Error::account("Account: Paste the complete callback URL."))?;
+        let url = Url::parse(value.trim())
+            .map_err(|_| Error::account("Account: Paste the complete callback URL."))?;
         if url.scheme() != "http"
             || url.host() != Some(url::Host::Ipv4(*CALLBACK_ADDRESS.ip()))
             || url.port() != Some(CALLBACK_ADDRESS.port())
@@ -301,7 +300,9 @@ impl PendingLogin {
             || url.password().is_some()
             || url.fragment().is_some()
         {
-            return Err(Error::account("Account: This callback URL does not match the current sign-in.").into());
+            return Err(Error::account(
+                "Account: This callback URL does not match the current sign-in.",
+            ));
         }
         let uri: Uri = format!("{}?{}", url.path(), url.query().unwrap_or_default())
             .parse()
@@ -309,10 +310,9 @@ impl PendingLogin {
         let mut headers = HeaderMap::new();
         let host = CALLBACK_ADDRESS.to_string();
         headers.insert("host", host.parse().expect("constant host"));
-        state
-            .accept(&uri, &headers)
-            .await
-            .map_err(|_| Error::account("Account: This callback is invalid or has already been used.").into())
+        state.accept(&uri, &headers).await.map_err(|_| {
+            Error::account("Account: This callback is invalid or has already been used.")
+        })
     }
 
     pub fn profile_id(&self) -> &str {

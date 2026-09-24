@@ -73,7 +73,9 @@ impl DesktopRuntime {
             ));
         }
         let hash = match password {
-            Some(password) => Some(web_ui::password::hash(&password).map_err(Error::invalid_state)?),
+            Some(password) => {
+                Some(web_ui::password::hash(&password).map_err(Error::invalid_state)?)
+            }
             None if self.settings.config()?.web_ui.enabled => {
                 return Err(Error::invalid_state(
                     "Web UI is on. Turn it off before removing its password.",

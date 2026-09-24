@@ -109,7 +109,7 @@ impl DesktopRuntime {
                 Ok(state) => state,
                 Err(error) => {
                     self.proxy.set_api_key(None);
-                    return Err(error.into());
+                    return Err(error);
                 }
             };
             let Some(session_id) = started.session_id.clone() else {
@@ -159,14 +159,14 @@ impl DesktopRuntime {
             }) {
                 self.proxy.set_api_key(None);
                 self.manager.restore_snapshot(previous);
-                return Err(error.into());
+                return Err(error);
             }
         }
         if replace_key {
             if let Err(error) = self.set_profile_key(&id, Some(&candidate_key)) {
                 self.proxy.set_api_key(None);
                 self.manager.restore_snapshot(previous);
-                return Err(error.into());
+                return Err(error);
             }
         }
         if replace_key
@@ -206,8 +206,9 @@ impl DesktopRuntime {
             return Err(match restore_error {
                 Some(restore_error) => format!(
                     "{error}. The previous credential could not be restored: {restore_error}"
-                ).into(),
-                None => error.into(),
+                )
+                .into(),
+                None => error,
             });
         }
         self.recovery.cancel();
@@ -257,7 +258,9 @@ impl DesktopRuntime {
     pub async fn delete_profile(&self, profile_id: String) -> Result<AppState, Error> {
         let _operation = self.configuration_change()?;
         if self.manager.is_running()? {
-            return Err(Error::invalid_state("Stop protection before deleting a profile"));
+            return Err(Error::invalid_state(
+                "Stop protection before deleting a profile",
+            ));
         }
         let previous = self.manager.snapshot()?;
         let affects_active = previous.active_profile_id == profile_id;
@@ -302,7 +305,8 @@ impl DesktopRuntime {
                     Ok(()) => error,
                     Err(restore_error) => format!(
                         "{error}. The deleted credential could not be restored: {restore_error}"
-                    ).into(),
+                    )
+                    .into(),
                 },
             );
         }
@@ -317,7 +321,9 @@ impl DesktopRuntime {
     pub async fn clear_api_key(&self) -> Result<AppState, Error> {
         let _operation = self.configuration_change()?;
         if self.manager.is_running()? {
-            return Err(Error::invalid_state("Stop protection before deleting a profile credential"));
+            return Err(Error::invalid_state(
+                "Stop protection before deleting a profile credential",
+            ));
         }
         let state = self.manager.snapshot()?;
         if state.active_profile_id.is_empty() {

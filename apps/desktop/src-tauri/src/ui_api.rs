@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use desktop_core::{
     agent_access::AgentAccessStatus,
-    client::Client,
+    client::{CallError, Client},
     config::{Appearance, NotificationPreferences},
     contracts::{AgentStatus, AppState},
     protocol::rpc,
@@ -92,7 +92,7 @@ impl Host for TauriHost {
         notifications::set_cached_preferences(self.app(), preferences)
     }
 
-    async fn reset_settings(&self, backend: &impl Backend) -> Result<AppState, String> {
+    async fn reset_settings(&self, backend: &impl Backend) -> Result<AppState, CallError> {
         let prepared = self.app().state::<updates::PreparedUpdate>();
         let mut prepared = prepared
             .0
@@ -128,7 +128,9 @@ impl Host for TauriHost {
         .await;
         *prepared = None;
         result.map_err(|error| {
-            format!("Reset did not finish. Review the error and retry Reset settings. {error}")
+            CallError::Local(format!(
+                "Reset did not finish. Review the error and retry Reset settings. {error}"
+            ))
         })
     }
 
@@ -152,7 +154,7 @@ pub(crate) async fn invoke(
 ) -> Result<Value, String> {
     shared::invoke(client.inner(), &TauriHost::new(window), method, params)
         .await
-        .map_err(shared::Error::message)
+        .map_err(String::from)
 }
 
 #[cfg(all(target_os = "macos", feature = "mac-app-store"))]

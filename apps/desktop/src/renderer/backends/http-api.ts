@@ -48,7 +48,7 @@ function createPlatform(bootstrap: WebBootstrap): UiPlatform {
     setUpdateChannel: async (channel) => channel,
     // The backend's own installation owns updates; the browser only announces them.
     prepareUpdate: async (): Promise<UpdateInfo> => {
-      const notice = await rpc<UpdateNotice>("getUpdateNotice");
+      const notice = await rpc<UpdateNotice>("get_update_notice");
       return {
         enabled: false,
         systemManaged: true,
@@ -72,11 +72,11 @@ function createPlatform(bootstrap: WebBootstrap): UiPlatform {
     selectProfileBackup,
     saveProfileExport: async () => download(
       "private-ai-proxy-profiles.json",
-      await rpc<string>("exportProfilesContent"),
+      await rpc<string>("export_profiles_content"),
     ),
     saveDiagnosticsExport: async () => download(
       "private-ai-proxy-diagnostics.json",
-      await rpc<string>("exportDiagnosticsContent"),
+      await rpc<string>("export_diagnostics_content"),
     ),
     requestNotificationPermission: async () => ({ permission: "unsupported", alertsEnabled: false }),
     openNotificationSettings: async () => undefined,
@@ -100,10 +100,10 @@ function createPlatform(bootstrap: WebBootstrap): UiPlatform {
       }
     },
     openOrganization: async (organizationSlug) => openAllowed(
-      await rpc<string>("getOrganizationUrl", { organizationSlug }),
+      await rpc<string>("get_organization_url", { organizationSlug }),
     ),
     openTopUp: async (provider, scopeSlug) => openAllowed(
-      await rpc<string>("getTopUpUrl", { provider, scopeSlug }),
+      await rpc<string>("get_top_up_url", { provider, scopeSlug }),
     ),
   };
 }

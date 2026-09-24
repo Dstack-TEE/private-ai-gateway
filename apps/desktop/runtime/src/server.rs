@@ -141,7 +141,10 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
     // Open connections finish their answer and close; event streams end at
     // `stopped`. A command blocked on the network is not waited for past the bound.
     tracing::info!("Shutdown: closing management connections");
-    if tokio::time::timeout(EXIT_DRAIN_TIMEOUT, server).await.is_err() {
+    if tokio::time::timeout(EXIT_DRAIN_TIMEOUT, server)
+        .await
+        .is_err()
+    {
         tracing::warn!(
             "Shutdown: management connections still open after {} s; closing without them",
             EXIT_DRAIN_TIMEOUT.as_secs()
@@ -245,7 +248,9 @@ pub(crate) fn execute(
     command: Command,
 ) -> Result<Value, protocol::Error> {
     match command {
-        Command::GetState {} => return handle.block_on(crate::dispatch::dispatch(runtime, command)),
+        Command::GetState {} => {
+            return handle.block_on(crate::dispatch::dispatch(runtime, command))
+        }
         Command::Shutdown { instance_id, mode } => {
             if instance_id != api::version().instance_id {
                 return Err(protocol::Error::new(
@@ -274,13 +279,14 @@ pub(crate) fn execute(
             "The backend is shutting down.",
         ));
     }
-    let _export = if matches!(command, Command::ExportUsage { .. }) {
-        Some(admission.exports.try_acquire().map_err(|_| {
-            protocol::Error::new(ErrorCode::Busy, "Another export is in progress.")
-        })?)
-    } else {
-        None
-    };
+    let _export =
+        if matches!(command, Command::ExportUsage { .. }) {
+            Some(admission.exports.try_acquire().map_err(|_| {
+                protocol::Error::new(ErrorCode::Busy, "Another export is in progress.")
+            })?)
+        } else {
+            None
+        };
     handle.block_on(crate::dispatch::dispatch(runtime, command))
 }
 
@@ -333,7 +339,10 @@ pub(crate) async fn drain_and_stop(
                 DRAIN_TIMEOUT.as_secs()
             )
         });
-    runtime.shutdown(mode).await.map_err(|error| error.to_string())
+    runtime
+        .shutdown(mode)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Exits the process if it is still running [`SHUTDOWN_TIMEOUT`] after
@@ -364,4 +373,3 @@ impl Watchdog {
         std::mem::forget(self);
     }
 }
-

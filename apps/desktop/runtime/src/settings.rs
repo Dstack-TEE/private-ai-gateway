@@ -30,6 +30,7 @@ use std::{
     time::Duration,
 };
 
+use crate::Error;
 use desktop_core::{
     config::{
         self, Config, Invalid, Parsed, CONFIG_FILE, CONFIG_HEADER, CREDENTIALS_FILE, SCHEMA_FILE,
@@ -41,7 +42,6 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use toml_edit::{DocumentMut, Item, TableLike};
-use crate::Error;
 
 const CREDENTIALS_HEADER: &str =
     "# Private AI Proxy credentials: provider API keys and the web UI password
@@ -414,13 +414,12 @@ pub(crate) fn write<T: Serialize>(
     let current = read(&path, name == CREDENTIALS_FILE)
         .map_err(|error| format!("Cannot read {name}: {error}"))?;
     // The file's own errors name it with a position; the user fixes them.
-    let text =
-        edit(current.as_deref().unwrap_or(header), &from, &to).map_err(|()| {
-            Error::invalid_state(match current.as_deref().map(parse) {
-                Some(Err(error)) => format!("{error}. Fix {name} before changing settings."),
-                _ => format!("{name} is not valid TOML. Fix it before changing settings."),
-            })
-        })?;
+    let text = edit(current.as_deref().unwrap_or(header), &from, &to).map_err(|()| {
+        Error::invalid_state(match current.as_deref().map(parse) {
+            Some(Err(error)) => format!("{error}. Fix {name} before changing settings."),
+            _ => format!("{name} is not valid TOML. Fix it before changing settings."),
+        })
+    })?;
     parse(&text).map_err(|error| {
         Error::invalid_state(format!("{error}. Fix {name} before changing settings."))
     })?;

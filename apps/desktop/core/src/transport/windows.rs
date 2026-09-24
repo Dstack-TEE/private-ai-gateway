@@ -33,7 +33,9 @@ use windows_sys::Win32::{
     },
     System::{
         Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId},
-        Threading::{GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION},
+        Threading::{
+            GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+        },
     },
 };
 

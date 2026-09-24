@@ -41,7 +41,11 @@ async fn main() {
                 }
             }
         }
-        Err(_) => manage::run_matches(&matches, command).map(|()| 0),
+        // Management calls block on the local API; keep them off the async workers.
+        Err(_) => tokio::task::spawn_blocking(move || manage::run_matches(&matches, command))
+            .await
+            .unwrap_or_else(|_| Err("The command could not complete".into()))
+            .map(|()| 0),
     };
     let code = match result {
         Ok(code) => code,

@@ -12,10 +12,10 @@ impl DesktopRuntime {
         &self,
         change: desktop_core::protocol::Preference,
     ) -> Result<Config, Error> {
-        Ok(self.update_config(|saved| {
+        self.update_config(|saved| {
             change.apply(saved);
             Ok(())
-        })?)
+        })
     }
 
     /// Applies edits of `config.toml` or `credentials.toml` made outside the

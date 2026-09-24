@@ -22,12 +22,8 @@ impl DesktopRuntime {
     }
 
     /// Saves or removes a profile's API key.
-    pub(super) fn set_profile_key(
-        &self,
-        profile_id: &str,
-        key: Option<&str>,
-    ) -> Result<(), Error> {
-        Ok(self.update_credentials(|credentials| {
+    pub(super) fn set_profile_key(&self, profile_id: &str, key: Option<&str>) -> Result<(), Error> {
+        self.update_credentials(|credentials| {
             match key {
                 Some(key) => {
                     credentials.profiles.insert(
@@ -42,7 +38,7 @@ impl DesktopRuntime {
                 }
             }
             Ok(())
-        })?)
+        })
     }
 
     /// Publishes the saved profiles without touching the session.

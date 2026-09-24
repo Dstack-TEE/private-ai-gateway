@@ -3,10 +3,7 @@ use desktop_core::protocol::ShutdownMode;
 
 impl DesktopRuntime {
     pub(super) fn configuration_change(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, Error> {
-        let operation = self
-            .lifecycle
-            .try_lock()
-            .map_err(|_| Error::busy())?;
+        let operation = self.lifecycle.try_lock().map_err(|_| Error::busy())?;
         if self.exiting.load(Ordering::Acquire) {
             return Err("The app is closing".into());
         }
@@ -89,9 +86,7 @@ impl DesktopRuntime {
         })();
         if let Err(error) = resumed {
             self.recovery.wait();
-            return Err(format!(
-                "Could not reconnect; retrying automatically: {error}"
-            ).into());
+            return Err(format!("Could not reconnect; retrying automatically: {error}").into());
         }
         Ok(())
     }
@@ -124,23 +119,27 @@ impl DesktopRuntime {
         let config = settings_config::resolve_runtime_config(config)?;
         let state = self.manager.snapshot()?;
         if config.remote_url != state.config.remote_url {
-            return Err(Error::invalid_state("Select or verify the Confidential AI profile before starting"));
+            return Err(Error::invalid_state(
+                "Select or verify the Confidential AI profile before starting",
+            ));
         }
         let profile = state
             .profiles
             .iter()
             .find(|profile| profile.id == state.active_profile_id)
-            .ok_or_else(|| Error::invalid_state("Create a Confidential AI profile before starting"))?;
-        let key = self
-            .load_profile_key(&profile.id)?
-            .ok_or_else(|| Error::invalid_state("Add a credential to the active Confidential AI profile"))?;
+            .ok_or_else(|| {
+                Error::invalid_state("Create a Confidential AI profile before starting")
+            })?;
+        let key = self.load_profile_key(&profile.id)?.ok_or_else(|| {
+            Error::invalid_state("Add a credential to the active Confidential AI profile")
+        })?;
         self.proxy.set_api_key(Some(key));
         self.manager.set_api_key_saved(true);
         match self.manager.clone().start(config) {
             Ok(state) => Ok(state),
             Err(error) => {
                 self.proxy.set_api_key(None);
-                Err(error.into())
+                Err(error)
             }
         }
     }

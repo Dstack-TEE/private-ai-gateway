@@ -440,18 +440,19 @@ fn import_pending_secrets(
 
     // 1. Secrets, durable and verified, before anything is deleted.
     if !keys.is_empty() {
-        settings.update_credentials(|credentials| {
-            for (id, key) in &keys {
-                credentials
-                    .profiles
-                    .entry(id.clone())
-                    .or_insert_with(|| ProfileCredential {
-                        api_key: key.clone(),
-                    });
-            }
-            Ok(())
-        })
-        .map_err(|error| error.to_string())?;
+        settings
+            .update_credentials(|credentials| {
+                for (id, key) in &keys {
+                    credentials
+                        .profiles
+                        .entry(id.clone())
+                        .or_insert_with(|| ProfileCredential {
+                            api_key: key.clone(),
+                        });
+                }
+                Ok(())
+            })
+            .map_err(|error| error.to_string())?;
         let written = private_fs::read_private_text(&settings.dir.join(CREDENTIALS_FILE))
             .map_err(|error| format!("Cannot verify {CREDENTIALS_FILE}: {error}"))?
             .ok_or_else(|| format!("Cannot verify {CREDENTIALS_FILE}"))

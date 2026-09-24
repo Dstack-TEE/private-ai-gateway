@@ -163,53 +163,70 @@ impl Client {
             }
             Err(error) if absent(&error) => {
                 if block_on(legacy::is_running())? {
-                    Client::new().shutdown_owned(Some(&expected()?), ShutdownMode::UpdateRestart)?;
+                    Client::new()
+                        .shutdown_owned(Some(&expected()?), ShutdownMode::UpdateRestart)?;
                 }
             }
             Err(error) => return Err(connection_error(error)),
         }
-        let mut child = crate::launch::spawn_background()?;
+        let mut child = Some(crate::launch::spawn_background()?);
         // A backend that exits is reported immediately below; this only bounds a
         // live but slow start.
         let deadline = Instant::now() + BACKEND_START_TIMEOUT;
         loop {
             match block_on(open())? {
                 Ok(connection) if current(&connection.version) => {
-                    std::thread::spawn(move || {
-                        let _ = child.wait();
-                    });
+                    if let Some(mut child) = child {
+                        std::thread::spawn(move || {
+                            let _ = child.wait();
+                        });
+                    }
                     return Ok(());
                 }
                 Ok(_) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    if let Some(mut child) = child {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
                     return Err("The bundled backend started with a different build. Reinstall the app and try again.".into());
                 }
                 Err(error) if absent(&error) => {}
                 Err(error) => {
-                    std::thread::spawn(move || {
-                        let _ = child.wait();
-                    });
+                    if let Some(mut child) = child {
+                        std::thread::spawn(move || {
+                            let _ = child.wait();
+                        });
+                    }
                     return Err(connection_error(error));
                 }
             }
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|error| format!("Cannot inspect backend startup: {error}"))?
-            {
-                let diagnostic = child.startup_diagnostic();
-                return Err(match diagnostic {
-                    Some(diagnostic) => {
-                        format!("Backend exited during startup ({status}): {diagnostic}")
+            if let Some(running) = child.as_mut() {
+                if let Some(status) = running
+                    .try_wait()
+                    .map_err(|error| format!("Cannot inspect backend startup: {error}"))?
+                {
+                    // Another client started a backend at the same time and it
+                    // holds the instance lock: wait for that one instead.
+                    if crate::lock::instance(&data).is_ok_and(|lock| lock.is_none()) {
+                        child = None;
+                    } else {
+                        let diagnostic = running.startup_diagnostic();
+                        return Err(match diagnostic {
+                            Some(diagnostic) => {
+                                format!("Backend exited during startup ({status}): {diagnostic}")
+                            }
+                            None => format!("Backend exited during startup ({status})"),
+                        });
                     }
-                    None => format!("Backend exited during startup ({status})"),
-                });
+                }
             }
             if Instant::now() >= deadline {
                 // Never kill an unrelated winner or retry a mutation after an ambiguous timeout.
-                let diagnostic = child.diagnostic_snapshot();
-                let _ = child.kill();
-                let _ = child.wait();
+                let diagnostic = child.as_ref().and_then(|child| child.diagnostic_snapshot());
+                if let Some(mut child) = child {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
                 return Err(match diagnostic {
                     Some(diagnostic) => format!(
                         "Backend readiness timed out: {diagnostic}. Run private-ai-proxy doctor."
@@ -291,9 +308,14 @@ impl Client {
         block_on(async {
             let mut connection = open_current().await.map_err(connection_error)?;
             let instance = connection.version.instance_id.clone();
-            let response = send(&mut connection.sender, Method::GET, protocol::EVENTS_PATH, None)
-                .await
-                .map_err(connection_error)?;
+            let response = send(
+                &mut connection.sender,
+                Method::GET,
+                protocol::EVENTS_PATH,
+                None,
+            )
+            .await
+            .map_err(connection_error)?;
             if response.status() != StatusCode::OK {
                 return Err(connection_error(io::ErrorKind::InvalidData.into()));
             }
@@ -303,7 +325,9 @@ impl Client {
                 let frame = match tokio::time::timeout(EVENTS_IDLE_TIMEOUT, body.frame()).await {
                     Err(_) => return Err(connection_error(io::ErrorKind::TimedOut.into())),
                     Ok(None) => return Err(connection_error(io::ErrorKind::UnexpectedEof.into())),
-                    Ok(Some(frame)) => frame.map_err(|error| connection_error(http_error(error)))?,
+                    Ok(Some(frame)) => {
+                        frame.map_err(|error| connection_error(http_error(error)))?
+                    }
                 };
                 let Ok(data) = frame.into_data() else {
                     continue;
@@ -424,13 +448,14 @@ impl Client {
                 }
             }
         })??;
-        let stopped = crate::launch::wait_for_exit(process_id, BACKEND_EXIT_TIMEOUT).and_then(|()| {
-            match block_on(open())? {
-                Err(error) if absent(&error) => Ok(()),
-                Err(error) => Err(connection_error(error)),
-                Ok(_) => Err("Another backend started during shutdown".into()),
-            }
-        });
+        let stopped =
+            crate::launch::wait_for_exit(process_id, BACKEND_EXIT_TIMEOUT).and_then(|()| {
+                match block_on(open())? {
+                    Err(error) if absent(&error) => Ok(()),
+                    Err(error) => Err(connection_error(error)),
+                    Ok(_) => Err("Another backend started during shutdown".into()),
+                }
+            });
         if stopped.is_err() {
             self.expect_shutdown(None)?;
         }

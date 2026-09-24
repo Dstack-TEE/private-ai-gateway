@@ -2,11 +2,10 @@ use super::*;
 impl DesktopRuntime {
     fn require_agent_access(&self) -> Result<(), Error> {
         if let Some(error) = &self.agent_access_error {
-            return Err(format!(
-                "Agent Home access is unavailable to the backend: {error}"
-            ).into());
+            return Err(format!("Agent Home access is unavailable to the backend: {error}").into());
         }
-        Ok(self.agent_configuration_enabled()
+        Ok(self
+            .agent_configuration_enabled()
             .then_some(())
             .ok_or_else(|| "Agent Home access is required".to_string())?)
     }

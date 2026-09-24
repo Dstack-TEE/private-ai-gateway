@@ -123,9 +123,9 @@ impl Drop for Listener {
 
 /// Connects to the endpoint of a backend running as this user.
 pub async fn connect(endpoint: &Path) -> io::Result<ClientStream> {
-    let dir = endpoint.parent().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "IPC endpoint has no parent")
-    })?;
+    let dir = endpoint
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "IPC endpoint has no parent"))?;
     validate_private_dir(dir)?;
     let stream = tokio::time::timeout(CONNECT_TIMEOUT, UnixStream::connect(endpoint))
         .await

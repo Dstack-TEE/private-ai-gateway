@@ -38,7 +38,7 @@ use desktop_core::{
 
 /// How often an event stream of a browser checks that its session lives.
 #[cfg_attr(not(feature = "web-ui"), allow(dead_code))]
-const SESSION_CHECK: Duration = Duration::from_secs(15);
+pub(crate) const SESSION_CHECK: Duration = Duration::from_secs(15);
 
 /// This process as `GET /api/version` reports it.
 pub(crate) fn version() -> &'static Version {
@@ -133,7 +133,10 @@ pub(crate) fn router<B: Backend>(api: Api<B>) -> Router {
     let routes = Router::new()
         .route(protocol::VERSION_PATH, get(version_handler))
         .route(protocol::EVENTS_PATH, get(events::<B>))
-        .route(&format!("{}{{command}}", protocol::RPC_PATH), post(rpc::<B>));
+        .route(
+            &format!("{}{{command}}", protocol::RPC_PATH),
+            post(rpc::<B>),
+        );
     #[cfg(feature = "web-ui")]
     let routes = match &api.listener {
         Listener::Web(_) => crate::web_ui::routes(routes),
@@ -288,4 +291,199 @@ fn sse(event: &Event) -> SseEvent {
     SseEvent::default()
         .json_data(event)
         .unwrap_or_else(|_| SseEvent::default().data("{}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::StreamExt;
+    use std::sync::Mutex;
+    use tower::ServiceExt;
+
+    /// Records the commands it receives and answers like the service would.
+    #[derive(Clone, Default)]
+    struct Recorder(Arc<Mutex<Vec<Value>>>);
+
+    impl Backend for Recorder {
+        async fn execute(&self, command: Command) -> Result<Value, CallError> {
+            let (name, params) = command.encode().map_err(CallError::Api)?;
+            self.0
+                .lock()
+                .unwrap()
+                .push(json!({ "command": name, "params": params }));
+            match name.as_str() {
+                "get_state" => Ok(serde_json::to_value(AppState::default()).unwrap()),
+                "export_usage" => Err(CallError::Api(protocol::Error::new(
+                    protocol::ErrorCode::Busy,
+                    "Another export is in progress.",
+                ))),
+                _ => Ok(Value::Null),
+            }
+        }
+    }
+
+    fn local() -> (Router, Recorder, watch::Sender<AppState>) {
+        let recorder = Recorder::default();
+        let (states, receiver) = watch::channel(AppState::default());
+        let router = router(Api {
+            backend: recorder.clone(),
+            host: ServiceHost::default(),
+            states: receiver,
+            shutdown: CancellationToken::new(),
+            listener: Listener::Local,
+        });
+        (router, recorder, states)
+    }
+
+    async fn call(router: &Router, method: &str, path: &str, body: &str) -> (StatusCode, Value) {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.headers().get(API_VERSION_HEADER),
+            Some(&HeaderValue::from(API_VERSION))
+        );
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn version_names_this_backend() {
+        let (router, _, _) = local();
+        let (status, body) = call(&router, "GET", protocol::VERSION_PATH, "").await;
+        assert_eq!(status, StatusCode::OK);
+        let reported: Version = serde_json::from_value(body.clone()).unwrap();
+        assert_eq!(reported.api_version, API_VERSION);
+        assert_eq!(reported.version, BUILD_VERSION);
+        assert_eq!(reported.process_id, std::process::id());
+        for field in [
+            "apiVersion",
+            "product",
+            "version",
+            "instanceId",
+            "processId",
+            "executable",
+        ] {
+            assert!(body.get(field).is_some(), "{field}");
+        }
+    }
+
+    #[tokio::test]
+    async fn commands_travel_by_name_with_their_parameters() {
+        let (router, recorder, _) = local();
+        let (status, body) = call(&router, "POST", "/api/rpc/get_state", "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["result"]["status"], AppState::default().status);
+        // The owner may run every command, including ones browsers cannot.
+        let (status, body) = call(
+            &router,
+            "POST",
+            "/api/rpc/shutdown",
+            r#"{"instanceId":"1-2","mode":"updateRestart"}"#,
+        )
+        .await;
+        assert_eq!((status, body), (StatusCode::OK, json!({ "result": null })));
+        assert_eq!(
+            recorder.0.lock().unwrap().as_slice(),
+            [
+                json!({ "command": "get_state", "params": {} }),
+                json!({ "command": "shutdown", "params": { "instanceId": "1-2", "mode": "updateRestart" } }),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn failures_answer_typed_errors_with_their_status() {
+        let (router, recorder, _) = local();
+        for (path, body, status, code) in [
+            (
+                "/api/rpc/notACommand",
+                "{}",
+                StatusCode::NOT_FOUND,
+                "method_not_found",
+            ),
+            (
+                "/api/rpc/activate_profile",
+                r#"{"profile_id":"p"}"#,
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                "/api/rpc/get_state",
+                "[]",
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                "/api/rpc/get_state",
+                "not json",
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                "/api/rpc/export_usage",
+                r#"{"query":{},"path":"/tmp/usage.csv"}"#,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "busy",
+            ),
+        ] {
+            let (answered, answer) = call(&router, "POST", path, body).await;
+            assert_eq!(answered, status, "{path} {body}");
+            assert_eq!(answer["error"]["code"], code, "{path} {body}");
+            assert!(answer["error"]["message"].is_string());
+        }
+        // Only the valid export reached the backend.
+        assert_eq!(recorder.0.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn events_start_with_the_state_and_follow_it() {
+        let (router, _, states) = local();
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri(protocol::EVENTS_PATH)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body().into_data_stream();
+        let mut received = String::new();
+        while !received.contains(ui_api::STATE_EVENT) {
+            let chunk = tokio::time::timeout(Duration::from_secs(5), body.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            received.push_str(std::str::from_utf8(&chunk).unwrap());
+        }
+        let first = received
+            .lines()
+            .find(|line| line.starts_with("data: "))
+            .unwrap();
+        let event: Value = serde_json::from_str(&first["data: ".len()..]).unwrap();
+        assert_eq!(event["event"], ui_api::STATE_EVENT);
+        states.send_modify(|state| state.status = "running".into());
+        while !received.contains(r#""status":"running""#) {
+            let chunk = tokio::time::timeout(Duration::from_secs(5), body.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            received.push_str(std::str::from_utf8(&chunk).unwrap());
+        }
+    }
 }

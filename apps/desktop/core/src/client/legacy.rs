@@ -62,10 +62,12 @@ pub(super) async fn shutdown(expected: Option<&Path>, mode: ShutdownMode) -> Res
         .and_then(|response| response.get("outcome"))
     {
         Some(outcome) if outcome.get("result").is_some() => Ok(hello.process_id),
-        Some(outcome) => Err(match outcome.pointer("/error/message").and_then(Value::as_str) {
-            Some(message) => format!("The previous backend did not stop: {message}"),
-            None => "The previous backend did not stop.".into(),
-        }),
+        Some(outcome) => Err(
+            match outcome.pointer("/error/message").and_then(Value::as_str) {
+                Some(message) => format!("The previous backend did not stop: {message}"),
+                None => "The previous backend did not stop.".into(),
+            },
+        ),
         None => Err(connection_error(std::io::ErrorKind::InvalidData.into())),
     }
 }

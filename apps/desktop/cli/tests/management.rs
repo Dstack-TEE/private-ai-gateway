@@ -1008,8 +1008,8 @@ fn shutdown_is_explicit_and_read_only_commands_do_not_restart_backend() {
 
 #[cfg(unix)]
 #[test]
-fn malformed_client_and_watch_disconnect_do_not_stop_backend() {
-    use std::io::{BufReader, Write};
+fn malformed_requests_and_event_streams_do_not_stop_backend() {
+    use std::io::Write;
     let backend = Backend::start();
     let home = backend.directory.path().join("diagnostic-home");
     let command_dir = home.join(".local/bin");
@@ -1029,48 +1029,120 @@ fn malformed_client_and_watch_disconnect_do_not_stop_backend() {
         .as_str()
         .unwrap()
         .to_owned();
-    let mut stream = std::os::unix::net::UnixStream::connect(&endpoint).unwrap();
-    stream
-        .write_all(b"{\"version\":1,\"id\":1,\"command\":{\"method\":\"notACommand\"}}\n")
-        .unwrap();
-    drop(stream);
-    {
-        use desktop_core::protocol::{
-            self, Command as RpcCommand, Hello, Outcome, Request, Response,
-        };
-        let mut subscribers = Vec::new();
-        for index in 0..5 {
-            let stream = std::os::unix::net::UnixStream::connect(&endpoint).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let mut reader = BufReader::new(stream);
-            let _: Hello = protocol::read(&mut reader).unwrap();
-            protocol::write(
-                reader.get_mut(),
-                &Request {
-                    version: protocol::VERSION,
-                    id: index,
-                    command: RpcCommand::Watch,
-                },
-            )
-            .unwrap();
-            let response: Response = protocol::read(&mut reader).unwrap();
-            if index < 4 {
-                let Outcome::Result(snapshot) = response.outcome else {
-                    panic!("Subscription failed");
-                };
-                assert!(snapshot["proxyUrl"]
-                    .as_str()
-                    .is_some_and(|url| url.starts_with("http://127.0.0.1:")));
-                subscribers.push(reader);
-            } else {
-                assert!(matches!(response.outcome, Outcome::Error(_)));
-            }
-        }
-        assert!(backend.run(&["status"])["backend"]["processId"].is_number());
+    use std::{io::BufRead, os::unix::net::UnixStream};
+    // A pre-0.2 frame and a truncated request are not HTTP; each closes only its connection.
+    for garbage in [
+        &b"{\"version\":3,\"id\":1,\"command\":{\"method\":\"notACommand\"}}\n"[..],
+        b"POST /api/rpc/stop HTTP/1.1\r\nHost: localhost\r\nContent-Length: 99\r\n\r\n{",
+    ] {
+        let mut stream = UnixStream::connect(&endpoint).unwrap();
+        stream.write_all(garbage).unwrap();
+        drop(stream);
     }
+    // Event streams start with the state; a subscriber may leave at any time.
+    let mut subscribers = Vec::new();
+    for _ in 0..8 {
+        let mut stream = UnixStream::connect(&endpoint).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        write!(
+            stream,
+            "GET /api/events HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        )
+        .unwrap();
+        let mut reader = std::io::BufReader::new(stream);
+        let snapshot = (0..64)
+            .map_while(|_| {
+                let mut line = String::new();
+                reader.read_line(&mut line).ok().filter(|read| *read > 0)?;
+                Some(line)
+            })
+            .find_map(|line| {
+                let event: Value = serde_json::from_str(line.strip_prefix("data: ")?).ok()?;
+                (event["event"] == "pap://state").then(|| event["payload"].clone())
+            })
+            .expect("the event stream starts with the state");
+        assert!(snapshot["proxyUrl"]
+            .as_str()
+            .is_some_and(|url| url.starts_with("http://127.0.0.1:")));
+        subscribers.push(reader);
+    }
+    drop(subscribers.pop());
+    assert!(backend.run(&["status"])["backend"]["processId"].is_number());
+    drop(subscribers);
     assert!(backend.run(&["status"])["backend"]["processId"]
         .as_u64()
         .is_some());
+}
+
+/// A 0.1.4 to 0.2 beta backend speaks only NDJSON on the old endpoint; this
+/// client still stops it (`client::legacy`, removed in 0.3).
+#[cfg(unix)]
+#[test]
+fn a_legacy_backend_is_stopped_over_its_own_protocol() {
+    use std::{
+        io::{BufRead, BufReader},
+        os::unix::{fs::PermissionsExt, net::UnixListener},
+    };
+    let sandbox = Sandbox::new();
+    let cli = sandbox.path().join(executable("private-ai-proxy"));
+    install(env!("CARGO_BIN_EXE_private-ai-proxy"), &cli);
+    let home = sandbox.path().join("home");
+    let runtime = home.join(".private-ai-proxy/runtime");
+    fs::create_dir_all(&runtime).unwrap();
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+    let listener = UnixListener::bind(runtime.join("backend.sock")).unwrap();
+    // Stands in for the old backend process whose exit the client awaits.
+    let mut process = Command::new("sleep").arg("60").spawn().unwrap();
+    let pid = process.id();
+    let server = std::thread::spawn(move || {
+        let request = loop {
+            let (mut stream, _) = listener.accept().unwrap();
+            let hello = json!({
+                "protocolVersion": 3,
+                "product": desktop_core::brand::APP_IDENTIFIER,
+                "version": "0.1.7",
+                "instanceId": "legacy-1",
+                "processId": pid,
+                "executable": "/opt/old/private-ai-proxy-service",
+            });
+            writeln!(stream, "{hello}").unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut request = String::new();
+            let _ = BufReader::new(&stream).read_line(&mut request);
+            if !request.is_empty() {
+                writeln!(stream, r#"{{"id":1,"outcome":{{"result":null}}}}"#).unwrap();
+                break request;
+            }
+        };
+        process.kill().unwrap();
+        process.wait().unwrap();
+        request
+    });
+    let command = |args: &[&str]| {
+        Command::new(&cli)
+            .args(args)
+            .env(desktop_core::paths::HOME_OVERRIDE_ENV, &home)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let status = command(&["status", "--json"]);
+    assert!(String::from_utf8_lossy(&status.stderr).contains("Incompatible"));
+    assert_success(&command(&["service", "stop", "--yes", "--json"]));
+    let request: Value = serde_json::from_str(&server.join().unwrap()).unwrap();
+    assert_eq!(
+        request,
+        json!({
+            "version": 3,
+            "id": 1,
+            "command": {
+                "method": "shutdown",
+                "params": { "instance_id": "legacy-1", "mode": "quit" },
+            },
+        })
+    );
 }

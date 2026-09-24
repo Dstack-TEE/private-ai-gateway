@@ -133,7 +133,7 @@ async fn failed_authorization_is_terminal_and_repeatable() {
     })
     .await
     .unwrap();
-    assert_eq!(error, "Authorization was declined");
+    assert_eq!(error.to_string(), "Authorization was declined");
     assert_eq!(pending.poll("login-test").await.unwrap_err(), error);
     assert!(!pending.is_active());
     pending.cancel().await.unwrap();
@@ -165,7 +165,10 @@ async fn redpill_requires_an_explicit_accessible_workspace() {
     };
     for selection in [None, Some(999)] {
         let result = authorization.issue(&profile, selection).await;
-        assert_eq!(result.err().unwrap(), "Choose a workspace before saving");
+        assert_eq!(
+            result.err().unwrap().to_string(),
+            "Choose a workspace before saving"
+        );
     }
 }
 
@@ -260,7 +263,10 @@ async fn phala_slow_down_adds_five_seconds_to_later_polls() {
         .await
         .err()
         .unwrap();
-    assert_eq!(error, "Account: Authorization was declined.");
+    assert_eq!(
+        error,
+        crate::Error::account("Account: Authorization was declined.")
+    );
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     // RFC 8628 §3.5.
     assert!(started.elapsed() >= Duration::from_secs(5));
@@ -272,7 +278,8 @@ fn structured_account_errors_survive_the_management_boundary_without_raw_details
         StatusCode::FORBIDDEN,
         &json!({"detail":{"error":"device_disabled","internal":"secret-do-not-show"}}),
     );
-    let public = desktop_core::protocol::RpcError::operation(&error);
+    let public = desktop_core::protocol::Error::from(error);
+    assert_eq!(public.code, desktop_core::protocol::ErrorCode::AccountError);
     assert!(public.message.contains("disabled"));
     assert!(!public.message.contains("secret"));
 }
@@ -509,6 +516,7 @@ async fn redpill_token_errors_never_echo_the_response() {
     .await
     .err()
     .unwrap();
+    let error = error.to_string();
     assert!(
         error.starts_with("Account: Service rejected the request"),
         "{error}"

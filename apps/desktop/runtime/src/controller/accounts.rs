@@ -15,14 +15,15 @@ impl DesktopRuntime {
         profile: ConfidentialProfileInput,
     ) -> Result<desktop_core::account::LoginPresentation, Error> {
         let mut slot = self.account_login.try_lock().map_err(|_| {
-            Error::account("Account: An account operation is in progress. Finish it before signing in again.")
+            Error::account(
+                "Account: An account operation is in progress. Finish it before signing in again.",
+            )
         })?;
         if let Some(pending) = slot.as_mut() {
             if pending.is_active() && pending.profile_id() != profile.id {
-                return Err(
-                    Error::account("Account: Another sign-in is open. Finish or cancel it in the other window.")
-                        .into(),
-                );
+                return Err(Error::account(
+                    "Account: Another sign-in is open. Finish or cancel it in the other window.",
+                ));
             }
             self.cancel_pending(pending).await?;
         }
@@ -103,9 +104,9 @@ impl DesktopRuntime {
         let (_, result) = operation
             .as_ref()
             .filter(|(id, _)| id == operation_id)
-            .ok_or(
-                Error::account("Account: Save outcome is unavailable. Check the saved profile before retrying."),
-            )?;
+            .ok_or(Error::account(
+                "Account: Save outcome is unavailable. Check the saved profile before retrying.",
+            ))?;
         let outcome = result.borrow().clone();
         if matches!(outcome, desktop_core::contracts::AccountSaveResult::Running)
             && result.has_changed().is_err()

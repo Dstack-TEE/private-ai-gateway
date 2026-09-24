@@ -17,7 +17,7 @@ impl DesktopRuntime {
             Ok(token) => token,
             Err(error) => {
                 self.manager.client_key_changed(false);
-                return Err(error.into());
+                return Err(error);
             }
         };
         let mut tokens = self.proxy.tokens();
@@ -71,8 +71,11 @@ impl DesktopRuntime {
                 return Err(match result {
                     Ok(_) => format!(
                         "Local API settings saved, but protection could not restart: {error}"
-                    ).into(),
-                    Err(original) => format!("{original}. Protection could not restart: {error}").into(),
+                    )
+                    .into(),
+                    Err(original) => {
+                        format!("{original}. Protection could not restart: {error}").into()
+                    }
                 });
             }
         }
@@ -111,7 +114,7 @@ impl DesktopRuntime {
                         .set_endpoint(current.config, Err(restore_error.to_string()));
                     return Err(format!("{error}; {restore_error}").into());
                 }
-                return Err(error.into());
+                return Err(error);
             }
         };
         let resolved = match self.save_local_api(config) {
@@ -123,7 +126,7 @@ impl DesktopRuntime {
                         .set_endpoint(current.config, Err(restore_error.to_string()));
                     return Err(format!("{error}; {restore_error}").into());
                 }
-                return Err(error.into());
+                return Err(error);
             }
         };
         self.endpoint
