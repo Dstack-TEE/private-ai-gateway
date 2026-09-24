@@ -194,7 +194,6 @@ pub struct AccountScope {
 pub struct AccountWorkspace {
     pub id: i64,
     pub name: String,
-    #[serde(alias = "is_default")]
     pub is_default: bool,
 }
 
@@ -342,7 +341,7 @@ pub struct GatewayState {
     pub config: StartGatewayConfig,
     pub profiles: Vec<ConfidentialProfile>,
     pub active_profile_id: String,
-    pub local_api: LocalApiConfig,
+    pub local_api: ListenConfig,
     pub api_key_saved: bool,
     /// The most recently verified catalog. A stopped gateway may retain it for
     /// agent projection and readiness state; the proxy still requires a live
@@ -430,7 +429,7 @@ impl Default for GatewayState {
             config: StartGatewayConfig::default(),
             profiles: Vec::new(),
             active_profile_id: String::new(),
-            local_api: LocalApiConfig::default(),
+            local_api: ListenConfig::default(),
             api_key_saved: false,
             catalog: None,
             web_ui: WebUiStatus::from(&crate::preferences::WebUiConfig::default()),
@@ -450,8 +449,6 @@ pub struct ListenConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_host: Option<String>,
 }
-
-pub type LocalApiConfig = ListenConfig;
 
 /// The Local API listener; the web UI keeps its own defaults.
 impl Default for ListenConfig {
@@ -492,13 +489,54 @@ pub struct WebUiLogin {
 
 /// A `pap cli status|install|uninstall` result; the desktop shell reads it
 /// from the CLI's JSON output.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandRegistration {
     pub executable: std::path::PathBuf,
     pub command_path: std::path::PathBuf,
     pub installed: bool,
     pub on_path: bool,
+}
+
+/// The `pap` command registration the renderer shows, with the error from
+/// the desktop app's automatic registration attempt, if any.
+#[derive(Debug, Clone, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(optional_fields)]
+pub struct CliRegistration {
+    #[serde(flatten)]
+    pub registration: CommandRegistration,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub startup_error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum DistributionChannel {
+    Direct,
+    MacAppStore,
+    Web,
+}
+
+/// What this distribution of the app may offer; the renderer hides the rest.
+#[derive(Clone, Copy, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DistributionCapabilities {
+    pub channel: DistributionChannel,
+    pub native_updates: bool,
+    pub cli_registration: bool,
+    pub account_portal_links: bool,
+    pub sandbox_home_access: bool,
+    pub launch_at_login: bool,
+    pub notifications: bool,
+    pub web_ui: bool,
+}
+
+/// `GET /api/bootstrap` on the web UI.
+#[derive(Clone, Debug, Serialize, TS)]
+pub struct WebBootstrap {
+    pub version: String,
+    pub distribution: DistributionCapabilities,
 }
 
 #[cfg(test)]
@@ -515,7 +553,7 @@ mod typescript {
         maintenance::{ImportResult, ProfileBackup, ProfileConfiguration},
         preferences::{Appearance, NotificationPreferences, UpdateChannel, WebUiConfig},
         ui_api::{LaunchPreferences, ListenAddress, Method},
-        updates::{Installation, UpdateNotice},
+        updates::{Installation, UpdateInfo, UpdateNotice},
         usage::{UsageModelPoint, UsagePage, UsagePoint, UsageQuery},
     };
 
@@ -585,6 +623,12 @@ mod typescript {
             ConfigChange,
             ConnectOptions,
             AgentAccessStatus,
+            UpdateInfo,
+            CommandRegistration,
+            CliRegistration,
+            DistributionChannel,
+            DistributionCapabilities,
+            WebBootstrap,
         ) {
             output.push_str(&declaration);
         }

@@ -26,10 +26,10 @@ use desktop_core::{
     agents::Agent,
     contracts::{
         AgentPreview, AgentStatus, ConfidentialProfileInput, ConnectOptions, GatewayState,
-        LocalApiConfig, RequestActivity, ServiceProvider, StartGatewayConfig,
+        ListenConfig, RequestActivity, ServiceProvider, StartGatewayConfig,
     },
-    local_api::{self, ResolvedLocalApi},
-    lock,
+    listen::ResolvedListen,
+    local_api, lock,
     paths::app_data_dir,
     service_config,
     usage::{UsagePage, UsageQuery},
@@ -164,7 +164,7 @@ impl EndpointRuntime {
         manager: Arc<SessionManager>,
         proxy: Arc<ProxyState>,
         listener: std::net::TcpListener,
-        config: LocalApiConfig,
+        config: ListenConfig,
     ) -> Result<(), String> {
         let mut runtime = self
             .task
@@ -242,7 +242,7 @@ impl DesktopRuntime {
         let (local, local_error) = match local_api::load() {
             Ok(config) => (config, None),
             Err(error) => (
-                local_api::resolve(LocalApiConfig::default()).map_err(|fallback| {
+                local_api::resolve(ListenConfig::default()).map_err(|fallback| {
                     format!("The built-in Local API settings are invalid: {fallback}")
                 })?,
                 Some(error),

@@ -178,7 +178,7 @@ commands! {
     ClearUsage -> u64;
     ClientKey -> String;
     RotateClientKey -> String;
-    SaveLocalApi(config: LocalApiConfig) -> GatewayState;
+    SaveLocalApi(config: ListenConfig) -> GatewayState;
     SaveWebUi(config: WebUiConfig) -> GatewayState;
     /// Mint a one-time web UI login link. Only the authenticated IPC endpoint can ask.
     WebUiLogin -> WebUiLogin;

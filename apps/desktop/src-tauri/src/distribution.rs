@@ -1,26 +1,4 @@
-use serde::Serialize;
-
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) enum DistributionChannel {
-    #[cfg(not(feature = "mac-app-store"))]
-    Direct,
-    #[cfg(feature = "mac-app-store")]
-    MacAppStore,
-}
-
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct DistributionCapabilities {
-    pub channel: DistributionChannel,
-    pub native_updates: bool,
-    pub cli_registration: bool,
-    pub account_portal_links: bool,
-    pub sandbox_home_access: bool,
-    pub launch_at_login: bool,
-    pub notifications: bool,
-    pub web_ui: bool,
-}
+use desktop_core::contracts::{DistributionCapabilities, DistributionChannel};
 
 #[cfg(feature = "mac-app-store")]
 pub(crate) const CAPABILITIES: DistributionCapabilities = DistributionCapabilities {

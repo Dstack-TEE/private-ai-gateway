@@ -187,5 +187,37 @@ export type ConnectOptions = {
  */
 defaultModel?: string, };
 export type AgentAccessStatus = "authorized" | "authorizationRequired" | "reauthorizationRequired";
+/**
+ * The desktop app's update check result for the renderer.
+ */
+export type UpdateInfo = { enabled: boolean, systemManaged: boolean, currentVersion: string, channel: UpdateChannel, version: string | null, channelPublished: boolean,
+/**
+ * Steps that install `version` when a package manager or the user owns
+ * the installation.
+ */
+upgradeCommands: Array<string>,
+/**
+ * Portable archive to extract into a fresh directory.
+ */
+downloadUrl?: string | null, };
+/**
+ * A `pap cli status|install|uninstall` result; the desktop shell reads it
+ * from the CLI's JSON output.
+ */
+export type CommandRegistration = { executable: string, commandPath: string, installed: boolean, onPath: boolean, };
+/**
+ * The `pap` command registration the renderer shows, with the error from
+ * the desktop app's automatic registration attempt, if any.
+ */
+export type CliRegistration = { startupError?: string, executable: string, commandPath: string, installed: boolean, onPath: boolean, };
+export type DistributionChannel = "direct" | "macAppStore" | "web";
+/**
+ * What this distribution of the app may offer; the renderer hides the rest.
+ */
+export type DistributionCapabilities = { channel: DistributionChannel, nativeUpdates: boolean, cliRegistration: boolean, accountPortalLinks: boolean, sandboxHomeAccess: boolean, launchAtLogin: boolean, notifications: boolean, webUi: boolean, };
+/**
+ * `GET /api/bootstrap` on the web UI.
+ */
+export type WebBootstrap = { version: string, distribution: DistributionCapabilities, };
 /** A method the shared UI API accepts (`ui_api::Method`). */
 export type UiMethod = "startBackendService" | "getState" | "start" | "stop" | "activateProfile" | "deleteProfile" | "saveConfiguration" | "completeAccountLogin" | "beginAccountLogin" | "pollAccountLogin" | "saveAccountLogin" | "getAccountDetails" | "getAccountBalance" | "getOrganizationUrl" | "getTopUpUrl" | "cancelAccountLogin" | "getClientKey" | "rotateClientKey" | "saveLocalApiConfig" | "saveWebUi" | "listListenAddresses" | "importProfiles" | "exportProfilesContent" | "exportDiagnosticsContent" | "queryUsage" | "getUsageRecord" | "listAgents" | "getAgentAccess" | "requestAgentAccess" | "previewAgent" | "applyAgent" | "getAppearance" | "setAppearance" | "getLaunchPreferences" | "setLaunchPreference" | "getNotificationSettings" | "saveNotificationSettings" | "resetSettings" | "getUpdateNotice";

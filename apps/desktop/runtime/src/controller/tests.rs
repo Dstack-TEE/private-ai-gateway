@@ -489,7 +489,7 @@ fn finished_local_listener_can_restart_at_the_same_address() {
     let runtime = test_runtime(&executor, directory.path());
     executor.block_on(async {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let config = LocalApiConfig {
+        let config = ListenConfig {
             port: listener.local_addr().unwrap().port(),
             ..Default::default()
         };
@@ -847,9 +847,9 @@ fn occupied_listener_preserves_previous_endpoint_and_serializes_mutations() {
         let temp = tempfile::tempdir().unwrap();
         let old_listener = proxy::bind_std("127.0.0.1:0".parse().unwrap()).unwrap();
         let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let config = LocalApiConfig {
+        let config = ListenConfig {
             port: old_listener.local_addr().unwrap().port(),
-            ..LocalApiConfig::default()
+            ..ListenConfig::default()
         };
         let original = local_api::resolve(config.clone()).unwrap();
         let runtime = test_runtime(&executor, temp.path());
@@ -873,7 +873,7 @@ fn occupied_listener_preserves_previous_endpoint_and_serializes_mutations() {
             .unwrap_err()
             .contains("in progress"));
         drop(gate);
-        let candidate = LocalApiConfig {
+        let candidate = ListenConfig {
             port: occupied.local_addr().unwrap().port(),
             ..config.clone()
         };

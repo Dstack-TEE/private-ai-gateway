@@ -8,7 +8,7 @@ import { brand } from "../generated/brand";
 import { LocalApiExamples } from "../components/local-api-examples";
 import { NotificationsProvider, NotificationsSheet, useNotifications } from "../components/notifications";
 import { NativeDialogHost } from "../components/sheet";
-import type { GatewayState, LocalApiConfig, WebUiConfig } from "../../shared/contracts";
+import type { GatewayState, ListenConfig, WebUiConfig } from "../../shared/contracts";
 import { desktopApi, initialGatewayState, query, web } from "../lib/environment";
 import { INITIAL_STATE, protectionFlags } from "../lib/protection";
 import { ProfileEditorSheet, ProfilesSheet } from "../features/profiles";
@@ -228,7 +228,7 @@ function NativeLocalApiWindow(): React.JSX.Element {
       rotatingClientKey.current = false;
     }
   };
-  const saveLocalApi = async (config: LocalApiConfig): Promise<string | undefined> => {
+  const saveLocalApi = async (config: ListenConfig): Promise<string | undefined> => {
     try {
       native.setState(await desktopApi.saveLocalApiConfig(config));
       return undefined;

@@ -23,10 +23,10 @@ use aci_protocol::types::ServiceCapabilities;
 use agent_bridge::catalog::{Catalog, EndpointInventory};
 use agent_bridge::proxy::{ProxyEvent, ProxyState, Session};
 use desktop_core::contracts::{
-    CatalogSummary, ConfidentialProfile, GatewayIdentity, GatewayState, LocalApiConfig,
-    ModelSummary, RequestActivity, SourceProvenance, StartGatewayConfig, UsageSummary,
-    VerificationCheck,
+    CatalogSummary, ConfidentialProfile, GatewayIdentity, GatewayState, ListenConfig, ModelSummary,
+    RequestActivity, SourceProvenance, StartGatewayConfig, UsageSummary, VerificationCheck,
 };
+use desktop_core::listen::ResolvedListen;
 use desktop_core::local_api;
 use desktop_core::service_config;
 use serde_json::{Map, Value};
@@ -534,7 +534,7 @@ impl SessionManager {
 
     /// Record whether the stable local endpoint is bound. A failure blocks
     /// starting and connecting until the listener is successfully rebound.
-    pub fn set_endpoint(&self, config: LocalApiConfig, bound: Result<String, String>) {
+    pub fn set_endpoint(&self, config: ListenConfig, bound: Result<String, String>) {
         self.update(|state| match bound {
             Ok(endpoint) => {
                 state.local_api = config;
@@ -553,7 +553,7 @@ impl SessionManager {
         self.update(|state| state.web_ui = status);
     }
 
-    pub fn local_api(&self) -> Result<local_api::ResolvedLocalApi, String> {
+    pub fn local_api(&self) -> Result<ResolvedListen, String> {
         local_api::resolve(self.lock()?.state.local_api.clone())
     }
 

@@ -306,14 +306,30 @@ pub(super) fn redpill_details(account: &Value) -> Result<AccountLoginDetails, St
     })
 }
 
+/// One entry of RedPill's `workspaces` account field.
+#[derive(serde::Deserialize)]
+struct RedpillWorkspace {
+    id: i64,
+    name: String,
+    is_default: bool,
+}
+
 pub(super) fn parse_workspaces(account: &Value) -> Result<Vec<AccountWorkspace>, String> {
-    let workspaces: Vec<AccountWorkspace> = serde_json::from_value(
+    let workspaces: Vec<RedpillWorkspace> = serde_json::from_value(
         account
             .get("workspaces")
             .cloned()
             .ok_or("Missing workspace list")?,
     )
     .map_err(|_| "Invalid workspace list")?;
+    let workspaces: Vec<_> = workspaces
+        .into_iter()
+        .map(|workspace| AccountWorkspace {
+            id: workspace.id,
+            name: workspace.name,
+            is_default: workspace.is_default,
+        })
+        .collect();
     validate_workspaces(&workspaces)?;
     Ok(workspaces)
 }

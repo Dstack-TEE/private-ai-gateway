@@ -4,9 +4,8 @@ use desktop_core::{
     client::Client,
     preferences::UpdateChannel,
     protocol::{rpc, Preference},
-    updates::{self, Installation},
+    updates::{self, Installation, UpdateInfo},
 };
-use serde::Serialize;
 use tauri::{AppHandle, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
@@ -60,19 +59,6 @@ pub async fn set_update_channel(
     Ok(channel)
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateInfo {
-    enabled: bool,
-    system_managed: bool,
-    current_version: String,
-    channel: UpdateChannel,
-    version: Option<String>,
-    channel_published: bool,
-    /// Steps that install `version` when a package manager owns the app.
-    upgrade_commands: Vec<String>,
-}
-
 #[tauri::command]
 pub async fn prepare_update(
     app: AppHandle,
@@ -101,6 +87,7 @@ pub async fn prepare_update(
         version: None,
         channel_published: true,
         upgrade_commands: Vec::new(),
+        download_url: None,
     };
     if !configured || system_managed {
         *prepared = None;

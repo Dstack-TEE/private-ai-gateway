@@ -10,7 +10,7 @@ use crate::{
     client::Client,
     contracts::{
         AccountBalanceTarget, AccountSaveResult, AgentStatus, ConfidentialProfileInput,
-        ConnectOptions, GatewayState, LocalApiConfig, ServiceProvider, StartGatewayConfig,
+        ConnectOptions, GatewayState, ListenConfig, ServiceProvider, StartGatewayConfig,
     },
     maintenance::ProfileBackup,
     preferences::{Appearance, NotificationPreferences, Preferences, WebUiConfig},
@@ -667,7 +667,7 @@ struct TopUpParams {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LocalApiParams {
-    config: LocalApiConfig,
+    config: ListenConfig,
 }
 
 #[derive(Deserialize)]

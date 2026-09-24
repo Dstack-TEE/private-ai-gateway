@@ -8,12 +8,12 @@ import type {
   UiMethod,
   UpdateInfo,
   UpdateNotice,
+  WebBootstrap,
 } from "../../shared/contracts";
 import { showBrowserDialog } from "../components/browser-dialog";
 import { createDesktopApi, type UiPlatform, type UiTransport } from "./create-api";
 
 type EventListener = (payload: never) => void;
-type Bootstrap = { version: string; distribution: DistributionCapabilities };
 
 const tokenKey = "private-ai-proxy-web-token";
 const invalidLink = "This sign-in link has expired or was already used. Run pap app open --web for a new link.";
@@ -31,7 +31,7 @@ export async function createBackend(): Promise<{
   signOut: (() => Promise<void>) | undefined;
 }> {
   token = await signIn();
-  const bootstrap = await request<Bootstrap>("/api/bootstrap", { method: "GET" });
+  const bootstrap = await request<WebBootstrap>("/api/bootstrap", { method: "GET" });
   const transport: UiTransport = { call: rpc, subscribe };
   void readEvents();
   return {
@@ -43,7 +43,7 @@ export async function createBackend(): Promise<{
   };
 }
 
-function createPlatform(bootstrap: Bootstrap): UiPlatform {
+function createPlatform(bootstrap: WebBootstrap): UiPlatform {
   const registration: CliRegistration = {
     executable: "private-ai-proxy",
     commandPath: "pap",

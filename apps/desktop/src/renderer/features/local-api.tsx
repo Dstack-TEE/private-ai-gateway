@@ -10,7 +10,7 @@ import { Item } from "../components/ui/item";
 import { InputGroup, InputGroupInput, InputGroupAddon, InputGroupButton } from "../components/ui/input-group";
 import { IconButton } from "../components/controls";
 import { Sheet, SheetActions } from "../components/sheet";
-import type { GatewayState, LocalApiConfig } from "../../shared/contracts";
+import type { GatewayState, ListenConfig } from "../../shared/contracts";
 import { maskClientKey } from "../lib/format";
 import { desktopApi } from "../lib/environment";
 import { cn } from "../lib/utils";
@@ -109,10 +109,10 @@ export function LocalApiSheet({
   onCopy(label: string, value: string): Promise<void>;
   onToggleKey(): void;
   onRotate(): Promise<string | undefined>;
-  onSave(config: LocalApiConfig): Promise<string | undefined>;
+  onSave(config: ListenConfig): Promise<string | undefined>;
   onClose(): void;
 }): React.JSX.Element {
-  const [draft, setDraft] = useState<LocalApiConfig>(state.localApi);
+  const [draft, setDraft] = useState<ListenConfig>(state.localApi);
   const addressKind = localAddressKind(draft.listenAddress);
   const networkAccess = Boolean(addressKind && addressKind !== "loopback");
   const [saving, setSaving] = useState(false);

@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 use super::{throttle::THROTTLE_REFILL, Auth, Throttle};
 use crate::controller::DesktopRuntime;
 use desktop_core::{
-    contracts::GatewayState,
+    contracts::{DistributionCapabilities, DistributionChannel, GatewayState, WebBootstrap},
     listen::{self, url_host, ResolvedListen},
     protocol::{Command, RpcError, BUILD_VERSION},
     ui_api::{self, Backend, Event, Host, Method, StateEventProjection},
@@ -312,20 +312,20 @@ async fn sign_out<B: Backend>(State(state): State<WebState<B>>, headers: HeaderM
     StatusCode::NO_CONTENT
 }
 
-async fn bootstrap() -> Json<Value> {
-    Json(json!({
-        "version": BUILD_VERSION,
-        "distribution": {
-            "channel": "web",
-            "nativeUpdates": false,
-            "cliRegistration": false,
-            "accountPortalLinks": true,
-            "sandboxHomeAccess": false,
-            "launchAtLogin": false,
-            "notifications": false,
-            "webUi": true
-        }
-    }))
+async fn bootstrap() -> Json<WebBootstrap> {
+    Json(WebBootstrap {
+        version: BUILD_VERSION.to_string(),
+        distribution: DistributionCapabilities {
+            channel: DistributionChannel::Web,
+            native_updates: false,
+            cli_registration: false,
+            account_portal_links: true,
+            sandbox_home_access: false,
+            launch_at_login: false,
+            notifications: false,
+            web_ui: true,
+        },
+    })
 }
 
 /// Each connection starts with a full snapshot, so a client that falls behind

@@ -114,15 +114,6 @@ struct CliStartupState {
     last_error: Option<String>,
 }
 
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CliRegistration {
-    #[serde(flatten)]
-    registration: CommandRegistration,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    startup_error: Option<String>,
-}
-
 #[cfg(any(target_os = "macos", test))]
 fn transient_macos_app_path(path: &std::path::Path) -> bool {
     path.starts_with("/Volumes")

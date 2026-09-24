@@ -1,4 +1,4 @@
-import type { LocalApiConfig } from "../../shared/contracts";
+import type { ListenConfig } from "../../shared/contracts";
 
 export function maskClientKey(key: string): string {
   if (!key) return "Unavailable";
@@ -6,7 +6,7 @@ export function maskClientKey(key: string): string {
   return `${prefix}${"•".repeat(12)}`;
 }
 
-export function localEndpoint(config: LocalApiConfig): string | undefined {
+export function localEndpoint(config: ListenConfig): string | undefined {
   const host = config.clientHost?.trim() || config.listenAddress.trim();
   if (!host || !Number.isInteger(config.port) || config.port < 1 || config.port > 65_535) return undefined;
   const wrapped = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;

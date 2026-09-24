@@ -8,6 +8,7 @@ import type {
   AgentAccessStatus,
   AgentPreview,
   AgentStatus,
+  CliRegistration,
   ConnectOptions,
   GatewayState,
   ImportResult,
@@ -21,6 +22,7 @@ import type {
   ServiceProvider,
   StartGatewayConfig,
   UpdateChannel,
+  UpdateInfo,
   UsagePage,
   UsageQuery,
   VerificationCheck,
@@ -31,20 +33,6 @@ export type * from "./contracts.generated";
 
 export type GatewayStatus = GatewayState["status"];
 export type CheckStatus = VerificationCheck["status"];
-export type LocalApiConfig = ListenConfig;
-
-export interface UpdateInfo {
-  enabled: boolean;
-  systemManaged: boolean;
-  currentVersion: string;
-  channel: UpdateChannel;
-  version?: string | null;
-  channelPublished: boolean;
-  /** Steps that install `version` when a package manager or the user owns the installation. */
-  upgradeCommands?: string[];
-  /** Portable archive to extract into a fresh directory. */
-  downloadUrl?: string | null;
-}
 
 export interface NotificationConfiguration {
   preferences: NotificationPreferences;
@@ -57,25 +45,6 @@ export interface ConfirmationOptions {
   message: string;
   confirmLabel: string;
   cancelLabel?: string;
-}
-
-export interface CliRegistration {
-  executable: string;
-  commandPath: string;
-  installed: boolean;
-  onPath: boolean;
-  startupError?: string;
-}
-
-export interface DistributionCapabilities {
-  channel: "direct" | "macAppStore" | "web";
-  nativeUpdates: boolean;
-  cliRegistration: boolean;
-  accountPortalLinks: boolean;
-  sandboxHomeAccess: boolean;
-  launchAtLogin: boolean;
-  notifications: boolean;
-  webUi: boolean;
 }
 
 export interface DesktopApi {
@@ -98,7 +67,7 @@ export interface DesktopApi {
   copyText(text: string): Promise<void>;
   getClientKey(): Promise<string>;
   rotateClientKey(): Promise<string>;
-  saveLocalApiConfig(config: LocalApiConfig): Promise<GatewayState>;
+  saveLocalApiConfig(config: ListenConfig): Promise<GatewayState>;
   saveWebUi(config: WebUiConfig): Promise<GatewayState>;
   listListenAddresses(): Promise<ListenAddress[]>;
   getNotificationSettings(): Promise<NotificationConfiguration>;

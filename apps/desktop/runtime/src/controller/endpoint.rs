@@ -29,7 +29,7 @@ impl DesktopRuntime {
 
     pub async fn save_local_api_config(
         self: &Arc<Self>,
-        config: LocalApiConfig,
+        config: ListenConfig,
     ) -> Result<GatewayState, String> {
         let _operation = self.configuration_change()?;
         if self.instance.is_none() {
@@ -74,9 +74,9 @@ impl DesktopRuntime {
 
     pub(super) async fn rebind_local_api(
         self: &Arc<Self>,
-        config: LocalApiConfig,
-        current: ResolvedLocalApi,
-        resolved: ResolvedLocalApi,
+        config: ListenConfig,
+        current: ResolvedListen,
+        resolved: ResolvedListen,
     ) -> Result<GatewayState, String> {
         let needs_bind =
             current.bind != resolved.bind || self.manager.snapshot()?.proxy_url.is_none();
@@ -136,7 +136,7 @@ impl DesktopRuntime {
 
     pub(super) fn restore_endpoint(
         self: &Arc<Self>,
-        previous: ResolvedLocalApi,
+        previous: ResolvedListen,
     ) -> Result<(), String> {
         let listener = rebind(previous.bind).map_err(|error| {
             format!(
@@ -162,7 +162,7 @@ impl DesktopRuntime {
             self.disconnect_all_agents_inner()?;
         }
         let current = self.manager.local_api()?;
-        let defaults = LocalApiConfig::default();
+        let defaults = ListenConfig::default();
         let resolved = local_api::resolve(defaults.clone())?;
         self.rebind_local_api(defaults, current, resolved).await?;
         let state = self.manager.snapshot()?;

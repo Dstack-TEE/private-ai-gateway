@@ -24,8 +24,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
-# Serde `alias` only widens deserialization, so its ts-rs notice is noise.
-ts-rs = { version = "12", features = ["no-serde-warnings"] }
+ts-rs = "12"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 

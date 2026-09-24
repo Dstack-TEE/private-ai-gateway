@@ -2,6 +2,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use desktop_core::{
     client::Client,
+    contracts::CliRegistration,
     maintenance::ProfileBackup,
     protocol::{rpc, Preference},
     ui_api::Method,
@@ -9,7 +10,7 @@ use desktop_core::{
 use serde_json::json;
 use tauri::{AppHandle, Manager, State, WebviewWindow};
 
-use crate::{distribution, run_blocking, run_cli_command, CliRegistration, CliStartup};
+use crate::{distribution, run_blocking, run_cli_command, CliStartup};
 
 #[tauri::command]
 pub(crate) async fn read_profile_backup(path: PathBuf) -> Result<ProfileBackup, String> {
