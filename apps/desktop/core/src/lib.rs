@@ -1,7 +1,8 @@
 //! The client side of Private AI Proxy, shared by the desktop shell, the CLI
 //! and the backend: renderer and IPC contracts, the management protocol and
 //! its client, the IPC transport, backend launch, preferences, app paths and
-//! owner-only file primitives. It links no server, database or HTTP stack.
+//! owner-only file primitives. It links no server or database; its only HTTP
+//! client is the release-channel update check.
 
 use std::io::Write;
 
@@ -26,8 +27,27 @@ pub mod ui_api;
 pub mod updates;
 pub mod usage;
 
-/// Write a best-effort backend diagnostic without letting a detached stderr
-/// pipe turn an otherwise recoverable request error into a process panic.
+/// Seconds since the Unix epoch; 0 if the system clock is set before it.
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+/// Write a best-effort diagnostic line to stderr, formatted like `eprintln!`.
+///
+/// Unlike `eprintln!`, a closed or detached stderr (a GUI process, a service
+/// whose log pipe went away) never turns the write into a panic.
+#[macro_export]
+macro_rules! diagnostic {
+    ($($arg:tt)*) => {
+        $crate::diagnostic(::std::format_args!($($arg)*))
+    };
+}
+
+/// The function behind [`diagnostic!`]; call the macro instead.
+#[doc(hidden)]
 pub fn diagnostic(args: std::fmt::Arguments<'_>) {
     let stderr = std::io::stderr();
     diagnostic_to(&mut stderr.lock(), args);

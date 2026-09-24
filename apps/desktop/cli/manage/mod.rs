@@ -138,18 +138,16 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                     let state = client.state()?;
                     if state.session_id != started.session_id {
                         return Err(
-                            "The gateway operation was superseded by another client.".into()
+                            "The protection operation was superseded by another client.".into()
                         );
                     }
                     match state.status.as_str() {
                         "verified" if !state.configuration_verification => break value(state)?,
                         "verifying" => {}
-                        _ => {
-                            return Err(
-                                "Gateway did not become verified. Inspect private-ai-proxy status."
-                                    .into(),
-                            )
-                        }
+                        _ => return Err(
+                            "Protection did not become verified. Inspect private-ai-proxy status."
+                                .into(),
+                        ),
                     }
                     if Instant::now() >= deadline {
                         return Err("Verification wait timed out; the backend may still be verifying. Inspect private-ai-proxy status before retrying.".into());
@@ -342,16 +340,14 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
         Action::Models {
             command: Models::List { refresh },
         } => {
-            let state: GatewayState = if *refresh {
+            let state: AppState = if *refresh {
                 client.call(rpc::RefreshCatalog)?
             } else {
                 client.state()?
             };
-            value(
-                state
-                    .catalog
-                    .ok_or("No verified model catalog. Start and verify the gateway first.")?,
-            )?
+            value(state.catalog.ok_or(
+                "No verified model catalog. Start protection and wait for verification first.",
+            )?)?
         }
         Action::Usage { command } => match command {
             Usage::List { filter, page } => value(client.call(rpc::Usage {
@@ -391,7 +387,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                     json!({"preferences": client.call(rpc::Preferences)?, "localApi": state.local_api, "webUi": state.web_ui})
                 }
                 Settings::Set { key, value: input } => {
-                    confirm(cli, "Change gateway settings?")?;
+                    confirm(cli, "Change Private AI Proxy settings?")?;
                     let set = |change| client.call(rpc::SetPreference { change });
                     match key {
                     SettingsKey::AutoCliRegistration => value(
@@ -596,6 +592,7 @@ fn open_web_ui(cli: &Cli, client: &Client) -> Result<Value, String> {
     }))
 }
 
+/// Open `url` in the user's browser without waiting for it.
 fn open_browser(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let mut command = std::process::Command::new("open");
@@ -610,13 +607,17 @@ fn open_browser(url: &str) -> Result<(), String> {
     #[cfg(not(any(target_os = "macos", windows)))]
     command.arg(url);
     // Without a terminal, a text-mode fallback browser cannot take over this shell.
-    command
+    let mut child = command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .map(drop)
-        .map_err(|_| "Cannot open a browser".to_string())
+        .map_err(|_| "Cannot open a browser".to_string())?;
+    // Reap the short-lived OS launcher without blocking the caller.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 fn new_export_path(path: &std::path::Path) -> Result<PathBuf, String> {
@@ -680,7 +681,7 @@ fn agent_change(
         return value(preview);
     }
     if !cli.yes && !cli.json && !cli.non_interactive && io::stdin().is_terminal() {
-        desktop_core::diagnostic(format_args!("{}", output::details(&value(&preview)?)));
+        desktop_core::diagnostic!("{}", output::details(&value(&preview)?));
     }
     confirm(cli, "Apply these agent configuration changes?")?;
     value(client.call(rpc::ApplyAgent {
@@ -795,7 +796,7 @@ fn read_key(cli: &Cli, stdin: bool) -> Result<String, String> {
         }
         rpassword::prompt_password("API key: ").map_err(|_| "Cannot read credential")?
     };
-    agent_bridge::secrets::validate_api_key(&key)
+    desktop_core::service_config::validate_api_key(&key)
 }
 fn parse_bool(value: &str) -> Result<bool, String> {
     value.parse().map_err(|_| "Expected true or false".into())

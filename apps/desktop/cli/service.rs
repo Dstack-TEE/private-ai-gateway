@@ -1,20 +1,6 @@
-// The service compiles the shared verifier modules but does not call their
-// standalone CLI entry points.
-#![allow(dead_code)]
-
-mod args;
-mod capture;
-mod checks;
-mod client;
-mod serve;
-mod sessions;
-#[cfg(test)]
-mod spec_fixtures;
-mod transcript;
-mod verify;
-
 use clap::Parser;
 use desktop_runtime::controller::{DesktopRuntime, RuntimeOptions};
+use private_ai_proxy::serve::managed::InProcessVerifierLauncher;
 use std::sync::Arc;
 
 #[derive(Parser)]
@@ -25,7 +11,7 @@ struct Arguments {}
 async fn main() {
     private_ai_proxy::install_crypto_provider();
     if let Err(error) = run().await {
-        desktop_core::diagnostic(format_args!("Private AI Proxy backend: {error}"));
+        desktop_core::diagnostic!("Private AI Proxy backend: {error}");
         std::process::exit(1);
     }
 }
@@ -38,7 +24,7 @@ async fn run() -> Result<(), String> {
     let (agent_home_access, agent_access_error) = match service_access {
         Ok(access) => (access, None),
         Err(error) => {
-            desktop_core::diagnostic(format_args!("Private AI Proxy backend: {error}"));
+            desktop_core::diagnostic!("Private AI Proxy backend: {error}");
             (None, Some(error))
         }
     };
@@ -63,7 +49,7 @@ async fn run() -> Result<(), String> {
             name.to_string()
         }
     };
-    let launcher = Arc::new(serve::InProcessVerifierLauncher::new(
+    let launcher = Arc::new(InProcessVerifierLauncher::new(
         tokio::runtime::Handle::current(),
     ));
     let options = RuntimeOptions {
@@ -85,9 +71,7 @@ async fn run() -> Result<(), String> {
     ) {
         Ok(monitor) => Some(monitor),
         Err(error) => {
-            desktop_core::diagnostic(format_args!(
-                "System wake monitoring is unavailable: {error}"
-            ));
+            desktop_core::diagnostic!("System wake monitoring is unavailable: {error}");
             None
         }
     };

@@ -19,17 +19,17 @@ use agent_bridge::{
     agents::Projector,
     catalog::Catalog,
     proxy::{self, ProxyEvent, ProxyState},
-    secrets::{validate_api_key, KeyringStore, SecretStore},
+    secrets::{KeyringStore, SecretStore},
     tokens::{TokenFiles, TokenSet, LOCAL_TOOLS_AGENT},
 };
 use desktop_core::{
     agents::Agent,
     contracts::{
-        AgentPreview, AgentStatus, ConfidentialProfileInput, ConnectOptions, GatewayState,
-        LocalApiConfig, RequestActivity, ServiceProvider, StartGatewayConfig,
+        AgentPreview, AgentStatus, AppState, ConfidentialProfileInput, ConnectOptions,
+        ListenConfig, RequestActivity, ServiceProvider, StartConfig,
     },
-    local_api::{self, ResolvedLocalApi},
-    lock,
+    listen::ResolvedListen,
+    local_api, lock,
     paths::app_data_dir,
     service_config,
     usage::{UsagePage, UsageQuery},
@@ -81,7 +81,7 @@ pub struct DesktopRuntime {
 }
 
 struct SavedConfiguration<'a> {
-    config: StartGatewayConfig,
+    config: StartConfig,
     reconnect: bool,
     // Keep mutations serialized until the post-save restart has completed.
     _operation: tokio::sync::MutexGuard<'a, ()>,
@@ -164,7 +164,7 @@ impl EndpointRuntime {
         manager: Arc<SessionManager>,
         proxy: Arc<ProxyState>,
         listener: std::net::TcpListener,
-        config: LocalApiConfig,
+        config: ListenConfig,
     ) -> Result<(), String> {
         let mut runtime = self
             .task
@@ -217,7 +217,7 @@ impl DesktopRuntime {
         if agent_configuration {
             if let Err(error) = crate::helper_staging::stage(&helper_path, &data_dir) {
                 // OpenClaw independently rejects an unavailable or mismatched staged copy.
-                crate::diagnostic(format_args!("Cannot stage the credential helper: {error}"));
+                desktop_core::diagnostic!("Cannot stage the credential helper: {error}");
             }
         }
         let secrets: Arc<dyn SecretStore> = Arc::new(KeyringStore);
@@ -242,7 +242,7 @@ impl DesktopRuntime {
         let (local, local_error) = match local_api::load() {
             Ok(config) => (config, None),
             Err(error) => (
-                local_api::resolve(LocalApiConfig::default()).map_err(|fallback| {
+                local_api::resolve(ListenConfig::default()).map_err(|fallback| {
                     format!("The built-in Local API settings are invalid: {fallback}")
                 })?,
                 Some(error),
@@ -271,12 +271,12 @@ impl DesktopRuntime {
             },
         };
         let task_runtime = options.task_runtime;
-        let initial_state = GatewayState {
+        let initial_state = AppState {
             local_api: local.config.clone(),
             config: runtime_config,
             profiles: settings.profiles.clone(),
             active_profile_id: settings.active_profile_id.clone(),
-            ..GatewayState::default()
+            ..AppState::default()
         };
         let manager = Arc::new(
             SessionManager::new(
@@ -419,7 +419,7 @@ impl DesktopRuntime {
         Ok(runtime)
     }
 
-    pub fn subscribe(&self) -> watch::Receiver<GatewayState> {
+    pub fn subscribe(&self) -> watch::Receiver<AppState> {
         self.manager.subscribe()
     }
 
@@ -436,7 +436,7 @@ impl DesktopRuntime {
             .ok_or_else(|| "The backend does not own its instance lock".to_string())
     }
 
-    pub fn state(&self) -> Result<GatewayState, String> {
+    pub fn state(&self) -> Result<AppState, String> {
         self.manager.snapshot()
     }
 

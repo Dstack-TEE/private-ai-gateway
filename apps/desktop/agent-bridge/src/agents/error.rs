@@ -62,7 +62,7 @@ impl fmt::Display for AgentError {
             Self::IncompatibleModel => "The selected model is unavailable on this agent's API for the current profile. Choose a supported model in the agent and retry.",
             Self::RevisionConflict => "The agent settings changed while applying this connection. Try again.",
             Self::InvalidState => "The agent connection is not ready. Check protection and the selected profile, then retry.",
-            Self::Internal => "The agent operation could not complete. Check the gateway state and agent configuration, then retry.",
+            Self::Internal => "The agent operation could not complete. Check the protection status and agent configuration, then retry.",
         })
     }
 }

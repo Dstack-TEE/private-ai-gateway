@@ -130,8 +130,9 @@ pub(super) fn callback_code(
     headers: &HeaderMap,
     expected: &str,
 ) -> Result<String, CallbackError> {
-    if uri.path() != "/oauth/callback"
-        || headers.get("host").and_then(|v| v.to_str().ok()) != Some("127.0.0.1:4181")
+    if uri.path() != CALLBACK_PATH
+        || headers.get("host").and_then(|v| v.to_str().ok())
+            != Some(CALLBACK_ADDRESS.to_string().as_str())
     {
         return Err(CallbackError::Invalid);
     }
@@ -261,7 +262,7 @@ pub(super) async fn redpill(
         ("client_id", REDPILL_CLIENT_ID),
         ("code", &code),
         ("code_verifier", &verifier),
-        ("redirect_uri", CALLBACK),
+        ("redirect_uri", &callback_url()),
     ]))
     .await?;
     let access_token = string(&token, "access_token")?;
@@ -306,14 +307,30 @@ pub(super) fn redpill_details(account: &Value) -> Result<AccountLoginDetails, St
     })
 }
 
+/// One entry of RedPill's `workspaces` account field.
+#[derive(serde::Deserialize)]
+struct RedpillWorkspace {
+    id: i64,
+    name: String,
+    is_default: bool,
+}
+
 pub(super) fn parse_workspaces(account: &Value) -> Result<Vec<AccountWorkspace>, String> {
-    let workspaces: Vec<AccountWorkspace> = serde_json::from_value(
+    let workspaces: Vec<RedpillWorkspace> = serde_json::from_value(
         account
             .get("workspaces")
             .cloned()
             .ok_or("Missing workspace list")?,
     )
     .map_err(|_| "Invalid workspace list")?;
+    let workspaces: Vec<_> = workspaces
+        .into_iter()
+        .map(|workspace| AccountWorkspace {
+            id: workspace.id,
+            name: workspace.name,
+            is_default: workspace.is_default,
+        })
+        .collect();
     validate_workspaces(&workspaces)?;
     Ok(workspaces)
 }

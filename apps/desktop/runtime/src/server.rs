@@ -98,9 +98,9 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
                 match tokio::task::spawn_blocking(move || shutdown(&worker, &gate, &executor, ShutdownMode::Quit)).await {
                     Ok(Ok(())) => {},
                     Ok(Err(error)) => runtime.report_error(error),
-                    Err(error) => crate::diagnostic(format_args!(
+                    Err(error) => desktop_core::diagnostic!(
                         "Cannot finish backend shutdown: {error}"
-                    )),
+                    ),
                 }
                 stopping.store(true, Ordering::Release);
                 break;

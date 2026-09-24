@@ -8,8 +8,9 @@ import type {
   AgentAccessStatus,
   AgentPreview,
   AgentStatus,
+  CliRegistration,
   ConnectOptions,
-  GatewayState,
+  AppState,
   ImportResult,
   LaunchPreferences,
   ListenAddress,
@@ -19,8 +20,9 @@ import type {
   ProfileBackup,
   RequestActivity,
   ServiceProvider,
-  StartGatewayConfig,
+  StartConfig,
   UpdateChannel,
+  UpdateInfo,
   UsagePage,
   UsageQuery,
   VerificationCheck,
@@ -29,22 +31,7 @@ import type {
 
 export type * from "./contracts.generated";
 
-export type GatewayStatus = GatewayState["status"];
 export type CheckStatus = VerificationCheck["status"];
-export type LocalApiConfig = ListenConfig;
-
-export interface UpdateInfo {
-  enabled: boolean;
-  systemManaged: boolean;
-  currentVersion: string;
-  channel: UpdateChannel;
-  version?: string | null;
-  channelPublished: boolean;
-  /** Steps that install `version` when a package manager or the user owns the installation. */
-  upgradeCommands?: string[];
-  /** Portable archive to extract into a fresh directory. */
-  downloadUrl?: string | null;
-}
 
 export interface NotificationConfiguration {
   preferences: NotificationPreferences;
@@ -59,27 +46,8 @@ export interface ConfirmationOptions {
   cancelLabel?: string;
 }
 
-export interface CliRegistration {
-  executable: string;
-  commandPath: string;
-  installed: boolean;
-  onPath: boolean;
-  startupError?: string;
-}
-
-export interface DistributionCapabilities {
-  channel: "direct" | "macAppStore" | "web";
-  nativeUpdates: boolean;
-  cliRegistration: boolean;
-  accountPortalLinks: boolean;
-  sandboxHomeAccess: boolean;
-  launchAtLogin: boolean;
-  notifications: boolean;
-  webUi: boolean;
-}
-
 export interface DesktopApi {
-  startBackendService(): Promise<GatewayState>;
+  startBackendService(): Promise<AppState>;
   showEditMenu(editable: boolean): Promise<void>;
   getAppearance(): Promise<Appearance>;
   setAppearance(appearance: Appearance): Promise<void>;
@@ -98,8 +66,8 @@ export interface DesktopApi {
   copyText(text: string): Promise<void>;
   getClientKey(): Promise<string>;
   rotateClientKey(): Promise<string>;
-  saveLocalApiConfig(config: LocalApiConfig): Promise<GatewayState>;
-  saveWebUi(config: WebUiConfig): Promise<GatewayState>;
+  saveLocalApiConfig(config: ListenConfig): Promise<AppState>;
+  saveWebUi(config: WebUiConfig): Promise<AppState>;
   listListenAddresses(): Promise<ListenAddress[]>;
   getNotificationSettings(): Promise<NotificationConfiguration>;
   selectProfileBackup(): Promise<ProfileBackup | null>;
@@ -112,10 +80,10 @@ export interface DesktopApi {
   saveNotificationSettings(config: NotificationPreferences): Promise<void>;
   requestNotificationPermission(): Promise<Pick<NotificationConfiguration, "permission" | "alertsEnabled">>;
   openNotificationSettings(): Promise<void>;
-  getState(): Promise<GatewayState>;
-  resetSettings(): Promise<GatewayState>;
+  getState(): Promise<AppState>;
+  resetSettings(): Promise<AppState>;
   onSettingsReset(listener: () => void): () => void;
-  onStateChange(listener: (state: GatewayState) => void): () => void;
+  onStateChange(listener: (state: AppState) => void): () => void;
   onSurfaceError(listener: (error: SurfaceError) => void): () => void;
   /** A native menu asked the main window to show a section. */
   onNavigate(listener: (section: "settings" | "agents") => void): () => void;
@@ -126,7 +94,7 @@ export interface DesktopApi {
   openNativeDialog(kind: "profiles" | "profile-editor" | "setup-profile" | "privacy" | "local-api" | "usage-proof" | "local-api-example" | "notifications" | "web-ui", options?: { repair?: boolean; recordId?: string; profileId?: string }): Promise<void>;
   nativeDialogReady(): Promise<void>;
   mainWindowReady(): Promise<void>;
-  onNativeDialogOpen(listener: (request: { state: GatewayState; repair: boolean; recordId?: string | null; profileId?: string | null; startAfterSave?: boolean }) => void): () => void;
+  onNativeDialogOpen(listener: (request: { state: AppState; repair: boolean; recordId?: string | null; profileId?: string | null; startAfterSave?: boolean }) => void): () => void;
   onNativeDialogDismissed(listener: () => void): () => void;
   onNativeCloseRequest(listener: () => void): () => void;
   closeNativeDialog(): Promise<void>;
@@ -138,20 +106,20 @@ export interface DesktopApi {
   confirm(options: ConfirmationOptions): Promise<boolean>;
   /** Show a platform-native error alert for an explicit user action that failed. */
   showErrorAlert(title: string, message: string): Promise<void>;
-  start(config: StartGatewayConfig): Promise<GatewayState>;
-  saveConfiguration(profile: ConfidentialProfileInput, requireProductionOs: boolean, key?: string): Promise<GatewayState>;
+  start(config: StartConfig): Promise<AppState>;
+  saveConfiguration(profile: ConfidentialProfileInput, requireProductionOs: boolean, key?: string): Promise<AppState>;
   completeAccountLogin(id: string, callbackUrl: string): Promise<void>;
   beginAccountLogin(profile: ConfidentialProfileInput): Promise<LoginPresentation>;
   pollAccountLogin(id: string): Promise<AccountLoginDetails | null>;
-  saveAccountLogin(id: string, profile: ConfidentialProfileInput, requireProductionOs: boolean, workspaceId?: number): Promise<GatewayState>;
+  saveAccountLogin(id: string, profile: ConfidentialProfileInput, requireProductionOs: boolean, workspaceId?: number): Promise<AppState>;
   getAccountDetails(profileId: string): Promise<AccountLoginDetails>;
   getAccountBalance(target: AccountBalanceTarget): Promise<AccountBalance | null>;
   openOrganization(organizationSlug: string): Promise<void>;
   openTopUp(provider: ServiceProvider, scopeSlug?: string): Promise<void>;
   cancelAccountLogin(id: string): Promise<void>;
-  activateProfile(profileId: string): Promise<GatewayState>;
-  deleteProfile(profileId: string): Promise<GatewayState>;
-  stop(): Promise<GatewayState>;
+  activateProfile(profileId: string): Promise<AppState>;
+  deleteProfile(profileId: string): Promise<AppState>;
+  stop(): Promise<AppState>;
   queryUsage(query: UsageQuery): Promise<UsagePage>;
   getUsageRecord(recordId: string): Promise<RequestActivity>;
   listAgents(): Promise<AgentStatus[]>;

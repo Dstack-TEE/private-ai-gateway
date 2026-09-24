@@ -7,7 +7,7 @@ import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import type {
   Appearance,
   DistributionCapabilities,
-  GatewayState,
+  AppState,
   ProfileBackup,
   UiMethod,
 } from "../../shared/contracts";
@@ -15,16 +15,13 @@ import { createDesktopApi, type UiPlatform, type UiTransport } from "./create-ap
 
 declare global {
   interface Window {
-    __GATEWAY_INITIAL_STATE__?: GatewayState;
-    __GATEWAY_INITIAL_APPEARANCE__?: Appearance;
+    __PAP_INITIAL_STATE__?: AppState;
+    __PAP_INITIAL_APPEARANCE__?: Appearance;
     __PAP_DISTRIBUTION__?: DistributionCapabilities;
   }
 }
 
 const commandOverrides: Partial<Record<UiMethod, string>> = {
-  getState: "get_gateway_state",
-  start: "start_gateway",
-  stop: "stop_gateway",
   getAccountDetails: "account_details",
   getAccountBalance: "account_balance",
   previewAgent: "preview_agent_connection",
@@ -128,10 +125,10 @@ function subscribe<T>(event: string, listener: (payload: T) => void): () => void
 }
 
 export async function createBackend() {
-  const initialGatewayState = window.__GATEWAY_INITIAL_STATE__;
-  delete window.__GATEWAY_INITIAL_STATE__;
-  const initialAppearance = window.__GATEWAY_INITIAL_APPEARANCE__;
-  delete window.__GATEWAY_INITIAL_APPEARANCE__;
+  const initialAppState = window.__PAP_INITIAL_STATE__;
+  delete window.__PAP_INITIAL_STATE__;
+  const initialAppearance = window.__PAP_INITIAL_APPEARANCE__;
+  delete window.__PAP_INITIAL_APPEARANCE__;
   const distributionCapabilities = window.__PAP_DISTRIBUTION__;
   delete window.__PAP_DISTRIBUTION__;
   if (!distributionCapabilities) throw new Error("Distribution capabilities were not initialized");
@@ -139,7 +136,7 @@ export async function createBackend() {
     desktopApi: createDesktopApi(transport, platform),
     distributionCapabilities,
     initialAppearance,
-    initialGatewayState,
+    initialAppState,
     signOut: undefined,
   };
 }

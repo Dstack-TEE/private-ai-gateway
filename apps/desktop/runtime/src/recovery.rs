@@ -1,4 +1,4 @@
-use desktop_core::contracts::GatewayState;
+use desktop_core::contracts::AppState;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -121,11 +121,11 @@ impl Retry {
     }
 }
 
-pub fn connection_intended(state: &GatewayState) -> bool {
+pub fn connection_intended(state: &AppState) -> bool {
     state.session_active && !state.configuration_verification && state.status != "blocked"
 }
 
-pub fn should_retry(state: &GatewayState) -> bool {
+pub fn should_retry(state: &AppState) -> bool {
     connection_intended(state)
         && (matches!(state.status.as_str(), "error" | "stopped") || state.endpoint_error.is_some())
 }
@@ -152,7 +152,7 @@ mod tests {
             assert!(retry.due(failed_at + Duration::from_secs(delay)));
             failed_at += Duration::from_secs(delay + 45);
         }
-        let mut state = GatewayState {
+        let mut state = AppState {
             status: "error".into(),
             session_active: true,
             api_key_saved: true,

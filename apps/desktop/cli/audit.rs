@@ -5,11 +5,11 @@
 
 use std::fs;
 
-use private_ai_proxy::aci::types::AttestationReport;
+use crate::aci::types::AttestationReport;
 
 use crate::args::AuditArgs;
 use crate::checks::{
-    established_identity, now_secs, parse_receipt_document, run_report_checks, run_response_checks,
+    established_identity, parse_receipt_document, run_report_checks, run_response_checks,
     BodyDigest, ChannelEvidence, QuoteSource, ReportCheckContext, UpstreamContext,
 };
 use crate::transcript::Transcript;
@@ -26,7 +26,7 @@ pub async fn run(args: AuditArgs, require_production_os: bool) -> Result<i32, St
         &report,
         ReportCheckContext {
             nonce: args.nonce.as_deref(),
-            now_secs: now_secs(),
+            now_secs: desktop_core::now_secs(),
             expiry_skipped: args.skip_expiry,
             quote: QuoteSource::Offline {
                 reason: "quote collateral offline",

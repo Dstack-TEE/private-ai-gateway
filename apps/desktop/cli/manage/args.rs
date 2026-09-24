@@ -26,7 +26,7 @@ pub(super) struct Cli {
 
 #[derive(Subcommand)]
 pub(super) enum Action {
-    /// Show backend and gateway state. This does not start the backend.
+    /// Show backend and protection state. This does not start the backend.
     Status {
         /// Stream state changes. Human output suppresses unchanged heartbeats; JSON remains NDJSON.
         #[arg(long)]
@@ -115,7 +115,7 @@ pub(super) enum Service {
     Start,
     /// Stop the backend and restore managed agent configurations.
     Stop,
-    /// Show backend and gateway state without starting the backend.
+    /// Show backend and protection state without starting the backend.
     Status,
 }
 

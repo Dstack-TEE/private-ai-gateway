@@ -15,8 +15,8 @@
     "allow-open-organization",
     "allow-cancel-account-login",
     "allow-delete-profile",
-    "allow-start-gateway",
-    "allow-stop-gateway",
+    "allow-start",
+    "allow-stop",
     "allow-copy-text",
     "allow-open-about-link",
     "allow-open-api-key-page"

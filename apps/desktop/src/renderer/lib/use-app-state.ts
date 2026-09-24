@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, type SetStateAction } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import type { DesktopApi, GatewayState } from "../../shared/contracts";
+import type { DesktopApi, AppState } from "../../shared/contracts";
 
-const key = ["gateway-state"];
+const key = ["app-state"];
 
 /** Rust owns this snapshot. Events and command results supersede pending reads. */
-export function useGatewayState(api: DesktopApi, fallback: GatewayState) {
+export function useAppState(api: DesktopApi, fallback: AppState) {
   const client = useQueryClient();
   const query = useQuery({ queryKey: key, queryFn: () => api.getState(), retry: false });
   const usageRevision = useRef(query.data?.usageRevision);
@@ -15,9 +15,9 @@ export function useGatewayState(api: DesktopApi, fallback: GatewayState) {
     void client.invalidateQueries({ queryKey: ["usage"] });
     void client.invalidateQueries({ queryKey: ["usage-record"] });
   }, [client, query.data?.usageRevision]);
-  const setState = useCallback((next: SetStateAction<GatewayState>) => {
+  const setState = useCallback((next: SetStateAction<AppState>) => {
     void client.cancelQueries({ queryKey: key }).then(() => {
-      client.setQueryData<GatewayState>(key, (current) => typeof next === "function" ? next(current ?? fallback) : next);
+      client.setQueryData<AppState>(key, (current) => typeof next === "function" ? next(current ?? fallback) : next);
     });
   }, [client, fallback]);
   useEffect(() => api.onStateChange(setState), [api, setState]);

@@ -17,9 +17,10 @@ Status: implemented.
 `private-ai-proxy` composes the managed CLI's Clap command tree with its ACI
 commands. The `cli` crate is the only command-line surface: management
 arguments, execution, output, completions and `schema` live in
-`apps/desktop/cli/manage`; ACI command modules live beside them in
-`apps/desktop/cli`. The backend crates contain no argument parsing or terminal
-prompting.
+`apps/desktop/cli/manage`. The ACI commands and the verifying proxy
+(`cli/serve.rs`, which the backend also runs in managed mode) form the crate's
+library, built once for both executables. The backend crates contain no
+argument parsing or terminal prompting.
 There is one PAP user-facing executable and one PAP relying-party verifier.
 Desktop integration adds lifecycle events for process integration and post-delivery receipt auditing.
 The Private AI Proxy package owns the user-facing CLI, its managed service binary,
@@ -68,11 +69,12 @@ bridge (no HTTP server, SQLite, keyring, config editors or CLI parser). The
 backend binary lives in `cli` because it injects the in-process verifier, which
 `cli` owns, into `runtime` through `VerifierLauncher`.
 
-In prose, "gateway" names the remote Private AI Gateway. Some wire and UI names
-predate that rule and are kept for compatibility across updates: the
-`GatewayState` contract, `StartGatewayConfig`, the `start_gateway`,
-`stop_gateway` and `get_gateway_state` Tauri commands, and the `gateway`
-notification preference all describe local protection state.
+"Gateway" names the remote Private AI Gateway. The renderer, desktop shell,
+web UI and backend ship together (IPC requires a matching `BUILD_VERSION`, and
+web UI sessions end when the service restarts), so their internal contract,
+command and event names can change in one release. Only persisted data keeps
+older names: the `gateway` notification preference, which covers local
+protection problems, is stored under that key.
 
 ## Module boundaries
 
@@ -116,9 +118,9 @@ notification preference all describe local protection state.
   and awaits process exit. Failure to restore leaves management available for
   recovery instead of closing the inference listener halfway through shutdown.
 - An owned verifier task performs attestation, TLS pinning and receipt audits in
-  the backend process. Task failure publishes the same error/reconnect state as
-  the former verifier-process exit; explicit stop cancels the task after first
-  revoking the published forwarding session.
+  the backend process. Task failure publishes the error/reconnect state;
+  explicit stop cancels the task after first revoking the published forwarding
+  session.
 
 ## Verifier execution
 
@@ -127,18 +129,13 @@ the Local API proxy swaps in the provider credential and calls the verified serv
 directly with the request body and typed attribution context. The verifier makes
 the sole remote HTTP hop over its attestation-bound TLS client. Lifecycle events
 use a direct callback, and request delivery, usage and receipt-audit updates all
-flow through `ProxyEvent`; there is no stdout JSON protocol, control listener,
-tag header or supervisor process.
+flow through `ProxyEvent`.
 
-Process isolation was not a security boundary: the old verifier received the
-provider credential, MAS signed both children with `app-sandbox` plus `inherit`,
-and Windows only applied `CREATE_NO_WINDOW`. It had no lower-privilege token,
-separate sandbox or provider-key boundary. Git history introduced the supervisor
-to ensure backend death reaped the listener. In-process ownership preserves that
-lifecycle property without a separately reachable port. Standalone `pap serve`
-still uses the same verifier and retains its explicit proxy listener plus the
-documented `--control` receipt-audit listener. Managed mode binds neither
-verifier listener; it calls the verifier directly.
+The verifier runs as a task owned by the backend, so it shares the backend's
+lifetime and has no separately reachable port. Standalone `pap serve` uses the
+same verifier with its own proxy listener and the documented `--control`
+receipt-audit listener; managed mode binds neither and calls the verifier
+directly.
 
 ## Security and Protocol
 

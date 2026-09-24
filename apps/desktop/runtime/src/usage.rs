@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::Write,
+    io::{ErrorKind, Write},
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
 };
@@ -11,6 +11,7 @@ use rusqlite::{
 
 use desktop_core::{
     contracts::{RequestActivity, UsageSummary},
+    private_fs::{self, Publish},
     usage::{UsageModelPoint, UsagePage, UsagePoint, UsageQuery},
 };
 
@@ -216,69 +217,34 @@ impl UsageStore {
         let mut all = query.clone();
         all.cursor = None;
         let (where_sql, bindings) = filters(&all, false)?;
-        let connection = self.lock()?;
-        let mut statement = connection
-            .prepare(&format!(
-                "SELECT {} FROM usage_records {where_sql} ORDER BY at DESC, id DESC",
-                columns()
-            ))
-            .map_err(db_error)?;
-        let rows = statement
-            .query_map(params_from_iter(bindings.iter()), row_to_activity)
-            .map_err(db_error)?;
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let output = options.open(path).map_err(|_| {
-            "Cannot create the usage export. Choose a new writable file path.".to_string()
-        })?;
-        let mut writer = std::io::BufWriter::new(output);
-        let write_error =
-            |_| "The usage export could not be completed; its file may be partial.".to_string();
-        writer.write_all(b"timestamp,id,session_id,agent,model,method,path,status,streamed,left_device,receipt_id,verified,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_usd,detail\n").map_err(write_error)?;
+        // Render under the database lock, then write the file without it.
+        let mut csv = b"timestamp,id,session_id,agent,model,method,path,status,streamed,left_device,receipt_id,verified,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_usd,detail\n".to_vec();
         let mut count = 0;
-        for item in rows {
-            let item = item.map_err(db_error)?;
-            let fields = [
-                item.at.to_string(),
-                item.id.clone(),
-                item.session_id.clone(),
-                item.agent.clone().unwrap_or_default(),
-                item.model.clone().unwrap_or_default(),
-                item.method.clone(),
-                item.path.clone(),
-                item.status.to_string(),
-                item.streamed.to_string(),
-                item.left_device.to_string(),
-                item.receipt_id.clone().unwrap_or_default(),
-                item.verified
-                    .map(|value| value.to_string())
-                    .unwrap_or_default(),
-                optional_number(item.input_tokens),
-                optional_number(item.output_tokens),
-                optional_number(item.cache_read_tokens),
-                optional_number(item.cache_write_tokens),
-                item.cost_usd
-                    .map(|value| value.to_string())
-                    .unwrap_or_default(),
-                item.detail.clone(),
-            ];
-            let line = fields
-                .iter()
-                .map(|field| csv_field(field))
-                .collect::<Vec<_>>()
-                .join(",");
-            writeln!(writer, "{line}").map_err(write_error)?;
-            count += 1;
+        {
+            let connection = self.lock()?;
+            let mut statement = connection
+                .prepare(&format!(
+                    "SELECT {} FROM usage_records {where_sql} ORDER BY at DESC, id DESC",
+                    columns()
+                ))
+                .map_err(db_error)?;
+            let rows = statement
+                .query_map(params_from_iter(bindings.iter()), row_to_activity)
+                .map_err(db_error)?;
+            for item in rows {
+                csv_row(&mut csv, &item.map_err(db_error)?);
+                count += 1;
+            }
         }
-        writer
-            .flush()
-            .and_then(|()| writer.get_ref().sync_all())
-            .map_err(write_error)?;
+        // The export appears complete or not at all, never over an existing file.
+        private_fs::publish(path, Publish::NoClobber, |file| file.write_all(&csv)).map_err(
+            |error| match error.kind() {
+                ErrorKind::AlreadyExists | ErrorKind::NotFound | ErrorKind::PermissionDenied => {
+                    "Cannot create the usage export. Choose a new writable file path.".to_string()
+                }
+                _ => "The usage export could not be completed.".to_string(),
+            },
+        )?;
         Ok(count)
     }
 
@@ -295,6 +261,40 @@ impl UsageStore {
             .lock()
             .map_err(|_| "The usage database is unavailable".to_string())
     }
+}
+
+fn csv_row(csv: &mut Vec<u8>, item: &RequestActivity) {
+    let fields = [
+        item.at.to_string(),
+        item.id.clone(),
+        item.session_id.clone(),
+        item.agent.clone().unwrap_or_default(),
+        item.model.clone().unwrap_or_default(),
+        item.method.clone(),
+        item.path.clone(),
+        item.status.to_string(),
+        item.streamed.to_string(),
+        item.left_device.to_string(),
+        item.receipt_id.clone().unwrap_or_default(),
+        item.verified
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        optional_number(item.input_tokens),
+        optional_number(item.output_tokens),
+        optional_number(item.cache_read_tokens),
+        optional_number(item.cache_write_tokens),
+        item.cost_usd
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        item.detail.clone(),
+    ];
+    let line = fields
+        .iter()
+        .map(|field| csv_field(field))
+        .collect::<Vec<_>>()
+        .join(",");
+    csv.extend_from_slice(line.as_bytes());
+    csv.push(b'\n');
 }
 
 fn initialize(connection: &Connection) -> Result<(), String> {

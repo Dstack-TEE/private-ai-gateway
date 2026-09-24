@@ -26,9 +26,9 @@ macro_rules! ui_commands {
 
 ui_commands! {
     start_backend_service => StartBackendService,
-    get_gateway_state => GetState,
-    start_gateway => Start,
-    stop_gateway => Stop,
+    get_state => GetState,
+    start => Start,
+    stop => Stop,
     activate_profile => ActivateProfile,
     delete_profile => DeleteProfile,
     save_configuration => SaveConfiguration,

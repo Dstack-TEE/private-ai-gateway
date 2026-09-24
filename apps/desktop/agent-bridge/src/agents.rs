@@ -1,4 +1,4 @@
-//! Agent configuration projection: point an agent at the local gateway by
+//! Agent configuration projection: point an agent at the local proxy by
 //! editing only the fields this app owns, remember what those fields held
 //! before, and put them back on disconnect. Credential fields a connection
 //! takes over are parked in the OS credential store and referenced opaquely;
@@ -519,18 +519,14 @@ fn revision(
             .unwrap_or_default()
             .as_bytes(),
     );
-    hex(&hasher.finalize())
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    hex::encode(hasher.finalize())
 }
 
 fn secret_entry(agent: Agent, path: &[String]) -> String {
     format!(
         "restore:{}:{}",
         agent.id(),
-        hex(&Sha256::digest(path.join("\u{1f}")))
+        hex::encode(Sha256::digest(path.join("\u{1f}")))
     )
 }
 

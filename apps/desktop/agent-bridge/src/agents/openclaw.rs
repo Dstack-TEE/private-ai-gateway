@@ -24,7 +24,7 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
     if selected.is_some_and(|id| catalog.get(id).is_none()) {
         return Err("Choose an OpenClaw model from the verified model list".into());
     }
-    let endpoint = reqwest::Url::parse(inputs.endpoint).map_err(|_| "Invalid local gateway URL")?;
+    let endpoint = reqwest::Url::parse(inputs.endpoint).map_err(|_| "Invalid Local API URL")?;
     if endpoint.scheme() != "http"
         || !matches!(
             endpoint.host_str(),
@@ -36,7 +36,7 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
         || endpoint.query().is_some()
         || endpoint.fragment().is_some()
     {
-        return Err("OpenClaw projection requires the native host's loopback gateway".into());
+        return Err("OpenClaw projection requires the native host's loopback Local API".into());
     }
     let models: Vec<Value> = catalog
         .models

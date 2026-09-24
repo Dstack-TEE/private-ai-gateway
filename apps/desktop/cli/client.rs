@@ -6,8 +6,8 @@
 
 use std::sync::Arc;
 
+use crate::aci::tls::{observing_spki_client, SpkiObservations};
 use futures_util::StreamExt;
-use private_ai_proxy::aci::tls::{observing_spki_client, SpkiObservations};
 use rand::RngCore;
 
 const CONNECT_TIMEOUT_SECONDS: u64 = 10;

@@ -1,6 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useGatewayState } from "../lib/use-gateway-state";
+import { useAppState } from "../lib/use-app-state";
 import { useWindowReady } from "../lib/use-window-ready";
 import { errorMessage } from "../lib/error-message";
 import { showErrorAlert, useErrorAlert } from "../lib/error-alert";
@@ -8,8 +8,8 @@ import { brand } from "../generated/brand";
 import { LocalApiExamples } from "../components/local-api-examples";
 import { NotificationsProvider, NotificationsSheet, useNotifications } from "../components/notifications";
 import { NativeDialogHost } from "../components/sheet";
-import type { GatewayState, LocalApiConfig, WebUiConfig } from "../../shared/contracts";
-import { desktopApi, initialGatewayState, query, web } from "../lib/environment";
+import type { AppState, ListenConfig, WebUiConfig } from "../../shared/contracts";
+import { desktopApi, initialAppState, query, web } from "../lib/environment";
 import { INITIAL_STATE, protectionFlags } from "../lib/protection";
 import { ProfileEditorSheet, ProfilesSheet } from "../features/profiles";
 import { localEndpoint } from "../lib/format";
@@ -18,38 +18,38 @@ import { LocalApiSheet } from "../features/local-api";
 import { WebUiSheet } from "../features/web-ui";
 import { UsageEvidenceSheet } from "../features/usage";
 
-const NativeStateContext = createContext<GatewayState | undefined>(initialGatewayState);
+const NativeStateContext = createContext<AppState | undefined>(initialAppState);
 
 type NativeWindowOptions = {
   contentReady?: boolean;
   contentError?: string;
-  validate?(state: GatewayState): string | undefined;
+  validate?(state: AppState): string | undefined;
 };
 
 type NativeWindowRequest = {
   kind?: string;
-  state?: GatewayState;
+  state?: AppState;
   repair: boolean;
   recordId?: string | null;
   profileId?: string | null;
   startAfterSave?: boolean;
 };
 
-function useNativeGatewayWindow(title: string, options: NativeWindowOptions = {}): {
-  state: GatewayState;
-  setState: React.Dispatch<React.SetStateAction<GatewayState>>;
+function useNativeWindow(title: string, options: NativeWindowOptions = {}): {
+  state: AppState;
+  setState: React.Dispatch<React.SetStateAction<AppState>>;
   loaded: boolean;
   loadError?: string;
   close(): void;
 } {
   const initialState = useContext(NativeStateContext);
-  const gateway = useGatewayState(desktopApi, initialState ?? INITIAL_STATE);
-  const state = gateway.data ?? initialState ?? INITIAL_STATE;
-  const setState = gateway.setState;
-  const loaded = Boolean(initialState) || !gateway.isLoading;
+  const appState = useAppState(desktopApi, initialState ?? INITIAL_STATE);
+  const state = appState.data ?? initialState ?? INITIAL_STATE;
+  const setState = appState.setState;
+  const loaded = Boolean(initialState) || !appState.isLoading;
   const [presentationError, setLoadError] = useState<string>();
   const validationError = loaded ? options.validate?.(state) : undefined;
-  const loadError = presentationError ?? options.contentError ?? validationError ?? (gateway.error ? errorMessage(gateway.error) : undefined);
+  const loadError = presentationError ?? options.contentError ?? validationError ?? (appState.error ? errorMessage(appState.error) : undefined);
   useWindowReady(loaded && (options.contentReady ?? true) && !loadError, desktopApi.nativeDialogReady, setLoadError);
 
   useEffect(() => {
@@ -77,14 +77,14 @@ function NativeDialogStatus({ label, error, onClose }: { label: string; error?: 
 }
 
 function NativeProfilesWindow({ repair, editor = false, profileId, startAfterSave = false }: { repair: boolean; editor?: boolean; profileId?: string | null; startAfterSave?: boolean }): React.JSX.Element {
-  const native = useNativeGatewayWindow(editor ? profileId ? "Edit Profile" : "New Profile" : "Profiles", {
+  const native = useNativeWindow(editor ? profileId ? "Edit Profile" : "New Profile" : "Profiles", {
     validate: (state) => editor && profileId && !state.profiles.some((profile) => profile.id === profileId)
       ? "This profile is no longer available."
       : undefined,
   });
   const [repairRequest, setRepairRequest] = useState(repair ? 1 : 0);
   useEffect(() => desktopApi.onProfileRepairRequest(() => setRepairRequest((current) => current + 1)), []);
-  const run = async (action: () => Promise<GatewayState>): Promise<string | undefined> => {
+  const run = async (action: () => Promise<AppState>): Promise<string | undefined> => {
     try {
       native.setState(await action());
       return undefined;
@@ -124,7 +124,7 @@ function NativeProfilesWindow({ repair, editor = false, profileId, startAfterSav
 
 function NativeNotificationsWindow(): React.JSX.Element {
   const { data, error } = useNotifications();
-  const native = useNativeGatewayWindow("Notifications", {
+  const native = useNativeWindow("Notifications", {
     contentReady: Boolean(data),
     contentError: !data ? error : undefined,
   });
@@ -139,7 +139,7 @@ function NativeLocalApiExampleWindow(): React.JSX.Element {
     setExampleError(error);
     setExampleReady(true);
   }, []);
-  const native = useNativeGatewayWindow("Local API examples", { contentReady: exampleReady, contentError: exampleError });
+  const native = useNativeWindow("Local API examples", { contentReady: exampleReady, contentError: exampleError });
   if (!native.loaded || native.loadError) return <NativeDialogStatus label="Local API examples" error={native.loadError} onClose={native.close} />;
   return <NativeDialogHost ><LocalApiExamples
     api={desktopApi}
@@ -151,7 +151,7 @@ function NativeLocalApiExampleWindow(): React.JSX.Element {
 }
 
 function NativePrivacyWindow(): React.JSX.Element {
-  const native = useNativeGatewayWindow("Privacy Verification");
+  const native = useNativeWindow("Privacy Verification");
   if (!native.loaded || native.loadError) return <NativeDialogStatus label="privacy verification" error={native.loadError} onClose={native.close} />;
   return (
     <NativeDialogHost >
@@ -168,7 +168,7 @@ function NativeLocalApiWindow(): React.JSX.Element {
   const [keyError, setKeyError] = useState<string>();
   const reportError = useErrorAlert("Local API action failed");
   const rotatingClientKey = useRef(false);
-  const native = useNativeGatewayWindow("Local API Settings", { contentReady: keyLoaded, contentError: keyError });
+  const native = useNativeWindow("Local API Settings", { contentReady: keyLoaded, contentError: keyError });
   const copyTimer = useRef<number | undefined>(undefined);
 
   const loadClientKey = useCallback(() => {
@@ -228,7 +228,7 @@ function NativeLocalApiWindow(): React.JSX.Element {
       rotatingClientKey.current = false;
     }
   };
-  const saveLocalApi = async (config: LocalApiConfig): Promise<string | undefined> => {
+  const saveLocalApi = async (config: ListenConfig): Promise<string | undefined> => {
     try {
       native.setState(await desktopApi.saveLocalApiConfig(config));
       return undefined;
@@ -255,7 +255,7 @@ function NativeLocalApiWindow(): React.JSX.Element {
 }
 
 function NativeWebUiWindow(): React.JSX.Element {
-  const native = useNativeGatewayWindow("Web UI Settings");
+  const native = useNativeWindow("Web UI Settings");
   if (!native.loaded || native.loadError) {
     return <NativeDialogStatus label="Web UI settings" error={native.loadError} onClose={native.close} />;
   }
@@ -278,7 +278,7 @@ function NativeUsageProofWindow({ initialRecordId }: { initialRecordId: string }
     initialData: initialState?.activity.find((item) => item.id === recordId),
   });
   const error = recordError ? errorMessage(recordError) : undefined;
-  const native = useNativeGatewayWindow("Usage Proof", { contentReady: Boolean(activity), contentError: error });
+  const native = useNativeWindow("Usage Proof", { contentReady: Boolean(activity), contentError: error });
   useEffect(() => desktopApi.onUsageProofRequest(setRecordId), []);
   if (!activity || error || native.loadError) return <NativeDialogStatus label="usage proof" error={error ?? native.loadError} onClose={native.close} />;
   return <NativeDialogHost ><UsageEvidenceSheet activity={activity} onClose={native.close} /></NativeDialogHost>;
@@ -287,7 +287,7 @@ function NativeUsageProofWindow({ initialRecordId }: { initialRecordId: string }
 export function NativeWindowContent(): React.JSX.Element | null {
   const nativeDialog = query.get("native-dialog");
   const [request, setRequest] = useState<NativeWindowRequest | null>(() => web ? null : ({
-    state: initialGatewayState, repair: query.get("repair") === "1",
+    state: initialAppState, repair: query.get("repair") === "1",
     recordId: query.get("record"), profileId: query.get("profile"), startAfterSave: query.get("start") === "1",
   }));
   const [generation, setGeneration] = useState(0);

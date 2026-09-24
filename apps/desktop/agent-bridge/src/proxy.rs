@@ -26,7 +26,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc, PoisonError, RwLock, RwLockReadGuard,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use axum::{
@@ -47,6 +47,7 @@ use tokio_util::sync::CancellationToken;
 use desktop_core::{
     agents::Agent,
     brand::{PRODUCT_NAME, SERVICE_NAME},
+    now_secs,
 };
 
 use crate::{
@@ -252,7 +253,7 @@ impl ProxyState {
             session
                 .service
                 .clone()
-                .ok_or_else(|| "The gateway is not running".to_string())?
+                .ok_or_else(|| "Protection is not running".to_string())?
         };
         let mut request = Request::builder().method("GET").uri("/v1/models");
         if let Some(key) = read(&self.credentials).api_key.as_deref() {
@@ -440,7 +441,7 @@ pub async fn serve(state: Arc<ProxyState>, listener: std::net::TcpListener) -> R
         .map_err(|error| format!("Cannot use the local listener: {error}"))?;
     axum::serve(listener, router(state))
         .await
-        .map_err(|error| format!("The local gateway stopped: {error}"))
+        .map_err(|error| format!("The Local API stopped: {error}"))
 }
 
 async fn relay(
@@ -460,7 +461,7 @@ async fn relay(
         let rejection = Rejection::new(
             StatusCode::TOO_MANY_REQUESTS,
             "rate_limited",
-            "Too many requests are in flight through the local gateway; retry shortly",
+            "Too many requests are in flight through the Local API; retry shortly",
         );
         return reject(&state, Some(agent), "POST", path, None, surface, rejection);
     };
@@ -480,7 +481,7 @@ async fn relay(
             let rejection = Rejection::new(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "request_too_large",
-                "The request body exceeds the local gateway limit",
+                "The request body exceeds the Local API limit",
             );
             return reject(&state, Some(agent), "POST", path, None, surface, rejection);
         }
@@ -991,14 +992,7 @@ fn model_of(bytes: &[u8]) -> Option<String> {
 fn new_id() -> String {
     let mut bytes = [0u8; 16];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    hex::encode(bytes)
 }
 
 #[cfg(test)]

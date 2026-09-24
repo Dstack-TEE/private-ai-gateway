@@ -1,19 +1,8 @@
 //! Unified Private AI Proxy CLI, including the ACI protocol commands.
-mod args;
-mod audit;
-mod capture;
-mod checks;
-mod client;
 mod manage;
-mod send;
-mod serve;
-mod sessions;
-#[cfg(test)]
-mod spec_fixtures;
-mod transcript;
-mod verify;
 
 use clap::{FromArgMatches, Subcommand};
+use private_ai_proxy::{args, audit, send, serve, sessions, verify};
 use std::{io::IsTerminal, path::Path};
 
 #[tokio::main]
@@ -83,8 +72,8 @@ fn legacy_alias_hint() {
         .take_while(|arg| arg != "--")
         .any(|arg| arg == "--json" || arg == "--json-events");
     if invoked_as_aci && !machine_output && std::io::stderr().is_terminal() {
-        desktop_core::diagnostic(format_args!(
+        desktop_core::diagnostic!(
             "note: `aci` is a legacy alias; use `pap` or `private-ai-proxy` instead."
-        ));
+        );
     }
 }

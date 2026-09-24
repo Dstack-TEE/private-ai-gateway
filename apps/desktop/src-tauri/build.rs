@@ -1,7 +1,7 @@
 fn main() {
     let manifest = tauri_build::AppManifest::new().commands(&[
         "start_backend_service",
-        "get_gateway_state",
+        "get_state",
         "reset_settings",
         "read_profile_backup",
         "import_profiles",
@@ -18,7 +18,7 @@ fn main() {
         "restart_to_update",
         "get_launch_preferences",
         "set_launch_preference",
-        "start_gateway",
+        "start",
         "complete_account_login",
         "begin_account_login",
         "poll_account_login",
@@ -31,7 +31,7 @@ fn main() {
         "activate_profile",
         "delete_profile",
         "save_configuration",
-        "stop_gateway",
+        "stop",
         "copy_text",
         "show_edit_menu",
         "show_error_alert",

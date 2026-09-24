@@ -4,13 +4,12 @@
 //! whose leaf SPKI is recorded, then checks online: DCAP collateral
 //! fetched, observed channel bound.
 
-use private_ai_proxy::aci::types::AttestationReport;
-use private_ai_proxy::aci::verifier::DEFAULT_DCAP_PCCS_URL;
+use crate::aci::types::AttestationReport;
+use crate::aci::verifier::DEFAULT_DCAP_PCCS_URL;
 
 use crate::args::VerifyArgs;
 use crate::checks::{
-    now_secs, run_report_checks, ChannelEvidence, EstablishedIdentity, QuoteSource,
-    ReportCheckContext,
+    run_report_checks, ChannelEvidence, EstablishedIdentity, QuoteSource, ReportCheckContext,
 };
 use crate::client::{host_of, normalize_base_url, random_nonce_hex, AciClient};
 use crate::transcript::Transcript;
@@ -67,7 +66,7 @@ pub async fn verify_service(
         &report,
         ReportCheckContext {
             nonce: Some(&nonce),
-            now_secs: now_secs(),
+            now_secs: desktop_core::now_secs(),
             expiry_skipped: false,
             quote: QuoteSource::Online {
                 pccs_url: DEFAULT_DCAP_PCCS_URL,

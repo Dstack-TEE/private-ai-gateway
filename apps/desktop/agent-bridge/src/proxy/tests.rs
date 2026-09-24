@@ -59,8 +59,8 @@ async fn spawn(router: Router) -> String {
     format!("http://{addr}")
 }
 
-/// A stand-in sidecar that echoes what it received.
-async fn mock_sidecar() -> String {
+/// A stand-in verified upstream that echoes what it received.
+async fn mock_upstream() -> String {
     let echo = |headers: HeaderMap, body: Bytes| async move {
         let header = |name: &str| {
             headers
@@ -154,12 +154,12 @@ async fn discovery_and_request_admission_share_endpoint_capabilities() {
     assert_eq!(error.code, "model_endpoint_unavailable");
 }
 
-async fn verified(state: &ProxyState, sidecar: &str, generation: u64, epoch: u64) {
+async fn verified(state: &ProxyState, upstream: &str, generation: u64, epoch: u64) {
     state.publish(Session {
         generation,
         epoch,
         session_id: Some("test-session".to_string()),
-        service: Some(http_service(sidecar)),
+        service: Some(http_service(upstream)),
         verified: false,
         catalog: None,
     });
@@ -168,7 +168,7 @@ async fn verified(state: &ProxyState, sidecar: &str, generation: u64, epoch: u64
         generation,
         epoch,
         session_id: Some("test-session".to_string()),
-        service: Some(http_service(sidecar)),
+        service: Some(http_service(upstream)),
         verified: true,
         catalog: Some(catalog),
     });
@@ -257,7 +257,7 @@ async fn anonymous_wrong_and_cross_agent_tokens_are_refused() {
 async fn requests_fail_closed_until_a_verified_session_with_a_catalog_and_key() {
     let (state, _events) = state();
     state.set_tokens(tokens());
-    let sidecar = mock_sidecar().await;
+    let upstream = mock_upstream().await;
     let proxy = spawn(router(state.clone())).await;
     let client = reqwest::Client::new();
     let send = |client: reqwest::Client, proxy: String| async move {
@@ -278,7 +278,7 @@ async fn requests_fail_closed_until_a_verified_session_with_a_catalog_and_key() 
         generation: 1,
         epoch: 1,
         session_id: Some("test-session".to_string()),
-        service: Some(http_service(&sidecar)),
+        service: Some(http_service(&upstream)),
         verified: true,
         catalog: None,
     });
@@ -287,7 +287,7 @@ async fn requests_fail_closed_until_a_verified_session_with_a_catalog_and_key() 
         503
     );
 
-    verified(&state, &sidecar, 1, 1).await;
+    verified(&state, &upstream, 1, 1).await;
     let response = send(client.clone(), proxy.clone()).await;
     assert_eq!(response.status().as_u16(), 503);
     let body: Value = response.json().await.unwrap();
@@ -300,7 +300,7 @@ async fn requests_fail_closed_until_a_verified_session_with_a_catalog_and_key() 
         generation: 1,
         epoch: 2,
         session_id: Some("test-session".to_string()),
-        service: Some(http_service(&sidecar)),
+        service: Some(http_service(&upstream)),
         verified: false,
         catalog: None,
     });
@@ -319,8 +319,8 @@ async fn requests_fail_closed_until_a_verified_session_with_a_catalog_and_key() 
 async fn verified_catalog_models_are_forwarded_with_the_real_key() {
     let (state, mut events) = state();
     state.set_tokens(tokens());
-    let sidecar = mock_sidecar().await;
-    verified(&state, &sidecar, 1, 1).await;
+    let upstream = mock_upstream().await;
+    verified(&state, &upstream, 1, 1).await;
     state.set_api_key(Some("sk-real".to_string()));
     let proxy = spawn(router(state.clone())).await;
     let client = reqwest::Client::new();
@@ -379,8 +379,8 @@ async fn verified_catalog_models_are_forwarded_with_the_real_key() {
 async fn send_failures_are_not_reported_as_local_rejections() {
     let (state, mut events) = state();
     state.set_tokens(tokens());
-    let sidecar = mock_sidecar().await;
-    verified(&state, &sidecar, 1, 1).await;
+    let upstream = mock_upstream().await;
+    verified(&state, &upstream, 1, 1).await;
     state.set_api_key(Some("sk-real".to_string()));
 
     // Drop every connection unanswered. A closed port would do on Unix, but Windows
@@ -481,9 +481,9 @@ async fn verifier_hang_returns_504_and_records_activity() {
     assert!(event.left_device);
 }
 
-/// The proxy relays: for every inference path the sidecar sees the same
+/// The proxy relays: for every inference path the upstream sees the same
 /// method, path, query, and body bytes the agent sent, and the agent gets
-/// the sidecar's status, content type, and streamed bytes back unchanged.
+/// the upstream's status, content type, and streamed bytes back unchanged.
 #[tokio::test]
 async fn every_path_is_relayed_without_rewriting_request_or_response() {
     let (state, _events) = state();
@@ -499,7 +499,7 @@ async fn every_path_is_relayed_without_rewriting_request_or_response() {
             format!("event: echo\ndata: {method} {uri}\n\ndata: {body}\n\n"),
         )
     };
-    let sidecar = spawn(
+    let upstream = spawn(
         Router::new()
             .route("/v1/chat/completions", post(echo))
             .route("/v1/messages", post(echo))
@@ -510,7 +510,7 @@ async fn every_path_is_relayed_without_rewriting_request_or_response() {
             ),
     )
     .await;
-    verified(&state, &sidecar, 1, 1).await;
+    verified(&state, &upstream, 1, 1).await;
     state.set_api_key(Some("sk-real".to_string()));
     let proxy = spawn(router(state.clone())).await;
     let client = reqwest::Client::new();
@@ -637,7 +637,7 @@ async fn usage_is_recorded_when_the_consumer_stops_before_eof() {
         b"data: {\"response\":{\"usage\":{\"input_tokens\":123,\"output_tokens\":45}}}\n\n",
     );
     let expected = payload.clone();
-    let sidecar = spawn(Router::new().route(
+    let upstream = spawn(Router::new().route(
         "/v1/responses",
         post(move || {
             let payload = payload.clone();
@@ -655,7 +655,7 @@ async fn usage_is_recorded_when_the_consumer_stops_before_eof() {
     .await;
     let response = forward(
         state,
-        http_service(&sidecar),
+        http_service(&upstream),
         1,
         "test-session",
         "test-key",
@@ -698,8 +698,8 @@ async fn usage_is_recorded_when_the_consumer_stops_before_eof() {
 async fn credentials_revoked_mid_body_fail_before_send() {
     let (state, _events) = state();
     state.set_tokens(tokens());
-    let sidecar = mock_sidecar().await;
-    verified(&state, &sidecar, 1, 1).await;
+    let upstream = mock_upstream().await;
+    verified(&state, &upstream, 1, 1).await;
     state.set_api_key(Some("sk-real".to_string()));
     let proxy = spawn(router(state.clone())).await;
 
@@ -743,8 +743,8 @@ fn tokio_stream_from_receiver(
 async fn helper_endpoints_require_a_verified_catalog_model() {
     let (state, _events) = state();
     state.set_tokens(tokens());
-    let sidecar = mock_sidecar().await;
-    verified(&state, &sidecar, 1, 1).await;
+    let upstream = mock_upstream().await;
+    verified(&state, &upstream, 1, 1).await;
     state.set_api_key(Some("sk-real".to_string()));
     let proxy = spawn(router(state.clone())).await;
     let client = reqwest::Client::new();
@@ -843,8 +843,8 @@ async fn token_revocation_interrupts_a_stream_after_its_first_chunk() {
 async fn agent_scan_and_catalog_refresh_preserve_admitted_requests() {
     let (state, _events) = state();
     state.set_tokens(tokens());
-    let sidecar = mock_sidecar().await;
-    verified(&state, &sidecar, 1, 1).await;
+    let upstream = mock_upstream().await;
+    verified(&state, &upstream, 1, 1).await;
     state.set_api_key(Some("sk-real".to_string()));
     let reached = Arc::new(tokio::sync::Notify::new());
     let resume = Arc::new(tokio::sync::Notify::new());
@@ -877,7 +877,7 @@ async fn agent_scan_and_catalog_refresh_preserve_admitted_requests() {
 }
 
 /// A revocation that lands after the final checks but before the send
-/// must deliver nothing to the sidecar.
+/// must deliver nothing to the upstream.
 #[tokio::test]
 async fn revocation_after_the_final_check_delivers_nothing() {
     let revocations: [fn(&ProxyState); 4] = [
@@ -900,7 +900,7 @@ async fn revocation_after_the_final_check_delivers_nothing() {
         state.set_tokens(tokens());
         let delivered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = delivered.clone();
-        let sidecar = spawn(
+        let upstream = spawn(
             Router::new()
                 .route(
                     "/v1/chat/completions",
@@ -919,7 +919,7 @@ async fn revocation_after_the_final_check_delivers_nothing() {
                 ),
         )
         .await;
-        verified(&state, &sidecar, 1, 1).await;
+        verified(&state, &upstream, 1, 1).await;
         state.set_api_key(Some("sk-real".to_string()));
         let reached = Arc::new(tokio::sync::Notify::new());
         let resume = Arc::new(tokio::sync::Notify::new());

@@ -90,7 +90,7 @@ export function NotificationsSheet({ onClose }: { onClose(): void }) {
       {data && <>
         <SettingsList><SettingsToggle label="Allow notifications" checked={data.preferences.enabled} disabled={busy} onToggle={() => void change("enabled", !data.preferences.enabled)} /></SettingsList>
         <SettingsList>{([
-          ["gateway", "Gateway problems", "Protection, connection and agent configuration errors."],
+          ["gateway", "Protection problems", "Protection, connection and agent configuration errors."],
           ["localApi", "Local API problems", "The local listener becomes unavailable."],
           ["verification", "Response verification failures", "A response fails proof verification."],
         ] as const).map(([key, label, description]) => <SettingsToggle key={key} label={label} description={description} checked={data.preferences[key]} disabled={busy || !data.preferences.enabled} onToggle={() => void change(key, !data.preferences[key])} />)}</SettingsList>

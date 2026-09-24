@@ -100,12 +100,12 @@ mod platform {
                         if let Some(runtime) = runtime.upgrade() {
                             if runtime.set_wake_monitor_available(false) {
                                 match result {
-                                    Err(error) => crate::diagnostic(format_args!(
+                                    Err(error) => desktop_core::diagnostic!(
                                         "System wake monitoring will reconnect: {error}"
-                                    )),
-                                    Ok(()) => crate::diagnostic(format_args!(
+                                    ),
+                                    Ok(()) => desktop_core::diagnostic!(
                                         "System wake monitoring stream ended; reconnecting"
-                                    )),
+                                    ),
                                 }
                             }
                         }
@@ -340,9 +340,9 @@ mod platform {
             }
             if let Some(thread) = self.thread.take() {
                 if thread.join().is_err() {
-                    crate::diagnostic(format_args!(
+                    desktop_core::diagnostic!(
                         "System wake monitor thread did not shut down cleanly"
-                    ));
+                    );
                 }
             }
             unsafe {
@@ -464,14 +464,12 @@ mod platform {
             IONotificationPortDestroy(port);
             drop(Box::from_raw(context));
             if deregistered != 0 {
-                crate::diagnostic(format_args!(
+                desktop_core::diagnostic!(
                     "Could not unregister macOS power notifications ({deregistered})"
-                ));
+                );
             }
             if closed != 0 {
-                crate::diagnostic(format_args!(
-                    "Could not close the macOS power connection ({closed})"
-                ));
+                desktop_core::diagnostic!("Could not close the macOS power connection ({closed})");
             }
         }
     }
@@ -589,14 +587,12 @@ mod platform {
                         slot.reusable = false;
                     }
                 }
-                Err(_) => crate::diagnostic(format_args!(
+                Err(_) => desktop_core::diagnostic!(
                     "System wake callback state is unavailable during shutdown"
-                )),
+                ),
             }
             if status != 0 {
-                crate::diagnostic(format_args!(
-                    "Could not unregister power notifications ({status})"
-                ));
+                desktop_core::diagnostic!("Could not unregister power notifications ({status})");
             }
         }
     }

@@ -16,19 +16,17 @@
 //! `validate_aci_report_binding` composes, step by step, so every check gets
 //! its own honest status instead of stopping at the first failure.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use private_ai_proxy::aci::digest::{jcs_bytes, sha256_hex, sha256_raw};
-use private_ai_proxy::aci::identity;
-use private_ai_proxy::aci::keys::verify_receipt_signature;
-use private_ai_proxy::aci::receipt::receipt_signing_input;
-use private_ai_proxy::aci::types::{AttestationReport, WorkloadKeyset};
-use private_ai_proxy::aci::verifier::{
+use crate::aci::digest::{jcs_bytes, sha256_hex, sha256_raw};
+use crate::aci::identity;
+use crate::aci::keys::verify_receipt_signature;
+use crate::aci::receipt::receipt_signing_input;
+use crate::aci::types::{AttestationReport, WorkloadKeyset};
+use crate::aci::verifier::{
     appraise_report, dstack_rtmr3_event, AppraisalInputs, CheckId, CheckResult, CustodyEvidence,
     DstackEventLog, Outcome,
 };
-pub use private_ai_proxy::aci::verifier::{ChannelEvidence, QuoteSource};
+pub use crate::aci::verifier::{ChannelEvidence, QuoteSource};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde_json::Value;
 
 use crate::client::{AciClient, HttpResult};
@@ -70,13 +68,6 @@ pub struct ReportCheckContext<'a> {
     /// bind that hash to MRTD/RTMR0-2 for the same evidence.
     pub require_production_os: bool,
     pub explain: bool,
-}
-
-pub fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default()
 }
 
 /// The workload identity a verified report establishes (§9.1): the keyset
@@ -875,12 +866,12 @@ fn evidence_check(evidence: Option<&Value>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aci::verifier::validate_aci_report_binding;
     use crate::spec_fixtures::{
         vector_receipt_envelope, vector_receipt_envelope_rewritten, vector_report,
         vector_session_bytes, KEYSET_NOT_AFTER, REQUEST_BODY, RESPONSE_BODY, SERVED_AT, TEST_NONCE,
     };
     use crate::transcript::Status;
-    use private_ai_proxy::aci::verifier::validate_aci_report_binding;
 
     fn offline_cx<'a>(nonce: Option<&'a str>, now_secs: u64) -> ReportCheckContext<'a> {
         ReportCheckContext {
@@ -1214,7 +1205,7 @@ mod tests {
     #[test]
     fn audit_session_record_agrees_with_the_fixture() {
         let bytes = vector_session_bytes();
-        let id = private_ai_proxy::aci::digest::sha256_bare_hex(&bytes);
+        let id = crate::aci::digest::sha256_bare_hex(&bytes);
         let record: Value = serde_json::from_slice(&bytes).unwrap();
         let at = record.get("established_at").and_then(Value::as_u64);
         let audit = audit_session_record(&bytes, &id, at).unwrap();

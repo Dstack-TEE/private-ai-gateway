@@ -22,6 +22,6 @@
     "allow-show-edit-menu",
     "allow-get-appearance",
     "allow-show-error-alert",
-    "allow-get-gateway-state"
+    "allow-get-state"
   ]
 }

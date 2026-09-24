@@ -11,7 +11,7 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use desktop_core::agents::{Agent, AgentStatus, ConnectOptions};
 use desktop_core::brand::PRODUCT_NAME as APP_NAME;
-use desktop_core::{client::Client, contracts::GatewayState, protocol::rpc};
+use desktop_core::{client::Client, contracts::AppState, protocol::rpc};
 
 /// Native menu handles mirror backend state; actions use the same client as the window.
 pub struct TrayMenu {
@@ -33,7 +33,7 @@ struct ProfileMenuItem {
 }
 
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
-    let state = GatewayState::default();
+    let state = AppState::default();
     let status_line = protection_title(&state);
     let toggle = MenuItemBuilder::with_id("toggle", protection_action(&state)).build(app)?;
     let status = MenuItemBuilder::with_id("status", &status_line)
@@ -107,7 +107,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             }
             "stop-all-quit" => {
                 show_window(app);
-                let _ = app.emit("gateway://confirm-stop-all", ());
+                let _ = app.emit("pap://confirm-stop-all", ());
             }
             id if matches!(id, "profiles" | "copy-key" | "copy-endpoint")
                 || id.starts_with("profile:")
@@ -195,7 +195,7 @@ fn perform_action(app: &AppHandle, id: String) {
             if let Ok(agents) = client.call(rpc::Agents) {
                 sync_agents(&app, &agents);
             }
-            let _ = app.emit("gateway://agents-changed", ());
+            let _ = app.emit("pap://agents-changed", ());
         }
     });
 }
@@ -227,7 +227,7 @@ fn sync_agents_inner(app: &AppHandle, agents: &[AgentStatus]) {
     }
 }
 
-fn sync_profiles(app: &AppHandle, state: &GatewayState, menu: &TrayMenu) -> tauri::Result<()> {
+fn sync_profiles(app: &AppHandle, state: &AppState, menu: &TrayMenu) -> tauri::Result<()> {
     let Ok(mut cached) = menu.profile_items.lock() else {
         return Ok(());
     };
@@ -356,13 +356,13 @@ pub fn set_open_at_login(app: &AppHandle, enabled: bool) -> Result<(), String> {
 }
 
 /// Keep the status separate from the action the user can take.
-pub fn sync(app: &AppHandle, state: &GatewayState) {
+pub fn sync(app: &AppHandle, state: &AppState) {
     let handle = app.clone();
     let state = state.clone();
     let _ = app.run_on_main_thread(move || sync_inner(&handle, &state));
 }
 
-fn sync_inner(app: &AppHandle, state: &GatewayState) {
+fn sync_inner(app: &AppHandle, state: &AppState) {
     let status_line = protection_title(state);
     if let Some(menu) = app.try_state::<TrayMenu>() {
         let _ = menu.status.set_text(&status_line);
@@ -370,7 +370,7 @@ fn sync_inner(app: &AppHandle, state: &GatewayState) {
         let _ = menu.toggle.set_enabled(protection_action_enabled(state));
         let _ = menu.endpoint.set_enabled(state.proxy_url.is_some());
         if let Err(error) = sync_profiles(app, state, &menu) {
-            eprintln!("Cannot refresh tray profiles: {error}");
+            desktop_core::diagnostic!("Cannot refresh tray profiles: {error}");
         }
         let protected = state.is_protected();
         if menu.protected_icon.load(Ordering::Relaxed) != protected {
@@ -380,7 +380,7 @@ fn sync_inner(app: &AppHandle, state: &GatewayState) {
                 protected,
                 menu.dark_icon.load(Ordering::Relaxed),
             ) {
-                eprintln!("Cannot update tray protection state: {error}");
+                desktop_core::diagnostic!("Cannot update tray protection state: {error}");
             }
         }
     }
@@ -402,7 +402,7 @@ pub(crate) fn set_dark(app: &AppHandle, dark: bool) -> tauri::Result<()> {
                     menu.protected_icon.load(Ordering::Relaxed),
                     dark,
                 ) {
-                    eprintln!("Cannot update tray system theme: {error}");
+                    desktop_core::diagnostic!("Cannot update tray system theme: {error}");
                 }
             }
         }
@@ -443,7 +443,7 @@ fn tray_icon(protected: bool, dark: bool) -> tauri::Result<tauri::image::Image<'
     ))
 }
 
-fn protection_title(state: &GatewayState) -> String {
+fn protection_title(state: &AppState) -> String {
     if !state.is_protected() {
         return menu_state(state).into();
     }
@@ -530,16 +530,16 @@ fn set_dock_visibility(visible: bool) {
 #[cfg(not(target_os = "macos"))]
 fn set_dock_visibility(_visible: bool) {}
 
-fn should_stop(state: &GatewayState) -> bool {
+fn should_stop(state: &AppState) -> bool {
     state.should_stop_protection()
 }
 
-fn protection_action_enabled(state: &GatewayState) -> bool {
+fn protection_action_enabled(state: &AppState) -> bool {
     !(state.status == "verifying" && state.configuration_verification)
         && (should_stop(state) || state.endpoint_error.is_none())
 }
 
-fn protection_action(state: &GatewayState) -> &'static str {
+fn protection_action(state: &AppState) -> &'static str {
     if state.reconnecting {
         return "Cancel reconnection";
     }
@@ -554,7 +554,7 @@ fn protection_action(state: &GatewayState) -> &'static str {
     }
 }
 
-fn menu_state(state: &GatewayState) -> &'static str {
+fn menu_state(state: &AppState) -> &'static str {
     if state.reconnecting {
         return "Reconnecting - requests paused";
     }
@@ -576,7 +576,7 @@ fn menu_state(state: &GatewayState) -> &'static str {
     }
 }
 
-fn active_profile_ready(state: &GatewayState) -> bool {
+fn active_profile_ready(state: &AppState) -> bool {
     state.api_key_saved
         && state
             .profiles
@@ -601,22 +601,20 @@ fn activate_app() {}
 #[cfg(test)]
 mod tests {
     use super::{menu_state, protection_action, protection_action_enabled, should_stop};
-    use desktop_core::contracts::{
-        ConfidentialProfile, GatewayState, ProfileAuth, ServiceProvider,
-    };
+    use desktop_core::contracts::{AppState, ConfidentialProfile, ProfileAuth, ServiceProvider};
 
-    fn state(status: &str, api_key_saved: bool) -> GatewayState {
-        GatewayState {
+    fn state(status: &str, api_key_saved: bool) -> AppState {
+        AppState {
             status: status.to_string(),
             api_key_saved,
-            ..GatewayState::default()
+            ..AppState::default()
         }
     }
 
     #[test]
     fn protection_action_matches_the_runtime_operation() {
         assert_eq!(
-            menu_state(&GatewayState::default()),
+            menu_state(&AppState::default()),
             "Not protected - profile required"
         );
         assert_eq!(menu_state(&state("verified", true)), "Protected");

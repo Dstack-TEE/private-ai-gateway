@@ -18,7 +18,7 @@ mod platform {
     impl Drop for Watcher {
         fn drop(&mut self) {
             if let Err(error) = self.settings.RemoveColorValuesChanged(self.token) {
-                eprintln!("Cannot remove system appearance observer: {error}");
+                desktop_core::diagnostic!("Cannot remove system appearance observer: {error}");
             }
         }
     }
@@ -33,10 +33,10 @@ mod platform {
                 let app = handle.clone();
                 if let Err(error) = handle.run_on_main_thread(move || {
                     if let Err(error) = apply(&app) {
-                        eprintln!("Cannot refresh system tray appearance: {error}");
+                        desktop_core::diagnostic!("Cannot refresh system tray appearance: {error}");
                     }
                 }) {
-                    eprintln!("Cannot schedule system tray appearance: {error}");
+                    desktop_core::diagnostic!("Cannot schedule system tray appearance: {error}");
                 }
                 Ok(())
             });
@@ -69,7 +69,9 @@ mod platform {
                 Ok(mut guard) => {
                     guard.take();
                 }
-                Err(error) => eprintln!("Cannot stop system appearance observer: {error}"),
+                Err(error) => {
+                    desktop_core::diagnostic!("Cannot stop system appearance observer: {error}")
+                }
             }
         }
     }
@@ -117,7 +119,7 @@ mod platform {
         let handle = app.clone();
         let task = tauri::async_runtime::spawn(async move {
             if let Err(error) = observe(&handle).await {
-                eprintln!("System tray appearance observer stopped: {error}");
+                desktop_core::diagnostic!("System tray appearance observer stopped: {error}");
             }
         });
         if !app.manage(Mutex::new(Some(Watcher(task)))) {
@@ -149,11 +151,13 @@ mod platform {
             match signal.args() {
                 Ok(args) if args.namespace == NAMESPACE && args.key == KEY => {
                     if let Err(error) = apply(app, &args.value) {
-                        eprintln!("Cannot refresh system tray appearance: {error}");
+                        desktop_core::diagnostic!("Cannot refresh system tray appearance: {error}");
                     }
                 }
                 Ok(_) => {}
-                Err(error) => eprintln!("Invalid system appearance signal: {error}"),
+                Err(error) => {
+                    desktop_core::diagnostic!("Invalid system appearance signal: {error}")
+                }
             }
         }
         Err("Desktop portal appearance stream closed".into())
@@ -171,7 +175,9 @@ mod platform {
                 Ok(mut guard) => {
                     guard.take();
                 }
-                Err(error) => eprintln!("Cannot stop system appearance observer: {error}"),
+                Err(error) => {
+                    desktop_core::diagnostic!("Cannot stop system appearance observer: {error}")
+                }
             }
         }
     }

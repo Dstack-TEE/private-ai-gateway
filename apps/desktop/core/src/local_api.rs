@@ -1,7 +1,7 @@
 use std::{fs, path::PathBuf};
 
 use crate::{
-    contracts::LocalApiConfig,
+    contracts::ListenConfig,
     listen::{self, ResolvedListen},
     paths::app_data_dir,
     private_fs::{self, write_atomic},
@@ -9,20 +9,18 @@ use crate::{
 
 const CONFIG_FILE: &str = "local-api.json";
 
-pub type ResolvedLocalApi = ResolvedListen;
-
-pub fn load() -> Result<ResolvedLocalApi, String> {
+pub fn load() -> Result<ResolvedListen, String> {
     let path = config_path()?;
     let config = match fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str(&text)
             .map_err(|_| "The saved Local API settings are invalid".to_string())?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => LocalApiConfig::default(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => ListenConfig::default(),
         Err(error) => return Err(format!("Cannot read Local API settings: {error}")),
     };
     resolve(config)
 }
 
-pub fn save(config: LocalApiConfig) -> Result<ResolvedLocalApi, String> {
+pub fn save(config: ListenConfig) -> Result<ResolvedListen, String> {
     let resolved = resolve(config)?;
     let path = config_path()?;
     let text = serde_json::to_string_pretty(&resolved.config)
@@ -37,7 +35,7 @@ pub fn save(config: LocalApiConfig) -> Result<ResolvedLocalApi, String> {
     Ok(resolved)
 }
 
-pub fn resolve(config: LocalApiConfig) -> Result<ResolvedLocalApi, String> {
+pub fn resolve(config: ListenConfig) -> Result<ResolvedListen, String> {
     if config.port < 1024 {
         return Err("Port must be between 1024 and 65535".to_string());
     }
@@ -54,7 +52,7 @@ mod tests {
 
     #[test]
     fn local_api_config_is_fail_closed_for_network_listeners() {
-        let mut config = LocalApiConfig::default();
+        let mut config = ListenConfig::default();
         assert_eq!(
             resolve(config.clone()).unwrap().endpoint,
             "http://127.0.0.1:4180"

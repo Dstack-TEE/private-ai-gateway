@@ -1,6 +1,6 @@
 mod permission;
 use desktop_core::{
-    client::Client, contracts::GatewayState, preferences::NotificationPreferences, protocol::rpc,
+    client::Client, contracts::AppState, preferences::NotificationPreferences, protocol::rpc,
 };
 use std::{
     sync::{Arc, Mutex},
@@ -26,7 +26,7 @@ pub fn initialize(app: &AppHandle) {
                 *current = preferences.notifications;
             }
         }
-        Err(error) => eprintln!("Cannot load notification preferences: {error}"),
+        Err(error) => desktop_core::diagnostic!("Cannot load notification preferences: {error}"),
     }
 }
 
@@ -87,7 +87,7 @@ pub struct Observer {
 }
 
 impl Observer {
-    pub fn new(state: &GatewayState) -> Self {
+    pub fn new(state: &AppState) -> Self {
         Self {
             faults: [false; 2],
             session: state.session_id.clone(),
@@ -97,7 +97,7 @@ impl Observer {
     }
     fn next(
         &mut self,
-        state: &GatewayState,
+        state: &AppState,
         background: bool,
         config: NotificationPreferences,
         now: Instant,
@@ -122,7 +122,7 @@ impl Observer {
         self.failed_proof = state.session_usage.failed_proof;
         let allowed = [config.gateway, config.local_api, config.verification];
         let messages = [
-            ("Gateway needs attention", "Protection or a gateway operation encountered a problem. Open Private AI Proxy to review its status."),
+            ("Protection needs attention", "Protection or a Private AI Proxy operation encountered a problem. Open Private AI Proxy to review its status."),
             ("Local API unavailable", "The local listener encountered a problem. Open Local API settings to review it."),
             ("Response verification failed", "A response failed proof verification. Open Usage to review the recorded result."),
         ];
@@ -141,7 +141,7 @@ impl Observer {
         }
         result
     }
-    pub fn update(&mut self, app: &AppHandle, state: &GatewayState) {
+    pub fn update(&mut self, app: &AppHandle, state: &AppState) {
         let background = !app
             .webview_windows()
             .values()
@@ -151,7 +151,7 @@ impl Observer {
         };
         for (title, body) in self.next(state, background, config, Instant::now()) {
             if let Err(error) = app.notification().builder().title(title).body(body).show() {
-                eprintln!("Cannot submit notification: {error}");
+                desktop_core::diagnostic!("Cannot submit notification: {error}");
             }
         }
     }
@@ -162,7 +162,7 @@ mod tests {
     use super::*;
     #[test]
     fn categories_deduplicate_and_respect_foreground_and_master_switch() {
-        let mut state = GatewayState::default();
+        let mut state = AppState::default();
         let mut observer = Observer::new(&state);
         let now = Instant::now();
         let config = NotificationPreferences {

@@ -29,9 +29,9 @@ use desktop_core::{
     preferences::WebUiConfig,
 };
 
-const ACCOUNT_CALLBACK_PORT: u16 = 4181;
-
 /// Checks the port policy and the shared listener rules; non-loopback fails closed.
+/// Unlike the Local API, privileged ports are allowed: agents never store this
+/// port, and a failed bind only disables the optional web UI (see docs/cli.md).
 pub fn validate(config: &WebUiConfig, local_api_port: u16) -> Result<ResolvedListen, String> {
     let port = config.port;
     if port == 0 {
@@ -42,7 +42,7 @@ pub fn validate(config: &WebUiConfig, local_api_port: u16) -> Result<ResolvedLis
             "Web UI port {port} is used by the Local API; choose another port"
         ));
     }
-    if port == ACCOUNT_CALLBACK_PORT {
+    if port == crate::account_login::CALLBACK_ADDRESS.port() {
         return Err(format!(
             "Web UI port {port} is reserved for account connection callbacks; choose another port"
         ));

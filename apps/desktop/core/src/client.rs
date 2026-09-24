@@ -13,7 +13,7 @@ use serde_json::Value;
 use tokio::sync::watch;
 
 use crate::{
-    contracts::GatewayState,
+    contracts::AppState,
     protocol::{self, rpc, Call, Command, Hello, Outcome, Request, Response, ShutdownMode},
     transport::Stream,
 };
@@ -31,7 +31,7 @@ const STARTUP_GATE_WAIT: Duration = Duration::from_secs(5);
 const STARTUP_IN_PROGRESS: &str = "Backend startup or an update is already in progress.";
 
 pub struct Client {
-    states: watch::Sender<GatewayState>,
+    states: watch::Sender<AppState>,
     expected_shutdown: Mutex<Option<String>>,
 }
 
@@ -43,7 +43,7 @@ impl Default for Client {
 
 impl Client {
     pub fn new() -> Self {
-        let (states, _) = watch::channel(GatewayState::default());
+        let (states, _) = watch::channel(AppState::default());
         Self {
             states,
             expected_shutdown: Mutex::new(None),
@@ -150,7 +150,7 @@ impl Client {
                 client.states.send_replace(state);
             }
             Err(error) => {
-                crate::diagnostic(format_args!("Cannot start the PAP backend: {error}"));
+                crate::diagnostic!("Cannot start the PAP backend: {error}");
                 client.report_disconnect(error);
             }
         }
@@ -202,7 +202,7 @@ impl Client {
         self.states.send_replace(state);
     }
 
-    pub fn watch_connection(mut receive: impl FnMut(GatewayState) -> bool) -> Result<(), String> {
+    pub fn watch_connection(mut receive: impl FnMut(AppState) -> bool) -> Result<(), String> {
         let (mut reader, hello) = open_current().map_err(connection_error)?;
         reader
             .get_mut()
@@ -219,7 +219,7 @@ impl Client {
         )
         .map_err(connection_error)?;
         loop {
-            let mut state: GatewayState = decode(&mut reader, id)?;
+            let mut state: AppState = decode(&mut reader, id)?;
             state.backend_instance = Some(hello.instance_id.clone());
             if !receive(state) {
                 return Ok(());
@@ -256,19 +256,19 @@ impl Client {
         decode(&mut reader, id)
     }
 
-    pub fn cached_state(&self) -> GatewayState {
+    pub fn cached_state(&self) -> AppState {
         self.states.borrow().clone()
     }
 
-    pub fn subscribe(&self) -> watch::Receiver<GatewayState> {
+    pub fn subscribe(&self) -> watch::Receiver<AppState> {
         self.states.subscribe()
     }
 
-    pub fn state(&self) -> Result<GatewayState, String> {
+    pub fn state(&self) -> Result<AppState, String> {
         self.call(rpc::State)
     }
 
-    pub fn state_or_cached(&self) -> Result<GatewayState, String> {
+    pub fn state_or_cached(&self) -> Result<AppState, String> {
         match self.state() {
             Ok(state) => Ok(state),
             Err(error) => {
@@ -282,7 +282,7 @@ impl Client {
         }
     }
 
-    pub fn toggle(&self) -> Result<GatewayState, String> {
+    pub fn toggle(&self) -> Result<AppState, String> {
         self.state().and_then(|state| {
             if state.should_stop_protection() {
                 self.call(rpc::Stop)
@@ -583,7 +583,7 @@ mod tests {
     #[test]
     fn only_the_intentionally_stopped_instance_disconnects_without_a_fault() {
         let client = super::Client::new();
-        let mut state = crate::contracts::GatewayState {
+        let mut state = crate::contracts::AppState {
             backend_instance: Some("old-instance".into()),
             ..Default::default()
         };

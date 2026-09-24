@@ -8,7 +8,7 @@ import { Badge } from "../components/ui/badge";
 import { Card, CardHeader, CardTitle, CardDescription, CardAction, CardContent } from "../components/ui/card";
 import { Separator } from "../components/ui/separator";
 import { IconButton } from "../components/controls";
-import type { AgentAccessStatus, AgentStatus, DesktopApi, GatewayState, RequestActivity, UsageSummary } from "../../shared/contracts";
+import type { AgentAccessStatus, AgentStatus, DesktopApi, AppState, RequestActivity, UsageSummary } from "../../shared/contracts";
 import { isProtected, presentation } from "../lib/protection";
 import { LocalApiPanel } from "./local-api";
 import { EmptyState } from "../components/detail";
@@ -67,7 +67,7 @@ export function Overview({
   onInspect,
 }: {
   pendingAgentChanges: Record<string, boolean>;
-  state: GatewayState;
+  state: AppState;
   agents: AgentStatus[];
   busy: boolean;
   running: boolean;
@@ -196,7 +196,7 @@ function StatusSurface({
   onSettings,
   onPrivacy,
 }: {
-  state: GatewayState;
+  state: AppState;
   busy: boolean;
   running: boolean;
   endpointDown: boolean;

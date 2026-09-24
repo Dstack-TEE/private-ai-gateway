@@ -1,15 +1,10 @@
-use std::{
-    collections::HashSet,
-    fs,
-    path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{collections::HashSet, fs, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::{
-    contracts::{ConfidentialProfile, ConfidentialProfileInput, ProfileAuth, StartGatewayConfig},
+    contracts::{ConfidentialProfile, ConfidentialProfileInput, ProfileAuth, StartConfig},
     paths::app_data_dir,
     private_fs::{self, write_atomic},
 };
@@ -17,6 +12,7 @@ use crate::{
 const CONFIG_FILE: &str = "confidential-ai.json";
 const CONFIG_VERSION: u8 = 1;
 const MAX_PROFILES: usize = 50;
+const MAX_KEY_LEN: usize = 512;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,8 +42,8 @@ impl ServiceSettings {
             .ok_or_else(|| "The active Confidential AI profile does not exist".to_string())
     }
 
-    pub fn runtime_config(&self) -> Result<StartGatewayConfig, String> {
-        Ok(StartGatewayConfig {
+    pub fn runtime_config(&self) -> Result<StartConfig, String> {
+        Ok(StartConfig {
             remote_url: self
                 .profiles
                 .iter()
@@ -152,9 +148,7 @@ pub fn resolve_profile(
     })
 }
 
-pub fn resolve_runtime_config(
-    mut config: StartGatewayConfig,
-) -> Result<StartGatewayConfig, String> {
+pub fn resolve_runtime_config(mut config: StartConfig) -> Result<StartConfig, String> {
     config.remote_url = normalize_url(&config.remote_url)?;
     Ok(config)
 }
@@ -181,11 +175,16 @@ pub fn credential_entry(profile_id: &str) -> Result<String, String> {
     Ok(format!("service-profile-{profile_id}-api-key"))
 }
 
-pub fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
+/// Validate a key the user typed: trimmed, single line, bounded length.
+pub fn validate_api_key(value: &str) -> Result<String, String> {
+    let key = value.trim();
+    if key.is_empty() {
+        return Err("Enter an API key".to_string());
+    }
+    if key.len() > MAX_KEY_LEN || key.chars().any(char::is_whitespace) {
+        return Err("The API key must be a single token without spaces".to_string());
+    }
+    Ok(key.to_string())
 }
 
 fn resolve_settings(mut settings: ServiceSettings) -> Result<ServiceSettings, String> {
@@ -286,6 +285,13 @@ fn config_path() -> Result<PathBuf, String> {
 mod tests {
     use super::*;
     use crate::contracts::ServiceProvider;
+
+    #[test]
+    fn rejects_blank_and_multiline_keys() {
+        assert!(validate_api_key("  ").is_err());
+        assert!(validate_api_key("sk-a\nsk-b").is_err());
+        assert_eq!(validate_api_key("  sk-abc  ").unwrap(), "sk-abc");
+    }
 
     fn input(remote_url: &str) -> ConfidentialProfileInput {
         ConfidentialProfileInput {

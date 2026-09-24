@@ -6,7 +6,7 @@ import { Sheet, SheetActions } from "../components/sheet";
 import { useErrorAlert } from "../lib/error-alert";
 import { localAddressKind } from "../lib/local-api-config";
 import { desktopApi } from "../lib/environment";
-import type { GatewayState, WebUiConfig, WebUiStatus } from "../../shared/contracts";
+import type { AppState, WebUiConfig, WebUiStatus } from "../../shared/contracts";
 
 const DEFAULT_LISTENER = { listenAddress: "127.0.0.1", allowNetworkAccess: false, port: 4182 } as const;
 
@@ -20,7 +20,7 @@ export function WebUiSheet({
   onSave,
   onClose,
 }: {
-  state: GatewayState;
+  state: AppState;
   onSave(config: WebUiConfig): Promise<string | undefined>;
   onClose(): void;
 }): React.JSX.Element {

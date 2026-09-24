@@ -1,6 +1,6 @@
 // Generated from the Rust contracts by `npm run generate:contracts`. Do not edit.
 
-export type GatewayState = { backendInstance?: string, clientKeyRevision: number, clientKeyAvailable?: boolean,
+export type AppState = { backendInstance?: string, clientKeyRevision: number, clientKeyAvailable?: boolean,
 /**
  * Client connection state; the backend leaves this unset.
  */
@@ -26,7 +26,7 @@ proxyUrl?: string,
 /**
  * Why the local endpoint could not be bound; blocks starting and connecting.
  */
-endpointError?: string, identity?: GatewayIdentity, checks: Array<VerificationCheck>, activity: Array<RequestActivity>,
+endpointError?: string, identity?: ServiceIdentity, checks: Array<VerificationCheck>, activity: Array<RequestActivity>,
 /**
  * Stable id and complete persisted totals for the current protection run.
  */
@@ -47,7 +47,7 @@ usageRevision: number, error?: string,
 /**
  * The configuration the next start (window or tray toggle) will use.
  */
-config: StartGatewayConfig, profiles: Array<ConfidentialProfile>, activeProfileId: string, localApi: ListenConfig, apiKeySaved: boolean,
+config: StartConfig, profiles: Array<ConfidentialProfile>, activeProfileId: string, localApi: ListenConfig, apiKeySaved: boolean,
 /**
  * The most recently verified catalog. A stopped gateway may retain it for
  * agent projection and readiness state; the proxy still requires a live
@@ -55,10 +55,10 @@ config: StartGatewayConfig, profiles: Array<ConfidentialProfile>, activeProfileI
  */
 catalog?: CatalogSummary, webUi: WebUiStatus, };
 export type VerificationCheck = { id: string, section: string, title: string, status: "pass" | "fail" | "skip" | "info", detail: string, };
-export type GatewayIdentity = { teeType: string, trustLevel: string, keysetDigest: string, keysetNotAfter: number, tlsSpki?: string, source: SourceProvenance, serving: string, supportedE2eeVersions: Array<string>, };
+export type ServiceIdentity = { teeType: string, trustLevel: string, keysetDigest: string, keysetNotAfter: number, tlsSpki?: string, source: SourceProvenance, serving: string, supportedE2eeVersions: Array<string>, };
 export type SourceProvenance = { repoUrl?: string, repoCommit?: string, imageDigest?: string, };
 /**
- * One request seen by the local gateway: forwarded through the verifier (with
+ * One request seen by the local proxy: forwarded through the verifier (with
  * its receipt verdict) or answered locally (rejected before any receipt).
  */
 export type RequestActivity = { id: string, sessionId: string, method: string, path: string, model?: string, status: number, streamed: boolean, receiptId?: string, verified: boolean | null, detail: string, at: number,
@@ -102,7 +102,7 @@ export type AccountLoginDetails = { auth: ProfileAuth, workspaces: Array<Account
 export type AccountBalance = { balanceUsd: string, canTopUp: boolean, organizationId: string | null, grantedUsd: string | null, scope: AccountScope, };
 export type AccountBalanceTarget = { "kind": "login", id: string, } | { "kind": "profile", profileId: string, };
 export type LoginPresentation = { id: string, url: string, userCode: string | null, };
-export type StartGatewayConfig = { remoteUrl: string, requireProductionOs: boolean, };
+export type StartConfig = { remoteUrl: string, requireProductionOs: boolean, };
 /**
  * A TCP listener shared by the Local API and the web UI. Non-loopback
  * addresses require `allow_network_access`; see [`crate::listen::resolve`].
@@ -187,5 +187,37 @@ export type ConnectOptions = {
  */
 defaultModel?: string, };
 export type AgentAccessStatus = "authorized" | "authorizationRequired" | "reauthorizationRequired";
+/**
+ * The desktop app's update check result for the renderer.
+ */
+export type UpdateInfo = { enabled: boolean, systemManaged: boolean, currentVersion: string, channel: UpdateChannel, version: string | null, channelPublished: boolean,
+/**
+ * Steps that install `version` when a package manager or the user owns
+ * the installation.
+ */
+upgradeCommands: Array<string>,
+/**
+ * Portable archive to extract into a fresh directory.
+ */
+downloadUrl?: string | null, };
+/**
+ * A `pap cli status|install|uninstall` result; the desktop shell reads it
+ * from the CLI's JSON output.
+ */
+export type CommandRegistration = { executable: string, commandPath: string, installed: boolean, onPath: boolean, };
+/**
+ * The `pap` command registration the renderer shows, with the error from
+ * the desktop app's automatic registration attempt, if any.
+ */
+export type CliRegistration = { startupError?: string, executable: string, commandPath: string, installed: boolean, onPath: boolean, };
+export type DistributionChannel = "direct" | "macAppStore" | "web";
+/**
+ * What this distribution of the app may offer; the renderer hides the rest.
+ */
+export type DistributionCapabilities = { channel: DistributionChannel, nativeUpdates: boolean, cliRegistration: boolean, accountPortalLinks: boolean, sandboxHomeAccess: boolean, launchAtLogin: boolean, notifications: boolean, webUi: boolean, };
+/**
+ * `GET /api/bootstrap` on the web UI.
+ */
+export type WebBootstrap = { version: string, distribution: DistributionCapabilities, };
 /** A method the shared UI API accepts (`ui_api::Method`). */
 export type UiMethod = "startBackendService" | "getState" | "start" | "stop" | "activateProfile" | "deleteProfile" | "saveConfiguration" | "completeAccountLogin" | "beginAccountLogin" | "pollAccountLogin" | "saveAccountLogin" | "getAccountDetails" | "getAccountBalance" | "getOrganizationUrl" | "getTopUpUrl" | "cancelAccountLogin" | "getClientKey" | "rotateClientKey" | "saveLocalApiConfig" | "saveWebUi" | "listListenAddresses" | "importProfiles" | "exportProfilesContent" | "exportDiagnosticsContent" | "queryUsage" | "getUsageRecord" | "listAgents" | "getAgentAccess" | "requestAgentAccess" | "previewAgent" | "applyAgent" | "getAppearance" | "setAppearance" | "getLaunchPreferences" | "setLaunchPreference" | "getNotificationSettings" | "saveNotificationSettings" | "resetSettings" | "getUpdateNotice";

@@ -9,7 +9,7 @@
 use tauri::AppHandle;
 
 /// Emitted to the window when a menu item asks it to show a section.
-pub const NAVIGATE_EVENT: &str = "gateway://navigate";
+pub const NAVIGATE_EVENT: &str = "pap://navigate";
 
 #[cfg(target_os = "macos")]
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
@@ -107,7 +107,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
                 .find(|window| window.is_focused().unwrap_or(false))
             {
                 if let Err(error) = crate::native_dialog::request_close(&window) {
-                    eprintln!("Cannot close the active window: {error}");
+                    desktop_core::diagnostic!("Cannot close the active window: {error}");
                 }
             }
         }

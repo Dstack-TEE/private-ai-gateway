@@ -90,9 +90,7 @@ impl SessionManager {
         // Use the same runtime -> usage lock order as start_inner, so this
         // blocked event cannot delete the resume marker of a newer Start.
         if end_session && self.usage.end_session().is_err() {
-            crate::diagnostic(format_args!(
-                "Could not persist the end of a blocked protection session"
-            ));
+            desktop_core::diagnostic!("Could not persist the end of a blocked protection session");
         }
         drop(runtime);
         if let Some(mut task) = retired_task {
@@ -112,14 +110,14 @@ impl SessionManager {
 
 /// Record the verifier's identity and checks; the status is decided by the
 /// caller once the catalog is in.
-pub(super) fn apply_identity_event(state: &mut GatewayState, event: &IdentityEvent) {
+pub(super) fn apply_identity_event(state: &mut AppState, event: &IdentityEvent) {
     state.identity = Some(parse_identity(event));
     state.checks = parse_checks(Some(&event.verification));
     state.error = None;
 }
 
-pub(super) fn parse_identity(event: &IdentityEvent) -> GatewayIdentity {
-    GatewayIdentity {
+pub(super) fn parse_identity(event: &IdentityEvent) -> ServiceIdentity {
+    ServiceIdentity {
         tee_type: event.tee_type.clone(),
         trust_level: event.trust_level.clone(),
         keyset_digest: event.keyset_digest.clone(),
@@ -163,7 +161,7 @@ pub(super) fn parse_checks(value: Option<&Value>) -> Vec<VerificationCheck> {
         .collect()
 }
 
-pub(super) fn merge_activity(state: &mut GatewayState, mut incoming: RequestActivity) {
+pub(super) fn merge_activity(state: &mut AppState, mut incoming: RequestActivity) {
     if incoming.path == "/v1/models" {
         return;
     }

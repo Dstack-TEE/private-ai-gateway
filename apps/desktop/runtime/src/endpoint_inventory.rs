@@ -1,12 +1,13 @@
 use std::{
     fs::File,
-    io::{Read, Write},
+    io::Read,
     path::PathBuf,
     sync::{Mutex, PoisonError},
     time::Duration,
 };
 
 use agent_bridge::catalog::EndpointInventory;
+use desktop_core::private_fs::{self, Publish};
 use reqwest::{
     header::{ETAG, IF_NONE_MATCH},
     Client, StatusCode,
@@ -102,9 +103,7 @@ impl InventoryUpdater {
                 // Persist before replacing the in-memory copy. A full disk must
                 // not discard validated data already available to this session.
                 if let Err(error) = persist(&self.cache_path, &updated) {
-                    crate::diagnostic(format_args!(
-                        "Cannot cache model endpoint inventory: {error}"
-                    ));
+                    desktop_core::diagnostic!("Cannot cache model endpoint inventory: {error}");
                 }
                 *self.cache.lock().unwrap_or_else(PoisonError::into_inner) = updated;
             }
@@ -171,15 +170,9 @@ fn read_cache(path: &std::path::Path) -> Option<CachedInventory> {
 }
 
 fn persist(path: &std::path::Path, cache: &CachedInventory) -> std::io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| std::io::Error::other("Missing cache directory"))?;
-    let mut file = tempfile::NamedTempFile::new_in(parent)?;
-    serde_json::to_writer(&mut file, cache)?;
-    file.flush()?;
-    file.as_file().sync_all()?;
-    file.persist(path).map_err(|error| error.error)?;
-    Ok(())
+    private_fs::publish(path, Publish::Replace, |file| {
+        serde_json::to_writer(file, cache).map_err(std::io::Error::from)
+    })
 }
 
 #[cfg(test)]

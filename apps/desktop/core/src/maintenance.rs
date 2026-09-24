@@ -1,5 +1,6 @@
 use crate::{
-    contracts::{ConfidentialProfile, ConfidentialProfileInput, GatewayState, ServiceProvider},
+    contracts::{AppState, ConfidentialProfile, ConfidentialProfileInput, ServiceProvider},
+    private_fs::{self, Publish},
     service_config::{self, ServiceSettings},
 };
 use serde::{Deserialize, Serialize};
@@ -122,21 +123,11 @@ pub fn write_json(path: &Path, data: &impl Serialize) -> Result<(), String> {
 
 pub fn write_export(path: &Path, text: &str) -> Result<(), String> {
     use std::io::Write;
-    let write = || -> std::io::Result<()> {
-        let parent = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        let mut file = tempfile::NamedTempFile::new_in(parent)?;
-        file.write_all(text.as_bytes())?;
-        file.as_file().sync_all()?;
-        // Publish only the completed file, and atomically refuse any existing destination.
-        file.persist_noclobber(path).map_err(|error| error.error)?;
-        #[cfg(unix)]
-        std::fs::File::open(parent)?.sync_all()?;
-        Ok(())
-    };
-    write().map_err(|error| {
+    // Publish only the completed file, and atomically refuse any existing destination.
+    private_fs::publish(path, Publish::NoClobber, |file| {
+        file.write_all(text.as_bytes())
+    })
+    .map_err(|error| {
         if error.kind() == std::io::ErrorKind::AlreadyExists {
             "Export target already exists; choose a new path.".to_string()
         } else {
@@ -152,7 +143,7 @@ pub fn json_content(data: &impl Serialize) -> Result<String, String> {
 }
 
 /// An allowlist of typed fields; never serialize state, raw errors or stderr.
-pub fn diagnostics(state: &GatewayState, version: &str) -> serde_json::Value {
+pub fn diagnostics(state: &AppState, version: &str) -> serde_json::Value {
     let status = match state.status.as_str() {
         "verified" | "verifying" | "blocked" | "stopped" | "error" => state.status.as_str(),
         _ => "unknown",
@@ -254,7 +245,7 @@ mod tests {
     }
     #[test]
     fn diagnostic_allowlist_omits_untrusted_strings() {
-        let mut state = GatewayState {
+        let mut state = AppState {
             error: Some("SECRET".into()),
             remote_url: Some("https://SECRET".into()),
             endpoint_error: Some("/home/SECRET".into()),

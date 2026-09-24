@@ -55,9 +55,9 @@ pub fn selected_channel(current_version: &str) -> UpdateChannel {
     match preferences::load() {
         Ok(saved) => saved.update_channel.unwrap_or(default),
         Err(error) => {
-            crate::diagnostic(format_args!(
+            crate::diagnostic!(
                 "Could not read update preferences; using the build channel: {error}"
-            ));
+            );
             default
         }
     }
@@ -186,6 +186,25 @@ pub struct UpdateNotice {
     /// Portable archive to extract into a fresh directory.
     pub download_url: Option<String>,
     pub channel_published: bool,
+}
+
+/// The desktop app's update check result for the renderer.
+#[derive(Clone, Debug, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateInfo {
+    pub enabled: bool,
+    pub system_managed: bool,
+    pub current_version: String,
+    pub channel: UpdateChannel,
+    pub version: Option<String>,
+    pub channel_published: bool,
+    /// Steps that install `version` when a package manager or the user owns
+    /// the installation.
+    pub upgrade_commands: Vec<String>,
+    /// Portable archive to extract into a fresh directory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub download_url: Option<String>,
 }
 
 #[derive(Deserialize)]

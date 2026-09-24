@@ -30,11 +30,10 @@ sha2 = "0.10"
 subtle = "2.6"
 reqwest = { version = "0.13", default-features = false, features = ["form", "json", "rustls-no-provider"] }
 tokio-util = { version = "0.7", features = ["rt"] }
-tempfile = "3"
 rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "process", "io-util", "signal", "macros", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "signal", "macros", "net"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 netwatcher = "0.8"
@@ -51,6 +50,7 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Power", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
+tempfile = "3"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
-tokio = { version = "1", features = ["test-util"] }
+tokio = { version = "1", features = ["io-util", "test-util"] }
 tower = { version = "0.5", features = ["util"] }

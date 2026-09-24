@@ -32,9 +32,9 @@ const PRIVACY_LABEL: &str = "privacy";
 const LOCAL_API_LABEL: &str = "local-api";
 const WEB_UI_LABEL: &str = "web-ui";
 const USAGE_PROOF_LABEL: &str = "usage-proof";
-const PROFILE_REPAIR_EVENT: &str = "gateway://profile-repair";
-const USAGE_PROOF_EVENT: &str = "gateway://usage-proof";
-const PRESENTED_EVENT: &str = "gateway://dialog-presented";
+const PROFILE_REPAIR_EVENT: &str = "pap://profile-repair";
+const USAGE_PROOF_EVENT: &str = "pap://usage-proof";
+const PRESENTED_EVENT: &str = "pap://dialog-presented";
 const DIALOG_LABELS: [&str; 8] = [
     "notifications",
     "local-api-example",
@@ -200,7 +200,7 @@ pub fn open(
                 "state": state, "repair": repair,
                 "recordId": record_id, "profileId": profile_id, "startAfterSave": kind == "setup-profile"
             });
-            if let Err(error) = window.emit_to(window.label(), "gateway://dialog-open", request) {
+            if let Err(error) = window.emit_to(window.label(), "pap://dialog-open", request) {
                 let _ = window.destroy();
                 return Err(window_error(error));
             }
@@ -243,7 +243,7 @@ pub fn open(
     let mut builder =
         WebviewWindowBuilder::new(app, spec.label, WebviewUrl::App(spec.query.into()))
             .initialization_script(format!(
-                "window.__GATEWAY_INITIAL_STATE__ = {initial_state};window.__GATEWAY_INITIAL_APPEARANCE__ = {initial_appearance};{}",
+                "window.__PAP_INITIAL_STATE__ = {initial_state};window.__PAP_INITIAL_APPEARANCE__ = {initial_appearance};{}",
                 crate::distribution::initialization_script()
             ))
             .background_color(if theme == tauri::Theme::Dark { tauri::webview::Color(10, 10, 10, 255) } else { tauri::webview::Color(255, 255, 255, 255) })
@@ -278,13 +278,13 @@ pub fn open(
         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
             api.prevent_close();
             if let Err(error) = request_close(&dialog) {
-                eprintln!("Cannot request dialog close: {error}");
+                desktop_core::diagnostic!("Cannot request dialog close: {error}");
             }
         }
         #[cfg(not(target_os = "macos"))]
         if matches!(event, tauri::WindowEvent::Destroyed) {
             if let Err(error) = main.set_enabled(true).and_then(|_| main.set_focus()) {
-                eprintln!("Cannot restore the dialog parent: {error}");
+                desktop_core::diagnostic!("Cannot restore the dialog parent: {error}");
             }
         }
     });
@@ -337,7 +337,7 @@ pub fn request_close(window: &tauri::WebviewWindow) -> Result<(), String> {
         }
     }
     window
-        .emit_to(window.label(), "gateway://dialog-close-requested", ())
+        .emit_to(window.label(), "pap://dialog-close-requested", ())
         .map_err(window_error)
 }
 
@@ -433,7 +433,7 @@ pub fn close(window: &tauri::WebviewWindow) -> Result<(), String> {
     if !cfg!(target_os = "macos") && window.label() == PROFILE_EDITOR_LABEL {
         return window.destroy().map_err(window_error);
     }
-    if let Err(error) = window.emit_to(window.label(), "gateway://dialog-dismissed", ()) {
+    if let Err(error) = window.emit_to(window.label(), "pap://dialog-dismissed", ()) {
         let _ = window.destroy();
         return Err(window_error(error));
     }

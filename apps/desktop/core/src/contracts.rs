@@ -31,7 +31,7 @@ pub struct SourceProvenance {
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(optional_fields)]
-pub struct GatewayIdentity {
+pub struct ServiceIdentity {
     pub tee_type: String,
     pub trust_level: String,
     pub keyset_digest: String,
@@ -43,7 +43,7 @@ pub struct GatewayIdentity {
     pub supported_e2ee_versions: Vec<String>,
 }
 
-/// One request seen by the local gateway: forwarded through the verifier (with
+/// One request seen by the local proxy: forwarded through the verifier (with
 /// its receipt verdict) or answered locally (rejected before any receipt).
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -171,7 +171,7 @@ impl ServiceProvider {
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum AccountSaveResult {
     Running,
-    Complete { state: Box<GatewayState> },
+    Complete { state: Box<AppState> },
     Failed { error: String },
 }
 
@@ -194,7 +194,6 @@ pub struct AccountScope {
 pub struct AccountWorkspace {
     pub id: i64,
     pub name: String,
-    #[serde(alias = "is_default")]
     pub is_default: bool,
 }
 
@@ -287,7 +286,7 @@ pub struct ConfidentialProfileInput {
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(optional_fields)]
-pub struct GatewayState {
+pub struct AppState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_instance: Option<String>,
     #[serde(default)]
@@ -318,7 +317,7 @@ pub struct GatewayState {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub identity: Option<GatewayIdentity>,
+    pub identity: Option<ServiceIdentity>,
     pub checks: Vec<VerificationCheck>,
     pub activity: Vec<RequestActivity>,
     /// Stable id and complete persisted totals for the current protection run.
@@ -339,10 +338,10 @@ pub struct GatewayState {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// The configuration the next start (window or tray toggle) will use.
-    pub config: StartGatewayConfig,
+    pub config: StartConfig,
     pub profiles: Vec<ConfidentialProfile>,
     pub active_profile_id: String,
-    pub local_api: LocalApiConfig,
+    pub local_api: ListenConfig,
     pub api_key_saved: bool,
     /// The most recently verified catalog. A stopped gateway may retain it for
     /// agent projection and readiness state; the proxy still requires a live
@@ -387,7 +386,7 @@ impl From<&crate::preferences::WebUiConfig> for WebUiStatus {
     }
 }
 
-impl GatewayState {
+impl AppState {
     pub fn is_protected(&self) -> bool {
         self.status == "verified"
             && !self.configuration_verification
@@ -403,7 +402,7 @@ impl GatewayState {
     }
 }
 
-impl Default for GatewayState {
+impl Default for AppState {
     fn default() -> Self {
         Self {
             status: "stopped".to_string(),
@@ -427,10 +426,10 @@ impl Default for GatewayState {
             session_usage: UsageSummary::default(),
             usage_revision: 0,
             error: None,
-            config: StartGatewayConfig::default(),
+            config: StartConfig::default(),
             profiles: Vec::new(),
             active_profile_id: String::new(),
-            local_api: LocalApiConfig::default(),
+            local_api: ListenConfig::default(),
             api_key_saved: false,
             catalog: None,
             web_ui: WebUiStatus::from(&crate::preferences::WebUiConfig::default()),
@@ -451,8 +450,6 @@ pub struct ListenConfig {
     pub client_host: Option<String>,
 }
 
-pub type LocalApiConfig = ListenConfig;
-
 /// The Local API listener; the web UI keeps its own defaults.
 impl Default for ListenConfig {
     fn default() -> Self {
@@ -467,12 +464,12 @@ impl Default for ListenConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct StartGatewayConfig {
+pub struct StartConfig {
     pub remote_url: String,
     pub require_production_os: bool,
 }
 
-impl Default for StartGatewayConfig {
+impl Default for StartConfig {
     fn default() -> Self {
         Self {
             remote_url: crate::brand::SERVICE_DEFAULT_URL.to_string(),
@@ -492,13 +489,54 @@ pub struct WebUiLogin {
 
 /// A `pap cli status|install|uninstall` result; the desktop shell reads it
 /// from the CLI's JSON output.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandRegistration {
     pub executable: std::path::PathBuf,
     pub command_path: std::path::PathBuf,
     pub installed: bool,
     pub on_path: bool,
+}
+
+/// The `pap` command registration the renderer shows, with the error from
+/// the desktop app's automatic registration attempt, if any.
+#[derive(Debug, Clone, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(optional_fields)]
+pub struct CliRegistration {
+    #[serde(flatten)]
+    pub registration: CommandRegistration,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub startup_error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum DistributionChannel {
+    Direct,
+    MacAppStore,
+    Web,
+}
+
+/// What this distribution of the app may offer; the renderer hides the rest.
+#[derive(Clone, Copy, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DistributionCapabilities {
+    pub channel: DistributionChannel,
+    pub native_updates: bool,
+    pub cli_registration: bool,
+    pub account_portal_links: bool,
+    pub sandbox_home_access: bool,
+    pub launch_at_login: bool,
+    pub notifications: bool,
+    pub web_ui: bool,
+}
+
+/// `GET /api/bootstrap` on the web UI.
+#[derive(Clone, Debug, Serialize, TS)]
+pub struct WebBootstrap {
+    pub version: String,
+    pub distribution: DistributionCapabilities,
 }
 
 #[cfg(test)]
@@ -515,7 +553,7 @@ mod typescript {
         maintenance::{ImportResult, ProfileBackup, ProfileConfiguration},
         preferences::{Appearance, NotificationPreferences, UpdateChannel, WebUiConfig},
         ui_api::{LaunchPreferences, ListenAddress, Method},
-        updates::{Installation, UpdateNotice},
+        updates::{Installation, UpdateInfo, UpdateNotice},
         usage::{UsageModelPoint, UsagePage, UsagePoint, UsageQuery},
     };
 
@@ -542,9 +580,9 @@ mod typescript {
         );
         for declaration in declarations!(
             &config,
-            GatewayState,
+            AppState,
             VerificationCheck,
-            GatewayIdentity,
+            ServiceIdentity,
             SourceProvenance,
             RequestActivity,
             UsageSummary,
@@ -561,7 +599,7 @@ mod typescript {
             AccountBalance,
             AccountBalanceTarget,
             LoginPresentation,
-            StartGatewayConfig,
+            StartConfig,
             ListenConfig,
             WebUiConfig,
             WebUiStatus,
@@ -585,6 +623,12 @@ mod typescript {
             ConfigChange,
             ConnectOptions,
             AgentAccessStatus,
+            UpdateInfo,
+            CommandRegistration,
+            CliRegistration,
+            DistributionChannel,
+            DistributionCapabilities,
+            WebBootstrap,
         ) {
             output.push_str(&declaration);
         }

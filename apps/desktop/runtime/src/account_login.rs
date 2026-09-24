@@ -12,7 +12,11 @@ use phala::*;
 pub(crate) use redpill::transition_credential;
 use redpill::*;
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    net::{Ipv4Addr, SocketAddrV4},
+    sync::Arc,
+    time::Duration,
+};
 
 use axum::{
     extract::State,
@@ -49,10 +53,16 @@ use desktop_core::contracts::{
 
 const REDPILL_CLIENT_ID: &str = "cGrHCOWG3S91oa0A";
 const ISSUER: &str = "https://clerk.redpill.ai";
-const CALLBACK: &str = "http://127.0.0.1:4181/oauth/callback";
+/// Where RedPill redirects the OAuth callback; the web UI may not take its port.
+pub(crate) const CALLBACK_ADDRESS: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 4181);
+const CALLBACK_PATH: &str = "/oauth/callback";
 const KEY_URL: &str = "https://service.redpill.ai/api/oauth/key";
 const PHALA_API: &str = "https://cloud-api.phala.com";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(900);
+
+fn callback_url() -> String {
+    format!("http://{CALLBACK_ADDRESS}{CALLBACK_PATH}")
+}
 
 #[derive(Clone)]
 pub(crate) struct Credential {
@@ -114,7 +124,9 @@ impl Authorization {
                 }
                 let organization = string(&result, "account_name")?;
                 Ok(Credential {
-                    key: agent_bridge::secrets::validate_api_key(&string(&result, "api_key")?)?,
+                    key: desktop_core::service_config::validate_api_key(&string(
+                        &result, "api_key",
+                    )?)?,
                     auth: ProfileAuth::OAuth {
                         account_id: string(&result, "account_id")?,
                         account_name: match &details.auth {
@@ -284,9 +296,9 @@ impl PendingLogin {
         let url =
             Url::parse(value.trim()).map_err(|_| "Account: Paste the complete callback URL.")?;
         if url.scheme() != "http"
-            || url.host_str() != Some("127.0.0.1")
-            || url.port() != Some(4181)
-            || url.path() != "/oauth/callback"
+            || url.host() != Some(url::Host::Ipv4(*CALLBACK_ADDRESS.ip()))
+            || url.port() != Some(CALLBACK_ADDRESS.port())
+            || url.path() != CALLBACK_PATH
             || !url.username().is_empty()
             || url.password().is_some()
             || url.fragment().is_some()
@@ -297,7 +309,8 @@ impl PendingLogin {
             .parse()
             .map_err(|_| "Account: Invalid callback URL.")?;
         let mut headers = HeaderMap::new();
-        headers.insert("host", "127.0.0.1:4181".parse().expect("constant host"));
+        let host = CALLBACK_ADDRESS.to_string();
+        headers.insert("host", host.parse().expect("constant host"));
         state
             .accept(&uri, &headers)
             .await
@@ -333,9 +346,9 @@ impl PendingLogin {
             {
                 // Pending credentials also expire server-side. Offline cleanup
                 // must not trap the user in an editor or prevent a fresh login.
-                crate::diagnostic(format_args!(
+                desktop_core::diagnostic!(
                     "Pending authorization cleanup deferred to server expiry"
-                ));
+                );
             }
         }
         Ok(())
@@ -386,8 +399,11 @@ pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<Pendi
             let discovery =
                 response(client.get(format!("{ISSUER}/.well-known/openid-configuration"))).await?;
             validate_discovery(&discovery)?;
-            let listener = TcpListener::bind("127.0.0.1:4181").await.map_err(|_| {
-                "Connection callback port 4181 is in use; close the other connection and retry"
+            let listener = TcpListener::bind(CALLBACK_ADDRESS).await.map_err(|_| {
+                format!(
+                    "Connection callback port {} is in use; close the other connection and retry",
+                    CALLBACK_ADDRESS.port()
+                )
             })?;
             let verifier = random_secret();
             let state = random_secret();
@@ -396,7 +412,7 @@ pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<Pendi
                 ("client_id", REDPILL_CLIENT_ID),
                 ("response_type", "code"),
                 ("response_mode", "query"),
-                ("redirect_uri", CALLBACK),
+                ("redirect_uri", &callback_url()),
                 ("scope", "openid profile user:org:read"),
                 ("state", &state),
                 ("code_challenge_method", "S256"),

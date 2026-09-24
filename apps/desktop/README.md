@@ -103,7 +103,7 @@ cd apps/desktop
 cargo build --package private-ai-proxy --bin private-ai-proxy
 ```
 
-All four Rust packages under `apps/desktop` share this workspace's `Cargo.lock`
+All five Rust packages under `apps/desktop` share this workspace's `Cargo.lock`
 and write build output to `apps/desktop/target` unless `CARGO_TARGET_DIR` is set.
 Tauri, its sidecars, and the standalone CLI therefore resolve one dependency
 graph and reuse one build cache.

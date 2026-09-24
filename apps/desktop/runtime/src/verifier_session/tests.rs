@@ -96,7 +96,7 @@ async fn compatibility_refresh_is_background_work_and_cannot_resurrect_a_stopped
             Arc::new(UsageStore::memory().unwrap()),
             Arc::new(WaitingSidecar),
             Handle::current(),
-            GatewayState::default(),
+            AppState::default(),
         )
         .with_endpoint_inventory(updater),
     );
@@ -192,7 +192,7 @@ async fn late_catalog_failure_cannot_override_a_newer_success_or_security_stop()
         Arc::new(UsageStore::memory().unwrap()),
         Arc::new(WaitingSidecar),
         Handle::current(),
-        GatewayState::default(),
+        AppState::default(),
     ));
     {
         let mut runtime = manager.lock().unwrap();
@@ -293,10 +293,10 @@ async fn ready_event_loads_catalog_before_opening_the_session() {
         Arc::new(UsageStore::memory().unwrap()),
         Arc::new(WaitingSidecar),
         Handle::current(),
-        GatewayState::default(),
+        AppState::default(),
     ));
     let started = manager
-        .start(StartGatewayConfig {
+        .start(StartConfig {
             remote_url: "https://inference.phala.com".into(),
             require_production_os: true,
         })
@@ -349,10 +349,10 @@ fn unexpected_termination_revokes_forwarding_and_requests_reconnect() {
         Arc::new(UsageStore::memory().unwrap()),
         Arc::new(WaitingSidecar),
         executor.handle().clone(),
-        GatewayState::default(),
+        AppState::default(),
     ));
     manager
-        .start(StartGatewayConfig {
+        .start(StartConfig {
             remote_url: "https://inference.phala.com".into(),
             require_production_os: true,
         })
@@ -389,10 +389,10 @@ fn explicit_stop_stops_the_task_and_ends_the_session() {
         usage.clone(),
         Arc::new(StopTrackingLauncher(stopped.clone())),
         executor.handle().clone(),
-        GatewayState::default(),
+        AppState::default(),
     ));
     manager
-        .start(StartGatewayConfig {
+        .start(StartConfig {
             remote_url: "https://inference.phala.com".into(),
             require_production_os: true,
         })
@@ -414,9 +414,9 @@ async fn silent_verifier_times_out_without_stopping_a_completed_verification() {
         Arc::new(UsageStore::memory().unwrap()),
         Arc::new(WaitingSidecar),
         Handle::current(),
-        GatewayState::default(),
+        AppState::default(),
     ));
-    let config = StartGatewayConfig {
+    let config = StartConfig {
         remote_url: "https://inference.phala.com".into(),
         require_production_os: true,
     };
@@ -455,10 +455,10 @@ fn keyset_change_requests_fresh_verification_without_ending_the_session() {
         usage.clone(),
         Arc::new(WaitingSidecar),
         executor.handle().clone(),
-        GatewayState::default(),
+        AppState::default(),
     ));
     manager
-        .start(StartGatewayConfig {
+        .start(StartConfig {
             remote_url: "https://inference.phala.com".into(),
             require_production_os: true,
         })
@@ -492,9 +492,9 @@ fn security_blocks_survive_process_failure_without_cancelling_candidate_sessions
             usage.clone(),
             Arc::new(WaitingSidecar),
             executor.handle().clone(),
-            GatewayState::default(),
+            AppState::default(),
         ));
-        let config = StartGatewayConfig {
+        let config = StartConfig {
             remote_url: "https://inference.phala.com".into(),
             require_production_os: true,
         };
@@ -557,13 +557,13 @@ fn reconnection_preserves_session_history_but_requires_fresh_verification() {
         Arc::new(UsageStore::memory().unwrap()),
         Arc::new(WaitingSidecar),
         executor.handle().clone(),
-        GatewayState::default(),
+        AppState::default(),
     ));
-    let config = StartGatewayConfig {
+    let config = StartConfig {
         remote_url: "https://inference.phala.com".into(),
         require_production_os: true,
     };
-    manager.restore_snapshot(GatewayState {
+    manager.restore_snapshot(AppState {
         status: "verified".into(),
         config: config.clone(),
         session_id: Some("same-session".into()),
@@ -595,7 +595,7 @@ fn reconnection_preserves_session_history_but_requires_fresh_verification() {
         manager.usage.clone(),
         Arc::new(WaitingSidecar),
         executor.handle().clone(),
-        GatewayState::default(),
+        AppState::default(),
     )
     .snapshot()
     .unwrap();
@@ -608,7 +608,7 @@ fn reconnection_preserves_session_history_but_requires_fresh_verification() {
     assert_eq!(retried.session_usage.requests, 7);
     assert!(retried.session_active);
     manager.stop_with_reconnect(true).unwrap();
-    let candidate = StartGatewayConfig {
+    let candidate = StartConfig {
         remote_url: "https://tee.redpill.ai".into(),
         ..config.clone()
     };
@@ -632,9 +632,9 @@ fn reconnection_preserves_session_history_but_requires_fresh_verification() {
 
 #[test]
 fn stopping_preserves_usage_but_not_the_protection_clock() {
-    let mut state = GatewayState {
+    let mut state = AppState {
         protected_since: Some(123),
-        ..GatewayState::default()
+        ..AppState::default()
     };
     state.session_usage.requests = 7;
     let stopped = SessionManager::carried(&state);
@@ -651,7 +651,7 @@ async fn stale_verifier_generation_cannot_record_activity() {
         Arc::new(UsageStore::memory().unwrap()),
         Arc::new(WaitingSidecar),
         Handle::current(),
-        GatewayState::default(),
+        AppState::default(),
     );
     manager.lock().unwrap().generation = 2;
 
@@ -738,7 +738,7 @@ fn identity_alone_does_not_verify() {
             "status": "pass", "detail": "TDX quote verified"
         }]}
     });
-    let mut state = GatewayState::default();
+    let mut state = AppState::default();
     apply_identity_event(&mut state, &identity_event(identity));
     assert_eq!(
         state.status, "stopped",
@@ -749,7 +749,7 @@ fn identity_alone_does_not_verify() {
 
 #[test]
 fn proxy_receipt_and_usage_events_merge_into_one_complete_activity() {
-    let mut state = GatewayState::default();
+    let mut state = AppState::default();
     merge_activity(
         &mut state,
         RequestActivity {

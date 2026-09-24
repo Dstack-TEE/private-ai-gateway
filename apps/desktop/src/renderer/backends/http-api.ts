@@ -2,18 +2,18 @@ import type {
   Appearance,
   CliRegistration,
   DistributionCapabilities,
-  GatewayState,
+  AppState,
   ProfileBackup,
   ServiceProvider,
   UiMethod,
   UpdateInfo,
   UpdateNotice,
+  WebBootstrap,
 } from "../../shared/contracts";
 import { showBrowserDialog } from "../components/browser-dialog";
 import { createDesktopApi, type UiPlatform, type UiTransport } from "./create-api";
 
 type EventListener = (payload: never) => void;
-type Bootstrap = { version: string; distribution: DistributionCapabilities };
 
 const tokenKey = "private-ai-proxy-web-token";
 const invalidLink = "This sign-in link has expired or was already used. Run pap app open --web for a new link.";
@@ -26,24 +26,24 @@ let ended = false;
 export async function createBackend(): Promise<{
   desktopApi: ReturnType<typeof createDesktopApi>;
   distributionCapabilities: DistributionCapabilities;
-  initialGatewayState: GatewayState | undefined;
+  initialAppState: AppState | undefined;
   initialAppearance: Appearance | undefined;
   signOut: (() => Promise<void>) | undefined;
 }> {
   token = await signIn();
-  const bootstrap = await request<Bootstrap>("/api/bootstrap", { method: "GET" });
+  const bootstrap = await request<WebBootstrap>("/api/bootstrap", { method: "GET" });
   const transport: UiTransport = { call: rpc, subscribe };
   void readEvents();
   return {
     desktopApi: createDesktopApi(transport, createPlatform(bootstrap)),
     distributionCapabilities: bootstrap.distribution,
-    initialGatewayState: undefined,
+    initialAppState: undefined,
     initialAppearance: undefined,
     signOut,
   };
 }
 
-function createPlatform(bootstrap: Bootstrap): UiPlatform {
+function createPlatform(bootstrap: WebBootstrap): UiPlatform {
   const registration: CliRegistration = {
     executable: "private-ai-proxy",
     commandPath: "pap",
@@ -98,8 +98,8 @@ function createPlatform(bootstrap: Bootstrap): UiPlatform {
     requestNotificationPermission: async () => ({ permission: "unsupported", alertsEnabled: false }),
     openNotificationSettings: async () => undefined,
     openNativeDialog: async (kind, options) => {
-      const state = await rpc<GatewayState>("getState");
-      emit("gateway://dialog-open", {
+      const state = await rpc<AppState>("getState");
+      emit("pap://dialog-open", {
         kind: kind === "setup-profile" ? "profile-editor" : kind,
         state,
         repair: options?.repair ?? false,
@@ -108,7 +108,7 @@ function createPlatform(bootstrap: Bootstrap): UiPlatform {
         startAfterSave: kind === "setup-profile",
       });
     },
-    closeNativeDialog: async () => emit("gateway://dialog-dismissed", undefined),
+    closeNativeDialog: async () => emit("pap://dialog-dismissed", undefined),
     nativeDialogReady: async () => undefined,
     mainWindowReady: async () => undefined,
     openAboutLink: async (target) => openAllowed({

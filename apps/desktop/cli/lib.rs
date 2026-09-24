@@ -1,6 +1,20 @@
-//! ACI relying-party verification and audit primitives owned by Private AI Proxy.
+//! Private AI Proxy's ACI relying-party side: verification and audit
+//! primitives, the ACI commands, and the verifying proxy that both the
+//! standalone `serve` command and the managed backend run.
 
 pub mod aci;
+pub mod args;
+pub mod audit;
+mod capture;
+mod checks;
+mod client;
+pub mod send;
+pub mod serve;
+pub mod sessions;
+#[cfg(test)]
+mod spec_fixtures;
+mod transcript;
+pub mod verify;
 
 /// Select the provider used by the CLI and its verifier dependencies.
 pub fn install_crypto_provider() {

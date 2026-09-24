@@ -5,8 +5,6 @@
 //! The Tauri shell owns window, menu, tray, clipboard, file-picker, and
 //! autostart integration; clients reach this crate only over IPC.
 
-pub use desktop_core::diagnostic;
-
 pub mod account_login;
 mod balance_cache;
 pub mod controller;

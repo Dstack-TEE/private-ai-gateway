@@ -3,8 +3,6 @@
 
 use std::{fs, io, path::Path};
 
-use rand::RngCore;
-
 /// Owner-only (0700) directory on Unix; on Windows the per-user app data
 /// directory already carries the profile's ACL.
 pub fn create_private_dir(dir: &Path) -> io::Result<()> {
@@ -126,10 +124,9 @@ pub fn sync_dir(_dir: &Path) -> io::Result<()> {
 }
 
 /// Replace `path` atomically: refuse symlinks, re-check that the file still
-/// holds `expected` right before the swap, write a random owner-only temp file
-/// (never following links), keep the target's permissions when it exists,
-/// rename, then fsync the directory on Unix. Callers that need cross-process
-/// exclusion wrap this in `lock::with_apply_lock`.
+/// holds `expected` right before the swap, and keep the target's permissions
+/// when it exists; see [`publish`]. Callers that need cross-process exclusion
+/// wrap this in `lock::with_apply_lock`.
 pub fn write_atomic(path: &Path, content: &str, expected: Option<Option<&str>>) -> io::Result<()> {
     let dir = path
         .parent()
@@ -158,25 +155,56 @@ pub fn write_atomic(path: &Path, content: &str, expected: Option<Option<&str>>) 
             ));
         }
     }
+    publish(path, Publish::Replace, |file| {
+        use std::io::Write;
+        file.write_all(content.as_bytes())?;
+        if let Some(metadata) = &existing {
+            file.set_permissions(metadata.permissions())?;
+        }
+        Ok(())
+    })
+}
+
+/// What [`publish`] does when the destination already exists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Publish {
+    Replace,
+    /// Fail with `AlreadyExists` instead, atomically.
+    NoClobber,
+}
+
+/// Write a file so that readers only ever see the complete result: `write`
+/// fills a new owner-only temporary file (`.<name>.<random>.tmp`) beside
+/// `path`, which is synced, closed and then moved into place; the directory
+/// entry is synced on Unix. Nothing is left behind on failure.
+pub fn publish(
+    path: &Path,
+    mode: Publish,
+    write: impl FnOnce(&mut fs::File) -> io::Result<()>,
+) -> io::Result<()> {
+    let dir = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("config");
-    let mut nonce = [0u8; 8];
-    rand::rngs::OsRng.fill_bytes(&mut nonce);
-    let temp = dir.join(format!(".{name}.{}.tmp", hex(&nonce)));
-    let result = (|| {
-        write_private(&temp, content)?;
-        if let Some(metadata) = &existing {
-            fs::set_permissions(&temp, metadata.permissions())?;
-        }
-        fs::rename(&temp, path)?;
-        sync_parent(dir)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
+        .unwrap_or("file");
+    let mut temporary = tempfile::Builder::new()
+        .prefix(&format!(".{name}."))
+        .suffix(".tmp")
+        .tempfile_in(dir)?;
+    write(temporary.as_file_mut())?;
+    temporary.as_file().sync_all()?;
+    // Publish through a closed handle: nothing can observe the destination
+    // while it is still open for writing.
+    let temporary = temporary.into_temp_path();
+    match mode {
+        Publish::Replace => temporary.persist(path),
+        Publish::NoClobber => temporary.persist_noclobber(path),
     }
-    result
+    .map_err(|error| error.error)?;
+    sync_parent(dir)
 }
 
 #[cfg(unix)]
@@ -187,10 +215,6 @@ fn sync_parent(dir: &Path) -> io::Result<()> {
 #[cfg(not(unix))]
 fn sync_parent(_dir: &Path) -> io::Result<()> {
     Ok(())
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(all(test, unix))]

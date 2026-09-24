@@ -194,7 +194,7 @@ impl TokenSet {
 fn generate() -> String {
     let mut bytes = [0u8; TOKEN_BYTES];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    hex::encode(bytes)
 }
 
 /// FlushFileBuffers supports regular writable files, not directory handles.

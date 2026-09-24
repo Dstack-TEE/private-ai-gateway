@@ -7,25 +7,12 @@
 use std::{collections::HashMap, sync::Mutex};
 
 const SERVICE: &str = desktop_core::brand::APP_IDENTIFIER;
-const MAX_KEY_LEN: usize = 512;
 
 /// A named-entry secret store. Entry names are app-chosen, never user input.
 pub trait SecretStore: Send + Sync {
     fn get(&self, entry: &str) -> Result<Option<String>, String>;
     fn set(&self, entry: &str, value: &str) -> Result<(), String>;
     fn delete(&self, entry: &str) -> Result<(), String>;
-}
-
-/// Validate a key the user typed: trimmed, single line, bounded length.
-pub fn validate_api_key(value: &str) -> Result<String, String> {
-    let key = value.trim();
-    if key.is_empty() {
-        return Err("Enter an API key".to_string());
-    }
-    if key.len() > MAX_KEY_LEN || key.chars().any(char::is_whitespace) {
-        return Err("The API key must be a single token without spaces".to_string());
-    }
-    Ok(key.to_string())
 }
 
 /// OS credential store backed by the `keyring` crate.
@@ -132,13 +119,6 @@ impl SecretStore for MemoryStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn rejects_blank_and_multiline_keys() {
-        assert!(validate_api_key("  ").is_err());
-        assert!(validate_api_key("sk-a\nsk-b").is_err());
-        assert_eq!(validate_api_key("  sk-abc  ").unwrap(), "sk-abc");
-    }
 
     #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread")]

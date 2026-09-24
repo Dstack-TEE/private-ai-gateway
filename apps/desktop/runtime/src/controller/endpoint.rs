@@ -29,8 +29,8 @@ impl DesktopRuntime {
 
     pub async fn save_local_api_config(
         self: &Arc<Self>,
-        config: LocalApiConfig,
-    ) -> Result<GatewayState, String> {
+        config: ListenConfig,
+    ) -> Result<AppState, String> {
         let _operation = self.configuration_change()?;
         if self.instance.is_none() {
             return Err("Change Local API settings in the primary app instance".to_string());
@@ -74,10 +74,10 @@ impl DesktopRuntime {
 
     pub(super) async fn rebind_local_api(
         self: &Arc<Self>,
-        config: LocalApiConfig,
-        current: ResolvedLocalApi,
-        resolved: ResolvedLocalApi,
-    ) -> Result<GatewayState, String> {
+        config: ListenConfig,
+        current: ResolvedListen,
+        resolved: ResolvedListen,
+    ) -> Result<AppState, String> {
         let needs_bind =
             current.bind != resolved.bind || self.manager.snapshot()?.proxy_url.is_none();
         if !needs_bind {
@@ -136,7 +136,7 @@ impl DesktopRuntime {
 
     pub(super) fn restore_endpoint(
         self: &Arc<Self>,
-        previous: ResolvedLocalApi,
+        previous: ResolvedListen,
     ) -> Result<(), String> {
         let listener = rebind(previous.bind).map_err(|error| {
             format!(
@@ -151,7 +151,7 @@ impl DesktopRuntime {
         )
     }
 
-    pub async fn reset_settings(self: &Arc<Self>) -> Result<GatewayState, String> {
+    pub async fn reset_settings(self: &Arc<Self>) -> Result<AppState, String> {
         let _operation = self.configuration_change()?;
         if self.instance.is_none() {
             return Err("Reset settings in the primary backend instance".into());
@@ -162,7 +162,7 @@ impl DesktopRuntime {
             self.disconnect_all_agents_inner()?;
         }
         let current = self.manager.local_api()?;
-        let defaults = LocalApiConfig::default();
+        let defaults = ListenConfig::default();
         let resolved = local_api::resolve(defaults.clone())?;
         self.rebind_local_api(defaults, current, resolved).await?;
         let state = self.manager.snapshot()?;

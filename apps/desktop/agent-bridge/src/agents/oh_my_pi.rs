@@ -92,7 +92,7 @@ pub(super) fn validate_config(doc: &ConfigDoc, prior: Option<&Connection>) -> Re
             })
         })
     {
-        return Err("The Oh My Pi gateway provider already exists outside this connection; it will not be overwritten".into());
+        return Err("The Oh My Pi private-ai-proxy provider already exists outside this connection; it will not be overwritten".into());
     }
     Ok(())
 }
