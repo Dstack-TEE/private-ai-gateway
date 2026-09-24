@@ -280,11 +280,11 @@ impl RpcError {
         for prefix in [
             "Web UI",
             "Stop protection before",
-            "Gateway is already running",
+            "Protection is already running",
             "Create a Confidential AI profile",
             "Add a credential",
             "Enter an API key",
-            "Start the gateway and wait",
+            "Start protection and wait",
             "Disconnect managed agents",
             "At least one",
             "Confidential AI profile not found",
@@ -299,7 +299,7 @@ impl RpcError {
         if message.contains("credential store") {
             return Self::new("credential_store_unavailable", "The OS credential store is unavailable or locked. Unlock it in your user session and retry.");
         }
-        Self::new("operation_failed", "The operation could not complete. Check the gateway state and supplied configuration before retrying.")
+        Self::new("operation_failed", "The operation could not complete. Check the protection status and supplied configuration before retrying.")
     }
 }
 

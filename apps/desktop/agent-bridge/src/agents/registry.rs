@@ -88,7 +88,7 @@ impl AgentIntegration for Agent {
                     since are left in place. The agent's local token is revoked.";
         }
         match self {
-            Agent::OpenClaw => "OpenClaw uses a native-host provider and an executable SecretRef for its local gateway token. Restart OpenClaw after applying.",
+            Agent::OpenClaw => "OpenClaw uses a native-host provider and an executable SecretRef for its local token. Restart OpenClaw after applying.",
             Agent::OhMyPi => "Oh My Pi uses its own local token and native models YAML. Connect selects a compatible default; Disconnect restores the previous selection while keeping the provider. Restart omp after applying. Named profiles and conflicting overrides are not modified.",
             Agent::Codex => {
                 "Codex will use its official custom model provider with the Responses API, the \

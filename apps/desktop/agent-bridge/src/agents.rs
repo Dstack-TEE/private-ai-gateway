@@ -1,4 +1,4 @@
-//! Agent configuration projection: point an agent at the local gateway by
+//! Agent configuration projection: point an agent at the local proxy by
 //! editing only the fields this app owns, remember what those fields held
 //! before, and put them back on disconnect. Credential fields a connection
 //! takes over are parked in the OS credential store and referenced opaquely;

@@ -158,7 +158,7 @@ impl Projector {
             Agent::OhMyPi => oh_my_pi::validate_config(doc, prior)
                 .map_err(AgentError::ConfigurationConflict),
             Agent::Codex if doc.contains(&["model_providers", "private_ai_proxy", "aws"]) => {
-                Err(AgentError::AuthenticationConflict("Codex's gateway provider has AWS authentication, which conflicts with command authentication. Remove that conflict in Codex; it will not be overwritten".to_string()))
+                Err(AgentError::AuthenticationConflict("Codex's private_ai_proxy provider has AWS authentication, which conflicts with command authentication. Remove that conflict in Codex; it will not be overwritten".to_string()))
             }
             Agent::Pi => {
                 let path = Agent::Pi.config_path(&self.home, self.tool_env).with_file_name("auth.json");
@@ -181,11 +181,11 @@ impl Projector {
                 }
                 if doc.contains(&["providers", "private-ai-proxy", "enabled"])
                     && doc.get_value(&["providers", "private-ai-proxy", "enabled"]) != Some(ConfigValue::Bool(true)) {
-                    return Err(AgentError::ConfigurationConflict("The Hermes gateway provider must have enabled: true or omit that field; resolve it in Hermes before connecting".to_string()));
+                    return Err(AgentError::ConfigurationConflict("The Hermes private-ai-proxy provider must have enabled: true or omit that field; resolve it in Hermes before connecting".to_string()));
                 }
                 if doc.contains(&["providers", "private-ai-proxy", "api_mode"])
                     && doc.get_str(&["providers", "private-ai-proxy", "api_mode"]).as_deref() != Some("chat_completions") {
-                    return Err(AgentError::ConfigurationConflict("Hermes api_mode overrides the gateway's chat_completions transport; resolve that conflict in Hermes".to_string()));
+                    return Err(AgentError::ConfigurationConflict("Hermes api_mode overrides the private-ai-proxy provider's chat_completions transport; resolve that conflict in Hermes".to_string()));
                 }
                 for key in ["api_key", "key_env", "api_key_env"] {
                     if doc.contains(&["providers", "private-ai-proxy", key]) || doc.contains(&["model", key]) {
@@ -219,7 +219,7 @@ impl Projector {
                         let pool = pool.as_object().ok_or_else(|| AgentError::InvalidConfiguration("Cannot verify Hermes credential_pool; resolve its shape in Hermes".to_string()))?;
                         for key in ["private-ai-proxy".to_string(), format!("custom:{}", name.trim().to_lowercase().replace(' ', "-"))] {
                             if pool.get(&key).is_some_and(|entries| entries.as_array().is_none_or(|entries| !entries.is_empty())) {
-                                return Err(AgentError::AuthenticationConflict("Hermes has a gateway credential pool that takes priority over key_cmd; resolve it in Hermes. Native auth files are left unchanged".to_string()));
+                                return Err(AgentError::AuthenticationConflict("Hermes has a private-ai-proxy credential pool that takes priority over key_cmd; resolve it in Hermes. Native auth files are left unchanged".to_string()));
                             }
                         }
                     }
@@ -320,7 +320,7 @@ impl Projector {
                         .any(|value| value.as_str() == Some("private-ai-proxy"))
             })
         }) {
-            return Err("OpenCode's enabled_providers/disabled_providers exclude the gateway or are invalid. Resolve those filters in OpenCode; they will not be overwritten".to_string());
+            return Err("OpenCode's enabled_providers/disabled_providers exclude private-ai-proxy or are invalid. Resolve those filters in OpenCode; they will not be overwritten".to_string());
         }
         for pointer in ["/provider/private-ai-proxy", "/model"] {
             if pointer == "/model" && !owns_model {

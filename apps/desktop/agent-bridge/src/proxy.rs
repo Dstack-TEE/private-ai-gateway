@@ -253,7 +253,7 @@ impl ProxyState {
             session
                 .service
                 .clone()
-                .ok_or_else(|| "The gateway is not running".to_string())?
+                .ok_or_else(|| "Protection is not running".to_string())?
         };
         let mut request = Request::builder().method("GET").uri("/v1/models");
         if let Some(key) = read(&self.credentials).api_key.as_deref() {
@@ -441,7 +441,7 @@ pub async fn serve(state: Arc<ProxyState>, listener: std::net::TcpListener) -> R
         .map_err(|error| format!("Cannot use the local listener: {error}"))?;
     axum::serve(listener, router(state))
         .await
-        .map_err(|error| format!("The local gateway stopped: {error}"))
+        .map_err(|error| format!("The Local API stopped: {error}"))
 }
 
 async fn relay(
@@ -461,7 +461,7 @@ async fn relay(
         let rejection = Rejection::new(
             StatusCode::TOO_MANY_REQUESTS,
             "rate_limited",
-            "Too many requests are in flight through the local gateway; retry shortly",
+            "Too many requests are in flight through the Local API; retry shortly",
         );
         return reject(&state, Some(agent), "POST", path, None, surface, rejection);
     };
@@ -481,7 +481,7 @@ async fn relay(
             let rejection = Rejection::new(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "request_too_large",
-                "The request body exceeds the local gateway limit",
+                "The request body exceeds the Local API limit",
             );
             return reject(&state, Some(agent), "POST", path, None, surface, rejection);
         }

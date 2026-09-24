@@ -138,18 +138,16 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                     let state = client.state()?;
                     if state.session_id != started.session_id {
                         return Err(
-                            "The gateway operation was superseded by another client.".into()
+                            "The protection operation was superseded by another client.".into()
                         );
                     }
                     match state.status.as_str() {
                         "verified" if !state.configuration_verification => break value(state)?,
                         "verifying" => {}
-                        _ => {
-                            return Err(
-                                "Gateway did not become verified. Inspect private-ai-proxy status."
-                                    .into(),
-                            )
-                        }
+                        _ => return Err(
+                            "Protection did not become verified. Inspect private-ai-proxy status."
+                                .into(),
+                        ),
                     }
                     if Instant::now() >= deadline {
                         return Err("Verification wait timed out; the backend may still be verifying. Inspect private-ai-proxy status before retrying.".into());
@@ -347,11 +345,9 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
             } else {
                 client.state()?
             };
-            value(
-                state
-                    .catalog
-                    .ok_or("No verified model catalog. Start and verify the gateway first.")?,
-            )?
+            value(state.catalog.ok_or(
+                "No verified model catalog. Start protection and wait for verification first.",
+            )?)?
         }
         Action::Usage { command } => match command {
             Usage::List { filter, page } => value(client.call(rpc::Usage {
@@ -391,7 +387,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                     json!({"preferences": client.call(rpc::Preferences)?, "localApi": state.local_api, "webUi": state.web_ui})
                 }
                 Settings::Set { key, value: input } => {
-                    confirm(cli, "Change gateway settings?")?;
+                    confirm(cli, "Change Private AI Proxy settings?")?;
                     let set = |change| client.call(rpc::SetPreference { change });
                     match key {
                     SettingsKey::AutoCliRegistration => value(

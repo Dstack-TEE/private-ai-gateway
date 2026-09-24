@@ -220,7 +220,7 @@ impl SessionManager {
             return Err(format!("The local endpoint is unavailable: {error}"));
         }
         if runtime.task.is_some() {
-            return Err("Gateway is already running".to_string());
+            return Err("Protection is already running".to_string());
         }
 
         runtime.generation = runtime.generation.wrapping_add(1);
@@ -315,7 +315,7 @@ impl SessionManager {
             let mut runtime = self.lock()?;
             if runtime.generation != generation {
                 let _ = task.stop();
-                return Err("Gateway start was superseded".to_string());
+                return Err("Protection start was superseded".to_string());
             }
             if matches!(runtime.state.status.as_str(), "error" | "blocked") {
                 let _ = task.stop();
@@ -641,7 +641,7 @@ impl SessionManager {
         let (generation, epoch) = {
             let runtime = self.lock()?;
             if !runtime.identity_ready {
-                return Err("Start the gateway and wait for verification first".to_string());
+                return Err("Start protection and wait for verification first".to_string());
             }
             (runtime.generation, runtime.epoch)
         };
@@ -882,7 +882,7 @@ impl SessionManager {
     fn lock(&self) -> Result<MutexGuard<'_, RuntimeState>, String> {
         self.inner
             .lock()
-            .map_err(|_| "Gateway runtime state is unavailable".to_string())
+            .map_err(|_| "Protection state is unavailable".to_string())
     }
 }
 

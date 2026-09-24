@@ -43,7 +43,7 @@ pub struct ServiceIdentity {
     pub supported_e2ee_versions: Vec<String>,
 }
 
-/// One request seen by the local gateway: forwarded through the verifier (with
+/// One request seen by the local proxy: forwarded through the verifier (with
 /// its receipt verdict) or answered locally (rejected before any receipt).
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]

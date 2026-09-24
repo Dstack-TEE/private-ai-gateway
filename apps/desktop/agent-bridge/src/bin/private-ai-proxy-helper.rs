@@ -34,7 +34,7 @@ fn main() -> ExitCode {
         .and_then(|token| {
             token.ok_or_else(|| {
                 format!(
-                    "No active gateway credential. Open {}, enable protection, and reconnect this agent if it needs attention. After disconnecting, restart the agent to reload its restored configuration.",
+                    "No active Private AI Proxy credential. Open {}, enable protection, and reconnect this agent if it needs attention. After disconnecting, restart the agent to reload its restored configuration.",
                     PRODUCT_NAME
                 )
             })

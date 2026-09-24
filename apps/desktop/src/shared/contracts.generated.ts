@@ -58,7 +58,7 @@ export type VerificationCheck = { id: string, section: string, title: string, st
 export type ServiceIdentity = { teeType: string, trustLevel: string, keysetDigest: string, keysetNotAfter: number, tlsSpki?: string, source: SourceProvenance, serving: string, supportedE2eeVersions: Array<string>, };
 export type SourceProvenance = { repoUrl?: string, repoCommit?: string, imageDigest?: string, };
 /**
- * One request seen by the local gateway: forwarded through the verifier (with
+ * One request seen by the local proxy: forwarded through the verifier (with
  * its receipt verdict) or answered locally (rejected before any receipt).
  */
 export type RequestActivity = { id: string, sessionId: string, method: string, path: string, model?: string, status: number, streamed: boolean, receiptId?: string, verified: boolean | null, detail: string, at: number,
