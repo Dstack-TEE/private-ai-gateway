@@ -124,7 +124,9 @@ impl Authorization {
                 }
                 let organization = string(&result, "account_name")?;
                 Ok(Credential {
-                    key: agent_bridge::secrets::validate_api_key(&string(&result, "api_key")?)?,
+                    key: desktop_core::service_config::validate_api_key(&string(
+                        &result, "api_key",
+                    )?)?,
                     auth: ProfileAuth::OAuth {
                         account_id: string(&result, "account_id")?,
                         account_name: match &details.auth {

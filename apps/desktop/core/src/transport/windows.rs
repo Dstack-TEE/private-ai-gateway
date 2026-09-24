@@ -496,7 +496,7 @@ fn authenticate_process(process_id: u32) -> io::Result<()> {
     let process = unsafe { OwnedHandle::from_raw_handle(process.cast()) };
     let token = open_process_token(process.as_raw_handle().cast())?;
     let server = Sid::from_token(token.as_raw_handle().cast())?;
-    let current = current_user_sid()?;
+    let current = current_user()?;
     require_same_user(&server, &current)
 }
 
@@ -519,7 +519,12 @@ fn open_process_token(process: HANDLE) -> io::Result<OwnedHandle> {
     Ok(unsafe { OwnedHandle::from_raw_handle(token.cast()) })
 }
 
-fn current_user_sid() -> io::Result<Sid> {
+/// The current Windows user's SID in string form (`S-1-5-…`).
+pub fn current_user_sid() -> io::Result<String> {
+    current_user()?.string()
+}
+
+fn current_user() -> io::Result<Sid> {
     let token = open_process_token(unsafe { GetCurrentProcess() })?;
     Sid::from_token(token.as_raw_handle().cast())
 }
@@ -579,6 +584,10 @@ impl Sid {
     }
 
     fn sddl(&self) -> io::Result<String> {
+        Ok(format!("D:P(A;;GA;;;{})", self.string()?))
+    }
+
+    fn string(&self) -> io::Result<String> {
         let mut string_sid = ptr::null_mut();
         if unsafe { ConvertSidToStringSidW(self.as_ptr(), &mut string_sid) } == FALSE {
             return Err(io::Error::last_os_error());
@@ -596,7 +605,7 @@ impl Sid {
                 )
             })?;
         drop(allocation);
-        Ok(format!("D:P(A;;GA;;;{sid})"))
+        Ok(sid)
     }
 }
 
@@ -604,7 +613,7 @@ struct SecurityDescriptor(PSECURITY_DESCRIPTOR);
 
 impl SecurityDescriptor {
     fn current_user() -> io::Result<Self> {
-        let sddl = current_user_sid()?.sddl()?;
+        let sddl = current_user()?.sddl()?;
         let wide = wide_string(OsStr::new(&sddl));
         let mut descriptor = ptr::null_mut();
         if unsafe {

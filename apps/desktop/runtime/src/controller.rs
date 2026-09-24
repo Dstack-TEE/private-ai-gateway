@@ -19,7 +19,7 @@ use agent_bridge::{
     agents::Projector,
     catalog::Catalog,
     proxy::{self, ProxyEvent, ProxyState},
-    secrets::{validate_api_key, KeyringStore, SecretStore},
+    secrets::{KeyringStore, SecretStore},
     tokens::{TokenFiles, TokenSet, LOCAL_TOOLS_AGENT},
 };
 use desktop_core::{

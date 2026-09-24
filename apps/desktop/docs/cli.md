@@ -66,8 +66,12 @@ pap settings show                 # preferences plus the web UI address or bind 
 pap settings set webUi false      # closes the listener and ends every browser session
 ```
 
-The listener uses the same rules as the Local API's `listenAddress`,
-`allowNetworkAccess` and `clientHost`, under `webUi`-prefixed keys:
+Its port may be any of 1–65535, while the Local API requires 1024 or above: the
+Local API port is written into every connected agent's configuration and must
+bind for protection to work, whereas a web UI bind failure is only reported in
+its status. The listener otherwise uses the same rules as the Local API's
+`listenAddress`, `allowNetworkAccess` and `clientHost`, under `webUi`-prefixed
+keys:
 
 | Key | Default | Meaning |
 | --- | --- | --- |

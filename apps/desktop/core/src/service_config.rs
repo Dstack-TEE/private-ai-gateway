@@ -12,6 +12,7 @@ use crate::{
 const CONFIG_FILE: &str = "confidential-ai.json";
 const CONFIG_VERSION: u8 = 1;
 const MAX_PROFILES: usize = 50;
+const MAX_KEY_LEN: usize = 512;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -174,6 +175,18 @@ pub fn credential_entry(profile_id: &str) -> Result<String, String> {
     Ok(format!("service-profile-{profile_id}-api-key"))
 }
 
+/// Validate a key the user typed: trimmed, single line, bounded length.
+pub fn validate_api_key(value: &str) -> Result<String, String> {
+    let key = value.trim();
+    if key.is_empty() {
+        return Err("Enter an API key".to_string());
+    }
+    if key.len() > MAX_KEY_LEN || key.chars().any(char::is_whitespace) {
+        return Err("The API key must be a single token without spaces".to_string());
+    }
+    Ok(key.to_string())
+}
+
 fn resolve_settings(mut settings: ServiceSettings) -> Result<ServiceSettings, String> {
     if settings.version != CONFIG_VERSION {
         return Err("The saved Confidential AI settings use an unsupported version".to_string());
@@ -272,6 +285,13 @@ fn config_path() -> Result<PathBuf, String> {
 mod tests {
     use super::*;
     use crate::contracts::ServiceProvider;
+
+    #[test]
+    fn rejects_blank_and_multiline_keys() {
+        assert!(validate_api_key("  ").is_err());
+        assert!(validate_api_key("sk-a\nsk-b").is_err());
+        assert_eq!(validate_api_key("  sk-abc  ").unwrap(), "sk-abc");
+    }
 
     fn input(remote_url: &str) -> ConfidentialProfileInput {
         ConfidentialProfileInput {

@@ -21,15 +21,12 @@ use std::{
     ptr::{null, null_mut},
 };
 use windows_sys::Win32::{
-    Foundation::{
-        GetLastError, LocalFree, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, INVALID_HANDLE_VALUE,
-    },
+    Foundation::{LocalFree, ERROR_SUCCESS, INVALID_HANDLE_VALUE},
     Security::{
         Authorization::{ConvertSidToStringSidW, GetSecurityInfo, SE_FILE_OBJECT},
-        GetAce, GetLengthSid, GetSecurityDescriptorDacl, GetSecurityDescriptorLength,
-        GetTokenInformation, IsValidAcl, IsValidSecurityDescriptor, IsValidSid, TokenUser,
-        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-        PSID, TOKEN_QUERY, TOKEN_USER,
+        GetAce, GetLengthSid, GetSecurityDescriptorDacl, GetSecurityDescriptorLength, IsValidAcl,
+        IsValidSecurityDescriptor, IsValidSid, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
+        DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSID,
     },
     Storage::FileSystem::{
         CreateFileW, GetDriveTypeW, GetFileInformationByHandle, GetFileType,
@@ -38,10 +35,7 @@ use windows_sys::Win32::{
         FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK, OPEN_EXISTING,
         READ_CONTROL,
     },
-    System::{
-        Threading::{GetCurrentProcess, OpenProcessToken},
-        WindowsProgramming::{DRIVE_CDROM, DRIVE_FIXED, DRIVE_RAMDISK, DRIVE_REMOVABLE},
-    },
+    System::WindowsProgramming::{DRIVE_CDROM, DRIVE_FIXED, DRIVE_RAMDISK, DRIVE_REMOVABLE},
 };
 
 struct LocalAllocation(*mut c_void);
@@ -170,40 +164,8 @@ unsafe fn sid_text(sid: PSID, available: usize) -> Result<String, String> {
 }
 
 fn current_user_sid() -> Result<String, String> {
-    let mut raw = null_mut();
-    // GetCurrentProcess is borrowed; only the returned process token is owned.
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) } == 0 || raw.is_null()
-    {
-        return Err("Cannot inspect the current Windows user".into());
-    }
-    let token = unsafe { OwnedHandle::from_raw_handle(raw) };
-    let mut needed = 0;
-    if unsafe { GetTokenInformation(token.as_raw_handle(), TokenUser, null_mut(), 0, &mut needed) }
-        != 0
-        || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER
-        || !(size_of::<TOKEN_USER>()..=65536).contains(&(needed as usize))
-    {
-        return Err("Cannot size the current Windows user token".into());
-    }
-    // usize storage aligns TOKEN_USER and its embedded SID; the API gets its byte capacity.
-    let mut buffer = vec![0usize; (needed as usize).div_ceil(size_of::<usize>())];
-    let capacity = buffer.len() * size_of::<usize>();
-    if unsafe {
-        GetTokenInformation(
-            token.as_raw_handle(),
-            TokenUser,
-            buffer.as_mut_ptr().cast(),
-            capacity as u32,
-            &mut needed,
-        )
-    } == 0
-        || !(size_of::<TOKEN_USER>()..=capacity).contains(&(needed as usize))
-    {
-        return Err("Cannot read the current Windows user token".into());
-    }
-    let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
-    let available = remaining(buffer.as_ptr().cast(), needed as usize, user.User.Sid, 8)?;
-    unsafe { sid_text(user.User.Sid, available) }
+    desktop_core::transport::current_user_sid()
+        .map_err(|_| "Cannot inspect the current Windows user".to_string())
 }
 
 fn read_acl(handle: &OwnedHandle) -> Result<WindowsAcl, String> {
@@ -294,6 +256,7 @@ fn read_acl(handle: &OwnedHandle) -> Result<WindowsAcl, String> {
 mod tests {
     use super::*;
     use windows_sys::Win32::{
+        Foundation::GetLastError,
         Security::{
             Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW,
             SECURITY_ATTRIBUTES,

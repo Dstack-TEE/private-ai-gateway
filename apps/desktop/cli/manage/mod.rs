@@ -796,7 +796,7 @@ fn read_key(cli: &Cli, stdin: bool) -> Result<String, String> {
         }
         rpassword::prompt_password("API key: ").map_err(|_| "Cannot read credential")?
     };
-    agent_bridge::secrets::validate_api_key(&key)
+    desktop_core::service_config::validate_api_key(&key)
 }
 fn parse_bool(value: &str) -> Result<bool, String> {
     value.parse().map_err(|_| "Expected true or false".into())

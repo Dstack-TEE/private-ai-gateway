@@ -28,7 +28,7 @@ pub(super) async fn phala_at(
                 _ => return Err(account_error(status, &data)),
             }
         }
-        let key = agent_bridge::secrets::validate_api_key(&string(&data, "access_token")?)?;
+        let key = desktop_core::service_config::validate_api_key(&string(&data, "access_token")?)?;
         let metadata = response(
             client
                 .get(format!("{base}/api/v1/private_ai/self"))

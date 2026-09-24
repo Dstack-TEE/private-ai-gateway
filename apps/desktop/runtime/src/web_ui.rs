@@ -30,6 +30,8 @@ use desktop_core::{
 };
 
 /// Checks the port policy and the shared listener rules; non-loopback fails closed.
+/// Unlike the Local API, privileged ports are allowed: agents never store this
+/// port, and a failed bind only disables the optional web UI (see docs/cli.md).
 pub fn validate(config: &WebUiConfig, local_api_port: u16) -> Result<ResolvedListen, String> {
     let port = config.port;
     if port == 0 {

@@ -91,7 +91,7 @@ impl DesktopRuntime {
             None => None,
         };
         let candidate_key = match key {
-            Some(key) => validate_api_key(&key)?,
+            Some(key) => service_config::validate_api_key(&key)?,
             None if !profile_changed => stored_candidate_key
                 .clone()
                 .ok_or_else(|| "Enter an API key".to_string())?,
