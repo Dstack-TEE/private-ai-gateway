@@ -48,6 +48,8 @@ fn main() {
         "rotate_client_key",
         "save_local_api_config",
         "save_web_ui",
+        "set_web_ui_password",
+        "open_web_ui",
         "list_listen_addresses",
         "list_agents",
         "preview_agent_connection",

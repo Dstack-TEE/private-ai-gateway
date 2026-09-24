@@ -29,7 +29,7 @@ export const INITIAL_STATE: AppState = {
   activeProfileId: "",
   localApi: { listenAddress: "127.0.0.1", allowNetworkAccess: false, port: 4180 },
   apiKeySaved: false,
-  webUi: { enabled: false, listenAddress: "127.0.0.1", allowNetworkAccess: false, port: 4182 },
+  webUi: { enabled: false, listenAddress: "127.0.0.1", allowNetworkAccess: false, port: 4182, passwordSet: false },
 };
 
 export function unavailableState(error: unknown): AppState {

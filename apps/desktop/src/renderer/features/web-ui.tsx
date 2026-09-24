@@ -1,30 +1,45 @@
 import React, { useState } from "react";
 import { Button } from "../components/ui/button";
-import { FieldDescription, FieldGroup } from "../components/ui/field";
+import { Field, FieldContent, FieldDescription, FieldGroup, FieldSeparator, FieldTitle } from "../components/ui/field";
+import { Input } from "../components/ui/input";
 import { ListenerFields } from "../components/listen-address";
+import { FormField, SettingsList, SettingsToggle } from "../components/settings";
 import { Sheet, SheetActions } from "../components/sheet";
 import { useErrorAlert } from "../lib/error-alert";
 import { localAddressKind } from "../lib/local-api-config";
-import { desktopApi } from "../lib/environment";
+import { desktopApi, web } from "../lib/environment";
 import type { AppState, WebUiConfig, WebUiStatus } from "../../shared/contracts";
 
 const DEFAULT_LISTENER = { listenAddress: "127.0.0.1", allowNetworkAccess: false, port: 4182 } as const;
+const MIN_PASSWORD_LENGTH = 12;
 
 /** The saved settings behind a status, without listener results. */
 export function webUiConfig({ enabled, listenAddress, allowNetworkAccess, port, clientHost }: WebUiStatus): WebUiConfig {
   return { enabled, listenAddress, allowNetworkAccess, port, clientHost };
 }
 
+function sameConfig(left: WebUiConfig, right: WebUiConfig): boolean {
+  return left.enabled === right.enabled && left.listenAddress === right.listenAddress
+    && left.port === right.port && (left.clientHost ?? "") === (right.clientHost ?? "");
+}
+
 export function WebUiSheet({
   state,
   onSave,
+  onSetPassword,
   onClose,
 }: {
   state: AppState;
   onSave(config: WebUiConfig): Promise<string | undefined>;
+  onSetPassword(password: string, currentPassword?: string): Promise<string | undefined>;
   onClose(): void;
 }): React.JSX.Element {
-  const [draft, setDraft] = useState<WebUiConfig>(() => webUiConfig(state.webUi));
+  const status = state.webUi;
+  const [draft, setDraft] = useState<WebUiConfig>(() => webUiConfig(status));
+  const [changingPassword, setChangingPassword] = useState(!status.passwordSet);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmation, setConfirmation] = useState("");
   const addressKind = localAddressKind(draft.listenAddress);
   const networkAccess = Boolean(addressKind && addressKind !== "loopback");
   const [saving, setSaving] = useState(false);
@@ -37,12 +52,49 @@ export function WebUiSheet({
         reportError("Enter a valid IPv4 or IPv6 listen address.");
         return;
       }
-      if (networkAccess && !await desktopApi.confirm({
+      const config = { ...draft, allowNetworkAccess: networkAccess };
+      const configChanged = !sameConfig(config, webUiConfig(status));
+      const newPassword = changingPassword && Boolean(password || confirmation);
+      if (newPassword) {
+        if ([...password].length < MIN_PASSWORD_LENGTH) {
+          reportError(`Use a password of at least ${MIN_PASSWORD_LENGTH} characters.`);
+          return;
+        }
+        if (password !== confirmation) {
+          reportError("The passwords do not match.");
+          return;
+        }
+        if (web && !currentPassword) {
+          reportError("Enter the current password to change it.");
+          return;
+        }
+      }
+      if (config.enabled && !status.passwordSet && !newPassword) {
+        reportError("Set a password to turn on the web UI.");
+        return;
+      }
+      if (configChanged && networkAccess && !await desktopApi.confirm({
         title: "Allow network access?",
         message: `Listen on ${draft.listenAddress}:${draft.port}? The web UI uses unencrypted HTTP, and a signed-in browser can change every setting and read the client key. Only use a trusted network, and never expose this port to the internet. An SSH tunnel or Tailscale is safer.`,
         confirmLabel: "Allow and Save",
       })) return;
-      const message = await onSave({ ...draft, allowNetworkAccess: networkAccess });
+      if (web && status.enabled && !config.enabled && !await desktopApi.confirm({
+        title: "Turn off the web UI?",
+        message: "This browser session ends now. Turn the web UI on again from the desktop app or with pap settings set webUi true.",
+        confirmLabel: "Turn Off",
+      })) return;
+      if (newPassword) {
+        const message = await onSetPassword(password, web ? currentPassword : undefined);
+        if (message) {
+          reportError(message);
+          return;
+        }
+        setChangingPassword(false);
+        setCurrentPassword("");
+        setPassword("");
+        setConfirmation("");
+      }
+      const message = configChanged ? await onSave(config) : undefined;
       if (message) reportError(message);
       else onClose();
     } catch (saveError) {
@@ -51,13 +103,46 @@ export function WebUiSheet({
       setSaving(false);
     }
   };
+  const openInBrowser = () => void desktopApi.openWebUi().catch(reportError);
   return (
-    <Sheet title="Web UI settings" className="web-ui-sheet w-[min(520px,_calc(var(--window-dialog-width,_100vw)_-_32px))] h-[min(420px,_calc(var(--window-dialog-height,_100vh)_-_32px))] [&_.sheet-card]:mt-3 form-sheet [&_>_.sheet-heading]:px-5 [&_.sheet-footer]:mx-5 [&_.sheet-scroll]:px-5" dismissible={!saving} onClose={onClose}>
+    <Sheet title="Web UI settings" className="web-ui-sheet w-[min(520px,_calc(var(--window-dialog-width,_100vw)_-_32px))] [&_.sheet-scroll]:min-h-0 [&_.sheet-scroll]:overflow-y-auto [&_.sheet-footer]:flex-none [&[open]]:flex [&[open]]:flex-col [&_form]:min-h-0 [&_form]:flex [&_form]:flex-col [&_.sheet-card]:mt-3 form-sheet [&_>_.sheet-heading]:px-5 [&_.sheet-footer]:mx-5 [&_.sheet-scroll]:px-5" dismissible={!saving} onClose={onClose}>
       <form onSubmit={(event) => void submit(event)}>
         <div className="sheet-scroll py-4">
           <FieldGroup>
-            <ListenerFields api={desktopApi} idPrefix="web-ui" value={draft} minPort={1} access="need a sign-in link from pap app open --web" clientHostNote="Optional host for sign-in links. Does not change the listener." disabled={saving} onChange={(listener) => setDraft((current) => ({ ...current, ...listener }))} />
-            <FieldDescription>Saving restarts the web UI and signs out every browser session.</FieldDescription>
+            <SettingsList>
+              <SettingsToggle label="Web UI" description="Manage this app from a browser. Browsers sign in with the password below." checked={draft.enabled} disabled={saving} onToggle={() => setDraft((current) => ({ ...current, enabled: !current.enabled }))} />
+            </SettingsList>
+            <ListenerFields api={desktopApi} idPrefix="web-ui" value={draft} minPort={1} access="are protected only by the web UI password" clientHostNote="Optional host shown in the web UI address. Does not change the listener." disabled={saving} onChange={(listener) => setDraft((current) => ({ ...current, ...listener }))} />
+            <FieldDescription>Saving listener changes restarts the web UI and signs out every browser session.</FieldDescription>
+            <FieldSeparator />
+            {changingPassword ? <>
+              {web && <FormField id="web-ui-current-password" label="Current password">
+                <Input id="web-ui-current-password" type="password" autoComplete="current-password" value={currentPassword} disabled={saving} onChange={(event) => setCurrentPassword(event.target.value)} />
+              </FormField>}
+              <FormField id="web-ui-password" label={status.passwordSet ? "New password" : "Password"} description={`At least ${MIN_PASSWORD_LENGTH} characters. Changing it signs out every browser session.`}>
+                <Input id="web-ui-password" aria-describedby="web-ui-password-note" type="password" autoComplete="new-password" value={password} disabled={saving} onChange={(event) => setPassword(event.target.value)} />
+              </FormField>
+              <FormField id="web-ui-password-confirmation" label="Confirm password">
+                <Input id="web-ui-password-confirmation" type="password" autoComplete="new-password" value={confirmation} disabled={saving} onChange={(event) => setConfirmation(event.target.value)} />
+              </FormField>
+            </> : <Field orientation="horizontal">
+              <FieldContent>
+                <FieldTitle>Password</FieldTitle>
+                <FieldDescription>Set. Changing it signs out every browser session.</FieldDescription>
+              </FieldContent>
+              <Button type="button" variant="outline" disabled={saving} onClick={() => setChangingPassword(true)}>Change Password</Button>
+            </Field>}
+            <FieldSeparator />
+            <Field orientation="horizontal">
+              <FieldContent>
+                <FieldTitle>Sign in</FieldTitle>
+                <FieldDescription>
+                  {status.url ? `Browsers open ${status.url} and enter the password.` : "Turn on the web UI to get its address."}
+                  {!web && " From a terminal: pap app open --web."}
+                </FieldDescription>
+              </FieldContent>
+              {!web && <Button type="button" variant="outline" disabled={saving || !status.url} onClick={openInBrowser}>Open in Browser</Button>}
+            </Field>
           </FieldGroup>
         </div>
         <SheetActions leading={

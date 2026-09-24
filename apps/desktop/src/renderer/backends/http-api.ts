@@ -11,16 +11,16 @@ import type {
   WebBootstrap,
 } from "../../shared/contracts";
 import { showBrowserDialog } from "../components/browser-dialog";
+import { showSignIn } from "../components/sign-in";
 import { createDesktopApi, type UiPlatform, type UiTransport } from "./create-api";
 
 type EventListener = (payload: never) => void;
 
-const tokenKey = "private-ai-proxy-web-token";
-const invalidLink = "This sign-in link has expired or was already used. Run pap app open --web for a new link.";
-const sessionEnded = "This web UI session has ended or expired. Run pap app open --web for a new link.";
-const signedOut = "You signed out of the web UI. Run pap app open --web to sign in again.";
+/** Why the last session ended, shown once on the sign-in page after a reload. */
+const noticeKey = "private-ai-proxy-web-notice";
+const sessionEnded = "Your web UI session ended or expired. Sign in again.";
+const signedOut = "You signed out. Sign in again to continue.";
 const listeners = new Map<string, Set<EventListener>>();
-let token = "";
 let ended = false;
 
 export async function createBackend(): Promise<{
@@ -30,10 +30,9 @@ export async function createBackend(): Promise<{
   initialAppearance: Appearance | undefined;
   signOut: (() => Promise<void>) | undefined;
 }> {
-  token = await signIn();
-  const bootstrap = await request<WebBootstrap>("/api/bootstrap", { method: "GET" });
+  const bootstrap = await signIn();
   const transport: UiTransport = { call: rpc, subscribe };
-  void readEvents();
+  readEvents();
   return {
     desktopApi: createDesktopApi(transport, createPlatform(bootstrap)),
     distributionCapabilities: bootstrap.distribution,
@@ -111,6 +110,9 @@ function createPlatform(bootstrap: WebBootstrap): UiPlatform {
     closeNativeDialog: async () => emit("pap://dialog-dismissed", undefined),
     nativeDialogReady: async () => undefined,
     mainWindowReady: async () => undefined,
+    openWebUi: async () => {
+      throw new Error("The web UI is already open in this browser");
+    },
     openAboutLink: async (target) => openAllowed({
       documentation: "https://github.com/Dstack-TEE/private-ai-gateway#readme",
       github: "https://github.com/Dstack-TEE/private-ai-gateway",
@@ -143,51 +145,49 @@ function createPlatform(bootstrap: WebBootstrap): UiPlatform {
 }
 
 /**
- * Exchanges the one-time code from `pap app open --web` for a session token.
- * The code leaves the address bar before any request; reloads reuse the tab's session.
+ * Loads the bootstrap with this browser's session cookie, showing the password
+ * sign-in page first when there is no live session.
  */
-async function signIn(): Promise<string> {
-  const code = new URLSearchParams(window.location.hash.replace(/^#/, "")).get("code");
-  history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
-  if (code) {
-    const response = await fetch("/api/session", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code }),
-      cache: "no-store",
-      credentials: "same-origin",
-    });
-    const payload: unknown = await response.json().catch(() => undefined);
-    const issued = payload && typeof payload === "object" && "token" in payload ? payload.token : undefined;
-    if (!response.ok || typeof issued !== "string") endSession(invalidLink);
-    sessionStorage.setItem(tokenKey, issued);
-    return issued;
-  }
-  const stored = sessionStorage.getItem(tokenKey);
-  if (!stored) endSession(invalidLink);
-  return stored;
+async function signIn(): Promise<WebBootstrap> {
+  const response = await fetch("/api/bootstrap", { cache: "no-store", credentials: "same-origin" });
+  // Signed-in requests are never throttled, so 429 also means there is no session.
+  if (response.status !== 401 && response.status !== 429) return read<WebBootstrap>(response);
+  const notice = sessionStorage.getItem(noticeKey) ?? undefined;
+  sessionStorage.removeItem(noticeKey);
+  await showSignIn(notice, openSession);
+  return request<WebBootstrap>("/api/bootstrap", { method: "GET" });
 }
 
-/** Revokes this tab's session on the server, then leaves sign-in guidance. */
+/** Exchanges the web UI password for an `HttpOnly` session cookie. */
+async function openSession(password: string): Promise<void> {
+  const response = await fetch("/api/session", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+    cache: "no-store",
+    credentials: "same-origin",
+  });
+  if (response.ok) return;
+  const payload: unknown = await response.json().catch(() => undefined);
+  throw new Error(isErrorPayload(payload) ? payload.error.message : "Sign-in failed. Try again.");
+}
+
+/** Ends this browser's session on the server, then returns to the sign-in page. */
 async function signOut(): Promise<void> {
   await request<undefined>("/api/session", { method: "DELETE" });
-  showEnded(signedOut);
+  restartSignIn(signedOut);
 }
 
-/** Replaces the page with sign-in guidance; the session cannot be recovered in place. */
+/** The session cannot be recovered in place; reload into the sign-in page. */
 function endSession(text: string): never {
-  showEnded(text);
+  restartSignIn(text);
   throw new Error(text);
 }
 
-function showEnded(text: string): void {
+function restartSignIn(text: string): void {
   ended = true;
-  sessionStorage.removeItem(tokenKey);
-  const message = document.createElement("p");
-  message.textContent = text;
-  message.setAttribute("role", "alert");
-  message.style.cssText = "margin:3rem auto;max-width:32rem;padding:0 1rem;font:15px/1.5 system-ui,sans-serif";
-  document.body.replaceChildren(message);
+  sessionStorage.setItem(noticeKey, text);
+  window.location.reload();
 }
 
 async function rpc<T>(method: UiMethod, params: Record<string, unknown> = {}): Promise<T> {
@@ -204,14 +204,10 @@ async function rpc<T>(method: UiMethod, params: Record<string, unknown> = {}): P
 }
 
 async function request<T>(path: string, init: RequestInit): Promise<T> {
-  const headers = new Headers(init.headers);
-  headers.set("Authorization", `Bearer ${token}`);
-  const response = await fetch(path, {
-    ...init,
-    headers,
-    cache: "no-store",
-    credentials: "same-origin",
-  });
+  return read<T>(await fetch(path, { ...init, cache: "no-store", credentials: "same-origin" }));
+}
+
+async function read<T>(response: Response): Promise<T> {
   const payload: unknown = await response.json().catch(() => undefined);
   if (response.status === 401) endSession(sessionEnded);
   if (!response.ok) {
@@ -241,38 +237,34 @@ function emit(event: string, payload: unknown): void {
   for (const listener of listeners.get(event) ?? []) listener(payload as never);
 }
 
-async function readEvents(): Promise<void> {
-  // The server sends a fresh state snapshot on every connection, so reconnecting loses nothing.
-  try {
-    const response = await fetch("/api/events", {
-      headers: { Authorization: `Bearer ${token}` },
-      cache: "no-store",
-      credentials: "same-origin",
-    });
-    if (response.status === 401) endSession(sessionEnded);
-    if (!response.ok || !response.body) throw new Error("Event stream unavailable");
-    const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
-    let buffer = "";
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += value;
-      const blocks = buffer.split("\n\n");
-      buffer = blocks.pop() ?? "";
-      for (const block of blocks) {
-        const data = block.split("\n")
-          .filter((line) => line.startsWith("data:"))
-          .map((line) => line.slice(5).trimStart())
-          .join("\n");
-        if (!data) continue;
-        const decoded: unknown = JSON.parse(data);
-        if (isWebEvent(decoded)) emit(decoded.event, decoded.payload);
-      }
+/** The server sends a full state snapshot on every connection, so reconnecting loses nothing. */
+function readEvents(): void {
+  const source = new EventSource("/api/events");
+  source.addEventListener("message", (message) => {
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(message.data);
+    } catch {
+      return;
     }
+    if (isWebEvent(decoded)) emit(decoded.event, decoded.payload);
+  });
+  // EventSource retries dropped connections itself but stops at an error
+  // response, such as after the session ended.
+  source.addEventListener("error", () => {
+    if (source.readyState === EventSource.CLOSED && !ended) window.setTimeout(() => void resumeEvents(), 1_000);
+  });
+}
+
+/** Reopens the stream while the session lives; an ended session returns to sign-in. */
+async function resumeEvents(): Promise<void> {
+  try {
+    await request("/api/bootstrap", { method: "GET" });
   } catch {
-    // Reconnect below.
+    if (!ended) window.setTimeout(() => void resumeEvents(), 5_000);
+    return;
   }
-  if (!ended) window.setTimeout(() => void readEvents(), 1_000);
+  readEvents();
 }
 
 function isWebEvent(value: unknown): value is { event: string; payload: unknown } {

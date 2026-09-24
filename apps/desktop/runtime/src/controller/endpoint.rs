@@ -181,6 +181,7 @@ impl DesktopRuntime {
             false,
         );
         desktop_core::preferences::reset()?;
+        self.web_ui.set_password(None);
         self.apply_web_ui(&desktop_core::preferences::WebUiConfig::default());
         self.manager.snapshot()
     }

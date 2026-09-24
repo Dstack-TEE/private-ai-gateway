@@ -1,11 +1,12 @@
 //! The browser UI hosted by the backend service.
 //!
 //! It is off by default and listens on `127.0.0.1` unless network access is
-//! explicitly allowed, exactly like the Local API. The IPC endpoint remains the
-//! root of trust: only an authenticated local client can mint the one-time
-//! login code that opens a browser session.
+//! explicitly allowed, exactly like the Local API. It cannot run without a
+//! sign-in password, which only an authenticated local client (the desktop app
+//! or CLI over IPC) or an already signed-in browser can set.
 
 mod auth;
+pub(crate) mod password;
 #[cfg(feature = "web-ui")]
 mod server;
 #[cfg(feature = "web-ui")]
@@ -24,9 +25,8 @@ pub use auth::Auth;
 pub use throttle::Throttle;
 
 use desktop_core::{
-    contracts::WebUiLogin,
     listen::{self, ResolvedListen},
-    preferences::WebUiConfig,
+    preferences::{self, WebUiConfig},
 };
 
 /// Checks the port policy and the shared listener rules; non-loopback fails closed.
@@ -62,8 +62,14 @@ pub struct WebUi {
 
 impl WebUi {
     pub(crate) fn new(handle: Handle) -> Self {
+        let auth = Auth::default();
+        match preferences::load() {
+            Ok(saved) => auth.set_password(saved.web_ui_password_hash),
+            // Without a readable password the web UI stays closed.
+            Err(error) => desktop_core::diagnostic!("{error}"),
+        }
         Self {
-            auth: Arc::default(),
+            auth: Arc::new(auth),
             #[cfg(feature = "web-ui")]
             throttle: Arc::default(),
             running: Mutex::new(None),
@@ -118,11 +124,13 @@ impl WebUi {
         Err("The web UI is not included in this build".into())
     }
 
-    pub(crate) fn login(&self, url: &str) -> WebUiLogin {
-        WebUiLogin {
-            url: format!("{url}/#code={}", self.auth.mint_code()),
-            expires_in_seconds: auth::CODE_TTL.as_secs(),
-        }
+    pub(crate) fn has_password(&self) -> bool {
+        self.auth.has_password()
+    }
+
+    /// Applies a saved password change; every browser session ends.
+    pub(crate) fn set_password(&self, hash: Option<String>) {
+        self.auth.set_password(hash);
     }
 }
 

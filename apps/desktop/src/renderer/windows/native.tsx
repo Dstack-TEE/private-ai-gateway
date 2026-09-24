@@ -8,7 +8,7 @@ import { brand } from "../generated/brand";
 import { LocalApiExamples } from "../components/local-api-examples";
 import { NotificationsProvider, NotificationsSheet, useNotifications } from "../components/notifications";
 import { NativeDialogHost } from "../components/sheet";
-import type { AppState, ListenConfig, WebUiConfig } from "../../shared/contracts";
+import type { AppState, ListenConfig } from "../../shared/contracts";
 import { desktopApi, initialAppState, query, web } from "../lib/environment";
 import { INITIAL_STATE, protectionFlags } from "../lib/protection";
 import { ProfileEditorSheet, ProfilesSheet } from "../features/profiles";
@@ -259,15 +259,20 @@ function NativeWebUiWindow(): React.JSX.Element {
   if (!native.loaded || native.loadError) {
     return <NativeDialogStatus label="Web UI settings" error={native.loadError} onClose={native.close} />;
   }
-  const save = async (config: WebUiConfig): Promise<string | undefined> => {
+  const run = async (action: () => Promise<AppState>): Promise<string | undefined> => {
     try {
-      native.setState(await desktopApi.saveWebUi(config));
+      native.setState(await action());
       return undefined;
     } catch (error) {
       return errorMessage(error);
     }
   };
-  return <NativeDialogHost><WebUiSheet state={native.state} onSave={save} onClose={native.close} /></NativeDialogHost>;
+  return <NativeDialogHost><WebUiSheet
+    state={native.state}
+    onSave={(config) => run(() => desktopApi.saveWebUi(config))}
+    onSetPassword={(password, currentPassword) => run(() => desktopApi.setWebUiPassword(password, currentPassword))}
+    onClose={native.close}
+  /></NativeDialogHost>;
 }
 
 function NativeUsageProofWindow({ initialRecordId }: { initialRecordId: string }): React.JSX.Element {

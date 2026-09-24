@@ -60,6 +60,7 @@ methods! {
     RotateClientKey => "rotateClientKey",
     SaveLocalApiConfig => "saveLocalApiConfig",
     SaveWebUi => "saveWebUi",
+    SetWebUiPassword => "setWebUiPassword",
     ListListenAddresses => "listListenAddresses",
     ImportProfiles => "importProfiles",
     ExportProfilesContent => "exportProfilesContent",
@@ -361,6 +362,9 @@ pub async fn invoke(
             Command::SaveLocalApi(params::<LocalApiParams>(input)?.config)
         }
         Method::SaveWebUi => Command::SaveWebUi(params::<WebUiParams>(input)?.config),
+        Method::SetWebUiPassword => Command::SetWebUiPassword {
+            password: params::<WebUiPasswordParams>(input)?.password,
+        },
         Method::ListListenAddresses => return Ok(value(blocking(list_listen_addresses).await?)?),
         Method::ImportProfiles => Command::ImportProfiles(params::<ImportParams>(input)?.backup),
         Method::ExportProfilesContent => Command::ExportProfilesContent,
@@ -674,6 +678,12 @@ struct LocalApiParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WebUiParams {
     config: WebUiConfig,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WebUiPasswordParams {
+    password: Option<String>,
 }
 
 #[derive(Deserialize)]

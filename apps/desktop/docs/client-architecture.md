@@ -172,14 +172,18 @@ The optional web UI is a second, browser-facing transport owned by the service.
 It is off by default and binds `127.0.0.1` unless network access is explicitly
 allowed; its listener settings share `ListenConfig` and `listen::resolve` with
 the Local API, so non-loopback addresses fail closed without confirmation.
-Setting changes apply live and bind failures are reported in state. The IPC
-endpoint is its root of trust: an authenticated client asks for a one-time login
-code (60 s, single use), and the page exchanges it for an idle-expiring session
-token. Disabling the web UI, moving its listener or restarting the service
-revokes every session. Requests require an allowed `Host` (the bound address,
-the client host, or loopback when bound to every interface), origin headers
-for that host (always present on `POST`) and JSON mutations, then run through the same admission and dispatch
-as IPC commands. Code exchanges and rejected requests share a token bucket. Its state
+Setting changes apply live and bind failures are reported in state. It requires
+a sign-in password, stored only as an Argon2id hash in the preferences and set
+over the IPC endpoint (its root of trust) or by a signed-in browser that proves
+the current password. Signing in sets an `HttpOnly`, `SameSite=Strict` cookie
+for an idle-expiring server-side session; mutations also need an exact
+`Origin`.
+Changing the password, disabling the web UI, moving its listener, resetting
+settings or restarting the service revokes every session. Requests require an
+allowed `Host` (the bound address, the client host, or loopback when bound to
+every interface), origin headers for that host (always present on `POST`) and
+JSON mutations, then run through the same admission and dispatch
+as IPC commands. Sign-in attempts and rejected requests share a token bucket. Its state
 stream is fed from the controller's state channel. Mac App Store builds omit it.
 
 Agent changes retain preview/revision/apply validation. CSV exports are streamed

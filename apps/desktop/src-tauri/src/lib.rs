@@ -276,6 +276,8 @@ pub fn run() {
             commands::ui::rotate_client_key,
             commands::ui::save_local_api_config,
             commands::ui::save_web_ui,
+            commands::ui::set_web_ui_password,
+            commands::desktop::open_web_ui,
             commands::ui::list_listen_addresses,
             commands::ui::list_agents,
             commands::ui::preview_agent_connection,

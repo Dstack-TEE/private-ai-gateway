@@ -1,9 +1,11 @@
 use super::*;
 use crate::web_ui;
 use desktop_core::{
-    contracts::{WebUiLogin, WebUiStatus},
+    contracts::WebUiStatus,
     preferences::{self, WebUiConfig},
 };
+
+const NEEDS_PASSWORD: &str = "Web UI needs a sign-in password. Set one in Settings or with `pap settings set webUiPassword`, then turn it on.";
 
 impl DesktopRuntime {
     pub(crate) fn admission(&self) -> Arc<crate::server::Admission> {
@@ -16,6 +18,9 @@ impl DesktopRuntime {
             return Err("Web UI settings can change only in the primary backend instance".into());
         }
         let listen = web_ui::validate(&config, self.manager.snapshot()?.local_api.port)?;
+        if config.enabled && !self.web_ui.has_password() {
+            return Err(NEEDS_PASSWORD.into());
+        }
         // Save the normalized address and client host.
         let config = WebUiConfig {
             listen_address: listen.config.listen_address,
@@ -28,12 +33,15 @@ impl DesktopRuntime {
     }
 
     /// Closes any running listener, revoking its sessions, then opens the configured one.
-    /// Invalid saved settings fail closed, and bind failures are reported in state
-    /// rather than failing the service.
+    /// Invalid saved settings and a missing password fail closed, and bind failures
+    /// are reported in state rather than failing the service.
     pub(super) fn apply_web_ui(self: &Arc<Self>, config: &WebUiConfig) {
         let previous = self.web_ui.stop();
         let mut status = WebUiStatus::from(config);
-        if config.enabled {
+        status.password_set = self.web_ui.has_password();
+        if config.enabled && !status.password_set {
+            status.error = Some(NEEDS_PASSWORD.into());
+        } else if config.enabled {
             let started = self
                 .manager
                 .snapshot()
@@ -51,19 +59,25 @@ impl DesktopRuntime {
         self.manager.set_web_ui(status);
     }
 
-    pub fn web_ui_login(&self) -> Result<WebUiLogin, String> {
-        let status = self.manager.snapshot()?.web_ui;
-        if !status.enabled {
-            return Err("Web UI is off. Enable it with `pap settings set webUi true`.".into());
+    /// Saves or removes the sign-in password. The listener keeps running, but
+    /// every browser session ends.
+    pub fn set_web_ui_password(&self, password: Option<String>) -> Result<AppState, String> {
+        let _operation = self.configuration_change()?;
+        if self.instance.is_none() {
+            return Err("Web UI settings can change only in the primary backend instance".into());
         }
-        let url = status.url.ok_or_else(|| {
-            format!(
-                "Web UI is not listening: {}",
-                status
-                    .error
-                    .unwrap_or_else(|| "the listener is unavailable".into())
-            )
-        })?;
-        Ok(self.web_ui.login(&url))
+        let hash = match password {
+            Some(password) => Some(web_ui::password::hash(&password)?),
+            None if preferences::load()?.web_ui.enabled => {
+                return Err("Web UI is on. Turn it off before removing its password.".into());
+            }
+            None => None,
+        };
+        preferences::update(|saved| saved.web_ui_password_hash = hash.clone())?;
+        self.web_ui.set_password(hash);
+        let mut status = self.manager.snapshot()?.web_ui;
+        status.password_set = self.web_ui.has_password();
+        self.manager.set_web_ui(status);
+        self.manager.snapshot()
     }
 }

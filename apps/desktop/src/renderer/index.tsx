@@ -17,6 +17,7 @@ function WindowContent({ reset }: { reset: boolean }): React.JSX.Element {
 export function Renderer(): React.JSX.Element {
   const [settingsRevision, setSettingsRevision] = useState(0);
   useEffect(() => desktopApi.onSettingsReset(() => { queryClient.clear(); setSettingsRevision((value) => value + 1); }), []);
-  useEffect(() => installNativeInteractions(desktopApi), []);
+  // Browsers keep their own context menu, reload and drop behavior.
+  useEffect(() => web ? undefined : installNativeInteractions(desktopApi), []);
   return <QueryClientProvider client={queryClient}><TooltipProvider><AppearanceProvider key={settingsRevision} api={desktopApi}><DialogCloseProvider api={desktopApi}><WindowContent reset={settingsRevision > 0} /></DialogCloseProvider></AppearanceProvider></TooltipProvider></QueryClientProvider>;
 }

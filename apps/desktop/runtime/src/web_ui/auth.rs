@@ -1,11 +1,10 @@
-//! One-time login codes and expiring browser sessions for the web UI.
+//! The sign-in password and expiring browser sessions for the web UI.
 //!
-//! Only hashes are stored. Codes are minted over the authenticated IPC
-//! endpoint, travel in a URL fragment, and are exchanged once for a session
-//! token that the page keeps in `sessionStorage`. Sessions end after an idle
-//! period and, however active, after an absolute lifetime. A per-client rate
-//! limit bounds unauthenticated requests, which matters once the listener
-//! leaves loopback.
+//! The password is kept only as an Argon2id hash, and session tokens only as
+//! SHA-256 digests. Signing in sets the token in an `HttpOnly` cookie; the
+//! page never sees it. Sessions end after an idle period and, however active,
+//! after an absolute lifetime. A per-client rate limit bounds sign-in attempts
+//! and other unauthenticated requests.
 
 use std::{
     sync::Mutex,
@@ -17,23 +16,20 @@ use rand::{rngs::OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
-pub const CODE_TTL: Duration = Duration::from_secs(60);
+use super::password;
+
 pub const SESSION_IDLE: Duration = Duration::from_secs(60 * 60);
 /// Open pages keep a session active, so this bounds every session regardless.
 pub const SESSION_LIFETIME: Duration = Duration::from_secs(12 * 60 * 60);
-const MAX_CODES: usize = 16;
 const MAX_SESSIONS: usize = 16;
 
 type Digested = [u8; 32];
 
 #[derive(Default)]
-pub struct Auth(Mutex<Entries>);
-
-#[derive(Default)]
-struct Entries {
-    /// Code digest and expiry.
-    codes: Vec<(Digested, Instant)>,
-    sessions: Vec<Session>,
+pub struct Auth {
+    sessions: Mutex<Vec<Session>>,
+    /// Argon2id hash of the sign-in password, when one is set.
+    password: Mutex<Option<String>>,
 }
 
 struct Session {
@@ -50,13 +46,32 @@ impl Session {
 }
 
 impl Auth {
-    pub fn mint_code(&self) -> String {
-        self.mint_code_at(Instant::now())
+    /// Checks the password and opens a session. Slow by design; run it off the async runtime.
+    pub fn sign_in(&self, password: &str) -> Option<String> {
+        self.sign_in_at(password, Instant::now())
     }
 
-    /// Consumes a live code and opens a session. Expired or reused codes fail.
-    pub fn exchange(&self, code: &str) -> Option<String> {
-        self.exchange_at(code, Instant::now())
+    /// Checks the password without opening a session. Slow by design.
+    pub fn verify_password(&self, password: &str) -> bool {
+        let hash = self.password.lock().ok().and_then(|hash| hash.clone());
+        hash.is_some_and(|hash| password::verify(&hash, password))
+    }
+
+    pub fn has_password(&self) -> bool {
+        self.password.lock().is_ok_and(|hash| hash.is_some())
+    }
+
+    /// Replaces the password hash and ends every session.
+    pub fn set_password(&self, hash: Option<String>) {
+        if let Ok(mut password) = self.password.lock() {
+            *password = hash;
+            self.revoke_all();
+        }
+    }
+
+    /// Opens a session for a caller that already proved the password.
+    pub fn open_session(&self) -> Option<String> {
+        self.open_session_at(Instant::now())
     }
 
     /// Accepts a live session and records activity.
@@ -66,46 +81,40 @@ impl Auth {
 
     /// Ends one session, as when its page signs out.
     pub fn revoke(&self, token: &str) {
-        if let Ok(mut entries) = self.0.lock() {
-            let wanted = digest(token);
-            if let Some(index) = position(
-                entries.sessions.iter().map(|session| &session.digest),
-                &wanted,
-            ) {
-                entries.sessions.swap_remove(index);
+        if let Ok(mut sessions) = self.sessions.lock() {
+            if let Some(index) = position(&sessions, &digest(token)) {
+                sessions.swap_remove(index);
             }
         }
     }
 
     pub fn revoke_all(&self) {
-        if let Ok(mut entries) = self.0.lock() {
-            *entries = Entries::default();
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.clear();
         }
     }
 
-    fn mint_code_at(&self, now: Instant) -> String {
-        let code = secret();
-        if let Ok(mut entries) = self.0.lock() {
-            entries.codes.retain(|(_, expires)| *expires > now);
-            if entries.codes.len() >= MAX_CODES {
-                entries.codes.remove(0);
-            }
-            entries.codes.push((digest(&code), now + CODE_TTL));
+    fn sign_in_at(&self, password: &str, now: Instant) -> Option<String> {
+        let hash = self.password.lock().ok()?.clone()?;
+        if !password::verify(&hash, password) {
+            return None;
         }
-        code
+        // A password changed during verification must not open a session.
+        let current = self.password.lock().ok()?;
+        if current.as_deref() != Some(hash.as_str()) {
+            return None;
+        }
+        self.open_session_at(now)
     }
 
-    fn exchange_at(&self, code: &str, now: Instant) -> Option<String> {
-        let mut entries = self.0.lock().ok()?;
-        entries.codes.retain(|(_, expires)| *expires > now);
-        let index = position(entries.codes.iter().map(|(code, _)| code), &digest(code))?;
-        entries.codes.swap_remove(index);
-        entries.sessions.retain(|session| session.live(now));
-        if entries.sessions.len() >= MAX_SESSIONS {
-            entries.sessions.remove(0);
+    fn open_session_at(&self, now: Instant) -> Option<String> {
+        let mut sessions = self.sessions.lock().ok()?;
+        sessions.retain(|session| session.live(now));
+        if sessions.len() >= MAX_SESSIONS {
+            sessions.remove(0);
         }
         let token = secret();
-        entries.sessions.push(Session {
+        sessions.push(Session {
             digest: digest(&token),
             created: now,
             used: now,
@@ -114,17 +123,13 @@ impl Auth {
     }
 
     fn authorize_at(&self, token: &str, now: Instant) -> bool {
-        let Ok(mut entries) = self.0.lock() else {
+        let Ok(mut sessions) = self.sessions.lock() else {
             return false;
         };
-        entries.sessions.retain(|session| session.live(now));
-        let wanted = digest(token);
-        match position(
-            entries.sessions.iter().map(|session| &session.digest),
-            &wanted,
-        ) {
+        sessions.retain(|session| session.live(now));
+        match position(&sessions, &digest(token)) {
             Some(index) => {
-                entries.sessions[index].used = now;
+                sessions[index].used = now;
                 true
             }
             None => false,
@@ -143,10 +148,10 @@ fn digest(value: &str) -> Digested {
 }
 
 /// Compares every entry without early exit so timing does not reveal matches.
-fn position<'a>(entries: impl Iterator<Item = &'a Digested>, wanted: &Digested) -> Option<usize> {
+fn position(sessions: &[Session], wanted: &Digested) -> Option<usize> {
     let mut found = None;
-    for (index, candidate) in entries.enumerate() {
-        if bool::from(candidate.ct_eq(wanted)) {
+    for (index, session) in sessions.iter().enumerate() {
+        if bool::from(session.digest.ct_eq(wanted)) {
             found = Some(index);
         }
     }
@@ -157,31 +162,48 @@ fn position<'a>(entries: impl Iterator<Item = &'a Digested>, wanted: &Digested) 
 mod tests {
     use super::*;
 
-    #[test]
-    fn codes_are_single_use() {
+    const PASSWORD: &str = "correct horse battery";
+
+    fn auth() -> Auth {
         let auth = Auth::default();
-        let code = auth.mint_code();
-        let token = auth.exchange(&code).expect("fresh code");
-        assert!(auth.authorize(&token));
-        assert_eq!(auth.exchange(&code), None);
-        assert_eq!(auth.exchange("guess"), None);
+        auth.set_password(Some(password::hash(PASSWORD).unwrap()));
+        auth
     }
 
     #[test]
-    fn expired_codes_are_rejected() {
+    fn only_the_password_opens_sessions() {
         let auth = Auth::default();
-        let start = Instant::now();
-        let code = auth.mint_code_at(start);
-        assert_eq!(auth.exchange_at(&code, start + CODE_TTL), None);
+        assert!(!auth.has_password());
+        assert_eq!(auth.sign_in(PASSWORD), None);
+        auth.set_password(Some(password::hash(PASSWORD).unwrap()));
+        assert!(auth.has_password());
+        assert_eq!(auth.sign_in("wrong horse battery"), None);
+        let token = auth.sign_in(PASSWORD).expect("password");
+        assert!(auth.authorize(&token));
+        assert!(!auth.authorize("guess"));
+        assert!(auth.verify_password(PASSWORD));
+        assert!(!auth.verify_password("wrong horse battery"));
+    }
+
+    #[test]
+    fn changing_or_clearing_the_password_ends_every_session() {
+        let auth = auth();
+        let token = auth.sign_in(PASSWORD).unwrap();
+        auth.set_password(Some(password::hash("another long passphrase").unwrap()));
+        assert!(!auth.authorize(&token));
+        assert_eq!(auth.sign_in(PASSWORD), None);
+        let token = auth.sign_in("another long passphrase").unwrap();
+        auth.set_password(None);
+        assert!(!auth.authorize(&token));
+        assert_eq!(auth.sign_in("another long passphrase"), None);
+        assert!(!auth.verify_password("another long passphrase"));
     }
 
     #[test]
     fn sessions_expire_when_idle_and_activity_extends_them() {
         let auth = Auth::default();
         let start = Instant::now();
-        let token = auth
-            .exchange_at(&auth.mint_code_at(start), start)
-            .expect("fresh code");
+        let token = auth.open_session_at(start).unwrap();
         let later = start + SESSION_IDLE - Duration::from_secs(1);
         assert!(auth.authorize_at(&token, later));
         assert!(auth.authorize_at(&token, later + SESSION_IDLE - Duration::from_secs(1)));
@@ -193,9 +215,7 @@ mod tests {
     fn sessions_end_at_their_absolute_lifetime_despite_activity() {
         let auth = Auth::default();
         let start = Instant::now();
-        let token = auth
-            .exchange_at(&auth.mint_code_at(start), start)
-            .expect("fresh code");
+        let token = auth.open_session_at(start).unwrap();
         let mut now = start;
         while now + SESSION_IDLE / 2 < start + SESSION_LIFETIME {
             now += SESSION_IDLE / 2;
@@ -207,22 +227,14 @@ mod tests {
     #[test]
     fn signing_out_ends_only_that_session() {
         let auth = Auth::default();
-        let first = auth.exchange(&auth.mint_code()).expect("fresh code");
-        let second = auth.exchange(&auth.mint_code()).expect("fresh code");
+        let first = auth.open_session().unwrap();
+        let second = auth.open_session().unwrap();
         auth.revoke(&first);
         assert!(!auth.authorize(&first));
         assert!(auth.authorize(&second));
         auth.revoke("unknown");
         assert!(auth.authorize(&second));
-    }
-
-    #[test]
-    fn revocation_ends_sessions_and_pending_codes() {
-        let auth = Auth::default();
-        let pending = auth.mint_code();
-        let token = auth.exchange(&auth.mint_code()).expect("fresh code");
         auth.revoke_all();
-        assert!(!auth.authorize(&token));
-        assert_eq!(auth.exchange(&pending), None);
+        assert!(!auth.authorize(&second));
     }
 }

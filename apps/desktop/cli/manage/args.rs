@@ -122,10 +122,10 @@ pub(super) enum Service {
 #[derive(Subcommand)]
 pub(super) enum App {
     /// Open the installed desktop UI; startup may honor saved connect-on-launch behavior.
-    /// Without a desktop app or graphical session, or with --web, print a one-time
-    /// browser login link for the service-hosted web UI (offering to enable it).
+    /// Without a desktop app or graphical session, or with --web, open or print the
+    /// service-hosted web UI address (offering to enable it once a password is set).
     Open {
-        /// Print a one-time web UI login link instead of opening the desktop app.
+        /// Open or print the web UI address instead of opening the desktop app.
         #[arg(long)]
         web: bool,
     },
@@ -394,6 +394,8 @@ pub(super) enum SettingsKey {
     WebUiAllowNetworkAccess,
     #[value(name = "webUiClientHost")]
     WebUiClientHost,
+    #[value(name = "webUiPassword")]
+    WebUiPassword,
 }
 
 impl SettingsKey {
@@ -413,6 +415,7 @@ impl SettingsKey {
             Self::WebUiListenAddress => "webUiListenAddress",
             Self::WebUiAllowNetworkAccess => "webUiAllowNetworkAccess",
             Self::WebUiClientHost => "webUiClientHost",
+            Self::WebUiPassword => "webUiPassword",
         }
     }
 }
@@ -433,7 +436,10 @@ pub(super) enum Settings {
     Set {
         #[arg(value_enum)]
         key: SettingsKey,
-        /// Boolean keys use true/false; appearance uses system/light/dark; updateChannel uses beta/stable; notifications is a JSON object with boolean fields.
-        value: String,
+        /// Boolean keys use true/false; appearance uses system/light/dark; updateChannel uses beta/stable; notifications is a JSON object with boolean fields. webUiPassword takes no value (use --value-stdin or the hidden prompt); "" removes it.
+        value: Option<String>,
+        /// Read the webUiPassword value from stdin instead of a hidden terminal prompt.
+        #[arg(long)]
+        value_stdin: bool,
     },
 }

@@ -117,7 +117,9 @@ pub(crate) async fn dispatch(
             respond::<rpc::SaveLocalApi, _>(runtime.save_local_api_config(config).await)
         }
         Command::SaveWebUi(config) => respond::<rpc::SaveWebUi, _>(runtime.save_web_ui(config)),
-        Command::WebUiLogin => respond::<rpc::WebUiLogin, _>(runtime.web_ui_login()),
+        Command::SetWebUiPassword { password } => {
+            respond::<rpc::SetWebUiPassword, _>(runtime.set_web_ui_password(password))
+        }
         Command::RefreshCatalog => {
             respond::<rpc::RefreshCatalog, _>(runtime.refresh_catalog().await)
         }
@@ -139,9 +141,13 @@ pub(crate) async fn dispatch(
             respond::<rpc::DisconnectAllAgents, _>(runtime.disconnect_all_agents())
         }
         Command::ResetSettings => respond::<rpc::ResetSettings, _>(runtime.reset_settings().await),
-        Command::Preferences => respond::<rpc::Preferences, _>(preferences::load()),
+        Command::Preferences => respond::<rpc::Preferences, _>(
+            preferences::load().map(preferences::Preferences::shared),
+        ),
         Command::SetPreference(change) => respond::<rpc::SetPreference, _>(
-            preferences::update(|saved| change.apply(saved)).and_then(|()| preferences::load()),
+            preferences::update(|saved| change.apply(saved))
+                .and_then(|()| preferences::load())
+                .map(preferences::Preferences::shared),
         ),
     }
 }

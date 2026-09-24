@@ -51,6 +51,7 @@ export interface UiPlatform {
   nativeDialogReady(): Promise<void>;
   mainWindowReady(): Promise<void>;
   openAboutLink: DesktopApi["openAboutLink"];
+  openWebUi(): Promise<void>;
   openAgentWebsite(agentId: string): Promise<void>;
   openApiKeyPage(provider: ServiceProvider): Promise<void>;
   confirm(options: ConfirmationOptions): Promise<boolean>;
@@ -85,6 +86,8 @@ export function createDesktopApi(transport: UiTransport, platform: UiPlatform): 
     rotateClientKey: () => call<string>("rotateClientKey"),
     saveLocalApiConfig: (config: ListenConfig) => call("saveLocalApiConfig", { config }),
     saveWebUi: (config: WebUiConfig) => call("saveWebUi", { config }),
+    setWebUiPassword: (password, currentPassword) => call("setWebUiPassword", currentPassword === undefined ? { password } : { password, currentPassword }),
+    openWebUi: platform.openWebUi,
     listListenAddresses: () => call("listListenAddresses"),
     getNotificationSettings: () => call("getNotificationSettings"),
     selectProfileBackup: platform.selectProfileBackup,

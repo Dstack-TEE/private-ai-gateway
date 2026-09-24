@@ -1,8 +1,8 @@
-//! Per-client rate limit on unauthenticated web UI requests: code exchanges
-//! and rejected API calls. Codes are 256-bit, so this bounds request volume
-//! rather than guessing odds; signed-in sessions never draw from it. Each
-//! client address has its own budget, so one LAN client cannot lock others
-//! out of signing in.
+//! Per-client rate limit on unauthenticated web UI requests: password sign-ins
+//! and rejected API calls. After a burst, each client gets one password guess
+//! per refill period; signed-in sessions never draw from it. Each client
+//! address has its own budget, so one LAN client cannot lock others out of
+//! signing in.
 
 use std::{
     net::{IpAddr, Ipv6Addr},

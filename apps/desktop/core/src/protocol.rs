@@ -180,8 +180,8 @@ commands! {
     RotateClientKey -> String;
     SaveLocalApi(config: ListenConfig) -> AppState;
     SaveWebUi(config: WebUiConfig) -> AppState;
-    /// Mint a one-time web UI login link. Only the authenticated IPC endpoint can ask.
-    WebUiLogin -> WebUiLogin;
+    /// Set or clear the web UI sign-in password; every browser session ends.
+    SetWebUiPassword { password: Option<String> } -> AppState;
     RefreshCatalog -> AppState;
     Agents -> Vec<AgentStatus>;
     PreviewAgent { agent_id: String, connect: bool, options: ConnectOptions } -> AgentPreview;
