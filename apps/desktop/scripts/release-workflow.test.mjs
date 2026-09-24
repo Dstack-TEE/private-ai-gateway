@@ -55,7 +55,7 @@ test("stable desktop releases use one same-revision workflow graph", async () =>
   assert.equal(npm.on.release, undefined);
 });
 
-test("npm publishes the channel wrapper only after its platform packages resolve", async () => {
+test("npm publishes the channel wrapper only after its platform versions resolve", async () => {
   const [direct, npm] = await Promise.all([
     readWorkflow("desktop-native.yml"),
     readWorkflow("private-ai-proxy-npm.yml"),
@@ -70,13 +70,14 @@ test("npm publishes the channel wrapper only after its platform packages resolve
 
   // Trusted publishing cannot run `npm dist-tag`, so the channel tag moves
   // with the wrapper publish, which must come after the registry gates.
-  assert.ok(index("Publish platform packages") < index("Wait for the registry to serve every platform package"));
-  assert.ok(index("Wait for the registry to serve every platform package") < index("Install the wrapper against the public platform packages"));
-  assert.ok(index("Install the wrapper against the public platform packages") < index("Publish wrapper with the channel dist-tag"));
+  assert.ok(index("Publish platform versions") < index("Wait for the registry to serve every platform version"));
+  assert.ok(index("Wait for the registry to serve every platform version") < index("Install the wrapper against the public platform versions"));
+  assert.ok(index("Install the wrapper against the public platform versions") < index("Publish wrapper with the channel dist-tag"));
   assert.ok(index("Publish wrapper with the channel dist-tag") < index("Install the published release"));
   assert.match(publish.steps[index("Publish wrapper with the channel dist-tag")].run, /--tag "\$DIST_TAG"/);
-  // The scoped platform packages share the channel tag; no per-platform tags.
-  assert.match(publish.steps[index("Publish platform packages")].run, /--tag "\$DIST_TAG"/);
+  // Platform versions of the same package must never take the channel tag.
+  assert.match(publish.steps[index("Publish platform versions")].run, /--tag "\$platform_tag"/);
+  assert.doesNotMatch(publish.steps[index("Publish platform versions")].run, /--tag "\$DIST_TAG"/);
   assert.doesNotMatch(JSON.stringify(publish.steps), /dist-tag add/);
 
   const waitMinutes = Number(publish.env.REGISTRY_WAIT_SECONDS) / 60;

@@ -2,12 +2,13 @@
 "use strict";
 
 const { spawnSync } = require("node:child_process");
-const { accessSync, constants } = require("node:fs");
+const { accessSync, constants, realpathSync } = require("node:fs");
 const path = require("node:path");
 
-// The native binaries ship in one optional dependency per target, and the
-// package manager installs only the one whose os/cpu/libc match, as esbuild's
-// lib/npm/node-platform.ts and Biome's bin/biome resolve theirs.
+// Each target's native binaries are a version of this package, such as
+// private-ai-proxy@1.2.3-linux-x64, installed through an optional dependency
+// alias such as private-ai-proxy-linux-x64. The package manager installs only
+// the one whose os/cpu/libc match, as for @openai/codex's bin/codex.js.
 const supportedTargets = [
   "darwin-arm64",
   "darwin-x64",
@@ -23,9 +24,25 @@ function platformPackage(platform, arch) {
   const target = `${platform}-${arch}`;
   if (!supportedTargets.includes(target)) return undefined;
   return {
-    name: `@phala/private-ai-proxy-${target}`,
+    alias: `private-ai-proxy-${target}`,
+    target,
     executable: `vendor/private-ai-proxy${platform === "win32" ? ".exe" : ""}`,
   };
+}
+
+// The global reinstall command for the package manager that owns this copy,
+// detected from its install path as bin/codex.js does.
+function reinstallCommand(version) {
+  const spec = `private-ai-proxy@${version}`;
+  let location = __dirname;
+  try {
+    location = realpathSync(__dirname);
+  } catch {
+    // Fall back to the lexical path.
+  }
+  if (/[\\/]\.bun[\\/]install[\\/]global[\\/]/.test(location)) return `bun add --global ${spec}`;
+  if (/[\\/]\.pnpm[\\/]/.test(location)) return `pnpm add --global ${spec}`;
+  return `npm install --global ${spec} --include=optional`;
 }
 
 // Only consulted after a failure: npm skips the glibc package on musl, and
@@ -53,21 +70,27 @@ function main() {
     return;
   }
 
+  const version = require("../package.json").version;
+  const expectedVersion = `${version}-${platform.target}`;
   let manifestPath;
   try {
-    manifestPath = require.resolve(`${platform.name}/package.json`);
+    manifestPath = require.resolve(`${platform.alias}/package.json`);
   } catch (error) {
     if (error?.code !== "MODULE_NOT_FOUND") throw error;
     fail(isLinuxWithoutGlibc()
       ? muslMessage
-      : `the optional dependency ${platform.name} is not installed. Reinstall private-ai-proxy with optional dependencies enabled (without --omit=optional or --no-optional).`);
+      : `the native binaries for ${target} (private-ai-proxy@${expectedVersion}) are not installed. `
+        + "Optional dependencies were omitted (--omit=optional or --no-optional) or their download failed. "
+        + `Reinstall with: ${reinstallCommand(version)}`);
     return;
   }
 
-  const expectedVersion = require("../package.json").version;
+  // An update that could not replace the native package, for example because
+  // a running process locked its files on Windows, leaves an older version.
   const installedVersion = require(manifestPath).version;
   if (installedVersion !== expectedVersion) {
-    fail(`${platform.name}@${installedVersion} does not match private-ai-proxy@${expectedVersion}; reinstall private-ai-proxy`);
+    fail(`the installed native binaries are private-ai-proxy@${installedVersion}, expected ${expectedVersion}. `
+      + `Stop any running private-ai-proxy processes, then reinstall with: ${reinstallCommand(version)}`);
     return;
   }
 
@@ -75,7 +98,8 @@ function main() {
   try {
     accessSync(executable, process.platform === "win32" ? constants.F_OK : constants.X_OK);
   } catch {
-    fail(`the native executable is missing or not executable in ${platform.name}`);
+    fail(`the native executable is missing or not executable in ${path.dirname(manifestPath)}. `
+      + `Reinstall with: ${reinstallCommand(version)}`);
     return;
   }
 

@@ -9,8 +9,7 @@ import { fileURLToPath } from "node:url";
 // This helper runs in the OIDC publish job, which intentionally installs no
 // dependencies, so it only uses Node built-ins.
 const scriptPath = fileURLToPath(import.meta.url);
-// The wrapper and its scoped per-platform packages.
-const packageNamePattern = /^(?:private-ai-proxy|@phala\/private-ai-proxy-(?:darwin|linux|win32)-(?:arm64|x64))$/;
+const npmPackageName = "private-ai-proxy";
 
 export const defaultRegistry = "https://registry.npmjs.org";
 // The abbreviated ("corgi") packument is the document npm install resolves
@@ -21,8 +20,8 @@ export async function tarballIdentity(tarball) {
   const manifest = JSON.parse(execFileSync("tar", ["-xOzf", tarball, "package/package.json"], {
     encoding: "utf8",
   }));
-  if (!packageNamePattern.test(manifest.name) || typeof manifest.version !== "string") {
-    throw new Error(`${tarball} is not a private-ai-proxy tarball`);
+  if (manifest.name !== npmPackageName || typeof manifest.version !== "string") {
+    throw new Error(`${tarball} is not a ${npmPackageName} tarball`);
   }
   const digest = createHash("sha512").update(await readFile(tarball)).digest("base64");
   return {
@@ -30,15 +29,6 @@ export async function tarballIdentity(tarball) {
     version: manifest.version,
     integrity: `sha512-${digest}`,
   };
-}
-
-// Scoped names keep their `@` but escape the `/`, as npm-package-arg does.
-function packageUrl(registry, name) {
-  return `${registry}/${name.replace("/", "%2f")}`;
-}
-
-function spec(identity) {
-  return `${identity.name}@${identity.version}`;
 }
 
 async function fetchJson(fetchImpl, url, headers = {}) {
@@ -60,7 +50,7 @@ async function fetchJson(fetchImpl, url, headers = {}) {
 function checkIntegrity(identity, integrity, source) {
   if (integrity !== identity.integrity) {
     throw new Error(
-      `${spec(identity)} exists in the ${source} with different contents`,
+      `${identity.name}@${identity.version} exists in the ${source} with different contents`,
     );
   }
 }
@@ -69,7 +59,7 @@ function checkIntegrity(identity, integrity, source) {
 // "missing", "published" or "unavailable"; throws when the registry has the
 // version with different contents, which a rerun must never paper over.
 export async function registryVersionState(identity, { registry = defaultRegistry, fetchImpl = fetch } = {}) {
-  const result = await fetchJson(fetchImpl, `${packageUrl(registry, identity.name)}/${identity.version}`);
+  const result = await fetchJson(fetchImpl, `${registry}/${identity.name}/${identity.version}`);
   if (result.state !== "ok") return result;
   if (result.body?.version !== identity.version) {
     return { state: "unavailable", reason: `registry returned version ${result.body?.version}` };
@@ -84,7 +74,7 @@ export async function registryVisibility(identity, options = {}) {
   const { registry = defaultRegistry, fetchImpl = fetch } = options;
   const version = await registryVersionState(identity, { registry, fetchImpl });
   if (version.state !== "published") return version;
-  const packument = await fetchJson(fetchImpl, packageUrl(registry, identity.name), { accept: installAccept });
+  const packument = await fetchJson(fetchImpl, `${registry}/${identity.name}`, { accept: installAccept });
   if (packument.state !== "ok") return packument;
   const entry = packument.body?.versions?.[identity.version];
   if (!entry) return { state: "missing", reason: "not yet in the install packument" };
@@ -108,17 +98,17 @@ export async function waitForRegistry(identities, {
     for (const identity of pending) {
       const result = await registryVisibility(identity, { registry, fetchImpl });
       if (result.state === "published") {
-        log(`${spec(identity)} is visible on ${registry}`);
+        log(`${identity.name}@${identity.version} is visible on ${registry}`);
       } else {
         remaining.push({ identity, reason: result.reason ?? result.state });
       }
     }
     if (remaining.length === 0) return;
     if (now() >= deadline) {
-      const details = remaining.map(({ identity, reason }) => `${spec(identity)} (${reason})`);
+      const details = remaining.map(({ identity, reason }) => `${identity.version} (${reason})`);
       throw new Error(`Timed out waiting for ${registry} to serve ${details.join(", ")}`);
     }
-    log(`Waiting for ${remaining.map(({ identity }) => spec(identity)).join(", ")}`);
+    log(`Waiting for ${remaining.map(({ identity }) => identity.version).join(", ")}`);
     pending = remaining.map(({ identity }) => identity);
     await sleep(Math.min(intervalMs, Math.max(0, deadline - now())));
   }
