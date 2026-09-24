@@ -19,7 +19,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID,
             WINDOW_SUBMENU_ID,
         },
-        Emitter, Manager,
+        Emitter,
     };
 
     let about = AboutMetadata {
