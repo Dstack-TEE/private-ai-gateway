@@ -12,6 +12,10 @@ The admission review is `docs/providers/confidential-ai/review.md` (on the
 review branch). That review lists a hard reject that is still open: the c8s
 operator key can reach cluster-admin. This adapter does not resolve it. It
 records the key state honestly (see [RTMR3 and the operator key](#rtmr3-and-the-operator-key)).
+A second open finding is that admission leaves the plaintext-path workloads'
+environment and mounts unconstrained. The adapter reports this and refutes
+`serving_software_known_good` (see
+[Admission env and mounts](#admission-env-and-mounts)).
 
 ## Configure a Confidential AI origin
 
@@ -100,6 +104,9 @@ verification, it:
    signature must verify under the mesh leaf key, using ECDSA with SHA-384 over
    the 48-byte transcript digest.
 10. Requires `c8s.activeAllowlist.sha256` to be in the release's accepted set.
+    Recomputes the canonical digest of `c8s.activeAllowlist.document` (see
+    [Allowlist canonicalization](#allowlist-canonicalization)) and requires it
+    to equal `c8s.activeAllowlist.sha256`.
 11. Decodes the front-door quote as hex or base64 (standard or URL-safe). It
     must be a TDX v4 quote.
 
@@ -122,25 +129,33 @@ verification, it:
     4. Parses the mesh leaf's matched-workload stamp (OID
        `1.3.6.1.4.1.66378.1.5`, strict minimal DER, exactly one). The stamped
        name must equal the reviewed `identity`. The stamped allowlist digest
-       must be in the release's accepted allowlist set.
+       must equal `c8s.activeAllowlist.sha256`, so the document inspected in
+       step 15 is the one that the workload was admitted under.
     5. Recomputes the attest-pq transcript for the release's protocol. Session
        fields must have their exact sizes.
     6. Verifies `identity_proof` as in step 9, under the workload's mesh leaf.
     7. Decodes the workload quote as in step 11.
 
+15. Reads each required workload's allowlist entry (named by its stamped
+    identity), plus each entry in the release's `additional_admission_entries`
+    (`gateway-state-mounter`). An entry is pinned only if every init and main
+    container has an `env` and a `mounts` policy of `exact` or `deny`. If the
+    release sets `require_pinned_env_mounts` and any entry is not pinned,
+    verification fails.
+
 ### Quotes and measurements
 
-15. Verifies the front-door quote and every workload quote with `dcap_qvl`
+16. Verifies the front-door quote and every workload quote with `dcap_qvl`
     against Intel PCS collateral, concurrently (at most 4 at a time). Quotes
     with the same FMSPC and PCK CA share one collateral fetch.
-16. For each verified quote, it:
+17. For each verified quote, it:
     - requires TCB status `UpToDate`;
     - rejects a debug TD (any TUD bit in `td_attributes` byte 0);
     - requires `report_data[0:48]` to equal that quote's transcript digest and
       `report_data[48:64]` to be zero;
     - requires MRTD, RTMR1, and RTMR2 to equal the release pins, and RTMR3 to
       be in the release's accepted RTMR3 set.
-17. Emits a `tls_spki_sha256` binding for the observed serving leaf. The
+18. Emits a `tls_spki_sha256` binding for the observed serving leaf. The
     TEE holds the key, so the SPKI pin is equivalent to the leaf binding. The
     Rust forwarding path enforces the pin on every model request.
 
@@ -163,7 +178,7 @@ The scope is `router`. One origin and one SPKI serve every configured model.
 | Identity proof | The TD that produced the quote holds the mesh leaf's private key. A copied public chain cannot sign a new transcript. |
 | Mesh CA = front-door mesh CA | The workload holds a leaf from the same CDS mesh CA as the front door. It belongs to the same cluster, and it is the peer that the mesh authenticates on the request path. |
 | `workload`/`identity` = target binding, and stamped name = `identity` | The reviewed workload identity is stamped by the mesh CA into a leaf that the quote binds. JSON labels cannot relabel one node's receipt as another's. |
-| Stamped allowlist digest accepted | The CA admitted the workload under a reviewed allowlist. |
+| Stamped allowlist digest = active allowlist digest, which is accepted and whose document hashes to it | The CA admitted the workload under a reviewed allowlist, and that allowlist's document is the one the adapter inspects. |
 
 ## Transcript constructions
 
@@ -217,6 +232,114 @@ How each construction was confirmed:
 
 No AGPL `confidential-dot-ai/c8s` code was used.
 
+## Allowlist canonicalization
+
+The allowlist digest is SHA-256 over the canonical bytes of the
+`c8s.allowlist/v1` document. The canonical form is Go's `encoding/json`
+`json.Marshal` of c8s's allowlist struct:
+
+- compact output, with no whitespace and no trailing newline;
+- struct fields in declaration order;
+- map keys (`digests`, `workloads`, `env.values`) sorted;
+- Go string escaping: `<`, `>`, `&`, U+2028, and U+2029 as `\u` escapes, and
+  `\b`, `\f`, `\n`, `\r`, and `\t` in short form (Go 1.22 and later; c8s
+  builds with Go 1.27);
+- non-ASCII characters as raw UTF-8.
+
+`/attestation` embeds the document re-serialized with sorted keys, so its bytes
+are not canonical. The adapter re-encodes the parsed document with this field
+order:
+
+| Object | Field order |
+| --- | --- |
+| allowlist | `schema`, `digests`, `workloads` |
+| workload | `label`, `initContainers`, `containers`, `secrets` |
+| container | `digest`, `image`, `command`, `args`, `mounts`, `env` |
+| `command`, `args` | `policy`, `argv` |
+| `mounts` | `policy`, `destinations`, `rules` |
+| mount rule | `destination`, `kind`, `source`, `readOnly` |
+| `env` | `policy`, `names`, `values` |
+| `secrets` | `policy`, `read`, `write` |
+
+It keeps a field only if the document has it. An unknown field, a number, a lone
+surrogate, or a schema other than `c8s.allowlist/v1` fails closed. Different
+c8s versions have used `mounts.destinations` or `mounts.rules`, and `env.names`
+or `env.values`. The table covers both, so the check keeps working after the
+provider pins env and mounts. The digest check is what guarantees correctness:
+a wrong field order or escape can only fail verification. It cannot accept a
+document the digest does not name.
+
+How this was confirmed on 2026-09-24:
+
+- MIT-licensed `confidential-dot-ai/TEErminator` (`internal/verifier/allowlist.go`,
+  commit `8d302348`) hashes the bytes served at `GET /allowlist` verbatim.
+  `c8s-verify-js` `PROTOCOL.md` also says these are "canonical allowlist bytes",
+  hashed as received and never re-serialized.
+- On both endpoints, the SHA-256 of the `GET /allowlist` bytes equals
+  `c8s.activeAllowlist.sha256` and every workload stamp's digest. Those bytes
+  parse to exactly the embedded `document`. They are compact, with no trailing
+  newline, and their key order is the table above.
+- Re-encoding the embedded `document` with the table above reproduces the served
+  bytes byte for byte, for both production (17,931 bytes) and candidate
+  (14,463 bytes). Sorted-key, indented, or newline-terminated serializations
+  do not.
+- The field declaration order, including the `destinations`/`rules` and
+  `names`/`values` fields that no live document uses yet, was read from the
+  AGPL `confidential-dot-ai/c8s` `pkg/allowlist/allowlist.go` (HEAD
+  `ec67bd84`, and before commit `75af991` for `digests`). Its package comment
+  states that the canonical form is `json.Marshal` of the normalized struct. No
+  c8s code was copied. The adapter's encoder is written from the table above.
+
+The verifier does not fetch `/allowlist`. It canonicalizes the embedded document
+instead, so each verification is still a single `/attestation` request.
+
+## Admission env and mounts
+
+Audit finding, verified on 2026-09-24: both deployments admit `gateway`,
+`sglang-router`, and every `inference-worker-*` with `env: {policy: any}` and
+`mounts: {policy: any}` on every container, including the c8s sidecars. Only the
+image digest and argv are exact (`confidential-inference`
+`scripts/regenerate-c8s-allowlist.py:193` at `a54319a`). `gateway-state-mounter`
+has the same policies, and it runs a ConfigMap-supplied script as privileged
+root.
+
+Env and mounts are not measured anywhere: not in a quote, not in RTMR3, and not
+in the mesh leaf. So any Kubernetes API writer can change them without changing
+anything the adapter verifies. For example:
+
+- `GATEWAY_ALLOW_DIRECT_INFERENCE_URL` plus `GATEWAY_INFERENCE_URL` redirects
+  prompts out of the attested path.
+- `LD_PRELOAD` or `PYTHONPATH`, together with a ConfigMap mount, injects code
+  into an attested image.
+- A changed ConfigMap script runs as privileged root in `gateway-state-mounter`.
+
+The adapter derives the policy from the digest-checked allowlist document
+(algorithm step 15) and reports it:
+
+- `admission_env_mounts_pinned`: `true` only if every checked entry is pinned.
+- `admission_env_mounts`: keyed by required target, plus
+  `gateway-state-mounter`. Each value holds the `allowlist_entry` name,
+  `pinned`, and each container's `kind`, `digest`, `image`, `env` policy, and
+  `mounts` policy.
+- `require_pinned_env_mounts`: the release's policy.
+
+`serving_software_known_good` is **refuted** while
+`admission_env_mounts_pinned` is `false`. The reason names the unconstrained
+entries. When it is `true`, the claim stays unknown, because the adapter still
+does not review the images themselves.
+
+**Interim policy.** As with RTMR3, the provider has not fixed this in any
+release. Both current releases set `require_pinned_env_mounts: false`, so they
+verify and report the gap instead of failing.
+
+**Launch requires** a reviewed release with `require_pinned_env_mounts: true`.
+Its allowlist must pin env and mounts (`exact` or `deny`) for every container of
+the plaintext-path workloads and of `gateway-state-mounter`. With that setting,
+today's allowlists fail closed, as the soundness test shows. Pinning is
+necessary but not sufficient. The reviewer must also check that the exact env
+values and mount rules do not re-open the gap, for example by allowing a
+ConfigMap mount whose contents are not measured.
+
 ## Release registry
 
 `provider_refs/c8s.json` is keyed by release ID. Each entry records:
@@ -232,9 +355,14 @@ No AGPL `confidential-dot-ai/c8s` code was used.
 - `required_workloads`: `{target, workload, identity}` for `gateway`,
   `sglang-router`, and every `inference-worker-*`, copied from the bundle's
   `c8s.attestationTargets`
+- `additional_admission_entries`: allowlist entries outside `receipts[]` whose
+  env and mounts policy is also checked (`gateway-state-mounter`)
+- `require_pinned_env_mounts`: whether an unpinned env or mounts policy fails
+  verification (`false` for both current releases; launch requires `true`)
 
 The loader rejects an entry that has no RTMR3 set, no allowlist, an unknown
-workload protocol, or duplicate targets. It also rejects an entry whose
+workload protocol, a missing or non-boolean `require_pinned_env_mounts`, or
+duplicate targets. It also rejects an entry whose
 `required_workloads` omits `gateway`, `sglang-router`, or all inference
 workers.
 
@@ -262,7 +390,10 @@ accept a new release:
 4. Confirm that the workload transcript variant matches live receipts.
 5. Record RTMR3 from verified live quotes. Every required node must report an
    accepted value.
-6. Add the entry in a reviewed gateway change.
+6. Review the allowlist's env and mounts policies. Set
+   `require_pinned_env_mounts` to `true` only when every checked entry is
+   pinned and the pinned values are safe.
+7. Add the entry in a reviewed gateway change.
 
 A release that is not in the registry fails closed.
 
@@ -305,14 +436,16 @@ armed node keeps the whole upstream armed. The Rust claim test
 | TEE attested | Asserted (hardware-proven): DCAP-verified TDX quotes for the front door (report_data binds the nonce and the serving TLS leaf) and for each plaintext-path workload (report_data binds the nonce and the workload's mesh identity). |
 | Platform TCB current | Asserted only when every quote is `UpToDate`; any other status fails verification. |
 | OS known good | Refuted while any accepted RTMR3 arms the operator key. Asserted once a reviewed release accepts only RTMR3 values with the key removed. |
-| Serving software known good | Unknown. The allowlist digest is in the reviewed set, and each workload leaf carries it in its CA-signed stamp. The mesh CA's own TEE evidence is not verified, so no quote vouches for the stamp. |
+| Serving software known good | Refuted while the allowlist admits a plaintext-path workload or `gateway-state-mounter` with env or mounts policy `any` (true of both releases on 2026-09-24). Otherwise unknown: the images are not reviewed, and the mesh CA's own TEE evidence is not verified. |
 | GPU attested | Unknown. The bridge emits `gpu_verified: false` and never fails on GPU evidence. |
 | Model weights provenance | Unknown. The bundle pins a model revision and dm-verity root, and the workers' stamped identities name the reviewed worker workloads. The adapter does not verify the weights. |
 
 `provider_claims` also records `tcb_status`, `release_id`, `bundle_sha256`,
 `bundle_signed`, `policy_mode`, `mesh_ca_sha256`, `allowlist_sha256`,
 `front_door_mode`, `tls_mode`, the front door's measured registers,
-`rtmr3_source`, `operator_key_armed`, `workload_attestation_protocol`, the
+`rtmr3_source`, `operator_key_armed`, `workload_attestation_protocol`,
+`admission_env_mounts_pinned`, `admission_env_mounts`,
+`require_pinned_env_mounts`, the
 matched `registry_entry`, and the provider's own `scope` and
 `operationalStatus` (`launch-or-admission-only` and `not-verified` on
 2026-09-24).
@@ -362,6 +495,11 @@ Front door and release:
 | RTMR3 zero, from another release, or removed from the accepted set | accepted RTMR3 set |
 | Unknown release, or bundle digest mismatch | release registry |
 | Allowlist digest not accepted | accepted allowlist set |
+| Allowlist document edited (env and mounts pinned) without a matching digest | canonical digest of the document |
+| Allowlist document missing, out of schema, or with an unknown field | canonicalizer fails closed |
+| Allowlist document and digest both replaced, even with the registry accepting the new digest | workload stamps name the original digest |
+| `additional_admission_entries` names an entry the allowlist lacks | admission entry lookup |
+| Release with `require_pinned_env_mounts: true` on today's allowlists | unpinned env and mounts |
 | `tls.mode` or signed `front_door_mode` set to `webpki` | TEE-held mode check |
 | Missing front door | front-door receipt required |
 | Identity proof signature changed | ECDSA verification under the mesh leaf key |
@@ -430,7 +568,10 @@ cache, each quote would fetch the same collateral again.
   bind the forwarded request to a specific worker. Routing inside the cluster
   relies on the mesh: peers authenticate with leaves from that CA, and the CA
   stamps only allowlist-admitted workloads. The adapter does not verify the mesh
-  CA's embedded RA-TLS evidence or the allowlist document contents.
+  CA's embedded RA-TLS evidence. It checks the allowlist document against its
+  digest but reviews only its env and mounts policies.
+- Env and mounts are unconstrained on every accepted release (see
+  [Admission env and mounts](#admission-env-and-mounts)).
 - A worker that the router can reach but that has no receipt in `receipts[]`
   is not detected. An unlisted `inference-worker-*` receipt fails, but the
   adapter cannot see a worker the response omits.
@@ -464,8 +605,8 @@ cargo test c8s
 fixtures in `tests/fixtures/c8s/` are live `/attestation` responses captured on
 2026-09-24. Each includes the serving leaf from the same connection and the DCAP
 collateral for every FMSPC in the response, valid at capture time. Fields
-outside the transcripts, quotes, mesh chains, and identity proofs were removed
-to keep the files small (`c8s.discovery`, the allowlist document, GPU evidence
+outside the transcripts, quotes, mesh chains, identity proofs, and the active
+allowlist were removed to keep the files small (`c8s.discovery`, GPU evidence
 items, event logs, `receipts[].admittedLaunch`, and worker `nvidia_gpu`). Each
 fixture lists the removed fields in `trimmed`.
 

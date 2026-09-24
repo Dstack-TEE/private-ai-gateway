@@ -218,9 +218,10 @@ impl ProviderClaimMapper for SecretAiClaims {
 /// Confidential AI (c8s): a DCAP-verified TDX front-door quote whose
 /// report_data binds the serving TLS leaf, plus one nonce-bound quote per
 /// plaintext-path workload (gateway, router, inference workers), all on nodes
-/// matched to a reviewed release. Serving software stays Unknown (the allowlist
-/// digest is vouched by the unattested mesh CA, not by a quote), and the
-/// provider's GPU evidence is not verified, so `gpu_attested` stays Unknown.
+/// matched to a reviewed release. Serving software is refuted while the
+/// admission allowlist leaves those workloads' env or mounts unconstrained, and
+/// otherwise stays Unknown (the images are not reviewed). The provider's GPU
+/// evidence is not verified, so `gpu_attested` stays Unknown.
 pub(super) struct C8sClaims;
 impl ProviderClaimMapper for C8sClaims {
     fn claims(&self, event: &UpstreamVerifiedEvent) -> SessionClaims {
@@ -228,6 +229,7 @@ impl ProviderClaimMapper for C8sClaims {
             tee_attested: hardware_tee_attested(event),
             tcb_up_to_date: tcb_up_to_date_claim(event),
             os_known_good: c8s_os_claim(event),
+            serving_software_known_good: c8s_software_claim(event),
             ..SessionClaims::default()
         }
     }
@@ -456,6 +458,50 @@ pub(super) fn c8s_os_claim(event: &UpstreamVerifiedEvent) -> Claim {
     }
 }
 
+/// c8s serving software: the admission allowlist pins each plaintext-path
+/// workload's image and argv, but env and mounts are not attested. An `any`
+/// policy lets any Kubernetes API writer redirect prompts or inject code without
+/// changing a quote, so it **refutes**. Pinned env and mounts are necessary but
+/// not sufficient (the images are not reviewed), so they leave it Unknown.
+pub(super) fn c8s_software_claim(event: &UpstreamVerifiedEvent) -> Claim {
+    let claims = event.provider_claims.as_ref();
+    match claims
+        .and_then(|c| c.get("admission_env_mounts_pinned"))
+        .and_then(Value::as_bool)
+    {
+        Some(false) => {
+            let mut unpinned: Vec<&str> = claims
+                .and_then(|c| c.get("admission_env_mounts"))
+                .and_then(Value::as_object)
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .filter(|(_, entry)| {
+                            entry.get("pinned").and_then(Value::as_bool) != Some(true)
+                        })
+                        .map(|(name, _)| name.as_str())
+                        .collect()
+                })
+                .unwrap_or_default();
+            unpinned.sort_unstable();
+            let workloads = if unpinned.is_empty() {
+                "plaintext-path workloads".to_string()
+            } else {
+                unpinned.join(", ")
+            };
+            Claim::refuted(
+                ClaimSource::VerifierDerived,
+                format!(
+                    "c8s admission allowlist leaves env and mounts unconstrained (policy any) \
+                     for {workloads}; a Kubernetes API writer can redirect prompts or inject \
+                     code without changing any attested measurement"
+                ),
+            )
+        }
+        _ => Claim::unknown(),
+    }
+}
+
 #[cfg(test)]
 mod claim_mapping_tests {
     use super::session_claims_for_event;
@@ -638,7 +684,8 @@ mod claim_mapping_tests {
         assert_eq!(armed.os_known_good.status, ClaimStatus::Refuted);
         let reason = armed.os_known_good.reason.unwrap();
         assert!(reason.contains("v0.13.28-rc.2"), "{reason}");
-        // GPU evidence is not verified and serving software is not quote-bound.
+        // GPU evidence is not verified; without an admission analysis the
+        // serving software stays Unknown.
         assert_eq!(armed.gpu_attested.status, ClaimStatus::Unknown);
         assert_eq!(
             armed.serving_software_known_good.status,
@@ -659,6 +706,57 @@ mod claim_mapping_tests {
             Some(json!({ "tcb_status": "UpToDate" })),
         ));
         assert_eq!(unpinned.os_known_good.status, ClaimStatus::Unknown);
+    }
+
+    #[test]
+    fn c8s_refutes_serving_software_while_env_and_mounts_are_unconstrained() {
+        let provider_claims = |pinned: bool| {
+            json!({
+                "tcb_status": "UpToDate",
+                "admission_env_mounts_pinned": pinned,
+                "admission_env_mounts": {
+                    "gateway": { "allowlist_entry": "gateway", "pinned": pinned },
+                    "gateway-state-mounter": {
+                        "allowlist_entry": "gateway-state-mounter",
+                        "pinned": pinned,
+                    },
+                },
+            })
+        };
+        let unconstrained = session_claims_for_event(&event(
+            Some("c8s"),
+            VerificationResult::Verified,
+            Some(provider_claims(false)),
+        ));
+        let claim = unconstrained.serving_software_known_good;
+        assert_eq!(claim.status, ClaimStatus::Refuted);
+        assert_eq!(claim.source, Some(ClaimSource::VerifierDerived));
+        let reason = claim.reason.unwrap();
+        assert!(reason.contains("env and mounts unconstrained"), "{reason}");
+        assert!(
+            reason.contains("gateway, gateway-state-mounter"),
+            "{reason}"
+        );
+
+        // Pinned env and mounts do not make unreviewed images known good.
+        let pinned = session_claims_for_event(&event(
+            Some("c8s"),
+            VerificationResult::Verified,
+            Some(provider_claims(true)),
+        ));
+        assert_eq!(
+            pinned.serving_software_known_good.status,
+            ClaimStatus::Unknown
+        );
+        let absent = session_claims_for_event(&event(
+            Some("c8s"),
+            VerificationResult::Verified,
+            Some(json!({ "tcb_status": "UpToDate" })),
+        ));
+        assert_eq!(
+            absent.serving_software_known_good.status,
+            ClaimStatus::Unknown
+        );
     }
 
     #[test]

@@ -5,6 +5,7 @@
   "review": "docs/providers/confidential-ai/review.md",
   "rtmr3_policy": "RTMR3 is matched against accepted_rtmr3. Every value accepted on 2026-09-23 has the c8s operator key armed, so it is non-zero. The provider plans to remove that key and pin RTMR3 to zero; zero is not accepted until a reviewed release publishes it.",
   "workload_policy": "required_workloads lists the plaintext-path targets (gateway, sglang-router, and every inference-worker-*) copied from the reviewed bundle's c8s.attestationTargets. Each needs exactly one nonce-bound attest-pq receipt from a node that matches the release pins. Targets outside the plaintext path (kube-state-metrics, metrics-collector) are not required.",
+  "admission_policy": "require_pinned_env_mounts gates on the admission allowlist: when true, every container of each required workload's allowlist entry and of each additional_admission_entries entry must have an exact (or deny) env and mounts policy. Both releases accepted on 2026-09-24 admit these workloads with env and mounts policy any, so it is false for them and serving_software_known_good is refuted. Launch requires a release with it set to true.",
   "releases": {
     "v0.13.27-static-attestation-20260910": {
       "environment": "production",
@@ -53,7 +54,11 @@
           "workload": "sglang-router-684393d",
           "identity": "sglang-router-684393d"
         }
-      ]
+      ],
+      "additional_admission_entries": [
+        "gateway-state-mounter"
+      ],
+      "require_pinned_env_mounts": false
     },
     "v0.13.28-rc.2": {
       "environment": "production",
@@ -107,7 +112,11 @@
           "workload": "sglang-router",
           "identity": "sglang-router"
         }
-      ]
+      ],
+      "additional_admission_entries": [
+        "gateway-state-mounter"
+      ],
+      "require_pinned_env_mounts": false
     }
   }
 }

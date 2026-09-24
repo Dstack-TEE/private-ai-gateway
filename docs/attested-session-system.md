@@ -71,7 +71,7 @@ nothing.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `tee_attested` | ✅ hardware | ✅ hardware | ✅ hardware | ✅ hardware | ✅ hardware | ✅ hardware | ✅ verifier-derived |
 | `tcb_up_to_date` | tri-state¹ | tri-state¹ | tri-state¹ | tri-state¹ | TDX ✅ / SEV unknown | ✅ required | unknown |
-| `serving_software_known_good` | ✅ Sigstore² | unknown | unknown | unknown | optional pin | unknown | unknown |
+| `serving_software_known_good` | ✅ Sigstore² | unknown | unknown | unknown | optional pin | ❌ env/mounts unpinned | unknown |
 | `os_known_good` | unknown | unknown | unknown | unknown | ✅ registry | ❌ operator key armed | unknown |
 | `gpu_attested` | unknown | unknown | ✅³ | ✅³ | ✅ required | unknown | unknown |
 | `model_weights_provenance` | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
@@ -116,7 +116,9 @@ nothing.
 - ⁵ c8s requires DCAP `UpToDate` for the front door and for every
   plaintext-path workload quote (gateway, router, inference workers).
   `os_known_good` is refuted while any accepted RTMR3 arms the c8s operator
-  key, and asserted once a reviewed release pins it with the key removed. GPU evidence is not verified. See
+  key, and asserted once a reviewed release pins it with the key removed.
+  `serving_software_known_good` is refuted while the admission allowlist
+  leaves those workloads' env or mounts unconstrained, and unknown otherwise. GPU evidence is not verified. See
   [Confidential AI (c8s) verification](providers/c8s/verification.md).
 - "generic" is a verifier path with no provider-specific identity: it asserts
   only `tee_attested` (`verifier_derived`), nothing else.

@@ -39,6 +39,7 @@ ZERO_48 = "00" * 48
 FRONT_DOOR = "frontDoor"
 ALL_QUOTES = "*"
 REQUIRED = ("gateway", "inference-worker-0", "inference-worker-1", "sglang-router")
+MOUNTER = "gateway-state-mounter"
 
 
 def _fixture(name: str) -> dict[str, Any]:
@@ -265,6 +266,17 @@ def _check_verified(
             failures.append(f"{name}: provider claim {key}={claims.get(key)!r}, expected {value!r}")
     if claims.get("registry_entry", {}).get("release_id") != release["id"]:
         failures.append(f"{name}: provider claims do not name the matched registry entry")
+    # Both live allowlists admit the plaintext path with env and mounts `any`.
+    admission = claims.get("admission_env_mounts") or {}
+    if (
+        claims.get("admission_env_mounts_pinned") is not False
+        or claims.get("require_pinned_env_mounts") is not False
+        or sorted(admission) != sorted((*REQUIRED, MOUNTER))
+        or any(item.get("pinned") is not False for item in admission.values())
+        or admission.get("gateway", {}).get("allowlist_entry")
+        != next(b.identity for b in pin.required_workloads if b.target == "gateway")
+    ):
+        failures.append(f"{name}: unexpected admission env/mounts claims {admission!r}")
     workloads = claims.get("verified_workloads") or {}
     if sorted(workloads) != sorted(REQUIRED):
         failures.append(f"{name}: verified_workloads covers {sorted(workloads)!r}")
@@ -410,6 +422,10 @@ def _check_registry_fails_closed(failures: list[str], tmp: Path) -> None:
             workload_attestation_protocol="c8s/attest-pq/v2"
         ),
         "no-required-workloads": lambda release: release.pop("required_workloads"),
+        "no-env-mounts-policy": lambda release: release.pop("require_pinned_env_mounts"),
+        "env-mounts-policy-not-bool": lambda release: release.update(
+            require_pinned_env_mounts="false"
+        ),
         "no-router": drop_router,
         "no-workers": drop_workers,
         "duplicate-target": duplicate_target,
@@ -493,6 +509,50 @@ def _check_fetch_policy(failures: list[str]) -> None:
         c8s.http.client.HTTPSConnection = original
 
 
+def _allowlist(fixture: dict[str, Any]) -> dict[str, Any]:
+    return copy.deepcopy(fixture["attestation"]["c8s"]["activeAllowlist"]["document"])
+
+
+def _pin_all_env_mounts(document: dict[str, Any]) -> None:
+    for entry in document["workloads"].values():
+        for container in (entry.get("initContainers") or []) + (entry.get("containers") or []):
+            container["env"] = {"policy": "exact", "values": {"MODE": "prod"}}
+            container["mounts"] = {"policy": "deny"}
+
+
+def _check_allowlist_canonicalization(failures: list[str]) -> None:
+    """The allowlist digest is Go's json.Marshal of the struct, re-derived from JSON."""
+    for name, fixture in (("production", PRODUCTION), ("candidate", CANDIDATE)):
+        active = fixture["attestation"]["c8s"]["activeAllowlist"]
+        if c8s.allowlist_canonical_sha256(active["document"]) != active["sha256"]:
+            failures.append(f"allowlist-canonical-{name}: canonical digest does not reproduce")
+    expected = '"a\\u003cb\\u003e\\u0026\\n\\u0001\\b\\u2028\\"é"'
+    if c8s._go_json_string('a<b>&\n\x01\b\u2028"é') != expected:
+        failures.append("allowlist-go-escapes: string escaping differs from Go encoding/json")
+    for label, mutate in {
+        "unknown-field": lambda doc: doc["workloads"][MOUNTER].update(extra=True),
+        "wrong-schema": lambda doc: doc.update(schema="c8s.allowlist/v2"),
+        "number": lambda doc: doc["workloads"][MOUNTER].update(label=1),
+    }.items():
+        document = _allowlist(PRODUCTION)
+        mutate(document)
+        try:
+            c8s.allowlist_canonical_sha256(document)
+            failures.append(f"allowlist-{label}: canonicalized an out-of-schema document")
+        except ValueError:
+            pass
+    # Env/mounts analysis: `any` anywhere in an entry, init containers included, unpins it.
+    document = _allowlist(PRODUCTION)
+    _pin_all_env_mounts(document)
+    if not c8s._admission_env_mounts(document, MOUNTER)["pinned"]:
+        failures.append("admission-pinned: exact env and denied mounts must count as pinned")
+    entry = next(e for e in document["workloads"].values() if e.get("initContainers"))
+    entry["initContainers"][0]["mounts"] = {"policy": "any"}
+    name = next(n for n, e in document["workloads"].items() if e is entry)
+    if c8s._admission_env_mounts(document, name)["pinned"]:
+        failures.append("admission-init-any: an init container with mounts any must unpin")
+
+
 def _check_rtmr3_zero_readiness(failures: list[str]) -> None:
     """A future release that removes the operator key pins RTMR3 to zero.
 
@@ -558,6 +618,7 @@ def check(tmp: Path) -> list[str]:
     _check_registry_fails_closed(failures, tmp)
     _check_fetch_policy(failures)
     _check_rtmr3_zero_readiness(failures)
+    _check_allowlist_canonicalization(failures)
 
     prod_release = PRODUCTION["attestation"]["release"]["id"]
     cand_release = CANDIDATE["attestation"]["release"]["id"]
@@ -861,8 +922,64 @@ def check(tmp: Path) -> list[str]:
             {"verified": _td("rt_mr3", candidate_rtmr3), "tamper_target": worker},
         ),
     ]
+    # Admission allowlist: the inspected document must be the one the digests name.
+    def tampered_allowlist(document: dict[str, Any]) -> None:
+        allowlist = document["c8s"]["activeAllowlist"]["document"]
+        _pin_all_env_mounts(allowlist)
+
+    def rehashed_allowlist(document: dict[str, Any]) -> None:
+        active = document["c8s"]["activeAllowlist"]
+        _pin_all_env_mounts(active["document"])
+        active["sha256"] = c8s.allowlist_canonical_sha256(active["document"])
+
+    prod_pinned_doc = _allowlist(PRODUCTION)
+    _pin_all_env_mounts(prod_pinned_doc)
+    prod_pinned_sha = c8s.allowlist_canonical_sha256(prod_pinned_doc)
+    prod_allowlists = c8s._load_registry()[prod_release].accepted_allowlist_sha256
+    cases += [
+        (
+            "allowlist-document-tampered",
+            "c8s.activeAllowlist.document does not hash to c8s.activeAllowlist.sha256",
+            {"body": tampered_allowlist},
+        ),
+        (
+            "allowlist-document-missing",
+            "missing c8s.activeAllowlist.document",
+            {"body": _set("c8s.activeAllowlist.document", None)},
+        ),
+        # A self-consistent substitute (even one the registry accepted) is not
+        # the snapshot the workloads' CA-signed stamps name.
+        (
+            "allowlist-not-stamped",
+            "stamped allowlist sha256:05235c60",
+            {
+                "body": rehashed_allowlist,
+                "registry": _pin(
+                    prod_release,
+                    accepted_allowlist_sha256=prod_allowlists | {prod_pinned_sha},
+                ),
+            },
+        ),
+        (
+            "allowlist-entry-missing",
+            "allowlist has no entry 'gateway-state-mounter-x'",
+            {"registry": _pin(prod_release, additional_admission_entries=(MOUNTER + "-x",))},
+        ),
+    ]
     for name, reason, kwargs in cases:
         _expect_failure(failures, name, reason, **kwargs)
+
+    # Launch policy: a release that requires pinned env/mounts rejects today's allowlists.
+    for name, fixture in (("production", PRODUCTION), ("candidate", CANDIDATE)):
+        release_id = fixture["attestation"]["release"]["id"]
+        _expect_failure(
+            failures,
+            f"require-pinned-env-mounts-{name}",
+            "requires pinned env and mounts, but the allowlist admits gateway, "
+            "gateway-state-mounter, inference-worker-0, inference-worker-1, sglang-router",
+            fixture=fixture,
+            registry=_pin(release_id, require_pinned_env_mounts=True),
+        )
 
     # Candidate uses the X-Wing transcript; its session fields are bound too.
     for name, reason, kwargs in [

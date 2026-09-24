@@ -85,6 +85,53 @@ _INFERENCE_WORKER_RE = re.compile(r"^inference-worker-[0-9]+$")
 _MATCHED_WORKLOAD_OID = x509.ObjectIdentifier("1.3.6.1.4.1.66378.1.5")
 _WORKLOAD_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
 _ALLOWLIST_VERSION_RE = re.compile(r"^(0|[1-9][0-9]{0,19})$")
+# Admission allowlist (`c8s.allowlist/v1`). Its digest is SHA-256 over Go's
+# json.Marshal of the allowlist struct: compact, struct fields in declaration
+# order, map keys sorted. Field order per object kind; the union covers every
+# field the schema has used (mounts `destinations`/`rules`, env `names`/`values`).
+_ALLOWLIST_SCHEMA = "c8s.allowlist/v1"
+_ALLOWLIST_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
+    "allowlist": (("schema", "str"), ("digests", "map:str"), ("workloads", "map:workload")),
+    "workload": (
+        ("label", "str"),
+        ("initContainers", "list:container"),
+        ("containers", "list:container"),
+        ("secrets", "secrets"),
+    ),
+    "container": (
+        ("digest", "str"),
+        ("image", "str"),
+        ("command", "argv"),
+        ("args", "argv"),
+        ("mounts", "mounts"),
+        ("env", "env"),
+    ),
+    "argv": (("policy", "str"), ("argv", "list:str")),
+    "mounts": (("policy", "str"), ("destinations", "list:str"), ("rules", "list:mount_rule")),
+    "mount_rule": (
+        ("destination", "str"),
+        ("kind", "str"),
+        ("source", "str"),
+        ("readOnly", "bool"),
+    ),
+    "env": (("policy", "str"), ("names", "list:str"), ("values", "map:str")),
+    "secrets": (("policy", "str"), ("read", "list:str"), ("write", "list:str")),
+}
+# Go's encoding/json string escapes beyond `"` and `\` (HTML-safe, Go >= 1.22).
+_GO_JSON_ESCAPES = {
+    "\b": "\\b",
+    "\f": "\\f",
+    "\n": "\\n",
+    "\r": "\\r",
+    "\t": "\\t",
+    "<": "\\u003c",
+    ">": "\\u003e",
+    "&": "\\u0026",
+    "\u2028": "\\u2028",
+    "\u2029": "\\u2029",
+}
+# Env and mount policies that fix what the container gets; `any` does not.
+_PINNED_ADMISSION_POLICIES = frozenset({"exact", "deny"})
 # Quotes verified at once; DCAP collateral is fetched once per (FMSPC, CA).
 _DCAP_CONCURRENCY = 4
 # TDX v4 quote: 48-byte header followed by the TD report body.
@@ -125,6 +172,8 @@ class _ReleasePin:
     accepted_mesh_ca_sha256: frozenset[str]
     workload_attestation_protocol: str
     required_workloads: tuple[_WorkloadBinding, ...]
+    require_pinned_env_mounts: bool
+    additional_admission_entries: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -241,6 +290,12 @@ def _load_registry(path: Path | None = None) -> dict[str, _ReleasePin]:
                 for value in (entry.get("bundle_sha256"), *allowlists, *mesh_cas)
             )
             or entry.get("workload_attestation_protocol") not in _SESSION_FIELDS
+            or not isinstance(entry.get("require_pinned_env_mounts"), bool)
+            or not isinstance(entry.get("additional_admission_entries", []), list)
+            or any(
+                not isinstance(name, str) or not name
+                for name in entry.get("additional_admission_entries", [])
+            )
         ):
             raise ValueError(f"{_LABEL} release registry entry {release_id!r} is malformed")
         pins[release_id] = _ReleasePin(
@@ -258,6 +313,8 @@ def _load_registry(path: Path | None = None) -> dict[str, _ReleasePin]:
             required_workloads=_load_required_workloads(
                 entry.get("required_workloads"), release_id
             ),
+            require_pinned_env_mounts=entry["require_pinned_env_mounts"],
+            additional_admission_entries=tuple(entry.get("additional_admission_entries", [])),
         )
     return pins
 
@@ -552,6 +609,104 @@ def _matched_workload(leaf: x509.Certificate, subject: str) -> tuple[str, str]:
     return name_text, f"sha256:{digest.hex()}"
 
 
+def _go_json_string(value: str) -> str:
+    out = ['"']
+    for char in value:
+        if char in ('"', "\\"):
+            out.append("\\" + char)
+        elif char in _GO_JSON_ESCAPES:
+            out.append(_GO_JSON_ESCAPES[char])
+        elif ord(char) < 0x20:
+            out.append(f"\\u{ord(char):04x}")
+        elif 0xD800 <= ord(char) <= 0xDFFF:
+            # Go replaces invalid UTF-8; a lone surrogate has no canonical form.
+            raise ValueError("lone surrogate")
+        else:
+            out.append(char)
+    out.append('"')
+    return "".join(out)
+
+
+def _canonical_allowlist_json(value: Any, kind: str) -> str:
+    """Re-encode a parsed allowlist value exactly as Go's json.Marshal would."""
+    if kind == "str":
+        if not isinstance(value, str):
+            raise ValueError("expected a string")
+        return _go_json_string(value)
+    if kind == "bool":
+        if not isinstance(value, bool):
+            raise ValueError("expected a boolean")
+        return "true" if value else "false"
+    if kind.startswith(("list:", "map:")) and value is None:
+        return "null"
+    if kind.startswith("list:"):
+        if not isinstance(value, list):
+            raise ValueError("expected a list")
+        items = (_canonical_allowlist_json(item, kind[5:]) for item in value)
+        return "[" + ",".join(items) + "]"
+    if kind.startswith("map:"):
+        if not isinstance(value, dict):
+            raise ValueError("expected an object")
+        items = (
+            _go_json_string(key) + ":" + _canonical_allowlist_json(value[key], kind[4:])
+            for key in sorted(value)
+        )
+        return "{" + ",".join(items) + "}"
+    fields = _ALLOWLIST_FIELDS[kind]
+    if not isinstance(value, dict):
+        raise ValueError(f"expected a {kind} object")
+    unknown = set(value) - {name for name, _ in fields}
+    if unknown:
+        raise ValueError(f"unknown {kind} fields {sorted(unknown)}")
+    items = (
+        _go_json_string(name) + ":" + _canonical_allowlist_json(value[name], field_kind)
+        for name, field_kind in fields
+        if name in value
+    )
+    return "{" + ",".join(items) + "}"
+
+
+def allowlist_canonical_sha256(document: Any) -> str:
+    """SHA-256 tag of the canonical bytes of a parsed `c8s.allowlist/v1` document."""
+    if not isinstance(document, dict) or document.get("schema") != _ALLOWLIST_SCHEMA:
+        raise ValueError(f"{_LABEL} allowlist document is not {_ALLOWLIST_SCHEMA}")
+    try:
+        canonical = _canonical_allowlist_json(document, "allowlist")
+    except ValueError as exc:
+        raise ValueError(f"{_LABEL} allowlist document has no canonical form: {exc}") from exc
+    return _sha256_tag(canonical.encode("utf-8"))
+
+
+def _admission_env_mounts(document: dict[str, Any], entry_name: str) -> dict[str, Any]:
+    """Report whether every container of an allowlist entry has pinned env and mounts."""
+    entry = (document.get("workloads") or {}).get(entry_name)
+    if not isinstance(entry, dict):
+        raise ValueError(f"{_LABEL} allowlist has no entry {entry_name!r}")
+    containers = []
+    for field in ("initContainers", "containers"):
+        for container in entry.get(field) or []:
+            containers.append(
+                {
+                    "kind": "init" if field == "initContainers" else "main",
+                    "digest": container.get("digest"),
+                    "image": container.get("image"),
+                    "env": (container.get("env") or {}).get("policy"),
+                    "mounts": (container.get("mounts") or {}).get("policy"),
+                }
+            )
+    if not containers:
+        raise ValueError(f"{_LABEL} allowlist entry {entry_name!r} has no containers")
+    return {
+        "allowlist_entry": entry_name,
+        "pinned": all(
+            container["env"] in _PINNED_ADMISSION_POLICIES
+            and container["mounts"] in _PINNED_ADMISSION_POLICIES
+            for container in containers
+        ),
+        "containers": containers,
+    }
+
+
 def _td_report(verified: dict[str, Any], subject: str) -> dict[str, str]:
     td10 = (verified.get("report") or {}).get("TD10")
     if not isinstance(td10, dict):
@@ -654,6 +809,7 @@ def _prepare_workload(
     nonce: str,
     nonce_raw: bytes,
     mesh_ca_der: bytes,
+    allowlist_sha256: str,
 ) -> _Workload:
     """Check one workload receipt up to (not including) DCAP verification."""
     subject = f"workload {binding.target!r}"
@@ -677,16 +833,16 @@ def _prepare_workload(
 
     mesh_leaf, _ = _mesh_chain(receipt, subject, expected_ca_der=mesh_ca_der)
     mesh_leaf_der = mesh_leaf.public_bytes(Encoding.DER)
-    stamped_name, allowlist_sha256 = _matched_workload(mesh_leaf, subject)
+    stamped_name, stamped_allowlist = _matched_workload(mesh_leaf, subject)
     if stamped_name != binding.identity:
         raise ValueError(
             f"{_LABEL} {subject} mesh leaf matched-workload stamp {stamped_name!r} does not match "
             f"the reviewed identity {binding.identity!r}"
         )
-    if allowlist_sha256 not in pin.accepted_allowlist_sha256:
+    if stamped_allowlist != allowlist_sha256:
         raise ValueError(
-            f"{_LABEL} {subject} stamped allowlist {allowlist_sha256} is not accepted for "
-            f"release {pin.release_id!r}"
+            f"{_LABEL} {subject} stamped allowlist {stamped_allowlist} is not the active "
+            f"allowlist {allowlist_sha256}"
         )
 
     protocol = pin.workload_attestation_protocol
@@ -811,13 +967,21 @@ async def verify_c8s(request: dict[str, Any]) -> None:
         )
         _verify_identity_proof(receipt, transcript_digest, mesh_leaf, mesh_leaf_der, mesh_ca_der)
 
+        active_allowlist = _require_dict(c8s.get("activeAllowlist"), "c8s.activeAllowlist")
         allowlist_sha256 = _require_str(
-            _require_dict(c8s.get("activeAllowlist"), "c8s.activeAllowlist").get("sha256"),
-            "c8s.activeAllowlist.sha256",
+            active_allowlist.get("sha256"), "c8s.activeAllowlist.sha256"
         )
         if allowlist_sha256 not in pin.accepted_allowlist_sha256:
             raise ValueError(
                 f"{_LABEL} allowlist {allowlist_sha256} is not accepted for release {release_id!r}"
+            )
+        # The document is inspected below, so it must be the one the digest names.
+        # Each workload's CA-stamped allowlist digest must also be this digest.
+        allowlist = _require_dict(active_allowlist.get("document"), "c8s.activeAllowlist.document")
+        if allowlist_canonical_sha256(allowlist) != allowlist_sha256:
+            raise ValueError(
+                f"{_LABEL} c8s.activeAllowlist.document does not hash to "
+                "c8s.activeAllowlist.sha256"
             )
 
         front_door_quote = _PendingQuote(
@@ -839,10 +1003,32 @@ async def verify_c8s(request: dict[str, Any]) -> None:
         entries = _collect_receipts(document, pin)
         workloads = [
             _prepare_workload(
-                entries[binding.target], binding, pin, nonce, nonce_raw, mesh_ca_der
+                entries[binding.target],
+                binding,
+                pin,
+                nonce,
+                nonce_raw,
+                mesh_ca_der,
+                allowlist_sha256,
             )
             for binding in pin.required_workloads
         ]
+
+        # Admission policy of each plaintext-path workload's stamped entry, plus
+        # the reviewed entries that can reach them (e.g. gateway-state-mounter).
+        admission = {
+            binding.target: _admission_env_mounts(allowlist, binding.identity)
+            for binding in pin.required_workloads
+        }
+        for entry_name in pin.additional_admission_entries:
+            admission[entry_name] = _admission_env_mounts(allowlist, entry_name)
+        env_mounts_pinned = all(item["pinned"] for item in admission.values())
+        if pin.require_pinned_env_mounts and not env_mounts_pinned:
+            unpinned = sorted(name for name, item in admission.items() if not item["pinned"])
+            raise ValueError(
+                f"{_LABEL} release {release_id!r} requires pinned env and mounts, but the "
+                f"allowlist admits {', '.join(unpinned)} with an unconstrained env or mount policy"
+            )
 
         pending = [front_door_quote, *(workload.pending for workload in workloads)]
         verified = await _QuoteVerifier(timeout).verify_all(pending)
@@ -921,6 +1107,11 @@ async def verify_c8s(request: dict[str, Any]) -> None:
                         entry.get("operator_key_armed") is not False for entry in rtmr3_entries
                     ),
                     "verified_workloads": verified_workloads,
+                    # Env and mounts are not attested; an `any` policy lets any
+                    # Kubernetes API writer change them without changing a quote.
+                    "admission_env_mounts_pinned": env_mounts_pinned,
+                    "admission_env_mounts": admission,
+                    "require_pinned_env_mounts": pin.require_pinned_env_mounts,
                     "registry_entry": {
                         "release_id": pin.release_id,
                         "bundle_sha256": pin.bundle_sha256,
