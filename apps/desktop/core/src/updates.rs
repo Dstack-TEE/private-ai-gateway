@@ -425,7 +425,7 @@ mod tests {
         );
         assert_eq!(
             classify(
-                "/home/u/.npm-global/lib/node_modules/@dstack/private-ai-proxy-linux-x64/bin",
+                "/home/u/.npm-global/lib/node_modules/private-ai-proxy/node_modules/private-ai-proxy-linux-x64/vendor",
                 false,
                 None
             ),
