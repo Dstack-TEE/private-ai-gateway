@@ -3,9 +3,10 @@
 This reference is for Private AI Gateway operators who configure Confidential
 AI (`https://api.confidential.ai`, operated by Inexorable, Inc.). Confidential
 AI runs on c8s (Confidential Kubernetes). Each node is an Intel TDX CVM. The
-`c8s-tls-lb` front door terminates public TLS inside that CVM. The gateway
-verifies the front door and the node measurements, and then pins the serving
-TLS key for forwarded traffic.
+`c8s-tls-lb` front door terminates public TLS inside that CVM. Request content
+is then processed by workloads on other nodes. The gateway verifies the front
+door, every workload on the plaintext path, and each of their node measurements.
+It then pins the serving TLS key for forwarded traffic.
 
 The admission review is `docs/providers/confidential-ai/review.md` (on the
 review branch). That review lists a hard reject that is still open: the c8s
@@ -36,6 +37,29 @@ ships with the gateway release. `/attestation` needs no credential.
 served model ID, because the provider catalog lists models that it does not
 serve.
 
+## Multi-node topology
+
+On 2026-09-24 neither deployment ran every plaintext-handling workload on the
+front-door node. Each `/attestation` response carries one nonce-bound receipt
+per workload in `receipts[]` (`{target, workload, identity, admittedLaunch,
+receipt}`). The quotes group into two nodes per deployment by RTMR0, the
+per-host firmware configuration. MRTD, RTMR1, RTMR2, and RTMR3 are identical on
+every node of a deployment.
+
+| Deployment | Node (RTMR0 prefix, FMSPC) | Workloads |
+| --- | --- | --- |
+| production | `8cd47f5d…`, `00A06D080000` | front door, `gateway`, `metrics-collector` |
+| production | `e6351ce4…`, `00A06D080000` | `inference-worker-0`, `inference-worker-1`, `sglang-router`, `kube-state-metrics` |
+| candidate | `41aa2900…`, `B0C06F000000` | front door, `gateway`, `metrics-collector`, `kube-state-metrics` |
+| candidate | `d695907c…`, `00A06D080000` | `inference-worker-0`, `inference-worker-1`, `sglang-router` |
+
+A request travels from the front door to the provider `gateway`, then to
+`sglang-router`, then to an `inference-worker-*`. All of these see request
+plaintext. The front-door quote alone says nothing about the worker nodes, so
+the adapter requires a verified receipt for each of these workloads.
+`metrics-collector` and `kube-state-metrics` are not on the request path and are
+not required.
+
 ## Verification algorithm
 
 The bridge reports verifier ID `private-ai-verifier/c8s/v1`. For each
@@ -54,6 +78,9 @@ verification, it:
    `release.bundleSha256` must equal the reviewed bundle digest.
 5. Requires `tls.mode` to be `acme`, `tee-webpki`, or `cds`. In these modes the
    TEE holds the serving key. `webpki` and every other mode fail.
+
+### Front door
+
 6. Requires `frontDoor.source` to be `c8s-tls-lb` and requires a receipt with
    version `c8s/attest-lb/v1` and platform `tdx`. The receipt `nonce` must
    equal the client nonce. The signed `front_door_mode` must be a TEE-held mode
@@ -63,38 +90,132 @@ verification, it:
    be a self-signed CA certificate, and the leaf must be issued by it. Both
    must be inside their validity period. `c8s.meshCaSha256` must equal the
    SHA-256 of the mesh CA DER. If the registry lists accepted mesh CAs for the
-   release, the CA must be one of them.
-8. Recomputes the attest-lb transcript digest from the client nonce and the
-   observed serving leaf. `LP(x)` is a 4-byte big-endian length followed by
-   `x`:
-
-   ```text
-   SHA-384( LP("c8s/attest-lb/v1") || LP(front_door_mode) || LP(nonce_raw_32) ||
-            LP(SHA-256(serving_leaf_DER)) || LP(SHA-256(mesh_leaf_DER)) ||
-            LP(SHA-256(mesh_CA_DER)) )
-   ```
-
+   release, the CA must be one of them. This CA is the mesh CA for every
+   workload check below.
+8. Recomputes the attest-lb transcript digest (see
+   [Transcript constructions](#transcript-constructions)) from the client nonce
+   and the observed serving leaf.
 9. Verifies `identity_proof`. The algorithm must be `ecdsa-sha384`.
    `leaf_sha256` and `mesh_ca_sha256` must name the returned certificates. The
    signature must verify under the mesh leaf key, using ECDSA with SHA-384 over
    the 48-byte transcript digest.
 10. Requires `c8s.activeAllowlist.sha256` to be in the release's accepted set.
 11. Decodes the front-door quote as hex or base64 (standard or URL-safe). It
-    must be a TDX v4 quote. The bridge verifies the quote with `dcap_qvl`
-    against Intel PCS collateral and requires TCB status `UpToDate`.
-12. Reads the verified TD report. It rejects a debug TD (any TUD bit in
-    `td_attributes` byte 0). It requires `report_data[0:48]` to equal the
-    transcript digest and `report_data[48:64]` to be zero.
-13. Requires MRTD, RTMR1, and RTMR2 to equal the release pins, and RTMR3 to be
-    in the release's accepted RTMR3 set.
-14. Emits a `tls_spki_sha256` binding for the observed serving leaf. The
+    must be a TDX v4 quote.
+
+### Plaintext-path workloads
+
+12. If the response states `c8s.attestationProtocol`, it must equal the
+    release's reviewed `workload_attestation_protocol`.
+13. Requires exactly one `receipts[]` entry for each target in the release's
+    `required_workloads`. A missing or duplicated required target fails. An
+    `inference-worker-*` target that the release does not list also fails,
+    because the router could send requests to it. Other targets are ignored.
+14. For each required target, it:
+    1. Requires the entry's `workload` and `identity` to equal the reviewed
+       target binding.
+    2. Requires receipt version `c8s/attest-pq/v1`, platform `tdx`, and a
+       receipt `nonce` equal to the client nonce.
+    3. Parses `cds_cert_pem` as one mesh leaf and one mesh CA. The CA must be
+       byte-identical to the front door's mesh CA, and the leaf must be inside
+       its validity period and be issued by that CA.
+    4. Parses the mesh leaf's matched-workload stamp (OID
+       `1.3.6.1.4.1.66378.1.5`, strict minimal DER, exactly one). The stamped
+       name must equal the reviewed `identity`. The stamped allowlist digest
+       must be in the release's accepted allowlist set.
+    5. Recomputes the attest-pq transcript for the release's protocol. Session
+       fields must have their exact sizes.
+    6. Verifies `identity_proof` as in step 9, under the workload's mesh leaf.
+    7. Decodes the workload quote as in step 11.
+
+### Quotes and measurements
+
+15. Verifies the front-door quote and every workload quote with `dcap_qvl`
+    against Intel PCS collateral, concurrently (at most 4 at a time). Quotes
+    with the same FMSPC and PCK CA share one collateral fetch.
+16. For each verified quote, it:
+    - requires TCB status `UpToDate`;
+    - rejects a debug TD (any TUD bit in `td_attributes` byte 0);
+    - requires `report_data[0:48]` to equal that quote's transcript digest and
+      `report_data[48:64]` to be zero;
+    - requires MRTD, RTMR1, and RTMR2 to equal the release pins, and RTMR3 to
+      be in the release's accepted RTMR3 set.
+17. Emits a `tls_spki_sha256` binding for the observed serving leaf. The
     TEE holds the key, so the SPKI pin is equivalent to the leaf binding. The
     Rust forwarding path enforces the pin on every model request.
 
+Any failure fails the whole verification.
+
 RTMR0 is not pinned. It carries the per-host virtual firmware configuration
-and differs between production and candidate nodes that run the same image.
+and differs between nodes that run the same image. The adapter records each
+workload's RTMR0 in `verified_workloads` so the node layout stays visible.
 
 The scope is `router`. One origin and one SPKI serve every configured model.
+
+## What each workload check binds
+
+| Check | What it proves |
+| --- | --- |
+| DCAP `UpToDate`, debug bit clear | A genuine, patched, production TDX TD produced the quote. |
+| MRTD, RTMR1, RTMR2 = release pins; RTMR3 accepted | The workload's node booted the reviewed c8s firmware, kernel, and rootfs, with a reviewed RTMR3 (operator-key state). |
+| Receipt nonce = client nonce, and nonce in the transcript | The quote was produced for this verification. It is not a replay. |
+| Transcript in `report_data[0:48]`, zero padding | The quote commits to this exact mesh leaf, mesh CA, session keys, `front_door_mode`, and nonce. |
+| Identity proof | The TD that produced the quote holds the mesh leaf's private key. A copied public chain cannot sign a new transcript. |
+| Mesh CA = front-door mesh CA | The workload holds a leaf from the same CDS mesh CA as the front door. It belongs to the same cluster, and it is the peer that the mesh authenticates on the request path. |
+| `workload`/`identity` = target binding, and stamped name = `identity` | The reviewed workload identity is stamped by the mesh CA into a leaf that the quote binds. JSON labels cannot relabel one node's receipt as another's. |
+| Stamped allowlist digest accepted | The CA admitted the workload under a reviewed allowlist. |
+
+## Transcript constructions
+
+`LP(x)` is a 4-byte big-endian length followed by `x`. All hashes are over
+DER-encoded certificates. The transcript digest fills `report_data[0:48]`, and
+`report_data[48:64]` is zero. The mesh leaf signs the digest with
+ECDSA-SHA384.
+
+| Protocol | Used by | Transcript |
+| --- | --- | --- |
+| `c8s/attest-lb/v1` | Front door, both deployments | `SHA-384( LP("c8s/attest-lb/v1") ‖ LP(front_door_mode) ‖ LP(nonce32) ‖ LP(SHA-256(serving_leaf)) ‖ LP(SHA-256(mesh_leaf)) ‖ LP(SHA-256(mesh_CA)) )` |
+| `c8s/attest-pq/v1` | Workloads on `v0.13.27-static-attestation-20260910` (production) | `SHA-384( LP("c8s-verify/v1") ‖ LP(front_door_mode) ‖ LP(SHA-256(mesh_CA)) ‖ LP(SHA-256(mesh_leaf)) ‖ LP(x25519_pub32) ‖ LP(mlkem768_ek1184) ‖ LP(nonce32) )` |
+| `c8s/attest-pq/v1+xwing` | Workloads on `v0.13.28-rc.2` (candidate) | `SHA-384( LP("c8s-verify/v1") ‖ LP(front_door_mode) ‖ LP(SHA-256(mesh_CA)) ‖ LP(SHA-256(mesh_leaf)) ‖ LP(xwing_ek1216) ‖ LP(xwing_ct1120) ‖ LP(session_id16) ‖ LP(nonce32) )` |
+
+Both attest-pq variants carry receipt version `c8s/attest-pq/v1` and the domain
+tag `c8s-verify/v1`. They differ only in the session fields. For
+`c8s/attest-pq/v1`, the fields are `session_pubkey.x25519` and
+`session_pubkey.mlkem768`. For `+xwing`, they are `xwing_ek`, `xwing_ct`, and
+`session_id`, all unpadded base64url. The response does not say which variant
+it uses (production omits `c8s.attestationProtocol`). The registry therefore
+pins it per release as `workload_attestation_protocol`.
+
+The workload `front_door_mode` is the workload sidecar's own credential mode
+(`webpki` on every workload on 2026-09-24). It is only a transcript input.
+Workloads do not terminate public TLS, so the TEE-held-mode policy applies only
+to the front door.
+
+How each construction was confirmed:
+
+- **`c8s/attest-pq/v1+xwing`** is specified in the MIT-licensed
+  `confidential-dot-ai/c8s-verify-js` `PROTOCOL.md` ("Report-data and
+  mesh-identity binding") and `src/identity.ts` `identityTranscriptHash`, at
+  commit `d589419a5d61b63b6c5c086e2e4a5a073402a445`.
+- **`c8s/attest-pq/v1`** (x25519 and ML-KEM-768) combines two MIT sources. The
+  same repository's `src/identity.ts` at `3b48074^` (`54074f0`, before the
+  X-Wing change) gives the field order: domain tag, CA hash, leaf hash, x25519,
+  ML-KEM-768, nonce. Commit `d589419` shows where `LP(front_door_mode)` goes,
+  right after the domain tag. No MIT source has both together; the combination
+  was confirmed empirically.
+- **Empirical check.** On 2026-09-24, live production and candidate
+  `/attestation` responses were checked with the constructions above, 12
+  workload receipts in total (6 per deployment). For every receipt, the
+  recomputed digest equaled `report_data[0:48]`, the padding was zero, and the
+  ECDSA identity proof verified under the chain-verified mesh leaf. The same
+  constructions without `LP(front_door_mode)` did not match any receipt. The
+  captured fixtures replay this check in
+  `tests/provider_verifier/c8s_soundness.py`.
+- `c8s/attest-lb/v1` is unchanged from the front-door adapter. MIT-licensed
+  `confidential-dot-ai/TEErminator` `internal/verifier/endpoint.go` specifies
+  it.
+
+No AGPL `confidential-dot-ai/c8s` code was used.
 
 ## Release registry
 
@@ -107,36 +228,51 @@ The scope is `router`. One origin and one SPKI serve every configured model.
 - the accepted RTMR3 values, with their source
 - the accepted allowlist digests
 - the accepted mesh CA digests, when the bundle publishes one
+- `workload_attestation_protocol`: the reviewed attest-pq variant
+- `required_workloads`: `{target, workload, identity}` for `gateway`,
+  `sglang-router`, and every `inference-worker-*`, copied from the bundle's
+  `c8s.attestationTargets`
 
-MRTD, RTMR1, RTMR2, the allowlist digest, and (for `v0.13.28-rc.2`) the mesh CA
-digest come from `confidential-dot-ai/confidential-inference`
+The loader rejects an entry that has no RTMR3 set, no allowlist, an unknown
+workload protocol, or duplicate targets. It also rejects an entry whose
+`required_workloads` omits `gateway`, `sglang-router`, or all inference
+workers.
+
+MRTD, RTMR1, RTMR2, the allowlist digest, the attestation targets, and (for
+`v0.13.28-rc.2`) the mesh CA digest come from
+`confidential-dot-ai/confidential-inference`
 `releases/production/release-bundle.json` (`c8s.measurements`,
-`allowlistDigest`, and `c8s.meshCa`). Both bundles' SHA-256 digests match the
-`release.bundleSha256` that the live endpoints report. The bundles do not
-publish RTMR3, so each accepted RTMR3 records `"source": "observed-live"` and
-the observation date.
+`allowlistDigest`, `c8s.attestationTargets`, and `c8s.meshCa`). Both bundles'
+SHA-256 digests match the `release.bundleSha256` that the live endpoints
+report. The bundles do not publish RTMR3 or the attest-pq variant. Each accepted
+RTMR3 therefore records `"source": "observed-live"` and the observation date,
+and the variant comes from the empirical check above.
 
-| Release | Endpoint on 2026-09-23 | Bundle | Policy mode |
-| --- | --- | --- | --- |
-| `v0.13.27-static-attestation-20260910` | production | unsigned, from commit `475c35d` | static |
-| `v0.13.28-rc.2` | candidate | signed pre-release (Sigstore bundle asset recorded, not verified by this adapter) | operator |
+| Release | Endpoint on 2026-09-24 | Bundle | Policy mode | Workload protocol |
+| --- | --- | --- | --- | --- |
+| `v0.13.27-static-attestation-20260910` | production | unsigned, from commit `475c35d` | static | `c8s/attest-pq/v1` |
+| `v0.13.28-rc.2` | candidate | signed pre-release (Sigstore bundle asset recorded, not verified by this adapter) | operator | `c8s/attest-pq/v1+xwing` |
 
 The adapter never fetches bundles or measurements at verification time. To
 accept a new release:
 
 1. Review the bundle.
 2. Confirm that its digest matches the live `release.bundleSha256`.
-3. Record RTMR3 from a verified live quote.
-4. Add the entry in a reviewed gateway change.
+3. Copy the plaintext-path targets from `c8s.attestationTargets`.
+4. Confirm that the workload transcript variant matches live receipts.
+5. Record RTMR3 from verified live quotes. Every required node must report an
+   accepted value.
+6. Add the entry in a reviewed gateway change.
 
 A release that is not in the registry fails closed.
 
 The registry ships with the gateway, so accepting a release takes a gateway
 redeploy. The provider published two releases on 2026-09-23 alone. Without
 notice before rollout, a provider release makes this upstream fail
-verification until the registry catches up. Deployments that use it as a
-fallback should not rely on it until the provider commits to publishing
-releases before rolling them out (audit criterion 7).
+verification until the registry catches up. So does a change to the worker
+set, such as scaling to `inference-worker-2`. Deployments that use this
+upstream as a fallback should not rely on it until the provider commits to
+publishing releases before rolling them out (audit criterion 7).
 
 ## RTMR3 and the operator key
 
@@ -144,38 +280,71 @@ A non-zero RTMR3 means the c8s operator key was armed at boot. The provider's
 threat model states that this key can obtain cluster-admin, which can exec into
 a pod inside the TEE and read workload memory. The product owner accepted
 starting implementation while this remains open. The adapter therefore never
-skips RTMR3. It accepts only the RTMR3 values listed for that release. Every
-value accepted today has the key armed (`"operator_key_armed": true`).
+skips RTMR3. It accepts only the RTMR3 values listed for that release, on the
+front-door node and on every workload node. Every value accepted today has the
+key armed (`"operator_key_armed": true`).
 
 The provider plans to remove the operator key and pin RTMR3 to zero. Zero is
 not accepted today. A zero RTMR3 on a current release fails like any other
 unlisted value. When a reviewed release ships with the key removed, add that
 release with an RTMR3 of zero and `"operator_key_armed": false`. The
-`os_known_good` claim then changes from refuted to asserted.
+`os_known_good` claim then changes from refuted to asserted. It stays refuted
+while any verified node's accepted RTMR3 has the key armed.
+
+The soundness test covers this transition with a hypothetical zero-only entry
+(no real zero entry exists). Today's non-zero quotes fail against it. Quotes
+that report zero on every node verify with `operator_key_armed: false`. One
+armed node keeps the whole upstream armed. The Rust claim test
+`c8s_refutes_the_os_while_the_operator_key_is_armed` maps
+`operator_key_armed: false` to an asserted `os_known_good`.
 
 ## Verified claims
 
 | Claim | Result |
 | --- | --- |
-| TEE attested | Asserted (hardware-proven): DCAP-verified TDX quote whose report_data binds the nonce and the serving TLS leaf. |
-| Platform TCB current | Asserted only for `UpToDate`; any other status fails verification. |
-| OS known good | Refuted while the accepted RTMR3 arms the operator key. Asserted once a reviewed release accepts an RTMR3 with the key removed. |
-| Serving software known good | Unknown. The allowlist digest must be in the reviewed set, but the adapter reads it from the response JSON; this adapter does not bind it to the quote. |
+| TEE attested | Asserted (hardware-proven): DCAP-verified TDX quotes for the front door (report_data binds the nonce and the serving TLS leaf) and for each plaintext-path workload (report_data binds the nonce and the workload's mesh identity). |
+| Platform TCB current | Asserted only when every quote is `UpToDate`; any other status fails verification. |
+| OS known good | Refuted while any accepted RTMR3 arms the operator key. Asserted once a reviewed release accepts only RTMR3 values with the key removed. |
+| Serving software known good | Unknown. The allowlist digest is in the reviewed set, and each workload leaf carries it in its CA-signed stamp. The mesh CA's own TEE evidence is not verified, so no quote vouches for the stamp. |
 | GPU attested | Unknown. The bridge emits `gpu_verified: false` and never fails on GPU evidence. |
-| Model weights provenance | Unknown. The bundle pins a model revision and dm-verity root, but the adapter does not verify the worker receipts. |
+| Model weights provenance | Unknown. The bundle pins a model revision and dm-verity root, and the workers' stamped identities name the reviewed worker workloads. The adapter does not verify the weights. |
 
 `provider_claims` also records `tcb_status`, `release_id`, `bundle_sha256`,
 `bundle_signed`, `policy_mode`, `mesh_ca_sha256`, `allowlist_sha256`,
-`front_door_mode`, `tls_mode`, the measured registers, `rtmr3_source`,
-`operator_key_armed`, the matched `registry_entry`, and the provider's own
-`scope` and `operationalStatus` (`launch-or-admission-only` and `not-verified`
-on 2026-09-23).
+`front_door_mode`, `tls_mode`, the front door's measured registers,
+`rtmr3_source`, `operator_key_armed`, `workload_attestation_protocol`, the
+matched `registry_entry`, and the provider's own `scope` and
+`operationalStatus` (`launch-or-admission-only` and `not-verified` on
+2026-09-24).
+
+`verified_workloads` maps each required target to what it matched:
+
+```json
+"inference-worker-0": {
+  "workload": "inference-worker-0",
+  "identity": "inference-worker-0",
+  "release_id": "v0.13.28-rc.2",
+  "attestation_protocol": "c8s/attest-pq/v1+xwing",
+  "front_door_mode": "webpki",
+  "allowlist_sha256": "sha256:eb60…0dcc",
+  "tcb_status": "UpToDate",
+  "mrtd": "9309…8ba1",
+  "rtmr1": "70f5…de6c",
+  "rtmr2": "f57a…5b59",
+  "rtmr3": "3e70…091f",
+  "rtmr3_source": "observed-live",
+  "operator_key_armed": true,
+  "rtmr0": "d695…"
+}
+```
 
 ## What a tamper rejects
 
 `tests/provider_verifier/c8s_soundness.py` replays live production and
-candidate captures. The quote is verified by the real `dcap_qvl` against the
-collateral captured with it. Each tamper must fail closed:
+candidate captures. Every quote is verified by the real `dcap_qvl` against the
+collateral captured with it. Each tamper must fail closed.
+
+Front door and release:
 
 | Tamper | Rejected by |
 | --- | --- |
@@ -201,16 +370,76 @@ collateral captured with it. Each tamper must fail closed:
 | Mesh CA not in a release's accepted set | accepted mesh CA set |
 | Mesh leaf expired | certificate validity check |
 | Non-HTTPS origin or origin with a path | origin validation |
+| Registry entry without RTMR3, workload protocol, or a required router or worker target | registry loader |
+
+Workloads:
+
+| Tamper | Rejected by |
+| --- | --- |
+| `receipts[]` missing, or the `inference-worker-1` receipt removed | required target set |
+| `gateway` receipt duplicated | one receipt per required target |
+| Extra `inference-worker-2` receipt not in the release | unreviewed inference worker |
+| `c8s.attestationProtocol` differs from the reviewed variant | workload protocol pin |
+| Worker `identity` or `workload` label changed | target binding |
+| Two genuine worker receipts swapped between targets | matched-workload stamp in the CA-signed leaf |
+| Worker receipt nonce changed | workload receipt nonce mismatch |
+| Worker receipt version changed | attest-pq version check |
+| Worker session key, X-Wing ciphertext, or `front_door_mode` changed | workload identity proof over the attest-pq transcript |
+| Worker `session_id` of the wrong size | session field size check |
+| Worker identity proof signature changed | ECDSA verification under the workload mesh leaf |
+| Worker verified report_data changed (`+xwing` and legacy) | attest-pq transcript comparison |
+| Worker quote bytes changed | DCAP signature verification |
+| Worker chain from another cluster, or worker leaf re-parented to another CA | same mesh CA as the front door |
+| Worker debug TD | `td_attributes` TUD check |
+| Worker or router TCB `OutOfDate` or `SWHardeningNeeded` | TCB status must be `UpToDate` |
+| Worker MRTD or RTMR1, gateway RTMR2, or candidate worker RTMR1 not pinned | release measurement pins |
+| Worker RTMR3 zero or from another release | accepted RTMR3 set |
+| Candidate release pinned to the other attest-pq variant | session field decoding |
+| Malformed matched-workload stamp (absent, trailing bytes, wrong version, long-form length, short digest, bad grammar) | strict stamp parser |
+
+## Performance
+
+The bridge verifies 5 quotes per call: the front door and the 4 required
+workloads. Collateral fetches and DCAP checks run concurrently, at most 4 at a
+time. Collateral is cached per FMSPC and PCK CA for the duration of one
+verification, so production (one FMSPC) needs one fetch and candidate (two
+FMSPCs) needs two.
+
+On 2026-09-24, one bridge process run through `uv` took 3.6 s end to end
+against production and 4.4 s against candidate. An instrumented in-process
+production run took 2.6 s:
+
+| Step | Time |
+| --- | --- |
+| `GET /attestation` (about 1.3 MB) | 1.56 s |
+| One shared collateral fetch (PCCS) | 0.96 s |
+| 5 DCAP verifications | about 2 ms each |
+
+The response fetch and one collateral round trip dominate. Without the per-FMSPC
+cache, each quote would fetch the same collateral again.
 
 ## Trust boundaries and limitations
 
-- The trust boundary is the c8s front door on a measured node. The adapter
-  does not verify the per-workload `receipts[]`, the mesh CA's embedded RA-TLS
-  evidence, or the allowlist document contents. The provider declares
-  `scope: "launch-or-admission-only"` and `operationalStatus: "not-verified"`.
-- Mesh peers are authenticated by the mesh CA chain, not by per-peer
-  measurement. The mesh CA changes when CDS restarts. The CA of a release with
-  a pinned mesh CA must be updated in the registry, or verification fails.
+- The trust boundary is the front door plus the `gateway`, `sglang-router`, and
+  `inference-worker-*` workloads, each on a node that matches the reviewed
+  release. `metrics-collector` and `kube-state-metrics` are not verified. The
+  provider declares `scope: "launch-or-admission-only"` and
+  `operationalStatus: "not-verified"`.
+- Workload receipts prove that measured nodes, holding leaves from the front
+  door's mesh CA, run the reviewed workload identities right now. They do not
+  bind the forwarded request to a specific worker. Routing inside the cluster
+  relies on the mesh: peers authenticate with leaves from that CA, and the CA
+  stamps only allowlist-admitted workloads. The adapter does not verify the mesh
+  CA's embedded RA-TLS evidence or the allowlist document contents.
+- A worker that the router can reach but that has no receipt in `receipts[]`
+  is not detected. An unlisted `inference-worker-*` receipt fails, but the
+  adapter cannot see a worker the response omits.
+- In `+xwing` receipts, the X-Wing key exchange belongs to a session between the
+  provider's attestation aggregator and the workload, not to the gateway. The
+  adapter uses `xwing_ek`, `xwing_ct`, and `session_id` only as transcript
+  inputs. It does not use that session for traffic.
+- The mesh CA changes when CDS restarts. The CA of a release with a pinned mesh
+  CA must be updated in the registry, or verification fails.
 - The operator key remains armed on every accepted release (see above).
 - The production bundle is unsigned. The candidate bundle is a signed
   pre-release. The adapter does not verify Sigstore signatures; the registry
@@ -233,10 +462,12 @@ cargo test c8s
 
 `cargo test --test c8s_bridge` runs the soundness script through `uv`. The
 fixtures in `tests/fixtures/c8s/` are live `/attestation` responses captured on
-2026-09-23 with the serving leaf from the same connection and the DCAP
-collateral valid at capture time. Fields outside the transcript, quote, and
-identity proof (`c8s.discovery`, the allowlist document, `receipts[]`, GPU
-evidence items, and the event log) were removed to keep the files small.
+2026-09-24. Each includes the serving leaf from the same connection and the DCAP
+collateral for every FMSPC in the response, valid at capture time. Fields
+outside the transcripts, quotes, mesh chains, and identity proofs were removed
+to keep the files small (`c8s.discovery`, the allowlist document, GPU evidence
+items, event logs, `receipts[].admittedLaunch`, and worker `nvidia_gpu`). Each
+fixture lists the removed fields in `trimmed`.
 
 For a live check against the unauthenticated attestation endpoint:
 
@@ -246,5 +477,6 @@ printf '%s' '{"provider":"c8s","url_origin":"https://api.confidential.ai","model
 ```
 
 A successful result has `result: "verified"`, `attested_scope: "router"`, one
-`tls_spki_sha256` binding, and the matched release in
-`provider_claims.registry_entry`.
+`tls_spki_sha256` binding, the matched release in
+`provider_claims.registry_entry`, and one entry per required target in
+`provider_claims.verified_workloads`.

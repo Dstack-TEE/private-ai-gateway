@@ -113,9 +113,10 @@ nothing.
   facts stay in `extra`.
 - ⁴ SecretAI policy and claim details are documented in
   [SecretAI verification](providers/secret-ai/verification.md).
-- ⁵ c8s requires DCAP `UpToDate`. `os_known_good` is refuted while the
-  accepted RTMR3 arms the c8s operator key, and asserted once a reviewed
-  release pins it with the key removed. GPU evidence is not verified. See
+- ⁵ c8s requires DCAP `UpToDate` for the front door and for every
+  plaintext-path workload quote (gateway, router, inference workers).
+  `os_known_good` is refuted while any accepted RTMR3 arms the c8s operator
+  key, and asserted once a reviewed release pins it with the key removed. GPU evidence is not verified. See
   [Confidential AI (c8s) verification](providers/c8s/verification.md).
 - "generic" is a verifier path with no provider-specific identity: it asserts
   only `tee_attested` (`verifier_derived`), nothing else.

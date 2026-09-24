@@ -216,10 +216,11 @@ impl ProviderClaimMapper for SecretAiClaims {
 }
 
 /// Confidential AI (c8s): a DCAP-verified TDX front-door quote whose
-/// report_data binds the serving TLS leaf, with node measurements matched to a
-/// reviewed release. Serving software stays Unknown (the allowlist digest is a
-/// provider statement, not quote-bound), and the provider's GPU evidence is not
-/// verified, so `gpu_attested` stays Unknown.
+/// report_data binds the serving TLS leaf, plus one nonce-bound quote per
+/// plaintext-path workload (gateway, router, inference workers), all on nodes
+/// matched to a reviewed release. Serving software stays Unknown (the allowlist
+/// digest is vouched by the unattested mesh CA, not by a quote), and the
+/// provider's GPU evidence is not verified, so `gpu_attested` stays Unknown.
 pub(super) struct C8sClaims;
 impl ProviderClaimMapper for C8sClaims {
     fn claims(&self, event: &UpstreamVerifiedEvent) -> SessionClaims {
@@ -424,10 +425,11 @@ pub(super) fn secret_ai_gpu_claim(event: &UpstreamVerifiedEvent) -> Claim {
     }
 }
 
-/// c8s node OS: MRTD and RTMR1-RTMR3 matched a reviewed release. An accepted
-/// RTMR3 that arms the c8s operator key lets that key reach cluster-admin and
-/// exec into TEE workloads, so it **refutes** (like a dev image's operator
-/// shell) rather than asserting a known-good OS.
+/// c8s node OS: MRTD and RTMR1-RTMR3 of the front-door node and every
+/// plaintext-path workload node matched a reviewed release. An accepted RTMR3
+/// that arms the c8s operator key on any of them lets that key reach
+/// cluster-admin and exec into TEE workloads, so it **refutes** (like a dev
+/// image's operator shell) rather than asserting a known-good OS.
 pub(super) fn c8s_os_claim(event: &UpstreamVerifiedEvent) -> Claim {
     let claims = event.provider_claims.as_ref();
     let field = |key: &str| claims.and_then(|c| c.get(key));
@@ -438,13 +440,17 @@ pub(super) fn c8s_os_claim(event: &UpstreamVerifiedEvent) -> Claim {
         (Some(true), Some(release), Some(true)) => Claim::refuted(
             ClaimSource::VerifierDerived,
             format!(
-                "c8s node measurements match reviewed release {release}, but its RTMR3 arms \
-                 the operator key, which can reach cluster-admin inside the TEE"
+                "c8s front-door and workload node measurements match reviewed release \
+                 {release}, but its RTMR3 arms the operator key, which can reach cluster-admin \
+                 inside the TEE"
             ),
         ),
         (Some(true), Some(release), Some(false)) => Claim::asserted(
             ClaimSource::VerifierDerived,
-            format!("c8s node MRTD and RTMR1-RTMR3 match reviewed release {release}"),
+            format!(
+                "c8s front-door and workload node MRTD and RTMR1-RTMR3 match reviewed release \
+                 {release}"
+            ),
         ),
         _ => Claim::unknown(),
     }
@@ -612,6 +618,12 @@ mod claim_mapping_tests {
                 "node_measurements_pinned": true,
                 "release_id": "v0.13.28-rc.2",
                 "operator_key_armed": armed,
+                "verified_workloads": {
+                    "inference-worker-0": {
+                        "release_id": "v0.13.28-rc.2",
+                        "operator_key_armed": armed,
+                    },
+                },
                 "gpu_verified": false,
             })
         };

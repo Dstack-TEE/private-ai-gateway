@@ -228,7 +228,7 @@ Supported `provider` values:
 | `chutes` | Chutes provider adapter. |
 | `secret-ai` | Direct SecretAI SecretVM origin with optional workload pinning; see [SecretAI verification](providers/secret-ai/verification.md). |
 | `phala-direct` | Direct Phala dstack-vllm-proxy endpoint. |
-| `c8s` | Confidential AI (c8s) front door, verified against the reviewed release registry; see [Confidential AI (c8s) verification](providers/c8s/verification.md). |
+| `c8s` | Confidential AI (c8s) front door and plaintext-path workloads, verified against the reviewed release registry; see [Confidential AI (c8s) verification](providers/c8s/verification.md). |
 
 Provider verification policy belongs on the upstream entry. For ACI service
 routes, configure accepted keyset subjects, image digests, or dstack KMS
@@ -252,9 +252,9 @@ origin must meet the componentwise AMD TCB minimum embedded in the verifier.
 
 For `c8s`, `base_url` must be the root HTTPS origin, for example
 `https://api.confidential.ai`. The entry has no measurement fields. The verifier
-accepts only the releases, measurements, RTMR3 values, and allowlist digests in
-`scripts/provider_verifier/provider_refs/c8s.json`, which ships with the gateway
-release. The `/attestation` endpoint needs no credential; `bearer_token` is used
+accepts only the releases, measurements, RTMR3 values, allowlist digests, and
+required workload targets in `scripts/provider_verifier/provider_refs/c8s.json`,
+which ships with the gateway release. The `/attestation` endpoint needs no credential; `bearer_token` is used
 only for model traffic.
 
 For `aci-service`, `base_url` is the HTTPS origin used for both model traffic and
