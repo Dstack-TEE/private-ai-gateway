@@ -18,6 +18,7 @@ import {
   AISDK_OPENAI_COMPATIBLE,
   OPENCODE_ACI_PACKAGE,
   sameEndpoint,
+  sanitizeAciRequestBody,
   verifiedEndpointOnly,
 } from "./endpoints.ts";
 import { pluginConfig, type OpenCodeAciPluginOptions } from "./options.ts";
@@ -73,6 +74,14 @@ export interface OpenCodeAciV2AccountAuthMethod {
     callback: Promise<Credential.OAuth>;
   }>;
   label: (credential: Credential.OAuth) => string | undefined;
+}
+
+export function pinVerifiedModel(model: Model.Info, baseURL: string): Model.Info {
+  return {
+    ...model,
+    package: OPENCODE_ACI_PACKAGE,
+    settings: { ...model.settings, baseURL },
+  };
 }
 
 export function createOpenCodeAccountAuthMethodV2(
@@ -263,10 +272,20 @@ export function createOpenCodeAciV2Plugin({
         if (!provider) throw new Error(blockedReason);
         const violation = verifiedEndpointOnly(request, provider.config.baseURL);
         if (violation) throw new Error(`ACI inference blocked: ${violation}`);
+        const original = init?.body;
+        const sanitized = original === undefined ? undefined : sanitizeAciRequestBody(original);
+        if (sanitized !== original && init) {
+          init.body = sanitized as BodyInit;
+        }
         return provider.fetch(request, init);
       };
 
       await ctx.provider.transform((editor) => {
+        // Pin the verified runtime package and endpoint on every model as
+        // well: a user `providers.<id>.settings` or `.package` override
+        // replaces the provider record, and model settings take precedence.
+        // Without this, an override would hand traffic to a plain transport.
+        const verifiedBaseURL = active?.config.baseURL ?? initial.baseURL;
         editor.add({
           info: {
             ...Provider.Info.empty(Provider.ID.make(providerID)),
@@ -274,9 +293,11 @@ export function createOpenCodeAciV2Plugin({
             activation: "auto",
             package: OPENCODE_ACI_PACKAGE,
             integrationID: Integration.ID.make(providerID),
-            settings: { baseURL: initial.baseURL },
+            settings: { baseURL: verifiedBaseURL },
           },
-          models: catalog.map((model) => mapOpenCodeModelV2(providerID, model)),
+          models: catalog.map((model) =>
+            pinVerifiedModel(mapOpenCodeModelV2(providerID, model), verifiedBaseURL),
+          ),
         });
       });
 

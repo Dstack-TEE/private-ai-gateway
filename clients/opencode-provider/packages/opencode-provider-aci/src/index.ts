@@ -16,21 +16,26 @@ import type {
 } from "@opencode-ai/plugin";
 import type { Plugin as OpenCodeV2Plugin } from "@opencode/plugin";
 
-import { OPENCODE_ACI_PACKAGE, sameEndpoint, verifiedEndpointOnly } from "./endpoints.ts";
 import { createAciInspectTool } from "./inspect.ts";
 import { pluginConfig, type OpenCodeAciPluginOptions } from "./options.ts";
 import type { CreateOpenCodeAciV2PluginOptions } from "./v2.ts";
 
-export { OPENCODE_ACI_PACKAGE, sameEndpoint, verifiedEndpointOnly };
+export {
+  OPENCODE_ACI_PACKAGE,
+  sameEndpoint,
+  sanitizeAciRequestBody,
+  verifiedEndpointOnly,
+} from "./endpoints.ts";
 export type { CreateOpenCodeAciV2PluginOptions };
 export type { OpenCodeAciPluginOptions } from "./options.ts";
 
 /**
  * Load the OpenCode V2 definition on demand. V1 hosts never import the V2
  * plugin SDK (`@opencode/plugin`, the AI SDK provider) just to load the
- * server-plugin entrypoint.
+ * server-plugin entrypoint. Use the synchronous factory from `./v2` when the
+ * definition is already being loaded on a V2 host.
  */
-export async function createOpenCodeAciV2Plugin(
+export async function loadOpenCodeAciV2Plugin(
   options: CreateOpenCodeAciV2PluginOptions,
 ): Promise<OpenCodeV2Plugin.Plugin> {
   const module = await import("./v2.ts");
@@ -239,7 +244,7 @@ let v2Definition: OpenCodeV2Plugin.Plugin | undefined;
 const plugin: PluginModule & OpenCodeV2Plugin.Plugin = {
   id: "@phala/opencode-provider-aci",
   async setup(context) {
-    v2Definition ??= await createOpenCodeAciV2Plugin({ id: "@phala/opencode-provider-aci" });
+    v2Definition ??= await loadOpenCodeAciV2Plugin({ id: "@phala/opencode-provider-aci" });
     return v2Definition.setup(context);
   },
   server: AciProviderPlugin,

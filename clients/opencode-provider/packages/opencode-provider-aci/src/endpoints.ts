@@ -36,3 +36,30 @@ export function verifiedEndpointOnly(
     return "invalid ACI request URL";
   }
 }
+
+/**
+ * OpenCode adds a non-object `provider` field to request bodies when a custom
+ * provider entry exists in configuration. ACI serving constraints require that
+ * field to be a JSON object when present, so drop OpenCode's own provider id
+ * while leaving a caller-supplied routing object untouched.
+ */
+export function sanitizeAciRequestBody(body: unknown): unknown {
+  if (typeof body !== "string") return body;
+  let value: unknown;
+  try {
+    value = JSON.parse(body);
+  } catch {
+    return body;
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return body;
+  const root = value as Record<string, unknown>;
+  const provider = root.provider;
+  if (
+    provider === undefined ||
+    (typeof provider === "object" && provider !== null && !Array.isArray(provider))
+  ) {
+    return body;
+  }
+  delete root.provider;
+  return JSON.stringify(root);
+}
