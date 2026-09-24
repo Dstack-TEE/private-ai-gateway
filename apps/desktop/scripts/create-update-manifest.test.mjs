@@ -8,22 +8,21 @@ import { promisify } from "node:util";
 import { artifactName, desktopPackages, desktopTargets, manifestTargets } from "./release-artifacts.mjs";
 import { updateFeeds } from "./update-feeds.mjs";
 
-test("partial releases preserve independent platform versions and the complete legacy feed", () => {
+test("releases write latest.json to every channel feed and legacy per-platform files to their own", () => {
   const targets = desktopTargets;
   const manifest = { version: "0.1.2-beta.38", channel: "beta", platforms: Object.fromEntries(targets.map((target) => [target, { url: target, signature: target }])) };
   assert.deepEqual(manifestTargets(manifest), targets);
   assert.throws(() => manifestTargets({ platforms: { unsupported: {} } }), /unsupported desktop targets: unsupported/);
   assert.throws(() => manifestTargets({ platforms: {} }), /no desktop targets/);
-  const complete = updateFeeds(manifest, targets);
+  const complete = updateFeeds(manifest, targets, "beta");
   assert.equal(complete.size, 7);
   assert.deepEqual(complete.get("latest.json"), manifest);
   assert.deepEqual(Object.keys(complete.get("latest-linux-aarch64.json").platforms), ["linux-aarch64-deb", "linux-aarch64-rpm"]);
-  const partial = updateFeeds({ ...manifest, version: "0.1.2-beta.39" }, ["darwin-aarch64"]);
+  const partial = updateFeeds({ ...manifest, version: "0.1.2-beta.39" }, ["darwin-aarch64"], "beta");
   assert.deepEqual([...partial.keys()], ["latest-darwin-aarch64.json"]);
-  const published = new Map([...complete, ...partial]);
-  assert.equal(published.get("latest-darwin-aarch64.json").version, "0.1.2-beta.39");
-  assert.equal(published.get("latest-linux-aarch64.json").version, "0.1.2-beta.38");
-  assert.equal(published.get("latest.json").version, "0.1.2-beta.38");
+  const stable = { ...manifest, version: "0.1.2", channel: "stable" };
+  assert.equal(updateFeeds(stable, targets, "stable").size, 7);
+  assert.deepEqual([...updateFeeds(stable, targets, "beta")], [["latest.json", stable]]);
 });
 
 for (const [channel, version] of [["stable", "0.1.2"], ["beta", "0.1.2-beta.10"]]) {

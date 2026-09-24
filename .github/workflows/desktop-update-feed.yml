@@ -17,7 +17,8 @@ permissions:
   contents: write
 
 concurrency:
-  group: desktop-update-feed-${{ contains(inputs.tag, '-beta.') && 'beta' || 'stable' }}
+  # Stable releases also write the beta feed.
+  group: desktop-update-feed
   cancel-in-progress: false
 
 jobs:

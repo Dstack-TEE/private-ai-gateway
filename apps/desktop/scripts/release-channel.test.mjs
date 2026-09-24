@@ -57,12 +57,16 @@ test("stable release requests come from main and cover every platform", () => {
   );
 });
 
-test("feeds advance using SemVer without downgrade or cross-channel contamination", () => {
+test("feeds advance using SemVer; the beta feed also carries stable releases", () => {
   assert.equal(shouldAdvance("0.2.0-beta.10", "0.2.0-beta.2", "beta"), true);
   assert.equal(shouldAdvance("0.2.0-beta.2", "0.2.0-beta.10", "beta"), false);
   assert.equal(shouldAdvance("0.2.0-beta.2", "0.2.0-beta.2", "beta"), false);
   assert.equal(shouldAdvance("0.2.0-beta.1", undefined, "beta"), true);
   assert.equal(shouldAdvance("0.2.0", "0.1.9", "stable"), true);
-  assert.throws(() => shouldAdvance("0.2.0-beta.1", "0.1.9", "beta"));
+  assert.equal(shouldAdvance("0.2.0", "0.2.0-beta.10", "beta"), true);
+  assert.equal(shouldAdvance("0.2.1-beta.1", "0.2.0", "beta"), true);
+  assert.equal(shouldAdvance("0.1.9", "0.2.0-beta.1", "beta"), false);
   assert.throws(() => shouldAdvance("0.2.0", "0.2.0-beta.1", "stable"));
+  assert.throws(() => shouldAdvance("0.2.0-beta.1", undefined, "stable"));
+  assert.throws(() => shouldAdvance("0.2.0-rc.1", undefined, "beta"));
 });

@@ -24,24 +24,14 @@ pub fn channel_name(channel: UpdateChannel) -> &'static str {
     }
 }
 
-/// Feeds consulted for a channel. Beta users also follow the stable feed so a
-/// stable release newer than the latest beta is never withheld from them.
-pub fn feeds(channel: UpdateChannel) -> &'static [UpdateChannel] {
-    match channel {
-        UpdateChannel::Beta => &[UpdateChannel::Beta, UpdateChannel::Stable],
-        UpdateChannel::Stable => &[UpdateChannel::Stable],
-    }
-}
-
-/// Whether a release version may be published in `feed`.
+/// Whether a release version may be published in `feed`. Stable releases are
+/// also published to the beta feed, so beta users receive them too.
 pub fn belongs_to_feed(version: &str, feed: UpdateChannel) -> bool {
     let Ok(version) = semver::Version::parse(version) else {
         return false;
     };
-    match feed {
-        UpdateChannel::Stable => version.pre.is_empty(),
-        UpdateChannel::Beta => version.pre.as_str().starts_with("beta."),
-    }
+    version.pre.is_empty()
+        || feed == UpdateChannel::Beta && version.pre.as_str().starts_with("beta.")
 }
 
 /// The channel of the running build, used until one is saved.
@@ -80,35 +70,14 @@ fn release_root(configured: &str) -> Result<url::Url, String> {
     Ok(root)
 }
 
-/// The per-platform manifest of `feed` derived from the configured feed.
-pub fn feed_url(configured: &str, feed: UpdateChannel, target: &str) -> Result<url::Url, String> {
+/// The static update manifest of `feed` derived from the configured feed.
+pub fn feed_url(configured: &str, feed: UpdateChannel) -> Result<url::Url, String> {
     release_root(configured)?
         .join(&format!(
-            "desktop-updates-{}/latest-{target}.json",
+            "desktop-updates-{}/latest.json",
             channel_name(feed)
         ))
         .map_err(|_| INVALID_FEED.into())
-}
-
-/// The updater's `{os}-{arch}` manifest target for this build.
-pub fn target() -> Option<String> {
-    let os = if cfg!(target_os = "linux") {
-        "linux"
-    } else if cfg!(target_os = "macos") {
-        "darwin"
-    } else if cfg!(windows) {
-        "windows"
-    } else {
-        return None;
-    };
-    let arch = if cfg!(target_arch = "x86_64") {
-        "x86_64"
-    } else if cfg!(target_arch = "aarch64") {
-        "aarch64"
-    } else {
-        return None;
-    };
-    Some(format!("{os}-{arch}"))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
@@ -213,39 +182,24 @@ pub struct UpdateInfo {
 #[derive(Deserialize)]
 struct Manifest {
     version: String,
-    channel: String,
 }
 
-/// Checks the release feeds of `channel` without downloading a package.
+/// Checks the release feed of `channel` without downloading a package.
 pub async fn check(
     configured: &str,
     channel: UpdateChannel,
     current_version: &str,
     installation: Installation,
 ) -> Result<UpdateNotice, String> {
-    let target = target().ok_or("Updates are unavailable on this platform")?;
     let current = semver::Version::parse(current_version)
         .map_err(|_| "The installed version is invalid".to_string())?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|_| "Could not check for updates")?;
-    let mut latest: Option<semver::Version> = None;
-    let mut channel_published = true;
-    for &feed in feeds(channel) {
-        match published_version(&client, feed_url(configured, feed, &target)?, feed).await {
-            Ok(Some(version)) => {
-                if version > current && latest.as_ref().is_none_or(|latest| version > *latest) {
-                    latest = Some(version);
-                }
-            }
-            Ok(None) if feed == channel => channel_published = false,
-            Ok(None) => {}
-            // The stable feed only supplements beta; its failure never hides beta releases.
-            Err(_) if feed != channel => {}
-            Err(error) => return Err(error),
-        }
-    }
+    let published = published_version(&client, feed_url(configured, channel)?, channel).await?;
+    let channel_published = published.is_some();
+    let latest = published.filter(|version| *version > current);
     let (commands, download_url) = match &latest {
         Some(version) => upgrade_steps(
             installation,
@@ -286,7 +240,7 @@ async fn published_version(
         .json()
         .await
         .map_err(|_| "The update feed is invalid")?;
-    if manifest.channel != channel_name(feed) || !belongs_to_feed(&manifest.version, feed) {
+    if !belongs_to_feed(&manifest.version, feed) {
         return Err("The update does not match the selected channel".into());
     }
     semver::Version::parse(&manifest.version)
@@ -386,16 +340,11 @@ mod tests {
         "https://example.test/o/r/releases/download/desktop-updates-beta/latest.json";
 
     #[test]
-    fn beta_follows_stable_releases_but_stable_never_receives_betas() {
-        assert_eq!(
-            feeds(UpdateChannel::Beta),
-            [UpdateChannel::Beta, UpdateChannel::Stable]
-        );
-        assert_eq!(feeds(UpdateChannel::Stable), [UpdateChannel::Stable]);
+    fn beta_feed_carries_stable_releases_but_stable_never_carries_betas() {
         assert!(belongs_to_feed("0.2.0", UpdateChannel::Stable));
+        assert!(belongs_to_feed("0.2.0", UpdateChannel::Beta));
         assert!(belongs_to_feed("0.2.0-beta.10", UpdateChannel::Beta));
         assert!(!belongs_to_feed("0.2.0-beta.1", UpdateChannel::Stable));
-        assert!(!belongs_to_feed("0.2.0", UpdateChannel::Beta));
         assert!(!belongs_to_feed("0.2.0-rc.1", UpdateChannel::Beta));
         assert!(!belongs_to_feed("invalid", UpdateChannel::Stable));
     }
@@ -403,15 +352,14 @@ mod tests {
     #[test]
     fn channel_feeds_derive_from_the_configured_feed() {
         assert_eq!(
-            feed_url(FEED, UpdateChannel::Stable, "windows-x86_64")
+            feed_url(FEED, UpdateChannel::Stable)
                 .expect("valid feed")
                 .as_str(),
-            "https://example.test/o/r/releases/download/desktop-updates-stable/latest-windows-x86_64.json"
+            "https://example.test/o/r/releases/download/desktop-updates-stable/latest.json"
         );
         assert!(feed_url(
             "https://example.test/releases/latest.json",
-            UpdateChannel::Beta,
-            "darwin-aarch64"
+            UpdateChannel::Beta
         )
         .is_err());
     }

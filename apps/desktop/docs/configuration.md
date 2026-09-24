@@ -256,6 +256,11 @@ documents link here instead of keeping their own lists.
 - `src-tauri/src/autostart/migration.rs`, the bridge from the
   tauri-plugin-autostart login item.
 - The legacy default window size shim in `src-tauri/src/window_state.rs`.
+- The per-platform update manifests `latest-<os>-<arch>.json` that 0.1 clients
+  read (see [Updates by installation](distribution.md#updates-by-installation)):
+  the legacy branch of `updateFeeds` in `scripts/update-feeds.mjs`. Delete the
+  files from the `desktop-updates-beta` and `desktop-updates-stable` releases
+  afterwards; 0.2 clients read only `latest.json`.
 
 Not on this list: the `aci` command stays a documented legacy alias with its
 one-line hint. It predates the 0.1 settings format (it is the command name of

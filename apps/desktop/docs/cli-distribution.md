@@ -144,8 +144,8 @@ packages only; `package_only` cannot be combined with a version.
 - Public assets use `private-ai-proxy-<version>-<platform>-<arch>.<format>` or
   `private-ai-proxy-cli-<version>-<platform>-<arch>.<format>`.
 - Stable desktop releases become the repository's Latest release. Beta releases
-  and updater-feed releases never replace Latest. Beta and stable updater feeds
-  remain independent.
+  and updater-feed releases never replace Latest. Stable releases also advance
+  the beta updater feed when they are newer than its latest beta.
 
 `release_summary` accepts Markdown paragraphs or list items, not headings. Pass
 multiline summaries with `gh workflow run -f release_summary="$summary"`; the
