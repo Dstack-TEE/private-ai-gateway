@@ -50,6 +50,7 @@ mod wire;
 pub use clock::{Clock, FixedClock, SystemClock};
 pub use config::{
     validate_source_provenance, AciServiceConfig, ReceiptOwner, DEFAULT_KEYSET_NOT_AFTER_SECONDS,
+    DEFAULT_SESSION_RETENTION_SECONDS,
 };
 pub use errors::{E2eeError, ServiceError, UpstreamVerificationError};
 pub use receipt_store::{InMemoryReceiptStore, ReceiptStore};
@@ -131,6 +132,16 @@ impl AciService {
             return Err(ServiceError::TestKeysInProduction);
         }
         validate_source_provenance(&config.source_provenance)?;
+        // aci/1 §8: a session must remain retrievable for as long as any
+        // receipt citing it is live. A retention window below the receipt TTL
+        // would evict the cited session first; reject rather than silently
+        // undercut the audit trail.
+        if config.session_retention_seconds < config.receipt_ttl_seconds {
+            return Err(ServiceError::InvalidRetentionConfig {
+                session: config.session_retention_seconds,
+                receipt: config.receipt_ttl_seconds,
+            });
+        }
 
         let tls_public_keys = config
             .tls_public_keys
