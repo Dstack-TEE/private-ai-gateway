@@ -1,12 +1,18 @@
-//! Local management protocol. It is never exposed through the inference API.
-use std::{
-    io::{self, BufRead, Write},
-    path::Path,
-    time::{Duration, Instant},
-};
+//! The management API: one HTTP API the service answers on its private local
+//! socket (a named pipe on Windows) and, for the web UI, on TCP, as Docker
+//! Engine serves one API on `unix://` and `tcp://`. It is never exposed
+//! through the inference API.
+//!
+//! - `GET /api/version` answers [`Version`]; clients refuse another build.
+//! - `POST /api/rpc/{command}` runs one command of the table below: the body
+//!   is its parameters as a JSON object, the answer `{"result": …}` or
+//!   `{"error": Error}` with the status of its [`ErrorCode`].
+//! - `GET /api/events` streams server-sent `ui_api::Event`s, starting with a
+//!   full state snapshot.
+use std::{fmt, path::Path};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::{
     account::LoginPresentation,
@@ -16,32 +22,30 @@ use crate::{
     usage::{UsagePage, UsageQuery},
 };
 
-pub const VERSION: u16 = 3;
+/// The HTTP API's version, reported by `GET /api/version` and in the
+/// `Api-Version` header of every answer, as Docker Engine reports its own.
+pub const API_VERSION: u16 = 1;
+pub const API_VERSION_HEADER: &str = "api-version";
+pub const VERSION_PATH: &str = "/api/version";
+pub const RPC_PATH: &str = "/api/rpc/";
+pub const EVENTS_PATH: &str = "/api/events";
 /// The committed app version; Mac App Store builds append their build number
 /// (`runtimeBuildVersion` in `scripts/distribution.mjs`).
 pub const BUILD_VERSION: &str = match option_env!("PAP_BUILD_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
 };
-pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
+/// `GET /api/version`: which backend answers, like Docker's `/version`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Hello {
-    pub protocol_version: u16,
+#[serde(rename_all = "camelCase")]
+pub struct Version {
+    pub api_version: u16,
     pub product: String,
     pub version: String,
     pub instance_id: String,
     pub process_id: u32,
     pub executable: String,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Request {
-    pub version: u16,
-    pub id: u64,
-    pub command: Command,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,22 +60,31 @@ pub trait Call: Into<Command> {
     type Response: Serialize + DeserializeOwned;
 }
 
-/// Expands the command table below into the wire `Command` enum and one typed
-/// `rpc::*` request per command. Unit, newtype and struct entries keep their
-/// variant shape, so the wire format is unchanged. The backend answers each
-/// command with its declared response in an exhaustive match over `Command`.
+/// Expands the command table below into the `Command` enum and one typed
+/// `rpc::*` request per command. The backend answers each command with its
+/// declared response in an exhaustive match over `Command`. Every command
+/// takes a JSON object, so commands without parameters are empty structs.
 macro_rules! commands {
-    (@parse [$($variant:tt)*] [$($request:tt)*]) => {
+    (@parse [$($variant:tt)*] [$($request:tt)*] [$($name:ident)*]) => {
+        /// A command as `{"command": name, "params": {…}}`: the name is the
+        /// snake_case variant and the Tauri command of the renderer method
+        /// that forwards it; parameters are camelCase like the renderer's.
         #[derive(Serialize, Deserialize)]
         #[serde(
-            tag = "method",
+            tag = "command",
             content = "params",
-            rename_all = "camelCase",
+            rename_all = "snake_case",
+            rename_all_fields = "camelCase",
             deny_unknown_fields
         )]
         pub enum Command {
             $($variant)*
         }
+
+        /// Only the command names, to tell an unknown command from invalid parameters.
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum Name { $($name),* }
 
         /// Typed requests: `client.call(rpc::X { .. })` sends `Command::X`
         /// and decodes exactly its declared response.
@@ -80,37 +93,23 @@ macro_rules! commands {
             $($request)*
         }
     };
-    (@parse [$($variant:tt)*] [$($request:tt)*]
+    (@parse [$($variant:tt)*] [$($request:tt)*] [$($names:ident)*]
         $(#[$meta:meta])* $name:ident -> $response:ty; $($rest:tt)*) => {
         impl From<rpc::$name> for Command {
             fn from(_: rpc::$name) -> Self {
-                Self::$name
+                Self::$name {}
             }
         }
         impl Call for rpc::$name {
             type Response = $response;
         }
         commands!(@parse
-            [$($variant)* $(#[$meta])* $name,]
+            [$($variant)* $(#[$meta])* $name {},]
             [$($request)* $(#[$meta])* pub struct $name;]
+            [$($names)* $name]
             $($rest)*);
     };
-    (@parse [$($variant:tt)*] [$($request:tt)*]
-        $(#[$meta:meta])* $name:ident($field:ident: $type:ty) -> $response:ty; $($rest:tt)*) => {
-        impl From<rpc::$name> for Command {
-            fn from(request: rpc::$name) -> Self {
-                Self::$name(request.$field)
-            }
-        }
-        impl Call for rpc::$name {
-            type Response = $response;
-        }
-        commands!(@parse
-            [$($variant)* $(#[$meta])* $name($type),]
-            [$($request)* $(#[$meta])* pub struct $name { pub $field: $type }]
-            $($rest)*);
-    };
-    (@parse [$($variant:tt)*] [$($request:tt)*]
+    (@parse [$($variant:tt)*] [$($request:tt)*] [$($names:ident)*]
         $(#[$meta:meta])* $name:ident { $($field:ident: $type:ty),* $(,)? } -> $response:ty;
         $($rest:tt)*) => {
         impl From<rpc::$name> for Command {
@@ -124,23 +123,23 @@ macro_rules! commands {
         commands!(@parse
             [$($variant)* $(#[$meta])* $name { $($field: $type),* },]
             [$($request)* $(#[$meta])* pub struct $name { $(pub $field: $type),* }]
+            [$($names)* $name]
             $($rest)*);
     };
     ($($entries:tt)*) => {
-        commands!(@parse [] [] $($entries)*);
+        commands!(@parse [] [] [] $($entries)*);
     };
 }
 
-// The only list of management commands: wire parameters and response. The
-// backend (`desktop_runtime::dispatch`) handles each; admission is decided in
-// `desktop_runtime::server::execute`.
+// The only list of management commands: parameters and response. The backend
+// (`desktop_runtime::dispatch`) handles each; admission is decided in
+// `desktop_runtime::server::execute`. Browsers may call only the commands the
+// renderer method table (`ui_api::Method`) forwards.
 commands! {
-    State -> AppState;
-    /// Streams state snapshots on a dedicated connection.
-    Watch -> AppState;
-    Start(config: StartConfig) -> AppState;
+    GetState -> AppState;
+    Start { config: StartConfig } -> AppState;
     Stop -> AppState;
-    /// Answered by the connection under exclusive lifecycle admission.
+    /// Answered under exclusive lifecycle admission; the service then exits.
     Shutdown { instance_id: String, mode: ShutdownMode } -> ();
     Verify {
         profile: ConfidentialProfileInput,
@@ -154,7 +153,8 @@ commands! {
     } -> AppState;
     CompleteAccountLogin { id: String, callback_url: String } -> ();
     BeginAccountLogin { profile: ConfidentialProfileInput } -> LoginPresentation;
-    SaveAccountLogin {
+    /// Starts saving a signed-in account; poll `AccountSaveResult`.
+    BeginAccountSave {
         operation_id: String,
         id: String,
         profile: ConfidentialProfileInput,
@@ -162,30 +162,30 @@ commands! {
         workspace_id: Option<i64>,
     } -> AccountSaveResult;
     AccountSaveResult { operation_id: String } -> AccountSaveResult;
-    AccountDetails { profile_id: String } -> AccountLoginDetails;
-    AccountBalance { target: AccountBalanceTarget } -> Option<AccountBalance>;
+    GetAccountDetails { profile_id: String } -> AccountLoginDetails;
+    GetAccountBalance { target: AccountBalanceTarget } -> Option<AccountBalance>;
     PollAccountLogin { id: String } -> Option<AccountLoginDetails>;
     CancelAccountLogin { id: String } -> ();
     ActivateProfile { profile_id: String } -> AppState;
     DeleteProfile { profile_id: String } -> AppState;
     ClearApiKey -> AppState;
-    ImportProfiles(backup: ProfileBackup) -> ImportResult;
+    ImportProfiles { backup: ProfileBackup } -> ImportResult;
     ExportProfiles { path: String } -> ();
     ExportProfilesContent -> String;
     ExportDiagnostics { path: String } -> ();
     ExportDiagnosticsContent -> String;
-    Usage(query: UsageQuery) -> UsagePage;
-    UsageRecord { record_id: String } -> Option<RequestActivity>;
+    QueryUsage { query: UsageQuery } -> UsagePage;
+    GetUsageRecord { record_id: String } -> RequestActivity;
     ExportUsage { query: UsageQuery, path: String } -> usize;
     ClearUsage -> u64;
-    ClientKey -> String;
+    GetClientKey -> String;
     RotateClientKey -> String;
-    SaveLocalApi(config: ListenConfig) -> AppState;
-    SaveWebUi(config: WebUiConfig) -> AppState;
+    SaveLocalApiConfig { config: ListenConfig } -> AppState;
+    SaveWebUi { config: WebUiConfig } -> AppState;
     /// Set or clear the web UI sign-in password; every browser session ends.
     SetWebUiPassword { password: Option<String> } -> AppState;
     RefreshCatalog -> AppState;
-    Agents -> Vec<AgentStatus>;
+    ListAgents -> Vec<AgentStatus>;
     PreviewAgent { agent_id: String, connect: bool, options: ConnectOptions } -> AgentPreview;
     ApplyAgent {
         agent_id: String,
@@ -197,13 +197,33 @@ commands! {
     ResetSettings -> AppState;
     /// The settings in effect (`config.toml`); never includes a secret.
     Settings -> Config;
-    SetPreference(change: Preference) -> Config;
+    SetPreference { change: Preference } -> Config;
 }
 
-/// Encodes a response the connection handler produces for `C` itself.
-pub fn encode<C: Call>(response: C::Response) -> Result<Value, RpcError> {
-    serde_json::to_value(response)
-        .map_err(|_| RpcError::new("encoding_failed", "Cannot encode the operation result."))
+impl Command {
+    /// The command `POST /api/rpc/{name}` names, with its JSON body.
+    pub fn decode(name: &str, params: Value) -> Result<Self, Error> {
+        serde_json::from_value::<Name>(Value::String(name.into()))
+            .map_err(|_| Error::method_not_found())?;
+        serde_json::from_value(json!({ "command": name, "params": params }))
+            .map_err(|_| Error::invalid_request())
+    }
+
+    /// The command's name and parameters, as `POST /api/rpc/{name}` sends them.
+    pub fn encode(&self) -> Result<(String, Value), Error> {
+        let Ok(Value::Object(mut encoded)) = serde_json::to_value(self) else {
+            return Err(Error::internal());
+        };
+        match (encoded.remove("command"), encoded.remove("params")) {
+            (Some(Value::String(name)), Some(params)) => Ok((name, params)),
+            _ => Err(Error::internal()),
+        }
+    }
+}
+
+/// Encodes a response the service produces for `C` itself.
+pub fn encode<C: Call>(response: C::Response) -> Result<Value, Error> {
+    serde_json::to_value(response).map_err(|_| Error::internal())
 }
 
 /// Export paths travel as JSON strings.
@@ -265,215 +285,239 @@ impl Preference {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Response {
-    pub id: u64,
-    pub outcome: Outcome,
+/// Stable error codes. Each has one HTTP status, following Docker Engine's
+/// `errdefs` classes and the gRPC status codes they correspond to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    /// Malformed parameters (errdefs InvalidParameter, INVALID_ARGUMENT).
+    InvalidRequest,
+    /// No web UI session (errdefs Unauthorized, UNAUTHENTICATED).
+    Unauthorized,
+    /// A request the listener refuses (errdefs Forbidden, PERMISSION_DENIED).
+    Forbidden,
+    /// No such page or endpoint (errdefs NotFound, NOT_FOUND).
+    NotFound,
+    /// No such command, or none this caller may run (NOT_FOUND).
+    MethodNotFound,
+    MethodNotAllowed,
+    UnsupportedMediaType,
+    /// The sign-in budget is spent (RESOURCE_EXHAUSTED).
+    TooManyRequests,
+    /// The current state does not allow it (errdefs Conflict, FAILED_PRECONDITION).
+    InvalidState,
+    /// The backend instance named by a shutdown is gone (FAILED_PRECONDITION).
+    InstanceChanged,
+    /// Another operation holds what this one needs; retry (errdefs Unavailable, UNAVAILABLE).
+    Busy,
+    /// The account service, or signing in to it, failed; the message is authored locally.
+    AccountError,
+    /// The backend kept running; its log has the reason (errdefs System, INTERNAL).
+    ShutdownRefused,
+    /// An unexpected failure whose details stay in the service (errdefs System, INTERNAL).
+    OperationFailed,
+    // Agent configuration (`agent_bridge::agents::AgentError`).
+    ConfigurationReadFailed,
+    InvalidConfiguration,
+    ConfigurationConflict,
+    AuthenticationConflict,
+    CredentialStoreUnavailable,
+    ConfigurationWriteFailed,
+    ConfigurationLockFailed,
+    ConnectionRecordUnavailable,
+    ConfigurationRestoreFailed,
+    HelperUnavailable,
+    CodexMetadataUnavailable,
+    NoCompatibleModels,
+    IncompatibleModel,
+    RevisionConflict,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Outcome {
-    Result(Value),
-    Error(RpcError),
+impl ErrorCode {
+    pub fn status(self) -> u16 {
+        match self {
+            Self::InvalidRequest => 400,
+            Self::Unauthorized => 401,
+            Self::Forbidden => 403,
+            Self::NotFound | Self::MethodNotFound => 404,
+            Self::MethodNotAllowed => 405,
+            Self::InvalidState
+            | Self::InstanceChanged
+            | Self::InvalidConfiguration
+            | Self::ConfigurationConflict
+            | Self::AuthenticationConflict
+            | Self::NoCompatibleModels
+            | Self::IncompatibleModel
+            | Self::RevisionConflict => 409,
+            Self::UnsupportedMediaType => 415,
+            Self::TooManyRequests => 429,
+            Self::AccountError => 502,
+            Self::Busy => 503,
+            Self::ShutdownRefused
+            | Self::OperationFailed
+            | Self::ConfigurationReadFailed
+            | Self::CredentialStoreUnavailable
+            | Self::ConfigurationWriteFailed
+            | Self::ConfigurationLockFailed
+            | Self::ConnectionRecordUnavailable
+            | Self::ConfigurationRestoreFailed
+            | Self::HelperUnavailable
+            | Self::CodexMetadataUnavailable => 500,
+        }
+    }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RpcError {
-    pub code: String,
+const OPERATION_FAILED: &str = "The operation could not complete. Check the protection status and supplied configuration before retrying.";
+const BUSY: &str = "Another operation is in progress. Retry after it completes.";
+
+/// An API error: a stable code and a message authored for the user. Other
+/// failures convert from their text into [`ErrorCode::OperationFailed`], which
+/// never carries OS, SQL or provider details.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Error {
+    pub code: ErrorCode,
     pub message: String,
 }
 
-impl RpcError {
-    pub fn new(code: &str, message: &str) -> Self {
+impl Error {
+    pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         Self {
-            code: code.into(),
+            code,
             message: message.into(),
         }
     }
 
-    pub fn operation(message: &str) -> Self {
-        // Only locally mapped account errors carry this prefix; never raw provider bodies.
-        if message.starts_with("Account: ") && message.len() < 512 {
-            return Self::new("account_error", message);
-        }
-        // Return actionable product errors, never arbitrary OS/SQL/provider details.
-        if message.contains("in progress") || message.contains("busy") {
-            return Self::new(
-                "busy",
-                "Another operation is in progress. Retry after it completes.",
-            );
-        }
-        for prefix in [
-            "Web UI",
-            "Stop protection before",
-            "Protection is already running",
-            "Create a Confidential AI profile",
-            "Add a credential",
-            "Enter an API key",
-            "Start protection and wait",
-            "Disconnect managed agents",
-            "At least one",
-            "Confidential AI profile not found",
-            "Select or verify",
-            "No verified",
-            "The connection preview",
-            "config.toml",
-            "credentials.toml",
-            "Settings from 0.1",
-        ] {
-            if message.starts_with(prefix) && message.len() < 512 {
-                return Self::new("invalid_state", message);
-            }
-        }
-        Self::new("operation_failed", "The operation could not complete. Check the protection status and supplied configuration before retrying.")
+    pub fn invalid_request() -> Self {
+        Self::new(ErrorCode::InvalidRequest, "Invalid management request")
+    }
+
+    pub fn method_not_found() -> Self {
+        Self::new(ErrorCode::MethodNotFound, "Unknown management method")
+    }
+
+    pub fn invalid_state(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::InvalidState, message)
+    }
+
+    pub fn account(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::AccountError, message)
+    }
+
+    /// Another operation holds what this one needs.
+    pub fn busy() -> Self {
+        Self::new(ErrorCode::Busy, BUSY)
+    }
+
+    pub fn internal() -> Self {
+        Self::new(ErrorCode::OperationFailed, OPERATION_FAILED)
     }
 }
 
-impl From<String> for RpcError {
-    fn from(message: String) -> Self {
-        Self::operation(&message)
+/// The rendering every client shows and the CLI prints: `code: message`.
+impl fmt::Display for Error {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let code = serde_json::to_value(self.code).map_err(|_| fmt::Error)?;
+        write!(
+            formatter,
+            "{}: {}",
+            code.as_str().unwrap_or_default(),
+            self.message
+        )
     }
 }
 
-impl From<&str> for RpcError {
-    fn from(message: &str) -> Self {
-        Self::operation(message)
+impl std::error::Error for Error {}
+
+impl From<String> for Error {
+    fn from(_: String) -> Self {
+        Self::internal()
     }
 }
 
-pub fn read<T: DeserializeOwned>(reader: &mut impl BufRead) -> io::Result<T> {
-    read_with_timeout(reader, Duration::from_secs(5))
-}
-
-pub fn read_with_timeout<T: DeserializeOwned>(
-    reader: &mut impl BufRead,
-    timeout: Duration,
-) -> io::Result<T> {
-    let mut bytes = Vec::new();
-    let deadline = Instant::now() + timeout;
-    loop {
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Management frame deadline exceeded",
-            ));
-        }
-        let available = reader.fill_buf()?;
-        if available.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "Management connection closed",
-            ));
-        }
-        let end = available.iter().position(|byte| *byte == b'\n');
-        let count = end.map_or(available.len(), |at| at + 1);
-        if bytes.len() + count > MAX_FRAME_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Management frame exceeds limit",
-            ));
-        }
-        bytes.extend_from_slice(&available[..count]);
-        reader.consume(count);
-        if end.is_some() {
-            break;
-        }
+impl From<&str> for Error {
+    fn from(_: &str) -> Self {
+        Self::internal()
     }
-    serde_json::from_slice(&bytes)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid management frame"))
-}
-
-pub fn write(writer: &mut impl Write, message: &impl Serialize) -> io::Result<()> {
-    let mut bytes = serde_json::to_vec(message).map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidData, "Cannot encode management frame")
-    })?;
-    if bytes.len() >= MAX_FRAME_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Management frame exceeds limit",
-        ));
-    }
-    bytes.push(b'\n');
-    writer.write_all(&bytes)?;
-    writer.flush()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn framing_is_bounded_and_truncation_is_not_a_request() {
-        let mut input = io::Cursor::new(vec![b'x'; MAX_FRAME_BYTES + 1]);
-        assert_eq!(
-            read::<Request>(&mut input).err().unwrap().kind(),
-            io::ErrorKind::InvalidData
-        );
-        assert!(read::<Value>(&mut io::Cursor::new(b"{}" as &[u8])).is_err());
-        let mut bytes = Vec::new();
-        let response = Response {
-            id: 1,
-            outcome: Outcome::Error(RpcError::new("busy", "Busy")),
-        };
-        write(&mut bytes, &response).unwrap();
-        let decoded: Response = read(&mut io::Cursor::new(bytes)).unwrap();
-        assert!(matches!(decoded.outcome, Outcome::Error(_)));
-    }
 
     #[test]
-    fn wire_format_is_stable_across_builds() {
-        // Shutdown is sent to backends of other builds during updates, so the
-        // envelope and every command shape must keep these exact bytes.
-        let frames = [
-            (Command::State, r#"{"method":"state"}"#),
+    fn commands_have_stable_names_and_parameters() {
+        // The names are Tauri command names and web RPC paths; the
+        // parameters are what the renderer sends.
+        let commands = [
+            (Command::GetState {}, "get_state", json!({})),
             (
-                Command::Start(StartConfig {
-                    remote_url: "https://tee.example".into(),
-                    require_production_os: true,
-                }),
-                r#"{"method":"start","params":{"remoteUrl":"https://tee.example","requireProductionOs":true}}"#,
+                Command::Start {
+                    config: StartConfig {
+                        remote_url: "https://tee.example".into(),
+                        require_production_os: true,
+                    },
+                },
+                "start",
+                json!({"config": {"remoteUrl": "https://tee.example", "requireProductionOs": true}}),
             ),
             (
                 Command::Shutdown {
                     instance_id: "1-2".into(),
                     mode: ShutdownMode::UpdateRestart,
                 },
-                r#"{"method":"shutdown","params":{"instance_id":"1-2","mode":"updateRestart"}}"#,
+                "shutdown",
+                json!({"instanceId": "1-2", "mode": "updateRestart"}),
             ),
             (
                 Command::ActivateProfile {
                     profile_id: "p".into(),
                 },
-                r#"{"method":"activateProfile","params":{"profile_id":"p"}}"#,
+                "activate_profile",
+                json!({"profileId": "p"}),
             ),
             (
-                Command::SetPreference(Preference::Appearance(Appearance::Dark)),
-                r#"{"method":"setPreference","params":{"name":"appearance","value":"dark"}}"#,
+                Command::SetPreference {
+                    change: Preference::Appearance(Appearance::Dark),
+                },
+                "set_preference",
+                json!({"change": {"name": "appearance", "value": "dark"}}),
             ),
         ];
-        for (command, expected) in frames {
-            let request = Request {
-                version: VERSION,
-                id: 7,
-                command,
-            };
-            let encoded = serde_json::to_string(&request).unwrap();
-            assert_eq!(
-                encoded,
-                format!(r#"{{"version":{VERSION},"id":7,"command":{expected}}}"#)
-            );
-            let decoded: Request = serde_json::from_str(&encoded).unwrap();
-            assert_eq!(serde_json::to_string(&decoded).unwrap(), encoded);
+        for (command, name, params) in commands {
+            let (encoded, body) = command.encode().unwrap();
+            assert_eq!((encoded.as_str(), &body), (name, &params));
+            let decoded = Command::decode(name, params).unwrap();
+            assert_eq!(decoded.encode().unwrap(), (encoded, body));
         }
-        let response = Response {
-            id: 7,
-            outcome: Outcome::Result(Value::Null),
-        };
+    }
+
+    #[test]
+    fn unknown_commands_and_invalid_parameters_differ() {
+        let code = |name, params| Command::decode(name, params).err().map(|error| error.code);
+        assert_eq!(code("notACommand", json!({})), Some(ErrorCode::MethodNotFound));
         assert_eq!(
-            serde_json::to_string(&response).unwrap(),
-            r#"{"id":7,"outcome":{"result":null}}"#
+            code("activate_profile", json!({"profile_id": "p"})),
+            Some(ErrorCode::InvalidRequest)
         );
+        assert_eq!(code("get_state", json!({"extra": 1})), Some(ErrorCode::InvalidRequest));
+    }
+
+    #[test]
+    fn errors_render_their_code_and_hide_unauthored_details() {
+        let error = Error::invalid_state("Stop protection before deleting a profile");
+        assert_eq!(
+            error.to_string(),
+            "invalid_state: Stop protection before deleting a profile"
+        );
+        assert_eq!(
+            serde_json::to_value(&error).unwrap(),
+            json!({"code": "invalid_state", "message": "Stop protection before deleting a profile"})
+        );
+        assert_eq!(error.code.status(), 409);
+        let unclassified = Error::from("PRIVATE_OS_DETAIL secret=sk-hidden".to_string());
+        assert_eq!(unclassified.code, ErrorCode::OperationFailed);
+        assert!(!unclassified.message.contains("PRIVATE_OS_DETAIL"));
+        assert!(!unclassified.message.contains("sk-hidden"));
     }
 
     #[cfg(unix)]
@@ -486,13 +530,5 @@ mod tests {
             export_path(Path::new("/tmp/pap.csv")).unwrap(),
             "/tmp/pap.csv"
         );
-    }
-
-    #[test]
-    fn unclassified_failures_hide_internal_details() {
-        let unclassified = RpcError::operation("PRIVATE_OS_DETAIL secret=sk-hidden");
-        assert_eq!(unclassified.code, "operation_failed");
-        assert!(!unclassified.message.contains("PRIVATE_OS_DETAIL"));
-        assert!(!unclassified.message.contains("sk-hidden"));
     }
 }

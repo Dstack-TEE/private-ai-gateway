@@ -2,7 +2,8 @@
 //!
 //! `instance` decides which process is the primary app instance before the
 //! endpoint is claimed, so a process that lost the port can never become the
-//! primary. `with_apply_lock` serializes agent-config transactions across
+//! primary. The startup gate keeps installers from replacing a backend that a
+//! client is starting. `with_apply_lock` serializes agent-config transactions across
 //! processes: the lock is held from the revision check through the final
 //! rename and manifest update.
 
@@ -28,42 +29,31 @@ pub struct InstanceLock {
     _file: fs::File,
 }
 
-/// Coordinates client-driven startup with installer replacement before spawn.
+/// The startup gate, a reader-writer lock (`flock(2)` `LOCK_SH`/`LOCK_EX`,
+/// `LockFileEx`): clients starting the backend hold it shared, so they never
+/// wait for each other (the instance lock picks one backend, as gpg-agent's
+/// socket does); an installer or updater replacing the backend holds it
+/// exclusively and starts only once no client is starting one.
 pub struct StartupLock {
     _file: fs::File,
 }
 
-pub fn startup(data_dir: &Path) -> io::Result<Option<StartupLock>> {
+/// Take the gate to start the backend; `None` while an installer holds it.
+pub fn startup_shared(data_dir: &Path) -> io::Result<Option<StartupLock>> {
     let file = open(data_dir, "startup.lock")?;
-    match file.try_lock() {
+    match file.try_lock_shared() {
         Ok(()) => Ok(Some(StartupLock { _file: file })),
         Err(fs::TryLockError::WouldBlock) => Ok(None),
         Err(fs::TryLockError::Error(error)) => Err(error),
     }
 }
 
-/// Held beside the startup lock by a client that is starting the backend, so
-/// clients waiting on the startup lock can tell a slow start (worth waiting
-/// for) from an installer or updater holding the gate (reported at once).
-pub struct StartingLock {
-    _file: fs::File,
-}
-
-/// Mark this startup-lock holder as starting the backend. Blocks only while
-/// another client briefly probes `start_in_progress`.
-pub fn starting(data_dir: &Path) -> io::Result<StartingLock> {
-    let file = open(data_dir, "starting.lock")?;
-    file.lock()?;
-    Ok(StartingLock { _file: file })
-}
-
-/// Whether the startup lock is held by a client starting the backend rather
-/// than by an installer or updater, which never take `starting`.
-pub fn start_in_progress(data_dir: &Path) -> io::Result<bool> {
-    let file = open(data_dir, "starting.lock")?;
-    match file.try_lock_shared() {
-        Ok(()) => Ok(false),
-        Err(fs::TryLockError::WouldBlock) => Ok(true),
+/// Take the gate to replace the backend; `None` while anyone else holds it.
+pub fn startup(data_dir: &Path) -> io::Result<Option<StartupLock>> {
+    let file = open(data_dir, "startup.lock")?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(StartupLock { _file: file })),
+        Err(fs::TryLockError::WouldBlock) => Ok(None),
         Err(fs::TryLockError::Error(error)) => Err(error),
     }
 }
@@ -132,16 +122,15 @@ mod tests {
     }
 
     #[test]
-    fn starting_marks_only_client_starts() {
+    fn clients_share_the_startup_gate_and_installers_exclude_them() {
         let dir = tempfile::tempdir().unwrap();
-        let gate = startup(dir.path()).unwrap().unwrap();
-        assert!(!start_in_progress(dir.path()).unwrap());
-        let marker = starting(dir.path()).unwrap();
-        assert!(start_in_progress(dir.path()).unwrap());
-        // Probes are shared, so they never block each other.
-        assert!(start_in_progress(dir.path()).unwrap());
-        drop(marker);
-        drop(gate);
+        let first = startup_shared(dir.path()).unwrap().unwrap();
+        let second = startup_shared(dir.path()).unwrap().unwrap();
+        assert!(startup(dir.path()).unwrap().is_none());
+        drop((first, second));
+        let installer = startup(dir.path()).unwrap().unwrap();
+        assert!(startup_shared(dir.path()).unwrap().is_none());
+        drop(installer);
     }
 
     #[test]
