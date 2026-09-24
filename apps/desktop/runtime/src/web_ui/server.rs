@@ -987,6 +987,65 @@ mod tests {
         assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
     }
 
+    #[tokio::test]
+    async fn client_routes_serve_the_app_document_and_api_misses_stay_json() {
+        let fixture = fixture();
+        let get = |uri: &str| {
+            send(
+                &fixture.router,
+                request(HttpMethod::GET, uri).body(Body::empty()).unwrap(),
+            )
+        };
+        let root = get("/").await;
+        let (status, content_type) = (
+            root.status(),
+            root.headers().get(header::CONTENT_TYPE).cloned(),
+        );
+        let document = axum::body::to_bytes(root.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        // The page renders before sign-in, so client routes need no session either.
+        for uri in [
+            "/usage",
+            "/usage?agent=codex&rows=50",
+            "/settings",
+            "/unknown/page",
+        ] {
+            let response = get(uri).await;
+            assert_eq!(response.status(), status, "{uri}");
+            assert_eq!(
+                response.headers().get(header::CONTENT_TYPE),
+                content_type.as_ref(),
+                "{uri}"
+            );
+            for name in [
+                header::CONTENT_SECURITY_POLICY,
+                header::X_CONTENT_TYPE_OPTIONS,
+                header::CACHE_CONTROL,
+                header::REFERRER_POLICY,
+            ] {
+                assert!(response.headers().contains_key(&name), "{uri} {name}");
+            }
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(body, document, "{uri}");
+        }
+        for uri in ["/api", "/api/unknown"] {
+            let token = fixture.auth.open_session().unwrap();
+            let response = send(
+                &fixture.router,
+                request(HttpMethod::GET, uri)
+                    .header(header::COOKIE, cookie(&token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+            assert_eq!(json_body(response).await["error"]["code"], 404, "{uri}");
+        }
+    }
+
     async fn bootstrap_from(router: &Router, host: &str, origin: &str, token: &str) -> StatusCode {
         send(
             router,

@@ -1,6 +1,7 @@
 import { useAgents } from "./hooks/use-agents";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useLocation, useNavigate } from "@tanstack/react-router";
 import { cliRegistrationQuery, usagePageQuery } from "./lib/page-queries";
 import { useAppState } from "./lib/use-app-state";
 import { useWindowReady } from "./lib/use-window-ready";
@@ -9,8 +10,8 @@ import { showErrorAlert } from "./lib/error-alert";
 import { brand } from "./generated/brand";
 import { useUpdates } from "./updates";
 import type { AgentStatus, ConfidentialProfile, AppState, LaunchPreferences, RequestActivity, SurfaceErrorScope } from "../shared/contracts";
-import { PageHeader, Sidebar } from "./components/navigation";
-import type { SettingsTarget, View } from "./components/navigation";
+import { PageHeader, Sidebar, useView } from "./components/navigation";
+import type { SettingsTarget } from "./components/navigation";
 import { desktopApi, distributionCapabilities } from "./lib/environment";
 import { INITIAL_STATE, protectionFlags, profileIsAvailable, unavailableState } from "./lib/protection";
 import { AgentsView } from "./features/agents";
@@ -23,9 +24,11 @@ const errorTitles: Record<SurfaceErrorScope, string> = {
   "local-api": "Local API action failed", usage: "Usage action failed", settings: "Settings action failed",
 };
 
-export function App({ initialView = "overview" }: { initialView?: View }): React.JSX.Element {
+export function App(): React.JSX.Element {
   const updates = useUpdates(desktopApi, distributionCapabilities.nativeUpdates || distributionCapabilities.channel === "web");
-  const [view, setView] = useState<View>(initialView);
+  const view = useView();
+  const navigate = useNavigate();
+  const routeNotice = useLocation({ select: (location) => location.state.notice });
   const appState = useAppState(desktopApi, INITIAL_STATE);
   const state = appState.error ? unavailableState(appState.error) : appState.data ?? INITIAL_STATE;
   const setState = appState.setState;
@@ -51,7 +54,7 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
   const [clientKey, setClientKey] = useState("");
   const [clientKeyVisible, setClientKeyVisible] = useState(false);
   const [applying, setApplying] = useState(false);
-  const [notice, setNotice] = useState<{ id: number; text: string } | undefined>(() => initialView === "settings" ? { id: Date.now(), text: "Settings reset" } : undefined);
+  const [notice, setNotice] = useState<{ id: number; text: string } | undefined>();
   const notify = useCallback((message: string) => setNotice({ id: Date.now(), text: message }), []);
   const previousProfiles = useRef<ConfidentialProfile[] | undefined>(undefined);
   useEffect(() => {
@@ -105,14 +108,19 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
     document.title = brand.productName;
   }, []);
 
+  useEffect(() => desktopApi.onNavigate((section) => void navigate({ to: `/${section}` as const })), [navigate]);
+
+  // Moving through the sidebar with arrow keys keeps focus there; any other
+  // navigation, including history traversal, lands on the new page heading.
+  const shownView = useRef(view);
+  useEffect(() => {
+    if (shownView.current === view) return;
+    shownView.current = view;
+    if (!document.querySelector("#main-navigation :focus-visible")) document.getElementById(`page-title-${view}`)?.focus();
+  }, [view]);
+
   useEffect(() => {
     let active = true;
-    const unsubscribeNavigate = desktopApi.onNavigate((section) => {
-      if (active) {
-        setView(section);
-        window.requestAnimationFrame(() => document.getElementById(`page-title-${section}`)?.focus());
-      }
-    });
     let keyRead = 0;
     const loadClientKey = () => {
       const read = ++keyRead;
@@ -141,7 +149,6 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
     return () => {
       active = false;
       if (copyTimer.current !== undefined) window.clearTimeout(copyTimer.current);
-      unsubscribeNavigate();
       unsubscribeClientKey();
     };
   }, []);
@@ -160,12 +167,11 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
       if (event.key !== "," || !(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
       if (document.querySelector("dialog[open]")) return;
       event.preventDefault();
-      setView("settings");
-      window.requestAnimationFrame(() => document.getElementById("page-title-settings")?.focus());
+      void navigate({ to: "/settings" });
     };
     window.addEventListener("keydown", shortcut);
     return () => window.removeEventListener("keydown", shortcut);
-  }, []);
+  }, [navigate]);
 
 
   const applyStateAction = async (action: () => Promise<AppState | void>, notice?: string): Promise<string | undefined> => {
@@ -259,13 +265,6 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
   };
 
   const locked = applying;
-  const focusPageHeading = (next: View) => {
-    window.requestAnimationFrame(() => document.getElementById(`page-title-${next}`)?.focus());
-  };
-  const changeView = (next: View, focusHeading = true) => {
-    setView(next);
-    if (focusHeading) focusPageHeading(next);
-  };
   const openSettings = (target: SettingsTarget) => {
     if (target === "confidential") {
       if (state.profiles.length === 0) {
@@ -296,7 +295,7 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
 
   const windowContent = (
     <main className="app-shell w-full h-full grid grid-cols-[var(--sidebar-width)_minmax(0,_1fr)] overflow-hidden bg-background max-[780px]:grid-cols-[154px_minmax(0,_1fr)] max-[620px]:grid-cols-[68px_minmax(0,_1fr)] max-[440px]:grid-cols-[56px_minmax(0,_1fr)]">
-      <Sidebar view={view} updateReady={updates.ready} updateBusy={Boolean(updates.busy)} onRestartUpdate={() => void updates.restart()} onChange={changeView} />
+      <Sidebar updateReady={updates.ready} updateBusy={Boolean(updates.busy)} onRestartUpdate={() => void updates.restart()} />
       <section className="workspace min-w-0 min-h-0 flex flex-col">
         <PageHeader
           view={view}
@@ -334,8 +333,6 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
             onPrivacy={() => openSettings("privacy")}
             onLocalSettings={() => openSettings("local-api")}
             onLocalExamples={() => openSettings("local-api-example")}
-            onAgents={() => changeView("agents")}
-            onUsage={() => changeView("usage")}
             onCopy={copy}
             onToggleClientKey={() => setClientKeyVisible((visible) => !visible)}
             onSelect={selectAgent}
@@ -384,7 +381,7 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
       </section>
 
       <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-        {notice?.text}
+        {notice?.text ?? routeNotice}
       </div>
     </main>
   );

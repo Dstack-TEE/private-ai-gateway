@@ -1,4 +1,5 @@
 import React from "react";
+import { Link, useMatches, useNavigate } from "@tanstack/react-router";
 import { Bot, ChartNoAxesColumn, LayoutGrid, RotateCw, Settings } from "lucide-react";
 import { brand } from "../generated/brand";
 import { Badge } from "./ui/badge";
@@ -11,40 +12,43 @@ import { ProtectedControl, ProtectionStatus } from "./protection";
 import { toneTextClass } from "../lib/tone";
 import { cn } from "../lib/utils";
 
-export type View = "overview" | "agents" | "usage" | "settings";
-
 export type SettingsTarget = "confidential" | "privacy" | "local-api" | "local-api-example" | "notifications" | "web-ui";
 
-const VIEWS: { id: View; label: string; icon: typeof LayoutGrid }[] = [
-  { id: "overview", label: "Overview", icon: LayoutGrid },
-  { id: "agents", label: "Agents", icon: Bot },
-  { id: "usage", label: "Usage", icon: ChartNoAxesColumn },
-  { id: "settings", label: "Settings", icon: Settings },
-];
+const PAGES = [
+  { id: "overview", to: "/", label: "Overview", icon: LayoutGrid },
+  { id: "agents", to: "/agents", label: "Agents", icon: Bot },
+  { id: "usage", to: "/usage", label: "Usage", icon: ChartNoAxesColumn },
+  { id: "settings", to: "/settings", label: "Settings", icon: Settings },
+] as const;
+
+export type View = (typeof PAGES)[number]["id"];
+
+/** The page for the matched route; unknown paths redirect to the overview. */
+export function useView(): View {
+  return useMatches({ select: (matches) => PAGES.find((page) => page.to === matches.at(-1)?.routeId)?.id ?? "overview" });
+}
 
 export function Sidebar({
-  view,
-  onChange,
   updateReady,
   updateBusy,
   onRestartUpdate,
 }: {
-  view: View;
   updateReady: boolean;
   updateBusy: boolean;
   onRestartUpdate(): void;
-  onChange(view: View, focusHeading?: boolean): void;
 }): React.JSX.Element {
+  const view = useView();
+  const navigate = useNavigate();
   const onKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
-    const index = VIEWS.findIndex((entry) => entry.id === view);
+    const index = PAGES.findIndex((entry) => entry.id === view);
     const step = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
     if (step === 0) {
       return;
     }
     event.preventDefault();
-    const next = VIEWS[(index + step + VIEWS.length) % VIEWS.length]?.id ?? view;
-    onChange(next, false);
-    (event.currentTarget.querySelector(`#nav-${next}`) as HTMLElement | null)?.focus();
+    const next = PAGES[(index + step + PAGES.length) % PAGES.length] ?? PAGES[0];
+    void navigate({ to: next.to });
+    event.currentTarget.querySelector<HTMLElement>(`#nav-${next.id}`)?.focus();
   };
   return (
     <aside className={macOS && !web ? "sidebar min-w-0 pt-3 pr-2 pb-3 pl-2 flex flex-col gap-0.5 bg-sidebar border-r border-r-sidebar-border [&_nav]:grid [&_nav]:gap-0.5 max-[620px]:pl-2 max-[620px]:pr-2 max-[440px]:pl-1.5 max-[440px]:pr-1.5" : "sidebar min-w-0 pt-3 pr-2 pb-3 pl-2 flex flex-col gap-0.5 bg-sidebar border-r border-r-sidebar-border [&_nav]:grid [&_nav]:gap-0.5 max-[620px]:pl-2 max-[620px]:pr-2 max-[440px]:pl-1.5 max-[440px]:pr-1.5 sidebar-standard [&_.sidebar-drag]:hidden"}>
@@ -55,19 +59,18 @@ export function Sidebar({
         <span className="sidebar-brand-copy min-w-0 flex flex-col gap-0.5 text-sm leading-4.5 [&_small]:text-xs [&_small]:leading-4 [&_small]:font-normal [&_small]:text-muted-foreground"><span>{brand.productName}</span><small>{brand.byline}</small></span>
       </div>
       <SidebarProvider keyboardShortcut={false} className="min-h-0 flex-col">
-      <nav className="w-full" aria-label="Main navigation" onKeyDown={onKeyDown}>
+      <nav className="w-full" id="main-navigation" aria-label="Main navigation" onKeyDown={onKeyDown}>
         <SidebarMenu>
-        {VIEWS.map((entry) => {
+        {PAGES.map((entry) => {
           const Icon = entry.icon;
           return (
             <SidebarMenuItem key={entry.id}><SidebarMenuButton
               size="default"
+              render={<Link to={entry.to} activeOptions={{ exact: true, includeSearch: false }} />}
               isActive={view === entry.id}
               id={`nav-${entry.id}`}
               aria-label={entry.label}
-              aria-current={view === entry.id ? "page" : undefined}
               tabIndex={view === entry.id ? 0 : -1}
-              onClick={() => onChange(entry.id, true)}
             >
               <Icon size={18} aria-hidden="true" />
               <span>{entry.label}</span>
@@ -103,7 +106,7 @@ export function PageHeader({
   developmentMode: boolean;
   onToggle(): void;
 }): React.JSX.Element {
-  const title = VIEWS.find((entry) => entry.id === view)?.label ?? "";
+  const title = PAGES.find((entry) => entry.id === view)?.label ?? "";
   const verdict = presentation(state);
   return (
     <header className="page-header flex-[0_0_56px] mt-0 mr-6 mb-0 ml-6 pt-2 flex items-center justify-between gap-3 [&_h1]:text-xl [&_h1]:font-semibold [&_h1]:tracking-normal [&_h1]:pointer-events-none [&_h1]:select-none max-[620px]:pl-4 max-[620px]:pr-4 max-[440px]:basis-13 max-[440px]:mt-0 max-[440px]:mr-3 max-[440px]:mb-0 max-[440px]:ml-3 max-[440px]:pt-1.75 max-[440px]:gap-2" data-tauri-drag-region>

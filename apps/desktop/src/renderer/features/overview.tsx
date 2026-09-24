@@ -1,6 +1,7 @@
 import React, { memo } from "react";
 import { ChevronDown, CircleHelp, Info, LoaderCircle, Plus, RefreshCw, Settings } from "lucide-react";
-import { Button } from "../components/ui/button";
+import { Link } from "@tanstack/react-router";
+import { Button, buttonVariants } from "../components/ui/button";
 import { StateLabel } from "../components/state-label";
 import { Hint } from "../components/hint";
 import { currency, formatTokens } from "../lib/usage-presentation";
@@ -59,8 +60,6 @@ export function Overview({
   onPrivacy,
   onLocalSettings,
   onLocalExamples,
-  onAgents,
-  onUsage,
   onCopy,
   onToggleClientKey,
   onSelect,
@@ -90,8 +89,6 @@ export function Overview({
   onPrivacy(): void;
   onLocalSettings(): void;
   onLocalExamples(): void;
-  onAgents(): void;
-  onUsage(): void;
   onCopy(label: string, value: string): Promise<void>;
   onToggleClientKey(): void;
   onSelect(agent: AgentStatus, connect: boolean): void;
@@ -145,7 +142,7 @@ export function Overview({
               <span className={authorizingAgents ? "invisible" : undefined}>Enable</span>
               {authorizingAgents && <LoaderCircle aria-hidden="true" className="absolute animate-spin" />}
             </Button>
-          : <Button variant="outline" size="sm" className="min-w-20" onClick={onAgents}>View all</Button>}>
+          : <Link to="/agents" className={cn(buttonVariants({ variant: "outline", size: "sm" }), "min-w-20")}>View all</Link>}>
           <div className="preview-list [&_>_:last-child]:border-b-0 overview-agent-list [--agent-row-height:calc(2rem_+_1.25rem_+_2px)] grid grid-rows-[repeat(3,_minmax(var(--agent-row-height),_auto))] gap-3 [&_>_.empty-state]:row-span-full">
             {agentAccessStatus === "authorized" && !agents.some((agent) => agent.installed) ? <EmptyState text={agentProblem ? "Agent detection unavailable" : "No installed agents found"} />
               : previewAgents.map((agent) => (
@@ -164,8 +161,7 @@ export function Overview({
         <OverviewModule
           title="Recent usage"
           description="Latest requests in this session."
-          action="View all"
-          onAction={onUsage}
+          action={<Link to="/usage" className={cn(buttonVariants({ variant: "outline", size: "sm" }))}>View all</Link>}
           scrollable
         >
           <div className="preview-list flex-1 min-h-0 overflow-y-auto overscroll-contain [&_>_:last-child]:border-b-0" role="region" tabIndex={0} aria-label="Recent requests">
@@ -263,7 +259,6 @@ function OverviewModule({
   titleAdornment,
   status,
   action,
-  onAction,
   scrollable = false,
   stretch = true,
   children,
@@ -273,7 +268,6 @@ function OverviewModule({
   titleAdornment?: React.ReactNode;
   status?: React.ReactNode;
   action?: React.ReactNode;
-  onAction?(): void;
   scrollable?: boolean;
   stretch?: boolean;
 }>): React.JSX.Element {
@@ -282,7 +276,7 @@ function OverviewModule({
       <CardHeader className="flex-none items-center">
         <CardTitle className="overview-module-title flex items-center flex-wrap gap-2"><h2 className="text-base font-medium">{title}</h2>{titleAdornment}{status}</CardTitle>
         {description && <CardDescription>{description}</CardDescription>}
-        {action && <CardAction>{onAction ? <Button variant="outline" size="sm" onClick={onAction}>{action}</Button> : action}</CardAction>}
+        {action && <CardAction>{action}</CardAction>}
       </CardHeader>
       <CardContent className={`module flex min-w-0 flex-1 flex-col @container ${scrollable ? "min-h-0 [contain:size] @max-[600px]/overview:h-80 @max-[600px]/overview:flex-none" : "shrink-0"}`}>{children}</CardContent>
     </Card>
