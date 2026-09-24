@@ -406,6 +406,47 @@ fn shutdown_blocks_later_configuration_changes() {
 }
 
 #[test]
+fn shutdown_stops_waiting_for_a_stuck_command_after_its_bound() {
+    use crate::server::DRAIN_TIMEOUT;
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = test_runtime(&executor, directory.path());
+    let admission = runtime.admission();
+    executor.block_on(async {
+        // A command waiting on the network (an account request) keeps its admission.
+        let (admitted, running) = tokio::sync::oneshot::channel();
+        let stuck = admission.clone();
+        tokio::spawn(async move {
+            let _command = stuck.mutations.read().await;
+            let _ = admitted.send(());
+            std::future::pending::<()>().await
+        });
+        running.await.unwrap();
+        let started = tokio::time::Instant::now();
+        crate::server::drain_and_stop(
+            &runtime,
+            &admission,
+            desktop_core::protocol::ShutdownMode::Quit,
+        )
+        .await
+        .unwrap();
+        let waited = started.elapsed();
+        assert!(
+            waited >= DRAIN_TIMEOUT && waited < DRAIN_TIMEOUT * 2,
+            "{waited:?}"
+        );
+    });
+    assert_eq!(
+        runtime.start(runtime.state().unwrap().config).unwrap_err(),
+        "The app is closing"
+    );
+}
+
+#[test]
 fn update_restart_preserves_only_an_active_protection_session() {
     for (mode, active, preserved) in [
         (desktop_core::protocol::ShutdownMode::Quit, true, false),

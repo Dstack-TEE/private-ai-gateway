@@ -53,6 +53,13 @@ pap service stop --yes
 start protection. `start` waits for verified protection. `stop` stops protection
 and restores managed agent configuration but keeps management available.
 `service stop` shuts down the backend. Closing the desktop app does not stop it.
+Stopping (or SIGTERM) first restores the coding-agent configuration; if that
+fails, the backend refuses to stop so agents are not left pointing at a stopped
+Local API. `service stop` then reports that it keeps running, and the service
+log has the reason. Mac App Store builds stop anyway. Shutdown is bounded:
+running commands get 10 seconds, open connections and leftover background
+tasks another 10 each, and a shutdown that has not finished after 30 seconds
+exits the process.
 
 ## Settings
 
@@ -350,7 +357,9 @@ feed is unreachable it reports an `error` inside `update` without failing
 The background service writes its diagnostics to `service.<date>.log` in the
 `logs` directory of the app data directory (`pap doctor` prints the path), one
 file per day with the last seven kept, like Ollama's `~/.ollama/logs`. The
-CLI and the desktop app print theirs on stderr. Logs never contain API keys,
+CLI and the desktop app print theirs on stderr. Only this app's own events are
+logged, not its libraries'. The service log also records startup, every
+protection status change and error, and each shutdown step. Logs never contain API keys,
 tokens or the web UI password. The exported diagnostics report names the
 directory with the home directory shown as `~`.
 

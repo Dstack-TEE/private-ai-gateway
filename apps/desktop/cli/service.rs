@@ -8,8 +8,7 @@ use tracing_appender::rolling::{RollingFileAppender, Rotation};
 #[command(name = "private-ai-proxy-service", version = desktop_core::protocol::BUILD_VERSION, about = "Run the per-user Private AI Proxy backend in the foreground")]
 struct Arguments {}
 
-#[tokio::main]
-async fn main() {
+fn main() {
     Arguments::parse();
     init_logging();
     tracing::info!(
@@ -18,9 +17,27 @@ async fn main() {
         std::process::id()
     );
     private_ai_proxy::install_crypto_provider();
-    if let Err(error) = run().await {
-        tracing::error!("Private AI Proxy backend: {error}");
-        std::process::exit(1);
+    // What `#[tokio::main]` builds, kept so exit can use `shutdown_timeout`.
+    let executor = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(executor) => executor,
+        Err(error) => {
+            tracing::error!("Private AI Proxy backend: cannot start the async runtime: {error}");
+            std::process::exit(1);
+        }
+    };
+    let result = executor.block_on(run());
+    // A blocking task (a command waiting on the network) cannot be cancelled;
+    // stop waiting for it after the bound instead of hanging the exit.
+    executor.shutdown_timeout(desktop_runtime::server::DRAIN_TIMEOUT);
+    match result {
+        Ok(()) => tracing::info!("Private AI Proxy backend stopped"),
+        Err(error) => {
+            tracing::error!("Private AI Proxy backend: {error}");
+            std::process::exit(1);
+        }
     }
 }
 

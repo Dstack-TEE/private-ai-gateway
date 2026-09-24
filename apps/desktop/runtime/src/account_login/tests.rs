@@ -188,7 +188,8 @@ fn workspace_and_balance_responses_are_validated() {
     );
 }
 
-#[tokio::test]
+// The paused clock skips the polling sleeps; loopback I/O stays ready.
+#[tokio::test(start_paused = true)]
 async fn phala_polling_uses_the_device_authorization_contract() {
     use axum::{routing::post, Json};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -231,7 +232,8 @@ async fn phala_polling_uses_the_device_authorization_contract() {
         async move { axum::serve(listener, app).await },
     ));
     let started = Instant::now();
-    let credential = phala_at(client().unwrap(), "test-device".into(), 0, &base)
+    // Without client timeouts, which the paused clock would fire during I/O.
+    let credential = phala_at(Client::new(), "test-device".into(), 0, &base)
         .await
         .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 3);

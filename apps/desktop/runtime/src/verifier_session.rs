@@ -93,6 +93,24 @@ pub struct VerifierConfig {
 
 pub type VerifierEventSink = Arc<dyn Fn(VerifierEvent) + Send + Sync>;
 
+/// The status and error a state change introduced, for the service log.
+#[must_use]
+struct StateLog {
+    status: Option<String>,
+    error: Option<String>,
+}
+
+impl StateLog {
+    fn write(self) {
+        if let Some(status) = self.status {
+            tracing::info!("Protection {status}");
+        }
+        if let Some(error) = self.error {
+            tracing::warn!("{error}");
+        }
+    }
+}
+
 pub trait VerifierTask: Send {
     fn stop(&mut self) -> Result<(), String>;
 }
@@ -641,7 +659,7 @@ impl SessionManager {
         }
         let state = runtime.state.clone();
         drop(runtime);
-        self.send(state);
+        self.send(state).write();
     }
 
     /// Refresh discovery without revoking the current verified session.
@@ -804,23 +822,23 @@ impl SessionManager {
     }
 
     fn publish(&self) {
-        if let Ok(runtime) = self.lock() {
-            self.send(runtime.state.clone());
-        }
+        // Sent under the lock so publications keep their order; logged after it.
+        let changes = match self.lock() {
+            Ok(runtime) => self.send(runtime.state.clone()),
+            Err(_) => return,
+        };
+        changes.write();
     }
 
-    /// Every state change goes through here; a new status or error is also
-    /// logged, so the service log keeps what clients were shown.
-    fn send(&self, state: AppState) {
+    /// Every state change goes through here. A new status or error is also
+    /// logged, so the service log keeps what clients were shown; the caller
+    /// writes it once it holds no lock.
+    fn send(&self, state: AppState) -> StateLog {
+        let (status, error) = (state.status.clone(), state.error.clone());
         let previous = self.state_tx.send_replace(state);
-        let current = self.state_tx.borrow();
-        if current.status != previous.status {
-            tracing::info!("Protection {}", current.status);
-        }
-        if current.error != previous.error {
-            if let Some(error) = &current.error {
-                tracing::warn!("{error}");
-            }
+        StateLog {
+            status: (status != previous.status).then_some(status),
+            error: error.filter(|error| previous.error.as_ref() != Some(error)),
         }
     }
 

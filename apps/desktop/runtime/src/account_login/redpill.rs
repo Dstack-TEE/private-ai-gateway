@@ -326,9 +326,16 @@ fn token_error(error: RequestTokenError<std::io::Error, BasicErrorResponse>) -> 
             &json!({ "error": response.error().as_ref() }),
         ),
         RequestTokenError::Request(error) => error.to_string(),
-        RequestTokenError::Parse(..) | RequestTokenError::Other(_) => {
+        // RFC 6749 §5.1 requires a 200 JSON body with `token_type`; name only
+        // the offending field, never a value.
+        RequestTokenError::Parse(error, _) => {
+            tracing::warn!(
+                "The account token response is invalid at `{}`",
+                error.path()
+            );
             "Invalid account response".into()
         }
+        RequestTokenError::Other(_) => "Invalid account response".into(),
     }
 }
 

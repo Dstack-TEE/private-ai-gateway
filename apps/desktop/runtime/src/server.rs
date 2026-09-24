@@ -2,13 +2,17 @@ use std::{
     io::BufReader,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, RwLock,
+        mpsc, Arc,
     },
     time::Duration,
 };
 
 use serde_json::Value;
-use tokio::{runtime::Handle, sync::Semaphore, task::JoinSet};
+use tokio::{
+    runtime::Handle,
+    sync::{RwLock, Semaphore},
+    task::JoinSet,
+};
 
 use crate::controller::DesktopRuntime;
 
@@ -18,11 +22,19 @@ use desktop_core::{
 };
 
 const MAX_CLIENTS: usize = 32;
+/// How long shutdown waits for running management commands (a slow account
+/// request, an export) and afterwards for open connections, and how long the
+/// service waits for leftover blocking tasks, before continuing without them.
+pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+/// A shutdown that has not returned by then exits the process, as systemd's
+/// `TimeoutStopSec` or `docker stop`'s grace period would end it.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+const SHUTDOWN_IN_PROGRESS: &str = "Shutdown is already in progress";
 
 /// Lifecycle admission shared by every management transport of one service.
 pub(crate) struct Admission {
     draining: AtomicBool,
-    mutations: RwLock<()>,
+    pub(crate) mutations: RwLock<()>,
     watchers: Semaphore,
     exports: Semaphore,
 }
@@ -91,6 +103,7 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
             _ = &mut owner => {
                 // A sandboxed service belongs to its GUI parent. Restoration
                 // errors remain retryable on next launch, never keep it alive.
+                tracing::info!("The owning app exited");
                 let worker = runtime.clone();
                 let executor = handle.clone();
                 let gate = admission.clone();
@@ -106,6 +119,7 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
             }
             result = &mut signal => {
                 result?;
+                tracing::info!("Received a shutdown signal");
                 let worker = runtime.clone();
                 let executor = handle.clone();
                 let gate = admission.clone();
@@ -151,7 +165,19 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
     }
     drop(listener);
     // Idle clients have bounded read deadlines; watch clients observe stopping.
-    while tasks.join_next().await.is_some() {}
+    // A command blocked on the network is not waited for past the bound.
+    tracing::info!("Shutdown: closing management connections");
+    let drained = tokio::time::timeout(DRAIN_TIMEOUT, async {
+        while tasks.join_next().await.is_some() {}
+    })
+    .await;
+    if drained.is_err() {
+        tracing::warn!(
+            "Shutdown: {} management connections still open after {} s; closing without them",
+            tasks.len(),
+            DRAIN_TIMEOUT.as_secs()
+        );
+    }
     Ok(())
 }
 
@@ -159,25 +185,24 @@ async fn owner_exited() {
     #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
     {
         // The owner is this process's parent, so its exit is observed with
-        // kqueue's EVFILT_PROC/NOTE_EXIT like `launch::wait_for_exit`. No IPC
-        // endpoint is exposed to external agents. The waiting thread is
-        // detached: a blocking task would hold up the runtime's shutdown.
+        // kqueue's EVFILT_PROC/NOTE_EXIT like `launch::wait_for_exit`; a
+        // parent of 1 (launchd) means it already exited. No IPC endpoint is
+        // exposed to external agents. The waiting thread is detached: a
+        // blocking task would hold up the runtime's shutdown.
         let parent = unsafe { libc::getppid() };
         let (exited, exit) = tokio::sync::oneshot::channel();
         std::thread::spawn(move || {
-            if parent == 1
-                || desktop_core::launch::wait_for_exit(parent as u32, Duration::MAX).is_ok()
-            {
-                let _ = exited.send(());
-            }
+            let result = if parent == 1 {
+                Ok(())
+            } else {
+                desktop_core::launch::wait_for_exit(parent as u32, Duration::MAX)
+            };
+            let _ = exited.send(result);
         });
-        if exit.await.is_ok() {
-            return;
-        }
-        // Without kqueue, a child reparented to launchd (PID 1) has lost its
-        // owner, even after a crash.
-        while unsafe { libc::getppid() } != 1 {
-            tokio::time::sleep(Duration::from_millis(250)).await;
+        // A sandboxed service must not outlive its owner, so an owner that
+        // cannot be observed also stops it.
+        if let Ok(Err(error)) = exit.await {
+            tracing::error!("Cannot observe the owning app: {error}");
         }
     }
     #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
@@ -278,8 +303,16 @@ fn connection(
                 },
             );
         }
+        tracing::info!("A client requested shutdown");
+        // A refusal's reason, which may name local paths, stays in the service log.
         let result = shutdown(&runtime, &admission, &handle, *mode)
-            .map_err(|error| RpcError::operation(&error))
+            .map_err(|error| match error.as_str() {
+                SHUTDOWN_IN_PROGRESS => RpcError::operation(&error),
+                _ => RpcError::new(
+                    "shutdown_refused",
+                    "The backend did not stop and keeps running; the service log has the reason (`pap doctor` shows where).",
+                ),
+            })
             .and_then(protocol::encode::<rpc::Shutdown>);
         if result.is_ok() {
             stopping.store(true, Ordering::Release);
@@ -313,10 +346,7 @@ pub(crate) fn execute(
     if matches!(command, Command::State) {
         return handle.block_on(crate::dispatch::dispatch(runtime, command));
     }
-    let _operation = admission
-        .mutations
-        .read()
-        .map_err(|_| RpcError::new("busy", "Management admission failed."))?;
+    let _operation = admission.mutations.blocking_read();
     if admission.draining.load(Ordering::Acquire) {
         return Err(RpcError::new("busy", "The backend is shutting down."));
     }
@@ -340,19 +370,58 @@ fn shutdown(
     mode: ShutdownMode,
 ) -> Result<(), String> {
     if admission.draining.swap(true, Ordering::AcqRel) {
-        return Err("Shutdown is already in progress".into());
+        return Err(SHUTDOWN_IN_PROGRESS.into());
     }
-    let result = (|| {
-        let _exclusive = admission
-            .mutations
-            .write()
-            .map_err(|_| "Management admission unavailable")?;
-        handle.block_on(runtime.shutdown(mode))
-    })();
-    if result.is_err() {
+    tracing::info!("Shutting down ({mode:?})");
+    let _watchdog = Watchdog::arm();
+    let result = handle.block_on(drain_and_stop(runtime, admission, mode));
+    if let Err(error) = &result {
         admission.draining.store(false, Ordering::Release);
+        tracing::error!("Shutdown refused; the backend keeps running: {error}");
     }
     result
+}
+
+/// New commands are refused while draining; running ones get [`DRAIN_TIMEOUT`]
+/// before the runtime stops without them.
+pub(crate) async fn drain_and_stop(
+    runtime: &DesktopRuntime,
+    admission: &Admission,
+    mode: ShutdownMode,
+) -> Result<(), String> {
+    tracing::info!("Shutdown: waiting for running commands");
+    let _exclusive = tokio::time::timeout(DRAIN_TIMEOUT, admission.mutations.write())
+        .await
+        .inspect_err(|_| {
+            tracing::warn!(
+                "Shutdown: commands still running after {} s; continuing without them",
+                DRAIN_TIMEOUT.as_secs()
+            )
+        });
+    runtime.shutdown(mode).await
+}
+
+/// Exits the process if a shutdown has not returned within
+/// [`SHUTDOWN_TIMEOUT`] (a hung transaction or network call); dropping it
+/// disarms it.
+struct Watchdog {
+    _disarm: mpsc::Sender<()>,
+}
+
+impl Watchdog {
+    fn arm() -> Self {
+        let (disarm, disarmed) = mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            if disarmed.recv_timeout(SHUTDOWN_TIMEOUT) == Err(mpsc::RecvTimeoutError::Timeout) {
+                tracing::error!(
+                    "Shutdown did not finish within {} s; exiting",
+                    SHUTDOWN_TIMEOUT.as_secs()
+                );
+                std::process::exit(1);
+            }
+        });
+        Self { _disarm: disarm }
+    }
 }
 
 fn outcome(result: Result<Value, RpcError>) -> Outcome {
