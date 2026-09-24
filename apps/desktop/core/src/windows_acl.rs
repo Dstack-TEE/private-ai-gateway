@@ -130,10 +130,11 @@ pub fn allow_dacl_change(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions 
     options.access_mode(GENERIC_READ | GENERIC_WRITE | WRITE_DAC)
 }
 
-/// Opens an existing `path` itself (never a link target) to replace its DACL.
+/// Opens an existing `path` itself (never a link target) to replace its DACL
+/// (`FILE_READ_ATTRIBUTES` lets callers inspect it through the same handle).
 pub fn open_for_dacl_change(path: &Path) -> io::Result<fs::File> {
     fs::OpenOptions::new()
-        .access_mode(READ_CONTROL | WRITE_DAC)
+        .access_mode(READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
 }

@@ -100,7 +100,8 @@ mod tests {
     /// A new file in this test's own temporary directory with the given DACL.
     fn fixture(path: &Path, sddl: &str) {
         let mut options = std::fs::OpenOptions::new();
-        options.create_new(true);
+        // Windows accepts `create_new` only together with write access.
+        options.write(true).create_new(true);
         let file = windows_acl::allow_dacl_change(&mut options)
             .open(path)
             .unwrap();
