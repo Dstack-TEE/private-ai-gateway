@@ -90,6 +90,20 @@ function fakeContext({
   const commandEditor = {
     add: (command: Record<string, any>) => commandAdds.push(command),
   };
+  const modelEditor = {
+    list: (_providerID?: string): Record<string, any>[] => [],
+    update: (
+      _providerID: string,
+      _id: string,
+      _update: (model: Record<string, any>) => void,
+    ): void => {},
+  };
+  const modelTransforms: ((editor: typeof modelEditor) => void)[] = [];
+  const sessionHooks: {
+    name: string;
+    callback: (event: Record<string, any>) => void;
+    options?: Record<string, unknown>;
+  }[] = [];
 
   const context = {
     app: { name: "test", version: "0.0.0" },
@@ -111,6 +125,16 @@ function fakeContext({
       reload: async () => provider.replay(providerEditor),
       list: async () => ({ data: [] }),
       get: async () => ({ data: undefined }),
+    },
+    model: {
+      transform: async (callback: (editor: typeof modelEditor) => void) => {
+        modelTransforms.push(callback);
+        callback(modelEditor);
+        return { dispose: async () => {} };
+      },
+      reload: async () => {},
+      list: async () => ({ data: [] }),
+      default: async () => ({ data: undefined }),
     },
     integration: {
       transform: async (callback: (editor: typeof integrationEditor) => void) => {
@@ -188,6 +212,14 @@ function fakeContext({
         synthetics.push(input);
         return { sessionID: input.sessionID };
       },
+      hook: async (
+        name: string,
+        callback: (event: Record<string, any>) => void,
+        hookOptions?: Record<string, unknown>,
+      ) => {
+        sessionHooks.push({ name, callback, options: hookOptions });
+        return { dispose: async () => {} };
+      },
     },
   };
 
@@ -200,6 +232,8 @@ function fakeContext({
     commandAdds,
     prompts,
     synthetics,
+    modelTransforms,
+    sessionHooks,
   };
 }
 
@@ -403,6 +437,71 @@ test("drops OpenCode's provider id from ACI request bodies", () => {
   expect(sanitizeAciRequestBody("not json")).toBe("not json");
   expect(sanitizeAciRequestBody(undefined)).toBeUndefined();
   expect(sanitizeAciRequestBody(new Uint8Array())).toBeInstanceOf(Uint8Array);
+});
+
+test("pins models after model-level overrides", async () => {
+  const fake = fakeContext({ options: { baseURL } });
+  const plugin = await loadOpenCodeAciV2Plugin({ id: "aci-test" });
+  const cleanup = await plugin.setup(fake.context);
+
+  try {
+    expect(fake.modelTransforms).toHaveLength(1);
+    const updates: { providerID: string; id: string; draft: Record<string, any> }[] = [];
+    const editor = {
+      list: () => [{ providerID: "aci", id: "model-1" }],
+      update: (providerID: string, id: string, update: (model: Record<string, any>) => void) => {
+        const draft: Record<string, any> = {
+          package: "@opencode/ai/providers/openai-compatible",
+          settings: { baseURL: "https://attacker.example/v1" },
+        };
+        update(draft);
+        updates.push({ providerID, id, draft });
+      },
+    };
+    fake.modelTransforms[0]!(editor);
+
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.draft.package).toBe(OPENCODE_ACI_PACKAGE);
+    expect(updates[0]!.draft.settings).toEqual({ baseURL });
+
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.draft.package).toBe(OPENCODE_ACI_PACKAGE);
+    expect(updates[0]!.draft.settings).toEqual({ baseURL });
+  } finally {
+    await cleanup?.();
+  }
+});
+
+test("blocks native-route requests that do not target the verified gateway", async () => {
+  const fake = fakeContext({ options: { baseURL } });
+  const plugin = await loadOpenCodeAciV2Plugin({ id: "aci-test" });
+  const cleanup = await plugin.setup(fake.context);
+
+  try {
+    const hook = fake.sessionHooks.find((entry) => entry.name === "http.request")!;
+    expect(hook.options).toEqual({ providerID: "aci" });
+
+    expect(() =>
+      hook.callback({
+        model: { providerID: "aci" },
+        request: new Request("https://attacker.example/v1/chat/completions"),
+      }),
+    ).toThrow("blocked an unverified transport");
+    expect(() =>
+      hook.callback({
+        model: { providerID: "aci" },
+        request: new Request(`${baseURL}/chat/completions`),
+      }),
+    ).not.toThrow();
+    expect(() =>
+      hook.callback({
+        model: { providerID: "other" },
+        request: new Request("https://attacker.example/v1/chat/completions"),
+      }),
+    ).not.toThrow();
+  } finally {
+    await cleanup?.();
+  }
 });
 
 test("fails plugin setup on a misconfigured endpoint", async () => {

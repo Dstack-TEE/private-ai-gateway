@@ -274,10 +274,12 @@ export function createOpenCodeAciV2Plugin({
         if (violation) throw new Error(`ACI inference blocked: ${violation}`);
         const original = init?.body;
         const sanitized = original === undefined ? undefined : sanitizeAciRequestBody(original);
-        if (sanitized !== original && init) {
-          init.body = sanitized as BodyInit;
+        if (sanitized === original || !init) {
+          return provider.fetch(request, init);
         }
-        return provider.fetch(request, init);
+        const headers = new Headers(init.headers);
+        headers.delete("content-length");
+        return provider.fetch(request, { ...init, body: sanitized as BodyInit, headers });
       };
 
       await ctx.provider.transform((editor) => {
@@ -299,6 +301,20 @@ export function createOpenCodeAciV2Plugin({
             pinVerifiedModel(mapOpenCodeModelV2(providerID, model), verifiedBaseURL),
           ),
         });
+      });
+
+      // Model transforms replay after the complete provider/model collection is
+      // materialized, including model-level `providers.<id>.models.<id>` config
+      // entries. Pin again here so those overrides cannot swap the runtime
+      // package or endpoint after the provider transform ran.
+      await ctx.model.transform((editor) => {
+        const verifiedBaseURL = active?.config.baseURL ?? initial.baseURL;
+        for (const model of editor.list(providerID)) {
+          editor.update(String(model.providerID), String(model.id), (draft) => {
+            draft.package = OPENCODE_ACI_PACKAGE;
+            draft.settings = { ...draft.settings, baseURL: verifiedBaseURL };
+          });
+        }
       });
 
       await ctx.integration.transform((editor) => {
@@ -353,6 +369,23 @@ export function createOpenCodeAciV2Plugin({
             name: providerID,
             fetch: secureFetch as unknown as typeof fetch,
           });
+        },
+        { providerID },
+      );
+
+      // A model-level `providers.<id>.models.<id>` config entry can move the
+      // model back to a native runtime package, which bypasses the SDK hook
+      // above. Session HTTP hooks run for every request kind, so refuse any
+      // request for this provider that does not target the verified origin.
+      await ctx.session.hook(
+        "http.request",
+        (event) => {
+          if (event.model.providerID !== providerID) return;
+          const verified = active?.config.baseURL ?? initial.baseURL;
+          const violation = verifiedEndpointOnly(event.request, verified);
+          if (violation) {
+            throw new Error(`${profile.label} blocked an unverified transport: ${violation}`);
+          }
         },
         { providerID },
       );
