@@ -22,6 +22,16 @@ do
   [[ -n ${!name:-} ]] || die "$name must be set"
 done
 
+[[ $PRIVATE_AI_GATEWAY_REPO_COMMIT =~ ^[0-9a-f]{40}$ ]] ||
+  die "PRIVATE_AI_GATEWAY_REPO_COMMIT must be a full lowercase commit SHA"
+for name in \
+  PRIVATE_AI_GATEWAY_ADMIN_TOKEN_SHA256 \
+  PRIVATE_AI_GATEWAY_INFERENCE_TOKEN_SHA256
+do
+  [[ ${!name} =~ ^[0-9a-f]{64}$ ]] ||
+    die "$name must be a lowercase hex SHA-256 digest"
+done
+
 require_tool docker
 require_tool sha256sum
 
@@ -35,6 +45,8 @@ mkdir -p -- "$(dirname -- "$output")"
 tmp=$(mktemp "${output}.tmp.XXXXXX")
 trap 'rm -f -- "$tmp"' EXIT
 
+# The measured document must use the Compose file's fixed project name.
+unset COMPOSE_PROJECT_NAME
 docker compose -f "$script_dir/compose.privatemode.yaml" config --format json \
   >"$tmp"
 

@@ -53,9 +53,9 @@ This is the smallest practical container config.
 | `admin_token_sha256` | unset | Optional SHA-256 policy for the admin token supplied by config or `PRIVATE_AI_GATEWAY_ADMIN_TOKEN`. Startup fails on a missing or mismatched token. |
 | `inference_token_sha256` | unset | SHA-256 of the downstream bearer accepted by direct-mode inference POST endpoints; required when `privatemode_proxy` is configured without middleware and forbidden when middleware is enabled. The high-entropy bearer remains client-side. Missing or mismatched credentials are rejected before request parsing or forwarding. |
 | `dstack_endpoint` | dstack SDK default | dstack SDK endpoint, such as `unix:/var/run/dstack.sock`. |
-| `enable_e2ee` | `true` | Advertise and terminate the [E2EE v2 compatibility extension](../spec/e2ee-v2.md). Set to `false` only for an explicit TLS-only deployment; the attestation then reports `supported_e2ee_versions: []` and v2 requests fail with `e2ee_invalid_version`. |
+| `enable_e2ee` | `true` | Advertise and terminate the [E2EE v2 compatibility extension](../spec/e2ee-v2.md). Set to `false` only for an explicit TLS-only deployment; the attestation then reports `supported_e2ee_versions: []` and v2 requests fail with `e2ee_invalid_version`. Startup fails when `privatemode_proxy` is configured with `false`. |
 | `middleware` | unset | Optional middleware section. When present, the gateway consults a control plane to route and authorize each request and applies request/response transforms; when unset it serves directly. See [Middleware](#middleware). |
-| `privatemode_proxy` | unset | Static policy for an official Privatemode proxy co-deployed in the same measured dstack Compose. The proxy uses dynamic manifests. Required before a `privatemode` route can load. |
+| `privatemode_proxy` | unset | Static policy for an official Privatemode proxy co-deployed in the same measured dstack Compose. The proxy uses dynamic manifests. Required before a `privatemode` route can load. Inference then accepts only E2EE v2 requests and rejects others with `e2ee_required`. |
 
 ### Privatemode proxy
 
@@ -65,7 +65,7 @@ upstream database. All fields are required when the section is present.
 | Field | Meaning |
 | --- | --- |
 | `privatemode_proxy.base_url` | Internal HTTP(S) origin of the co-deployed proxy. Paths, credentials, queries, and fragments are rejected. |
-| `privatemode_proxy.manifest_log_path` | Absolute path to the proxy's read-only manifest-history log as mounted into the gateway. The latest entry is reported as unbound observation metadata. |
+| `privatemode_proxy.manifest_log_path` | Absolute path to the proxy's read-only manifest-history log as mounted into the gateway. The latest entry is reported as unbound observation metadata; while the proxy is still writing that entry's manifest file, the previous entry is reported. |
 | `privatemode_proxy.credential_path` | Absolute path to the Compose secret source mounted into both gateway and proxy. The gateway validates it but does not retain it in deployment state; the proxy owns its use. |
 | `privatemode_proxy.credential_sha256` | SHA-256 of that mounted API credential. The renderer derives it from `PRIVATEMODE_API_KEY`; a mismatch in the live shared secret fails startup. |
 | `privatemode_proxy.proxy_image_digest` | OCI digest of the proxy image pinned in the same Compose, in `sha256:<64-hex>` form. |
@@ -293,7 +293,7 @@ bridges may consume provider-specific environment variables such as
 | --- | --- |
 | `PRIVATE_AI_GATEWAY_CONFIG_PATH` | Required. Selects the static gateway config file. |
 | `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` | Optional runtime secret overriding static `admin_token`. |
-| `PRIVATE_AI_GATEWAY_ENV_FILE` | Optional dotenv file consulted for `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` when that variable is absent. The Privatemode Compose points it at dstack's decrypted, TEE-internal deployment environment. |
+| `PRIVATE_AI_GATEWAY_ENV_FILE` | Optional dotenv file consulted for `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` when that variable is absent; static `admin_token` applies when the file has no token. Parse errors report the position, never the line content. The Privatemode Compose points it at dstack's decrypted, TEE-internal deployment environment. |
 | `RUST_LOG` | Tracing filter consumed by `tracing_subscriber`. |
 
 Deployment tooling also uses these variables:

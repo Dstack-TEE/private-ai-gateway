@@ -1379,6 +1379,46 @@ async fn privatemode_verification_cache_and_refresh_follow_the_configured_lease(
 }
 
 #[tokio::test]
+async fn privatemode_reports_the_previous_manifest_while_the_logged_one_is_written() {
+    let (base_url, _provider_calls, _plaintext_path_hits) =
+        serve_privatemode_provider_fixture().await;
+    let fixture = PrivatemodeTestDeployment::new(base_url);
+    let verifier = fixture.verifier(10, 0);
+    let observed = |event: &UpstreamVerifiedEvent| {
+        assert_eq!(
+            event.result,
+            VerificationResult::Verified,
+            "{:?}",
+            event.reason
+        );
+        event.provider_claims.as_ref().unwrap()["observed_manifest_sha256"].clone()
+    };
+
+    // The proxy appends the log entry before it writes the manifest file.
+    std::fs::write(
+        &fixture.manifest_log_path,
+        concat!(
+            "2026-07-31T00:00:00Z /var/lib/privatemode/manifests/1.json\n",
+            "2026-07-31T01:00:00Z /var/lib/privatemode/manifests/2.json\n",
+            "2026-07-31T02:00:00Z /var/lib/privatemode/manif"
+        ),
+    )
+    .unwrap();
+    let pending = verifier.verify(fixture.verification_request("m")).await;
+    assert_eq!(observed(&pending), fixture.manifest_digest);
+
+    let manifest_path = fixture.manifest_dir.join("2.json");
+    std::fs::write(&manifest_path, br#"{"Policies":{"#).unwrap();
+    let partial = verifier.verify(fixture.verification_request("m")).await;
+    assert_eq!(observed(&partial), fixture.manifest_digest);
+
+    let manifest = br#"{"Policies":{}}"#;
+    std::fs::write(&manifest_path, manifest).unwrap();
+    let complete = verifier.verify(fixture.verification_request("m")).await;
+    assert_eq!(observed(&complete), normalized_sha256(manifest));
+}
+
+#[tokio::test]
 async fn privatemode_runtime_config_binds_the_measured_sidecar_in_the_receipt() {
     let (base_url, provider_calls, _plaintext_path_hits) =
         serve_privatemode_provider_fixture().await;

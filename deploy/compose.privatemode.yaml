@@ -1,6 +1,10 @@
 # dstack deployment with the official Privatemode proxy in the same measured
 # Compose workload as Private AI Gateway. Only the gateway port is published.
 
+# A fixed project name keeps the rendered measurement and volume names
+# independent of the checkout directory and COMPOSE_PROJECT_NAME.
+name: private-ai-gateway-privatemode
+
 services:
   private-ai-gateway:
     image: docker.io/dstacktee/git-launcher@sha256:4437dce18ec713b0991d34bd926d324966b1a0b90fad485b8ddb3f4ed2af138b

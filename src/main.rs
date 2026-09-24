@@ -60,13 +60,30 @@ fn env_non_empty(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// Describe a dotenv error without echoing file content: a `LineParse` error
+/// carries the offending line, which may hold a secret.
+fn describe_env_file_error(err: &dotenvy::Error) -> String {
+    match err {
+        dotenvy::Error::LineParse(_, index) => format!("invalid syntax at line index {index}"),
+        other => other.to_string(),
+    }
+}
+
 fn env_file_non_empty(path: &str, name: &str) -> Result<Option<String>, String> {
-    let entries = dotenvy::from_path_iter(path)
-        .map_err(|err| format!("failed to read encrypted environment file {path}: {err}"))?;
+    let entries = dotenvy::from_path_iter(path).map_err(|err| {
+        format!(
+            "failed to read encrypted environment file {path}: {}",
+            describe_env_file_error(&err)
+        )
+    })?;
     let mut value = None;
     for entry in entries {
-        let (key, candidate) = entry
-            .map_err(|err| format!("failed to parse encrypted environment file {path}: {err}"))?;
+        let (key, candidate) = entry.map_err(|err| {
+            format!(
+                "failed to parse encrypted environment file {path}: {}",
+                describe_env_file_error(&err)
+            )
+        })?;
         if key == name {
             value = Some(candidate);
         }
@@ -492,7 +509,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(token) => Some(token),
         None => match env_non_empty("PRIVATE_AI_GATEWAY_ENV_FILE") {
             Some(path) => env_file_non_empty(&path, "PRIVATE_AI_GATEWAY_ADMIN_TOKEN")
-                .map_err(invalid_input)?,
+                .map_err(invalid_input)?
+                .or_else(|| gateway_config.admin_token.clone()),
             None => gateway_config.admin_token.clone(),
         },
     };
@@ -513,6 +531,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         inference_token_sha256,
     )
     .map_err(invalid_input)?;
+    if gateway_config.privatemode_proxy.is_some() && !gateway_config.enable_e2ee {
+        return Err(invalid_input(
+            "privatemode_proxy requires enable_e2ee: Privatemode inference accepts only E2EE v2 requests",
+        )
+        .into());
+    }
     let source_provenance = resolve_source_provenance()?;
     let tls_public_keys = resolve_tls_public_keys(&gateway_config.tls)?;
     let dstack_endpoint = gateway_config.dstack_endpoint.clone();
@@ -990,6 +1014,17 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
         let err = validate_sha256_secret_policy("admin_token", Some("different"), Some(&digest))
             .unwrap_err();
         assert!(err.contains("does not match static admin_token_sha256"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn encrypted_env_parse_errors_do_not_echo_secret_lines() {
+        let path = temp_path("gateway-encrypted-env-invalid");
+        std::fs::write(&path, "PRIVATEMODE_API_KEY='unterminated-secret\n").unwrap();
+        let err = env_file_non_empty(path.to_str().unwrap(), "PRIVATE_AI_GATEWAY_ADMIN_TOKEN")
+            .unwrap_err();
+        assert!(err.contains("invalid syntax"), "{err}");
+        assert!(!err.contains("unterminated-secret"), "{err}");
         let _ = std::fs::remove_file(path);
     }
 

@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.live_e2e.common import audit_aci_artifacts, verify_aci_report
+from scripts.live_e2e.common import audit_aci_artifacts
 
 
 REQUIRED = (
@@ -22,7 +22,7 @@ REQUIRED = (
 class AuditTests(unittest.TestCase):
     def audit(self, transcript: dict, exit_code: int = 1) -> dict:
         result = subprocess.CompletedProcess(
-            ["aci", "audit"], exit_code, json.dumps(transcript).encode(), b""
+            ["pap", "audit"], exit_code, json.dumps(transcript).encode(), b""
         )
         with patch("scripts.live_e2e.common.run_cmd", return_value=result):
             return audit_aci_artifacts(
@@ -45,22 +45,17 @@ class AuditTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "did not pass"):
             self.audit(transcript)
 
-    def test_online_verification_must_match_saved_keyset(self) -> None:
-        transcript = {
-            "verdict": {"verified": True, "workload_keyset_digest": "sha256:abc"}
-        }
-        with patch("scripts.live_e2e.common.run_cmd_json", return_value=transcript):
-            self.assertEqual(
-                verify_aci_report(
-                    "https://gateway.example",
-                    "a" * 64,
-                    {"workload_keyset_digest": "sha256:abc"},
-                ),
-                transcript,
-            )
-            with self.assertRaisesRegex(RuntimeError, "did not match"):
-                verify_aci_report(
-                    "https://gateway.example",
-                    "a" * 64,
-                    {"workload_keyset_digest": "sha256:other"},
+    def test_invalid_transcript_surfaces_cli_stderr(self) -> None:
+        result = subprocess.CompletedProcess(
+            ["pap", "audit"], 1, b"", b"receipt.json: no such file"
+        )
+        with patch("scripts.live_e2e.common.run_cmd", return_value=result):
+            with self.assertRaisesRegex(RuntimeError, "no such file"):
+                audit_aci_artifacts(
+                    report=Path("report.json"),
+                    receipt=Path("receipt.json"),
+                    session=Path("session.json"),
+                    nonce="a" * 64,
+                    request_body=Path("request.json"),
+                    response_body=Path("response.json"),
                 )

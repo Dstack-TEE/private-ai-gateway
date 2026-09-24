@@ -49,6 +49,8 @@ pub enum PrivatemodeDeploymentConfigError {
         path: String,
         source: std::io::Error,
     },
+    #[error("observed Privatemode manifest {path} is not a complete JSON document")]
+    IncompleteObservedManifest { path: String },
     #[error("Privatemode credential path must be absolute")]
     RelativeCredentialPath,
     #[error("failed to read Privatemode credential {path}: {source}")]
@@ -64,6 +66,19 @@ pub enum PrivatemodeDeploymentConfigError {
     CredentialDigestMismatch { actual: String, expected: String },
     #[error("invalid Privatemode proxy OCI image digest: {0}")]
     InvalidImageDigest(String),
+}
+
+impl PrivatemodeDeploymentConfigError {
+    /// Whether a logged manifest file is not yet fully written.
+    fn is_pending_manifest(&self) -> bool {
+        match self {
+            Self::ReadObservedManifest { source, .. } => {
+                source.kind() == std::io::ErrorKind::NotFound
+            }
+            Self::IncompleteObservedManifest { .. } => true,
+            _ => false,
+        }
+    }
 }
 
 /// Static, measured deployment policy for one co-deployed Privatemode proxy.
@@ -148,13 +163,34 @@ impl PrivatemodeProxyDeployment {
                 source,
             }
         })?;
+        // The proxy terminates every entry with a newline; ignore a torn tail.
+        let mut entries = log
+            .split_inclusive('\n')
+            .filter_map(|line| line.strip_suffix('\n'))
+            .rev();
+        let newest = entries.next().ok_or_else(|| {
+            PrivatemodeDeploymentConfigError::InvalidManifestLog(
+                "manifest log is empty".to_string(),
+            )
+        })?;
+        // The proxy logs an entry before writing its manifest file, so the
+        // newest manifest may still be missing or partially written. Report
+        // the previous complete observation during that window.
+        match (self.read_logged_manifest(newest), entries.next()) {
+            (Err(err), Some(previous)) if err.is_pending_manifest() => {
+                self.read_logged_manifest(previous)
+            }
+            (result, _) => result,
+        }
+    }
+
+    fn read_logged_manifest(
+        &self,
+        line: &str,
+    ) -> Result<ObservedPrivatemodeManifest, PrivatemodeDeploymentConfigError> {
         let invalid_log = |message: &str| {
             PrivatemodeDeploymentConfigError::InvalidManifestLog(message.to_string())
         };
-        let line = log
-            .lines()
-            .next_back()
-            .ok_or_else(|| invalid_log("manifest log is empty"))?;
         let mut fields = line.split_ascii_whitespace();
         let (Some(observed_at), Some(logged_path), None) =
             (fields.next(), fields.next(), fields.next())
@@ -186,6 +222,13 @@ impl PrivatemodeProxyDeployment {
                 source,
             }
         })?;
+        if serde_json::from_slice::<serde::de::IgnoredAny>(&bytes).is_err() {
+            return Err(
+                PrivatemodeDeploymentConfigError::IncompleteObservedManifest {
+                    path: manifest_path.display().to_string(),
+                },
+            );
+        }
         Ok(ObservedPrivatemodeManifest {
             sha256: sha256_hex(&bytes),
             observed_at: observed_at.to_string(),

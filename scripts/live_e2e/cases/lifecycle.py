@@ -9,7 +9,6 @@ from ..common import (
     audit_aci_artifacts,
     json_bytes,
     request_json,
-    verify_aci_report,
     write_bytes,
     write_json,
 )
@@ -111,8 +110,6 @@ def run_lifecycle_case(
     )
     if len(attested_sessions) != 1:
         raise RuntimeError(f"{provider.name} expected one serving attested session")
-    verifier_summary = verify_aci_report(base_url, nonce, report_json)
-    write_json(provider_dir / "user-verification-summary.json", verifier_summary)
     audit_summary = audit_aci_artifacts(
         report=report_path,
         receipt=receipt_path,
@@ -127,10 +124,9 @@ def run_lifecycle_case(
         "chat_id": chat_id,
         "receipt_id": receipt_id,
         "status": status,
-        "verified": (verifier_summary.get("verdict") or {}).get("verified") is True,
         "checks": {
             check.get("id"): check.get("status")
-            for check in verifier_summary.get("checks") or []
+            for check in audit_summary.get("checks") or []
             if isinstance(check, dict)
         },
         "attested_sessions": attested_sessions,

@@ -40,14 +40,19 @@ class Provider:
     chutes_chute_ids: dict[str, str]
     chutes_e2ee_discovery_rounds: int | None
     chutes_e2ee_discovery_interval_seconds: int | None
-    privatemode_manifest_log_path: str | None
-    privatemode_proxy_image_digest: str | None
 
     @classmethod
     def from_json(cls, value: dict[str, Any]) -> "Provider":
+        provider = require_str(value, "provider")
+        if provider == "privatemode":
+            raise ValueError(
+                "privatemode deployments require attested client E2EE v2, which "
+                "this local suite does not send; verify them against a deployed "
+                "gateway as described in deploy/README.md"
+            )
         return cls(
             name=require_str(value, "name"),
-            provider=require_str(value, "provider"),
+            provider=provider,
             base_url=require_str(value, "base_url").rstrip("/"),
             public_model=require_str(value, "public_model"),
             upstream_model=require_str(value, "upstream_model"),
@@ -67,12 +72,6 @@ class Provider:
             ),
             chutes_e2ee_discovery_interval_seconds=optional_int(
                 value, "chutes_e2ee_discovery_interval_seconds"
-            ),
-            privatemode_manifest_log_path=optional_str(
-                value, "privatemode_manifest_log_path"
-            ),
-            privatemode_proxy_image_digest=optional_str(
-                value, "privatemode_proxy_image_digest"
             ),
         )
 
@@ -249,12 +248,13 @@ def audit_aci_artifacts(
     request_body: Path,
     response_body: Path,
 ) -> dict[str, Any]:
-    # An offline audit skips the live quote-root check and exits 1 for PARTIAL.
-    # Require every receipt/session check to pass and no check to fail; the
-    # separate online `aci verify` establishes the hardware root.
+    # An offline audit has no live quote root or TLS channel and exits 1 for
+    # PARTIAL. The local gateway serves plain HTTP from a dstack simulator, so
+    # an online `pap verify` cannot pass; require every receipt/session check to
+    # pass and no check to fail instead.
     result = run_cmd(
         [
-            "aci",
+            "pap",
             "audit",
             "--report",
             str(report),
@@ -273,16 +273,17 @@ def audit_aci_artifacts(
         ],
         timeout=240,
     )
+    stderr = result.stderr.decode(errors="replace")
     if result.returncode not in (0, 1):
-        raise RuntimeError(
-            f"ACI audit failed: {result.stderr.decode(errors='replace')}"
-        )
+        raise RuntimeError(f"ACI audit failed: {stderr}")
     try:
         transcript = json.loads(result.stdout)
         checks = {item["id"]: item["status"] for item in transcript["checks"]}
         failed = transcript["verdict"]["failed"]
     except (KeyError, TypeError, ValueError) as exc:
-        raise RuntimeError("ACI audit did not return a valid transcript") from exc
+        raise RuntimeError(
+            f"ACI audit did not return a valid transcript: {stderr}"
+        ) from exc
     required = {
         "receipt-1",
         "receipt-2",
@@ -293,22 +294,6 @@ def audit_aci_artifacts(
     }
     if failed != 0 or any(checks.get(check) != "pass" for check in required):
         raise RuntimeError(f"ACI receipt/session audit did not pass: {transcript}")
-    return transcript
-
-
-def verify_aci_report(
-    base_url: str, nonce: str, report: dict[str, Any]
-) -> dict[str, Any]:
-    transcript = run_cmd_json(
-        ["aci", "verify", base_url, "--nonce", nonce, "--json"], timeout=240
-    )
-    verdict = transcript.get("verdict") or {}
-    if verdict.get("verified") is not True or verdict.get(
-        "workload_keyset_digest"
-    ) != report.get("workload_keyset_digest"):
-        raise RuntimeError(
-            "live ACI verification did not match the saved report keyset"
-        )
     return transcript
 
 

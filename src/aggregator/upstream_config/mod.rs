@@ -354,8 +354,11 @@ pub struct UpstreamConfigManager {
 }
 
 impl UpstreamConfigManager {
-    /// A measured Privatemode sidecar must never receive prompts that were
-    /// plaintext on a client channel terminating outside the workload.
+    /// A measured Privatemode sidecar accepts only E2EE v2 requests, so the
+    /// fields E2EE v2 encrypts (message content, `prompt`, `input`) are never
+    /// plaintext on a client channel terminating outside the workload. Fields
+    /// E2EE v2 does not cover, such as tool schemas, remain client-visible;
+    /// see `docs/providers/privatemode/verification.md`.
     pub fn requires_client_e2ee(&self) -> bool {
         self.options.privatemode_proxy.is_some()
     }
