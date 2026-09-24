@@ -12,11 +12,11 @@ use private_ai_gateway::aci::upstream::{
     PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
 };
 use private_ai_gateway::aggregator::service::{
-    AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore, ServiceError,
+    AciService, AciServiceConfig, Clock, FixedClock, InMemoryReceiptStore, ServiceError,
     UpstreamVerificationError,
 };
-use private_ai_gateway::aggregator::session::{AttestedSession, ClaimStatus};
-use private_ai_gateway::aggregator::session_store::SessionStore;
+use private_ai_gateway::aggregator::session::{AttestedSession, ClaimStatus, EvidenceRef};
+use private_ai_gateway::aggregator::session_store::{JsonlSessionStore, SessionStore};
 use private_ai_gateway::aggregator::upstream_config::UpstreamSessionSink;
 
 use common::{failed_event, verified_event, StaticKeyProvider, StubQuoter};
@@ -135,6 +135,10 @@ impl UpstreamBackend for StubUpstream {
 }
 
 fn make_service_raw(body: &[u8]) -> (AciService, ReceivedBody) {
+    make_service_with_clock(body, Arc::new(FixedClock(1_700_000_000)))
+}
+
+fn make_service_with_clock(body: &[u8], clock: Arc<dyn Clock>) -> (AciService, ReceivedBody) {
     let keys = Arc::new(StaticKeyProvider::default());
     let quoter = Arc::new(StubQuoter::default());
     let (upstream, received) = StubUpstream::new(body);
@@ -146,15 +150,7 @@ fn make_service_raw(body: &[u8]) -> (AciService, ReceivedBody) {
         supported_e2ee_versions: vec![],
         serving: "aggregator".to_string(),
     };
-    let svc = AciService::new(
-        keys,
-        quoter,
-        upstream,
-        store,
-        cfg,
-        Arc::new(FixedClock(1_700_000_000)),
-    )
-    .unwrap();
+    let svc = AciService::new(keys, quoter, upstream, store, cfg, clock).unwrap();
     (svc, received)
 }
 
@@ -303,19 +299,26 @@ async fn verified_upstream_binding_creates_attested_session() {
 }
 
 /// Chutes verifies its whole fleet under one nonce, so the raw evidence bundle
-/// changes every round even when an instance's own material does not. That
-/// bundle must stay out of the per-instance session: sealing it in mints a
-/// fresh session per instance per round, so the store grows without bound
-/// relative to the live set.
+/// changes every round even when an instance's own material does not. The
+/// bundle therefore stays out of the dedup fingerprint — sealing it in would
+/// mint a fresh session per instance per round, growing the store without
+/// bound — but the establishing round's evidence must persist in the
+/// document: an empty `evidence` breaks §8.2 deep audit, and relying parties
+/// (§9.2 check 2) reject the record, which made every Chutes-routed model
+/// fail receipt verification.
 #[tokio::test]
 async fn chutes_instance_session_is_stable_across_evidence_rounds() {
+    use base64::Engine as _;
     let (svc, _) = make_service(br#"{"id":"chat-xyz","model":"x"}"#);
     let chutes_event = |round: &str| UpstreamVerifiedEvent {
         provider_type: Some("chutes".to_string()),
         url_origin: Some("https://stub-upstream".to_string()),
         verifier_id: "private-ai-verifier/chutes/v1".to_string(),
+        // §8.2: the digest is over the decoded evidence bytes.
         evidence: Some(serde_json::json!({
-            "digest": private_ai_gateway::aci::digest::sha256_hex(round.as_bytes()),
+            "digest": private_ai_gateway::aci::digest::sha256_hex(
+                &base64::engine::general_purpose::STANDARD.decode(round).unwrap(),
+            ),
             "data": format!("data:application/json;base64,{}", round),
         })),
         channel_bindings: vec![ChannelBinding::E2eePublicKeySha256 {
@@ -361,8 +364,777 @@ async fn chutes_instance_session_is_stable_across_evidence_rounds() {
     let session = svc
         .get_attested_session(&session_id)
         .expect("Chutes session should be queryable");
-    assert!(session.document().evidence.digest.is_none());
-    assert!(session.document().evidence.data_uri.is_none());
+    // §8.2: the record carries the establishing round's evidence (digest +
+    // data) so a relying party can deep-audit it, while the session id stays
+    // stable across nonce-bound evidence rounds.
+    let evidence = &session.document().evidence;
+    assert_eq!(
+        evidence.digest.as_deref(),
+        Some(private_ai_gateway::aci::digest::sha256_hex(b"abc").as_str(),),
+        "the first round's evidence digest must persist in the document"
+    );
+    assert_eq!(
+        evidence.data_uri.as_deref(),
+        Some("data:application/json;base64,YWJj"),
+        "the first round's evidence bytes must persist in the document"
+    );
+    assert!(
+        evidence.digest_matches_data(),
+        "persisted evidence must satisfy the §8.2 digest check"
+    );
+}
+
+// --- Chutes per-instance session regression suite -------------------------
+//
+// The tests below pin the store-level contract the stability test above can
+// only imply: dedup must bound what hits the disk, survive restarts, stay
+// per-instance under fleet churn, renew on validity lapse, and upgrade a
+// pre-evidence record once a bundle becomes available.
+
+/// A §8.2 evidence bundle over `bytes`: the digest of the decoded bytes plus
+/// the bytes as a data URI.
+fn chutes_evidence(bytes: &[u8]) -> serde_json::Value {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    serde_json::json!({
+        "digest": private_ai_gateway::aci::digest::sha256_hex(bytes),
+        "data": format!("data:application/json;base64,{b64}"),
+    })
+}
+
+/// The Chutes instance a per-instance session attests.
+fn chutes_instance_id_of(session: &AttestedSession) -> String {
+    match session
+        .document()
+        .channel_binding
+        .first()
+        .expect("a chutes session carries its instance binding")
+    {
+        ChannelBinding::E2eePublicKeySha256 {
+            key_id: Some(id), ..
+        } => id.clone(),
+        other => panic!("expected a chutes e2ee binding, got {other:?}"),
+    }
+}
+
+/// A per-test JSONL session log under the temp dir, with any stale leftovers
+/// from an earlier run (log, advisory-lock file, compaction temp) removed.
+fn chutes_log_path(label: &str) -> std::path::PathBuf {
+    let path =
+        std::env::temp_dir().join(format!("pr213-chutes-{label}-{}.jsonl", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("jsonl.lock"));
+    let _ = std::fs::remove_file(path.with_extension("jsonl.tmp"));
+    path
+}
+
+/// Count log records of one type. `"session"` records are bounded to one
+/// per instance per validity window; `"evidence"` records to one per
+/// distinct evidence bundle (a round's fleet-wide bundle is shared by every
+/// instance it establishes).
+fn count_log_records(path: &std::path::Path, record_type: &str) -> usize {
+    let needle = format!("\"type\":\"{record_type}\"");
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .filter(|line| line.contains(&needle))
+        .count()
+}
+
+/// The session id a verified Chutes round's receipt cites.
+fn chutes_session_of(result: &private_ai_gateway::aggregator::service::ForwardResult) -> String {
+    payload_event(&result.receipt, "upstream.verified")["session_id"]
+        .as_str()
+        .expect("verified Chutes binding should produce a session id")
+        .to_string()
+}
+
+/// One verified Chutes round for `instance-1` carrying `evidence` (or none).
+fn chutes_instance_event(evidence: Option<serde_json::Value>) -> UpstreamVerifiedEvent {
+    UpstreamVerifiedEvent {
+        provider_type: Some("chutes".to_string()),
+        url_origin: Some("https://stub-upstream".to_string()),
+        verifier_id: "private-ai-verifier/chutes/v1".to_string(),
+        evidence,
+        channel_bindings: vec![ChannelBinding::E2eePublicKeySha256 {
+            provider: "chutes".to_string(),
+            key_id: Some("instance-1".to_string()),
+            algorithm: "chutes-ml-kem-768".to_string(),
+            public_key_sha256: "aa".repeat(32),
+        }],
+        ..verified_event("stub-upstream", "x")
+    }
+}
+
+/// Forward one verified Chutes round and return the session id its receipt
+/// cites.
+async fn chutes_forward(svc: &AciService, event: UpstreamVerifiedEvent) -> String {
+    chutes_session_of(
+        &svc.forward_chat_completion(br#"{"model":"x","messages":[]}"#, None, false, Some(event))
+            .await
+            .unwrap(),
+    )
+}
+
+/// Upgrade regression (PR #213 review): a per-instance session sealed with
+/// NO evidence — replayed from a log written before evidence was persisted,
+/// or left by an earlier verified round that genuinely supplied none — shares
+/// its fingerprint with the evidence-bearing sessions that must replace it.
+/// The fingerprint hit must not shadow the new bundle: the channel reseals
+/// exactly once, the superseded record stays resolvable by id for the
+/// receipts that already cite it, and every later round — before and after
+/// another restart — dedupes without appending to the log.
+#[tokio::test]
+async fn chutes_instance_session_reseals_once_when_evidence_becomes_available() {
+    let path = chutes_log_path("upgrade");
+
+    // A pre-evidence log: one per-instance record with empty evidence, exactly
+    // the shape the earlier binary persisted for Chutes.
+    let old_id = {
+        let (svc, _) = make_service_raw(br#"{"id":"chat-xyz","model":"x"}"#);
+        let svc = svc.with_session_store(Arc::new(
+            JsonlSessionStore::open(&path, 1_700_000_000).unwrap(),
+        ));
+        let result = svc
+            .forward_chat_completion(
+                br#"{"model":"x","messages":[]}"#,
+                None,
+                false,
+                Some(chutes_instance_event(None)),
+            )
+            .await
+            .unwrap();
+        let old_id = chutes_session_of(&result);
+        let old = svc
+            .get_attested_session(&old_id)
+            .expect("the pre-evidence record must be queryable");
+        assert!(
+            old.document().evidence.is_empty(),
+            "the seeded record must carry no evidence"
+        );
+        old_id
+    };
+    assert_eq!(count_log_records(&path, "session"), 1);
+    assert_eq!(count_log_records(&path, "evidence"), 0);
+
+    // Restarted on the same log, a round supplying a valid bundle must not
+    // keep citing the empty-evidence record: it fails every §9.2 deep audit.
+    let (svc, _) = make_service_raw(br#"{"id":"chat-xyz","model":"x"}"#);
+    let svc = svc.with_session_store(Arc::new(
+        JsonlSessionStore::open(&path, 1_700_000_000).unwrap(),
+    ));
+    let result = svc
+        .forward_chat_completion(
+            br#"{"model":"x","messages":[]}"#,
+            None,
+            false,
+            Some(chutes_instance_event(Some(chutes_evidence(b"abc")))),
+        )
+        .await
+        .unwrap();
+    let new_id = chutes_session_of(&result);
+    assert_ne!(
+        new_id, old_id,
+        "a replayed empty-evidence session must not shadow a round with a valid bundle"
+    );
+    let session = svc
+        .get_attested_session(&new_id)
+        .expect("the resealed record must be queryable");
+    assert_eq!(
+        session.document().evidence,
+        EvidenceRef::from_value(&chutes_evidence(b"abc")),
+        "the resealed record carries the round that supplied the evidence"
+    );
+    assert!(session.document().evidence.is_verifiable_bundle());
+    assert!(
+        svc.get_attested_session(&old_id).is_some(),
+        "the superseded record stays resolvable by id, so receipts citing it \
+         still resolve it — their §9.2 evidence check against that record still \
+         fails; the reseal does not retro-repair them"
+    );
+
+    // One reseal per fingerprint, not one per round: later evidence rounds
+    // dedupe onto the resealed session without growing the log.
+    assert_eq!(count_log_records(&path, "session"), 2);
+    assert_eq!(
+        count_log_records(&path, "evidence"),
+        1,
+        "the bundle is stored once, not per session"
+    );
+    let bytes_after_reseal = std::fs::metadata(&path).unwrap().len();
+    for round in 0..8 {
+        let round = format!("round-{round}");
+        svc.record_session(&chutes_instance_event(Some(chutes_evidence(
+            round.as_bytes(),
+        ))));
+    }
+    assert_eq!(
+        count_log_records(&path, "session"),
+        2,
+        "evidence rounds after the reseal must not append"
+    );
+    assert_eq!(count_log_records(&path, "evidence"), 1);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), bytes_after_reseal);
+
+    // Replay after another restart keeps the evidence-bearing session current.
+    drop(svc);
+    let (svc, _) = make_service_raw(br#"{"id":"chat-xyz","model":"x"}"#);
+    let svc = svc.with_session_store(Arc::new(
+        JsonlSessionStore::open(&path, 1_700_000_000).unwrap(),
+    ));
+    let result = svc
+        .forward_chat_completion(
+            br#"{"model":"x","messages":[]}"#,
+            None,
+            false,
+            Some(chutes_instance_event(Some(chutes_evidence(
+                b"post-restart",
+            )))),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        chutes_session_of(&result),
+        new_id,
+        "replay must resolve the fingerprint to the evidence-bearing record"
+    );
+    assert_eq!(
+        count_log_records(&path, "session"),
+        2,
+        "a replayed evidence round must not append"
+    );
+
+    drop(svc);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("jsonl.lock"));
+    let _ = std::fs::remove_file(path.with_extension("jsonl.tmp"));
+}
+
+/// Same-run evidence recovery: a verified round that supplies no evidence
+/// seals an empty-evidence session, and the next round that does supply a
+/// valid bundle must reseal in place — without a restart — so the recovery
+/// converges immediately instead of pinning the channel to a record that
+/// fails every §9.2 deep audit for the rest of the validity window.
+#[tokio::test]
+async fn chutes_instance_session_reseals_when_evidence_recovers_within_a_run() {
+    let (svc, _) = make_service_raw(br#"{"id":"chat-xyz","model":"x"}"#);
+
+    // A round with no evidence cites the empty-evidence session it sealed.
+    let empty_id = chutes_forward(&svc, chutes_instance_event(None)).await;
+    assert!(svc
+        .get_attested_session(&empty_id)
+        .unwrap()
+        .document()
+        .evidence
+        .is_empty());
+
+    // The next round's bundle reseals the channel in place.
+    let sealed_id =
+        chutes_forward(&svc, chutes_instance_event(Some(chutes_evidence(b"abc")))).await;
+    assert_ne!(
+        sealed_id, empty_id,
+        "a recovering evidence round must not cite the empty-evidence session"
+    );
+    assert_eq!(
+        svc.get_attested_session(&sealed_id)
+            .unwrap()
+            .document()
+            .evidence,
+        EvidenceRef::from_value(&chutes_evidence(b"abc"))
+    );
+
+    // And later rounds dedupe onto the resealed session, empty or not.
+    assert_eq!(
+        chutes_forward(&svc, chutes_instance_event(Some(chutes_evidence(b"def")))).await,
+        sealed_id
+    );
+    assert_eq!(
+        chutes_forward(&svc, chutes_instance_event(None)).await,
+        sealed_id
+    );
+}
+
+/// Partial or invalid evidence must not lock the channel out of a later
+/// complete bundle, and must not mint a non-auditable record in place of the
+/// current one either. Only a full §8.2 bundle (a digest plus decodable data
+/// hashing to it) is worth resealing for; a digest without data, data without
+/// a digest, a non-`data:` URI, or bytes that do not hash to the digest
+/// dedupes onto whatever is current, and a complete round upgrades it — even
+/// after any number of bad rounds.
+#[tokio::test]
+async fn chutes_instance_session_is_not_locked_by_partial_or_invalid_evidence() {
+    let (svc, _) = make_service_raw(br#"{"id":"chat-xyz","model":"x"}"#);
+    let digest_of_abc = private_ai_gateway::aci::digest::sha256_hex(b"abc");
+    // digest without data
+    let digest_only = serde_json::json!({ "digest": digest_of_abc });
+    // data without digest
+    let data_only = serde_json::json!({ "data": "data:application/json;base64,YWJj" });
+    // complete shape, but the data ("xyz") does not hash to the digest
+    let bad_hash = serde_json::json!({
+        "digest": digest_of_abc,
+        "data": "data:application/json;base64,eHl6",
+    });
+    // a digest plus a URI we cannot decode as evidence data
+    let foreign_uri = serde_json::json!({
+        "digest": digest_of_abc,
+        "data": "https://attest.example/evidence/abc",
+    });
+    let bad_rounds = [digest_only, data_only, bad_hash, foreign_uri];
+
+    // An empty start.
+    let empty_id = chutes_forward(&svc, chutes_instance_event(None)).await;
+
+    // Partial/invalid rounds do not upgrade: deduping onto the existing
+    // record beats minting a new record that cannot pass a §9.2 audit.
+    for bad in &bad_rounds {
+        assert_eq!(
+            chutes_forward(&svc, chutes_instance_event(Some(bad.clone()))).await,
+            empty_id,
+            "an incomplete or invalid bundle must not reseal the channel"
+        );
+    }
+
+    // A complete bundle upgrades — even after all those bad rounds.
+    let sealed_id =
+        chutes_forward(&svc, chutes_instance_event(Some(chutes_evidence(b"abc")))).await;
+    assert_ne!(
+        sealed_id, empty_id,
+        "a complete bundle must upgrade a record that bad rounds left behind"
+    );
+    assert_eq!(
+        svc.get_attested_session(&sealed_id)
+            .unwrap()
+            .document()
+            .evidence,
+        EvidenceRef::from_value(&chutes_evidence(b"abc"))
+    );
+
+    // Later complete rounds dedupe, and partial/invalid rounds no longer
+    // disturb the established session.
+    assert_eq!(
+        chutes_forward(&svc, chutes_instance_event(Some(chutes_evidence(b"def")))).await,
+        sealed_id
+    );
+    for bad in &bad_rounds {
+        assert_eq!(
+            chutes_forward(&svc, chutes_instance_event(Some(bad.clone()))).await,
+            sealed_id,
+            "a bad round after a complete bundle must dedupe, not reseal"
+        );
+    }
+}
+
+/// Bounded growth: a fleet of instances verified over many nonce-bound
+/// evidence rounds appends one record per instance per validity window —
+/// never one per round — keeps each instance's establishing evidence, stays
+/// per-instance under sibling, GPU, binding, and fleet churn, and replays
+/// after a restart without resealing anybody.
+#[tokio::test]
+async fn chutes_fleet_log_stays_bounded_across_instances_and_evidence_rounds() {
+    let path = chutes_log_path("fleet");
+    let binding = |id: &str, material: &str| ChannelBinding::E2eePublicKeySha256 {
+        provider: "chutes".to_string(),
+        key_id: Some(id.to_string()),
+        algorithm: "chutes-ml-kem-768".to_string(),
+        public_key_sha256: material.repeat(32),
+    };
+    /// The knobs one fleet verification round can turn. Every field that is
+    /// an instance's OWN material (its TCB status, GPU outcome, binding key)
+    /// must rebuild only that instance; the fleet-aggregate GPU flag varies
+    /// every round and must never leak into a per-instance fingerprint.
+    struct FleetRound {
+        evidence: serde_json::Value,
+        instance_2_tcb: &'static str,
+        instance_1_gpu_verified: bool,
+        instance_2_material: &'static str,
+        fleet_gpu_verified: bool,
+        with_third_instance: bool,
+    }
+    let fleet_event = |f: &FleetRound| UpstreamVerifiedEvent {
+        provider_type: Some("chutes".to_string()),
+        url_origin: Some("https://stub-upstream".to_string()),
+        verifier_id: "private-ai-verifier/chutes/v1".to_string(),
+        evidence: Some(f.evidence.clone()),
+        channel_bindings: {
+            let mut bindings = vec![
+                binding("instance-1", "aa"),
+                binding("instance-2", f.instance_2_material),
+            ];
+            if f.with_third_instance {
+                bindings.push(binding("instance-3", "cc"));
+            }
+            bindings
+        },
+        provider_claims: Some(serde_json::json!({
+            "trust_boundary": "model_instance",
+            "chute_id": "chute-x",
+            "gpu_verified": f.fleet_gpu_verified,
+            "verified_instance_ids": ["instance-1", "instance-2", "instance-3"],
+            "instance_tcb_statuses": {
+                "instance-1": "UpToDate",
+                "instance-2": f.instance_2_tcb,
+                "instance-3": "UpToDate"
+            },
+            "instance_measurements": {
+                "instance-1": "profile-x",
+                "instance-2": "profile-y",
+                "instance-3": "profile-z"
+            },
+            "instance_gpu": {
+                "instance-1": { "gpu_verified": f.instance_1_gpu_verified, "gpu_arch": "hopper" },
+                "instance-2": { "gpu_verified": false },
+                "instance-3": { "gpu_verified": true, "gpu_arch": "blackwell" }
+            }
+        })),
+        ..verified_event("stub-upstream", "x")
+    };
+    let record = |svc: &AciService, f: &FleetRound| svc.record_session(&fleet_event(f));
+    // An instance's CURRENT session is the one sealed by its latest rebuild:
+    // the listed record carrying the evidence of the round that sealed it.
+    let current_id_with_evidence =
+        |svc: &AciService, instance: &str, evidence: &serde_json::Value| -> Option<String> {
+            svc.list_attested_sessions(Some("stub-upstream"))
+                .into_iter()
+                .find(|s| {
+                    chutes_instance_id_of(s) == instance
+                        && s.document().evidence == EvidenceRef::from_value(evidence)
+                })
+                .map(|s| s.session_id().to_string())
+        };
+
+    let (svc, _) = make_service_raw(br#"{"id":"chat-xyz","model":"x"}"#);
+    let svc = svc.with_session_store(Arc::new(
+        JsonlSessionStore::open(&path, 1_700_000_000).unwrap(),
+    ));
+
+    // Round 1 establishes one session per instance, sealed with that round's
+    // fleet evidence bundle.
+    let round_1 = chutes_evidence(b"round-1");
+    record(
+        &svc,
+        &FleetRound {
+            evidence: round_1.clone(),
+            instance_2_tcb: "UpToDate",
+            instance_1_gpu_verified: true,
+            instance_2_material: "aa",
+            fleet_gpu_verified: true,
+            with_third_instance: false,
+        },
+    );
+    assert_eq!(
+        count_log_records(&path, "session"),
+        2,
+        "one record per instance, not per binding set or evidence bundle"
+    );
+    assert_eq!(
+        count_log_records(&path, "evidence"),
+        1,
+        "the shared fleet bundle is stored once, not per instance"
+    );
+    let bytes_after_round_1 = std::fs::metadata(&path).unwrap().len();
+    let id_1 = current_id_with_evidence(&svc, "instance-1", &round_1)
+        .expect("instance-1 is sealed by round 1");
+    let id_2 = current_id_with_evidence(&svc, "instance-2", &round_1)
+        .expect("instance-2 is sealed by round 1");
+
+    // 128 more nonce-bound rounds with the fleet-aggregate GPU flag
+    // alternating every round: same sessions, no bytes appended.
+    for round in 2..=129u32 {
+        record(
+            &svc,
+            &FleetRound {
+                evidence: chutes_evidence(format!("round-{round}").as_bytes()),
+                instance_2_tcb: "UpToDate",
+                instance_1_gpu_verified: true,
+                instance_2_material: "aa",
+                fleet_gpu_verified: round % 2 == 0,
+                with_third_instance: false,
+            },
+        );
+    }
+    assert_eq!(
+        count_log_records(&path, "session"),
+        2,
+        "evidence rounds and fleet-aggregate churn must not append"
+    );
+    assert_eq!(count_log_records(&path, "evidence"), 1);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), bytes_after_round_1);
+    assert_eq!(
+        current_id_with_evidence(&svc, "instance-1", &round_1).as_deref(),
+        Some(id_1.as_str()),
+        "128 evidence rounds must not rebuild instance-1"
+    );
+    assert_eq!(
+        current_id_with_evidence(&svc, "instance-2", &round_1).as_deref(),
+        Some(id_2.as_str()),
+        "128 evidence rounds must not rebuild instance-2"
+    );
+
+    // A sibling's own TCB change rebuilds only that sibling.
+    let tcb_round = chutes_evidence(b"round-tcb");
+    record(
+        &svc,
+        &FleetRound {
+            evidence: tcb_round.clone(),
+            instance_2_tcb: "OutOfDate",
+            instance_1_gpu_verified: true,
+            instance_2_material: "aa",
+            fleet_gpu_verified: false,
+            with_third_instance: false,
+        },
+    );
+    assert_eq!(
+        count_log_records(&path, "session"),
+        3,
+        "exactly one rebuild is appended"
+    );
+    assert_eq!(count_log_records(&path, "evidence"), 2);
+    assert_eq!(
+        current_id_with_evidence(&svc, "instance-1", &round_1).as_deref(),
+        Some(id_1.as_str()),
+        "a sibling's TCB change must not rebuild instance-1"
+    );
+    let id_2b = current_id_with_evidence(&svc, "instance-2", &tcb_round)
+        .expect("instance-2 rebuilds on its own TCB change");
+    assert_ne!(id_2b, id_2);
+
+    // That instance's own GPU outcome dropping out rebuilds only it.
+    let gpu_round = chutes_evidence(b"round-gpu");
+    record(
+        &svc,
+        &FleetRound {
+            evidence: gpu_round.clone(),
+            instance_2_tcb: "OutOfDate",
+            instance_1_gpu_verified: false,
+            instance_2_material: "aa",
+            fleet_gpu_verified: true,
+            with_third_instance: false,
+        },
+    );
+    assert_eq!(
+        count_log_records(&path, "session"),
+        4,
+        "exactly one rebuild is appended"
+    );
+    assert_eq!(count_log_records(&path, "evidence"), 3);
+    assert_eq!(
+        current_id_with_evidence(&svc, "instance-2", &tcb_round).as_deref(),
+        Some(id_2b.as_str()),
+        "a sibling's GPU change must not rebuild instance-2"
+    );
+    let id_1b = current_id_with_evidence(&svc, "instance-1", &gpu_round)
+        .expect("instance-1 rebuilds on its own GPU outcome change");
+    assert_ne!(id_1b, id_1);
+
+    // That instance's binding rotation rebuilds only it.
+    let bind_round = chutes_evidence(b"round-bind");
+    record(
+        &svc,
+        &FleetRound {
+            evidence: bind_round.clone(),
+            instance_2_tcb: "OutOfDate",
+            instance_1_gpu_verified: false,
+            instance_2_material: "bb",
+            fleet_gpu_verified: false,
+            with_third_instance: false,
+        },
+    );
+    assert_eq!(
+        count_log_records(&path, "session"),
+        5,
+        "exactly one rebuild is appended"
+    );
+    assert_eq!(count_log_records(&path, "evidence"), 4);
+    assert_eq!(
+        current_id_with_evidence(&svc, "instance-1", &gpu_round).as_deref(),
+        Some(id_1b.as_str()),
+        "a sibling's binding rotation must not rebuild instance-1"
+    );
+    let id_2c = current_id_with_evidence(&svc, "instance-2", &bind_round)
+        .expect("instance-2 rebuilds on its binding rotation");
+    assert_ne!(id_2c, id_2b);
+
+    // Fleet churn — a new sibling joining — rebuilds nobody.
+    let join_round = chutes_evidence(b"round-join");
+    record(
+        &svc,
+        &FleetRound {
+            evidence: join_round.clone(),
+            instance_2_tcb: "OutOfDate",
+            instance_1_gpu_verified: false,
+            instance_2_material: "bb",
+            fleet_gpu_verified: true,
+            with_third_instance: true,
+        },
+    );
+    assert_eq!(
+        count_log_records(&path, "session"),
+        6,
+        "only the joining instance's record is appended; nobody is rebuilt"
+    );
+    assert_eq!(count_log_records(&path, "evidence"), 5);
+    assert_eq!(
+        current_id_with_evidence(&svc, "instance-1", &gpu_round).as_deref(),
+        Some(id_1b.as_str())
+    );
+    assert_eq!(
+        current_id_with_evidence(&svc, "instance-2", &bind_round).as_deref(),
+        Some(id_2c.as_str())
+    );
+    let id_3 = current_id_with_evidence(&svc, "instance-3", &join_round)
+        .expect("instance-3 is sealed by its joining round");
+
+    // Every retained record satisfies §8.2 and carries the evidence of a
+    // round that genuinely sealed an instance session: instance-1 keeps its
+    // round-1 and round-gpu records, instance-2 its round-1, round-tcb and
+    // round-bind ones, and instance-3 its joining record.
+    let allowed_rounds: std::collections::BTreeMap<&str, Vec<serde_json::Value>> = [
+        ("instance-1", vec![round_1.clone(), gpu_round.clone()]),
+        (
+            "instance-2",
+            vec![round_1.clone(), tcb_round.clone(), bind_round.clone()],
+        ),
+        ("instance-3", vec![join_round.clone()]),
+    ]
+    .into_iter()
+    .collect();
+    let listed = svc.list_attested_sessions(Some("stub-upstream"));
+    assert_eq!(listed.len(), 6, "every rebuild is retained, and no others");
+    for session in &listed {
+        let instance = chutes_instance_id_of(session);
+        let evidence = &session.document().evidence;
+        assert!(
+            evidence.digest_matches_data(),
+            "instance {instance}'s record must satisfy the §8.2 digest check"
+        );
+        assert!(
+            allowed_rounds
+                .get(instance.as_str())
+                .expect("listed instances are expected")
+                .iter()
+                .any(|round| *evidence == EvidenceRef::from_value(round)),
+            "instance {instance}'s record must carry the evidence of one of its establishing rounds"
+        );
+    }
+
+    // Replay after a restart: nobody reseals, nothing appends.
+    drop(svc);
+    let (svc, _) = make_service_raw(br#"{"id":"chat-xyz","model":"x"}"#);
+    let svc = svc.with_session_store(Arc::new(
+        JsonlSessionStore::open(&path, 1_700_000_000).unwrap(),
+    ));
+    record(
+        &svc,
+        &FleetRound {
+            evidence: chutes_evidence(b"round-replay"),
+            instance_2_tcb: "OutOfDate",
+            instance_1_gpu_verified: false,
+            instance_2_material: "bb",
+            fleet_gpu_verified: false,
+            with_third_instance: true,
+        },
+    );
+    assert_eq!(
+        count_log_records(&path, "session"),
+        6,
+        "a replayed round must dedupe onto the persisted per-instance sessions"
+    );
+    assert_eq!(count_log_records(&path, "evidence"), 5);
+    assert_eq!(
+        current_id_with_evidence(&svc, "instance-1", &gpu_round).as_deref(),
+        Some(id_1b.as_str()),
+        "replay must keep instance-1 on its latest session"
+    );
+    assert_eq!(
+        current_id_with_evidence(&svc, "instance-2", &bind_round).as_deref(),
+        Some(id_2c.as_str()),
+        "replay must keep instance-2 on its latest session"
+    );
+    assert_eq!(
+        current_id_with_evidence(&svc, "instance-3", &join_round).as_deref(),
+        Some(id_3.as_str()),
+        "replay must keep instance-3 on its joining session"
+    );
+
+    drop(svc);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("jsonl.lock"));
+    let _ = std::fs::remove_file(path.with_extension("jsonl.tmp"));
+}
+
+/// A clock a test can advance between rounds, for validity-window behaviour.
+struct TickingClock(std::sync::Arc<std::sync::atomic::AtomicU64>);
+
+impl Clock for TickingClock {
+    fn now_secs(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// The validity period — not the evidence rounds — is what renews an instance
+/// session: inside the window every round dedupes, past it a fresh session is
+/// sealed, and the expired record stays resolvable by id until its retention
+/// (last extended by a citation) lapses.
+#[tokio::test]
+async fn chutes_instance_session_renews_after_validity_lapses() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let now = Arc::new(AtomicU64::new(1_700_000_000));
+    let (svc, _) = make_service_with_clock(
+        br#"{"id":"chat-xyz","model":"x"}"#,
+        Arc::new(TickingClock(now.clone())),
+    );
+    let chutes_event = |round: &str| UpstreamVerifiedEvent {
+        provider_type: Some("chutes".to_string()),
+        url_origin: Some("https://stub-upstream".to_string()),
+        verifier_id: "private-ai-verifier/chutes/v1".to_string(),
+        evidence: Some(chutes_evidence(round.as_bytes())),
+        channel_bindings: vec![ChannelBinding::E2eePublicKeySha256 {
+            provider: "chutes".to_string(),
+            key_id: Some("instance-1".to_string()),
+            algorithm: "chutes-ml-kem-768".to_string(),
+            public_key_sha256: "aa".repeat(32),
+        }],
+        ..verified_event("stub-upstream", "x")
+    };
+    let forward = |evidence_round: &str| chutes_forward(&svc, chutes_event(evidence_round));
+
+    // Inside the validity window, every evidence round dedupes.
+    let first = forward("abc").await;
+    now.store(1_700_000_100, Ordering::Relaxed);
+    assert_eq!(
+        forward("def").await,
+        first,
+        "a later round inside the window resolves to the same session"
+    );
+
+    // Past the window (established 1_700_000_000 + 3600s TTL), a fresh session.
+    now.store(1_700_003_600, Ordering::Relaxed);
+    let renewed = forward("ghi").await;
+    assert_ne!(
+        renewed, first,
+        "a lapsed validity period must renew the session"
+    );
+    let old = svc
+        .get_attested_session(&first)
+        .expect("the expired record stays resolvable by id until retention lapses");
+    assert_eq!(old.document().expires_at, 1_700_003_600);
+    assert_eq!(
+        old.document().evidence,
+        EvidenceRef::from_value(&chutes_evidence(b"abc")),
+        "the expired record keeps its establishing round's evidence"
+    );
+    let fresh = svc.get_attested_session(&renewed).unwrap();
+    assert_eq!(fresh.document().established_at, 1_700_003_600);
+    assert_eq!(
+        fresh.document().evidence,
+        EvidenceRef::from_value(&chutes_evidence(b"ghi")),
+        "the renewed session carries the round that established it"
+    );
+
+    // The renewed session dedupes its own subsequent rounds.
+    now.store(1_700_003_700, Ordering::Relaxed);
+    assert_eq!(forward("jkl").await, renewed);
 }
 
 #[tokio::test]

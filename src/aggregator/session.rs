@@ -154,6 +154,37 @@ impl EvidenceRef {
         }
     }
 
+    /// True when the record carries no evidence at all — neither a digest
+    /// nor the data URI. Such a record cannot pass a §9.2 deep audit, so the
+    /// sealing path treats it as upgradeable: a later round that supplies a
+    /// complete bundle reseals rather than deduping onto it.
+    pub fn is_empty(&self) -> bool {
+        self.digest.is_none() && self.data_uri.is_none()
+    }
+
+    /// Strictly true when this is a complete, verifiable §8.2 bundle: a
+    /// digest AND a data URI are present, the URI carries a base64 payload we
+    /// can decode, and the decoded bytes hash to the digest. Unlike
+    /// [`Self::digest_matches_data`] — the lenient replay/compat rule, which
+    /// passes anything it has nothing to check against — this is the sealing
+    /// path's upgrade bar: a digest without data, data without a digest, a
+    /// URI shape we cannot decode, or bytes that do not hash to `digest` is
+    /// NOT a verifiable bundle, and a record carrying one cannot pass a §9.2
+    /// deep audit.
+    pub fn is_verifiable_bundle(&self) -> bool {
+        let (Some(digest), Some(data_uri)) = (self.digest.as_deref(), self.data_uri.as_deref())
+        else {
+            return false;
+        };
+        let Some((_, b64)) = data_uri.split_once(";base64,") else {
+            return false;
+        };
+        match BASE64.decode(b64.as_bytes()) {
+            Ok(bytes) => digest::sha256_hex(&bytes) == digest,
+            Err(_) => false,
+        }
+    }
+
     /// True when there is nothing to verify (no `data_uri`, or a `data_uri`
     /// shape we do not produce) or the decoded bytes hash to `digest`. §8.2:
     /// a record whose `data` does not hash to `digest` MUST be rejected.
@@ -367,6 +398,61 @@ mod tests {
                 "reason": "hard-coded known measurements",
             })
         );
+    }
+
+    #[test]
+    fn evidence_is_verifiable_bundle_requires_a_complete_matching_bundle() {
+        let complete = EvidenceRef {
+            digest: Some(digest::sha256_hex(b"abc")),
+            data_uri: Some("data:text/plain;base64,YWJj".to_string()), // "abc"
+        };
+        assert!(complete.is_verifiable_bundle());
+
+        // A digest without data, or data without a digest, is incomplete.
+        assert!(!EvidenceRef {
+            digest: Some(digest::sha256_hex(b"abc")),
+            data_uri: None,
+        }
+        .is_verifiable_bundle());
+        assert!(!EvidenceRef {
+            digest: None,
+            data_uri: Some("data:text/plain;base64,YWJj".to_string()),
+        }
+        .is_verifiable_bundle());
+        // Empty is not a bundle.
+        assert!(!EvidenceRef::default().is_verifiable_bundle());
+
+        // A URI shape we cannot decode is not a bundle.
+        assert!(!EvidenceRef {
+            digest: Some(digest::sha256_hex(b"abc")),
+            data_uri: Some("https://attest.example/evidence/abc".to_string()),
+        }
+        .is_verifiable_bundle());
+        assert!(!EvidenceRef {
+            digest: Some(digest::sha256_hex(b"abc")),
+            data_uri: Some("data:text/plain;base64,!not-base64!".to_string()),
+        }
+        .is_verifiable_bundle());
+
+        // Data that does not hash to the digest is not a bundle.
+        assert!(!EvidenceRef {
+            digest: Some(digest::sha256_hex(b"abc")),
+            data_uri: Some("data:text/plain;base64,eHl6".to_string()), // "xyz"
+        }
+        .is_verifiable_bundle());
+
+        // The lenient digest_matches_data rule (replay compatibility) stays
+        // permissive for everything except an actual hash mismatch.
+        assert!(EvidenceRef {
+            digest: Some(digest::sha256_hex(b"abc")),
+            data_uri: None,
+        }
+        .digest_matches_data());
+        assert!(EvidenceRef {
+            digest: Some(digest::sha256_hex(b"abc")),
+            data_uri: Some("https://attest.example/evidence/abc".to_string()),
+        }
+        .digest_matches_data());
     }
 
     #[test]

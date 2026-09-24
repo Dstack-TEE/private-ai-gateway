@@ -699,18 +699,35 @@ impl AciService {
                 Some(instance_id) => per_instance_session_claims(event, instance_id),
                 None => session_claims_for_event(event),
             };
-            // A per-instance (Chutes) binding excludes the shared, nonce-bound raw
-            // evidence so re-verifying the same instance is a no-op; a single
-            // channel keeps the event's evidence.
-            let evidence = if instance.is_some() {
-                EvidenceRef::default()
-            } else {
-                event
-                    .evidence
-                    .as_ref()
-                    .map(EvidenceRef::from_value)
-                    .unwrap_or_default()
-            };
+            // Every sealed session carries the verifier's evidence so a
+            // relying party can deep-audit it (§8.2, §9.2). Per-instance
+            // (Chutes) evidence is nonce-bound and rotates every verification
+            // round, so it is excluded from the dedup fingerprint — otherwise
+            // every request would mint a new session id. The document keeps
+            // the establishing round's evidence for the whole validity
+            // window; the enforceable channel binding, not the evidence
+            // freshness, is what each request is served over.
+            let evidence = event
+                .evidence
+                .as_ref()
+                .map(EvidenceRef::from_value)
+                .unwrap_or_default();
+            if evidence.is_empty() {
+                tracing::warn!(
+                    upstream = %event.upstream_name,
+                    model = %event.model_id,
+                    "verified upstream session carries no evidence bundle; the session \
+                     record will not survive a §9.2 evidence audit"
+                );
+            } else if !evidence.is_verifiable_bundle() {
+                tracing::warn!(
+                    upstream = %event.upstream_name,
+                    model = %event.model_id,
+                    "verified upstream session carries an incomplete or unverifiable \
+                     evidence bundle (a digest plus decodable data hashing to it is \
+                     required); the session record will not survive a §9.2 evidence audit"
+                );
+            }
             let session_id = self.seal_attested_session(
                 event,
                 identity.clone(),
@@ -719,6 +736,7 @@ impl AciService {
                 evidence,
                 now,
                 expires_at,
+                instance.is_none(),
             )?;
             sealed.push(SealedSession {
                 instance_key: instance.map(str::to_string),
@@ -814,6 +832,18 @@ impl AciService {
     /// verified material has a live validity period. The store's channel
     /// fingerprint provides the dedup — the document bytes themselves change
     /// with every validity period, so the id cannot.
+    ///
+    /// `fingerprint_covers_evidence` is false for per-instance (Chutes)
+    /// bindings whose nonce-bound evidence rotates every verification round:
+    /// covering the digest would make every request mint a new session. The
+    /// sealed document still carries the establishing round's evidence, so
+    /// the record stays deep-auditable per §8.2 for its whole window.
+    ///
+    /// One exception escapes the dedup: a current session whose document does
+    /// not carry a complete, verifiable §8.2 bundle is resealed when a later
+    /// round supplies one, so an upgraded or recovered channel stops citing
+    /// a record that cannot pass a §9.2 deep audit (see the upgrade check
+    /// below).
     #[allow(clippy::too_many_arguments)]
     fn seal_attested_session(
         &self,
@@ -824,7 +854,9 @@ impl AciService {
         evidence: EvidenceRef,
         now: u64,
         expires_at: u64,
+        fingerprint_covers_evidence: bool,
     ) -> Result<String, ServiceError> {
+        let no_digest = None;
         let fingerprint = ChannelMaterial {
             upstream_name: &event.upstream_name,
             endpoint: &event.url_origin,
@@ -832,7 +864,11 @@ impl AciService {
             identity: &identity,
             channel_binding: &channel_bindings,
             claims: &claims,
-            evidence_digest: &evidence.digest,
+            evidence_digest: if fingerprint_covers_evidence {
+                &evidence.digest
+            } else {
+                &no_digest
+            },
         }
         .fingerprint()
         .map_err(|err| ServiceError::SessionStore(format!("channel fingerprint: {err}")))?;
@@ -843,7 +879,35 @@ impl AciService {
             self.session_store
                 .current_session(&fingerprint, retention_until, now)
         {
-            return Ok(existing.session_id().to_string());
+            // Evidence upgrade: a current session whose document does not
+            // carry a complete, verifiable §8.2 bundle — a record replayed
+            // from a log written before evidence was persisted, an earlier
+            // round that supplied none, or one that supplied a partial or
+            // invalid bundle (a digest without data, data without a digest,
+            // or bytes that do not hash to the digest) — must not shadow a
+            // round that does supply one: deduping onto it would pin the
+            // channel to a record that fails every §9.2 deep audit until its
+            // validity lapses. Reseal once instead. The old session is
+            // immutable and stays resolvable by id until its retention
+            // lapses, so receipts already citing it still resolve it — their
+            // §9.2 evidence check against that old record still fails; the
+            // reseal does not retro-repair them. The new record takes over
+            // the fingerprint, and later rounds — with or without fresh
+            // evidence — dedupe onto it as usual. Only a complete bundle
+            // upgrades (`is_verifiable_bundle`), so a partial or invalid
+            // round can neither mint a non-auditable record in place of the
+            // current one nor lock the channel out of a later good round.
+            let upgrade = !existing.document().evidence.is_verifiable_bundle()
+                && evidence.is_verifiable_bundle();
+            if !upgrade {
+                return Ok(existing.session_id().to_string());
+            }
+            tracing::info!(
+                upstream = %event.upstream_name,
+                model = %event.model_id,
+                old_session = existing.session_id(),
+                "resealing current session to persist a newly available evidence bundle"
+            );
         }
 
         let session = AttestedSession::seal(SessionDocument {

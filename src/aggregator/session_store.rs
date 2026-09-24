@@ -1,16 +1,25 @@
 //! Persistence for attested sessions.
 //!
 //! [`SessionStore`] is the registry behind the audit endpoints. The durable
-//! implementation, [`JsonlSessionStore`], is an append-only log of one record
-//! per line, replayed into an in-memory index on open:
+//! implementation, [`JsonlSessionStore`], is an append-only log replayed into
+//! an in-memory index on open, with two record types:
 //!
 //! ```text
-//! {"seq":0,"ts":1700000000,"type":"session","fingerprint":"…","retention_until":1700003600,"payload_b64":"…"}
+//! {"seq":0,"ts":…,"type":"evidence","digest":"sha256:…","retention_until":…,"payload_b64":"…"}
+//! {"seq":1,"ts":…,"type":"session","fingerprint":"…","retention_until":…,"payload_b64":"…","evidence_data_prefix":"data:…;base64,"}
 //! ```
 //!
-//! `payload_b64` carries the sealed document bytes (JCS form, whose hash is
-//! the session id), so replay reproduces identical records; the id is always
-//! recomputed from those bytes, never trusted from disk.
+//! Session `payload_b64` carries the sealed document bytes (JCS form, whose
+//! hash is the session id), so replay reproduces identical records; the id is
+//! always recomputed from those bytes, never trusted from disk. A document
+//! whose §8.2 evidence is a complete, canonical bundle is stored *stripped* —
+//! `evidence.data` removed — with the bundle bytes in a shared `evidence`
+//! record keyed by digest: a fleet-wide Chutes bundle is byte-identical for
+//! every per-instance session of a round, so embedding it per record
+//! multiplied the log by the fleet size (measured 93-99% duplicate bytes).
+//! `evidence_data_prefix` (the data-URI head through `;base64,`) plus the
+//! shared bytes rebuild the exact served document on replay; anything that
+//! cannot be rebuilt byte-identically is stored whole, as older builds did.
 //!
 //! Two deadlines govern a record:
 //!
@@ -34,10 +43,19 @@ use std::sync::Mutex;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 
+use crate::aci::digest;
+
 use super::session::AttestedSession;
 
 /// Record type tag for a session line.
 const RECORD_TYPE_SESSION: &str = "session";
+
+/// Record type tag for a shared evidence line: the decoded §8.2 bundle bytes,
+/// stored once per digest. A fleet-wide Chutes bundle is identical for every
+/// per-instance session sealed in the same round, so each session record
+/// references the digest instead of embedding the bundle (measured: 93-99% of
+/// evidence bytes in the log were duplicate copies of the same bundle).
+const RECORD_TYPE_EVIDENCE: &str = "evidence";
 
 /// One line in the append-only session log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +65,36 @@ struct SessionLogRecord {
     #[serde(rename = "type")]
     record_type: String,
     fingerprint: String,
+    retention_until: u64,
+    payload_b64: String,
+    /// Set when the document's §8.2 evidence data was externalized into a
+    /// shared `evidence` record: the data-URI prefix (everything through
+    /// `;base64,`) which, prepended to the base64 of the shared bytes,
+    /// rebuilds the exact served document bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    evidence_data_prefix: Option<String>,
+}
+
+/// The minimal envelope every log record carries, used to dispatch on the
+/// record type before parsing the full struct.
+#[derive(Debug, Deserialize)]
+struct RecordEnvelope<'a> {
+    seq: u64,
+    #[serde(rename = "type", borrow)]
+    record_type: &'a str,
+    retention_until: u64,
+}
+
+/// One shared-evidence line in the log. `payload_b64` carries the RAW bundle
+/// bytes (a single base64 layer, unlike session payloads, whose document
+/// embeds the bytes a second time inside the JCS form).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EvidenceLogRecord {
+    seq: u64,
+    ts: u64,
+    #[serde(rename = "type")]
+    record_type: String,
+    digest: String,
     retention_until: u64,
     payload_b64: String,
 }
@@ -91,6 +139,28 @@ struct SessionEntry {
     session: AttestedSession,
     fingerprint: String,
     retention_until: u64,
+    /// Insertion order within this index. Several retained records can share
+    /// a fingerprint (an evidence upgrade reseals a channel under the same
+    /// fingerprint while the superseded record stays resolvable by id); the
+    /// *latest* inserted one is the channel's current session, so `compact`
+    /// writes records in this order and replay — inserting in file order —
+    /// rebuilds the same fingerprint mapping.
+    seq: u64,
+}
+
+/// A shared evidence bundle, stored once per digest and referenced by every
+/// session whose document carries that digest. `retention_until` tracks the
+/// longest-lived citing session (bumped on seal and on every retention
+/// extension), so the bundle outlives every record that resolves through it.
+struct EvidenceEntry {
+    bytes: Vec<u8>,
+    retention_until: u64,
+    /// The retention deadline actually persisted in the log. Invariant: an
+    /// entry in this map means the current log holds an evidence line with
+    /// this deadline. A cite carrying a later deadline must append a renewed
+    /// evidence line — otherwise a restart between the two deadlines skips
+    /// the stale line as lapsed and drops the live citing session with it.
+    written_retention_until: u64,
 }
 
 /// In-memory session index shared by both stores: id→entry plus a
@@ -101,17 +171,44 @@ struct SessionIndex {
     by_id: HashMap<String, SessionEntry>,
     by_fingerprint: HashMap<String, String>,
     by_retention: BTreeMap<u64, HashSet<String>>,
+    /// Shared evidence bundles by digest. Only the durable store populates
+    /// this; the in-memory store never externalizes evidence.
+    evidence: HashMap<String, EvidenceEntry>,
+    /// Monotonic insertion counter behind every entry's `seq`. It never
+    /// wraps in practice; saturating keeps the order total even if it did.
+    next_seq: u64,
 }
 
 impl SessionIndex {
+    /// Add or refresh a shared evidence bundle at a persisted deadline.
+    /// Retention only ever moves forward: the bundle must outlive every
+    /// session citing it. `retention_until` is the deadline just written to
+    /// the log, so both the in-memory and the persisted deadline take it.
+    fn insert_evidence(&mut self, digest: String, bytes: Vec<u8>, retention_until: u64) {
+        self.evidence
+            .entry(digest)
+            .and_modify(|e| {
+                e.retention_until = e.retention_until.max(retention_until);
+                e.written_retention_until = e.written_retention_until.max(retention_until);
+            })
+            .or_insert(EvidenceEntry {
+                bytes,
+                retention_until,
+                written_retention_until: retention_until,
+            });
+    }
+
     fn insert(&mut self, fingerprint: String, session: AttestedSession, retention_until: u64) {
         let id = session.session_id().to_string();
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.saturating_add(1);
         if let Some(prev) = self.by_id.insert(
             id.clone(),
             SessionEntry {
                 session,
                 fingerprint: fingerprint.clone(),
                 retention_until,
+                seq,
             },
         ) {
             if prev.retention_until != retention_until {
@@ -122,6 +219,8 @@ impl SessionIndex {
             .entry(retention_until)
             .or_default()
             .insert(id.clone());
+        // Last insert wins, so with several retained records under one
+        // fingerprint the latest-sealed session is the current one.
         self.by_fingerprint.insert(fingerprint, id);
     }
 
@@ -152,6 +251,9 @@ impl SessionIndex {
                 }
             }
         }
+        // Evidence retention tracks the longest-lived citing session, so a
+        // bundle lapses no earlier than its last citer.
+        self.evidence.retain(|_, e| e.retention_until > now);
     }
 
     fn get(&mut self, session_id: &str, now: u64) -> Option<AttestedSession> {
@@ -171,18 +273,27 @@ impl SessionIndex {
         if now >= entry.session.document().expires_at {
             return None; // validity lapsed; record stays for retention only
         }
-        if retention_until > entry.retention_until {
-            let old = entry.retention_until;
+        let old_retention = entry.retention_until;
+        let extends = retention_until > old_retention;
+        if extends {
             entry.retention_until = retention_until;
-            let session = entry.session.clone();
-            self.drop_retention_hint(&id, old);
+        }
+        let session = entry.session.clone();
+        let final_retention = entry.retention_until;
+        if extends {
+            self.drop_retention_hint(&id, old_retention);
             self.by_retention
                 .entry(retention_until)
                 .or_default()
                 .insert(id);
-            return Some(session);
         }
-        Some(entry.session.clone())
+        // Keep the cited evidence bundle alive as long as the session.
+        if let Some(digest) = session.document().evidence.digest.as_deref() {
+            if let Some(ev) = self.evidence.get_mut(digest) {
+                ev.retention_until = ev.retention_until.max(final_retention);
+            }
+        }
+        Some(session)
     }
 
     fn list(&self, upstream_name: Option<&str>, now: u64) -> Vec<AttestedSession> {
@@ -196,6 +307,87 @@ impl SessionIndex {
         sort_sessions_newest_first(&mut out);
         out
     }
+}
+
+/// Refuse to write a record we cannot assign a successor to, rather than
+/// overflow. Only reachable from a corrupt replayed `seq` near u64::MAX;
+/// the gateway's startup compaction renumbers from zero before serving.
+fn next_seq_after(seq: u64) -> io::Result<u64> {
+    seq.checked_add(1).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "session log sequence number overflowed u64::MAX",
+        )
+    })
+}
+
+/// The payload a session line actually stores.
+enum StoredSession {
+    /// The full sealed document bytes — the only form older builds write,
+    /// and the fallback whenever the evidence cannot be externalized.
+    Full,
+    /// The document with `evidence.data` stripped: `data_prefix` plus the
+    /// shared evidence record for `digest` rebuild the exact served bytes.
+    Stripped {
+        payload: Vec<u8>,
+        data_prefix: String,
+        digest: String,
+        evidence_bytes: Vec<u8>,
+    },
+}
+
+/// Split a complete, canonical §8.2 evidence bundle out of the document for
+/// shared storage. Anything we cannot rebuild byte-identically stays inline
+/// — missing digest or data, a non-`base64` data URI, non-canonical base64
+/// (re-encoding must reproduce the original payload exactly, or the rebuilt
+/// document would hash to a different session id), or bytes that do not hash
+/// to the digest (the replay path's §8.2 check owns rejecting those).
+fn externalize_evidence(session: &AttestedSession) -> Result<StoredSession, serde_json::Error> {
+    let evidence = &session.document().evidence;
+    let (Some(digest), Some(data_uri)) = (&evidence.digest, &evidence.data_uri) else {
+        return Ok(StoredSession::Full);
+    };
+    let Some((head, b64)) = data_uri.split_once(";base64,") else {
+        return Ok(StoredSession::Full);
+    };
+    let Ok(bytes) = BASE64.decode(b64.as_bytes()) else {
+        return Ok(StoredSession::Full);
+    };
+    if BASE64.encode(&bytes) != *b64 || digest::sha256_hex(&bytes) != *digest {
+        return Ok(StoredSession::Full);
+    }
+    let mut document = session.document().clone();
+    document.evidence.data_uri = None;
+    let payload =
+        digest::jcs_bytes(&serde_json::to_value(&document)?).map_err(serde::ser::Error::custom)?;
+    Ok(StoredSession::Stripped {
+        payload,
+        data_prefix: format!("{head};base64,"),
+        digest: digest.clone(),
+        evidence_bytes: bytes,
+    })
+}
+
+/// Rebuild the exact sealed document bytes of an externalized session record:
+/// parse the stripped payload, re-attach the shared evidence bytes under the
+/// stored data-URI prefix, and re-canonicalize. The lookup is keyed by the
+/// document's own digest and evidence bytes are hash-checked when their
+/// record loads, so a rebuilt document is consistent by construction; `None`
+/// means a malformed record or an unknown digest, and the caller skips it
+/// (fail-closed, like a tampered payload).
+fn rebuild_session_bytes(
+    stripped: &[u8],
+    data_prefix: &str,
+    evidence: &HashMap<String, EvidenceEntry>,
+) -> Option<Vec<u8>> {
+    let mut value: serde_json::Value = serde_json::from_slice(stripped).ok()?;
+    let digest = value.get("evidence")?.get("digest")?.as_str()?.to_string();
+    let bytes = &evidence.get(&digest)?.bytes;
+    value.get_mut("evidence")?.as_object_mut()?.insert(
+        "data".to_string(),
+        serde_json::Value::String(format!("{data_prefix}{}", BASE64.encode(bytes))),
+    );
+    digest::jcs_bytes(&value).ok()
 }
 
 /// Stable presentation order for a session listing: newest first, then by id.
@@ -310,36 +502,95 @@ impl JsonlSessionStore {
                 if trimmed.is_empty() {
                     continue;
                 }
-                let Ok(record) = serde_json::from_slice::<SessionLogRecord>(trimmed) else {
+                // Dispatch on the type tag first: session and evidence records
+                // carry different fields.
+                let Ok(envelope) = serde_json::from_slice::<RecordEnvelope>(trimmed) else {
                     continue; // malformed line; compaction will drop it
                 };
-                let Some(seq_after) = record.seq.checked_add(1) else {
+                let Some(seq_after) = envelope.seq.checked_add(1) else {
                     continue; // corrupt seq at u64::MAX; skip rather than overflow
                 };
                 next_seq = next_seq.max(seq_after);
-                if record.record_type != RECORD_TYPE_SESSION {
-                    continue;
-                }
                 // Ahead of the decode: a lapsed record costs a base64 decode, a
                 // parse and a digest hash before eviction would drop it.
-                if record.retention_until <= now {
+                if envelope.retention_until <= now {
                     continue;
                 }
-                let Ok(bytes) = BASE64.decode(record.payload_b64.as_bytes()) else {
-                    continue;
-                };
-                // The id is recomputed from the exact persisted bytes
-                // (`AttestedSession::from_bytes`), so a tampered payload simply
-                // resolves to a different id than any receipt cites. The
-                // evidence `data`, however, must still hash to its in-document
-                // `digest` (§8.2) — refuse to serve a swapped payload.
-                let Ok(session) = AttestedSession::from_bytes(bytes) else {
-                    continue;
-                };
-                if !session.document().evidence.digest_matches_data() {
-                    continue;
+                match envelope.record_type {
+                    RECORD_TYPE_EVIDENCE => {
+                        let Ok(record) = serde_json::from_slice::<EvidenceLogRecord>(trimmed)
+                        else {
+                            continue;
+                        };
+                        let Ok(bytes) = BASE64.decode(record.payload_b64.as_bytes()) else {
+                            continue;
+                        };
+                        // The §8.2 hash check happens once per bundle here, so
+                        // every session citing this digest can trust it.
+                        if digest::sha256_hex(&bytes) != record.digest {
+                            tracing::warn!(
+                                digest = %record.digest,
+                                "session log evidence record fails its digest check; skipping"
+                            );
+                            continue;
+                        }
+                        index.insert_evidence(record.digest, bytes, record.retention_until);
+                    }
+                    RECORD_TYPE_SESSION => {
+                        let Ok(record) = serde_json::from_slice::<SessionLogRecord>(trimmed) else {
+                            continue;
+                        };
+                        let Ok(payload) = BASE64.decode(record.payload_b64.as_bytes()) else {
+                            continue;
+                        };
+                        let bytes = match &record.evidence_data_prefix {
+                            Some(prefix) => {
+                                let Some(rebuilt) =
+                                    rebuild_session_bytes(&payload, prefix, &index.evidence)
+                                else {
+                                    tracing::warn!(
+                                        fingerprint = %record.fingerprint,
+                                        "session record cites evidence the log does not carry; skipping"
+                                    );
+                                    continue;
+                                };
+                                rebuilt
+                            }
+                            None => payload,
+                        };
+                        // The id is recomputed from the exact persisted bytes
+                        // (`AttestedSession::from_bytes`), so a tampered payload simply
+                        // resolves to a different id than any receipt cites. The
+                        // evidence `data`, however, must still hash to its in-document
+                        // `digest` (§8.2) — refuse to serve a swapped payload.
+                        // Externalized records skip this per-record check: their
+                        // evidence was hash-checked once when the evidence record
+                        // loaded, and the lookup was keyed by the document's own
+                        // digest, so the rebuilt document is consistent.
+                        let Ok(session) = AttestedSession::from_bytes(bytes) else {
+                            continue;
+                        };
+                        if record.evidence_data_prefix.is_none()
+                            && !session.document().evidence.digest_matches_data()
+                        {
+                            continue;
+                        }
+                        // Restore the evidence deadline this record implies: a
+                        // cite with a later retention must keep its bundle in
+                        // the index, or the next compact would strip the
+                        // session while the bundle is gone.
+                        if record.evidence_data_prefix.is_some() {
+                            if let Some(digest) = session.document().evidence.digest.as_deref() {
+                                if let Some(ev) = index.evidence.get_mut(digest) {
+                                    ev.retention_until =
+                                        ev.retention_until.max(record.retention_until);
+                                }
+                            }
+                        }
+                        index.insert(record.fingerprint, session, record.retention_until);
+                    }
+                    _ => continue,
                 }
-                index.insert(record.fingerprint, session, record.retention_until);
             }
         }
 
@@ -357,6 +608,12 @@ impl JsonlSessionStore {
     /// retention deadline (which the hot path extends in the index without
     /// appending). Returns the number of records kept.
     ///
+    /// Records are written in index insertion order, so when several retained
+    /// records share a fingerprint (an evidence upgrade reseals a channel while
+    /// the superseded record stays resolvable by id), replay's last-insert-wins
+    /// mapping resolves the fingerprint to the same — latest — session as the
+    /// live index did.
+    ///
     /// Records are written and synced to a temp file before an atomic rename.
     /// The replacement append handle is opened before the rename, so a
     /// successful swap never leaves the writer pointing at the old, unlinked
@@ -367,33 +624,111 @@ impl JsonlSessionStore {
         // can never deadlock against each other.
         let mut w = self.writer.lock().unwrap_or_else(|p| p.into_inner());
 
-        let live: Vec<(String, AttestedSession, u64)> = {
+        let (mut live, live_evidence) = {
             let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
             index.evict_lapsed(now);
-            index
+            let sessions: Vec<(String, AttestedSession, u64, u64)> = index
                 .by_id
                 .values()
-                .map(|e| (e.fingerprint.clone(), e.session.clone(), e.retention_until))
-                .collect()
+                .map(|e| {
+                    (
+                        e.fingerprint.clone(),
+                        e.session.clone(),
+                        e.retention_until,
+                        e.seq,
+                    )
+                })
+                .collect();
+            // The persisted deadline of a bundle must cover every session
+            // about to be stripped to it — including legacy inline records
+            // that never entered the table. Writing the bundle under the
+            // table's (shorter) deadline and stripping a longer-lived citer
+            // would drop that citer on the next restart.
+            let mut citer_max: HashMap<String, u64> = HashMap::new();
+            for (_, session, retention_until, _) in &sessions {
+                let ev = &session.document().evidence;
+                if let (Some(digest), Some(_)) = (&ev.digest, &ev.data_uri) {
+                    citer_max
+                        .entry(digest.clone())
+                        .and_modify(|r| *r = (*r).max(*retention_until))
+                        .or_insert(*retention_until);
+                }
+            }
+            // Drop uncited bundles from the index as well as the file:
+            // leaving one in the index would tell a later `put_session` the
+            // log already carries it, and the stripped session written then
+            // would cite a digest no evidence record provides.
+            index.evidence.retain(|d, _| citer_max.contains_key(d));
+            let evidence: Vec<(String, Vec<u8>, u64)> = index
+                .evidence
+                .iter()
+                .map(|(d, e)| {
+                    let persisted = e.retention_until.max(citer_max[d]);
+                    (d.clone(), e.bytes.clone(), persisted)
+                })
+                .collect();
+            (sessions, evidence)
         };
+        live.sort_by_key(|(_, _, _, seq)| *seq);
+        let written_digests: HashSet<&str> =
+            live_evidence.iter().map(|(d, _, _)| d.as_str()).collect();
 
         let tmp = self.path.with_extension("jsonl.tmp");
+        let kept = live.len();
         {
             let mut out = File::create(&tmp)?;
-            for (seq, (fingerprint, session, retention_until)) in live.iter().enumerate() {
-                let mut line = serde_json::to_string(&SessionLogRecord {
-                    seq: seq as u64,
+            let mut seq = 0u64;
+            // Evidence lines first: replay is single-pass, and a session line
+            // whose digest has not been seen is skipped.
+            for (digest, bytes, retention_until) in &live_evidence {
+                let mut line = serde_json::to_string(&EvidenceLogRecord {
+                    seq,
                     ts: now,
-                    record_type: RECORD_TYPE_SESSION.to_string(),
-                    fingerprint: fingerprint.clone(),
+                    record_type: RECORD_TYPE_EVIDENCE.to_string(),
+                    digest: digest.clone(),
                     retention_until: *retention_until,
-                    payload_b64: BASE64.encode(session.bytes()),
+                    payload_b64: BASE64.encode(bytes),
                 })
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 line.push('\n');
                 out.write_all(line.as_bytes())?;
+                seq = next_seq_after(seq)?;
+            }
+            for (fingerprint, session, retention_until, _) in live.iter() {
+                // Strip only when the bundle will actually be in the file — a
+                // citing session proves a reference exists, not that the
+                // bundle is available (a record replayed from a
+                // pre-externalization log carries its evidence inline and
+                // never entered the table). Anything else stays whole.
+                let (payload_b64, evidence_data_prefix) = match externalize_evidence(session)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                {
+                    StoredSession::Stripped {
+                        payload,
+                        data_prefix,
+                        digest,
+                        ..
+                    } if written_digests.contains(digest.as_str()) => {
+                        (BASE64.encode(payload), Some(data_prefix))
+                    }
+                    _ => (BASE64.encode(session.bytes()), None),
+                };
+                let mut line = serde_json::to_string(&SessionLogRecord {
+                    seq,
+                    ts: now,
+                    record_type: RECORD_TYPE_SESSION.to_string(),
+                    fingerprint: fingerprint.clone(),
+                    retention_until: *retention_until,
+                    payload_b64,
+                    evidence_data_prefix,
+                })
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                line.push('\n');
+                out.write_all(line.as_bytes())?;
+                seq = next_seq_after(seq)?;
             }
             out.sync_all()?; // durable temp contents before it becomes the log
+            w.next_seq = seq;
         }
 
         // Open the replacement append handle before the rename, so the only
@@ -403,8 +738,18 @@ impl JsonlSessionStore {
         std::fs::rename(&tmp, &self.path)?;
 
         w.file = new_file;
-        w.next_seq = live.len() as u64;
-        Ok(live.len())
+        // The rename is durable: record what the log now holds. Updating
+        // `written_retention_until` only after the swap keeps the invariant
+        // (index entry ⇒ the current log carries a line with that deadline)
+        // intact across a failed compaction.
+        let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
+        for (digest, _, retention_until) in &live_evidence {
+            if let Some(e) = index.evidence.get_mut(digest) {
+                e.retention_until = e.retention_until.max(*retention_until);
+                e.written_retention_until = e.written_retention_until.max(*retention_until);
+            }
+        }
+        Ok(kept)
     }
 }
 
@@ -417,15 +762,66 @@ impl SessionStore for JsonlSessionStore {
         now: u64,
     ) -> io::Result<u64> {
         let mut w = self.writer.lock().unwrap_or_else(|p| p.into_inner());
+        let stored = externalize_evidence(&session)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        // Lock order is writer → index, matching `compact`, so the two paths
+        // can never deadlock against each other. The index is acquired before
+        // any write so the log and the index advance together.
+        let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
+
+        // The evidence line MUST precede the first session line citing it:
+        // replay is single-pass, and a session line whose digest has not been
+        // seen is skipped. Crashing between the two leaves an orphan evidence
+        // record, which is harmless (evicted when its retention lapses).
+        //
+        // A known digest still needs a new line when this cite's retention
+        // outlives the deadline persisted in the log: the in-memory deadline
+        // alone would leave a window where a restart skips the stale line as
+        // lapsed and drops the live citing session with it.
+        if let StoredSession::Stripped {
+            digest,
+            evidence_bytes,
+            ..
+        } = &stored
+        {
+            let persisted = index
+                .evidence
+                .get(digest)
+                .map(|e| e.retention_until)
+                .unwrap_or(0)
+                .max(retention_until);
+            let needs_line = match index.evidence.get(digest) {
+                None => true,
+                Some(e) => persisted > e.written_retention_until,
+            };
+            if needs_line {
+                let evidence_line = serde_json::to_string(&EvidenceLogRecord {
+                    seq: w.next_seq,
+                    ts: now,
+                    record_type: RECORD_TYPE_EVIDENCE.to_string(),
+                    digest: digest.clone(),
+                    retention_until: persisted,
+                    payload_b64: BASE64.encode(evidence_bytes),
+                })
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                w.next_seq = next_seq_after(w.next_seq)?;
+                w.file.write_all(evidence_line.as_bytes())?;
+                w.file.write_all(b"\n")?;
+                index.insert_evidence(digest.clone(), evidence_bytes.clone(), persisted);
+            }
+            // No else: `needs_line == false` means the persisted deadline
+            // already covers this cite (persisted <= written <= in-memory
+            // retention), so a table update would change nothing.
+        }
+
         let seq = w.next_seq;
-        // Refuse to write a record we cannot assign a successor to, rather than
-        // overflow. Only reachable from a corrupt replayed `seq` near u64::MAX;
-        // the gateway's startup compaction renumbers from zero before serving.
-        let Some(next_seq) = seq.checked_add(1) else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "session log sequence number overflowed u64::MAX",
-            ));
+        let (payload_b64, evidence_data_prefix) = match &stored {
+            StoredSession::Full => (BASE64.encode(session.bytes()), None),
+            StoredSession::Stripped {
+                payload,
+                data_prefix,
+                ..
+            } => (BASE64.encode(payload), Some(data_prefix.clone())),
         };
         let mut line = serde_json::to_string(&SessionLogRecord {
             seq,
@@ -433,7 +829,8 @@ impl SessionStore for JsonlSessionStore {
             record_type: RECORD_TYPE_SESSION.to_string(),
             fingerprint: fingerprint.to_string(),
             retention_until,
-            payload_b64: BASE64.encode(session.bytes()),
+            payload_b64,
+            evidence_data_prefix,
         })
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         line.push('\n');
@@ -441,12 +838,7 @@ impl SessionStore for JsonlSessionStore {
         // `file` ever becomes a `BufWriter`, restore a flush or records can sit
         // unwritten on a crash.
         w.file.write_all(line.as_bytes())?;
-        w.next_seq = next_seq;
-        // Update the index under the writer lock so the log and index advance
-        // together: `compact` rewrites the log *from* the index, so an index that
-        // lagged a completed append could drop an on-disk record. Reads still
-        // don't wait on the file write — only on this brief index update.
-        let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
+        w.next_seq = next_seq_after(w.next_seq)?;
         index.insert(fingerprint.to_string(), session, retention_until);
         index.evict_lapsed(now);
         Ok(seq)
@@ -631,6 +1023,99 @@ mod tests {
 
     /// The filter is a scheduling change, not a policy one: `now = 0` keeps
     /// everything, so a caller that does not care still replays the whole log.
+    /// The #145 failure mode at scale: a log dominated by lapsed records
+    /// must not load them into the index — startup memory is proportional
+    /// to the live set, not to everything appended since the last
+    /// compaction. Deterministic (index size, not wall time): the lapsed
+    /// payloads are fully valid, so only the retention check keeps them out.
+    #[test]
+    fn replay_skips_a_log_full_of_lapsed_sessions() {
+        let path = temp_path();
+        let lapsed = session("https://lapsed", 0, 1_000);
+        let live = session("https://live", 0, 9_000);
+        let lapsed_payload = BASE64.encode(lapsed.bytes());
+        {
+            let mut out = String::new();
+            for i in 0..20_000u64 {
+                out.push_str(&format!(
+                    "{{\"seq\":{i},\"ts\":0,\"type\":\"session\",\"fingerprint\":\"fp-{i}\",\"retention_until\":1000,\"payload_b64\":\"{lapsed_payload}\"}}\n"
+                ));
+            }
+            out.push_str(&format!(
+                "{{\"seq\":20000,\"ts\":0,\"type\":\"session\",\"fingerprint\":\"fp-live\",\"retention_until\":9000,\"payload_b64\":\"{}\"}}\n",
+                BASE64.encode(live.bytes())
+            ));
+            std::fs::write(&path, out).unwrap();
+        }
+
+        let reopened = JsonlSessionStore::open(&path, 5_000).unwrap();
+        let index = reopened.index.lock().unwrap();
+        assert_eq!(index.by_id.len(), 1, "only the live record is resident");
+        assert!(index.by_fingerprint.contains_key("fp-live"));
+        drop(index);
+        assert_eq!(
+            reopened
+                .get_session(live.session_id(), 5_000)
+                .map(|s| s.bytes().to_vec()),
+            Some(live.bytes().to_vec())
+        );
+        drop(reopened);
+        cleanup(&path);
+    }
+
+    /// Same bound for shared evidence records: lapsed bundles never enter
+    /// the evidence table. The lapsed lines carry valid, hash-matching
+    /// payloads, so only the retention check keeps them out.
+    #[test]
+    fn replay_skips_a_log_full_of_lapsed_evidence() {
+        let path = temp_path();
+        let bundle: Vec<u8> = (0..2_000u32).map(|i| (i % 251) as u8).collect();
+        let live = session_with_evidence("https://live", 0, 9_000, &bundle);
+        {
+            let store = open_store(&path);
+            store
+                .put_session("fp-live", live.clone(), 9_000, 0)
+                .unwrap();
+        }
+        // Append 10k valid but lapsed evidence records behind the live pair.
+        let mut out = String::new();
+        for i in 0..10_000u64 {
+            let bytes = i.to_le_bytes();
+            out.push_str(&format!(
+                "{{\"seq\":{},\"ts\":0,\"type\":\"evidence\",\"digest\":\"{}\",\"retention_until\":1000,\"payload_b64\":\"{}\"}}\n",
+                20_001 + i,
+                crate::aci::digest::sha256_hex(&bytes),
+                BASE64.encode(bytes)
+            ));
+        }
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(out.as_bytes()).unwrap();
+        drop(file);
+
+        let reopened = JsonlSessionStore::open(&path, 5_000).unwrap();
+        let index = reopened.index.lock().unwrap();
+        assert_eq!(
+            index.evidence.len(),
+            1,
+            "only the cited live bundle is resident"
+        );
+        assert_eq!(index.by_id.len(), 1);
+        drop(index);
+        assert_eq!(
+            reopened
+                .get_session(live.session_id(), 5_000)
+                .map(|s| s.bytes().to_vec()),
+            Some(live.bytes().to_vec()),
+            "the citing session rebuilds from the surviving evidence record"
+        );
+        drop(reopened);
+        cleanup(&path);
+    }
+
     #[test]
     fn replay_keeps_everything_when_nothing_has_lapsed() {
         let path = temp_path();
@@ -784,6 +1269,413 @@ mod tests {
     }
 
     #[test]
+    fn compact_preserves_insertion_order_for_a_shared_fingerprint() {
+        // An evidence upgrade reseals a channel under the SAME fingerprint
+        // while the superseded record stays resolvable by id, so two live
+        // records can share a fingerprint. Compaction must keep resolving the
+        // fingerprint to the latest-sealed session after a restart, not to
+        // whichever record `HashMap` iteration happened to write last.
+        //
+        // The re-put below makes the failure deterministic: it refreshes
+        // whichever record the index's `by_id` iteration yields FIRST, so
+        // that record is simultaneously the latest insertion (the current
+        // one) and first in iteration order (a same-key re-insert does not
+        // move a `HashMap` entry). Without insertion-order sorting,
+        // compaction writes it first and replay's last-insert-wins hands the
+        // fingerprint to the other record — every run, not just when the
+        // iteration order happens to be unlucky.
+        let path = temp_path();
+        let first = session("https://x", 1_000, 9_000);
+        let second = session("https://x", 2_000, 9_000);
+        let store = open_store(&path);
+        store
+            .put_session("fp-shared", first.clone(), 9_000, 1_000)
+            .unwrap();
+        store
+            .put_session("fp-shared", second.clone(), 9_000, 2_000)
+            .unwrap();
+        let iteration_first = {
+            let index = store.index.lock().unwrap();
+            index
+                .by_id
+                .values()
+                .next()
+                .expect("two entries are resident")
+                .session
+                .clone()
+        };
+        // Re-put that record: same id, same fingerprint, but now the latest
+        // insertion — and still first in `by_id` iteration order.
+        store
+            .put_session("fp-shared", iteration_first.clone(), 9_000, 3_000)
+            .unwrap();
+        assert_eq!(
+            store
+                .current_session("fp-shared", 9_000, 3_000)
+                .map(|s| s.session_id().to_string()),
+            Some(iteration_first.session_id().to_string()),
+            "the latest insertion is the fingerprint's current session"
+        );
+        assert_eq!(store.compact(3_000).unwrap(), 2);
+        drop(store); // release the advisory lock before reopening
+
+        let reopened = open_store(&path);
+        assert_eq!(
+            reopened
+                .current_session("fp-shared", 9_000, 3_000)
+                .map(|s| s.session_id().to_string()),
+            Some(iteration_first.session_id().to_string()),
+            "replay must resolve the shared fingerprint to the latest-sealed record"
+        );
+        // Both records stay resolvable by id for retention.
+        assert!(reopened.get_session(first.session_id(), 3_000).is_some());
+        assert!(reopened.get_session(second.session_id(), 3_000).is_some());
+
+        drop(reopened);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn compact_append_compact_replay_keeps_the_latest_session_current() {
+        // Compaction renumbers the log, but the index's insertion order must
+        // survive compact → append → compact → replay: a record sealed AFTER a
+        // compaction (whose file seq was renumbered from zero) still wins the
+        // fingerprint against records that predate it, and the log sequence
+        // continues from the compacted file.
+        let path = temp_path();
+        let superseded = session("https://x", 1_000, 9_000);
+        let resealed = session("https://x", 2_000, 9_000);
+        {
+            let store = open_store(&path);
+            store
+                .put_session("fp", superseded.clone(), 9_000, 1_000)
+                .unwrap();
+            assert_eq!(store.compact(1_500).unwrap(), 1);
+            // The reseal lands after the log was renumbered.
+            assert_eq!(
+                store
+                    .put_session("fp", resealed.clone(), 9_000, 2_000)
+                    .unwrap(),
+                1,
+                "the log sequence continues from the compacted file"
+            );
+            assert_eq!(store.compact(2_500).unwrap(), 2);
+        }
+
+        let reopened = open_store(&path);
+        assert_eq!(
+            reopened
+                .current_session("fp", 9_000, 2_500)
+                .map(|s| s.session_id().to_string()),
+            Some(resealed.session_id().to_string()),
+            "the post-compaction reseal stays current after another compaction \
+             and replay"
+        );
+        assert!(reopened
+            .get_session(superseded.session_id(), 2_500)
+            .is_some());
+        let third = session("https://y", 3_000, 9_000);
+        assert_eq!(reopened.put_session("fp2", third, 9_000, 3_000).unwrap(), 2);
+
+        drop(reopened);
+        cleanup(&path);
+    }
+
+    /// A session carrying a complete §8.2 evidence bundle over `bytes` — the
+    /// shape that the store externalizes into a shared evidence record.
+    fn session_with_evidence(
+        endpoint: &str,
+        established_at: u64,
+        expires_at: u64,
+        evidence_bytes: &[u8],
+    ) -> AttestedSession {
+        let mut session = session(endpoint, established_at, expires_at);
+        let mut document = session.document().clone();
+        document.evidence = crate::aggregator::session::EvidenceRef {
+            digest: Some(crate::aci::digest::sha256_hex(evidence_bytes)),
+            data_uri: Some(format!(
+                "data:application/json;base64,{}",
+                BASE64.encode(evidence_bytes)
+            )),
+        };
+        session = AttestedSession::seal(document).unwrap();
+        session
+    }
+
+    /// Read the log as parsed JSON lines.
+    fn log_lines(path: &Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    fn count_type(lines: &[serde_json::Value], record_type: &str) -> usize {
+        lines.iter().filter(|l| l["type"] == record_type).count()
+    }
+
+    /// The core fidelity contract of evidence externalization: several
+    /// sessions sharing one fleet-wide bundle store the bundle once, and
+    /// every session still serves the exact sealed bytes — the session id is
+    /// a content address over those bytes, so byte equality IS the behavior
+    /// contract.
+    #[test]
+    fn externalized_evidence_is_stored_once_and_serves_byte_identical_sessions() {
+        let path = temp_path();
+        let bundle: Vec<u8> = (0..50_000u32).map(|i| (i % 251) as u8).collect();
+        let sessions: Vec<_> = (0..3)
+            .map(|i| session_with_evidence(&format!("https://node-{i}"), 1_000, 9_000, &bundle))
+            .collect();
+        let inline_bytes: usize = sessions
+            .iter()
+            .map(|s| BASE64.encode(s.bytes()).len())
+            .sum();
+
+        {
+            let store = open_store(&path);
+            for (i, s) in sessions.iter().enumerate() {
+                store
+                    .put_session(&format!("fp-{i}"), s.clone(), 9_000, 1_000)
+                    .unwrap();
+            }
+            // Served sessions are byte-identical to the sealed originals.
+            for s in &sessions {
+                let got = store
+                    .get_session(s.session_id(), 1_000)
+                    .expect("session is served");
+                assert_eq!(got.bytes(), s.bytes());
+                assert_eq!(got.document(), s.document());
+            }
+        }
+
+        let lines = log_lines(&path);
+        assert_eq!(
+            count_type(&lines, "evidence"),
+            1,
+            "the bundle is stored once"
+        );
+        assert_eq!(count_type(&lines, "session"), 3);
+        for line in lines.iter().filter(|l| l["type"] == "session") {
+            assert!(line["evidence_data_prefix"].is_string());
+            let payload = BASE64
+                .decode(line["payload_b64"].as_str().unwrap())
+                .unwrap();
+            assert!(
+                payload.len() < bundle.len() / 4,
+                "the session payload must not carry the bundle"
+            );
+        }
+        let actual = std::fs::metadata(&path).unwrap().len() as usize;
+        assert!(
+            actual < inline_bytes / 2,
+            "externalized ({actual} bytes) must be far smaller than inline ({inline_bytes} bytes)"
+        );
+        drop(open_store(&path));
+        cleanup(&path);
+    }
+
+    /// Replay of externalized records reproduces the exact sessions — same
+    /// ids, same bytes — and the fingerprint mapping survives.
+    #[test]
+    fn externalized_sessions_replay_byte_identical() {
+        let path = temp_path();
+        let bundle: Vec<u8> = (0..40_000u32).map(|i| (i % 241) as u8).collect();
+        let first = session_with_evidence("https://node-1", 1_000, 9_000, &bundle);
+        let second = session_with_evidence("https://node-2", 1_100, 9_000, &bundle);
+        {
+            let store = open_store(&path);
+            store
+                .put_session("fp-1", first.clone(), 9_000, 1_000)
+                .unwrap();
+            store
+                .put_session("fp-2", second.clone(), 9_000, 1_000)
+                .unwrap();
+        }
+
+        let reopened = open_store(&path);
+        for s in [&first, &second] {
+            let got = reopened
+                .get_session(s.session_id(), 1_000)
+                .expect("replayed session is served");
+            assert_eq!(got.bytes(), s.bytes(), "replayed bytes must be identical");
+            assert_eq!(got.session_id(), s.session_id());
+        }
+        assert_eq!(
+            reopened
+                .current_session("fp-1", 9_000, 1_000)
+                .map(|s| s.session_id().to_string()),
+            Some(first.session_id().to_string())
+        );
+        assert!(
+            reopened
+                .get_session(first.session_id(), 1_000)
+                .unwrap()
+                .document()
+                .evidence
+                .digest_matches_data(),
+            "the rebuilt document satisfies the §8.2 digest check"
+        );
+
+        drop(reopened);
+        cleanup(&path);
+    }
+
+    /// Compaction writes evidence lines before their citers and replay after
+    /// compaction is still byte-identical.
+    #[test]
+    fn compact_rewrites_externalized_records_and_replays_identically() {
+        let path = temp_path();
+        let bundle: Vec<u8> = (0..30_000u32).map(|i| (i % 239) as u8).collect();
+        let first = session_with_evidence("https://node-1", 1_000, 9_000, &bundle);
+        let second = session_with_evidence("https://node-2", 1_100, 9_000, &bundle);
+        {
+            let store = open_store(&path);
+            store
+                .put_session("fp-1", first.clone(), 9_000, 1_000)
+                .unwrap();
+            store
+                .put_session("fp-2", second.clone(), 9_000, 1_000)
+                .unwrap();
+            assert_eq!(store.compact(1_500).unwrap(), 2);
+        }
+
+        // Evidence precedes sessions, once.
+        let lines = log_lines(&path);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0]["type"], "evidence");
+        assert_eq!(count_type(&lines, "session"), 2);
+
+        let reopened = open_store(&path);
+        for s in [&first, &second] {
+            assert_eq!(
+                reopened.get_session(s.session_id(), 2_000).unwrap().bytes(),
+                s.bytes()
+            );
+        }
+        drop(reopened);
+        cleanup(&path);
+    }
+
+    /// Evidence retention tracks its citers: extending a session's retention
+    /// keeps its bundle alive; once the last citer lapses, the bundle goes.
+    #[test]
+    fn evidence_lifetime_tracks_its_citers() {
+        let path = temp_path();
+        let bundle: Vec<u8> = (0..10_000u32).map(|i| (i % 233) as u8).collect();
+        let s = session_with_evidence("https://node-1", 1_000, 9_000, &bundle);
+        {
+            let store = open_store(&path);
+            store.put_session("fp-1", s.clone(), 2_000, 1_000).unwrap();
+            // A citation extends the session's retention; the bundle must follow.
+            store.current_session("fp-1", 9_000, 1_500).unwrap();
+            assert_eq!(store.compact(3_000).unwrap(), 1);
+            let lines = log_lines(&path);
+            assert_eq!(count_type(&lines, "evidence"), 1);
+            assert_eq!(count_type(&lines, "session"), 1);
+            // Past the extended retention, both are dropped.
+            assert_eq!(store.compact(10_000).unwrap(), 0);
+            assert!(log_lines(&path).is_empty());
+        }
+        assert!(open_store(&path)
+            .get_session(s.session_id(), 10_001)
+            .is_none());
+        cleanup(&path);
+    }
+
+    /// A session line citing an evidence digest the log does not carry is
+    /// skipped on replay (fail-closed, like a tampered payload).
+    #[test]
+    fn session_citing_missing_evidence_is_skipped_on_replay() {
+        let path = temp_path();
+        let bundle: Vec<u8> = (0..5_000u32).map(|i| (i % 229) as u8).collect();
+        let s = session_with_evidence("https://node-1", 1_000, 9_000, &bundle);
+        {
+            let store = open_store(&path);
+            store.put_session("fp-1", s.clone(), 9_000, 1_000).unwrap();
+        }
+        // Drop the evidence line, keep the citing session line.
+        let lines: Vec<String> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .filter(|l| l.contains("\"session\""))
+            .map(|l| l.to_string())
+            .collect();
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+
+        let reopened = open_store(&path);
+        assert!(reopened.get_session(s.session_id(), 1_000).is_none());
+        assert!(reopened.current_session("fp-1", 9_000, 1_000).is_none());
+        drop(reopened);
+        cleanup(&path);
+    }
+
+    /// An evidence record whose bytes do not hash to its digest is rejected,
+    /// and sessions citing it are skipped.
+    #[test]
+    fn tampered_evidence_record_is_rejected_and_citers_skipped() {
+        let path = temp_path();
+        let bundle: Vec<u8> = (0..5_000u32).map(|i| (i % 227) as u8).collect();
+        let s = session_with_evidence("https://node-1", 1_000, 9_000, &bundle);
+        {
+            let store = open_store(&path);
+            store.put_session("fp-1", s.clone(), 9_000, 1_000).unwrap();
+        }
+        // Swap the evidence payload for different bytes under the same digest.
+        let mut lines = log_lines(&path);
+        let ev = lines
+            .iter_mut()
+            .find(|l| l["type"] == "evidence")
+            .expect("evidence line exists");
+        ev["payload_b64"] = serde_json::Value::String(BASE64.encode(b"swapped"));
+        let mut out = lines
+            .iter()
+            .map(|l| serde_json::to_string(l).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        out.push('\n');
+        std::fs::write(&path, out).unwrap();
+
+        let reopened = open_store(&path);
+        assert!(reopened.get_session(s.session_id(), 1_000).is_none());
+        drop(reopened);
+        cleanup(&path);
+    }
+
+    /// Evidence that is not a complete, canonical bundle stays inline: the
+    /// record is written whole (today's format), served from the index, and
+    /// the replay-time §8.2 check owns rejecting a digest mismatch.
+    #[test]
+    fn non_canonical_evidence_stays_inline() {
+        let path = temp_path();
+        // A digest that does not match the data: not externalizable.
+        let mut document = session("https://node-1", 1_000, 9_000).document().clone();
+        document.evidence = crate::aggregator::session::EvidenceRef {
+            digest: Some(crate::aci::digest::sha256_hex(b"something-else")),
+            data_uri: Some(format!(
+                "data:application/json;base64,{}",
+                BASE64.encode(b"payload")
+            )),
+        };
+        let s = AttestedSession::seal(document).unwrap();
+        {
+            let store = open_store(&path);
+            store.put_session("fp-1", s.clone(), 9_000, 1_000).unwrap();
+            assert!(store.get_session(s.session_id(), 1_000).is_some());
+            let lines = log_lines(&path);
+            assert_eq!(count_type(&lines, "evidence"), 0, "no evidence record");
+            assert_eq!(count_type(&lines, "session"), 1);
+            assert!(lines[0].get("evidence_data_prefix").is_none());
+        }
+        // Replay applies the lenient §8.2 rule and drops the mismatch.
+        assert!(open_store(&path)
+            .get_session(s.session_id(), 1_000)
+            .is_none());
+        cleanup(&path);
+    }
+
+    #[test]
     fn malformed_lines_are_skipped_on_replay() {
         let path = temp_path();
         let good = session("https://node-7.example.net", 1_000, 5_000);
@@ -873,6 +1765,7 @@ mod tests {
             fingerprint: "fp".to_string(),
             retention_until: 9_000,
             payload_b64: BASE64.encode(good.bytes()),
+            evidence_data_prefix: None,
         };
         std::fs::write(
             &path,

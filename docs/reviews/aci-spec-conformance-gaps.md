@@ -36,40 +36,68 @@ item.
    silently. Sessions do better: the JSONL store survives restarts and
    extends retention per citing receipt (§8 retention rule).
 
-4. **Chutes per-instance sessions carry no §8.2 evidence.** The Chutes
-   verifier's raw evidence is fleet-wide and nonce-bound, so sealing it into
-   each per-instance session would mint a new session id for every
-   verification round and every fleet change. The implementation instead
-   seals per-instance sessions with an empty `evidence` object
-   (`record_attested_upstream_session`), keeping them content-addressed on
-   per-instance facts only. Consequence: the §9.2 deep-audit step fails
-   closed on Chutes-cited sessions (`aci` CLI upstream-2; verifier-ts
-   `checkSessionEvidence`) — a §9.2(4) deep audit is impossible for Chutes
-   even once built (see the §9.2 audits item below), while receipt
-   verification and the §9.1/§9.3 checks are unaffected. The
-   session store still accepts these records (its §8.2 check rejects only
-   evidence whose `data` does not hash to `digest`).
+4. **Chutes per-instance sessions keep §8.2 evidence out of the dedup
+   fingerprint, not out of the document.** The Chutes verifier's raw
+   evidence is fleet-wide and nonce-bound, so sealing it into the channel
+   fingerprint would mint a new session id for every verification round.
+   Instead, `record_attested_upstream_session` seals per-instance documents
+   with the establishing round's evidence (`data` + `digest`, §8.2), and
+   `seal_attested_session` excludes the rotating evidence digest from
+   `ChannelMaterial` for instance-scoped bindings only. Within a validity
+   window the id stays stable across rounds — re-verifying the same
+   instance resolves to the existing session, and the document it points at
+   carries auditable evidence throughout. Material changes (per-instance
+   TCB, GPU outcome, binding) still flow through the claims and binding, so
+   they mint a new session as before.
 
-   Sealing the evidence in was tried and reverted. The predicted new session
-   id per round is what happens, and it compounds: each round appends a fresh
-   record per instance instead of resolving to the existing one, and each
-   record now carries the fleet-wide bundle, so the log grows without bound
-   relative to the live set. Startup replays that log into the index, so a
-   long enough gap since the last compaction exhausts memory before the
-   process serves a request — and because the kill lands during startup, it
-   repeats on every restart with no path back except moving the file aside.
+   Sealing the evidence into the fingerprint was tried (#142) and reverted
+   (#145): a fresh id per round appended a fresh record per instance, each
+   carrying the fleet-wide bundle, and startup replayed the whole log into
+   the index, so the process could exhaust memory before serving a request.
+   The properties this fix relies on are now the design contract, stated
+   explicitly because nothing enforces them mechanically: a session's
+   *fingerprint* must not commit to anything that changes per verification
+   round (the id still commits to the sealed document — which never changes
+   within a window, because the fingerprint gates resealing), and replay
+   must stay proportional to the live set rather than to everything
+   appended since the last compaction (#145 skips lapsed records ahead of
+   the decode). Append rate is one record per instance per validity window
+   (plus rare first-round races), not one per request.
 
-   So the fix has to keep the evidence *out* of what the session id commits
-   to. Emitting a per-instance evidence slice, the work item below, removes
-   the fleet-wide half but not the nonce-bound half, so on its own it still
-   mints a new id per round. Retaining the evidence under its own digest and
-   linking sessions to it out of band addresses both, and retains every
-   round's evidence rather than only the latest. Either way, two properties
-   the store depends on need stating explicitly, because nothing currently
-   enforces them: a session's identity must not commit to anything that
-   changes per verification round, and replay must stay proportional to the
-   live set rather than to everything appended since the last compaction.
+   Residual consequences: the evidence is a point-in-time proof from the
+   window's establishing round, not from the request's own round; the
+   enforceable channel binding, not the evidence, is what each request is
+   served over. A §9.2(4) deep audit remains impossible for Chutes until a
+   chutes-specific evidence re-verifier exists (see the §9.2 audits item
+   below) — §9.2(2) (`aci` CLI upstream-2; verifier-ts
+   `checkSessionEvidence`) now passes. The session store still accepts
+   records with empty evidence (it rejects only evidence whose `data` does
+   not hash to `digest`), so a Chutes verifier that stops emitting the
+   bundle degrades to the pre-fix state with a warning in the logs rather
+   than a hard failure — but the degradation is bounded: when a later round
+   supplies a complete bundle (`digest` plus decodable `data` hashing to
+   it), the channel reseals exactly once under the same fingerprint —
+   whether the superseded record was empty or carried a partial/invalid
+   bundle. The superseded record stays resolvable by id until its
+   retention lapses (receipts already citing it still resolve it, though
+   their §9.2 evidence check against that record still fails — the
+   reseal does not retro-repair them), new citations resolve to the
+   evidence-bearing record, and later rounds dedupe as before — so
+   upgrading a log written before evidence was persisted converges
+   within one round instead of after the old session's validity window
+   lapses.
 
+   Storage format: the JSONL store externalizes a complete, canonical
+   §8.2 bundle into a shared `evidence` record keyed by digest (session
+   records keep the digest and the data-URI prefix, and rebuild the exact
+   served bytes on replay). Measured on a real-shape simulation (14
+   instances, the public `/servers/tee/measurements` body plus per-instance
+   quotes): steady-state log 29.1 MiB → 1.6 MiB (18×); the savings factor
+   grows ~linearly with fleet size (the bundle is stored once per
+   generation instead of once per instance per generation). Cross-round
+   delta compression was measured and rejected: consecutive bundles share
+   only ~30% (quotes are re-signed every round), so the complexity buys
+   almost nothing over the shared record.
 5. **Streaming upstream errors carry no receipt.** A streaming request whose
    upstream answers non-200 is returned as a buffered error without a
    receipt (inherited dstack-vllm-proxy behavior,
