@@ -14,12 +14,13 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::{
     runtime::Handle,
-    sync::{broadcast, watch},
+    sync::{broadcast, watch, Semaphore},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -44,6 +45,11 @@ const SIGN_IN_FAILED: &str = "Sign-in failed. Check the password and try again."
 const WRONG_CURRENT_PASSWORD: &str = "The current password is incorrect.";
 const THROTTLED: &str = "Too many sign-in attempts. Wait a few seconds and try again.";
 const SESSION_CHECK: Duration = Duration::from_secs(15);
+/// At most this many password checks run at once, across all clients. Each
+/// Argon2 verification holds 19 MiB, and the per-client throttle alone admits
+/// a burst from every address.
+const CONCURRENT_VERIFICATIONS: usize = 2;
+static VERIFICATIONS: Semaphore = Semaphore::const_new(CONCURRENT_VERIFICATIONS);
 
 /// Runs management commands through the same admission and dispatch as the IPC endpoint.
 #[derive(Clone)]
@@ -134,8 +140,10 @@ pub(super) fn start(
 }
 
 /// `Host` values the listener answers to: the bound address, the client host,
-/// and loopback when bound to every interface. Anything else, including
-/// `localhost`, may be a DNS-rebinding page and is refused.
+/// and loopback when bound to every interface. A listener that loopback
+/// reaches also answers to `localhost`, as Syncthing's GUI does: browsers
+/// resolve that name only to loopback (RFC 6761 section 6.3), so no page can
+/// rebind it. Any other name may be a DNS-rebinding page and is refused.
 fn allowed_hosts(listen: &ResolvedListen) -> Vec<String> {
     let port = listen.bind.port();
     let bound = match listen.bind.ip() {
@@ -143,8 +151,12 @@ fn allowed_hosts(listen: &ResolvedListen) -> Vec<String> {
         IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
         ip => ip,
     };
+    let localhost = bound.is_loopback().then(|| "localhost".to_string());
     let mut hosts = Vec::new();
-    for host in std::iter::once(bound.to_string()).chain(listen.config.client_host.clone()) {
+    for host in std::iter::once(bound.to_string())
+        .chain(localhost)
+        .chain(listen.config.client_host.clone())
+    {
         let host = url_host(&host);
         hosts.push(format!("{host}:{port}"));
         // Browsers omit the default port.
@@ -213,18 +225,18 @@ async fn security<B: Backend>(
                 return secure_response(throttled());
             }
         } else {
-            let token = session_token(headers, &state.cookie);
-            if !token.is_some_and(|token| state.auth.authorize(token)) {
-                let mut response = if state.throttle.allow(peer.ip()) {
+            let jar = CookieJar::from_headers(headers);
+            if !session_token(&jar, &state.cookie).is_some_and(|token| state.auth.authorize(token))
+            {
+                let response = if state.throttle.allow(peer.ip()) {
                     status(StatusCode::UNAUTHORIZED, SESSION_ENDED)
                 } else {
                     throttled()
                 };
                 // Expire a cookie whose session ended, however it ended.
-                if token.is_some() {
-                    set_session_cookie(&mut response, &state.cookie, None);
-                }
-                return secure_response(response);
+                return secure_response(
+                    (expire_session(jar, &state.cookie), response).into_response(),
+                );
             }
         }
         if request.method() == HttpMethod::POST
@@ -304,29 +316,44 @@ fn valid_origin(headers: &HeaderMap, host: &str, method: &HttpMethod) -> bool {
     true
 }
 
-fn session_token<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    headers
-        .get_all(header::COOKIE)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(';'))
-        .filter_map(|pair| pair.trim().split_once('='))
-        .find_map(|(key, value)| (key == name).then_some(value))
+fn session_token<'a>(jar: &'a CookieJar, name: &str) -> Option<&'a str> {
+    jar.get(name).map(Cookie::value)
 }
 
-/// Sets the session cookie, or expires it when `token` is `None`. It cannot be
-/// `Secure`: the listener speaks plain HTTP, even on loopback.
-fn set_session_cookie(response: &mut Response, name: &str, token: Option<&str>) {
-    let cookie = match token {
-        Some(token) => format!(
-            "{name}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}",
-            SESSION_LIFETIME.as_secs()
-        ),
-        None => format!("{name}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"),
-    };
-    if let Ok(cookie) = HeaderValue::from_str(&cookie) {
-        response.headers_mut().append(header::SET_COOKIE, cookie);
+/// The session cookie. It cannot be `Secure`: the listener speaks plain HTTP,
+/// even on loopback.
+fn session_cookie(name: &str, token: &str) -> Cookie<'static> {
+    Cookie::build((name.to_string(), token.to_string()))
+        .http_only(true)
+        .same_site(SameSite::Strict)
+        .path("/")
+        .max_age(time::Duration::try_from(SESSION_LIFETIME).unwrap_or(time::Duration::MAX))
+        .build()
+}
+
+/// Sets a fresh session cookie, or expires the request's one when `token` is `None`.
+fn set_session(jar: CookieJar, name: &str, token: Option<&str>) -> CookieJar {
+    match token {
+        Some(token) => jar.add(session_cookie(name, token)),
+        None => expire_session(jar, name),
     }
+}
+
+/// Expires the session cookie the request carried; without one it sets nothing.
+fn expire_session(jar: CookieJar, name: &str) -> CookieJar {
+    jar.remove(session_cookie(name, ""))
+}
+
+/// Checks a password on the blocking pool once a verification slot is free.
+/// The slot stays taken until the check ends, even if the client disconnects.
+async fn verify<T: Send + 'static>(check: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    let permit = VERIFICATIONS.acquire().await.ok()?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        check()
+    })
+    .await
+    .ok()
 }
 
 #[derive(Deserialize)]
@@ -338,24 +365,25 @@ struct SessionRequest {
 /// Signs in with the password and sets the session cookie.
 async fn session<B: Backend>(
     State(state): State<WebState<B>>,
-    headers: HeaderMap,
+    jar: CookieJar,
     Json(request): Json<SessionRequest>,
 ) -> Response {
     let auth = state.auth.clone();
-    let token = tokio::task::spawn_blocking(move || auth.sign_in(&request.password))
+    let Some(token) = verify(move || auth.sign_in(&request.password))
         .await
-        .ok()
-        .flatten();
-    let Some(token) = token else {
+        .flatten()
+    else {
         return status(StatusCode::UNAUTHORIZED, SIGN_IN_FAILED);
     };
     // A browser signing in again replaces its previous session.
-    if let Some(previous) = session_token(&headers, &state.cookie) {
+    if let Some(previous) = session_token(&jar, &state.cookie) {
         state.auth.revoke(previous);
     }
-    let mut response = StatusCode::NO_CONTENT.into_response();
-    set_session_cookie(&mut response, &state.cookie, Some(&token));
-    response
+    (
+        jar.add(session_cookie(&state.cookie, &token)),
+        StatusCode::NO_CONTENT,
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -368,7 +396,12 @@ struct PasswordChange {
 /// A browser must prove the current password before changing or clearing it,
 /// and draws from its client's throttle budget to do so. The change ends every
 /// session, so the caller receives a fresh session cookie.
-async fn change_password<B: Backend>(state: WebState<B>, peer: IpAddr, params: Value) -> Response {
+async fn change_password<B: Backend>(
+    state: WebState<B>,
+    peer: IpAddr,
+    jar: CookieJar,
+    params: Value,
+) -> Response {
     let Ok(change) = serde_json::from_value::<PasswordChange>(params) else {
         return rpc_error(ui_api::Error::InvalidRequest.rpc());
     };
@@ -378,7 +411,7 @@ async fn change_password<B: Backend>(state: WebState<B>, peer: IpAddr, params: V
     if state.auth.has_password() {
         let auth = state.auth.clone();
         let current = change.current_password.unwrap_or_default();
-        let verified = tokio::task::spawn_blocking(move || auth.verify_password(&current))
+        let verified = verify(move || auth.verify_password(&current))
             .await
             .unwrap_or(false);
         if !verified {
@@ -395,26 +428,19 @@ async fn change_password<B: Backend>(state: WebState<B>, peer: IpAddr, params: V
     .await
     {
         Ok(result) => {
-            let mut response = Json(json!({ "result": result })).into_response();
-            set_session_cookie(
-                &mut response,
-                &state.cookie,
-                state.auth.open_session().as_deref(),
-            );
-            response
+            let jar = set_session(jar, &state.cookie, state.auth.open_session().as_deref());
+            (jar, Json(json!({ "result": result }))).into_response()
         }
         Err(error) => rpc_error(error.rpc()),
     }
 }
 
 /// Signs this browser out; other browser sessions stay open.
-async fn sign_out<B: Backend>(State(state): State<WebState<B>>, headers: HeaderMap) -> Response {
-    if let Some(token) = session_token(&headers, &state.cookie) {
+async fn sign_out<B: Backend>(State(state): State<WebState<B>>, jar: CookieJar) -> Response {
+    if let Some(token) = session_token(&jar, &state.cookie) {
         state.auth.revoke(token);
     }
-    let mut response = StatusCode::NO_CONTENT.into_response();
-    set_session_cookie(&mut response, &state.cookie, None);
-    response
+    (expire_session(jar, &state.cookie), StatusCode::NO_CONTENT).into_response()
 }
 
 async fn bootstrap() -> Json<WebBootstrap> {
@@ -437,9 +463,9 @@ async fn bootstrap() -> Json<WebBootstrap> {
 /// or reconnects resynchronizes without replaying missed events.
 async fn events<B: Backend>(
     State(state): State<WebState<B>>,
-    headers: HeaderMap,
+    jar: CookieJar,
 ) -> Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>> {
-    let token = session_token(&headers, &state.cookie)
+    let token = session_token(&jar, &state.cookie)
         .unwrap_or_default()
         .to_string();
     let mut states = state.states.clone();
@@ -515,6 +541,7 @@ async fn rpc<B: Backend>(
     State(state): State<WebState<B>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path(method): Path<String>,
+    jar: CookieJar,
     Json(params): Json<Value>,
 ) -> Response {
     let Some(method) = Method::from_name(&method) else {
@@ -527,7 +554,7 @@ async fn rpc<B: Backend>(
             .into_response();
     };
     if method == Method::SetWebUiPassword {
-        return change_password(state, peer.ip(), params).await;
+        return change_password(state, peer.ip(), jar, params).await;
     }
     match ui_api::invoke(&state.backend, &state.host, method, params).await {
         Ok(result) => Json(json!({ "result": result })).into_response(),
@@ -704,14 +731,17 @@ mod tests {
         format!("{}={token}", cookie_name(3210))
     }
 
+    /// The session cookie a response sets.
+    fn session_set_cookie(response: &Response) -> Option<Cookie<'static>> {
+        let value = response.headers().get(header::SET_COOKIE)?.to_str().ok()?;
+        Cookie::parse(value.to_string())
+            .ok()
+            .filter(|cookie| cookie.name() == cookie_name(3210))
+    }
+
     /// The session token a response sets, or `""` when it expires the cookie.
     fn set_cookie(response: &Response) -> Option<String> {
-        let value = response.headers().get(header::SET_COOKIE)?.to_str().ok()?;
-        let (pair, _) = value.split_once(';')?;
-        Some(
-            pair.strip_prefix(&format!("{}=", cookie_name(3210)))?
-                .to_string(),
-        )
+        session_set_cookie(response).map(|cookie| cookie.value().to_string())
     }
 
     fn set_password(auth: &Auth, password: &str) {
@@ -762,7 +792,10 @@ mod tests {
         let ended = stop(&fixture.router, &token).await;
         assert_eq!(ended.status(), StatusCode::UNAUTHORIZED);
         // An ended session expires its cookie and answers JSON.
-        assert_eq!(set_cookie(&ended).as_deref(), Some(""));
+        let expired = session_set_cookie(&ended).unwrap();
+        assert_eq!(expired.value(), "");
+        assert_eq!(expired.max_age(), Some(time::Duration::ZERO));
+        assert_eq!(expired.path(), Some("/"));
         assert_eq!(json_body(ended).await["error"]["message"], SESSION_ENDED);
     }
 
@@ -857,11 +890,15 @@ mod tests {
         assert_eq!(json_body(wrong).await["error"]["message"], SIGN_IN_FAILED);
         let response = sign_in(&fixture.router, json!({ "password": PASSWORD })).await;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        let header = response.headers()[header::SET_COOKIE].to_str().unwrap();
-        assert!(header.ends_with(&format!(
-            "; HttpOnly; SameSite=Strict; Path=/; Max-Age={}",
-            SESSION_LIFETIME.as_secs()
-        )));
+        let set = session_set_cookie(&response).unwrap();
+        assert_eq!(set.http_only(), Some(true));
+        assert_eq!(set.same_site(), Some(SameSite::Strict));
+        assert_eq!(set.path(), Some("/"));
+        assert_eq!(set.secure(), None);
+        assert_eq!(
+            set.max_age().map(|age| age.whole_seconds()),
+            Some(SESSION_LIFETIME.as_secs() as i64)
+        );
         let token = set_cookie(&response).unwrap();
         assert_eq!(stop(&fixture.router, &token).await.status(), StatusCode::OK);
         // Signing in again from the same browser replaces its session.
@@ -944,6 +981,7 @@ mod tests {
         let bearer = cookie(&token);
         for (host, origin, expected) in [
             ("localhost:3210", ORIGIN, StatusCode::FORBIDDEN),
+            ("localhost:3210", "http://localhost:3210", StatusCode::OK),
             ("attacker.example:3210", ORIGIN, StatusCode::FORBIDDEN),
             (HOST, "http://localhost:3210", StatusCode::FORBIDDEN),
             (HOST, "https://attacker.example", StatusCode::FORBIDDEN),
@@ -1103,10 +1141,16 @@ mod tests {
         assert_hosts(
             "0.0.0.0",
             Some("gateway.lan"),
-            &["127.0.0.1:3210", "gateway.lan:3210", "Gateway.LAN:3210"],
+            &[
+                "127.0.0.1:3210",
+                "localhost:3210",
+                "gateway.lan:3210",
+                "Gateway.LAN:3210",
+            ],
             &[
                 "0.0.0.0:3210",
-                "localhost:3210",
+                "[::1]:3210",
+                "localhost",
                 "192.168.1.20:3210",
                 "gateway.lan:3211",
                 "gateway.lan",
@@ -1118,8 +1162,12 @@ mod tests {
         assert_hosts(
             "127.0.0.1",
             Some("studio.tail1234.ts.net"),
-            &["127.0.0.1:3210", "studio.tail1234.ts.net:3210"],
-            &["localhost:3210", "studio.tail1234.ts.net"],
+            &[
+                "127.0.0.1:3210",
+                "localhost:3210",
+                "studio.tail1234.ts.net:3210",
+            ],
+            &["[::1]:3210", "localhost:3211", "studio.tail1234.ts.net"],
         )
         .await;
         assert_hosts(
@@ -1132,7 +1180,7 @@ mod tests {
         assert_hosts(
             "::",
             Some("fd00::20"),
-            &["[::1]:3210", "[fd00::20]:3210"],
+            &["[::1]:3210", "localhost:3210", "[fd00::20]:3210"],
             &["[::]:3210", "127.0.0.1:3210", "fd00::20:3210"],
         )
         .await;

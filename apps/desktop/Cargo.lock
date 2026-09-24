@@ -536,6 +536,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "axum-extra"
+version = "0.12.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be44683b41ccb9ab2d23a5230015c9c3c55be97a25e4428366de8873103f7970"
+dependencies = [
+ "axum-core",
+ "bytes",
+ "cookie",
+ "futures-core",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "mime",
+ "pin-project-lite",
+ "tower-layer",
+ "tower-service",
+]
+
+[[package]]
 name = "backon"
 version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1107,6 +1127,7 @@ version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1a373e3602691c3cdea496d2f0ee5935151e6168fe87739483c463db1b2f2f87"
 dependencies = [
+ "percent-encoding",
  "time",
  "version_check",
 ]
@@ -5081,6 +5102,7 @@ dependencies = [
  "argon2",
  "async-stream",
  "axum",
+ "axum-extra",
  "backon",
  "base64 0.23.1",
  "csv",
@@ -5107,6 +5129,7 @@ dependencies = [
  "sha2 0.10.9",
  "subtle",
  "tempfile",
+ "time",
  "tokio",
  "tokio-util",
  "toml_edit 0.25.15+spec-1.1.0",

@@ -171,9 +171,10 @@ Security model:
 - The listener binds `127.0.0.1` by default. A non-loopback address fails
   closed unless `webUiAllowNetworkAccess` is `true`.
 - Requests must carry an allowed `Host`: the bound `IP:PORT`, the client
-  `HOST:PORT`, and `127.0.0.1:PORT` (or `[::1]:PORT`) when bound to every
-  interface. Anything else, including `localhost`, is refused, which blocks DNS
-  rebinding.
+  `HOST:PORT`, `127.0.0.1:PORT` (or `[::1]:PORT`) when bound to every
+  interface, and `localhost:PORT` when loopback reaches the listener. Browsers
+  resolve `localhost` only to loopback (RFC 6761), so, as in Syncthing's GUI, no
+  page can rebind it. Any other name is refused, which blocks DNS rebinding.
 - Cross-site request forgery (following the OWASP CSRF cheat sheet): every
   request that is not a `GET` or `HEAD` must carry an `Origin` that names that
   same host exactly, or it is refused even with a valid cookie; this is the
@@ -191,7 +192,9 @@ Security model:
   and an unset one get the same answer. Each IPv4 address and IPv6 /64 has its
   own budget, so one client cannot delay sign-ins from others. Clients reaching
   a loopback listener through a TCP forwarder all appear as that forwarder and
-  share its budget. Use a long, unique password on any network listener.
+  share its budget. At most two password checks run at once across all
+  clients, which bounds Argon2 memory however many addresses send requests.
+  Use a long, unique password on any network listener.
 - Browser requests run through the same command admission and dispatch as the
   management endpoint, and errors carry the same sanitized messages as the
   desktop app. Responses set a restrictive CSP, `nosniff`, `no-store` and
