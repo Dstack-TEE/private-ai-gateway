@@ -396,7 +396,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                 value_stdin,
             } => {
                 if let Some(warning) = key.deprecation() {
-                    desktop_core::diagnostic!("{warning}");
+                    tracing::warn!("{warning}");
                 }
                 set_setting(cli, &client, key.key, input.as_deref(), *value_stdin)?
             }

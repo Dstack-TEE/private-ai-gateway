@@ -79,7 +79,7 @@ pub async fn prepare_update(
         let channel = match client.call(rpc::Settings) {
             Ok(saved) => saved.update_channel.unwrap_or(default),
             Err(error) => {
-                desktop_core::diagnostic!(
+                tracing::warn!(
                     "Could not read the update channel; using the build channel: {error}"
                 );
                 default
