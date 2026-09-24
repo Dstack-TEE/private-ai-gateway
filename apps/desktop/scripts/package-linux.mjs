@@ -5,7 +5,7 @@
 // as 1.2.3~beta.4 in DEB and RPM, which dpkg and rpm order before 1.2.3
 // (Debian Policy 5.6.12, Fedora versioning guidelines). The desktop packages
 // carry the payload Tauri bundled into its DEB; Tauri itself writes the SemVer
-// string verbatim. Names and descriptions come from the brand, as Tauri's do.
+// string verbatim. Names and descriptions come from tauri.conf.json, as Tauri's do.
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -35,17 +35,18 @@ export const aliasLinks = aliases.map((alias) => ({ src: "private-ai-proxy", dst
 // packages up to 0.1.7-beta.n. Remove in 0.3.
 const debPrerm = path.join(appRoot, "src-tauri/installer/deb-prerm.sh");
 
-// The brand prepare-brand.mjs selects; Tauri names the desktop package after it.
-const brand = JSON.parse(await readFile(path.join(appRoot, "brand", process.env.PRIVATE_AI_PROXY_BRAND ?? "dstack", "brand.json"), "utf8"));
-const desktopName = brand.productName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+// Tauri names the desktop package after the product and describes it with the
+// bundle metadata; the CLI and Arch packages use the same values.
+const tauri = JSON.parse(await readFile(path.join(appRoot, "src-tauri/tauri.conf.json"), "utf8"));
+const desktopName = tauri.productName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 const cliName = `${desktopName}-cli`;
 // Debian Policy 5.6.2: the maintainer is a name and an email address.
-const maintainer = `${brand.organizationName} <${brand.supportEmail}>`;
+export const maintainer = `${tauri.bundle.publisher} <support@phala.com>`;
 
 const linuxPackages = {
   desktop: {
     name: desktopName,
-    description: `${brand.bundle.shortDescription}\n${brand.bundle.longDescription}`,
+    description: `${tauri.bundle.shortDescription}\n${tauri.bundle.longDescription}`,
     other: cliName,
     // The desktop package includes the CLI, so it stands in for it.
     provides: true,
@@ -63,7 +64,7 @@ const linuxPackages = {
   },
   cli: {
     name: cliName,
-    description: `${brand.productName} command line client and user backend`,
+    description: `${tauri.productName} command line client and user backend`,
     other: desktopName,
     provides: false,
     markers: ["deb", "rpm", "archlinux"],
@@ -129,7 +130,7 @@ function nfpmConfig(kind, packager, { version, arch, contents, marker, mtime }) 
     section: "utils",
     priority: "optional",
     maintainer,
-    homepage: brand.homepageUrl,
+    homepage: tauri.bundle.homepage,
     license: "Apache-2.0",
     description: definition.description,
     depends: definition.depends[packager],

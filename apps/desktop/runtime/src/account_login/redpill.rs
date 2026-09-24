@@ -228,7 +228,7 @@ pub(super) fn callback_page(accepted: bool) -> String {
             &format!(
                 r#"<img src="data:image/png;base64,{}" alt="">"#,
                 STANDARD.encode(include_bytes!(
-                    "../../../src/renderer/generated/app-icon-light.png"
+                    "../../../src/renderer/brand/app-icon-light.png"
                 ))
             ),
         )

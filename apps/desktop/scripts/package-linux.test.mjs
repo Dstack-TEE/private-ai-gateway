@@ -7,7 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { binaries, linuxContents } from "./package-cli.mjs";
-import { buildLinuxPackages, packageDesktop, releaseVersionParts } from "./package-linux.mjs";
+import { buildLinuxPackages, maintainer, packageDesktop, releaseVersionParts } from "./package-linux.mjs";
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 // A fixed package time (2026-01-01) instead of the commit time.
@@ -99,12 +99,11 @@ test("the Tauri payload ships as DEB, RPM and Arch packages with signed updater 
     assert.match(debListing(deb), /\.\/usr\/bin\/aci -> private-ai-proxy$/m);
     assert.match(debListing(deb), /\.\/usr\/share\/applications\/Private AI Proxy\.desktop$/m);
     assert.doesNotMatch(debListing(deb), /package-manager/);
-    const brand = JSON.parse(await readFile(path.join(appRoot, "brand/dstack/brand.json"), "utf8"));
+    const tauri = JSON.parse(await readFile(path.join(appRoot, "src-tauri/tauri.conf.json"), "utf8"));
     // Debian Policy 5.6.2: a name and an email address, in every format.
-    const maintainer = `${brand.organizationName} <${brand.supportEmail}>`;
     assert.equal(output("dpkg-deb", ["-f", deb, "Maintainer"]), maintainer);
-    assert.equal(output("dpkg-deb", ["-f", deb, "Homepage"]), brand.homepageUrl);
-    assert.equal(output("dpkg-deb", ["-f", deb, "Description"]), `${brand.bundle.shortDescription}\n ${brand.bundle.longDescription}`);
+    assert.equal(output("dpkg-deb", ["-f", deb, "Homepage"]), tauri.bundle.homepage);
+    assert.equal(output("dpkg-deb", ["-f", deb, "Description"]), `${tauri.bundle.shortDescription}\n ${tauri.bundle.longDescription}`);
     // Every entry carries SOURCE_DATE_EPOCH (2026-01-01), so builds are reproducible.
     assert.doesNotMatch(debListing(deb), /^(?!.* 2026-01-01 00:00 ).+$/m);
     // The only maintainer script is the prerm that lets 0.1.x upgrades continue (Debian Policy 6.6).

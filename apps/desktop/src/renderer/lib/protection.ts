@@ -1,5 +1,5 @@
 import { errorMessage } from "./error-message";
-import { brand } from "../generated/brand";
+import { brand } from "../brand/brand";
 import type { Tone } from "./tone";
 import type { ConfidentialProfile, AppState } from "../../shared/contracts";
 import { serviceKeyLabel } from "./services";

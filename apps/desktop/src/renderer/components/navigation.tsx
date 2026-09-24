@@ -1,7 +1,7 @@
 import React from "react";
 import { Link, useMatches, useNavigate } from "@tanstack/react-router";
 import { Bot, ChartNoAxesColumn, LayoutGrid, RotateCw, Settings } from "lucide-react";
-import { brand } from "../generated/brand";
+import { brand } from "../brand/brand";
 import { Badge } from "./ui/badge";
 import { SidebarProvider, SidebarMenu, SidebarMenuItem, SidebarMenuButton } from "./ui/sidebar";
 import type { AppState } from "../../shared/contracts";

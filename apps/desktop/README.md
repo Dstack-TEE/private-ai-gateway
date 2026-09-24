@@ -178,16 +178,32 @@ inconclusive. Review the complete report before updating the inventory.
 
 ## Branding
 
-`brand/<id>/brand.json` and the adjacent source assets are the branding source
-of truth. Generate tracked outputs with:
+Product identity is committed where each consumer reads it:
+
+- `src-tauri/tauri.conf.json`: product name, identifier, deep-link scheme,
+  bundle metadata, installer images and the DMG layout. The Linux packages
+  (`scripts/package-linux.mjs`) take their names and descriptions from it too.
+- `core/src/brand.rs` for Rust and `src/renderer/brand/brand.ts` for the
+  renderer: names, links, service defaults and theme colors.
+- Images: `src-tauri/icons/` (from `tauri icon`, plus the Icon Composer project
+  `AppIcon.icon` that `npm run build` compiles on macOS), `assets/tray/trayTemplate@2x.png`,
+  `src/renderer/brand/app-icon-{light,dark}.png`, and the installer images
+  `src-tauri/installer/brand-header.bmp` (150×57), `brand-sidebar.bmp`
+  (164×314, the NSIS sizes) and `brand-dmg-background.png` (660×440, matching
+  `bundle.macOS.dmg`).
+
+Source artwork and its provenance are in [`brand/dstack`](brand/dstack/README.md).
+Regenerate the desktop icons with Tauri's icon command, then commit the files
+that `bundle.icon` lists:
 
 ```bash
-npm run prepare:brand
+npm exec tauri icon brand/dstack/icon/app-icon.png -- -o /tmp/icons
 ```
 
-Do not edit generated renderer, Tauri, installer, or tray assets directly. CI
-regenerates them and fails on drift. The default application identifier is
-`org.dstack.private-ai-proxy` and uses a separate data and credential namespace
+A second brand replaces exactly these values and images. It can do this in a
+`tauri build --config` overlay for the Tauri values, plus its own `brand.rs`
+and `brand.ts`. Its identifier gives it a separate data and credential
+namespace. The default identifier `org.dstack.private-ai-proxy` also differs
 from earlier beta builds.
 
 ## Packaging And Releases

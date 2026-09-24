@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { cliRegistrationQuery } from "../lib/page-queries";
 import { errorMessage } from "../lib/error-message";
 import { ChevronRight } from "lucide-react";
-import { brand } from "../generated/brand";
+import { brand } from "../brand/brand";
 import { UpdateControl, UpdateChannelControl, useUpdates } from "../updates";
 import { Button } from "../components/ui/button";
 import { AppearanceControl } from "../components/appearance";
