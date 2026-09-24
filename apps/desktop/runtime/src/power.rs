@@ -100,10 +100,10 @@ mod platform {
                         if let Some(runtime) = runtime.upgrade() {
                             if runtime.set_wake_monitor_available(false) {
                                 match result {
-                                    Err(error) => desktop_core::diagnostic!(
+                                    Err(error) => tracing::warn!(
                                         "System wake monitoring will reconnect: {error}"
                                     ),
-                                    Ok(()) => desktop_core::diagnostic!(
+                                    Ok(()) => tracing::warn!(
                                         "System wake monitoring stream ended; reconnecting"
                                     ),
                                 }
@@ -340,9 +340,7 @@ mod platform {
             }
             if let Some(thread) = self.thread.take() {
                 if thread.join().is_err() {
-                    desktop_core::diagnostic!(
-                        "System wake monitor thread did not shut down cleanly"
-                    );
+                    tracing::warn!("System wake monitor thread did not shut down cleanly");
                 }
             }
             unsafe {
@@ -464,12 +462,10 @@ mod platform {
             IONotificationPortDestroy(port);
             drop(Box::from_raw(context));
             if deregistered != 0 {
-                desktop_core::diagnostic!(
-                    "Could not unregister macOS power notifications ({deregistered})"
-                );
+                tracing::warn!("Could not unregister macOS power notifications ({deregistered})");
             }
             if closed != 0 {
-                desktop_core::diagnostic!("Could not close the macOS power connection ({closed})");
+                tracing::warn!("Could not close the macOS power connection ({closed})");
             }
         }
     }
@@ -587,12 +583,12 @@ mod platform {
                         slot.reusable = false;
                     }
                 }
-                Err(_) => desktop_core::diagnostic!(
-                    "System wake callback state is unavailable during shutdown"
-                ),
+                Err(_) => {
+                    tracing::warn!("System wake callback state is unavailable during shutdown")
+                }
             }
             if status != 0 {
-                desktop_core::diagnostic!("Could not unregister power notifications ({status})");
+                tracing::warn!("Could not unregister power notifications ({status})");
             }
         }
     }

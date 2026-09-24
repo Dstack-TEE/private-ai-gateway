@@ -1,12 +1,7 @@
 use super::*;
 
 pub async fn account_details(key: &str) -> Result<AccountLoginDetails, String> {
-    let account = response(
-        client()?
-            .get("https://service.redpill.ai/api/oauth/account")
-            .bearer_auth(key),
-    )
-    .await?;
+    let account = response(client()?.get(ACCOUNT_URL).bearer_auth(key)).await?;
     redpill_details(&account).map_err(|_| {
         "Account: Could not refresh account details. Try again or reconnect the account."
             .to_string()

@@ -12,9 +12,7 @@ Prefer `pap` or `private-ai-proxy` in new scripts and documentation.
 
 ## Discover Commands
 
-Start with `pap --help` and `<command> --help`. `pap schema` prints the command
-tree as JSON, derived from the same Clap definitions used for parsing. It is a
-discovery document, not an RPC or response JSON Schema.
+Start with `pap --help` and `<command> --help`.
 
 `pap completions bash` prints shell completion code without installing it or
 changing shell configuration. Other supported shells are listed in its help.
@@ -30,6 +28,11 @@ The same binary includes the ACI protocol commands:
 | `pap sessions <url>` | Inspect and verify attested inference sessions. |
 | `pap send <url>` | Send an inference request using the ACI client. |
 | `pap serve <url>` | Run the local streaming proxy with post-delivery receipt audits. |
+
+`send` reads the API key from the `ACI_API_KEY` environment variable or, with
+`--api-key-stdin`, from stdin (as `docker login --password-stdin` does), never
+from an argument that other local processes can see. The old `--api-key KEY`
+option is hidden, still works with a warning, and will be removed in 0.3.
 
 `private-ai-proxy` (and the legacy `aci` alias) accept these same commands. They are compiled from
 this package's ACI modules, not forwarded to another executable. `serve` is standalone;
@@ -50,6 +53,13 @@ pap service stop --yes
 start protection. `start` waits for verified protection. `stop` stops protection
 and restores managed agent configuration but keeps management available.
 `service stop` shuts down the backend. Closing the desktop app does not stop it.
+Stopping (or SIGTERM) first restores the coding-agent configuration; if that
+fails, the backend refuses to stop so agents are not left pointing at a stopped
+Local API. `service stop` then reports that it keeps running, and the service
+log has the reason. Mac App Store builds stop anyway. Shutdown is bounded:
+running commands get 10 seconds, then open connections and leftover background
+tasks 5 seconds each, and the process exits at the latest 30 seconds after the
+shutdown began.
 
 ## Settings
 
@@ -340,7 +350,18 @@ is an error. `warnings` lists problems that do not fail `doctor`: a
 `credentials.toml` other users can read (`credentials`) and profiles without a
 saved API key (`profileCredentials`). The `update` check is advisory: when the release
 feed is unreachable it reports an `error` inside `update` without failing
-`doctor`.
+`doctor`. `logs` is the directory of the service's log files.
+
+## Logs
+
+The background service writes its diagnostics to `service.<date>.log` in the
+`logs` directory of the app data directory (`pap doctor` prints the path), one
+file per day with the last seven kept, like Ollama's `~/.ollama/logs`. The
+CLI and the desktop app print theirs on stderr. Only this app's own events are
+logged, not its libraries'. The service log also records startup, every
+protection status change and error, and each shutdown step. Logs never contain API keys,
+tokens or the web UI password. The exported diagnostics report names the
+directory with the home directory shown as `~`.
 
 ## Coverage
 

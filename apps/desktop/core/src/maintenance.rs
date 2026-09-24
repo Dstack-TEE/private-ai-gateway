@@ -165,8 +165,17 @@ pub fn diagnostics(state: &AppState, version: &str) -> serde_json::Value {
         "profiles": { "count": state.profiles.len(), "activeCredentialAvailable": state.api_key_saved },
         "verification": { "identityPresent": state.identity.is_some(), "passedChecks": state.checks.iter().filter(|check| check.status == "pass").count(), "failedChecks": state.checks.iter().filter(|check| check.status == "fail").count() },
         "catalog": { "modelCount": state.catalog.as_ref().map_or(0, |catalog| catalog.models.len()) },
-        "usage": { "requestsThisSession": state.session_usage.requests, "failedProofsThisSession": state.session_usage.failed_proof }
+        "usage": { "requestsThisSession": state.session_usage.requests, "failedProofsThisSession": state.session_usage.failed_proof },
+        "logDirectory": redacted_logs_dir(),
     })
+}
+
+/// The service log directory with the home directory shown as `~`, so the
+/// report names no user; `None` outside the home directory.
+fn redacted_logs_dir() -> Option<String> {
+    let logs = crate::paths::logs_dir().ok()?;
+    let relative = logs.strip_prefix(crate::paths::home_dir().ok()?).ok()?;
+    Some(Path::new("~").join(relative).to_string_lossy().into_owned())
 }
 
 #[cfg(test)]
@@ -260,7 +269,12 @@ mod tests {
             ..Default::default()
         };
         state.config.remote_url = "https://SECRET".into();
-        assert!(!diagnostics(&state, "test").to_string().contains("SECRET"));
+        let report = diagnostics(&state, "test");
+        assert!(!report.to_string().contains("SECRET"));
+        if let (Some(logs), Ok(home)) = (report["logDirectory"].as_str(), crate::paths::home_dir())
+        {
+            assert!(logs.starts_with('~') && !logs.contains(&*home.to_string_lossy()));
+        }
         assert!(serde_json::from_str::<ProfileBackup>(
             r#"{"version":1,"profiles":[],"apiKey":"SECRET"}"#
         )

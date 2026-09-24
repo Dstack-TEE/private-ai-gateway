@@ -16,7 +16,7 @@ Status: implemented.
 
 `private-ai-proxy` composes the managed CLI's Clap command tree with its ACI
 commands. The `cli` crate is the only command-line surface: management
-arguments, execution, output, completions and `schema` live in
+arguments, execution, output and completions live in
 `apps/desktop/cli/manage`. The ACI commands and the verifying proxy
 (`cli/serve.rs`, which the backend also runs in managed mode) form the crate's
 library, built once for both executables. The backend crates contain no
@@ -194,7 +194,10 @@ stream is fed from the controller's state channel. Mac App Store builds omit it.
 
 Agent changes retain preview/revision/apply validation. CSV exports are streamed
 one row at a time into a newly created private file; existing targets and symlinks
-are not overwritten. Provider credentials persist only in the owner-only
+are not overwritten. Cells a spreadsheet would read as a formula get a leading
+`'` (OWASP CSV injection). The usage database is versioned by
+`PRAGMA user_version` through `rusqlite_migration`; a database written by a newer
+release is refused, not rewritten, and usage stays in memory for that run. Provider credentials persist only in the owner-only
 `credentials.toml` ([Settings files](configuration.md)), so UI-free operation
 on an unattended machine needs no unlocked OS keychain.
 

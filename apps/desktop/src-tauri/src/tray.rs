@@ -177,7 +177,7 @@ fn perform_action(app: &AppHandle, id: String) {
         // Like other tray apps, a failed menu action is logged; the menu and the
         // window show the state that actually applies.
         if let Err(error) = result {
-            desktop_core::diagnostic!("Tray action {id} failed: {error}");
+            tracing::warn!("Tray action {id} failed: {error}");
         }
         let state = client.state().unwrap_or_else(|_| client.cached_state());
         sync(&app, &state);
@@ -290,7 +290,7 @@ fn toggle_or_open_settings(app: &AppHandle) {
             return;
         }
         if let Err(error) = client.toggle() {
-            desktop_core::diagnostic!("Tray protection toggle failed: {error}");
+            tracing::warn!("Tray protection toggle failed: {error}");
         }
         let state = client.state().unwrap_or_else(|_| client.cached_state());
         sync(&app, &state);
@@ -314,7 +314,7 @@ fn sync_autostart(app: &AppHandle) {
         if let Err(error) = result {
             let menu = app.state::<TrayMenu>();
             let _ = menu.autostart.set_checked(!checked);
-            desktop_core::diagnostic!("Open at Login could not be changed: {}", error.message());
+            tracing::warn!("Open at Login could not be changed: {}", error.message());
             // Keep open windows in sync with the preference that actually applies.
             if let Ok(preferences) = desktop_core::ui_api::launch_preferences(&client, &host).await
             {
@@ -348,7 +348,7 @@ fn sync_inner(app: &AppHandle, state: &AppState) {
         let _ = menu.toggle.set_enabled(protection_action_enabled(state));
         let _ = menu.endpoint.set_enabled(state.proxy_url.is_some());
         if let Err(error) = sync_profiles(app, state, &menu) {
-            desktop_core::diagnostic!("Cannot refresh tray profiles: {error}");
+            tracing::warn!("Cannot refresh tray profiles: {error}");
         }
         let protected = state.is_protected();
         if menu.protected_icon.load(Ordering::Relaxed) != protected {
@@ -358,7 +358,7 @@ fn sync_inner(app: &AppHandle, state: &AppState) {
                 protected,
                 menu.dark_icon.load(Ordering::Relaxed),
             ) {
-                desktop_core::diagnostic!("Cannot update tray protection state: {error}");
+                tracing::warn!("Cannot update tray protection state: {error}");
             }
         }
     }
@@ -380,7 +380,7 @@ pub(crate) fn set_dark(app: &AppHandle, dark: bool) -> tauri::Result<()> {
                     menu.protected_icon.load(Ordering::Relaxed),
                     dark,
                 ) {
-                    desktop_core::diagnostic!("Cannot update tray system theme: {error}");
+                    tracing::warn!("Cannot update tray system theme: {error}");
                 }
             }
         }
@@ -500,7 +500,7 @@ fn set_dock_visibility(app: &AppHandle, visible: bool) {
         tauri::ActivationPolicy::Accessory
     };
     if let Err(error) = app.set_activation_policy(policy) {
-        desktop_core::diagnostic!("Cannot change the Dock presence: {error}");
+        tracing::warn!("Cannot change the Dock presence: {error}");
     }
 }
 

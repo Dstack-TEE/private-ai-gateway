@@ -36,7 +36,7 @@ interactive terminal outside JSON modes.
 | --- | --- |
 | `src/renderer` | React UI and native-window content |
 | `src-tauri` | Tauri application, system integration, tray, menus, dialogs, updates |
-| `cli` | The only command-line surface (arguments, output, completions, schema), ACI relying-party verifier, local streaming proxy, and the `private-ai-proxy-service` entry point |
+| `cli` | The only command-line surface (arguments, output, completions), ACI relying-party verifier, local streaming proxy, and the `private-ai-proxy-service` entry point |
 | `core` | Client side shared by the app, CLI and backend: contracts, management protocol and client, IPC transport, the `config.toml` model, paths |
 | `runtime` | Persistent backend: controller, settings files, management server, verifier sessions, usage, account login, web UI |
 | `agent-bridge` | Coding-agent bridge: Local API proxy, agent tokens, catalog, reversible agent configuration, and the `private-ai-proxy-helper` binary |

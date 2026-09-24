@@ -188,8 +188,15 @@ fn workspace_and_balance_responses_are_validated() {
     );
 }
 
-#[tokio::test]
-async fn phala_polling_uses_the_device_authorization_contract() {
+/// A Phala device authorization mock whose token endpoint answers `errors`
+/// in order (`detail.error`, as Phala nests them), then issues a key.
+async fn phala_mock(
+    errors: &'static [&'static str],
+) -> (
+    String,
+    Arc<std::sync::atomic::AtomicUsize>,
+    AbortOnDropHandle<std::io::Result<()>>,
+) {
     use axum::{routing::post, Json};
     use std::sync::atomic::{AtomicUsize, Ordering};
     let calls = Arc::new(AtomicUsize::new(0));
@@ -202,16 +209,15 @@ async fn phala_polling_uses_the_device_authorization_contract() {
                 body["grant_type"],
                 "urn:ietf:params:oauth:grant-type:device_code"
             );
-            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                (
+            match errors.get(calls.fetch_add(1, Ordering::SeqCst)) {
+                Some(error) => (
                     StatusCode::BAD_REQUEST,
-                    Json(json!({"detail":{"error":"authorization_pending"}})),
-                )
-            } else {
-                (
+                    Json(json!({"detail":{"error":error}})),
+                ),
+                None => (
                     StatusCode::OK,
                     Json(json!({"access_token":"sk-test-credential"})),
-                )
+                ),
             }
         }
     });
@@ -229,14 +235,35 @@ async fn phala_polling_uses_the_device_authorization_contract() {
     let server = AbortOnDropHandle::new(tokio::spawn(
         async move { axum::serve(listener, app).await },
     ));
+    (base, calls, server)
+}
+
+#[tokio::test]
+async fn phala_polling_uses_the_device_authorization_contract() {
+    let (base, calls, _server) = phala_mock(&["authorization_pending"]).await;
     let credential = phala_at(client().unwrap(), "test-device".into(), 0, &base)
         .await
         .unwrap();
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     assert!(
         matches!(credential.auth, ProfileAuth::OAuth { ref account_id, .. } if account_id == "alice")
     );
-    server.abort();
+}
+
+// The paused clock skips the polling sleeps. Polling ends before the metadata
+// request and the client has no timeouts, so no timer can fire during I/O.
+#[tokio::test(start_paused = true)]
+async fn phala_slow_down_adds_five_seconds_to_later_polls() {
+    let (base, calls, _server) = phala_mock(&["slow_down", "access_denied"]).await;
+    let started = Instant::now();
+    let error = phala_at(Client::new(), "test-device".into(), 0, &base)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error, "Account: Authorization was declined.");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    // RFC 8628 §3.5.
+    assert!(started.elapsed() >= Duration::from_secs(5));
 }
 
 #[test]
@@ -337,4 +364,154 @@ fn unsupported_pkce_discovery_fails_closed() {
     assert!(validate_discovery(&discovery).is_ok());
     discovery["code_challenge_methods_supported"] = json!(["plain"]);
     assert!(validate_discovery(&discovery).is_err());
+}
+
+#[tokio::test]
+async fn redpill_code_flow_binds_state_issuer_and_pkce_to_one_exchange() {
+    use axum::{routing::post, Form, Json};
+    let challenge = Arc::new(std::sync::Mutex::new(String::new()));
+    let expected_challenge = challenge.clone();
+    let token = post(
+        move |Form(form): Form<std::collections::HashMap<String, String>>| {
+            let challenge = expected_challenge.lock().unwrap().clone();
+            async move {
+                assert_eq!(form["grant_type"], "authorization_code");
+                assert_eq!(form["client_id"], REDPILL_CLIENT_ID);
+                assert_eq!(form["redirect_uri"], callback_url());
+                assert_eq!(form["code"], "one-use");
+                let verifier = Sha256::digest(form["code_verifier"].as_bytes());
+                assert_eq!(
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(verifier),
+                    challenge
+                );
+                Json(
+                    json!({"access_token": "clerk-access", "token_type": "Bearer", "expires_in": 60}),
+                )
+            }
+        },
+    );
+    let app = Router::new()
+        .route("/oauth/token", token)
+        .route(
+            "/oauth/userinfo",
+            get(|headers: HeaderMap| async move {
+                assert_eq!(headers["authorization"], "Bearer clerk-access");
+                Json(json!({"sub": "user_alice"}))
+            }),
+        )
+        .route(
+            "/api/oauth/account",
+            get(|| async {
+                Json(json!({
+                    "user_id": "user_alice", "user_name": "Alice",
+                    "organization_id": "org_test", "organization_slug": "research", "organization_name": "Research",
+                    "workspaces": [{"id": 7, "name": "Default", "is_default": true}]
+                }))
+            }),
+        );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let _server = AbortOnDropHandle::new(tokio::spawn(
+        async move { axum::serve(listener, app).await },
+    ));
+
+    let oauth = redpill_client(
+        Url::parse(&format!("{ISSUER}/oauth/authorize")).unwrap(),
+        Url::parse(&format!("{base}/oauth/token")).unwrap(),
+    )
+    .unwrap();
+    let (url, state, verifier) = authorization_request(&oauth);
+    let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+    assert_eq!(url.origin().ascii_serialization(), ISSUER);
+    assert_eq!(query["response_type"], "code");
+    assert_eq!(query["response_mode"], "query");
+    assert_eq!(query["client_id"], REDPILL_CLIENT_ID);
+    assert_eq!(query["redirect_uri"], callback_url());
+    assert_eq!(query["scope"], "openid profile user:org:read");
+    assert_eq!(query["code_challenge_method"], "S256");
+    assert_eq!(query["state"], *state.secret());
+    *challenge.lock().unwrap() = query["code_challenge"].clone();
+
+    // The browser redirect reaches the loopback callback (RFC 8252 §7.3).
+    let callback_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let callback_address = callback_listener.local_addr().unwrap();
+    let (sender, receiver) = oneshot::channel();
+    let callback = Arc::new(CallbackState {
+        expected: state.secret().clone(),
+        sender: Mutex::new(Some(sender)),
+    });
+    let code = tokio::spawn(receive_code(callback_listener, callback, receiver));
+    let redirect = client()
+        .unwrap()
+        .get(format!(
+            "http://{callback_address}/oauth/callback?state={}&code=one-use&iss={}",
+            state.secret(),
+            url::form_urlencoded::byte_serialize(ISSUER.as_bytes()).collect::<String>()
+        ))
+        .header("host", CALLBACK_ADDRESS.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(redirect.status(), StatusCode::OK);
+    let code = code.await.unwrap().unwrap();
+
+    let authorization = redpill(
+        &client().unwrap(),
+        &oauth,
+        code,
+        verifier,
+        &format!("{base}/oauth/userinfo"),
+        &format!("{base}/api/oauth/account"),
+    )
+    .await
+    .unwrap();
+    let Authorization::Redpill {
+        access_token,
+        details,
+    } = authorization
+    else {
+        panic!("Expected a RedPill authorization")
+    };
+    assert_eq!(access_token, "clerk-access");
+    assert_eq!(details.workspaces[0].id, 7);
+}
+
+#[tokio::test]
+async fn redpill_token_errors_never_echo_the_response() {
+    let app = Router::new().route(
+        "/oauth/token",
+        axum::routing::post(|| async {
+            (
+                StatusCode::BAD_REQUEST,
+                axum::Json(json!({"error": "invalid_grant", "error_description": "secret-detail"})),
+            )
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let _server = AbortOnDropHandle::new(tokio::spawn(
+        async move { axum::serve(listener, app).await },
+    ));
+    let oauth = redpill_client(
+        Url::parse(&format!("{ISSUER}/oauth/authorize")).unwrap(),
+        Url::parse(&format!("{base}/oauth/token")).unwrap(),
+    )
+    .unwrap();
+    let (_, _, verifier) = authorization_request(&oauth);
+    let error = redpill(
+        &client().unwrap(),
+        &oauth,
+        "used".into(),
+        verifier,
+        &base,
+        &base,
+    )
+    .await
+    .err()
+    .unwrap();
+    assert!(
+        error.starts_with("Account: Service rejected the request"),
+        "{error}"
+    );
+    assert!(!error.contains("secret"));
 }

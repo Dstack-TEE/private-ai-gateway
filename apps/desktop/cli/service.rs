@@ -2,29 +2,75 @@ use clap::Parser;
 use desktop_runtime::controller::{DesktopRuntime, RuntimeOptions};
 use private_ai_proxy::serve::managed::InProcessVerifierLauncher;
 use std::sync::Arc;
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
 
 #[derive(Parser)]
 #[command(name = "private-ai-proxy-service", version = desktop_core::protocol::BUILD_VERSION, about = "Run the per-user Private AI Proxy backend in the foreground")]
 struct Arguments {}
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    Arguments::parse();
+    init_logging();
+    tracing::info!(
+        "Private AI Proxy backend {} starting (process {})",
+        desktop_core::protocol::BUILD_VERSION,
+        std::process::id()
+    );
     private_ai_proxy::install_crypto_provider();
-    if let Err(error) = run().await {
-        desktop_core::diagnostic!("Private AI Proxy backend: {error}");
-        std::process::exit(1);
+    // What `#[tokio::main]` builds, kept so exit can use `shutdown_timeout`.
+    let executor = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(executor) => executor,
+        Err(error) => {
+            tracing::error!("Private AI Proxy backend: cannot start the async runtime: {error}");
+            std::process::exit(1);
+        }
+    };
+    let result = executor.block_on(run());
+    // A blocking task (a command waiting on the network) cannot be cancelled;
+    // stop waiting for it after the bound instead of hanging the exit.
+    executor.shutdown_timeout(desktop_runtime::server::EXIT_DRAIN_TIMEOUT);
+    match result {
+        Ok(()) => tracing::info!("Private AI Proxy backend stopped"),
+        Err(error) => {
+            tracing::error!("Private AI Proxy backend: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// One file per day in the logs directory, the last week kept.
+fn init_logging() {
+    let file = desktop_core::paths::logs_dir().and_then(|directory| {
+        desktop_core::private_fs::create_private_dir(&directory)
+            .map_err(|error| error.to_string())?;
+        RollingFileAppender::builder()
+            .rotation(Rotation::DAILY)
+            .filename_prefix("service")
+            .filename_suffix("log")
+            .max_log_files(7)
+            .build(directory)
+            .map_err(|error| error.to_string())
+    });
+    match file {
+        Ok(file) => desktop_core::logging::init_with_file(file),
+        Err(error) => {
+            desktop_core::logging::init();
+            tracing::warn!("Private AI Proxy backend: cannot open the log file: {error}");
+        }
     }
 }
 
 async fn run() -> Result<(), String> {
-    Arguments::parse();
     #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
     let service_access = desktop_core::agent_access::acquire_for_service();
     #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
     let (agent_home_access, agent_access_error) = match service_access {
         Ok(access) => (access, None),
         Err(error) => {
-            desktop_core::diagnostic!("Private AI Proxy backend: {error}");
+            tracing::warn!("Private AI Proxy backend: {error}");
             (None, Some(error))
         }
     };
@@ -71,7 +117,7 @@ async fn run() -> Result<(), String> {
     ) {
         Ok(monitor) => Some(monitor),
         Err(error) => {
-            desktop_core::diagnostic!("System wake monitoring is unavailable: {error}");
+            tracing::warn!("System wake monitoring is unavailable: {error}");
             None
         }
     };

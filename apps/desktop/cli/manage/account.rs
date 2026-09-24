@@ -15,7 +15,7 @@ impl Drop for Pending<'_> {
     fn drop(&mut self) {
         if let Some(id) = self.id.take() {
             if self.client.call(rpc::CancelAccountLogin { id }).is_err() {
-                desktop_core::diagnostic!("Account cleanup could not complete; unused authorization expires automatically.");
+                tracing::warn!("Account cleanup could not complete; unused authorization expires automatically.");
             }
         }
     }
@@ -67,12 +67,12 @@ pub(super) fn login(
         client,
         id: Some(login.id.clone()),
     };
-    desktop_core::diagnostic!("Open this URL to sign in:\n{}", login.url);
+    tracing::info!("Open this URL to sign in:\n{}", login.url);
     if let Some(code) = &login.user_code {
-        desktop_core::diagnostic!("Confirm device code: {code}");
+        tracing::info!("Confirm device code: {code}");
     }
     if !options.no_browser && open_browser(&login.url).is_err() {
-        desktop_core::diagnostic!("Browser did not open. Open the URL above manually.");
+        tracing::info!("Browser did not open. Open the URL above manually.");
     }
     if options.callback_stdin {
         let callback = read_callback()?;
@@ -108,7 +108,7 @@ pub(super) fn login(
         Some(details.workspaces[0].id)
     } else {
         for workspace in &details.workspaces {
-            desktop_core::diagnostic!("{}: {}", workspace.id, workspace.name.escape_default());
+            tracing::info!("{}: {}", workspace.id, workspace.name.escape_default());
         }
         if cli.non_interactive || cli.json || !io::stdin().is_terminal() {
             return Err("Choose a workspace with --workspace <id> and retry login.".into());

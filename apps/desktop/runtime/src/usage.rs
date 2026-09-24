@@ -8,6 +8,7 @@ use std::{
 use rusqlite::{
     params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension, Row,
 };
+use rusqlite_migration::{Migrations, M};
 
 use desktop_core::{
     contracts::{RequestActivity, UsageSummary},
@@ -61,9 +62,9 @@ impl UsageStore {
             }
             Err(error) => return Err(format!("Cannot inspect the usage database: {error}")),
         }
-        let connection = Connection::open(&path)
+        let mut connection = Connection::open(&path)
             .map_err(|error| format!("Cannot open the usage database: {error}"))?;
-        initialize(&connection)?;
+        initialize(&mut connection)?;
         secure_file(&path)?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -71,9 +72,9 @@ impl UsageStore {
     }
 
     pub fn memory() -> Result<Self, String> {
-        let connection = Connection::open_in_memory()
+        let mut connection = Connection::open_in_memory()
             .map_err(|error| format!("Cannot open the fallback usage database: {error}"))?;
-        initialize(&connection)?;
+        initialize(&mut connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -218,7 +219,28 @@ impl UsageStore {
         all.cursor = None;
         let (where_sql, bindings) = filters(&all, false)?;
         // Render under the database lock, then write the file without it.
-        let mut csv = b"timestamp,id,session_id,agent,model,method,path,status,streamed,left_device,receipt_id,verified,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_usd,detail\n".to_vec();
+        let mut csv = csv::Writer::from_writer(Vec::new());
+        csv.write_record([
+            "timestamp",
+            "id",
+            "session_id",
+            "agent",
+            "model",
+            "method",
+            "path",
+            "status",
+            "streamed",
+            "left_device",
+            "receipt_id",
+            "verified",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "cost_usd",
+            "detail",
+        ])
+        .map_err(csv_error)?;
         let mut count = 0;
         {
             let connection = self.lock()?;
@@ -232,10 +254,12 @@ impl UsageStore {
                 .query_map(params_from_iter(bindings.iter()), row_to_activity)
                 .map_err(db_error)?;
             for item in rows {
-                csv_row(&mut csv, &item.map_err(db_error)?);
+                csv.write_record(csv_record(&item.map_err(db_error)?))
+                    .map_err(csv_error)?;
                 count += 1;
             }
         }
+        let csv = csv.into_inner().map_err(csv_error)?;
         // The export appears complete or not at all, never over an existing file.
         private_fs::publish(path, Publish::NoClobber, |file| file.write_all(&csv)).map_err(
             |error| match error.kind() {
@@ -263,8 +287,8 @@ impl UsageStore {
     }
 }
 
-fn csv_row(csv: &mut Vec<u8>, item: &RequestActivity) {
-    let fields = [
+fn csv_record(item: &RequestActivity) -> [String; 18] {
+    [
         item.at.to_string(),
         item.id.clone(),
         item.session_id.clone(),
@@ -287,56 +311,60 @@ fn csv_row(csv: &mut Vec<u8>, item: &RequestActivity) {
             .map(|value| value.to_string())
             .unwrap_or_default(),
         item.detail.clone(),
-    ];
-    let line = fields
-        .iter()
-        .map(|field| csv_field(field))
-        .collect::<Vec<_>>()
-        .join(",");
-    csv.extend_from_slice(line.as_bytes());
-    csv.push(b'\n');
+    ]
+    .map(neutralize_formula)
 }
 
-fn initialize(connection: &Connection) -> Result<(), String> {
+/// The usage schema, versioned by `PRAGMA user_version`. Version 1 is the 0.1
+/// schema: 0.1 databases (version 0) already have its tables, which its
+/// `IF NOT EXISTS` lets them adopt. Append migrations; never edit one.
+const SCHEMA_V1: &str = "CREATE TABLE IF NOT EXISTS active_session (
+       singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+       session_id TEXT NOT NULL,
+       started_at INTEGER NOT NULL
+     );
+     CREATE TABLE IF NOT EXISTS usage_records (
+       id TEXT PRIMARY KEY NOT NULL,
+       session_id TEXT NOT NULL,
+       at INTEGER NOT NULL,
+       agent TEXT,
+       model TEXT,
+       method TEXT NOT NULL,
+       path TEXT NOT NULL,
+       status INTEGER NOT NULL,
+       streamed INTEGER NOT NULL,
+       receipt_id TEXT,
+       verified INTEGER,
+       detail TEXT NOT NULL,
+       locally_constrained INTEGER,
+       rewritten INTEGER,
+       left_device INTEGER NOT NULL,
+       input_tokens INTEGER,
+       output_tokens INTEGER,
+       cache_read_tokens INTEGER,
+       cache_write_tokens INTEGER,
+       cost_usd REAL,
+       updated_at INTEGER NOT NULL
+     );
+     CREATE INDEX IF NOT EXISTS usage_records_at ON usage_records(at DESC, id DESC);
+     CREATE INDEX IF NOT EXISTS usage_records_agent ON usage_records(agent, at DESC);
+     CREATE INDEX IF NOT EXISTS usage_records_model ON usage_records(model, at DESC);
+     CREATE INDEX IF NOT EXISTS usage_records_session ON usage_records(session_id, at DESC);";
+
+const MIGRATIONS_SLICE: &[M<'_>] = &[M::up(SCHEMA_V1)];
+const MIGRATIONS: Migrations<'_> = Migrations::from_slice(MIGRATIONS_SLICE);
+
+fn initialize(connection: &mut Connection) -> Result<(), String> {
     connection
         .execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
-             PRAGMA foreign_keys = ON;
-             CREATE TABLE IF NOT EXISTS active_session (
-               singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-               session_id TEXT NOT NULL,
-               started_at INTEGER NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS usage_records (
-               id TEXT PRIMARY KEY NOT NULL,
-               session_id TEXT NOT NULL,
-               at INTEGER NOT NULL,
-               agent TEXT,
-               model TEXT,
-               method TEXT NOT NULL,
-               path TEXT NOT NULL,
-               status INTEGER NOT NULL,
-               streamed INTEGER NOT NULL,
-               receipt_id TEXT,
-               verified INTEGER,
-               detail TEXT NOT NULL,
-               locally_constrained INTEGER,
-               rewritten INTEGER,
-               left_device INTEGER NOT NULL,
-               input_tokens INTEGER,
-               output_tokens INTEGER,
-               cache_read_tokens INTEGER,
-               cache_write_tokens INTEGER,
-               cost_usd REAL,
-               updated_at INTEGER NOT NULL
-             );
-             CREATE INDEX IF NOT EXISTS usage_records_at ON usage_records(at DESC, id DESC);
-             CREATE INDEX IF NOT EXISTS usage_records_agent ON usage_records(agent, at DESC);
-             CREATE INDEX IF NOT EXISTS usage_records_model ON usage_records(model, at DESC);
-             CREATE INDEX IF NOT EXISTS usage_records_session ON usage_records(session_id, at DESC);",
+             PRAGMA foreign_keys = ON;",
         )
-        .map_err(|error| format!("Cannot initialize the usage database: {error}"))
+        .map_err(|error| format!("Cannot initialize the usage database: {error}"))?;
+    MIGRATIONS
+        .to_latest(connection)
+        .map_err(|error| format!("Cannot upgrade the usage database: {error}"))
 }
 
 fn filters(query: &UsageQuery, include_cursor: bool) -> Result<(String, Vec<SqlValue>), String> {
@@ -544,17 +572,18 @@ fn optional_number(value: Option<u64>) -> String {
     value.map(|value| value.to_string()).unwrap_or_default()
 }
 
-fn csv_field(value: &str) -> String {
-    let protected = if value.starts_with(['=', '+', '-', '@']) {
+/// OWASP CSV injection defense: a cell a spreadsheet would read as a formula
+/// gets a leading `'` so it is shown as text. The `csv` writer quotes it.
+fn neutralize_formula(value: String) -> String {
+    if value.starts_with(['=', '+', '-', '@', '\t', '\r', '\n', '＝', '＋', '－', '＠']) {
         format!("'{value}")
     } else {
-        value.to_string()
-    };
-    if protected.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", protected.replace('"', "\"\""))
-    } else {
-        protected
+        value
     }
+}
+
+fn csv_error<E>(_: E) -> String {
+    "The usage export could not be completed.".to_string()
 }
 
 fn to_i64(value: u64) -> Result<i64, String> {
@@ -814,6 +843,46 @@ mod tests {
         let csv = fs::read_to_string(output).unwrap();
         assert!(csv.contains("'=MODEL()"));
         assert!(csv.contains("\"'+SUM(1,1)\""));
+        for formula in ["\t=1+2", "＝1+2", "-1+2"] {
+            assert_eq!(neutralize_formula(formula.into()), format!("'{formula}"));
+        }
+    }
+
+    #[test]
+    fn migrations_are_valid() {
+        MIGRATIONS.validate().unwrap();
+    }
+
+    #[test]
+    fn a_0_1_database_adopts_the_versioned_schema_with_its_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.sqlite3");
+        {
+            // 0.1 created the version 1 tables without setting user_version.
+            let old = Connection::open(&path).unwrap();
+            old.execute_batch(SCHEMA_V1).unwrap();
+            old.execute(
+                "INSERT INTO usage_records (id, session_id, at, method, path, status, streamed, detail, left_device, updated_at)
+                 VALUES ('kept', 'session-0', 5, 'POST', '/v1/responses', 200, 0, '', 1, 5)",
+                [],
+            )
+            .unwrap();
+        }
+        let store = UsageStore::open(path.clone()).unwrap();
+        assert_eq!(store.get("kept").unwrap().unwrap().session_id, "session-0");
+        let version: i64 = store
+            .lock()
+            .unwrap()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+        drop(store);
+        // A database from a newer release is refused, not silently rewritten.
+        Connection::open(&path)
+            .unwrap()
+            .pragma_update(None, "user_version", 2)
+            .unwrap();
+        assert!(UsageStore::open(path).is_err());
     }
 
     #[test]

@@ -1119,3 +1119,13 @@ async fn stopping_during_post_stream_does_not_report_a_failed_verdict() {
     assert!(outcome.detail.contains("protection stopped"));
     assert!(outcomes.try_recv().is_err());
 }
+
+#[test]
+fn default_control_port_is_clear_of_the_desktop_listeners() {
+    let port = DEFAULT_CONTROL
+        .parse::<std::net::SocketAddr>()
+        .unwrap()
+        .port();
+    assert_ne!(port, desktop_core::account::CALLBACK_PORT);
+    assert_ne!(port, desktop_core::config::WEB_UI_DEFAULT_PORT);
+}

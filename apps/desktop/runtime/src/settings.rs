@@ -363,7 +363,7 @@ impl Settings {
                         changed();
                     }
                 }
-                Err(error) => desktop_core::diagnostic!("Settings watcher error: {error}"),
+                Err(error) => tracing::warn!("Settings watcher error: {error}"),
             },
         )
         .map_err(|error| format!("Cannot watch the settings files: {error}"))?;

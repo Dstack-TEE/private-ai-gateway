@@ -7,6 +7,7 @@ use std::{io::IsTerminal, path::Path};
 
 #[tokio::main]
 async fn main() {
+    desktop_core::logging::init();
     private_ai_proxy::install_crypto_provider();
     let command = args::Command::augment_subcommands(manage::cli_command())
         .name("private-ai-proxy")
@@ -72,8 +73,6 @@ fn legacy_alias_hint() {
         .take_while(|arg| arg != "--")
         .any(|arg| arg == "--json" || arg == "--json-events");
     if invoked_as_aci && !machine_output && std::io::stderr().is_terminal() {
-        desktop_core::diagnostic!(
-            "note: `aci` is a legacy alias; use `pap` or `private-ai-proxy` instead."
-        );
+        tracing::info!("note: `aci` is a legacy alias; use `pap` or `private-ai-proxy` instead.");
     }
 }

@@ -460,7 +460,7 @@ pub async fn invoke(
             let result = host.reset_settings(backend).await;
             // A partial reset may still have changed preferences.
             if let Err(error) = refresh_preferences(backend, host).await {
-                crate::diagnostic!(
+                tracing::warn!(
                     "Cannot refresh preferences after reset: {}",
                     error.message()
                 );

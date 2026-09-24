@@ -18,7 +18,7 @@ mod platform {
     impl Drop for Watcher {
         fn drop(&mut self) {
             if let Err(error) = self.settings.RemoveColorValuesChanged(self.token) {
-                desktop_core::diagnostic!("Cannot remove system appearance observer: {error}");
+                tracing::warn!("Cannot remove system appearance observer: {error}");
             }
         }
     }
@@ -33,10 +33,10 @@ mod platform {
                 let app = handle.clone();
                 if let Err(error) = handle.run_on_main_thread(move || {
                     if let Err(error) = apply(&app) {
-                        desktop_core::diagnostic!("Cannot refresh system tray appearance: {error}");
+                        tracing::warn!("Cannot refresh system tray appearance: {error}");
                     }
                 }) {
-                    desktop_core::diagnostic!("Cannot schedule system tray appearance: {error}");
+                    tracing::warn!("Cannot schedule system tray appearance: {error}");
                 }
                 Ok(())
             });
@@ -70,7 +70,7 @@ mod platform {
                     guard.take();
                 }
                 Err(error) => {
-                    desktop_core::diagnostic!("Cannot stop system appearance observer: {error}")
+                    tracing::warn!("Cannot stop system appearance observer: {error}")
                 }
             }
         }
@@ -119,7 +119,7 @@ mod platform {
         let handle = app.clone();
         let task = tauri::async_runtime::spawn(async move {
             if let Err(error) = observe(&handle).await {
-                desktop_core::diagnostic!("System tray appearance observer stopped: {error}");
+                tracing::warn!("System tray appearance observer stopped: {error}");
             }
         });
         if !app.manage(Mutex::new(Some(Watcher(task)))) {
@@ -151,12 +151,12 @@ mod platform {
             match signal.args() {
                 Ok(args) if args.namespace == NAMESPACE && args.key == KEY => {
                     if let Err(error) = apply(app, &args.value) {
-                        desktop_core::diagnostic!("Cannot refresh system tray appearance: {error}");
+                        tracing::warn!("Cannot refresh system tray appearance: {error}");
                     }
                 }
                 Ok(_) => {}
                 Err(error) => {
-                    desktop_core::diagnostic!("Invalid system appearance signal: {error}")
+                    tracing::warn!("Invalid system appearance signal: {error}")
                 }
             }
         }
@@ -176,7 +176,7 @@ mod platform {
                     guard.take();
                 }
                 Err(error) => {
-                    desktop_core::diagnostic!("Cannot stop system appearance observer: {error}")
+                    tracing::warn!("Cannot stop system appearance observer: {error}")
                 }
             }
         }

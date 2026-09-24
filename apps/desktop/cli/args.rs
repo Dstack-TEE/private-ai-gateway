@@ -25,7 +25,8 @@ pub enum Command {
     #[command(
         about = "Verify the service (fail closed), send one chat completion over an \
                  SPKI-pinned connection, then fetch and verify its receipt. The API key \
-                 is also read from the ACI_API_KEY environment variable."
+                 is read from stdin with --api-key-stdin or from the ACI_API_KEY \
+                 environment variable."
     )]
     Send(SendArgs),
     #[command(
@@ -166,9 +167,17 @@ pub struct SendArgs {
     )]
     pub prompt: Option<String>,
     #[arg(
+        long = "api-key-stdin",
+        help = "Read the bearer API key from stdin; otherwise it is read from the \
+                ACI_API_KEY environment variable."
+    )]
+    pub api_key_stdin: bool,
+    /// Deprecated: a key in argv is visible to other local processes. Removed in 0.3.
+    #[arg(
         long = "api-key",
         value_name = "KEY",
-        help = "Bearer API key; falls back to the ACI_API_KEY environment variable."
+        hide = true,
+        conflicts_with = "api_key_stdin"
     )]
     pub api_key: Option<String>,
     #[arg(long = "no-stream", help = "Request a non-streaming chat completion.")]
@@ -253,7 +262,7 @@ pub struct ServeArgs {
         long,
         value_name = "ADDR:PORT",
         help = "Local control endpoint for on-demand receipt verification \
-                (default 127.0.0.1:4181)."
+                (default 127.0.0.1:4183)."
     )]
     pub control: Option<String>,
     #[arg(

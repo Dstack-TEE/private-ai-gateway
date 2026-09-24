@@ -424,8 +424,10 @@ fn remaining_millis(started: Instant, timeout: Duration) -> libc::c_int {
 #[cfg(target_os = "macos")]
 fn remaining_timespec(started: Instant, timeout: Duration) -> libc::timespec {
     let remaining = timeout.checked_sub(started.elapsed()).unwrap_or_default();
+    // XNU's kevent rejects tv_sec above INT32_MAX with EINVAL
+    // (`timespec_is_valid`); a longer wait resumes in the caller's loop.
     libc::timespec {
-        tv_sec: remaining.as_secs().min(libc::time_t::MAX as u64) as libc::time_t,
+        tv_sec: remaining.as_secs().min(i32::MAX as u64) as libc::time_t,
         tv_nsec: remaining.subsec_nanos() as libc::c_long,
     }
 }
@@ -447,6 +449,20 @@ fn exit_timeout(pid: u32, timeout: Duration) -> String {
         "Timed out after {} ms waiting for PAP service process {pid} to exit",
         timeout.as_millis()
     )
+}
+
+#[cfg(all(test, unix))]
+mod exit_tests {
+    use super::*;
+
+    // Regression: an unbounded wait once gave kevent a timeout XNU rejects,
+    // so the Mac App Store service never observed its owner exit.
+    #[test]
+    fn an_unbounded_wait_observes_a_child_exit() {
+        let mut child = Command::new("sleep").arg("0.2").spawn().unwrap();
+        wait_for_exit(child.id(), Duration::MAX).unwrap();
+        child.wait().unwrap();
+    }
 }
 
 // MAS resolves IPC from its app container, not inherited native runtime variables.

@@ -26,7 +26,7 @@ pub fn initialize(app: &AppHandle) {
                 *current = preferences.notifications;
             }
         }
-        Err(error) => desktop_core::diagnostic!("Cannot load notification preferences: {error}"),
+        Err(error) => tracing::warn!("Cannot load notification preferences: {error}"),
     }
 }
 
@@ -153,7 +153,7 @@ impl Observer {
             // On Linux the plugin sends from a spawned task, so a delivery
             // failure there never reaches this result.
             if let Err(error) = app.notification().builder().title(title).body(body).show() {
-                desktop_core::diagnostic!("Cannot submit notification: {error}");
+                tracing::warn!("Cannot submit notification: {error}");
             }
         }
     }

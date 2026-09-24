@@ -20,8 +20,10 @@ aci-protocol = { path = "../../../crates/aci-protocol" }
 agent-bridge = { package = "private-ai-proxy-agent-bridge", path = "../agent-bridge" }
 desktop-core = { package = "private-ai-proxy-core", path = "../core" }
 axum = "0.8"
+backon = { version = "1", default-features = false, features = ["std"] }
 async-stream = { version = "0.3", optional = true }
 base64 = "0.23"
+csv = "1"
 futures-core = { version = "0.3", optional = true }
 governor = { version = "0.10", default-features = false, features = ["std", "dashmap"], optional = true }
 hex = "0.4"
@@ -29,6 +31,7 @@ indexmap = { version = "2", features = ["serde"] }
 # Only for the one-time 0.1 import in settings/legacy.rs; remove with it.
 keyring = "4"
 notify-debouncer-mini = "0.7"
+oauth2 = { version = "5", default-features = false }
 rand = "0.8"
 rust-embed = { version = "8", optional = true }
 sha2 = "0.10"
@@ -36,10 +39,12 @@ subtle = "2.6"
 reqwest = { version = "0.13", default-features = false, features = ["form", "json", "rustls-no-provider"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
+rusqlite_migration = { version = "2", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "signal", "macros", "net"] }
 toml_edit = { version = "0.25", features = ["serde"] }
+tracing = "0.1"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 netwatcher = "0.8"

@@ -177,7 +177,9 @@ impl DesktopRuntime {
 
     pub async fn shutdown(&self, mode: ShutdownMode) -> Result<(), String> {
         // Shutdown waits for a configuration transaction to commit or roll back.
-        // Cancelling that future midway could split credential and config state.
+        // Cancelling that future midway could split credential and config state;
+        // the server's shutdown watchdog bounds the wait.
+        tracing::info!("Shutdown: waiting for configuration changes to finish");
         let _operation = self.lifecycle.lock().await;
         if self.exiting.load(Ordering::Acquire) {
             return Ok(());
@@ -185,10 +187,14 @@ impl DesktopRuntime {
         self.recovery.cancel();
         let preserve_session =
             mode == ShutdownMode::UpdateRestart && self.manager.snapshot()?.session_active;
+        tracing::info!("Shutdown: stopping protection and restoring agent configuration");
         let restored = self.stop_with_reconnect(preserve_session);
+        // Outside the Mac App Store, agents are never left pointing at a
+        // stopped Local API: a failed restore keeps the backend running.
         if !cfg!(all(target_os = "macos", feature = "mac-app-store")) {
             restored.as_ref().map_err(Clone::clone)?;
         }
+        tracing::info!("Shutdown: stopping the Local API and the web UI");
         self.endpoint.stop().await?;
         self.web_ui.stop();
         self.exiting.store(true, Ordering::Release);

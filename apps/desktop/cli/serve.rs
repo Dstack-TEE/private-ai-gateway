@@ -19,7 +19,6 @@ use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
 use axum::Router;
-use desktop_core::diagnostic;
 use desktop_runtime::verifier_session::{IdentityEvent, VerifierEvent, VerifierEventSink};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -324,7 +323,9 @@ impl ProxyState {
         };
         self.blocked.store(false, Ordering::SeqCst);
         (self.event_sink)(identity_event);
-        diagnostic!("private-ai-proxy serve: re-verified after keyset change; resuming forwards");
+        tracing::info!(
+            "private-ai-proxy serve: re-verified after keyset change; resuming forwards"
+        );
         Ok(())
     }
 }
@@ -340,6 +341,10 @@ pub async fn run(args: ServeArgs, require_production_os: bool) -> Result<i32, St
         Err(error) => Err(error),
     }
 }
+
+/// Clear of the account callback (4181) and the web UI (4182), which a
+/// desktop installation may bind at the same time.
+const DEFAULT_CONTROL: &str = "127.0.0.1:4183";
 
 async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, String> {
     let reporter: Reporter = if args.json_events {
@@ -375,7 +380,7 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
     let local = listener
         .local_addr()
         .map_err(|e| format!("cannot read listen address: {e}"))?;
-    let control = args.control.as_deref().unwrap_or("127.0.0.1:4181");
+    let control = args.control.as_deref().unwrap_or(DEFAULT_CONTROL);
     let control_listener = tokio::net::TcpListener::bind(control)
         .await
         .map_err(|e| format!("cannot bind control address {control}: {e}"))?;
@@ -581,14 +586,14 @@ async fn proxy_request(
             code: None,
             reason: reason.clone(),
         });
-        diagnostic!("!! {method} {path} -> 503 blocked: {reason}");
+        tracing::warn!("!! {method} {path} -> 503 blocked: {reason}");
         return text_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "upstream keyset changed or expired and re-verification failed; refusing to forward\n",
         );
     }
     if state.snapshot().keyset_digest != identity_before {
-        diagnostic!("!! {method} {path} -> 503 identity changed during re-verification; retry");
+        tracing::warn!("!! {method} {path} -> 503 identity changed during re-verification; retry");
         return text_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "service identity changed during re-verification; retry once the gateway is verified again\n",
@@ -677,7 +682,7 @@ async fn proxy_inference(
     let path = uri.path().to_string();
 
     if has_e2ee_request_headers(&headers) {
-        diagnostic!("!! POST {path} -> 400 E2EE request rejected by plaintext local API");
+        tracing::warn!("!! POST {path} -> 400 E2EE request rejected by plaintext local API");
         return text_response(
             StatusCode::BAD_REQUEST,
             "private-ai-proxy serve accepts plaintext requests only; remove E2EE request headers\n",
@@ -697,7 +702,7 @@ async fn proxy_inference(
         match apply_constraints(body.to_vec(), state.enforce_verified, &active_pins) {
             Ok(body) => body,
             Err(reason) => {
-                diagnostic!("!! POST {path} -> 400: {reason}");
+                tracing::warn!("!! POST {path} -> 400: {reason}");
                 return text_response(
                     StatusCode::BAD_REQUEST,
                     "request session ids are not accepted by the local ACI policy\n",
@@ -730,7 +735,7 @@ async fn proxy_inference(
     if resp.status().as_u16() == 412 && injected_policy_pins {
         match derive_policy_pins(&state).await {
             Ok(pins) if !pins.is_empty() && pins != active_pins => {
-                diagnostic!(
+                tracing::warn!(
                     "private-ai-proxy serve: pinned sessions refused (412); policy re-accepted {} current \
                      session(s), retrying",
                     pins.len()
@@ -740,7 +745,7 @@ async fn proxy_inference(
                 {
                     Ok(body) => body,
                     Err(reason) => {
-                        diagnostic!("private-ai-proxy serve: refreshed session policy rejected request: {reason}");
+                        tracing::warn!("private-ai-proxy serve: refreshed session policy rejected request: {reason}");
                         return text_response(
                             StatusCode::BAD_REQUEST,
                             "request session ids are not accepted by the refreshed ACI policy\n",
@@ -757,7 +762,7 @@ async fn proxy_inference(
             }
             Ok(_) => {}
             Err(e) => {
-                diagnostic!("private-ai-proxy serve: policy pin refresh after 412 failed: {e}")
+                tracing::warn!("private-ai-proxy serve: policy pin refresh after 412 failed: {e}")
             }
         }
     }
@@ -907,7 +912,7 @@ async fn race_delivery<T>(
 }
 
 fn delivery_revoked_response(path: &str) -> Response {
-    diagnostic!("!! {path} -> 503 verification changed before the request was sent");
+    tracing::warn!("!! {path} -> 503 verification changed before the request was sent");
     text_response(
         StatusCode::SERVICE_UNAVAILABLE,
         "verification changed before the request was sent; retry once the gateway is verified again\n",
@@ -929,7 +934,7 @@ fn rotation_gate(state: &ProxyState, trusted_digest: &str, headers: &HeaderMap) 
                 code: Some("keyset_changed".to_string()),
                 reason,
             });
-            diagnostic!(
+            tracing::warn!(
                 "!! upstream X-ACI-Keyset-Digest changed ({observed} != {trusted_digest}); \
                  blocking further inference forwards until re-verify"
             );
@@ -1018,7 +1023,7 @@ async fn derive_policy_pins(state: &ProxyState) -> Result<Vec<String>, String> {
         audit_current_sessions(&state.client, &state.base_url, None, &state.required_claims)
             .await?;
     for rejected in audited.iter().filter(|session| !session.accepted()) {
-        diagnostic!(
+        tracing::warn!(
             "private-ai-proxy serve: session {} rejected ({})",
             rejected.session_id,
             match &rejected.audit {

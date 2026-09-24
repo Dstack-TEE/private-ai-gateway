@@ -3,7 +3,6 @@
 
 use std::io::{self, Write};
 
-use desktop_core::diagnostic;
 use desktop_runtime::verifier_session::{IdentityEvent, IdentitySourceProvenance, VerifierEvent};
 use serde_json::{json, Value};
 
@@ -101,7 +100,7 @@ pub(super) fn default_reporter(outcome: RequestOutcome) {
         line.push_str(&outcome.detail);
     }
     if outcome.verified == Some(false) {
-        diagnostic!("!! {line}");
+        tracing::warn!("!! {line}");
     } else {
         println!("{line}");
     }
@@ -110,7 +109,7 @@ pub(super) fn default_reporter(outcome: RequestOutcome) {
 pub(super) fn json_reporter(outcome: RequestOutcome) {
     let event = request_outcome_event(outcome);
     if let Err(error) = write_json_event(&event) {
-        diagnostic!("private-ai-proxy serve: cannot write JSON event: {error}");
+        tracing::warn!("private-ai-proxy serve: cannot write JSON event: {error}");
     }
 }
 
@@ -133,7 +132,7 @@ pub(super) fn json_event_sink(event: VerifierEvent) {
         VerifierEvent::Ready { .. } => return,
     };
     if let Err(error) = write_json_event(&value) {
-        diagnostic!("private-ai-proxy serve: cannot write JSON event: {error}");
+        tracing::warn!("private-ai-proxy serve: cannot write JSON event: {error}");
     }
 }
 

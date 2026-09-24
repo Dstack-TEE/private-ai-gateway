@@ -49,6 +49,8 @@ sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time"] }
 tokio-util = "0.7"
+tracing = "0.1"
+tracing-appender = "0.2"
 uuid = { version = "1", features = ["v4"] }
 webpki-roots = "1"
 x509-parser = "0.18"

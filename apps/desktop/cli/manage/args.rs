@@ -105,8 +105,6 @@ pub(super) enum Action {
         #[arg(value_enum)]
         shell: Shell,
     },
-    /// Emit basic machine-readable Clap command and argument metadata as JSON.
-    Schema,
 }
 
 #[derive(Subcommand)]

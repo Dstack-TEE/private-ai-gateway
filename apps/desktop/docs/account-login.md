@@ -17,15 +17,20 @@ receives presentation and non-secret account metadata.
 
 Phala uses device authorization at `cloud-api.phala.com`, with
 `client_id=private-ai-proxy` and `scope=redpill:api-key`.
-Polling honors pending, slowdown and expiry. Its returned token is an inference
+Polling honors pending, slowdown (five more seconds for every later request,
+RFC 8628 §3.5) and expiry. The endpoints take JSON bodies and nest errors under
+`detail`, as Phala's own CLI expects, so this polling is not the `oauth2`
+crate's form-encoded RFC 8628 client. Its returned token is an inference
 key. Account metadata must load successfully before the authorization is ready.
 
 RedPill uses public OAuth client `cGrHCOWG3S91oa0A` on `clerk.redpill.ai` with
 exact callback `http://127.0.0.1:4181/oauth/callback`. Discovery must support code
-flow, S256 PKCE and public token exchange. The callback checks Host, state, unique
-code and issuer when present. Requests do not follow redirects. The requested
-scopes are `openid profile user:org:read`; no client secret or refresh token is
-used. Clerk tokens stay in runtime memory. Once the workspace is resolved,
+flow, S256 PKCE and public token exchange. The `oauth2` crate builds the
+authorization request (random state, S256 PKCE) and exchanges the code. The
+callback checks Host, state, unique code and the RFC 9207 issuer when present.
+Requests do not follow redirects. The requested scopes are
+`openid profile user:org:read`; no client secret or refresh token is used.
+Clerk tokens stay in runtime memory. Once the workspace is resolved,
 the runtime exchanges the grant for an inference key at
 `POST https://service.redpill.ai/api/oauth/key`.
 
@@ -44,7 +49,8 @@ profile only discards local credentials; unused keys must be managed in the Phal
 dashboard. New keys do not inherit the previous key's budget.
 
 RedPill device profiles derive an installation UUID from the local installation
-and profile IDs. RedPill owns its managed credential lifecycle, including activation,
+(the owner-only `installation-id` file, written once and atomically) and
+profile IDs. RedPill owns its managed credential lifecycle, including activation,
 revocation and expiry of abandoned pending credentials. The retry queue below
 applies to RedPill only.
 

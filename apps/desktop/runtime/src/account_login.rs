@@ -25,11 +25,7 @@ use axum::{
     routing::get,
     Router,
 };
-use base64::{
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
-    Engine,
-};
-use rand::RngCore;
+use base64::{engine::general_purpose::STANDARD, Engine};
 use reqwest::Client;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -58,6 +54,7 @@ pub(crate) const CALLBACK_ADDRESS: SocketAddrV4 =
     SocketAddrV4::new(Ipv4Addr::LOCALHOST, desktop_core::account::CALLBACK_PORT);
 const CALLBACK_PATH: &str = "/oauth/callback";
 const KEY_URL: &str = "https://service.redpill.ai/api/oauth/key";
+const ACCOUNT_URL: &str = "https://service.redpill.ai/api/oauth/account";
 const PHALA_API: &str = "https://cloud-api.phala.com";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(900);
 
@@ -345,9 +342,7 @@ impl PendingLogin {
             {
                 // Pending credentials also expire server-side. Offline cleanup
                 // must not trap the user in an editor or prevent a fresh login.
-                desktop_core::diagnostic!(
-                    "Pending authorization cleanup deferred to server expiry"
-                );
+                tracing::info!("Pending authorization cleanup deferred to server expiry");
             }
         }
         Ok(())
@@ -403,41 +398,30 @@ pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<Pendi
                     CALLBACK_ADDRESS.port()
                 )
             })?;
-            let verifier = random_secret();
-            let state = random_secret();
-            let mut url = trusted_url(&string(&discovery, "authorization_endpoint")?, ISSUER)?;
-            url.query_pairs_mut().extend_pairs([
-                ("client_id", REDPILL_CLIENT_ID),
-                ("response_type", "code"),
-                ("response_mode", "query"),
-                ("redirect_uri", &callback_url()),
-                ("scope", "openid profile user:org:read"),
-                ("state", &state),
-                ("code_challenge_method", "S256"),
-                (
-                    "code_challenge",
-                    &URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())),
-                ),
-            ]);
-            let token_url = trusted_url(&string(&discovery, "token_endpoint")?, ISSUER)?;
+            let oauth = redpill_client(
+                trusted_url(&string(&discovery, "authorization_endpoint")?, ISSUER)?,
+                trusted_url(&string(&discovery, "token_endpoint")?, ISSUER)?,
+            )?;
+            let (url, state, verifier) = authorization_request(&oauth);
             let (sender, receiver) = oneshot::channel();
             let callback = Arc::new(CallbackState {
-                expected: state,
+                expected: state.into_secret(),
                 sender: Mutex::new(Some(sender)),
             });
             let worker_callback = callback.clone();
             let worker = tokio::spawn(async move {
-                timeout(
-                    LOGIN_TIMEOUT,
+                timeout(LOGIN_TIMEOUT, async move {
+                    let code = receive_code(listener, worker_callback, receiver).await?;
                     redpill(
-                        client,
-                        listener,
-                        worker_callback,
-                        receiver,
+                        &client,
+                        &oauth,
+                        code,
                         verifier,
-                        token_url,
-                    ),
-                )
+                        &format!("{ISSUER}/oauth/userinfo"),
+                        ACCOUNT_URL,
+                    )
+                    .await
+                })
                 .await
                 .map_err(|_| "Authorization expired; reconnect the account".to_string())?
             });
