@@ -29,6 +29,32 @@ pub(crate) async fn open_about_link(app: AppHandle, target: String) -> Result<()
     .await
 }
 
+/// Opens the listening web UI in the system browser. The address carries no
+/// secret; the page asks for the web UI password.
+#[tauri::command]
+pub(crate) async fn open_web_ui(
+    app: AppHandle,
+    client: State<'_, Arc<Client>>,
+) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    distribution::require(
+        distribution::CAPABILITIES.web_ui,
+        "The web UI is unavailable in this distribution",
+    )?;
+    let client = client.inner().clone();
+    run_blocking(move || {
+        let url = client
+            .state()?
+            .web_ui
+            .url
+            .ok_or_else(|| "The web UI is not listening".to_string())?;
+        app.opener()
+            .open_url(url, None::<&str>)
+            .map_err(|_| "Cannot open the web UI in your browser".to_string())
+    })
+    .await
+}
+
 #[tauri::command]
 pub(crate) async fn copy_text(app: AppHandle, text: String) -> Result<(), String> {
     if text.is_empty() || text.len() > 4_096 {

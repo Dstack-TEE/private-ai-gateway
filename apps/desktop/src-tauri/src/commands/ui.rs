@@ -43,6 +43,7 @@ ui_commands! {
     rotate_client_key => RotateClientKey,
     save_local_api_config => SaveLocalApiConfig,
     save_web_ui => SaveWebUi,
+    set_web_ui_password => SetWebUiPassword,
     list_listen_addresses => ListListenAddresses,
     import_profiles => ImportProfiles,
     query_usage => QueryUsage,

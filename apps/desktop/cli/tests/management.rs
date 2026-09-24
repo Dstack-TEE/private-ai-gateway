@@ -1,7 +1,7 @@
 //! Real binaries and isolated user state; no UI, provider calls, or OS secrets.
 mod support;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::{
     fs,
     io::{Read, Write},
@@ -301,20 +301,80 @@ fn install(source: &str, destination: &Path) {
         fs::copy(source, destination).unwrap();
     }
 }
+const WEB_PASSWORD: &str = "correct horse battery staple";
+
 #[test]
-fn web_ui_is_opt_in_and_login_links_work_once() {
+fn web_ui_requires_a_password_that_never_leaves_the_service() {
     let backend = Backend::start();
-    assert_eq!(
-        backend.run(&["status"])["gateway"]["webUi"]["enabled"],
-        false
-    );
+    let status = &backend.run(&["status"])["gateway"]["webUi"];
+    assert_eq!(status["enabled"], false);
+    assert_eq!(status["passwordSet"], false);
     let refused = backend
         .command(&["app", "open", "--web", "--non-interactive"])
         .stdin(Stdio::null())
         .output()
         .unwrap();
     assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("pap settings set webUi true"));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("pap settings set webUiPassword"));
+    let refused = backend
+        .command(&["settings", "set", "webUi", "true", "--yes", "--json"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("pap settings set webUiPassword"));
+    // Passwords never travel in arguments.
+    let refused = backend
+        .command(&[
+            "settings",
+            "set",
+            "webUiPassword",
+            WEB_PASSWORD,
+            "--yes",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("--value-stdin"));
+    let short = backend.set_web_ui_password("too short");
+    assert!(!short.status.success());
+    assert!(String::from_utf8_lossy(&short.stderr).contains("at least 12 characters"));
+    assert_success(&backend.set_web_ui_password(WEB_PASSWORD));
+
+    let diagnostics = backend.directory.path().join("web-diagnostics.json");
+    backend.run(&["diagnostics", "--output", diagnostics.to_str().unwrap()]);
+    let show = backend.run(&["settings", "show"]);
+    assert_eq!(show["webUi"]["passwordSet"], true);
+    let data = backend.directory.path().join("home/.private-ai-proxy");
+    let saved = fs::read_to_string(data.join("preferences.json")).unwrap();
+    assert!(saved.contains("\"webUiPasswordHash\": \"$argon2id$"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(data.join("preferences.json"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0);
+    }
+    for (name, text) in [
+        ("settings show", show.to_string()),
+        ("status", backend.run(&["status"]).to_string()),
+        ("diagnostics", fs::read_to_string(&diagnostics).unwrap()),
+        ("preferences.json", saved),
+        (
+            "backend log",
+            fs::read_to_string(backend.directory.path().join("backend.log")).unwrap(),
+        ),
+    ] {
+        assert!(!text.contains(WEB_PASSWORD), "{name} contains the password");
+        if name != "preferences.json" {
+            assert!(
+                !text.contains("$argon2"),
+                "{name} contains the password hash"
+            );
+        }
+    }
 
     let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = occupied.local_addr().unwrap().port().to_string();
@@ -333,32 +393,59 @@ fn web_ui_is_opt_in_and_login_links_work_once() {
     drop(occupied);
 
     let state = backend.run(&["settings", "set", "webUi", "true", "--yes"]);
-    assert_eq!(state["webUi"]["url"], format!("http://127.0.0.1:{port}"));
-    let login = backend.web(&["app", "open", "--web", "--json"]);
-    assert_success(&login);
-    let login: Value = serde_json::from_slice(&login.stdout).unwrap();
-    let url = login["url"].as_str().unwrap();
-    let code = url
-        .strip_prefix(&format!("http://127.0.0.1:{port}/#code="))
-        .unwrap();
-    let body = serde_json::json!({ "code": code }).to_string();
+    let url = format!("http://127.0.0.1:{port}");
+    assert_eq!(state["webUi"]["url"], url);
+    let opened = backend.web(&["app", "open", "--web", "--json"]);
+    assert_success(&opened);
+    let opened: Value = serde_json::from_slice(&opened.stdout).unwrap();
+    // The address carries no secret.
+    assert_eq!(opened["url"], url);
     let authority = format!("127.0.0.1:{port}");
-    let (status, session) = http(&authority, "POST", "/api/session", None, &body);
-    assert_eq!(status, 200);
-    let token = session["token"].as_str().unwrap().to_string();
-    assert_eq!(http(&authority, "POST", "/api/session", None, &body).0, 401);
+    let wrong = json!({ "password": "wrong horse battery staple" }).to_string();
+    assert_eq!(
+        http(&authority, "POST", "/api/session", None, &wrong).0,
+        401
+    );
+    let token = web_session(&authority, WEB_PASSWORD);
+    let other = web_session(&authority, WEB_PASSWORD);
     assert_eq!(
         http(&authority, "GET", "/api/bootstrap", Some(&token), "").0,
         200
     );
     assert_eq!(http(&authority, "GET", "/api/bootstrap", None, "").0, 401);
 
+    // A new password ends every session; only the new one signs in.
+    let next = "another long passphrase";
+    assert_success(&backend.set_web_ui_password(next));
+    for token in [&token, &other] {
+        assert_eq!(
+            http(&authority, "GET", "/api/bootstrap", Some(token), "").0,
+            401
+        );
+    }
+    let old = json!({ "password": WEB_PASSWORD }).to_string();
+    assert_eq!(http(&authority, "POST", "/api/session", None, &old).0, 401);
+    web_session(&authority, next);
+
+    // The password stays while the web UI is on; turning it off ends sessions.
+    let clear = |backend: &Backend| {
+        backend
+            .command(&["settings", "set", "webUiPassword", "", "--yes", "--json"])
+            .output()
+            .unwrap()
+    };
+    assert!(!clear(&backend).status.success());
     backend.run(&["settings", "set", "webUi", "false", "--yes"]);
     let deadline = Instant::now() + Duration::from_secs(5);
-    while TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+    while TcpStream::connect(&authority).is_ok() {
         assert!(Instant::now() < deadline, "the web UI listener stayed open");
         std::thread::sleep(Duration::from_millis(50));
     }
+    assert_success(&clear(&backend));
+    assert_eq!(
+        backend.run(&["settings", "show"])["webUi"]["passwordSet"],
+        false
+    );
 }
 #[test]
 fn app_open_fails_fast_while_an_update_holds_the_startup_gate() {
@@ -407,6 +494,7 @@ fn web_ui_listener_fails_closed_and_rebinds_with_fresh_sessions() {
     assert!(String::from_utf8_lossy(&refused.stderr).contains("Client host is required"));
     assert_success(&set("webUiAllowNetworkAccess", "false"));
 
+    assert_success(&backend.set_web_ui_password(WEB_PASSWORD));
     let state = backend.run(&["settings", "set", "webUi", "true", "--yes"]);
     if state["webUi"]["error"]
         .as_str()
@@ -415,7 +503,7 @@ fn web_ui_listener_fails_closed_and_rebinds_with_fresh_sessions() {
         return;
     }
     let first = format!("127.0.0.1:{port}");
-    let token = web_session(&backend, &first);
+    let token = web_session(&first, WEB_PASSWORD);
     assert_eq!(
         http(&first, "GET", "/api/bootstrap", Some(&token), "").0,
         200
@@ -438,33 +526,32 @@ fn web_ui_listener_fails_closed_and_rebinds_with_fresh_sessions() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
-    // Moving the listener revokes every session; a new link signs in on the new address.
+    // Moving the listener revokes every session; the password signs in on the new address.
     assert_eq!(
         http(&second, "GET", "/api/bootstrap", Some(&token), "").0,
         401
     );
-    let token = web_session(&backend, &second);
+    let token = web_session(&second, WEB_PASSWORD);
     assert_eq!(
         http(&second, "GET", "/api/bootstrap", Some(&token), "").0,
         200
     );
 }
 
-/// Prints a login link for `authority` and exchanges its code for a session token.
-fn web_session(backend: &Backend, authority: &str) -> String {
-    let login = backend.web(&["app", "open", "--web", "--json"]);
-    assert_success(&login);
-    let login: Value = serde_json::from_slice(&login.stdout).unwrap();
-    let code = login["url"]
-        .as_str()
-        .unwrap()
-        .strip_prefix(&format!("http://{authority}/#code="))
-        .unwrap()
-        .to_string();
-    let body = serde_json::json!({ "code": code }).to_string();
-    let (status, session) = http(authority, "POST", "/api/session", None, &body);
-    assert_eq!(status, 200);
-    session["token"].as_str().unwrap().to_string()
+/// Signs in to the web UI at `authority` and returns its session cookie.
+fn web_session(authority: &str, password: &str) -> String {
+    let body = json!({ "password": password }).to_string();
+    let (status, headers, _) = exchange(authority, "POST", "/api/session", None, &body);
+    assert_eq!(status, 204);
+    let cookie = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(": ")?;
+            name.eq_ignore_ascii_case("set-cookie").then_some(value)
+        })
+        .expect("sign-in sets the session cookie");
+    assert!(cookie.contains("; HttpOnly; SameSite=Strict; Path=/"));
+    cookie.split_once(';').unwrap().0.to_string()
 }
 
 impl Backend {
@@ -476,30 +563,66 @@ impl Backend {
             .output()
             .unwrap()
     }
+
+    /// Sets the web UI password the way scripts do, through stdin.
+    fn set_web_ui_password(&self, password: &str) -> Output {
+        let mut child = self
+            .command(&[
+                "settings",
+                "set",
+                "webUiPassword",
+                "--value-stdin",
+                "--yes",
+                "--json",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writeln!(child.stdin.take().unwrap(), "{password}").unwrap();
+        child.wait_with_output().unwrap()
+    }
 }
 /// Sends a same-origin request to `authority` (`IP:PORT`).
 fn http(
     authority: &str,
     method: &str,
     path: &str,
-    token: Option<&str>,
+    cookie: Option<&str>,
     body: &str,
 ) -> (u16, Value) {
+    let (status, _, body) = exchange(authority, method, path, cookie, body);
+    (status, body)
+}
+
+/// Like [`http`], also returning the response headers.
+fn exchange(
+    authority: &str,
+    method: &str,
+    path: &str,
+    cookie: Option<&str>,
+    body: &str,
+) -> (u16, String, Value) {
     let mut stream = TcpStream::connect(authority).unwrap();
-    let authorization = token
-        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+    let cookie = cookie
+        .map(|cookie| format!("Cookie: {cookie}\r\n"))
         .unwrap_or_default();
     write!(
         stream,
-        "{method} {path} HTTP/1.1\r\nHost: {authority}\r\nOrigin: http://{authority}\r\n{authorization}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "{method} {path} HTTP/1.1\r\nHost: {authority}\r\nOrigin: http://{authority}\r\n{cookie}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
     .unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
     let status = response[9..12].parse().unwrap();
-    let body = response.split_once("\r\n\r\n").unwrap().1;
-    (status, serde_json::from_str(body).unwrap_or(Value::Null))
+    let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+    (
+        status,
+        headers.to_string(),
+        serde_json::from_str(body).unwrap_or(Value::Null),
+    )
 }
 fn assert_success(output: &Output) {
     assert!(
@@ -519,6 +642,7 @@ fn reset_settings_preserves_user_data_and_requires_explicit_consent() {
     backend.run(&["profiles", "import", backup.to_str().unwrap(), "--yes"]);
     backend.run(&["settings", "set", "appearance", "dark", "--yes"]);
     backend.run(&["settings", "set", "connectOnLaunch", "true", "--yes"]);
+    assert_success(&backend.set_web_ui_password(WEB_PASSWORD));
     backend.run(&["agents", "connect", "codex", "--yes"]);
     let key = backend.run(&["token", "show", "--yes"]);
     let profiles = backend.run(&["profiles", "list"]);
@@ -557,6 +681,7 @@ fn reset_settings_preserves_user_data_and_requires_explicit_consent() {
     assert_eq!(settings["preferences"]["appearance"], "system");
     assert_eq!(settings["preferences"]["connectOnLaunch"], false);
     assert_eq!(settings["preferences"]["notifications"]["enabled"], true);
+    assert_eq!(settings["webUi"]["passwordSet"], false);
 }
 
 /// Reset moves the Local API to its fixed default port, which every test

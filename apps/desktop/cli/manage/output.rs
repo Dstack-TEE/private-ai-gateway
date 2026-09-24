@@ -19,8 +19,7 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
             command: App::Open { .. },
         } => match value["url"].as_str() {
             Some(url) => format!(
-                "Web UI sign-in link (works once, expires in {}s):\n{}{}",
-                text(&value["expiresInSeconds"]),
+                "Web UI (sign in with the web UI password):\n{}{}",
                 safe(url),
                 if value["browserOpened"] == true {
                     "\nOpened in your browser."

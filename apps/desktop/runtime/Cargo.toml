@@ -37,6 +37,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "signal"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 netwatcher = "0.8"
+argon2 = "0.6"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

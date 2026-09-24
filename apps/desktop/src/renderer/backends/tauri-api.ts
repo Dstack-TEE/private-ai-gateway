@@ -82,6 +82,7 @@ const platform: UiPlatform = {
   nativeDialogReady: () => invoke("native_dialog_ready"),
   mainWindowReady: () => invoke("main_window_ready"),
   openAboutLink: (target) => invoke("open_about_link", { target }),
+  openWebUi: () => invoke("open_web_ui"),
   openAgentWebsite: (agentId) => invoke("open_agent_website", { agentId }),
   openApiKeyPage: (provider) => invoke("open_api_key_page", { provider }),
   confirm: (options) => confirm(options.message, {

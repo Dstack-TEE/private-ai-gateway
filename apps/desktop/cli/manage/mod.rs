@@ -386,10 +386,33 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                     let state = client.state()?;
                     json!({"preferences": client.call(rpc::Preferences)?, "localApi": state.local_api, "webUi": state.web_ui})
                 }
-                Settings::Set { key, value: input } => {
+                Settings::Set {
+                    key: SettingsKey::WebUiPassword,
+                    value: input,
+                    value_stdin,
+                } => {
+                    confirm(
+                        cli,
+                        "Change the web UI password and end every browser session?",
+                    )?;
+                    let password = read_web_ui_password(cli, input.as_deref(), *value_stdin)?;
+                    value(client.call(rpc::SetWebUiPassword { password })?)?
+                }
+                Settings::Set {
+                    key,
+                    value: input,
+                    value_stdin,
+                } => {
+                    if *value_stdin {
+                        return Err("Only webUiPassword reads its value from stdin".into());
+                    }
+                    let input = input
+                        .as_ref()
+                        .ok_or_else(|| format!("Missing the value for {key}"))?;
                     confirm(cli, "Change Private AI Proxy settings?")?;
                     let set = |change| client.call(rpc::SetPreference { change });
                     match key {
+                    SettingsKey::WebUiPassword => unreachable!(),
                     SettingsKey::AutoCliRegistration => value(
                         set(Preference::AutoCliRegistration(parse_bool(input)?))?,
                     )?,
@@ -562,11 +585,15 @@ fn open_desktop_app(app: PathBuf) -> Result<Value, String> {
     Ok(json!({"opened": true}))
 }
 
-/// Prints a one-time login link minted over the authenticated management endpoint.
+/// Opens or prints the web UI address. It carries no secret: the page asks for
+/// the web UI password.
 fn open_web_ui(cli: &Cli, client: &Client) -> Result<Value, String> {
     Client::ensure_service()?;
-    let status = client.state()?.web_ui;
+    let mut status = client.state()?.web_ui;
     if !status.enabled {
+        if !status.password_set {
+            return Err("The web UI is off and has no password. Set one with `pap settings set webUiPassword`, then run `pap settings set webUi true`.".into());
+        }
         if !cli.yes && (cli.json || cli.non_interactive || !io::stdin().is_terminal()) {
             return Err("The web UI is off. Enable it with `pap settings set webUi true`, or rerun with --yes.".into());
         }
@@ -581,15 +608,18 @@ fn open_web_ui(cli: &Cli, client: &Client) -> Result<Value, String> {
         // The same change `settings set webUi true` makes.
         let mut config = client.call(rpc::Preferences)?.web_ui;
         config.enabled = true;
-        client.call(rpc::SaveWebUi { config })?;
+        status = client.call(rpc::SaveWebUi { config })?.web_ui;
     }
-    let login = client.call(rpc::WebUiLogin)?;
-    let opened = graphical_session() && open_browser(&login.url).is_ok();
-    Ok(json!({
-        "url": login.url,
-        "expiresInSeconds": login.expires_in_seconds,
-        "browserOpened": opened
-    }))
+    let url = status.url.ok_or_else(|| {
+        format!(
+            "Web UI is not listening: {}",
+            status
+                .error
+                .unwrap_or_else(|| "the listener is unavailable".into())
+        )
+    })?;
+    let opened = graphical_session() && open_browser(&url).is_ok();
+    Ok(json!({ "url": url, "browserOpened": opened }))
 }
 
 /// Open `url` in the user's browser without waiting for it.
@@ -797,6 +827,47 @@ fn read_key(cli: &Cli, stdin: bool) -> Result<String, String> {
         rpassword::prompt_password("API key: ").map_err(|_| "Cannot read credential")?
     };
     desktop_core::service_config::validate_api_key(&key)
+}
+/// Reads a new web UI password from stdin or a hidden prompt. An explicit `""`
+/// removes it; any other command-line value is refused so it never reaches argv.
+fn read_web_ui_password(
+    cli: &Cli,
+    input: Option<&str>,
+    stdin: bool,
+) -> Result<Option<String>, String> {
+    match input {
+        Some("") if !stdin => return Ok(None),
+        Some(_) => return Err("Pass the web UI password with --value-stdin or at the hidden prompt, not as an argument. Use \"\" to remove it.".into()),
+        None => {}
+    }
+    if stdin {
+        if io::stdin().is_terminal() {
+            return Err("Refusing to read a password from a terminal with --value-stdin; omit the flag for a hidden prompt.".into());
+        }
+        let mut bytes = Vec::new();
+        io::stdin()
+            .take(4097)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "Cannot read the password from stdin")?;
+        if bytes.len() > 4096 {
+            return Err("Password input exceeds limit".into());
+        }
+        let text = String::from_utf8(bytes).map_err(|_| "Password must be UTF-8")?;
+        // The newline `echo` or a file adds is not part of the password.
+        let text = text.strip_suffix('\n').unwrap_or(&text);
+        return Ok(Some(text.strip_suffix('\r').unwrap_or(text).to_string()));
+    }
+    if !io::stdin().is_terminal() || cli.json || cli.non_interactive {
+        return Err("Use --value-stdin for noninteractive password input".into());
+    }
+    let password =
+        rpassword::prompt_password("Web UI password: ").map_err(|_| "Cannot read the password")?;
+    let confirmation =
+        rpassword::prompt_password("Confirm password: ").map_err(|_| "Cannot read the password")?;
+    if password != confirmation {
+        return Err("Passwords do not match".into());
+    }
+    Ok(Some(password))
 }
 fn parse_bool(value: &str) -> Result<bool, String> {
     value.parse().map_err(|_| "Expected true or false".into())

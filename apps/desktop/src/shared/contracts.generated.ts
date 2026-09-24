@@ -114,13 +114,17 @@ export type ListenConfig = { listenAddress: string, allowNetworkAccess: boolean,
  */
 export type WebUiConfig = { enabled: boolean, listenAddress: string, allowNetworkAccess: boolean, port: number, clientHost?: string, };
 /**
- * Listener state of the service-hosted web UI. Never carries login codes or tokens.
+ * Listener state of the service-hosted web UI. Never carries the password, its hash or session tokens.
  */
 export type WebUiStatus = { enabled: boolean, listenAddress: string, allowNetworkAccess: boolean, port: number, clientHost?: string,
 /**
  * Present only while the listener is bound.
  */
-url?: string, error?: string, };
+url?: string, error?: string,
+/**
+ * Whether a sign-in password is set. The password itself never leaves the service.
+ */
+passwordSet: boolean, };
 export type ListenAddress = { address: string, name: string, };
 export type Appearance = "system" | "light" | "dark";
 export type UpdateChannel = "beta" | "stable";
@@ -220,4 +224,4 @@ export type DistributionCapabilities = { channel: DistributionChannel, nativeUpd
  */
 export type WebBootstrap = { version: string, distribution: DistributionCapabilities, };
 /** A method the shared UI API accepts (`ui_api::Method`). */
-export type UiMethod = "startBackendService" | "getState" | "start" | "stop" | "activateProfile" | "deleteProfile" | "saveConfiguration" | "completeAccountLogin" | "beginAccountLogin" | "pollAccountLogin" | "saveAccountLogin" | "getAccountDetails" | "getAccountBalance" | "getOrganizationUrl" | "getTopUpUrl" | "cancelAccountLogin" | "getClientKey" | "rotateClientKey" | "saveLocalApiConfig" | "saveWebUi" | "listListenAddresses" | "importProfiles" | "exportProfilesContent" | "exportDiagnosticsContent" | "queryUsage" | "getUsageRecord" | "listAgents" | "getAgentAccess" | "requestAgentAccess" | "previewAgent" | "applyAgent" | "getAppearance" | "setAppearance" | "getLaunchPreferences" | "setLaunchPreference" | "getNotificationSettings" | "saveNotificationSettings" | "resetSettings" | "getUpdateNotice";
+export type UiMethod = "startBackendService" | "getState" | "start" | "stop" | "activateProfile" | "deleteProfile" | "saveConfiguration" | "completeAccountLogin" | "beginAccountLogin" | "pollAccountLogin" | "saveAccountLogin" | "getAccountDetails" | "getAccountBalance" | "getOrganizationUrl" | "getTopUpUrl" | "cancelAccountLogin" | "getClientKey" | "rotateClientKey" | "saveLocalApiConfig" | "saveWebUi" | "setWebUiPassword" | "listListenAddresses" | "importProfiles" | "exportProfilesContent" | "exportDiagnosticsContent" | "queryUsage" | "getUsageRecord" | "listAgents" | "getAgentAccess" | "requestAgentAccess" | "previewAgent" | "applyAgent" | "getAppearance" | "setAppearance" | "getLaunchPreferences" | "setLaunchPreference" | "getNotificationSettings" | "saveNotificationSettings" | "resetSettings" | "getUpdateNotice";

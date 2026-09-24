@@ -352,7 +352,7 @@ pub struct AppState {
     pub web_ui: WebUiStatus,
 }
 
-/// Listener state of the service-hosted web UI. Never carries login codes or tokens.
+/// Listener state of the service-hosted web UI. Never carries the password, its hash or session tokens.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(optional_fields)]
@@ -370,6 +370,9 @@ pub struct WebUiStatus {
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Whether a sign-in password is set. The password itself never leaves the service.
+    #[serde(default)]
+    pub password_set: bool,
 }
 
 impl From<&crate::preferences::WebUiConfig> for WebUiStatus {
@@ -382,6 +385,7 @@ impl From<&crate::preferences::WebUiConfig> for WebUiStatus {
             client_host: config.client_host.clone(),
             url: None,
             error: None,
+            password_set: false,
         }
     }
 }
@@ -476,15 +480,6 @@ impl Default for StartConfig {
             require_production_os: true,
         }
     }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WebUiLogin {
-    /// `http://HOST:PORT/#code=…` on the client host or listen address; the code
-    /// works once, within `expires_in_seconds`.
-    pub url: String,
-    pub expires_in_seconds: u64,
 }
 
 /// A `pap cli status|install|uninstall` result; the desktop shell reads it

@@ -42,6 +42,19 @@ pub struct Preferences {
     pub appearance: Appearance,
     #[serde(default)]
     pub web_ui: WebUiConfig,
+    /// Argon2id hash of the web UI sign-in password. Management reads omit it; see [`Preferences::shared`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_ui_password_hash: Option<String>,
+}
+
+impl Preferences {
+    /// These preferences as management clients may read them: without the password hash.
+    pub fn shared(self) -> Self {
+        Self {
+            web_ui_password_hash: None,
+            ..self
+        }
+    }
 }
 
 /// The service-hosted browser UI. It is off until the user enables it and

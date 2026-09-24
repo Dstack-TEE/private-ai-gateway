@@ -148,9 +148,9 @@ pub fn open(
             label: WEB_UI_LABEL,
             title: "Web UI Settings",
             width: 560.0,
-            height: 420.0,
+            height: 640.0,
             min_width: 500.0,
-            min_height: 380.0,
+            min_height: 520.0,
             query: "index.html?native-dialog=web-ui".to_string(),
         },
         "usage-proof" => {

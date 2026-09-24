@@ -15,7 +15,6 @@
     "allow-restart-to-update",
     "allow-get-launch-preferences",
     "allow-set-launch-preference",
-    "allow-save-web-ui",
     "allow-start",
     "allow-stop",
     "allow-copy-text",
