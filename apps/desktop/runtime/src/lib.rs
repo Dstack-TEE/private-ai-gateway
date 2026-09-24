@@ -1,10 +1,10 @@
 //! The per-user backend: the controller that owns the settings files,
 //! profiles, verifier sessions, agent configuration, usage, account login and
-//! the optional web UI, and the management server that answers
-//! `desktop_core::protocol`.
+//! the optional web UI, and the management API (`desktop_core::protocol`) it
+//! serves on the local endpoint and the web UI listener.
 //!
 //! The Tauri shell owns window, menu, tray, clipboard, file-picker, and
-//! autostart integration; clients reach this crate only over IPC.
+//! autostart integration; clients reach this crate only through the API.
 
 pub mod account_login;
 mod api;

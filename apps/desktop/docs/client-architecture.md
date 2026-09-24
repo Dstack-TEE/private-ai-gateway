@@ -57,20 +57,20 @@ service. No distribution contains an independent `aci` executable.
 | Crate | Package | Responsibility |
 | --- | --- | --- |
 | `cli` | `private-ai-proxy` | Every command-line surface, the ACI verifier, `pap serve`, and the `private-ai-proxy-service` entry point that injects the verifier into the backend |
-| `core` | `private-ai-proxy-core` | Client side shared by every process: renderer and IPC contracts, the management command table and client, IPC transport, backend launch, shared UI API, release-channel update checks, the `config.toml` model, its validation and JSON Schema, app paths, locks and owner-only file primitives |
-| `runtime` | `private-ai-proxy-runtime` | The backend: controller, the settings files (`config.toml`, `credentials.toml`: in-place edits, live reload, the one-time 0.1 import), device-local secrets (`local_state`), management server and command dispatch, verifier session state machine (`verifier_session`), usage store, account login, web UI, wake monitoring |
+| `core` | `private-ai-proxy-core` | Client side shared by every process: renderer contracts, the management API (command table, typed errors) and its HTTP client, the local endpoint, backend launch, shared UI API, release-channel update checks, the `config.toml` model, its validation and JSON Schema, app paths, locks and owner-only file primitives |
+| `runtime` | `private-ai-proxy-runtime` | The backend: controller, the settings files (`config.toml`, `credentials.toml`: in-place edits, live reload, the one-time 0.1 import), device-local secrets (`local_state`), the management API server and command dispatch, verifier session state machine (`verifier_session`), usage store, account login, web UI, wake monitoring |
 | `agent-bridge` | `private-ai-proxy-agent-bridge` | Loopback Local API proxy, agent tokens, verified catalog, reversible agent configuration, and `private-ai-proxy-helper` |
 | `src-tauri` | `private-ai-proxy-desktop` | Tauri shell: windows, tray, menus, notifications, updates |
 
 Dependencies point one way: `src-tauri` → `core`; `agent-bridge` → `core`;
 `runtime` → `agent-bridge`, `core`; `cli` → all three. The desktop shell only
-talks to the backend over IPC, so it links neither the backend nor the agent
+talks to the backend over its management API, so it links neither the backend nor the agent
 bridge (no HTTP server, SQLite, keyring, agent config editors or CLI parser). The
 backend binary lives in `cli` because it injects the in-process verifier, which
 `cli` owns, into `runtime` through `VerifierLauncher`.
 
 "Gateway" names the remote Private AI Gateway. The renderer, desktop shell,
-web UI and backend ship together (IPC requires a matching `BUILD_VERSION`, and
+web UI and backend ship together (clients require a matching `BUILD_VERSION`, and
 web UI sessions end when the service restarts), so their internal contract,
 command and event names can change in one release. Only persisted data keeps
 older names: the `gateway` notification preference, which covers local
@@ -94,13 +94,15 @@ protection problems, is stored under that key.
 - Agent registry, provider data, projection, discovery and validation are separate
   modules. Apply, disconnect, recovery and rollback stay together in transactions.
 - OAuth provider/HTTP/billing helpers and verifier events are separate from their
-  session owners. Tauri command modules adapt the shared runtime to IPC.
-- `core/src/ui_api.rs` is the renderer management table. Each method maps to
-  protocol commands through one `Backend`: the desktop shell sends them to the
-  service over IPC, and the service-hosted web UI calls the IPC server's own
-  admission and dispatch in process. Tauri commands and the web RPC route are
-  transport adapters; a `Host` supplies shell capabilities such as tray state.
-  The renderer builds one `DesktopApi` from a transport and platform primitives.
+  session owners. Tauri command modules adapt the shared runtime to the API.
+- `core/src/ui_api.rs` is the renderer management table. A method is either the
+  management command of the same name or composed by a `Host` (tray state,
+  Open at Login, notifications) from commands. The names are the Tauri command
+  names and the web RPC paths, so the renderer, the CLI and both transports
+  use one name per command. The desktop shell runs methods with its own host
+  and sends commands to the service; the service answers browsers' methods with
+  its own. The renderer builds one `DesktopApi` from a transport and platform
+  primitives.
 - Core tests are grouped by behavior. Layout, color and asset-name assertions are
   excluded; authorization, recovery, ownership, accounting and cache isolation
   remain covered. Self-spawned tests retain explicit, checked test selectors.
@@ -117,8 +119,12 @@ protection problems, is stored under that key.
   Login startup remains an explicit desktop OS preference.
 - Native wake monitoring also belongs to the backend: IOKit on macOS, power
   callbacks on Windows, and login1 on Linux. Recovery does not need an open UI.
-- The service acquires its instance lock before loading state.
-  Client startup and update replacement share an additional pre-spawn gate.
+- The service acquires its instance lock before loading state; a second
+  backend exits, and a client that started it waits for the one that won.
+- `startup.lock` is the installer gate, a reader-writer file lock: clients
+  starting the backend hold it shared, so they never wait for each other;
+  an installer or updater holds it exclusively while it stops the backend and
+  replaces files, and clients report it after 5 s instead of waiting.
 - Shutdown enters draining before taking the exclusive operation gate, waits
   for existing mutations, restores managed agent configuration, stops listeners,
   and awaits process exit. Failure to restore leaves management available for
@@ -145,13 +151,21 @@ directly.
 
 ## Security and Protocol
 
-Local management uses bounded, versioned NDJSON over Unix sockets or Windows
-named pipes. It is separate from the local inference HTTP API. An inference key
-never authorizes administration.
+Local management is one HTTP API (`core/src/protocol.rs`) the service serves on
+its private endpoint and, for the web UI, on TCP, as Docker Engine serves one
+API on `unix://` and `tcp://`: `GET /api/version`, `POST /api/rpc/{command}`
+with the command's parameters as a JSON object, and `GET /api/events`, a
+server-sent event stream that starts with a state snapshot. Errors are
+`{"error": {"code", "message"}}` with a stable code and the HTTP status of its
+Docker `errdefs` class. It is separate from the local inference HTTP API. An
+inference key never authorizes administration.
 
-Unix endpoints live in a validated private per-user directory and authenticate
-peer UID in both directions. Endpoint paths are shortened for Unix socket limits.
-Only an instance-lock owner may reclaim a stale socket, and only the socket inode
+The local endpoint is a Unix socket or a Windows named pipe; peers are
+authenticated by their OS user, as Tailscale's LocalAPI authenticates its Unix
+socket peers. Unix endpoints live in a validated private per-user directory,
+are `0600`, and check the peer UID in both directions (`SO_PEERCRED` or
+`getpeereid`). Endpoint paths are shortened for Unix socket limits. Only an
+instance-lock owner may reclaim a stale socket, and only the socket inode
 owned by a listener is removed when it closes.
 
 The MAS service keeps its management socket in the short `pap-ipc` directory at
@@ -163,16 +177,17 @@ the resulting security-scoped access for that work; a status check never grants
 only a temporary scope that is dropped before the scan.
 
 Windows uses a protected current-user DACL, rejects remote clients, protects the
-first pipe instance, and verifies both peer process token SIDs. Read/write
-operations use overlapped I/O with timeout cancellation and completion draining.
+first pipe instance, and verifies both peer process token SIDs.
 Same-user malicious code and OS administrators are outside this isolation boundary.
 
-Clients validate the server handshake before sending requests. Shutdown includes
-the expected instance ID on that same authenticated connection. Update validation
-also checks that the running executable belongs to the current installation.
-The service bounds frame sizes, frame deadlines, clients, subscriptions, and
-exports. Slow or malformed clients cannot close the service. Subscriptions have
-a separate quota so they cannot consume every short-request slot.
+Clients check `GET /api/version` on each connection before calling and refuse
+another build. Shutdown names the expected instance ID. Update validation also
+checks that the running executable belongs to the current installation. A
+browser session may run only the renderer's methods; the shutdown, export and
+maintenance commands are the local owner's. The service bounds response and
+event sizes and exports; accept errors such as `EMFILE` back off for a second
+instead of stopping the service, and malformed or disconnected clients close
+only their own connection.
 
 The optional web UI is a second, browser-facing transport owned by the service.
 It is off by default and binds `127.0.0.1` unless network access is explicitly
@@ -180,7 +195,7 @@ allowed; its listener settings share `ListenConfig` and `listen::resolve` with
 the Local API, so non-loopback addresses fail closed without confirmation.
 Setting changes apply live and bind failures are reported in state. It requires
 a sign-in password, stored only as an Argon2id hash in `credentials.toml` and set
-over the IPC endpoint (its root of trust) or by a signed-in browser that proves
+over the local endpoint (its root of trust) or by a signed-in browser that proves
 the current password. Signing in sets an `HttpOnly`, `SameSite=Strict` cookie
 for an idle-expiring server-side session; mutations also need an exact
 `Origin`.
@@ -189,8 +204,7 @@ settings or restarting the service revokes every session. Requests require an
 allowed `Host` (the bound address, the client host, loopback when bound to
 every interface, or `localhost` when loopback reaches the listener), origin
 headers for that host (always present on `POST`) and JSON mutations, then run
-through the same admission and dispatch
-as IPC commands. Sign-in attempts and rejected requests share a token bucket. Its state
+through the same router, admission and dispatch as the local endpoint. Sign-in attempts and rejected requests share a token bucket. Its state
 stream is fed from the controller's state channel. Mac App Store builds omit it.
 
 Agent changes retain preview/revision/apply validation. CSV exports are streamed

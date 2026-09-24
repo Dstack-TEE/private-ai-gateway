@@ -447,7 +447,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
             // Like the desktop app, the web path fails fast during installer updates
             // instead of waiting out the startup gate.
             let data = desktop_core::paths::app_data_dir()?;
-            let startup = desktop_core::lock::startup(&data)
+            let startup = desktop_core::lock::startup_shared(&data)
                 .map_err(|_| "Cannot acquire app startup lock")?
                 .ok_or("Backend startup or an update is already in progress.")?;
             match desktop_app().filter(|_| !*web && graphical_session()) {
