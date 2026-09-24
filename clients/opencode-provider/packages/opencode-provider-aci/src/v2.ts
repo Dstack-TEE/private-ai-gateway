@@ -14,46 +14,13 @@ import {
 } from "@phala/aci-provider";
 import { Credential, Integration, Model, Plugin, Provider } from "@opencode/plugin";
 
+import {
+  AISDK_OPENAI_COMPATIBLE,
+  OPENCODE_ACI_PACKAGE,
+  sameEndpoint,
+  verifiedEndpointOnly,
+} from "./endpoints.ts";
 import { pluginConfig, type OpenCodeAciPluginOptions } from "./options.ts";
-
-/**
- * The AI SDK package OpenCode loads for ACI providers. The `aisdk:` prefix
- * selects OpenCode's AI SDK runtime, which is what exposes `ctx.aisdk.hook`
- * and lets this plugin replace the provider's transport with the verified
- * ACI fetch.
- */
-export const OPENCODE_ACI_PACKAGE = "aisdk:@ai-sdk/openai-compatible";
-
-/** AI SDK package name after OpenCode strips the `aisdk:` prefix. */
-const AISDK_OPENAI_COMPATIBLE = "@ai-sdk/openai-compatible";
-
-/** Compare HTTP(S) endpoints without a trailing-slash difference. */
-export function sameEndpoint(left: string, right: string): boolean {
-  try {
-    const a = new URL(left);
-    const b = new URL(right);
-    const path = (url: URL) => url.pathname.replace(/\/+$/, "");
-    return a.origin === b.origin && path(a) === path(b);
-  } catch {
-    return false;
-  }
-}
-
-/** Reject requests that do not target the verified gateway origin. */
-export function verifiedEndpointOnly(
-  request: RequestInfo | URL,
-  verifiedBaseURL: string,
-): string | undefined {
-  const target =
-    typeof request === "string" ? request : request instanceof URL ? request.href : request.url;
-  try {
-    const origin = new URL(target).origin;
-    const verified = new URL(verifiedBaseURL).origin;
-    return origin === verified ? undefined : `${origin} is not the verified gateway (${verified})`;
-  } catch {
-    return "invalid ACI request URL";
-  }
-}
 
 export interface CreateOpenCodeAciV2PluginOptions {
   /** Stable plugin id used for status, diagnostics, and plugin-scoped storage. */
@@ -62,6 +29,9 @@ export interface CreateOpenCodeAciV2PluginOptions {
   defaults?: OpenCodeAciPluginOptions;
   accountAuth?: AccountApiKeyAuth;
 }
+
+/** Upper bound for the initial verification performed during plugin load. */
+const INITIAL_REFRESH_TIMEOUT_MS = 30_000;
 
 export function mapOpenCodeModelV2(providerID: string, model: AciModel): Model.Info {
   const provider = Provider.ID.make(providerID);
@@ -234,7 +204,11 @@ export function aciInspectRequest(
   action: AciInspectCommandDefinition["action"],
   idArgument: string,
 ): { request: AciInspectionRequest } | { error: string } {
-  const value = idArgument.trim().split(/\s+/)[0] ?? "";
+  const tokens = idArgument.trim().split(/\s+/).filter(Boolean);
+  const value = tokens[0] ?? "";
+  if (tokens.length > 1) {
+    return { error: `expected a single id, got ${JSON.stringify(tokens.join(" "))}.` };
+  }
   if (action === "session") {
     if (!value) return { error: "A session id is required." };
     return { request: { action: "session", id: value } };
@@ -446,9 +420,18 @@ export function createOpenCodeAciV2Plugin({
       };
 
       let refreshing: Promise<void> | undefined;
+      let refreshRequested = false;
       const refresh = () => {
-        refreshing ??= verify().finally(() => {
+        if (refreshing) {
+          refreshRequested = true;
+          return refreshing;
+        }
+        refreshing = verify().finally(() => {
           refreshing = undefined;
+          if (refreshRequested) {
+            refreshRequested = false;
+            void refresh().catch(report);
+          }
         });
         return refreshing;
       };
@@ -483,10 +466,26 @@ export function createOpenCodeAciV2Plugin({
         }
       })();
 
-      // Match the V1 config hook: make the initial verification part of plugin
-      // load so models are registered before the first session resolves one.
-      // Verification failures stay non-fatal; the secure fetch fails closed.
-      await refresh().catch(report);
+      // Match the V1 config hook: run the initial verification during plugin load
+      // so models are registered before the first session resolves one. The
+      // bound keeps a hung gateway from stalling startup; the background
+      // refresh still finishes and reloads the catalog. Verification failures
+      // stay non-fatal and the secure fetch fails closed.
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => {
+          console.error(
+            `${profile.logPrefix} initial verification is still running after ${INITIAL_REFRESH_TIMEOUT_MS}ms; continuing in the background`,
+          );
+          resolve();
+        }, INITIAL_REFRESH_TIMEOUT_MS);
+        timer.unref?.();
+        void refresh()
+          .catch(report)
+          .finally(() => {
+            clearTimeout(timer);
+            resolve();
+          });
+      });
 
       return async () => {
         disposed = true;

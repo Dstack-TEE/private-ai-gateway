@@ -33,6 +33,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./v2": {
+      "types": "./dist/v2.d.ts",
+      "import": "./dist/v2.js",
+      "default": "./dist/v2.js"
     }
   },
   "publishConfig": {
@@ -53,15 +58,12 @@
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^2.0.0",
+    "@opencode-ai/plugin": "^1.18.32",
     "@opencode/plugin": "^2.0.0",
     "@phala/aci-provider": "^0.7.3"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "1.18.32",
     "@opencode-ai/sdk": "1.18.32"
-  },
-  "peerDependencies": {
-    "@opencode-ai/plugin": ">=1.18.29 <2"
   },
   "engines": {
     "bun": ">=1.4.0",

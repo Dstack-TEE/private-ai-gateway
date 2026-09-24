@@ -1,13 +1,8 @@
 import { expect, test } from "bun:test";
 import type { Plugin } from "@opencode/plugin";
 
-import {
-  createOpenCodeAccountAuthMethodV2,
-  createOpenCodeAciV2Plugin,
-  mapOpenCodeModelV2,
-  sameEndpoint,
-  verifiedEndpointOnly,
-} from "../src/index.ts";
+import { createOpenCodeAciV2Plugin, sameEndpoint, verifiedEndpointOnly } from "../src/index.ts";
+import { createOpenCodeAccountAuthMethodV2, mapOpenCodeModelV2 } from "../src/v2.ts";
 
 const baseURL = "https://gateway.invalid/v1";
 
@@ -225,7 +220,7 @@ test("maps ACI model metadata into the OpenCode V2 model shape", () => {
 
 test("registers provider, integration, SDK hook, tool, and commands", async () => {
   const fake = fakeContext({ options: { baseURL } });
-  const plugin = createOpenCodeAciV2Plugin({ id: "aci-test" });
+  const plugin = await createOpenCodeAciV2Plugin({ id: "aci-test" });
   const cleanup = await plugin.setup(fake.context);
 
   try {
@@ -311,7 +306,7 @@ test("keeps user-defined commands with the same name", async () => {
     options: { baseURL },
     existingCommands: ["aci-attestation", "aci-session"],
   });
-  const plugin = createOpenCodeAciV2Plugin({ id: "aci-test" });
+  const plugin = await createOpenCodeAciV2Plugin({ id: "aci-test" });
   const cleanup = await plugin.setup(fake.context);
   try {
     expect(fake.commandAdds.map((command) => command.name)).toEqual([
@@ -325,7 +320,7 @@ test("keeps user-defined commands with the same name", async () => {
 
 test("fails closed when the AI SDK hook cannot install the verified transport", async () => {
   const fake = fakeContext({ options: { baseURL } });
-  const plugin = createOpenCodeAciV2Plugin({ id: "aci-test" });
+  const plugin = await createOpenCodeAciV2Plugin({ id: "aci-test" });
   const cleanup = await plugin.setup(fake.context);
   try {
     const hook = fake.aisdkHooks[0]!;
@@ -372,7 +367,7 @@ test("compares endpoints and rejects foreign origins", () => {
 
 test("fails plugin setup on a misconfigured endpoint", async () => {
   const fake = fakeContext({ options: { baseURL: "http://insecure.example/v1" } });
-  const plugin = createOpenCodeAciV2Plugin({ id: "aci-test" });
+  const plugin = await createOpenCodeAciV2Plugin({ id: "aci-test" });
   await expect(plugin.setup(fake.context)).rejects.toThrow("expected an https URL");
 });
 

@@ -8,30 +8,34 @@ import {
   type AciProvider,
   type AciProviderProfile,
 } from "@phala/aci-provider";
-import type { AuthHook, Config, Plugin, PluginModule } from "@opencode-ai/plugin";
+import type {
+  AuthHook,
+  Config,
+  Plugin as OpenCodeV1Plugin,
+  PluginModule,
+} from "@opencode-ai/plugin";
+import type { Plugin as OpenCodeV2Plugin } from "@opencode/plugin";
 
+import { OPENCODE_ACI_PACKAGE, sameEndpoint, verifiedEndpointOnly } from "./endpoints.ts";
 import { createAciInspectTool } from "./inspect.ts";
 import { pluginConfig, type OpenCodeAciPluginOptions } from "./options.ts";
-import {
-  createOpenCodeAciV2Plugin,
-  createOpenCodeAccountAuthMethodV2,
-  mapOpenCodeModelV2,
-  OPENCODE_ACI_PACKAGE,
-  sameEndpoint,
-  verifiedEndpointOnly,
-  type CreateOpenCodeAciV2PluginOptions,
-} from "./v2.ts";
+import type { CreateOpenCodeAciV2PluginOptions } from "./v2.ts";
 
-export {
-  createOpenCodeAciV2Plugin,
-  createOpenCodeAccountAuthMethodV2,
-  mapOpenCodeModelV2,
-  OPENCODE_ACI_PACKAGE,
-  sameEndpoint,
-  verifiedEndpointOnly,
-  type CreateOpenCodeAciV2PluginOptions,
-};
+export { OPENCODE_ACI_PACKAGE, sameEndpoint, verifiedEndpointOnly };
+export type { CreateOpenCodeAciV2PluginOptions };
 export type { OpenCodeAciPluginOptions } from "./options.ts";
+
+/**
+ * Load the OpenCode V2 definition on demand. V1 hosts never import the V2
+ * plugin SDK (`@opencode/plugin`, the AI SDK provider) just to load the
+ * server-plugin entrypoint.
+ */
+export async function createOpenCodeAciV2Plugin(
+  options: CreateOpenCodeAciV2PluginOptions,
+): Promise<OpenCodeV2Plugin.Plugin> {
+  const module = await import("./v2.ts");
+  return module.createOpenCodeAciV2Plugin(options);
+}
 
 const OPENAI_COMPATIBLE_PACKAGE = "@ai-sdk/openai-compatible";
 
@@ -133,7 +137,7 @@ export function createOpenCodeAciPlugin({
   defaults = {},
   accountAuth,
   authMethods = [],
-}: CreateOpenCodeAciPluginOptions = {}): Plugin {
+}: CreateOpenCodeAciPluginOptions = {}): OpenCodeV1Plugin {
   const profile = resolveAciProviderProfile(profileInput);
   const methods = [
     ...(accountAuth ? [createOpenCodeAccountAuthMethod(accountAuth)] : []),
@@ -230,13 +234,14 @@ export function createOpenCodeAciPlugin({
 
 export const AciProviderPlugin = createOpenCodeAciPlugin();
 
-/** OpenCode V2 plugin definition for the vendor-neutral ACI provider. */
-export const AciProviderPluginV2 = createOpenCodeAciV2Plugin({
-  id: "@phala/opencode-provider-aci",
-});
+let v2Definition: OpenCodeV2Plugin.Plugin | undefined;
 
-const plugin: PluginModule & typeof AciProviderPluginV2 = {
-  ...AciProviderPluginV2,
+const plugin: PluginModule & OpenCodeV2Plugin.Plugin = {
+  id: "@phala/opencode-provider-aci",
+  async setup(context) {
+    v2Definition ??= await createOpenCodeAciV2Plugin({ id: "@phala/opencode-provider-aci" });
+    return v2Definition.setup(context);
+  },
   server: AciProviderPlugin,
 };
 

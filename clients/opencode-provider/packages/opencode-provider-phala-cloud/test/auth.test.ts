@@ -1,9 +1,7 @@
 import { expect, test } from "bun:test";
 import { createPhalaCloudAccountAuth } from "@phala/aci-provider/phala-cloud";
-import {
-  createOpenCodeAccountAuthMethod,
-  createOpenCodeAccountAuthMethodV2,
-} from "@phala/opencode-provider-aci";
+import { createOpenCodeAccountAuthMethod } from "@phala/opencode-provider-aci";
+import { createOpenCodeAccountAuthMethodV2 } from "@phala/opencode-provider-aci/v2";
 
 function fakeResponses() {
   return [

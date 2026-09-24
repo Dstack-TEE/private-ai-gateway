@@ -1,20 +1,24 @@
 import type { PluginModule } from "@opencode-ai/plugin";
+import type { Plugin } from "@opencode/plugin";
 import { REDPILL_ACI_PROFILE } from "@phala/aci-provider/profiles";
 import { createOpenCodeAciPlugin, createOpenCodeAciV2Plugin } from "@phala/opencode-provider-aci";
 
-export const RedPillProviderPlugin = createOpenCodeAciPlugin({
+const server = createOpenCodeAciPlugin({
   profile: REDPILL_ACI_PROFILE,
 });
 
-/** OpenCode V2 plugin definition for RedPill ACI. */
-export const RedPillProviderPluginV2 = createOpenCodeAciV2Plugin({
+let definition: Plugin.Plugin | undefined;
+
+const plugin: PluginModule & Plugin.Plugin = {
   id: "opencode-provider-redpill",
-  profile: REDPILL_ACI_PROFILE,
-});
-
-const plugin: PluginModule & typeof RedPillProviderPluginV2 = {
-  ...RedPillProviderPluginV2,
-  server: RedPillProviderPlugin,
+  async setup(context) {
+    definition ??= await createOpenCodeAciV2Plugin({
+      id: "opencode-provider-redpill",
+      profile: REDPILL_ACI_PROFILE,
+    });
+    return definition.setup(context);
+  },
+  server,
 };
 
 export default plugin;

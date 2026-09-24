@@ -66,7 +66,12 @@ recorded exchange when no id is supplied. Session inspection requires the bare
 64-hex session id and verifies its content address, API version, validity
 window, and evidence digest. The tool returns verification metadata only,
 never model traffic or raw evidence. Branded plugins scope both commands and
-the tool name to their provider id.
+the tool name to their provider id. Commands you define yourself with the same
+name take precedence; that check runs when the plugin loads.
+
+The plugin definition for OpenCode V2 is loaded lazily from `./v2`, so V1
+hosts never import the V2 plugin SDK or the AI SDK provider just to load the
+server-plugin entrypoint.
 
 Attestation and response receipt verification are automatic and fail closed;
 the commands only display evidence or rerun an audit. The local wire-digest
