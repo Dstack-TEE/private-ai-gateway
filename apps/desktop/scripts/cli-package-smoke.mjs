@@ -7,7 +7,8 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { aliases, binaries } from "./package-cli.mjs";
+import { binaries } from "./package-cli.mjs";
+import { aliases } from "./package-linux.mjs";
 
 const [directory, expectedVersion, aliasDirectory = directory] = process.argv.slice(2);
 assert.ok(directory && path.isAbsolute(directory), "Supply an absolute CLI binary directory");

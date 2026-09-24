@@ -54,10 +54,9 @@ impl UsageValues {
 pub(super) struct UsageCapture {
     pub(super) streamed: bool,
     pub(super) body: Vec<u8>,
-    pub(super) line: Vec<u8>,
+    pub(super) lines: DataLines,
     pub(super) latest: UsageValues,
     pub(super) body_overflow: bool,
-    pub(super) line_overflow: bool,
 }
 
 impl UsageCapture {
@@ -65,16 +64,16 @@ impl UsageCapture {
         Self {
             streamed,
             body: Vec::new(),
-            line: Vec::new(),
+            lines: DataLines::new(),
             latest: UsageValues::default(),
             body_overflow: false,
-            line_overflow: false,
         }
     }
 
     pub(super) fn push(&mut self, bytes: &[u8]) {
         if self.streamed {
-            self.push_sse(bytes);
+            let latest = &mut self.latest;
+            self.lines.push(bytes, |data| merge_event(latest, data));
         } else if !self.body_overflow {
             if self.body.len().saturating_add(bytes.len()) <= MAX_USAGE_CAPTURE_BYTES {
                 self.body.extend_from_slice(bytes);
@@ -85,45 +84,10 @@ impl UsageCapture {
         }
     }
 
-    pub(super) fn push_sse(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            if *byte == b'\n' {
-                if !self.line_overflow {
-                    self.parse_sse_line();
-                }
-                self.line.clear();
-                self.line_overflow = false;
-            } else if !self.line_overflow {
-                if self.line.len() < MAX_SSE_LINE_BYTES {
-                    self.line.push(*byte);
-                } else {
-                    self.line.clear();
-                    self.line_overflow = true;
-                }
-            }
-        }
-    }
-
-    pub(super) fn parse_sse_line(&mut self) {
-        let line = self.line.strip_suffix(b"\r").unwrap_or(&self.line);
-        let payload = line
-            .strip_prefix(b"data: ")
-            .or_else(|| line.strip_prefix(b"data:"))
-            .map(trim_ascii_start);
-        let Some(payload) = payload else { return };
-        if payload == b"[DONE]" {
-            return;
-        }
-        if let Some(usage) = decode_usage(payload) {
-            self.latest.merge(usage);
-        }
-    }
-
     pub(super) fn finish(mut self) -> UsageValues {
         if self.streamed {
-            if !self.line.is_empty() && !self.line_overflow {
-                self.parse_sse_line();
-            }
+            let latest = &mut self.latest;
+            self.lines.finish(|data| merge_event(latest, data));
             self.latest
         } else if self.body_overflow {
             UsageValues::default()
@@ -199,9 +163,9 @@ pub(super) fn number_f64(value: &Value) -> Option<f64> {
     (value.is_finite() && value >= 0.0).then_some(value)
 }
 
-pub(super) fn trim_ascii_start(mut value: &[u8]) -> &[u8] {
-    while value.first().is_some_and(u8::is_ascii_whitespace) {
-        value = &value[1..];
+/// Takes the usage an event's `data` reports, if any; `[DONE]` carries none.
+fn merge_event(latest: &mut UsageValues, data: &str) {
+    if let Some(usage) = decode_usage(data.as_bytes()) {
+        latest.merge(usage);
     }
-    value
 }

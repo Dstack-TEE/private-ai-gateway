@@ -136,7 +136,28 @@ jobs:
       - name: Install Linux desktop dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev gnome-keyring dbus-x11 libsecret-tools rpm cpio
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev gnome-keyring dbus-x11 libsecret-tools rpm libarchive-tools
+      # nfpm (GoReleaser's packager) builds every Linux package.
+      - &install-nfpm
+        name: Install nfpm
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          NFPM_VERSION: 2.47.0
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) asset="nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" digest=0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783 ;;
+            aarch64) asset="nfpm_${NFPM_VERSION}_Linux_arm64.tar.gz" digest=1c0f5f2999b9a974bfb04fdb0cc3306096de530ac5dbb25d739cc5f5219c919c ;;
+            *) echo "Unsupported nfpm runner architecture $(uname -m)" >&2; exit 1 ;;
+          esac
+          directory="$RUNNER_TEMP/nfpm"
+          mkdir -p "$directory"
+          curl -fsSL -o "$directory/$asset" "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/$asset"
+          printf '%s  %s\n' "$digest" "$directory/$asset" | sha256sum -c -
+          tar -xzf "$directory/$asset" -C "$directory" nfpm
+          rm "$directory/$asset"
+          echo "$directory" >> "$GITHUB_PATH"
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci
@@ -209,8 +230,6 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.platforms.outputs.matrix }}
-      linux_matrix: ${{ steps.platforms.outputs.linux_matrix }}
-      has_linux: ${{ steps.platforms.outputs.has_linux }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -250,11 +269,7 @@ jobs:
           '
           matrix="$(node scripts/select-release-platforms.mjs "$RELEASE_PLATFORMS")"
           node --input-type=module -e 'const value = JSON.parse(process.argv[1]); if (!Array.isArray(value.include) || value.include.length === 0) process.exit(1)' "$matrix"
-          linux_matrix="$(node -e 'const matrix = JSON.parse(process.argv[1]); matrix.include = matrix.include.filter(({ cli_platform }) => cli_platform === "linux").map((entry) => ({ ...entry, os: entry.cli_arch === "arm64" ? "ubuntu-24.04-arm" : "ubuntu-24.04" })); process.stdout.write(JSON.stringify(matrix))' "$matrix")"
-          has_linux="$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).include.length > 0))' "$linux_matrix")"
           printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
-          printf 'linux_matrix=%s\n' "$linux_matrix" >> "$GITHUB_OUTPUT"
-          printf 'has_linux=%s\n' "$has_linux" >> "$GITHUB_OUTPUT"
 
   package:
     name: Package (${{ matrix.platform }})
@@ -296,7 +311,8 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev gnome-keyring dbus-x11 binutils rpm cpio xvfb x11-utils
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev gnome-keyring dbus-x11 binutils libarchive-tools xvfb x11-utils
+      - *install-nfpm
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci
@@ -407,14 +423,15 @@ jobs:
         run: npm run dist -- --bundles ${{ matrix.bundles }}
 
       # Tauri writes SemVer prereleases verbatim, which dpkg and rpm order after
-      # the stable release. Rewrite them to native forms and re-sign them.
-      - name: Normalize Linux package versions
+      # the stable release. nfpm packages its payload as DEB, RPM and Arch
+      # packages with native versions; the updater signs the final DEB and RPM.
+      - name: Package Linux desktop
         if: runner.os == 'Linux'
         working-directory: apps/desktop
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.release_version && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.release_version && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
-        run: node scripts/normalize-linux-packages.mjs "$PAP_BUNDLE_DIR" "${DESKTOP_RELEASE_VERSION:-0.1.0}"
+        run: node scripts/package-linux.mjs "$PAP_BUNDLE_DIR" "${DESKTOP_RELEASE_VERSION:-0.1.0}" '${{ matrix.cli_arch }}' release
 
       - name: Verify Windows Authenticode signatures
         if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE_THUMBPRINT != ''
@@ -458,11 +475,9 @@ jobs:
         run: |
           set -euo pipefail
           baseline=2.35
-          packages=("$PAP_BUNDLE_DIR"/deb/*.deb)
-          test "${#packages[@]}" -eq 1
           scratch="$(mktemp -d "$RUNNER_TEMP/glibc-baseline.XXXXXX")"
           trap 'rm -rf "$scratch"' EXIT
-          dpkg-deb -x "${packages[0]}" "$scratch"
+          dpkg-deb -x "release/private-ai-proxy-${DESKTOP_RELEASE_VERSION:-0.1.0}-linux-${{ matrix.cli_arch }}.deb" "$scratch"
           executables=(
             "$scratch/usr/bin/private-ai-proxy-desktop"
             "$scratch/usr/bin/private-ai-proxy"
@@ -536,26 +551,34 @@ jobs:
           node scripts/windows-startup-gate-smoke.mjs $makensis
           if ($LASTEXITCODE -ne 0) { throw 'Windows startup-gate smoke failed' }
 
-      - name: Check CLI-only Linux packages without installation
+      - name: Check Linux packages without installation
         if: runner.os == 'Linux'
         working-directory: apps/desktop
         shell: bash
         run: |
           set -euo pipefail
           version="${DESKTOP_RELEASE_VERSION:-0.1.0}"
-          deb="release/private-ai-proxy-cli-${version}-linux-${{ matrix.cli_arch }}.deb"
-          rpm="release/private-ai-proxy-cli-${version}-linux-${{ matrix.cli_arch }}.rpm"
-          test -f "$deb"
-          test -f "$rpm"
-          scratch="$(mktemp -d "$RUNNER_TEMP/cli-native.XXXXXX")"
+          scratch="$(mktemp -d "$RUNNER_TEMP/linux-native.XXXXXX")"
           trap 'rm -rf "$scratch"' EXIT
-          mkdir "$scratch/deb" "$scratch/rpm"
-          dpkg-deb -x "$deb" "$scratch/deb"
-          node scripts/cli-package-smoke.mjs "$scratch/deb/usr/libexec/private-ai-proxy" "$version" "$scratch/deb/usr/bin"
-          test "$(readlink "$scratch/deb/usr/bin/private-ai-proxy")" = ../libexec/private-ai-proxy/private-ai-proxy
-          (cd "$scratch/rpm" && rpm2cpio "$GITHUB_WORKSPACE/apps/desktop/$rpm" | cpio -idm --quiet)
-          node scripts/cli-package-smoke.mjs "$scratch/rpm/usr/libexec/private-ai-proxy" "$version" "$scratch/rpm/usr/bin"
-          test "$(readlink "$scratch/rpm/usr/bin/private-ai-proxy")" = ../libexec/private-ai-proxy/private-ai-proxy
+          extract() {
+            mkdir "$scratch/$2"
+            case "$1" in
+              *.deb) dpkg-deb -x "$1" "$scratch/$2" ;;
+              *) bsdtar -xf "$1" -C "$scratch/$2" ;;
+            esac
+          }
+          for suffix in deb rpm pkg.tar.zst; do
+            extract "release/private-ai-proxy-cli-${version}-linux-${{ matrix.cli_arch }}.$suffix" "cli-$suffix"
+            node scripts/cli-package-smoke.mjs "$scratch/cli-$suffix/usr/libexec/private-ai-proxy" "$version" "$scratch/cli-$suffix/usr/bin"
+            test "$(readlink "$scratch/cli-$suffix/usr/bin/private-ai-proxy")" = ../libexec/private-ai-proxy/private-ai-proxy
+          done
+          extract "release/private-ai-proxy-${version}-linux-${{ matrix.cli_arch }}.pkg.tar.zst" desktop-arch
+          expected_pkgver="$(node --input-type=module -e 'import { releaseVersionParts } from "./scripts/package-linux.mjs"; process.stdout.write(`${releaseVersionParts(process.argv[1]).arch}-1`)' "$version")"
+          grep -Fx "pkgver = $expected_pkgver" "$scratch/cli-pkg.tar.zst/.PKGINFO"
+          grep -Fx 'pkgname = private-ai-proxy' "$scratch/desktop-arch/.PKGINFO"
+          grep -Fx "pkgver = $expected_pkgver" "$scratch/desktop-arch/.PKGINFO"
+          test "$(cat "$scratch/desktop-arch/usr/share/private-ai-proxy/package-manager")" = pacman
+          node scripts/packaged-sidecars-smoke.mjs "$scratch/desktop-arch/usr/bin"
       - name: Notarize production macOS disk image
         if: runner.os == 'macOS' && inputs.release_version != ''
         working-directory: apps/desktop
@@ -684,8 +707,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          packages=("$PAP_BUNDLE_DIR"/deb/*.deb)
-          test "${#packages[@]}" -eq 1
+          packages=("release/private-ai-proxy-${DESKTOP_RELEASE_VERSION:-0.1.0}-linux-${{ matrix.cli_arch }}.deb")
           package=$(dpkg-deb -f "${packages[0]}" Package)
           if dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'install ok installed'; then
             echo 'Refusing to replace an existing installation'
@@ -704,7 +726,9 @@ jobs:
             return "$status"
           }
           trap cleanup EXIT
-          # Replay the in-app updater's transaction over the published stable package.
+          # Replay the in-app updater's transaction over the published stable
+          # package. The updater stops its own backend first: packages up to
+          # 0.1.7-beta.n refuse to upgrade while another of their processes runs.
           stable_url="$(curl -fsSL https://github.com/Dstack-TEE/private-ai-gateway/releases/download/desktop-updates-stable/latest.json | jq -er --arg target "linux-$(uname -m)-deb" '.platforms[$target].url')"
           curl -fsSL -o "$scratch/stable.deb" "$stable_url"
           sudo apt-get install -y "$scratch/stable.deb"
@@ -721,7 +745,8 @@ jobs:
             gdbus wait --session --timeout 10 org.freedesktop.secrets
             cargo test --release --locked --package private-ai-proxy-runtime --lib -- --ignored legacy_keychain_import_round_trip
           '
-          xvfb-run -a dbus-run-session -- node scripts/native-backend-smoke.mjs /usr/bin
+          # Install again over the running app and backend, as later in-app updates do.
+          xvfb-run -a dbus-run-session -- node scripts/native-backend-smoke.mjs /usr/bin sudo dpkg -i "${packages[0]}"
       - name: Stage and inspect macOS package
         if: runner.os == 'macOS'
         working-directory: apps/desktop
@@ -842,15 +867,8 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           path: |
-            apps/desktop/release/*.dmg
-            apps/desktop/release/*.app.tar.gz*
-            apps/desktop/release/private-ai-proxy-*.pkg.tar.zst*
-            apps/desktop/release/private-ai-proxy-cli-*
+            apps/desktop/release/private-ai-proxy-*
             ${{ env.PAP_BUNDLE_DIR }}/nsis/*.exe
-            ${{ env.PAP_BUNDLE_DIR }}/deb/*.deb
-            ${{ env.PAP_BUNDLE_DIR }}/deb/*.sig
-            ${{ env.PAP_BUNDLE_DIR }}/rpm/*.rpm
-            ${{ env.PAP_BUNDLE_DIR }}/rpm/*.sig
             ${{ env.PAP_BUNDLE_DIR }}/macos/*.tar.gz
             ${{ env.PAP_BUNDLE_DIR }}/macos/*.sig
             ${{ env.PAP_BUNDLE_DIR }}/nsis/*.sig
@@ -873,83 +891,9 @@ jobs:
           }
       - *save-rust-cache
 
-  arch-package:
-    name: Package Arch Linux (${{ matrix.cli_arch }})
-    needs: [select-platforms, package]
-    if: ${{ always() && needs.select-platforms.result == 'success' && needs.package.result == 'success' && needs.select-platforms.outputs.has_linux == 'true' }}
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.select-platforms.outputs.linux_matrix) }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
-      - name: Install Arch packaging tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends makepkg pacman-package-manager libarchive-tools zstd
-          # makepkg reads pacman's local database when generating .BUILDINFO.
-          sudo pacman -T
-      - name: Install release tooling
-        working-directory: apps/desktop
-        run: npm ci --ignore-scripts
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
-        with:
-          name: private-ai-proxy-${{ inputs.release_version && (inputs.release_channel || 'beta') || 'test' }}-${{ inputs.release_version || '0.1.0' }}-${{ github.sha }}-${{ matrix.platform }}
-          path: linux-package
-      - name: Build and verify Arch packages
-        working-directory: apps/desktop
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="${{ inputs.release_version || '0.1.0' }}"
-          desktop_debs=()
-          cli_debs=()
-          while IFS= read -r -d '' candidate; do
-            case "$(dpkg-deb -f "$candidate" Package)" in
-              private-ai-proxy) desktop_debs+=("$candidate") ;;
-              private-ai-proxy-cli) cli_debs+=("$candidate") ;;
-            esac
-          done < <(find "$GITHUB_WORKSPACE/linux-package" -type f -name '*.deb' -print0)
-          test "${#desktop_debs[@]}" -eq 1
-          test "${#cli_debs[@]}" -eq 1
-          node scripts/package-arch.mjs --kind desktop --source "${desktop_debs[0]}" --version "$version" --arch '${{ matrix.cli_arch }}' --output release
-          node scripts/package-arch.mjs --kind cli --source "${cli_debs[0]}" --version "$version" --arch '${{ matrix.cli_arch }}' --output release
-
-          desktop="release/private-ai-proxy-${version}-linux-${{ matrix.cli_arch }}.pkg.tar.zst"
-          cli="release/private-ai-proxy-cli-${version}-linux-${{ matrix.cli_arch }}.pkg.tar.zst"
-          scratch="$(mktemp -d "$RUNNER_TEMP/arch-packages.XXXXXX")"
-          trap 'rm -rf "$scratch"' EXIT
-          mkdir "$scratch/desktop" "$scratch/cli"
-          bsdtar -xf "$desktop" -C "$scratch/desktop"
-          bsdtar -xf "$cli" -C "$scratch/cli"
-          expected_pkgver="$(node --input-type=module -e 'import { releaseVersionParts } from "./scripts/package-cli.mjs"; process.stdout.write(`${releaseVersionParts(process.argv[1]).arch}-1`)' "$version")"
-          grep -Fx 'pkgname = private-ai-proxy' "$scratch/desktop/.PKGINFO"
-          grep -Fx "pkgver = $expected_pkgver" "$scratch/desktop/.PKGINFO"
-          test "$(cat "$scratch/desktop/usr/share/private-ai-proxy/package-manager")" = pacman
-          node scripts/packaged-sidecars-smoke.mjs "$scratch/desktop/usr/bin"
-          grep -Fx 'pkgname = private-ai-proxy-cli' "$scratch/cli/.PKGINFO"
-          grep -Fx "pkgver = $expected_pkgver" "$scratch/cli/.PKGINFO"
-          node scripts/cli-package-smoke.mjs "$scratch/cli/usr/libexec/private-ai-proxy" "$version" "$scratch/cli/usr/bin"
-          test "$(readlink "$scratch/cli/usr/bin/private-ai-proxy")" = ../libexec/private-ai-proxy/private-ai-proxy
-      - name: Upload Arch packages
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        with:
-          name: private-ai-proxy-arch-${{ inputs.release_version && (inputs.release_channel || 'beta') || 'test' }}-${{ inputs.release_version || '0.1.0' }}-${{ github.sha }}-${{ matrix.platform }}
-          if-no-files-found: error
-          retention-days: 14
-          path: apps/desktop/release/*.pkg.tar.zst*
-
   draft-release:
-    if: ${{ always() && inputs.release_version != '' && needs.package.result == 'success' && (needs.arch-package.result == 'success' || needs.arch-package.result == 'skipped') }}
-    needs: [package, arch-package]
+    if: ${{ always() && inputs.release_version != '' && needs.package.result == 'success' }}
+    needs: package
     environment: desktop-release
     runs-on: ubuntu-24.04
     permissions:

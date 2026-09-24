@@ -69,9 +69,9 @@ the updater key and verified before installation.
 | --- | --- | --- | --- |
 | macOS DMG app | `darwin-<arch>` (`.app.tar.gz`) | In-app: the Tauri updater replaces the app bundle | The owned backend is stopped first; the relaunched app starts the new bundled backend |
 | Windows NSIS (current user) | `windows-<arch>` (the updater falls back from `windows-<arch>-nsis`) | In-app: the signed setup runs with `/P /UPDATE /R` | The owned backend is stopped first; the installer hooks stop any remaining backend under the startup lock, keep the user `PATH` entry, and relaunch the app |
-| Linux desktop DEB | `linux-<arch>-deb` | In-app: `pkexec dpkg -i` (then zenity/kdialog with `sudo -S`, then `sudo`) | The owned backend is stopped first; maintainer scripts only exempt the updating app's own process tree; the app restarts and starts the new backend |
+| Linux desktop DEB | `linux-<arch>-deb` | In-app: `pkexec dpkg -i` (then zenity/kdialog with `sudo -S`, then `sudo`) | The owned backend is stopped first; the app restarts and starts the new backend |
 | Linux desktop RPM | `linux-<arch>-rpm` | In-app: `pkexec rpm -U` with the same fallbacks | As DEB |
-| Arch desktop package | Version from `latest-linux-<arch>.json` | Settings > About shows the release and the steps: quit the app, `private-ai-proxy --yes service stop`, `sudo pacman -U <release package URL>` | pacman refuses while the app or backend runs; the next launch starts the new backend |
+| Arch desktop package | Version from `latest-linux-<arch>.json` | Settings > About shows the release and the steps: quit the app, `private-ai-proxy --yes service stop`, `sudo pacman -U <release package URL>` | The next launch starts the new backend |
 | CLI-only DEB | Same | `pap doctor` and the web UI show `private-ai-proxy --yes service stop`, `curl -fLO <URL>`, `sudo apt install ./<file>` | User-driven; the next client start runs the new backend |
 | CLI-only RPM | Same | As above with `sudo rpm -U <URL>` | As above |
 | CLI-only Arch | Same | As above with `sudo pacman -U <URL>` | As above |
@@ -89,28 +89,44 @@ packages from releases up to 0.1.7-beta.1 lack the marker and are reported as a
 system package without commands.
 
 Native package versions keep prereleases ordered before their stable release:
-DEB `x.y.z~beta.n`, RPM `x.y.z-0.beta.n.1`, and Arch `x.y.zbeta.n`. Tauri writes
-the SemVer string verbatim, so the package job rewrites the desktop DEB and RPM
-with `scripts/normalize-linux-packages.mjs` and re-signs the rewritten bytes
-before the manifest is created. The rewritten desktop RPM has no epoch, like the
-CLI RPM; rpm compares a missing epoch as 0, the value Tauri writes. dpkg installs
-the one-time `0.1.7-beta.1` to `0.1.7~beta.2` transition with a downgrade
-warning.
+DEB and RPM `x.y.z~beta.n` (RPM release `1`, no epoch) and Arch `x.y.zbeta.n`.
+Tauri writes the SemVer string verbatim, so the package job builds the desktop
+DEB, RPM and Arch packages from the payload of Tauri's DEB with
+[nfpm](https://nfpm.goreleaser.com/), GoReleaser's packager, as it builds the
+CLI packages (`scripts/package-linux.mjs`), then signs the final DEB and RPM for
+the updater before the manifest is created. nfpm writes a SemVer prerelease
+with a tilde, which sorts before the release in dpkg (Debian Policy 5.6.12) and
+rpm (Fedora versioning guidelines). Its archlinux packager drops the
+prerelease from `pkgver`, so Arch packages get the pacman form instead, which
+sorts a trailing letter segment before the release (`vercmp`). Every earlier package sorts before
+`0.2.0~beta.1`, including the RPMs published as `0.1.7-0.beta.n.1` and the
+0.1.7-beta.1 desktop RPM published as `0.1.7-beta.1-1`, so they update in place.
 
-The desktop RPM of 0.1.7-beta.1 was published as `0.1.7-beta.1-1`, which rpm
-orders after every later 0.1.7 package, so its in-app update reports that a newer
-package is already installed. Anyone who installed that RPM makes one manual
-switch: quit the app, run `private-ai-proxy --yes service stop` as the signed-in
-user, then install the current desktop RPM from the release page with rpm's
-downgrade flag:
+The packages do not check for running processes, like the Chrome, VS Code and
+Firefox packages: dpkg, rpm and pacman already refuse files that another
+package owns, and replacing the executables of a running program is safe on
+Linux. A backend keeps running its old build until it stops; the next client
+command restarts a backend from another build. Package metadata (name,
+maintainer, homepage and the desktop description) comes from the brand
+configuration, as Tauri's does, and every entry carries the commit time (or
+`SOURCE_DATE_EPOCH`), so builds are reproducible and pacman's file checks match.
 
-```sh
-sudo rpm -Uvh --oldpackage https://github.com/Dstack-TEE/private-ai-gateway/releases/download/desktop-v<version>/private-ai-proxy-<version>-linux-<x64|arm64>.rpm
-```
+Packages up to 0.1.7-beta.n refuse removal while a Private AI Proxy process
+other than the updating app runs. Only DEB upgrades met that: dpkg runs the old
+package's `prerm upgrade` before unpacking. The DEBs therefore carry one
+maintainer script, a `prerm` that succeeds for `failed-upgrade`, which dpkg runs
+when the old `prerm` fails (Debian Policy 6.6) and which lets the upgrade
+continue. rpm runs the old `%preun` only after the new files are installed, and
+pacman runs only the new package's scripts on upgrade.
 
-`sudo dnf install <same URL>` works too, because dnf 5 accepts the downgrade.
-In-app updates work again after that. Packages from 0.1.8 onward sort after
-`0.1.7-beta.1-1` and install without this step.
+### Planned removals (0.3)
+
+These exist only for installations of 0.1.x and go in 0.3, with the other 0.3
+removals listed in [Settings files](configuration.md):
+
+- The DEB `prerm` for `failed-upgrade` (`src-tauri/installer/deb-prerm.sh`).
+- `pap cli install` replacing the Windows `.cmd` shims earlier releases wrote
+  (`LEGACY_SCRIPT` in `cli/manage/install.rs`).
 
 A feed advances only after its release is public and every manifest URL
 responds, so a feed never names an unpublished asset. Assets are replaced one

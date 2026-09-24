@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-// Linux native-window/process smoke; renderer assertions run separately.
+// Linux native-window/process smoke; renderer assertions run separately. An
+// optional command, such as a package install, runs while the app and backend
+// run, as the in-app updater installs over them.
 import assert from "node:assert/strict";
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -8,7 +10,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { createServer } from "node:net";
 
-const [binaries] = process.argv.slice(2);
+const [binaries, ...update] = process.argv.slice(2);
 assert.equal(process.platform, "linux");
 assert.ok(binaries && path.isAbsolute(binaries), "Supply an absolute installed binary directory");
 const exec = promisify(execFile);
@@ -91,6 +93,11 @@ try {
     await delay(100);
   }
   assert.match(windows, /Private AI Proxy/, ui.diagnostic);
+  if (update.length > 0) {
+    await exec(update[0], update.slice(1), { timeout: 120_000 });
+    assert.equal(ui.exitCode, null, `UI exited during the update: ${ui.diagnostic}`);
+    assert.equal((await cli("status")).backend.instanceId, instance);
+  }
   await stop(ui);
   assert.equal((await cli("status")).backend.instanceId, instance);
   ui = start("private-ai-proxy-desktop");

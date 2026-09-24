@@ -19,6 +19,7 @@ pub mod maintenance;
 pub mod paths;
 pub mod private_fs;
 pub mod protocol;
+pub mod sse;
 pub mod transport;
 pub mod ui_api;
 pub mod updates;

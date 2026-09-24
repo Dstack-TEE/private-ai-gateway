@@ -623,7 +623,7 @@ fn large_responses_preserve_usage_without_reading_output_as_usage() {
 fn oversized_sse_lines_are_discarded_before_the_next_event() {
     let mut stream = UsageCapture::new(true);
     stream.push(b"data: {\"usage\":{\"input_tokens\":999}}");
-    stream.push(&vec![b' '; MAX_SSE_LINE_BYTES]);
+    stream.push(&vec![b' '; desktop_core::sse::MAX_LINE_BYTES]);
     stream.push(b"invalid\n\n");
     assert!(stream.latest.input_tokens.is_none());
     stream.push(b"data: {\"usage\":{\"input_tokens\":42}}\n\n");

@@ -48,6 +48,7 @@ use desktop_core::{
     agents::Agent,
     brand::{PRODUCT_NAME, SERVICE_NAME},
     now_secs,
+    sse::DataLines,
 };
 
 use crate::{
@@ -66,8 +67,7 @@ const VERIFIER_CALL_TIMEOUT: Duration = Duration::from_secs(660);
 #[cfg(test)]
 const VERIFIER_CALL_TIMEOUT: Duration = Duration::from_millis(100);
 // Match the gateway's SSE limit: Responses terminal events repeat the full output.
-const MAX_USAGE_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
-const MAX_SSE_LINE_BYTES: usize = MAX_USAGE_CAPTURE_BYTES;
+const MAX_USAGE_CAPTURE_BYTES: usize = desktop_core::sse::MAX_LINE_BYTES;
 const HOP_BY_HOP: [&str; 9] = [
     "connection",
     "proxy-connection",

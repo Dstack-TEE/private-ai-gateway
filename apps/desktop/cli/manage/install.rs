@@ -31,7 +31,13 @@ mod windows_alias {
     use std::io::{self, Write};
     use std::path::Path;
 
-    const SCRIPT: &[u8] = b"@echo off\r\n\"%~dp0private-ai-proxy.exe\" %*\r\n";
+    /// A `.cmd` shim cannot set the executable's `argv[0]`, so it names the
+    /// alias it runs as (`%~n0`) in the environment instead, as the npm
+    /// launcher and symlinks do through `argv[0]`. The Windows archive ships
+    /// the same file (`scripts/package-cli.mjs`).
+    const SCRIPT: &[u8] = include_bytes!("alias.cmd");
+    /// The shim registered up to 0.1.x; registration replaces it.
+    const LEGACY_SCRIPT: &[u8] = b"@echo off\r\n\"%~dp0private-ai-proxy.exe\" %*\r\n";
     const ALIASES: [&str; 2] = ["pap", "aci"];
 
     pub(super) fn install(executable: &Path) -> Result<(), String> {
@@ -68,6 +74,10 @@ mod windows_alias {
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 if matches(&alias)? {
                     Ok(false)
+                } else if is_legacy(&alias)? {
+                    fs::write(&alias, SCRIPT)
+                        .map_err(|_| format!("Cannot update the {name}.cmd alias"))?;
+                    Ok(false)
                 } else {
                     Err(format!("Refusing to replace an unrelated {name}.cmd"))
                 }
@@ -81,7 +91,7 @@ mod windows_alias {
         for name in ALIASES {
             let alias = alias_path(executable, name, "cmd");
             match fs::symlink_metadata(&alias) {
-                Ok(_) if matches(&alias)? => existing.push((name, alias)),
+                Ok(_) if matches(&alias)? || is_legacy(&alias)? => existing.push((name, alias)),
                 Ok(_) => return Err(format!("Refusing to remove an unrelated {name}.cmd")),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(_) => return Err(format!("Cannot inspect the {name}.cmd alias")),
@@ -110,6 +120,12 @@ mod windows_alias {
             .map_err(|_| format!("Cannot verify the {} alias", alias.display()))
     }
 
+    fn is_legacy(alias: &Path) -> Result<bool, String> {
+        fs::read(alias)
+            .map(|bytes| bytes == LEGACY_SCRIPT)
+            .map_err(|_| format!("Cannot verify the {} alias", alias.display()))
+    }
+
     #[cfg(windows)]
     pub(super) fn all_match(executable: &Path) -> bool {
         ALIASES
@@ -131,6 +147,15 @@ mod windows_alias {
         use super::*;
 
         #[test]
+        fn the_shim_is_a_crlf_batch_file_naming_its_alias() {
+            // `.gitattributes` checks the file out with CRLF on every platform.
+            let text = std::str::from_utf8(SCRIPT).unwrap();
+            assert_eq!(text.matches('\n').count(), text.matches("\r\n").count());
+            assert!(text.contains("set \"PRIVATE_AI_PROXY_ALIAS=%~n0\""));
+            assert!(text.ends_with("\"%~dp0private-ai-proxy.exe\" %*\r\n"));
+        }
+
+        #[test]
         fn registration_accepts_only_the_matching_alias() {
             let root = tempfile::tempdir().unwrap();
             let executable = root.path().join("private-ai-proxy.exe");
@@ -148,6 +173,13 @@ mod windows_alias {
                 assert!(!root.path().join(format!("{name}.cmd")).exists());
             }
             assert!(executable.exists());
+            // Shims registered by earlier releases are updated and removed as ours.
+            fs::write(root.path().join("aci.cmd"), LEGACY_SCRIPT).unwrap();
+            install(&executable).unwrap();
+            assert_eq!(fs::read(root.path().join("aci.cmd")).unwrap(), SCRIPT);
+            fs::write(root.path().join("aci.cmd"), LEGACY_SCRIPT).unwrap();
+            uninstall(&executable).unwrap();
+            assert!(!root.path().join("aci.cmd").exists());
             let alias = root.path().join("pap.cmd");
             fs::write(&alias, b"other").unwrap();
             assert!(install(&executable).is_err());

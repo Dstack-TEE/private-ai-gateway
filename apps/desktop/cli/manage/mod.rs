@@ -577,7 +577,7 @@ fn graphical_session() -> bool {
 }
 
 fn open_desktop_app(app: PathBuf) -> Result<Value, String> {
-    let mut child = std::process::Command::new(app)
+    let mut child = desktop_core::launch::child_command(app)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -629,15 +629,15 @@ fn open_web_ui(cli: &Cli, client: &Client) -> Result<Value, String> {
 /// Open `url` in the user's browser without waiting for it.
 fn open_browser(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
-    let mut command = std::process::Command::new("open");
+    let mut command = desktop_core::launch::child_command("open");
     #[cfg(target_os = "macos")]
     command.arg(url);
     #[cfg(windows)]
-    let mut command = std::process::Command::new("rundll32.exe");
+    let mut command = desktop_core::launch::child_command("rundll32.exe");
     #[cfg(windows)]
     command.args(["url.dll,FileProtocolHandler", url]);
     #[cfg(not(any(target_os = "macos", windows)))]
-    let mut command = std::process::Command::new("xdg-open");
+    let mut command = desktop_core::launch::child_command("xdg-open");
     #[cfg(not(any(target_os = "macos", windows)))]
     command.arg(url);
     // Without a terminal, a text-mode fallback browser cannot take over this shell.

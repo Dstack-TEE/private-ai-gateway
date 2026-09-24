@@ -110,12 +110,24 @@ fn sibling_executable(name: &str) -> Result<PathBuf, String> {
     Ok(executable)
 }
 
+/// Names the alias a Windows `.cmd` shim ran the CLI as (`cli/manage/alias.cmd`).
+/// It describes only that invocation, so processes the CLI starts never
+/// inherit it; npm's cmd-shim avoids environment variables for the same reason.
+pub const ALIAS_ENV: &str = "PRIVATE_AI_PROXY_ALIAS";
+
+/// A command for any process the CLI starts, without [`ALIAS_ENV`].
+pub fn child_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
+    command.env_remove(ALIAS_ENV);
+    command
+}
+
 pub fn spawn_background() -> Result<BackgroundService, String> {
     let executable = service_executable()?;
     let working_directory = executable
         .parent()
         .ok_or_else(|| "Cannot locate the service executable directory".to_string())?;
-    let mut command = Command::new(&executable);
+    let mut command = child_command(&executable);
     command
         .current_dir(working_directory)
         .stdin(Stdio::null())

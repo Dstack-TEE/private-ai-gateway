@@ -62,7 +62,8 @@ function fail(message) {
   process.exitCode = 1;
 }
 
-function main() {
+// `command` becomes the binary's argv[0], as a symlink named after it would.
+function main(command) {
   const target = `${process.platform}-${process.arch}`;
   const platform = platformPackage(process.platform, process.arch);
   if (!platform) {
@@ -104,6 +105,7 @@ function main() {
   }
 
   const result = spawnSync(executable, process.argv.slice(2), {
+    argv0: command,
     stdio: "inherit",
     windowsHide: false,
   });
@@ -121,12 +123,14 @@ function main() {
   process.exitCode = result.status ?? 1;
 }
 
-if (require.main === module) {
+function run(command) {
   try {
-    main();
+    main(command);
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
   }
 }
 
-module.exports = { platformPackage, supportedTargets };
+if (require.main === module) run("private-ai-proxy");
+
+module.exports = { platformPackage, run, supportedTargets };

@@ -186,9 +186,10 @@ for an idle-expiring server-side session; mutations also need an exact
 `Origin`.
 Changing the password, disabling the web UI, moving its listener, resetting
 settings or restarting the service revokes every session. Requests require an
-allowed `Host` (the bound address, the client host, or loopback when bound to
-every interface), origin headers for that host (always present on `POST`) and
-JSON mutations, then run through the same admission and dispatch
+allowed `Host` (the bound address, the client host, loopback when bound to
+every interface, or `localhost` when loopback reaches the listener), origin
+headers for that host (always present on `POST`) and JSON mutations, then run
+through the same admission and dispatch
 as IPC commands. Sign-in attempts and rejected requests share a token bucket. Its state
 stream is fed from the controller's state channel. Mac App Store builds omit it.
 

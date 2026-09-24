@@ -82,7 +82,7 @@ export function wrapperManifest(version) {
     bin: {
       "private-ai-proxy": "bin/private-ai-proxy.cjs",
       pap: "bin/private-ai-proxy.cjs",
-      aci: "bin/private-ai-proxy.cjs",
+      aci: "bin/aci.cjs",
     },
     files: ["bin"],
     engines: { node: ">=18" },
@@ -148,9 +148,10 @@ export async function buildWrapperPackage({ version, output }) {
   try {
     const bin = path.join(scratch, "bin");
     await mkdir(bin);
-    const launcher = path.join(bin, "private-ai-proxy.cjs");
-    await copyFile(path.join(wrapperTemplate, "bin/private-ai-proxy.cjs"), launcher);
-    await chmod(launcher, 0o755);
+    for (const name of ["private-ai-proxy.cjs", "aci.cjs"]) {
+      await copyFile(path.join(wrapperTemplate, "bin", name), path.join(bin, name));
+      await chmod(path.join(bin, name), 0o755);
+    }
     await writePackageFiles(
       scratch,
       manifest,

@@ -7,6 +7,7 @@
 use std::io::{IsTerminal, Write};
 
 use crate::aci::types::{PROVIDER_ACI_SESSION_IDS, PROVIDER_ACI_VERIFIED};
+use desktop_core::sse::DataLines;
 use serde_json::{json, Value};
 
 use crate::args::SendArgs;
@@ -224,25 +225,24 @@ async fn first_model(
 /// The response's own `id`, from a buffered JSON body or the first SSE data
 /// event that carries one. The receipt endpoint accepts it as a lookup key.
 fn response_chat_id(body: &[u8]) -> Option<String> {
-    if let Ok(value) = serde_json::from_slice::<Value>(body) {
-        if let Some(id) = value["id"].as_str() {
-            return Some(id.to_string());
-        }
+    let id = |data: &[u8]| {
+        serde_json::from_slice::<Value>(data)
+            .ok()
+            .and_then(|value| value["id"].as_str().map(str::to_string))
+    };
+    if let Some(id) = id(body) {
+        return Some(id);
     }
-    for line in body.split(|b| *b == b'\n') {
-        let Ok(line) = std::str::from_utf8(line) else {
-            continue;
-        };
-        let Some(data) = line.trim_end_matches('\r').strip_prefix("data:") else {
-            continue;
-        };
-        if let Ok(value) = serde_json::from_str::<Value>(data.trim()) {
-            if let Some(id) = value["id"].as_str() {
-                return Some(id.to_string());
-            }
+    let mut found = None;
+    let mut lines = DataLines::new();
+    let mut first = |data: &str| {
+        if found.is_none() {
+            found = id(data.as_bytes());
         }
-    }
-    None
+    };
+    lines.push(body, &mut first);
+    lines.finish(&mut first);
+    found
 }
 
 fn buffered_response_text(response: &HttpResult) -> String {
@@ -256,11 +256,11 @@ fn buffered_response_text(response: &HttpResult) -> String {
         .unwrap_or_else(|| String::from_utf8_lossy(&response.body).into_owned())
 }
 
-/// Reassembles SSE lines across chunk boundaries, collects the streamed
-/// `choices[0].delta.content` text, and optionally echoes it as it arrives.
-/// The wire bytes themselves are captured separately, untouched.
+/// Collects the streamed `choices[0].delta.content` text across chunk
+/// boundaries, and optionally echoes it as it arrives. The wire bytes
+/// themselves are captured separately, untouched.
 struct SseTextCollector {
-    buf: Vec<u8>,
+    lines: DataLines,
     text: String,
     echo: bool,
 }
@@ -268,55 +268,57 @@ struct SseTextCollector {
 impl SseTextCollector {
     fn new(echo: bool) -> Self {
         Self {
-            buf: Vec::new(),
+            lines: DataLines::new(),
             text: String::new(),
             echo,
         }
     }
 
     fn feed(&mut self, chunk: &[u8]) {
-        self.buf.extend_from_slice(chunk);
-        while let Some(pos) = self.buf.iter().position(|b| *b == b'\n') {
-            let line: Vec<u8> = self.buf.drain(..=pos).collect();
-            self.line(&line);
-        }
+        let (text, echo) = (&mut self.text, self.echo);
+        self.lines
+            .push(chunk, |data| append_delta(text, echo, data));
     }
 
     fn finish(&mut self) {
-        if !self.buf.is_empty() {
-            let rest = std::mem::take(&mut self.buf);
-            self.line(&rest);
-        }
+        let (text, echo) = (&mut self.text, self.echo);
+        self.lines.finish(|data| append_delta(text, echo, data));
     }
+}
 
-    fn line(&mut self, raw: &[u8]) {
-        let Ok(line) = std::str::from_utf8(raw) else {
-            return;
-        };
-        // Handles both `data:{..}` and `data: {..}`, and CRLF framing.
-        let Some(data) = line.trim_end_matches(['\r', '\n']).strip_prefix("data:") else {
-            return;
-        };
-        let data = data.trim();
-        if data.is_empty() || data == "[DONE]" {
-            return;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(data) else {
-            return;
-        };
-        if let Some(delta) = value["choices"][0]["delta"]["content"].as_str() {
-            self.text.push_str(delta);
-            if self.echo {
-                print!("{delta}");
-                let _ = std::io::stdout().flush();
-            }
+/// Appends an event's content delta; `[DONE]` and other events carry none.
+fn append_delta(text: &mut String, echo: bool, data: &str) {
+    let Ok(value) = serde_json::from_str::<Value>(data) else {
+        return;
+    };
+    if let Some(delta) = value["choices"][0]["delta"]["content"].as_str() {
+        text.push_str(delta);
+        if echo {
+            print!("{delta}");
+            let _ = std::io::stdout().flush();
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::SseTextCollector;
+    use super::{response_chat_id, SseTextCollector};
+
+    #[test]
+    fn reads_the_response_id_from_json_or_the_first_event_carrying_one() {
+        assert_eq!(
+            response_chat_id(br#"{"id":"chat-1"}"#).as_deref(),
+            Some("chat-1")
+        );
+        assert_eq!(
+            response_chat_id(
+                b": keep-alive\n\ndata: {\"id\":\"chat-2\"}\r\n\ndata: {\"id\":\"chat-3\"}\n"
+            )
+            .as_deref(),
+            Some("chat-2")
+        );
+        assert_eq!(response_chat_id(b"data: [DONE]\n"), None);
+    }
 
     #[test]
     fn collects_deltas_across_chunk_boundaries() {
