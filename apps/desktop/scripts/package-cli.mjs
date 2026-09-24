@@ -9,9 +9,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const binaries = ["private-ai-proxy", "private-ai-proxy-service", "private-ai-proxy-helper"];
-// The shim `pap cli install` writes (cli/manage/install.rs): it names the
-// alias in PRIVATE_AI_PROXY_ALIAS because a .cmd file cannot set argv[0].
-export const windowsAliasScript = '@echo off\r\nsetlocal\r\nset "PRIVATE_AI_PROXY_ALIAS=%~n0"\r\n"%~dp0private-ai-proxy.exe" %*\r\n';
 
 const scriptPath = fileURLToPath(import.meta.url);
 const appRoot = path.resolve(path.dirname(scriptPath), "..");
@@ -45,7 +42,8 @@ export async function stagePortable({ sourceDir, targetTriple, platform, destina
   }
   if (platform === "windows") {
     for (const alias of aliases) {
-      await writeFile(path.join(destination, `${alias}.cmd`), windowsAliasScript);
+      // The shim `pap cli install` writes (cli/manage/install.rs).
+      await copyFile(path.join(appRoot, "cli/manage/alias.cmd"), path.join(destination, `${alias}.cmd`));
     }
   } else {
     for (const alias of aliases) {

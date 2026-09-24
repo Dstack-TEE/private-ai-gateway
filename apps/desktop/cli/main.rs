@@ -69,7 +69,7 @@ fn legacy_alias_hint() {
         .any(|arg| arg == "--json" || arg == "--json-events");
     if invoked_as_aci(
         std::env::args_os().next().as_deref(),
-        std::env::var_os("PRIVATE_AI_PROXY_ALIAS").as_deref(),
+        std::env::var_os(desktop_core::launch::ALIAS_ENV).as_deref(),
     ) && !machine_output
         && std::io::stderr().is_terminal()
     {
@@ -78,7 +78,7 @@ fn legacy_alias_hint() {
 }
 
 /// Symlinks and the npm launcher name the alias in `argv[0]`; Windows `.cmd`
-/// shims, which cannot, name it in `PRIVATE_AI_PROXY_ALIAS`.
+/// shims, which cannot, name it in [`desktop_core::launch::ALIAS_ENV`].
 fn invoked_as_aci(argv0: Option<&OsStr>, alias: Option<&OsStr>) -> bool {
     alias == Some(OsStr::new("aci"))
         || argv0.is_some_and(|name| Path::new(name).file_stem() == Some(OsStr::new("aci")))

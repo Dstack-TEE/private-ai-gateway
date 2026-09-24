@@ -33,8 +33,9 @@ mod windows_alias {
 
     /// A `.cmd` shim cannot set the executable's `argv[0]`, so it names the
     /// alias it runs as (`%~n0`) in the environment instead, as the npm
-    /// launcher and symlinks do through `argv[0]`.
-    const SCRIPT: &[u8] = b"@echo off\r\nsetlocal\r\nset \"PRIVATE_AI_PROXY_ALIAS=%~n0\"\r\n\"%~dp0private-ai-proxy.exe\" %*\r\n";
+    /// launcher and symlinks do through `argv[0]`. The Windows archive ships
+    /// the same file (`scripts/package-cli.mjs`).
+    const SCRIPT: &[u8] = include_bytes!("alias.cmd");
     /// The shim registered up to 0.1.x; registration replaces it.
     const LEGACY_SCRIPT: &[u8] = b"@echo off\r\n\"%~dp0private-ai-proxy.exe\" %*\r\n";
     const ALIASES: [&str; 2] = ["pap", "aci"];
@@ -144,6 +145,15 @@ mod windows_alias {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn the_shim_is_a_crlf_batch_file_naming_its_alias() {
+            // `.gitattributes` checks the file out with CRLF on every platform.
+            let text = std::str::from_utf8(SCRIPT).unwrap();
+            assert_eq!(text.matches('\n').count(), text.matches("\r\n").count());
+            assert!(text.contains("set \"PRIVATE_AI_PROXY_ALIAS=%~n0\""));
+            assert!(text.ends_with("\"%~dp0private-ai-proxy.exe\" %*\r\n"));
+        }
 
         #[test]
         fn registration_accepts_only_the_matching_alias() {

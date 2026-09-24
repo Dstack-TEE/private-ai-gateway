@@ -5046,6 +5046,7 @@ dependencies = [
  "socket2",
  "tempfile",
  "tokio",
+ "tokio-util",
  "toml_edit 0.25.15+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
@@ -7417,6 +7418,7 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "futures-util",
+ "libc",
  "pin-project-lite",
  "tokio",
 ]

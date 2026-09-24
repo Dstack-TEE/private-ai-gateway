@@ -10,6 +10,8 @@ import { binaries, linuxContents } from "./package-cli.mjs";
 import { buildLinuxPackages, packageDesktop, releaseVersionParts } from "./package-linux.mjs";
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+// A fixed package time (2026-01-01) instead of the commit time.
+process.env.SOURCE_DATE_EPOCH = "1767225600";
 const available = (tool) => {
   try {
     execFileSync("sh", ["-c", `command -v ${tool}`], { stdio: "ignore" });
@@ -97,7 +99,16 @@ test("the Tauri payload ships as DEB, RPM and Arch packages with signed updater 
     assert.match(debListing(deb), /\.\/usr\/bin\/aci -> private-ai-proxy$/m);
     assert.match(debListing(deb), /\.\/usr\/share\/applications\/Private AI Proxy\.desktop$/m);
     assert.doesNotMatch(debListing(deb), /package-manager/);
-    assert.doesNotMatch(output("dpkg-deb", ["-I", deb]), /preinst|postinst|prerm|postrm/);
+    const brand = JSON.parse(await readFile(path.join(appRoot, "brand/dstack/brand.json"), "utf8"));
+    assert.equal(output("dpkg-deb", ["-f", deb, "Maintainer"]), brand.organizationName);
+    assert.equal(output("dpkg-deb", ["-f", deb, "Homepage"]), brand.homepageUrl);
+    assert.equal(output("dpkg-deb", ["-f", deb, "Description"]), `${brand.bundle.shortDescription}\n ${brand.bundle.longDescription}`);
+    // Every entry carries SOURCE_DATE_EPOCH (2026-01-01), so builds are reproducible.
+    assert.doesNotMatch(debListing(deb), /^(?!.* 2026-01-01 00:00 ).+$/m);
+    // The only maintainer script is the prerm that lets 0.1.x upgrades continue (Debian Policy 6.6).
+    assert.match(output("dpkg-deb", ["-I", deb]), /^ +\d+ bytes, +\d+ lines +\* +prerm +#!\/bin\/sh$/m);
+    assert.doesNotMatch(output("dpkg-deb", ["-I", deb]), /preinst|postinst|postrm/);
+    execFileSync("sh", ["-c", 'dpkg-deb -I "$1" prerm | sh -s failed-upgrade 0.1.7~beta.4', "sh", deb]);
     if (available("rpm")) {
       const query = (format) => output("rpm", ["-qp", "--qf", format, rpm]);
       assert.equal(query("%{NAME} %{EPOCH}:%{VERSION}-%{RELEASE}"), "private-ai-proxy (none):1.2.3~beta.4-1");

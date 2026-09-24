@@ -76,9 +76,10 @@ Symlinks (Linux packages, archives and `pap cli install` on macOS and Linux)
 carry it in `argv[0]`, and the npm package's `aci` entry passes it as `argv0`
 to the native binary. A `.cmd` script cannot set `argv[0]`, so the Windows
 shims, written like npm's `cmd-shim` with `setlocal` and `%~dp0`, set
-`PRIVATE_AI_PROXY_ALIAS=%~n0` for the executable instead. `pap cli install`
-replaces the shims earlier releases wrote, which lack that line, as its own;
-that migration is removed in 0.3.
+`PRIVATE_AI_PROXY_ALIAS=%~n0` for the executable instead; processes the CLI
+starts never inherit it. `pap cli install` replaces the shims earlier releases
+wrote, which lack that line, as its own; that migration is removed in 0.3 (see
+[Planned removals](distribution.md#planned-removals-03)).
 
 Linux also publishes CLI-only DEB, RPM, and Arch Linux packages. They install the three real
 executables under `/usr/libexec/private-ai-proxy` and package-owned
@@ -89,8 +90,8 @@ every Linux package, desktop and CLI, in all three formats
 provides `private-ai-proxy-cli`, and each package conflicts with the other; the
 DEBs also declare `Replaces` so dpkg swaps one for the other (Debian Policy
 7.6.2). RPM and Arch packages declare no `Obsoletes` or `replaces`, which would
-swap them on every system upgrade. The packages have no maintainer scripts (see
-[Distribution](distribution.md#updates-by-installation)): the package manager refuses
+swap them on every system upgrade. The packages do not check for running
+processes (see [Distribution](distribution.md#updates-by-installation)): the package manager refuses
 files another package owns, and an upgrade replaces the executables of a running
 backend, which keeps its old build until the next client command restarts it. Run
 `pap --yes service stop` as the owning user to switch at once. The in-app updater

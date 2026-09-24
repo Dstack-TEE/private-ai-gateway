@@ -45,7 +45,7 @@ test("stages the three sibling CLI executables and portable aliases", async () =
       await writeFile(path.join(source, `${name}.exe`), name);
     }
     await stagePortable({ sourceDir: source, targetTriple: "x86_64-pc-windows-msvc", platform: "windows", destination: windows });
-    const shim = '@echo off\r\nsetlocal\r\nset "PRIVATE_AI_PROXY_ALIAS=%~n0"\r\n"%~dp0private-ai-proxy.exe" %*\r\n';
+    const shim = await readFile(new URL("../cli/manage/alias.cmd", import.meta.url), "utf8");
     assert.equal(await readFile(path.join(windows, "pap.cmd"), "utf8"), shim);
     assert.equal(await readFile(path.join(windows, "aci.cmd"), "utf8"), shim);
 

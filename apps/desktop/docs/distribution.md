@@ -102,15 +102,31 @@ sorts a trailing letter segment before the release (`vercmp`). Every earlier pac
 `0.2.0~beta.1`, including the RPMs published as `0.1.7-0.beta.n.1` and the
 0.1.7-beta.1 desktop RPM published as `0.1.7-beta.1-1`, so they update in place.
 
-The packages have no maintainer scripts, like the Chrome, VS Code and Firefox
-packages, which do not check for running processes: dpkg, rpm and pacman
-already refuse files that another package owns, and replacing the executables
-of a running program is safe on Linux. A backend keeps running its old build
-until it stops; the next client command restarts a backend from another build.
-Packages up to 0.1.7-beta.n still run their own removal scripts during an
-upgrade and refuse while any Private AI Proxy process other than the updating
-app runs; quit the app and run `private-ai-proxy --yes service stop` first when
-upgrading them with the package manager.
+The packages do not check for running processes, like the Chrome, VS Code and
+Firefox packages: dpkg, rpm and pacman already refuse files that another
+package owns, and replacing the executables of a running program is safe on
+Linux. A backend keeps running its old build until it stops; the next client
+command restarts a backend from another build. Package metadata (name,
+maintainer, homepage and the desktop description) comes from the brand
+configuration, as Tauri's does, and every entry carries the commit time (or
+`SOURCE_DATE_EPOCH`), so builds are reproducible and pacman's file checks match.
+
+Packages up to 0.1.7-beta.n refuse removal while a Private AI Proxy process
+other than the updating app runs. Only DEB upgrades met that: dpkg runs the old
+package's `prerm upgrade` before unpacking. The DEBs therefore carry one
+maintainer script, a `prerm` that succeeds for `failed-upgrade`, which dpkg runs
+when the old `prerm` fails (Debian Policy 6.6) and which lets the upgrade
+continue. rpm runs the old `%preun` only after the new files are installed, and
+pacman runs only the new package's scripts on upgrade.
+
+### Planned removals (0.3)
+
+These exist only for installations of 0.1.x and go in 0.3, with the other 0.3
+removals listed in [Settings files](configuration.md):
+
+- The DEB `prerm` for `failed-upgrade` (`src-tauri/installer/deb-prerm.sh`).
+- `pap cli install` replacing the Windows `.cmd` shims earlier releases wrote
+  (`LEGACY_SCRIPT` in `cli/manage/install.rs`).
 
 A feed advances only after its release is public and every manifest URL
 responds, so a feed never names an unpublished asset. Assets are replaced one

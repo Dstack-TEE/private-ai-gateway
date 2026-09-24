@@ -235,9 +235,9 @@ fn response_chat_id(body: &[u8]) -> Option<String> {
     }
     let mut found = None;
     let mut lines = DataLines::new();
-    let mut first = |data: &[u8]| {
+    let mut first = |data: &str| {
         if found.is_none() {
-            found = id(data);
+            found = id(data.as_bytes());
         }
     };
     lines.push(body, &mut first);
@@ -287,8 +287,8 @@ impl SseTextCollector {
 }
 
 /// Appends an event's content delta; `[DONE]` and other events carry none.
-fn append_delta(text: &mut String, echo: bool, data: &[u8]) {
-    let Ok(value) = serde_json::from_slice::<Value>(data) else {
+fn append_delta(text: &mut String, echo: bool, data: &str) {
+    let Ok(value) = serde_json::from_str::<Value>(data) else {
         return;
     };
     if let Some(delta) = value["choices"][0]["delta"]["content"].as_str() {

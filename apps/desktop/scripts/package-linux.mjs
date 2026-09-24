@@ -5,9 +5,9 @@
 // as 1.2.3~beta.4 in DEB and RPM, which dpkg and rpm order before 1.2.3
 // (Debian Policy 5.6.12, Fedora versioning guidelines). The desktop packages
 // carry the payload Tauri bundled into its DEB; Tauri itself writes the SemVer
-// string verbatim.
+// string verbatim. Names and descriptions come from the brand, as Tauri's do.
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import semver from "semver";
@@ -31,12 +31,20 @@ const markerDirectory = "/usr/share/private-ai-proxy";
 // in argv[0].
 export const aliases = ["pap", "aci"];
 export const aliasLinks = aliases.map((alias) => ({ src: "private-ai-proxy", dst: `/usr/bin/${alias}`, type: "symlink" }));
+// Debian Policy 6.6: lets an upgrade continue past the refusing prerm of
+// packages up to 0.1.7-beta.n. Remove in 0.3.
+const debPrerm = path.join(appRoot, "src-tauri/installer/deb-prerm.sh");
+
+// The brand prepare-brand.mjs selects; Tauri names the desktop package after it.
+const brand = JSON.parse(await readFile(path.join(appRoot, "brand", process.env.PRIVATE_AI_PROXY_BRAND ?? "dstack", "brand.json"), "utf8"));
+const desktopName = brand.productName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+const cliName = `${desktopName}-cli`;
 
 const linuxPackages = {
   desktop: {
-    name: "private-ai-proxy",
-    description: "Private AI Proxy desktop application and command line client",
-    other: "private-ai-proxy-cli",
+    name: desktopName,
+    description: `${brand.bundle.shortDescription}\n${brand.bundle.longDescription}`,
+    other: cliName,
     // The desktop package includes the CLI, so it stands in for it.
     provides: true,
     markers: ["archlinux"],
@@ -52,9 +60,9 @@ const linuxPackages = {
     },
   },
   cli: {
-    name: "private-ai-proxy-cli",
-    description: "Private AI Proxy command line client and user backend",
-    other: "private-ai-proxy",
+    name: cliName,
+    description: `${brand.productName} command line client and user backend`,
+    other: desktopName,
     provides: false,
     markers: ["deb", "rpm", "archlinux"],
     depends: { deb: [], rpm: [], archlinux: ["glibc", "libgcc"] },
@@ -77,9 +85,22 @@ export function releaseVersionParts(version) {
   };
 }
 
+// nfpm otherwise stamps entries with the time it writes each one, so an Arch
+// package's .MTREE and tar headers disagree and `pacman -Qkk` reports altered
+// files. Like GoReleaser's `mtime: "{{ .CommitDate }}"`, every entry gets
+// SOURCE_DATE_EPOCH (reproducible-builds.org) or the commit time, which also
+// makes the packages reproducible.
+function packageTime() {
+  const epoch = process.env.SOURCE_DATE_EPOCH?.trim()
+    || execFileSync("git", ["log", "-1", "--format=%ct"], { cwd: appRoot, encoding: "utf8" }).trim();
+  const seconds = Number(epoch);
+  if (!Number.isSafeInteger(seconds) || seconds < 0) throw new Error(`Invalid package time ${JSON.stringify(epoch)}`);
+  return new Date(seconds * 1000).toISOString();
+}
+
 // `contents` is the package's payload in nfpm terms; `marker` a file holding
 // the owning package manager, when this format carries one.
-function nfpmConfig(kind, packager, { version, arch, contents, marker }) {
+function nfpmConfig(kind, packager, { version, arch, contents, marker, mtime }) {
   const definition = linuxPackages[kind];
   if (!definition) throw new Error(`Unsupported Linux package kind ${JSON.stringify(kind)}`);
   if (!packagers[packager]) throw new Error(`Unsupported Linux packager ${JSON.stringify(packager)}`);
@@ -102,10 +123,11 @@ function nfpmConfig(kind, packager, { version, arch, contents, marker }) {
     platform: "linux",
     version: pacman ? versions.arch : version,
     version_schema: pacman ? "none" : "semver",
+    mtime,
     section: "utils",
     priority: "optional",
-    maintainer: "Dstack <support@dstack.org>",
-    homepage: "https://github.com/Dstack-TEE/private-ai-gateway",
+    maintainer: brand.organizationName,
+    homepage: brand.homepageUrl,
     license: "Apache-2.0",
     description: definition.description,
     depends: definition.depends[packager],
@@ -119,8 +141,9 @@ function nfpmConfig(kind, packager, { version, arch, contents, marker }) {
         { src: marker, dst: `${markerDirectory}/package-manager`, file_info: { mode: 0o644 } },
       ] : []),
     ],
+    overrides: { deb: { scripts: { preremove: debPrerm } } },
     deb: { compression: "xz" },
-    archlinux: { packager: "Dstack <support@dstack.org>" },
+    archlinux: { packager: brand.organizationName },
   };
 }
 
@@ -129,6 +152,7 @@ export async function buildLinuxPackages({ kind, version, arch, contents, output
   await mkdir(output, { recursive: true });
   const scratch = await mkdtemp(path.join(output, ".pap-nfpm-"));
   const packages = [];
+  const mtime = packageTime();
   try {
     for (const [packager, { suffix, manager }] of Object.entries(packagers)) {
       let marker;
@@ -137,7 +161,7 @@ export async function buildLinuxPackages({ kind, version, arch, contents, output
         await writeFile(marker, `${manager}\n`);
       }
       const config = path.join(scratch, `${packager}.json`);
-      await writeFile(config, JSON.stringify(nfpmConfig(kind, packager, { version, arch, contents, marker })));
+      await writeFile(config, JSON.stringify(nfpmConfig(kind, packager, { version, arch, contents, marker, mtime })));
       const target = path.join(output, artifactName({ version, platform: "linux", arch, suffix, cli: kind === "cli" }));
       execFileSync(process.env.NFPM ?? "nfpm", ["package", "--config", config, "--packager", packager, "--target", target], { stdio: "inherit" });
       packages.push(target);
@@ -146,22 +170,6 @@ export async function buildLinuxPackages({ kind, version, arch, contents, output
     await rm(scratch, { recursive: true, force: true });
   }
   return packages;
-}
-
-// The payload's files, each with its mode. Like Tauri's own RPM, the package
-// owns no directories: they are shared system paths. (nfpm's `type: tree`
-// would own them and, in Arch packages, write Go's directory bit into their
-// tar modes, which pacman reports as differing permissions.)
-async function fileContents(root) {
-  const contents = [];
-  for (const entry of await readdir(root, { recursive: true, withFileTypes: true })) {
-    if (entry.isDirectory()) continue;
-    if (!entry.isFile()) throw new Error(`Unexpected payload entry ${entry.name}`);
-    const file = path.join(entry.parentPath, entry.name);
-    const { mode } = await stat(file);
-    contents.push({ src: file, dst: `/${path.relative(root, file)}`, file_info: { mode: mode & 0o7777 } });
-  }
-  return contents;
 }
 
 // Repackages the Tauri DEB in `bundleDir/deb` in every Linux format under
@@ -183,7 +191,7 @@ export async function packageDesktop({ bundleDir, version, arch, output }) {
   try {
     const root = path.join(scratch, "root");
     execFileSync("dpkg-deb", ["-x", tauriDeb, root], { stdio: "inherit" });
-    const contents = [...await fileContents(root), ...aliasLinks];
+    const contents = [{ src: path.join(root, "usr"), dst: "/usr" }, ...aliasLinks];
     packages = await buildLinuxPackages({ kind: "desktop", version, arch, contents, output });
   } finally {
     await rm(scratch, { recursive: true, force: true });

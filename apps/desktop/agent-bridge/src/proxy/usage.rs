@@ -164,8 +164,8 @@ pub(super) fn number_f64(value: &Value) -> Option<f64> {
 }
 
 /// Takes the usage an event's `data` reports, if any; `[DONE]` carries none.
-fn merge_event(latest: &mut UsageValues, data: &[u8]) {
-    if let Some(usage) = decode_usage(data) {
+fn merge_event(latest: &mut UsageValues, data: &str) {
+    if let Some(usage) = decode_usage(data.as_bytes()) {
         latest.merge(usage);
     }
 }

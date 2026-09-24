@@ -578,6 +578,7 @@ fn graphical_session() -> bool {
 
 fn open_desktop_app(app: PathBuf) -> Result<Value, String> {
     let mut child = std::process::Command::new(app)
+        .env_remove(desktop_core::launch::ALIAS_ENV)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
