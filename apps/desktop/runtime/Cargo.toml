@@ -34,7 +34,7 @@ tempfile = "3"
 rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "process", "io-util", "signal", "macros", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "signal", "macros", "net"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 netwatcher = "0.8"
@@ -52,5 +52,5 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Syste
 
 [dev-dependencies]
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
-tokio = { version = "1", features = ["test-util"] }
+tokio = { version = "1", features = ["io-util", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
