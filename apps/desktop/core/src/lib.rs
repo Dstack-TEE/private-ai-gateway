@@ -1,7 +1,8 @@
 //! The client side of Private AI Proxy, shared by the desktop shell, the CLI
 //! and the backend: renderer and IPC contracts, the management protocol and
 //! its client, the IPC transport, backend launch, preferences, app paths and
-//! owner-only file primitives. It links no server, database or HTTP stack.
+//! owner-only file primitives. It links no server or database; its only HTTP
+//! client is the release-channel update check.
 
 use std::io::Write;
 

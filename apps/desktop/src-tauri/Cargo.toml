@@ -1,7 +1,7 @@
 [package]
 name = "private-ai-proxy-desktop"
 version = "0.1.0"
-description = "Menu bar controller for the ACI local verifying proxy"
+description = "Private AI Proxy desktop app: the Tauri shell for windows, tray, menus, notifications and updates"
 authors = ["Dstack-TEE"]
 license = "Apache-2.0"
 edition = "2021"

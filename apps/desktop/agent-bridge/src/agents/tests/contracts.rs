@@ -1008,7 +1008,7 @@ fn connect_creates_the_official_config_from_scratch() {
 /// H1 at the proxy layer: a scan is what publishes authority. A token
 /// obtained while connected stops opening the proxy as soon as a scan
 /// runs after the config drifted or broke — the request is refused at
-/// auth and nothing reaches the sidecar.
+/// auth and nothing reaches the verified upstream.
 #[tokio::test]
 async fn a_scan_after_config_drift_revokes_the_old_token_at_the_proxy() {
     use crate::proxy::{ForwardContext, ProxyState, Session, VerifiedResponse, VerifiedService};
@@ -1097,6 +1097,6 @@ async fn a_scan_after_config_drift_revokes_the_old_token_at_the_proxy() {
     assert_eq!(
         hits.load(Ordering::SeqCst),
         1,
-        "nothing reached the sidecar"
+        "nothing reached the verified upstream"
     );
 }

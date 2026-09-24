@@ -46,13 +46,10 @@ await mkdir(destinationDir, { recursive: true });
 // process so credential commands work on Windows.
 const appStore = distribution() === MAC_APP_STORE_DISTRIBUTION;
 const directSidecars = [
-  { name: "private-ai-proxy", package: "private-ai-proxy", appStoreFeatures: ["mac-app-store"] },
+  { name: "private-ai-proxy", package: "private-ai-proxy" },
+  // The App Store bundles only the service (MAC_APP_STORE_SIDECARS).
   { name: "private-ai-proxy-service", package: "private-ai-proxy", appStoreFeatures: ["mac-app-store"] },
-  {
-    name: "private-ai-proxy-helper",
-    package: "private-ai-proxy-agent-bridge",
-    appStoreFeatures: [],
-  },
+  { name: "private-ai-proxy-helper", package: "private-ai-proxy-agent-bridge" },
 ];
 const sidecars = appStore
   ? directSidecars.filter((sidecar) => MAC_APP_STORE_SIDECARS.includes(sidecar.name))
@@ -73,7 +70,7 @@ if (!appStore) {
 for (const sidecar of sidecars) {
   for (const target of targets) {
     const buildArgs = ["build", "--locked", "--package", sidecar.package, "--bin", sidecar.name];
-    if (appStore && sidecar.appStoreFeatures.length > 0) {
+    if (appStore && sidecar.appStoreFeatures) {
       // Replacing the default features drops the CLI package's web UI.
       buildArgs.push("--no-default-features", "--features", sidecar.appStoreFeatures.join(","));
     }
