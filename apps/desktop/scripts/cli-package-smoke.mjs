@@ -105,7 +105,7 @@ try {
   await chmod(data, 0o700);
   await mkdir(path.join(data, "Config"), { mode: 0o700 });
   const config = path.join(data, "Config", "config.toml");
-  await writeFile(config, `[localApi]\nport = ${port}\n`, { mode: 0o600 });
+  await writeFile(config, `[local-api]\nport = ${port}\n`, { mode: 0o600 });
   await chmod(config, 0o600);
 
   assert.equal((await runJson(["service", "status"])).status, "not_running");
@@ -123,13 +123,13 @@ try {
   assert.equal(changed.appearance, "dark");
   const settings = await runJson(["settings", "show"]);
   assert.equal(settings.settings.appearance, "dark");
-  assert.equal(settings.settings.localApi.port, port);
-  assert.equal(settings.settings.localApi.listenAddress, "127.0.0.1");
-  assert.equal(settings.settings.localApi.allowNetworkAccess, false);
+  assert.equal(settings.settings["local-api"].port, port);
+  assert.equal(settings.settings["local-api"]["listen-address"], "127.0.0.1");
+  assert.equal(settings.settings["local-api"]["allow-network-access"], false);
   assert.equal(settings.files.config, config);
   // Written in place: the hand-written table is kept as it was.
   const saved = await readFile(config, "utf8");
-  assert.ok(saved.includes('appearance = "dark"\n') && saved.includes(`[localApi]\nport = ${port}\n`), saved);
+  assert.ok(saved.includes('appearance = "dark"\n') && saved.includes(`[local-api]\nport = ${port}\n`), saved);
 
   assert.equal((await runJson(["--yes", "service", "stop"])).status, "stopped");
   assert.equal((await waitForNotRunning(10_000)).status, "not_running");

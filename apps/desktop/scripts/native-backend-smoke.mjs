@@ -73,7 +73,7 @@ try {
   await new Promise((resolve) => server.close(resolve));
   const data = path.join(home, ".private-ai-proxy");
   await mkdir(path.join(data, "Config"), { recursive: true, mode: 0o700 });
-  await writeFile(path.join(data, "Config", "config.toml"), `[localApi]\nport = ${address.port}\n`, { mode: 0o600 });
+  await writeFile(path.join(data, "Config", "config.toml"), `[local-api]\nport = ${address.port}\n`, { mode: 0o600 });
   const backend = start("private-ai-proxy-service");
   let state;
   for (let count = 0; count < 100; count++) {

@@ -89,7 +89,7 @@ credentials live in `config.toml` and `credentials.toml` inside the app
 container ([Settings files](configuration.md)); the Keychain group remains only
 so the backend can import and delete what 0.1 saved there. Remove it together
 with that import (planned for 0.3; see
-[the tracking note](configuration.md#tracking-mac-app-store-keychain-entitlement)).
+[Removal in 0.3](configuration.md#removal-in-03)).
 
 Apple does not allow a Mac App Store distribution-signed app to launch before
 App Store processing. The workflow therefore smoke-tests a temporary ad-hoc

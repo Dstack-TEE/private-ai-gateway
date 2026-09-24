@@ -224,6 +224,28 @@ jobs:
         run: cargo test --locked --package private-ai-proxy-core --package private-ai-proxy-runtime --package private-ai-proxy-agent-bridge --lib
       - *save-rust-cache
 
+  # Native Windows library tests on every change: the ACL, named-pipe and
+  # file-replacement code only compiles and runs there, and otherwise runs
+  # only in package builds.
+  verify-windows-x64:
+    name: Verify libraries (windows-x64)
+    if: ${{ inputs.package_only != true }}
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        id: rust
+        with:
+          toolchain: stable
+      - *restore-rust-cache
+      - name: Test desktop libraries
+        working-directory: apps/desktop
+        run: cargo test --locked --package private-ai-proxy-core --package private-ai-proxy-runtime --package private-ai-proxy-agent-bridge --lib
+      - *save-rust-cache
+
   select-platforms:
     name: Select release platforms
     if: ${{ github.event_name == 'workflow_dispatch' || inputs.release_version != '' }}
@@ -611,6 +633,7 @@ jobs:
         run: |
           cargo test --release --locked --package private-ai-proxy-core --target "$(rustc -vV | sed -n 's/^host: //p')" --lib
           cargo test --release --locked --package private-ai-proxy-runtime --target "$(rustc -vV | sed -n 's/^host: //p')" --lib
+          cargo test --release --locked --package private-ai-proxy-runtime --target "$(rustc -vV | sed -n 's/^host: //p')" --lib -- --ignored legacy_keychain_import_round_trip
 
       - name: Test Windows desktop libraries
         if: runner.os == 'Windows'

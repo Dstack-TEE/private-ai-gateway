@@ -84,7 +84,7 @@ export function WebUiDialog({
       })) return;
       if (web && status.enabled && !config.enabled && !await confirm({
         title: "Turn off the web UI?",
-        message: "This browser session ends now. Turn the web UI on again from the desktop app or with pap settings set webUi true.",
+        message: "This browser session ends now. Turn the web UI on again from the desktop app or with pap settings set web-ui.enabled true.",
         confirmLabel: "Turn Off",
       })) return;
       if (newPassword) {

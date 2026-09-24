@@ -1,6 +1,6 @@
 use std::{
     io::{self, IsTerminal, Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -9,7 +9,7 @@ use desktop_core::{
     client::Client,
     config::{Appearance, UpdateChannel},
     contracts::*,
-    protocol::{export_path, rpc, Preference},
+    protocol::{export_path, rpc, NotificationKind, Preference},
     usage::UsageQuery,
 };
 use serde::Serialize;
@@ -370,126 +370,37 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                 json!({"deleted": client.call(rpc::ClearUsage)?})
             }
         },
-        Action::Settings { command } => {
-            match command {
-                Settings::Reset => {
-                    confirm(cli, "Stop protection, restore all agents, and reset backend settings, including turning off the web UI? Profiles, keys and usage are kept. Open at Login is managed by the desktop app.")?;
-                    value(client.call(rpc::ResetSettings)?)?
-                }
-                Settings::Show => {
-                    let state = client.state()?;
-                    let files = state.config_files;
-                    json!({
-                        "files": {
-                            "config": files.config_path,
-                            "credentials": files.credentials_path,
-                            "error": files.error,
-                        },
-                        "settings": client.call(rpc::Settings)?,
-                        "webUi": state.web_ui,
-                    })
-                }
-                Settings::Schema => unreachable!(),
-                Settings::Set {
-                    key: SettingsKey::WebUiPassword,
-                    value: input,
-                    value_stdin,
-                } => {
-                    confirm(
-                        cli,
-                        "Change the web UI password and end every browser session?",
-                    )?;
-                    let password = read_web_ui_password(cli, input.as_deref(), *value_stdin)?;
-                    value(client.call(rpc::SetWebUiPassword { password })?)?
-                }
-                Settings::Set {
-                    key,
-                    value: input,
-                    value_stdin,
-                } => {
-                    if *value_stdin {
-                        return Err("Only webUiPassword reads its value from stdin".into());
-                    }
-                    let input = input
-                        .as_ref()
-                        .ok_or_else(|| format!("Missing the value for {key}"))?;
-                    confirm(cli, "Change Private AI Proxy settings?")?;
-                    let set = |change| client.call(rpc::SetPreference { change });
-                    match key {
-                    SettingsKey::WebUiPassword => unreachable!(),
-                    SettingsKey::AutoCliRegistration => value(
-                        set(Preference::AutoCliRegistration(parse_bool(input)?))?,
-                    )?,
-                    SettingsKey::Notifications => value(set(Preference::Notifications(
-                        serde_json::from_str(input).map_err(|_| "Expected notification settings as a JSON object with boolean values")?
-                    ))?)?,
-                    SettingsKey::ConnectOnLaunch => value(
-                        set(Preference::ConnectOnLaunch(parse_bool(input)?))?,
-                    )?,
-                    SettingsKey::Appearance => value(set(Preference::Appearance(
-                        match input.as_str() {
-                            "system" => Appearance::System,
-                            "light" => Appearance::Light,
-                            "dark" => Appearance::Dark,
-                            _ => return Err("Expected system, light, or dark".into()),
-                        },
-                    ))?)?,
-                    SettingsKey::UpdateChannel => value(set(Preference::UpdateChannel(
-                        match input.as_str() {
-                            "beta" => UpdateChannel::Beta,
-                            "stable" => UpdateChannel::Stable,
-                            _ => return Err("Expected beta or stable".into()),
-                        },
-                    ))?)?,
-                    SettingsKey::WebUi
-                    | SettingsKey::WebUiPort
-                    | SettingsKey::WebUiListenAddress
-                    | SettingsKey::WebUiAllowNetworkAccess
-                    | SettingsKey::WebUiClientHost => {
-                        let mut config = client.call(rpc::Settings)?.web_ui;
-                        match key {
-                            SettingsKey::WebUi => config.enabled = parse_bool(input)?,
-                            SettingsKey::WebUiPort => {
-                                config.port =
-                                    input.parse().map_err(|_| "Expected a valid port number")?
-                            }
-                            SettingsKey::WebUiListenAddress => config.listen_address = input.clone(),
-                            SettingsKey::WebUiAllowNetworkAccess => {
-                                config.allow_network_access = parse_bool(input)?
-                            }
-                            SettingsKey::WebUiClientHost => {
-                                config.client_host = (!input.is_empty()).then(|| input.clone())
-                            }
-                            _ => unreachable!(),
-                        }
-                        value(client.call(rpc::SaveWebUi { config })?)?
-                    }
-                    SettingsKey::ListenAddress
-                    | SettingsKey::AllowNetworkAccess
-                    | SettingsKey::Port
-                    | SettingsKey::ClientHost => {
-                        let mut config = client.state()?.local_api;
-                        match key {
-                            SettingsKey::ListenAddress => config.listen_address = input.clone(),
-                            SettingsKey::AllowNetworkAccess => {
-                                config.allow_network_access = parse_bool(input)?
-                            }
-                            SettingsKey::Port => {
-                                config.port =
-                                    input.parse().map_err(|_| "Expected a valid port number")?
-                            }
-                            SettingsKey::ClientHost => {
-                                config.client_host = (!input.is_empty()).then(|| input.clone())
-                            }
-                            _ => unreachable!(),
-                        }
-                        desktop_core::config::resolve_local_api(config.clone())?;
-                        value(client.call(rpc::SaveLocalApi { config })?)?
-                    }
-                }
-                }
+        Action::Settings { command } => match command {
+            Settings::Reset => {
+                confirm(cli, "Stop protection, restore all agents, and reset backend settings, including turning off the web UI? Profiles, keys and usage are kept. Open at Login is managed by the desktop app.")?;
+                value(client.call(rpc::ResetSettings)?)?
             }
-        }
+            Settings::Show => {
+                let state = client.state()?;
+                let files = state.config_files;
+                json!({
+                    "files": {
+                        "config": files.config_path,
+                        "credentials": files.credentials_path,
+                        "error": files.error,
+                        "warnings": files.warnings,
+                    },
+                    "settings": client.call(rpc::Settings)?,
+                    "webUi": state.web_ui,
+                })
+            }
+            Settings::Schema => unreachable!(),
+            Settings::Set {
+                key,
+                value: input,
+                value_stdin,
+            } => {
+                if let Some(warning) = key.deprecation() {
+                    tracing::warn!("{warning}");
+                }
+                set_setting(cli, &client, key.key, input.as_deref(), *value_stdin)?
+            }
+        },
         Action::Token { command } => match command {
             Token::Rotate => {
                 confirm(
@@ -589,6 +500,102 @@ fn open_desktop_app(app: PathBuf) -> Result<Value, String> {
     Ok(json!({"opened": true}))
 }
 
+/// `settings set`: one key, through the backend like the desktop Settings page.
+fn set_setting(
+    cli: &Cli,
+    client: &Client,
+    key: SettingsKey,
+    input: Option<&str>,
+    value_stdin: bool,
+) -> Result<Value, String> {
+    if key == SettingsKey::WebUiPassword {
+        confirm(
+            cli,
+            "Change the web UI password and end every browser session?",
+        )?;
+        let password = read_web_ui_password(cli, input, value_stdin)?;
+        return value(client.call(rpc::SetWebUiPassword { password })?);
+    }
+    if value_stdin {
+        return Err("Only web-ui.password reads its value from stdin".into());
+    }
+    let input = input.ok_or_else(|| format!("Missing the value for {key}"))?;
+    confirm(cli, "Change Private AI Proxy settings?")?;
+    let set = |change| client.call(rpc::SetPreference { change });
+    match key {
+        SettingsKey::AutoCliRegistration => {
+            value(set(Preference::AutoCliRegistration(parse_bool(input)?))?)
+        }
+        SettingsKey::NotificationsEnabled
+        | SettingsKey::NotificationsGateway
+        | SettingsKey::NotificationsLocalApi
+        | SettingsKey::NotificationsVerification => value(set(Preference::Notification {
+            kind: match key {
+                SettingsKey::NotificationsEnabled => NotificationKind::Enabled,
+                SettingsKey::NotificationsGateway => NotificationKind::Gateway,
+                SettingsKey::NotificationsLocalApi => NotificationKind::LocalApi,
+                _ => NotificationKind::Verification,
+            },
+            enabled: parse_bool(input)?,
+        })?),
+        SettingsKey::Notifications => value(set(Preference::Notifications(
+            serde_json::from_str(input).map_err(|_| {
+                "Expected notification settings as a JSON object with boolean values"
+            })?,
+        ))?),
+        SettingsKey::ConnectOnLaunch => {
+            value(set(Preference::ConnectOnLaunch(parse_bool(input)?))?)
+        }
+        SettingsKey::Appearance => value(set(Preference::Appearance(match input {
+            "system" => Appearance::System,
+            "light" => Appearance::Light,
+            "dark" => Appearance::Dark,
+            _ => return Err("Expected system, light, or dark".into()),
+        }))?),
+        SettingsKey::UpdateChannel => value(set(Preference::UpdateChannel(match input {
+            "beta" => UpdateChannel::Beta,
+            "stable" => UpdateChannel::Stable,
+            _ => return Err("Expected beta or stable".into()),
+        }))?),
+        SettingsKey::WebUi
+        | SettingsKey::WebUiPort
+        | SettingsKey::WebUiListenAddress
+        | SettingsKey::WebUiAllowNetworkAccess
+        | SettingsKey::WebUiClientHost => {
+            let mut config = client.call(rpc::Settings)?.web_ui;
+            match key {
+                SettingsKey::WebUi => config.enabled = parse_bool(input)?,
+                SettingsKey::WebUiPort => {
+                    config.port = input.parse().map_err(|_| "Expected a valid port number")?
+                }
+                SettingsKey::WebUiListenAddress => config.listen_address = input.to_string(),
+                SettingsKey::WebUiAllowNetworkAccess => {
+                    config.allow_network_access = parse_bool(input)?
+                }
+                _ => config.client_host = (!input.is_empty()).then(|| input.to_string()),
+            }
+            value(client.call(rpc::SaveWebUi { config })?)
+        }
+        SettingsKey::ListenAddress
+        | SettingsKey::AllowNetworkAccess
+        | SettingsKey::Port
+        | SettingsKey::ClientHost => {
+            let mut config = client.state()?.local_api;
+            match key {
+                SettingsKey::ListenAddress => config.listen_address = input.to_string(),
+                SettingsKey::AllowNetworkAccess => config.allow_network_access = parse_bool(input)?,
+                SettingsKey::Port => {
+                    config.port = input.parse().map_err(|_| "Expected a valid port number")?
+                }
+                _ => config.client_host = (!input.is_empty()).then(|| input.to_string()),
+            }
+            desktop_core::config::resolve_local_api(config.clone())?;
+            value(client.call(rpc::SaveLocalApi { config })?)
+        }
+        SettingsKey::WebUiPassword => unreachable!(),
+    }
+}
+
 /// Opens or prints the web UI address. It carries no secret: the page asks for
 /// the web UI password.
 fn open_web_ui(cli: &Cli, client: &Client) -> Result<Value, String> {
@@ -596,10 +603,10 @@ fn open_web_ui(cli: &Cli, client: &Client) -> Result<Value, String> {
     let mut status = client.state()?.web_ui;
     if !status.enabled {
         if !status.password_set {
-            return Err("The web UI is off and has no password. Set one with `pap settings set webUiPassword`, then run `pap settings set webUi true`.".into());
+            return Err("The web UI is off and has no password. Set one with `pap settings set web-ui.password`, then run `pap settings set web-ui.enabled true`.".into());
         }
         if !cli.yes && (cli.json || cli.non_interactive || !io::stdin().is_terminal()) {
-            return Err("The web UI is off. Enable it with `pap settings set webUi true`, or rerun with --yes.".into());
+            return Err("The web UI is off. Enable it with `pap settings set web-ui.enabled true`, or rerun with --yes.".into());
         }
         confirm(
             cli,
@@ -609,7 +616,7 @@ fn open_web_ui(cli: &Cli, client: &Client) -> Result<Value, String> {
                 status.port
             ),
         )?;
-        // The same change `settings set webUi true` makes.
+        // The same change `settings set web-ui.enabled true` makes.
         let mut config = client.call(rpc::Settings)?.web_ui;
         config.enabled = true;
         status = client.call(rpc::SaveWebUi { config })?.web_ui;
@@ -762,8 +769,10 @@ fn doctor(client: &Client) -> Value {
 }
 
 /// The settings files as the running backend sees them, or as this user's
-/// environment resolves them. An invalid file fails the doctor; a
-/// credentials file other users can read and profiles without a saved key warn.
+/// environment resolves them. An invalid file, or a 0.1 import the running
+/// backend could not finish, fails the doctor; unknown keys, 0.1 import
+/// notices, a credentials file other users can read and profiles without a
+/// saved key warn.
 fn settings_diagnostics(
     client: &Client,
     errors: &mut Map<String, Value>,
@@ -771,11 +780,12 @@ fn settings_diagnostics(
 ) -> Value {
     let running = client.is_running().unwrap_or(false);
     let state = running.then(|| client.state().ok()).flatten();
-    let (config, credentials, error) = match &state {
+    let (config, credentials, error, notices) = match &state {
         Some(state) => (
             state.config_files.config_path.clone(),
             state.config_files.credentials_path.clone(),
             state.config_files.error.clone(),
+            state.config_files.warnings.clone(),
         ),
         None => {
             let paths = desktop_core::config::config_path()
@@ -787,29 +797,47 @@ fn settings_diagnostics(
                     return Value::Null;
                 }
             };
-            let error = desktop_core::config::load().err();
+            let loaded = match std::fs::read_to_string(&config) {
+                Ok(text) => desktop_core::config::parse(&text).map(|parsed| parsed.unknown),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+                Err(error) => Err(format!("Cannot read {}: {error}", config.display())),
+            };
+            let (error, unknown) = match loaded {
+                Ok(unknown) => (None, unknown),
+                Err(error) => (Some(error), Vec::new()),
+            };
             (
                 config.to_string_lossy().into_owned(),
                 credentials.to_string_lossy().into_owned(),
                 error,
+                unknown,
             )
         }
     };
     if let Some(error) = &error {
         errors.insert("settings".into(), json!(error));
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(metadata) = std::fs::symlink_metadata(&credentials) {
-            if metadata.permissions().mode() & 0o077 != 0 {
-                warnings.insert(
-                    "credentials".into(),
-                    json!(format!(
-                        "{credentials} can be read by other users; run `chmod 600 {credentials}`"
-                    )),
-                );
-            }
+    if !notices.is_empty() {
+        warnings.insert("settingsFiles".into(), json!(notices));
+    }
+    match desktop_core::private_fs::readable_by_others(Path::new(&credentials)) {
+        Ok(Some(true)) => {
+            let fix = if cfg!(windows) {
+                format!("run `icacls \"{credentials}\" /inheritance:r /grant:r \"%USERNAME%:F\"`")
+            } else {
+                format!("run `chmod 600 {credentials}`")
+            };
+            warnings.insert(
+                "credentials".into(),
+                json!(format!("{credentials} can be read by other users; {fix}")),
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            warnings.insert(
+                "credentials".into(),
+                json!(format!("Cannot check who can read {credentials}: {error}")),
+            );
         }
     }
     if let Some(state) = &state {
@@ -826,7 +854,7 @@ fn settings_diagnostics(
             );
         }
     }
-    json!({ "config": config, "credentials": credentials, "error": error })
+    json!({ "config": config, "credentials": credentials, "error": error, "warnings": notices })
 }
 
 fn update_notice() -> Result<desktop_core::updates::UpdateNotice, String> {

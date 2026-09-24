@@ -52,7 +52,7 @@ remains optional and does not block the coordinated release.
 ## Updates by installation
 
 Every Direct installation follows the saved update channel (desktop **Update
-channel** toggle, or `pap settings set updateChannel beta|stable`); without a saved
+channel** toggle, or `pap settings set update-channel beta|stable`); without a saved
 choice it follows the channel of the running build. The beta channel reads both
 the beta and the stable feed and offers whichever release is newer, so beta users
 also receive stable releases. The stable channel never offers a beta. Switching
@@ -121,12 +121,9 @@ pacman runs only the new package's scripts on upgrade.
 
 ### Planned removals (0.3)
 
-These exist only for installations of 0.1.x and go in 0.3, with the other 0.3
-removals listed in [Settings files](configuration.md):
-
-- The DEB `prerm` for `failed-upgrade` (`src-tauri/installer/deb-prerm.sh`).
-- `pap cli install` replacing the Windows `.cmd` shims earlier releases wrote
-  (`LEGACY_SCRIPT` in `cli/manage/install.rs`).
+The packaging compatibility code for installations of 0.1.x (the DEB `prerm`
+for `failed-upgrade`, the Windows `.cmd` shim migration) is listed with every
+other 0.3 removal in [Removal in 0.3](configuration.md#removal-in-03).
 
 A feed advances only after its release is public and every manifest URL
 responds, so a feed never names an unpublished asset. Assets are replaced one

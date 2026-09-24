@@ -221,9 +221,25 @@ pub fn export_path(path: &Path) -> Result<String, String> {
 pub enum Preference {
     AutoCliRegistration(bool),
     Notifications(NotificationPreferences),
+    /// One notification switch, applied to the saved preferences by the
+    /// backend so concurrent changes of the others are kept.
+    Notification {
+        kind: NotificationKind,
+        enabled: bool,
+    },
     ConnectOnLaunch(bool),
     Appearance(Appearance),
     UpdateChannel(UpdateChannel),
+}
+
+/// A field of [`NotificationPreferences`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NotificationKind {
+    Enabled,
+    Gateway,
+    LocalApi,
+    Verification,
 }
 
 impl Preference {
@@ -231,6 +247,15 @@ impl Preference {
         match self {
             Self::AutoCliRegistration(enabled) => saved.auto_cli_registration = Some(enabled),
             Self::Notifications(config) => saved.notifications = config,
+            Self::Notification { kind, enabled } => {
+                let notifications = &mut saved.notifications;
+                *match kind {
+                    NotificationKind::Enabled => &mut notifications.enabled,
+                    NotificationKind::Gateway => &mut notifications.gateway,
+                    NotificationKind::LocalApi => &mut notifications.local_api,
+                    NotificationKind::Verification => &mut notifications.verification,
+                } = enabled;
+            }
             Self::ConnectOnLaunch(enabled) => saved.connect_on_launch = enabled,
             Self::Appearance(appearance) => saved.appearance = appearance,
             Self::UpdateChannel(channel) => saved.update_channel = Some(channel),
@@ -294,6 +319,7 @@ impl RpcError {
             "The connection preview",
             "config.toml",
             "credentials.toml",
+            "Settings from 0.1",
         ] {
             if message.starts_with(prefix) && message.len() < 512 {
                 return Self::new("invalid_state", message);

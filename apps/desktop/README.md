@@ -110,8 +110,10 @@ Tauri, its sidecars, and the standalone CLI therefore resolve one dependency
 graph and reuse one build cache.
 
 The Tauri development server is only the renderer transport used by
-`tauri dev`. The repository does not ship a browser preview application, a mock
-desktop runtime, or screenshot-specific production branches.
+`tauri dev`. The same renderer, built with `npm run build:web`, is the web UI
+the backend service serves (see [the CLI guide](docs/cli.md#web-ui)); it talks
+to the real service, never to a mock desktop runtime, and there are no
+screenshot-specific production branches.
 
 ## Verification
 

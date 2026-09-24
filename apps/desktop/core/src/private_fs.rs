@@ -1,5 +1,6 @@
 //! Owner-only files and atomic replacement, shared by every process that
-//! writes app state: preferences, profiles, locks, tokens and agent configs.
+//! writes app state and settings: credentials, local state, locks, tokens and
+//! agent configs.
 
 use std::{fs, io, path::Path};
 
@@ -20,7 +21,9 @@ pub fn create_private_dir(dir: &Path) -> io::Result<()> {
     }
 }
 
-/// Create an owner-only file that must not exist yet (never follows a symlink).
+/// Create an owner-only file that must not exist yet (never follows a
+/// symlink). It is owner-only before it holds anything: mode 0600 on Unix, the
+/// owner-only DACL on Windows.
 pub fn write_private(path: &Path, content: &str) -> io::Result<()> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -29,8 +32,12 @@ pub fn write_private(path: &Path, content: &str) -> io::Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
+    #[cfg(windows)]
+    crate::windows_acl::allow_dacl_change(&mut options);
     use std::io::Write;
     let mut file = options.open(path)?;
+    #[cfg(windows)]
+    crate::windows_acl::restrict_to_current_user(&file)?;
     file.write_all(content.as_bytes())?;
     file.sync_all()
 }
@@ -89,9 +96,11 @@ pub fn read_private_text(path: &Path) -> io::Result<Option<String>> {
     }
 }
 
-/// Restore owner-only permissions on an existing private file, through an
-/// `O_NOFOLLOW` descriptor so the path cannot be swapped for a symlink
-/// between check and change. Missing files are fine.
+/// Restore owner-only permissions on an existing private file, through a
+/// handle that does not follow links, so the file checked is the file
+/// changed: mode 0600 on Unix; on Windows a protected DACL for the current
+/// user (and LocalSystem and Administrators), so it is owner-only wherever it
+/// lives, not only under the profile's inherited ACL. Missing files are fine.
 pub fn tighten_private(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     if let Some(file) = open_private(path)? {
@@ -101,9 +110,41 @@ pub fn tighten_private(path: &Path) -> io::Result<()> {
             file.set_permissions(fs::Permissions::from_mode(0o600))?;
         }
     }
-    #[cfg(not(unix))]
-    let _ = path;
+    #[cfg(windows)]
+    if open_private(path)?.is_some() {
+        let file = crate::windows_acl::open_for_dacl_change(path)?;
+        if file.metadata()?.file_type().is_symlink() {
+            return Err(symlink_refused());
+        }
+        crate::windows_acl::restrict_to_current_user(&file)?;
+    }
     Ok(())
+}
+
+/// Whether other users can read an existing private file: group or other
+/// permission bits on Unix, an allow entry for anyone but the current user,
+/// LocalSystem and Administrators on Windows. `Ok(None)` when it is absent.
+pub fn readable_by_others(path: &Path) -> io::Result<Option<bool>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => Ok(Some(metadata.permissions().mode() & 0o077 != 0)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+    #[cfg(windows)]
+    {
+        let handle = match crate::windows_acl::open_for_inspection(path) {
+            Ok(handle) => handle,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        crate::windows_acl::read(&handle)
+            .map(|acl| Some(acl.readable_by_others()))
+            .map_err(io::Error::other)
+    }
 }
 
 /// Persist Unix directory entries through an O_DIRECTORY, O_NOFOLLOW handle.
@@ -128,6 +169,28 @@ pub fn sync_dir(_dir: &Path) -> io::Result<()> {
 /// when it exists; see [`publish`]. Callers that need cross-process exclusion
 /// wrap this in `lock::with_apply_lock`.
 pub fn write_atomic(path: &Path, content: &str, expected: Option<Option<&str>>) -> io::Result<()> {
+    replace(path, content, expected, false)
+}
+
+/// [`write_atomic`] for a file only its owner may read (credentials, local
+/// secrets): the replacement is made owner-only before it moves into place,
+/// whatever the permissions of the file it replaces, so there is no moment
+/// when another user can read it (0600 on Unix, the owner-only DACL on
+/// Windows).
+pub fn write_private_atomic(
+    path: &Path,
+    content: &str,
+    expected: Option<Option<&str>>,
+) -> io::Result<()> {
+    replace(path, content, expected, true)
+}
+
+fn replace(
+    path: &Path,
+    content: &str,
+    expected: Option<Option<&str>>,
+    private: bool,
+) -> io::Result<()> {
     let dir = path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no parent directory"))?;
@@ -155,11 +218,13 @@ pub fn write_atomic(path: &Path, content: &str, expected: Option<Option<&str>>) 
     }
     publish(path, Publish::Replace, |file| {
         use std::io::Write;
-        file.write_all(content.as_bytes())?;
-        if let Some(metadata) = &existing {
+        if private {
+            #[cfg(windows)]
+            crate::windows_acl::restrict_to_current_user(file)?;
+        } else if let Some(metadata) = &existing {
             file.set_permissions(metadata.permissions())?;
         }
-        Ok(())
+        file.write_all(content.as_bytes())
     })
 }
 
@@ -206,10 +271,20 @@ pub fn publish(
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("file");
+    // Created owner-only (0600 on Unix, as tempfile does; on Windows with
+    // the access `write` needs to replace its DACL before anything is in it).
     let mut temporary = tempfile::Builder::new()
         .prefix(&format!(".{name}."))
         .suffix(".tmp")
-        .tempfile_in(dir)?;
+        .make_in(dir, |path| {
+            let mut options = fs::OpenOptions::new();
+            options.read(true).write(true).create_new(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+            #[cfg(windows)]
+            crate::windows_acl::allow_dacl_change(&mut options);
+            options.open(path)
+        })?;
     write(temporary.as_file_mut())?;
     temporary.as_file().sync_all()?;
     // Publish through a closed handle: nothing can observe the destination

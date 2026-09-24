@@ -2,7 +2,7 @@ use super::*;
 use crate::web_ui;
 use desktop_core::{config::WebUiConfig, contracts::WebUiStatus};
 
-const NEEDS_PASSWORD: &str = "Web UI needs a sign-in password. Set one in Settings or with `pap settings set webUiPassword`, then turn it on.";
+const NEEDS_PASSWORD: &str = "Web UI needs a sign-in password. Set one in Settings or with `pap settings set web-ui.password`, then turn it on.";
 
 impl DesktopRuntime {
     pub(crate) fn admission(&self) -> Arc<crate::server::Admission> {

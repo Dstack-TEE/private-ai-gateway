@@ -8,7 +8,10 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::{Mutex, MutexGuard},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, MutexGuard,
+    },
 };
 
 use agent_bridge::secrets::SecretStore;
@@ -55,8 +58,7 @@ pub fn load(path: &Path) -> Result<LocalSecrets, String> {
 pub fn save(path: &Path, secrets: &LocalSecrets) -> Result<(), String> {
     let text = serde_json::to_string_pretty(secrets)
         .map_err(|_| format!("Cannot encode {LOCAL_STATE_FILE}"))?;
-    private_fs::write_atomic(path, &text, None)
-        .and_then(|()| private_fs::tighten_private(path))
+    private_fs::write_private_atomic(path, &text, None)
         .map_err(|error| format!("Cannot save {LOCAL_STATE_FILE}: {error}"))
 }
 
@@ -64,6 +66,9 @@ pub struct LocalState {
     path: PathBuf,
     /// A damaged file stays unavailable rather than being overwritten.
     secrets: Mutex<Result<LocalSecrets, String>>,
+    /// While the 0.1 credential import runs, a missing restore value may
+    /// still be on its way from the OS credential store.
+    importing: AtomicBool,
 }
 
 impl LocalState {
@@ -72,7 +77,16 @@ impl LocalState {
         Self {
             secrets: Mutex::new(load(&path)),
             path,
+            importing: AtomicBool::new(false),
         }
+    }
+
+    pub(crate) fn set_importing(&self, importing: bool) {
+        self.importing.store(importing, Ordering::Release);
+    }
+
+    pub(crate) fn importing(&self) -> bool {
+        self.importing.load(Ordering::Acquire)
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, Result<LocalSecrets, String>>, String> {
@@ -103,8 +117,14 @@ impl LocalState {
 
 /// Agents park the credential values they take over here.
 impl SecretStore for LocalState {
+    /// A value that may still be importing fails (the agent operation is
+    /// retried) rather than reading as absent, which would drop it for good.
     fn get(&self, entry: &str) -> Result<Option<String>, String> {
-        Ok(self.read()?.agent_restore.get(entry).cloned())
+        let value = self.read()?.agent_restore.get(entry).cloned();
+        if value.is_none() && self.importing.load(Ordering::Acquire) {
+            return Err("Saved agent credentials from 0.1 are not imported from the system credential store yet".to_string());
+        }
+        Ok(value)
     }
 
     fn set(&self, entry: &str, value: &str) -> Result<(), String> {
