@@ -18,14 +18,20 @@ export function installNativeInteractions(api: Pick<DesktopApi, "showEditMenu">)
   const fileDrop = (event: DragEvent) => {
     if (event.dataTransfer?.types.includes("Files")) event.preventDefault();
   };
+  // Dropping a dragged in-app link would load it as a new document.
+  const linkDrag = (event: DragEvent) => {
+    if (event.target instanceof Element && event.target.closest("a[href]")) event.preventDefault();
+  };
   window.addEventListener("contextmenu", contextMenu);
   window.addEventListener("keydown", keyDown);
   window.addEventListener("dragover", fileDrop);
   window.addEventListener("drop", fileDrop);
+  window.addEventListener("dragstart", linkDrag);
   return () => {
     window.removeEventListener("contextmenu", contextMenu);
     window.removeEventListener("keydown", keyDown);
     window.removeEventListener("dragover", fileDrop);
     window.removeEventListener("drop", fileDrop);
+    window.removeEventListener("dragstart", linkDrag);
   };
 }

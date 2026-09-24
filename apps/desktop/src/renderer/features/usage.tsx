@@ -1,5 +1,6 @@
 import React, { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import { usagePageQuery } from "../lib/page-queries";
 import { errorMessage } from "../lib/error-message";
 import { Ban, ChevronLeft, ChevronRight, ShieldCheck, ShieldX } from "lucide-react";
@@ -10,7 +11,7 @@ import { UsageChart, type UsageMetric } from "../components/usage-chart";
 import { StateLabel } from "../components/state-label";
 import { Hint } from "../components/hint";
 import { agentName, currency, formatTokens, outcomeOf, usageTokens } from "../lib/usage-presentation";
-import { usageDateBounds, usageDateLabel, type UsageDateSelection } from "../lib/usage-dates";
+import { USAGE_PAGE_SIZES, USAGE_SEARCH_DEFAULTS, usageDateBounds, usageDateLabel, usageDateSearch, usageDateSelection, type UsageSearch } from "../lib/usage-dates";
 import { Field, FieldLabel, FieldSet, FieldLegend } from "../components/ui/field";
 import { ErrorAlert } from "../components/error-alert";
 import { Card, CardHeader, CardTitle, CardDescription, CardAction, CardContent } from "../components/ui/card";
@@ -52,17 +53,24 @@ export function UsageView({
   agents: AgentStatus[];
   onInspect(activity: RequestActivity): void;
 }): React.JSX.Element {
-  const [agent, setAgent] = useState("");
-  const [model, setModel] = useState("");
-  const [range, setRange] = useState<UsageDateSelection>({ preset: "7d" });
-  const [pageSize, setPageSize] = useState(20);
+  const search = useSearch({ from: "/usage" });
+  const navigate = useNavigate({ from: "/usage" });
+  const filter = (next: UsageSearch) => void navigate({ search: (current) => ({ ...current, ...next }) });
+  const agent = search.agent ?? "";
+  const model = search.model ?? "";
+  const range = usageDateSelection(search);
+  const pageSize = search.rows ?? USAGE_SEARCH_DEFAULTS.rows;
   const [metric, setMetric] = useState<UsageMetric>("tokens");
-  const [cursors, setCursors] = useState<(string | undefined)[]>([undefined]);
-  const focusAfterPage = useRef(false);
-  const currentCursor = cursors[cursors.length - 1];
   const bounds = usageDateBounds(range);
   const { since, until } = bounds;
-  const usageQuery = { agent: agent || undefined, model: model || undefined, since, until, cursor: currentCursor, limit: pageSize };
+  const filters = { agent: search.agent, model: search.model, since, until, limit: pageSize };
+  // Cursors are opaque positions in one filtered result, so the page stack
+  // stays in memory and restarts whenever the filters in the URL change.
+  const filterKey = JSON.stringify(filters);
+  const [pagination, setPagination] = useState({ filterKey, cursors: [undefined] as (string | undefined)[] });
+  const cursors = pagination.filterKey === filterKey ? pagination.cursors : [undefined];
+  const focusAfterPage = useRef(false);
+  const usageQuery = { ...filters, cursor: cursors[cursors.length - 1] };
   const { data: page, error: queryError, isPending: loading } = useQuery(usagePageQuery(usageQuery));
   const error = queryError ? errorMessage(queryError) : undefined;
   useEffect(() => {
@@ -72,9 +80,6 @@ export function UsageView({
     }
   }, [loading, page, queryError]);
 
-  const resetPagination = () => {
-    setCursors([undefined]);
-  };
   const agentOptions = Array.from(new Set([
     ...(agent ? [agent] : []),
     ...agents.map((entry) => entry.id),
@@ -86,11 +91,11 @@ export function UsageView({
     <div className="usage-page max-w-230 min-h-full mt-0 mr-auto mb-0 ml-auto">
       <ErrorAlert title="Could not load usage" error={error} />
       <div className="usage-toolbar grid grid-cols-[minmax(150px,_0.8fr)_minmax(210px,_1.25fr)_auto] items-end gap-2.5 [&_select]:w-full [&_select]:min-w-0 max-[780px]:grid-cols-2 max-[440px]:grid-cols-1" role="group" aria-label="Usage filters">
-        <Field><FieldLabel htmlFor="usage-agent">Agent</FieldLabel><ChoiceSelect id="usage-agent" label="Agent" className="w-full" value={agent} onChange={(value) => { setAgent(value); resetPagination(); }} options={[{ value: "", label: "All agents" }, ...agentOptions.map((entry) => ({ value: entry, label: agentName(entry) }))]} /></Field>
-        <Field><FieldLabel htmlFor="usage-model">Model</FieldLabel><ChoiceSelect id="usage-model" label="Model" className="w-full" value={model} onChange={(value) => { setModel(value); resetPagination(); }} options={[{ value: "", label: "All models" }, ...modelOptions.map((entry) => ({ value: entry, label: entry }))]} /></Field>
+        <Field><FieldLabel htmlFor="usage-agent">Agent</FieldLabel><ChoiceSelect id="usage-agent" label="Agent" className="w-full" value={agent} onChange={(value) => filter({ agent: value || undefined })} options={[{ value: "", label: "All agents" }, ...agentOptions.map((entry) => ({ value: entry, label: agentName(entry) }))]} /></Field>
+        <Field><FieldLabel htmlFor="usage-model">Model</FieldLabel><ChoiceSelect id="usage-model" label="Model" className="w-full" value={model} onChange={(value) => filter({ model: value || undefined })} options={[{ value: "", label: "All models" }, ...modelOptions.map((entry) => ({ value: entry, label: entry }))]} /></Field>
         <FieldSet className="time-filter max-[780px]:col-span-full max-[440px]:col-auto min-w-0 gap-0">
           <FieldLegend variant="label" className="leading-snug">Time</FieldLegend>
-          <Suspense fallback={<Button variant="outline" disabled>{usageDateLabel(range)}</Button>}><UsageDatePicker value={range} onChange={(next) => { setRange(next); resetPagination(); }} /></Suspense>
+          <Suspense fallback={<Button variant="outline" disabled>{usageDateLabel(range)}</Button>}><UsageDatePicker value={range} onChange={(next) => filter(usageDateSearch(next))} /></Suspense>
         </FieldSet>
       </div>
       <UsageStats page={page} />
@@ -111,14 +116,14 @@ export function UsageView({
         <div className="pagination mt-2.5 flex flex-wrap items-center justify-center gap-3 [&_>_span]:min-w-32 [&_>_span]:text-muted-foreground [&_>_span]:text-center">
           <Field orientation="horizontal" className="w-auto">
             <FieldLabel htmlFor="usage-page-size">Rows per page</FieldLabel>
-            <ChoiceSelect id="usage-page-size" label="Rows per page" size="sm" value={String(pageSize)} disabled={loading} onChange={(value) => { setPageSize(Number(value)); resetPagination(); }} options={[20, 50, 100].map((size) => ({ value: String(size), label: String(size) }))} />
+            <ChoiceSelect id="usage-page-size" label="Rows per page" size="sm" value={String(pageSize)} disabled={loading} onChange={(value) => filter({ rows: USAGE_PAGE_SIZES.find((size) => String(size) === value) })} options={USAGE_PAGE_SIZES.map((size) => ({ value: String(size), label: String(size) }))} />
           </Field>
           <IconButton
             label="Previous usage page"
             disabled={loading || cursors.length === 1}
             onClick={() => {
               focusAfterPage.current = true;
-              setCursors((value) => value.slice(0, -1));
+              setPagination({ filterKey, cursors: cursors.slice(0, -1) });
             }}
           ><ChevronLeft size={16} /></IconButton>
           <span role="status" aria-live="polite">
@@ -134,7 +139,7 @@ export function UsageView({
               const next = page?.nextCursor;
               if (!next) return;
               focusAfterPage.current = true;
-              setCursors((value) => [...value, next]);
+              setPagination({ filterKey, cursors: [...cursors, next] });
             }}
           ><ChevronRight size={16} /></IconButton>
         </div>
