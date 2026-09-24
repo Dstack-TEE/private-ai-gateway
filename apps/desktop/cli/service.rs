@@ -1,20 +1,6 @@
-// The service compiles the shared verifier modules but does not call their
-// standalone CLI entry points.
-#![allow(dead_code)]
-
-mod args;
-mod capture;
-mod checks;
-mod client;
-mod serve;
-mod sessions;
-#[cfg(test)]
-mod spec_fixtures;
-mod transcript;
-mod verify;
-
 use clap::Parser;
 use desktop_runtime::controller::{DesktopRuntime, RuntimeOptions};
+use private_ai_proxy::serve::managed::InProcessVerifierLauncher;
 use std::sync::Arc;
 
 #[derive(Parser)]
@@ -63,7 +49,7 @@ async fn run() -> Result<(), String> {
             name.to_string()
         }
     };
-    let launcher = Arc::new(serve::InProcessVerifierLauncher::new(
+    let launcher = Arc::new(InProcessVerifierLauncher::new(
         tokio::runtime::Handle::current(),
     ));
     let options = RuntimeOptions {

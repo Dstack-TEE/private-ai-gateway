@@ -4,7 +4,7 @@
 //! constants keep PAP tests on the relying-party boundary: parse and verify
 //! artifacts exactly as a remote ACI service would send them.
 
-use private_ai_proxy::aci::types::{
+use crate::aci::types::{
     AttestationEnvelope, AttestationReport, ServiceCapabilities, SourceProvenance,
 };
 use serde_json::{json, Value};
@@ -57,7 +57,7 @@ pub fn vector_report() -> AttestationReport {
 }
 
 pub fn vector_session_bytes() -> Vec<u8> {
-    private_ai_proxy::aci::digest::jcs_bytes(&wire_fixture("session"))
+    crate::aci::digest::jcs_bytes(&wire_fixture("session"))
         .expect("published session fixture canonicalizes")
 }
 

@@ -1,19 +1,8 @@
 //! Unified Private AI Proxy CLI, including the ACI protocol commands.
-mod args;
-mod audit;
-mod capture;
-mod checks;
-mod client;
 mod manage;
-mod send;
-mod serve;
-mod sessions;
-#[cfg(test)]
-mod spec_fixtures;
-mod transcript;
-mod verify;
 
 use clap::{FromArgMatches, Subcommand};
+use private_ai_proxy::{args, audit, send, serve, sessions, verify};
 use std::{io::IsTerminal, path::Path};
 
 #[tokio::main]
