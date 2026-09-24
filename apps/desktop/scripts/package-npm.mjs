@@ -22,6 +22,7 @@ const repositoryRoot = path.resolve(appRoot, "../..");
 const wrapperTemplate = path.join(appRoot, "npm/private-ai-proxy");
 
 export const npmPackageName = "private-ai-proxy";
+export const npmPlatformScope = "@phala";
 export const npmPlatforms = {
   macos: "darwin",
   linux: "linux",
@@ -29,13 +30,11 @@ export const npmPlatforms = {
 };
 export const npmArchitectures = ["arm64", "x64"];
 
-export function platformPackageAlias(platform, arch) {
-  return `${npmPackageName}-${platformTarget(platform, arch)}`;
-}
-
-export function platformPackageVersion(version, platform, arch) {
-  validateNpmVersion(version);
-  return validateNpmVersion(`${version}-${platformTarget(platform, arch)}`);
+// One scoped package per target, named like esbuild's `@esbuild/linux-x64`
+// and Biome's `@biomejs/cli-linux-x64`, with the product prefix because the
+// `@phala` scope is shared.
+export function platformPackageName(platform, arch) {
+  return `${npmPlatformScope}/${npmPackageName}-${platformTarget(platform, arch)}`;
 }
 
 function platformTarget(platform, arch) {
@@ -57,10 +56,7 @@ export function validateNpmVersion(version) {
 export function wrapperManifest(version) {
   validateNpmVersion(version);
   const optionalDependencies = Object.keys(npmPlatforms).flatMap((platform) =>
-    npmArchitectures.map((arch) => [
-      platformPackageAlias(platform, arch),
-      `npm:${npmPackageName}@${platformPackageVersion(version, platform, arch)}`,
-    ]),
+    npmArchitectures.map((arch) => [platformPackageName(platform, arch), version]),
   );
   return {
     name: npmPackageName,
@@ -89,17 +85,22 @@ export function wrapperManifest(version) {
 export function platformManifest({ platform, arch, version }) {
   const target = platformTarget(platform, arch);
   return {
-    name: npmPackageName,
-    version: platformPackageVersion(version, platform, arch),
+    name: platformPackageName(platform, arch),
+    version: validateNpmVersion(version),
     description: `Native Private AI Proxy binaries for ${target}`,
     license: "Apache-2.0",
     repository: {
       type: "git",
       url: "git+https://github.com/Dstack-TEE/private-ai-gateway.git",
+      directory: "apps/desktop/npm",
     },
     homepage: "https://github.com/Dstack-TEE/private-ai-gateway#readme",
     os: [npmPlatforms[platform]],
     cpu: [arch],
+    // The Linux binaries link against glibc 2.35+; there is no musl build.
+    ...(platform === "linux" ? { libc: ["glibc"] } : {}),
+    // Yarn PnP must extract the package so the executables exist on disk.
+    preferUnplugged: true,
     files: ["vendor"],
     publishConfig: { access: "public" },
   };
@@ -124,7 +125,7 @@ export async function buildPlatformPackage({ platform, arch, version, source, ou
     await writePackageFiles(
       scratch,
       manifest,
-      `# Private AI Proxy (${platformTarget(platform, arch)})\n\nThis package version contains the native ${platformTarget(platform, arch)} binaries used by [private-ai-proxy](https://www.npmjs.com/package/private-ai-proxy).\n`,
+      `# ${manifest.name}\n\nThe native ${platformTarget(platform, arch)} binaries of [private-ai-proxy](https://www.npmjs.com/package/private-ai-proxy). Install \`private-ai-proxy\` instead of this package.\n`,
     );
     return packDirectory(scratch, output);
   } finally {
@@ -198,7 +199,7 @@ function parseArguments(arguments_) {
   if (command === "wrapper") return { command, version, output: path.resolve(output) };
   const platform = values.get("platform");
   const arch = values.get("arch");
-  platformPackageAlias(platform, arch);
+  platformTarget(platform, arch);
   const source = values.get("source");
   if (!source) throw new Error("--source is required for a platform package");
   return {

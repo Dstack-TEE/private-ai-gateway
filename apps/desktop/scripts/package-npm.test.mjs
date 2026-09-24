@@ -4,11 +4,11 @@ import {
   chmod,
   mkdir,
   mkdtemp,
-  readFile,
   rename,
   rm,
   writeFile,
 } from "node:fs/promises";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -16,13 +16,58 @@ import test from "node:test";
 import {
   buildPlatformPackage,
   buildWrapperPackage,
-  npmPackageName,
-  platformPackageAlias,
-  platformPackageVersion,
+  npmArchitectures,
+  npmPlatforms,
+  platformManifest,
+  platformPackageName,
+  wrapperManifest,
 } from "./package-npm.mjs";
 import { binaries } from "./package-cli.mjs";
 
+const require = createRequire(import.meta.url);
+const launcherModule = require("../npm/private-ai-proxy/bin/private-ai-proxy.cjs");
 const version = "1.2.3-beta.4";
+const targets = Object.entries(npmPlatforms).flatMap(([platform, npmPlatform]) =>
+  npmArchitectures.map((arch) => ({ platform, npmPlatform, arch })));
+
+test("pins one scoped platform package per target at the wrapper version", () => {
+  const wrapper = wrapperManifest(version);
+  assert.deepEqual(wrapper.optionalDependencies, {
+    "@phala/private-ai-proxy-darwin-arm64": version,
+    "@phala/private-ai-proxy-darwin-x64": version,
+    "@phala/private-ai-proxy-linux-arm64": version,
+    "@phala/private-ai-proxy-linux-x64": version,
+    "@phala/private-ai-proxy-win32-arm64": version,
+    "@phala/private-ai-proxy-win32-x64": version,
+  });
+  assert.equal(wrapper.scripts, undefined, "the wrapper must not rely on install scripts");
+
+  for (const { platform, npmPlatform, arch } of targets) {
+    const manifest = platformManifest({ platform, arch, version });
+    assert.equal(manifest.name, `@phala/private-ai-proxy-${npmPlatform}-${arch}`);
+    assert.equal(manifest.version, version);
+    assert.deepEqual(manifest.os, [npmPlatform]);
+    assert.deepEqual(manifest.cpu, [arch]);
+    assert.deepEqual(manifest.libc, platform === "linux" ? ["glibc"] : undefined);
+    assert.equal(manifest.publishConfig.access, "public");
+    assert.equal(manifest.scripts, undefined);
+  }
+  assert.throws(() => platformPackageName("linux", "ia32"), /Unsupported npm package target/);
+  assert.throws(() => wrapperManifest("1.2.3+build"), /without build metadata/);
+});
+
+test("the launcher resolves the same package the wrapper pins for each target", () => {
+  for (const { platform, npmPlatform, arch } of targets) {
+    assert.deepEqual(launcherModule.platformPackage(npmPlatform, arch), {
+      name: platformPackageName(platform, arch),
+      executable: `vendor/private-ai-proxy${npmPlatform === "win32" ? ".exe" : ""}`,
+    });
+  }
+  assert.equal(launcherModule.supportedTargets.length, targets.length);
+  for (const [platform, arch] of [["linux", "ia32"], ["freebsd", "x64"], ["darwin", "ppc64"]]) {
+    assert.equal(launcherModule.platformPackage(platform, arch), undefined);
+  }
+});
 
 test("packs a thin wrapper and a native package that execute together", {
   skip: process.platform !== "linux" || process.arch !== "x64",
@@ -41,67 +86,42 @@ test("packs a thin wrapper and a native package that execute together", {
       await chmod(file, 0o755);
     }
 
-    const platformTarball = await buildPlatformPackage({
-      platform: "linux",
-      arch: "x64",
-      version,
-      source,
-      output,
-    });
+    const platformTarball = await buildPlatformPackage({ platform: "linux", arch: "x64", version, source, output });
     const wrapperTarball = await buildWrapperPackage({ version, output });
-    const platformAlias = platformPackageAlias("linux", "x64");
-    const platformVersion = platformPackageVersion(version, "linux", "x64");
-    assert.equal(path.basename(platformTarball), `${npmPackageName}-${platformVersion}.tgz`);
-    assert.equal(path.basename(wrapperTarball), `${npmPackageName}-${version}.tgz`);
-
-    const platformFiles = tarballFiles(platformTarball);
+    assert.equal(path.basename(platformTarball), `phala-private-ai-proxy-linux-x64-${version}.tgz`);
+    assert.equal(path.basename(wrapperTarball), `private-ai-proxy-${version}.tgz`);
     assert.deepEqual(
-      platformFiles.filter((file) => file.startsWith("package/vendor/")).sort(),
-      binaries.map((binary) => `package/vendor/${binary}`).sort(),
+      tarballFiles(platformTarball).sort(),
+      ["package/LICENSE", "package/README.md", "package/package.json", ...binaries.map((binary) => `package/vendor/${binary}`)].sort(),
     );
-    const wrapperFiles = tarballFiles(wrapperTarball);
-    assert.ok(wrapperFiles.includes("package/bin/private-ai-proxy.cjs"));
-    assert.ok(!wrapperFiles.some((file) => file.startsWith("package/vendor/")));
+    assert.deepEqual(
+      tarballFiles(wrapperTarball).sort(),
+      ["package/LICENSE", "package/README.md", "package/bin/private-ai-proxy.cjs", "package/package.json"],
+    );
 
-    const missingDirectory = path.join(root, "missing/node_modules/private-ai-proxy");
-    await extractPackage(wrapperTarball, missingDirectory, root);
-    const missing = spawnSync(process.execPath, [path.join(missingDirectory, "bin/private-ai-proxy.cjs")], {
-      encoding: "utf8",
-    });
+    // A wrapper installed with --omit=optional has no platform package.
+    const modules = path.join(root, "node_modules");
+    const wrapperDirectory = path.join(modules, "private-ai-proxy");
+    await extractPackage(wrapperTarball, wrapperDirectory, root);
+    const launcher = path.join(wrapperDirectory, "bin/private-ai-proxy.cjs");
+    const missing = spawnSync(process.execPath, [launcher], { encoding: "utf8" });
     assert.equal(missing.status, 1);
-    assert.match(missing.stderr, new RegExp(`${platformAlias} is missing`));
+    assert.match(missing.stderr, /optional dependency @phala\/private-ai-proxy-linux-x64 is not installed/);
     assert.match(missing.stderr, /without --omit=optional/);
 
-    const install = path.join(root, "install");
-    const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-    execFileSync(npm, [
-      "install",
-      "--prefix", install,
-      "--ignore-scripts",
-      "--no-audit",
-      "--no-fund",
-      `${platformAlias}@file:${platformTarball}`,
-      `file:${wrapperTarball}`,
-    ]);
-
-    const wrapperDirectory = path.join(install, "node_modules/private-ai-proxy");
-    const platformDirectory = path.join(install, "node_modules", platformAlias);
-    const platformManifest = JSON.parse(await readFile(path.join(platformDirectory, "package.json"), "utf8"));
-    assert.equal(platformManifest.name, npmPackageName);
-    assert.equal(platformManifest.version, platformVersion);
-    assert.deepEqual(platformManifest.os, ["linux"]);
-    assert.deepEqual(platformManifest.cpu, ["x64"]);
-    const wrapperManifest = JSON.parse(await readFile(path.join(wrapperDirectory, "package.json"), "utf8"));
-    assert.equal(
-      wrapperManifest.optionalDependencies[platformAlias],
-      `npm:${npmPackageName}@${platformVersion}`,
-    );
-    assert.equal(Object.keys(wrapperManifest.optionalDependencies).length, 6);
-
-    const launcher = path.join(wrapperDirectory, "bin/private-ai-proxy.cjs");
+    const platformDirectory = path.join(modules, "@phala/private-ai-proxy-linux-x64");
+    await extractPackage(platformTarball, platformDirectory, root);
     assert.equal(execFileSync(process.execPath, [launcher, "hello", "world"], { encoding: "utf8" }), "native:hello world\n");
     const failed = spawnSync(process.execPath, [launcher, "--fail"], { encoding: "utf8" });
     assert.equal(failed.status, 7);
+
+    // A platform package from another release must not run.
+    await rm(platformDirectory, { recursive: true });
+    const otherTarball = await buildPlatformPackage({ platform: "linux", arch: "x64", version: "1.2.3", source, output });
+    await extractPackage(otherTarball, platformDirectory, root);
+    const mismatched = spawnSync(process.execPath, [launcher], { encoding: "utf8" });
+    assert.equal(mismatched.status, 1);
+    assert.match(mismatched.stderr, /@phala\/private-ai-proxy-linux-x64@1\.2\.3 does not match private-ai-proxy@1\.2\.3-beta\.4/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

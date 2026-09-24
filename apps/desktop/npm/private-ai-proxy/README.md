@@ -10,17 +10,14 @@ npm install --global private-ai-proxy
 
 The package installs `pap` as the preferred command. `private-ai-proxy` is the
 full-name alias and `aci` is a legacy alias kept for existing scripts; all three
-run the same CLI. npm selects the native package for the current operating system and CPU
-architecture.
+run the same CLI. The native executables for each supported platform ship in an
+optional dependency such as `@phala/private-ai-proxy-linux-x64`, and your package
+manager installs only the one for the current operating system and CPU
+architecture. Do not install with `--omit=optional` or `--no-optional`.
 
-Do not install with `--omit=optional`: the platform-specific executable is
-delivered as an optional dependency.
-
-Install `private-ai-proxy` (the stable release), `private-ai-proxy@beta`, or an
-exact version such as `private-ai-proxy@0.1.7`. Do not use a prerelease range
-such as `private-ai-proxy@^0.1.7-beta.2`: the platform-specific versions share
-this package name (for example `0.1.7-linux-x64`), so such a range can resolve
-to a platform payload instead of the installable package.
+Supported platforms are macOS, Linux with glibc 2.35 or newer, and Windows, each
+on arm64 and x64. musl-based Linux distributions such as Alpine are not
+supported.
 
 ## Use
 
