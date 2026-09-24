@@ -67,10 +67,18 @@ Feeds are the GitHub releases `desktop-updates-beta` and `desktop-updates-stable
 `<os>-<arch>-<installer>` keys; its `version` must belong to the feed. Every
 artifact is signed with the updater key and verified before installation.
 
-Clients released before 0.2.0 read per-platform `latest-<os>-<arch>.json`
-files instead and require their `channel` to match the feed. Each release keeps
-writing those files to its own channel's feed until 0.3 (see
-[Removal in 0.3](configuration.md#removal-in-03)).
+Clients up to 0.1.7-beta.4 read per-platform `latest-<os>-<arch>.json` files
+instead and require their `channel` to match the feed. Releases 0.1.7-beta.2 to
+0.1.7-beta.4 read both the beta and the stable feed and offer whichever release
+is newer; releases up to and including 0.1.7-beta.1 only read their own
+channel's feed. Each release keeps writing those files to its own channel's
+feed until 0.3 (see [Removal in 0.3](configuration.md#removal-in-03)).
+
+Beta builds that predate per-platform feeds (before 0.1.2-beta.44) read the beta
+feed's `latest.json` and accept only a beta. After a stable release is published
+to the beta feed, they report "The update does not match the selected channel"
+until the next beta is published. This is an accepted consequence of
+publishing stable releases to the beta feed.
 
 | Installation | Update key or source | How it updates | Backend and restart |
 | --- | --- | --- | --- |
