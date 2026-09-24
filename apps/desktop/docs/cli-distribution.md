@@ -103,10 +103,11 @@ publishes the GitHub release and updater feed, then dispatches the dedicated npm
 publisher at the immutable release tag and waits for its result. npm validates
 the top-level workflow filename for trusted publishing, so this keeps the single
 configured OIDC publisher without storing a write token or duplicating packaging
-logic. The npm publisher uploads the six platform versions first, waits until the
-public registry serves all of them and a fresh install of the wrapper resolves
-them, and only then publishes the wrapper under `latest` or `beta`, because
-trusted publishing cannot move a dist-tag after the fact. See
+logic. The npm publisher uploads the six `@phala/private-ai-proxy-<os>-<cpu>`
+platform packages first, waits until the public registry serves all of them and
+a fresh install of the wrapper resolves them, and only then publishes the
+wrapper under `latest` or `beta`, because trusted publishing cannot move a
+dist-tag after the fact. See
 [`apps/desktop/npm/README.md`](../npm/README.md#release) for the full order.
 
 `Desktop Tauri` remains the reusable Direct release worker and the focused beta,
