@@ -1,186 +1,192 @@
 # Confidential AI Review
 
-Date: 2026-09-23 UTC (live endpoints rechecked at 20:08 UTC).
-Operator: Inexorable, Inc. d/b/a Confidential AI.
+Date: 2026-09-24 UTC.
+Operator: Inexorable, Inc. d/b/a Confidential AI. Product: Confidential Inference.
 Production endpoint: `https://api.confidential.ai`.
 Candidate endpoint: `https://candidate.api.confidential.ai`.
 
 Source repos reviewed:
 
-- `confidential-dot-ai/confidential-inference` at `main`
-  `a54319a2ebb2ae51f161d7c2085bffcca02e082c`, which is also the signed
+- `confidential-dot-ai/confidential-inference` at
+  `a54319a2ebb2ae51f161d7c2085bffcca02e082c`, which is `main` and the signed
   pre-release tag `v0.13.28-rc.2`
 - `confidential-dot-ai/c8s` at `ec67bd84615990d797ae687f449120915e5002ea`
   (AGPL-3.0; read for the protocol, not a source for adapter code)
 - `confidential-dot-ai/TEErminator` at
   `8d302348a7f66a2bfd74b24535c6f2f791b2839e` (MIT)
 
-Supporting documentation:
+Provider documentation: `docs/threat-model.md`, `services/gateway/ATTESTATION.md`,
+and `releases/README.md` in `confidential-inference`.
 
-- `confidential.ai/docs/inference-api/attestation`
-- `confidential.ai/docs/c8s`
-- `confidential.ai/docs/attested-builds`
-
-> **Gateway verification:** an adapter (provider kind `c8s`) is in progress;
-> its reference will be [`../c8s/verification.md`](../c8s/verification.md).
-> It implements the requirements below with one interim deviation, described
-> in [Interim RTMR3 Policy](#interim-rtmr3-policy). Having an adapter does not
-> change this admission verdict.
+> **Gateway verification:** an adapter (provider kind `c8s`) is in progress. Its
+> reference will be [`../c8s/verification.md`](../c8s/verification.md). Having
+> an adapter does not change this admission verdict.
 
 ## Verdict
 
-Confidential AI is **not acceptable** today. One hard reject remains, plus one
-release-process gap.
+Confidential AI is **not acceptable** today. Three hard rejects remain. The
+first two are stated in the provider's own threat model, and the provider plans
+to fix both. The third comes from this review.
 
-- **Cluster-admin reaches TEE memory (hard reject).** The provider's threat
-  model (`docs/threat-model.md`, "The c8s operator key" and "The control-plane
-  state disk") states that a cluster-admin credential can exec into a pod
-  inside the TEE and read workload memory. Two paths lead to that credential:
-  the operator key can request a `system:masters` kubeconfig even in static
-  policy mode, and the host can read the unencrypted RKE2 state disk that holds
-  the RKE2 client CA key. Plaintext user content can therefore leave the
-  accepted trust boundary. The provider documents both fixes as planned:
-  removing the operator key with RTMR3 pinned to zero, and encrypting the state
-  disk. On 2026-09-23 RTMR3 was non-zero on both production and candidate.
-- **Production runs an unsigned release (criterion 7).** Production serves
-  `v0.13.27-static-attestation-20260910`, which has no signed GitHub release.
-  The signed pre-release `v0.13.28-rc.2` runs on candidate, and the provider
-  has just allowed the production hostname on the candidate router, so a
-  production cutover to signed releases appears imminent.
+1. **Operator key.** In static policy mode the operator key no longer changes
+   admission policy. It can still obtain a `system:masters` kubeconfig from the
+   c8s credential-release service, and that credential can exec into TEE pods
+   and read their memory (`docs/threat-model.md`, "The c8s operator key").
+   RTMR3 is non-zero on both endpoints, so the credential-release path was
+   armed at boot.
+2. **Control-plane state disk.** The RKE2 server state disk is plain ext4. It
+   holds the RKE2 client CA key, from which the host can mint a cluster-admin
+   certificate (`docs/threat-model.md`, "The control-plane state disk").
+3. **Kubernetes API writes reach plaintext.** The admission allowlist pins image
+   and argv for the plaintext-path workloads (`gateway`, `sglang-router`,
+   `inference-worker-*`), but admits them with `env: any` and `mounts: any`
+   (`scripts/regenerate-c8s-allowlist.py:193`, verified live on both endpoints).
+   A Kubernetes API writer can change either without changing any attested
+   value:
+   - `GATEWAY_ALLOW_DIRECT_INFERENCE_URL` together with `GATEWAY_INFERENCE_URL`
+     redirects prompts to any address (`services/gateway/src/main.rs:43-51,
+     408-418`). Workload egress allows any destination on the attestation API
+     port (`helm/confidential-inference/templates/network-policies.yaml:74-75`).
+   - A ConfigMap mount with `PYTHONPATH` or `LD_PRELOAD` injects code.
+   - `gateway-state-mounter` runs a ConfigMap-supplied script as privileged
+     root, with a bidirectional hostPath
+     (`helm/confidential-inference/templates/gateway-state-storage.yaml:8-9,
+     178-223`).
+
+   The c8s documentation treats the Kubernetes control plane as untrusted.
+   Fixing items 1 and 2 closes this only if no party keeps API write access
+   afterwards.
+
+Each of these paths lets plaintext user content leave the accepted trust
+boundary.
 
 Resolved on 2026-09-23:
 
-- Production serves inference again. Earlier the same day it was in maintenance
-  mode.
-- Production and candidate both use `tls.mode: "acme"`. An admitted `c8s acme`
-  sidecar generates the serving key inside the TEE and keeps it on a
-  Memory-medium `emptyDir` (`c8s/internal/cmds/acme/cmd.go`). The live
-  attest-lb binding holds on both endpoints (see Criteria Status).
+- Production and candidate hold the serving TLS key inside the TEE
+  (`tls.mode: acme`). The key is generated by the admitted `c8s acme` sidecar
+  and kept on a Memory-medium `emptyDir`.
+- Production serves inference again after a maintenance window.
 
-The provider becomes a candidate for **acceptable with conditions** once
-production runs a signed release, the operator key is removed with RTMR3
-pinned to zero, and the control-plane state disk is encrypted.
+## Topology
 
-## Trust Model If Admitted
+The front door (c8s TLS-LB) terminates public TLS inside a TDX node-as-CVM. It
+forwards to the provider gateway, which reaches the sglang router and
+inference workers over the RA-TLS mesh.
 
-1. Private AI Gateway fetches `GET /attestation` with a fresh 32-byte nonce,
-   encoded as unpadded base64url.
-2. It verifies the TDX quote in the `frontDoor.receipt` (`c8s/attest-lb/v1`)
-   with DCAP and requires `UpToDate`, and rejects debug TDs.
-3. It recomputes the attest-lb transcript from the TLS leaf it observed on its
-   own connection:
+Live responses on 2026-09-24 show at least two nodes:
 
-   ```text
-   SHA-384( LP("c8s/attest-lb/v1") || LP(mode) || LP(nonce) ||
-            LP(SHA-256(serving_leaf_DER)) || LP(SHA-256(mesh_leaf_DER)) ||
-            LP(SHA-256(mesh_CA_DER)) )
-   ```
+- One node hosts the front door, the gateway, and metrics-collector.
+- Another node hosts sglang-router, the inference workers, and
+  kube-state-metrics.
 
-   `LP` is a 4-byte big-endian length prefix. The 48-byte digest must equal
-   `report_data[0:48]`, and `report_data[48:64]` must be zero.
-4. It matches MRTD, RTMR1, and RTMR2 against a reviewed, signed release bundle,
-   and requires RTMR3 to be zero (no operator credential-release path armed at
-   boot).
-5. It checks the per-workload receipts, the `identity_proof` signatures, the
-   mesh CA, and the admitted image digests and argv against the same bundle.
-6. It pins the serving leaf SPKI for the lease. The serving key is TEE-held, so
-   the SPKI pin is equivalent to the leaf binding. Scope is per-router.
-
-## Interim RTMR3 Policy
-
-The relying party chose to implement the adapter before the provider removes
-the operator key. Until then, the adapter accepts only the non-zero RTMR3
-values recorded for each reviewed release (observed live on 2026-09-23, because
-the release bundles do not publish RTMR3), never an unlisted value. It records
-`operator_key_armed: true` and **refutes** `os_known_good` in every session it
-establishes. Zero replaces those values once a reviewed release ships with the
-key removed. This is a routing decision for the relying party. It does not meet
-the hard reject above, so the verdict stays not acceptable for strict
-inclusion.
+All nodes report identical MRTD, RTMR1, RTMR2, and RTMR3. RTMR0 differs per host,
+and the provider documents it as not pinnable. Request content is therefore
+processed on nodes other than the one whose quote binds the TLS leaf, so a
+verifier must check the workload receipts as well as the front door.
 
 ## Criteria Status
 
 Passed:
 
-- **Front-door channel binding (criterion 2).** Live probes of both endpoints
-  at 20:08 UTC returned an attest-lb receipt whose nonce equalled the client
-  nonce and whose `serving_leaf_sha256` equalled the SHA-256 of the leaf
-  observed on the same connection. Each quote's `report_data[0:48]` equalled
-  the recomputed transcript, with zero padding, and the TD attributes had the
-  debug bit clear. The probes did not run DCAP collateral verification.
-- **Production allowlist.** Production runs static policy mode. Its active
-  allowlist admits eight workloads (`c8s-tls-lb`, gateway, state mounter, two
-  inference workers, sglang router, and two metrics workloads), none with an
-  `any` command or argument policy.
-- **Signed releases exist.** `v0.13.28-rc.2` publishes `release-bundle.json`,
-  `release-bundle.sigstore.json`, and `release-tag-commit.txt`. The bundle pins
-  node image digest, workload image digests and argv, allowlist digest, c8s
-  commit, operator key, and model revision with a dm-verity root.
-- **In-TEE TLS termination.** The c8s router terminates public TLS inside the
-  CVM and forwards to the provider gateway, which reaches the sglang router and
-  inference workers over the RA-TLS mesh.
+- **Channel binding (criterion 2).** On both endpoints the `c8s/attest-lb/v1`
+  receipt bound the client nonce and the TLS leaf observed on the same
+  connection. `report_data[0:48]` equalled the recomputed transcript, the
+  padding was zero, DCAP returned `UpToDate`, and the TD debug bit was clear.
+- **Admission policy.** In static mode the allowlist is sealed into the
+  measured node image, and the mesh CA carries the sealed allowlist digest
+  (`services/gateway/ATTESTATION.md`). The production allowlist admits eight
+  workloads, none with an `any` command or argument policy. Environment and
+  mounts are not pinned; see Verdict item 3.
+- **Workload attestation.** Every plaintext-path workload receipt
+  (`c8s/attest-pq/v1`, `+xwing` on candidate) passed DCAP with `UpToDate`, had
+  the debug bit clear, carried the release measurement pins, bound the nonce,
+  matched its transcript and identity proof, and chained to the front door's
+  mesh CA.
+- **GPU CC boot gate (`v0.13.28-rc.2`).** `gpu-cc-enforce.sh`, its unit, and its
+  preset (c8s v0.26.5) are in the measured node image. The review recomputed
+  MRTD, RTMR1, RTMR2, and the dm-verity root from node image
+  `node-guest-base@sha256:3c57e9a6…`. The script checks CC mode on every NVIDIA
+  GPU and requires nonce-bound NRAS attestation. It powers off the node on
+  failure, and has no skip flag or environment override. PCI hot-plug is
+  disabled in the kernel.
+- **Content handling.** The provider gateway does not log, store, or forward
+  request bodies. sglang runs without request logging or tracing. Pod logs stay
+  on encrypted or tmpfs `/var` inside the guest, and kubelet debugging handlers
+  are off. Remote-written metrics carry bounded labels only (model, key ID,
+  status, finish reason).
 
-Failed or not yet evidenced:
+Failed:
 
-- **Cluster-admin reaches TEE memory (hard reject).** See Verdict. Required
-  fix: remove the operator key with RTMR3 pinned to zero, and encrypt the
-  state disk.
-- **Release publication (criteria 7 and 13).** Production runs an unsigned
-  release. The provider published two release candidates on 2026-09-23 and
-  seven candidate tags in the two days before, so a publication and notice
-  window must be agreed before strict pins are practical.
-- **GPU evidence.** Production copies two raw NVIDIA evidence items from worker
-  receipts (`raw-receipt-evidence`) and states that cryptographic GPU
-  verification remains a c8s verifier dependency. Candidate returns
-  `not-exposed-by-c8s` and relies on a boot gate inside the measured node
-  image. Unless raw evidence is verified with NRAS against the CPU transcript
-  nonce, the gateway records `gpu_attested` as unknown.
-- **Candidate allowlist breadth.** The candidate allowlist admits several
-  infrastructure images (`c8s-operator`, `cds`, `nginx-unprivileged`,
-  `nri-image-policy`, `ratls-mesh`, `volumed`) with `any` command and argument
-  policy, plus a Tailscale control-plane workload. If that shape reaches
-  production, the review must confirm none of them can obtain the serving key,
-  a mesh identity for the inference path, or plaintext request bodies.
+- **Privacy boundary (criterion 5): operator key.** See Verdict item 1.
+- **Privacy boundary (criterion 5): state disk.** See Verdict item 2.
+- **Runtime policy (criterion 6): env and mounts.** See Verdict item 3.
+
+Conditional:
+
+- **Release publication (criterion 7).** Signed releases are Sigstore keyless
+  bundles published as GitHub Release assets. A final production release must
+  equal a previously published release candidate except for its name
+  (`releases/README.md`). This gives relying parties the rc as advance notice.
+  Production still runs an unsigned development bundle
+  (`v0.13.27-static-attestation-20260910`). This criterion is met once
+  production runs a signed final.
+- **GPU confidential computing in production.** Production (`v0.13.27`)
+  predates the boot gate and returns raw NVIDIA evidence. The gateway relies on
+  the boot gate through node measurement pins, so it requires `v0.13.28` or
+  later. It records `gpu_attested` as unknown. The gate reads CC mode from the
+  guest driver, and relies on NRAS for driver and VBIOS appraisal.
+- **Worker placement.** Workers select nodes by hostname only. The guarantee
+  rests on every node running the measured image, which the gateway enforces
+  by verifying each plaintext-path workload's quote.
 - **Attestation scope.** Responses declare `scope:
-  "launch-or-admission-only"` and `operationalStatus: "not-verified"`. Mesh
-  peers are authenticated by CA chain, not per-peer measurement, and the mesh CA
-  rotates when CDS restarts.
-- **Model identity.** Production `/v1/models` lists
-  `MiniMaxAI/MiniMax-M3-MXFP8` alongside the served
-  `deepseek-ai/DeepSeek-V4-Flash-0731`, and the documented model ID differs from
-  the served ID. The adapter must bind the exact served ID.
-- **Receipts.** The provider emits no per-response signature.
+  "launch-or-admission-only"`. They do not prove current liveness, routing,
+  mounts, environment values, or model use (`services/gateway/ATTESTATION.md`).
+- **Platform.** RTMR0 is not pinnable, and trust rests on Intel TDX and NVIDIA
+  CC.
 
 ## Adapter Requirements
 
-P0:
+- Accept only TEE-held TLS modes (`acme`, `tee-webpki`, `cds`), and require a
+  verified `c8s/attest-lb/v1` front-door receipt. Fail closed on `webpki`.
+- Recompute the attest-lb transcript from the observed TLS leaf, and pin the
+  leaf SPKI.
+- Verify every workload receipt that handles plaintext: at least the gateway,
+  the sglang router, and each inference worker. Each receipt must pass DCAP
+  with `UpToDate`, have its debug bit clear, carry the release measurement
+  pins, bind the nonce, match its transcript, and chain to the front door's
+  mesh CA.
+- Pin MRTD, RTMR1, RTMR2, the accepted RTMR3 set, and the allowlist digest from
+  a reviewed release registry. Do not trust values fetched at verification time.
+- For admission, accept only RTMR3 = 0, and require exact `env` and `mounts`
+  policies for every plaintext-path workload in the quote-bound allowlist.
+- Implement the transcripts from specifications and MIT-licensed references.
+  Do not copy AGPL-3.0 c8s code.
 
-- Accept only `tls.mode` values that hold the key inside the TEE (`acme`,
-  `tee-webpki`, `cds`), and require a verified attest-lb front-door receipt.
-  Fail closed on `webpki`.
-- Recompute the attest-lb transcript from the observed leaf and emit a
-  `tls_spki_sha256` binding for the origin.
-- Pin MRTD, RTMR1, RTMR2, and the allowlist digest from a reviewed,
-  Sigstore-verified release bundle, and require RTMR3 to be zero. Do not trust
-  bundle values fetched at verification time.
-- Require DCAP `UpToDate` and reject debug TDs.
-- Implement the transcript from the specification and the MIT clients. Do not
-  copy AGPL-3.0 c8s code into the gateway.
+## Interim RTMR3 Policy
 
-P1:
+The relying party chose to implement the adapter before the provider removes
+the operator key. Until then, the adapter accepts only the non-zero RTMR3 values
+recorded for each reviewed release, never an unlisted value. It records
+`operator_key_armed: true` and refutes `os_known_good` in every session.
+Admission requires replacing those values with zero.
 
-- Record `release.id`, `bundleSha256`, `meshCaSha256`, and the front-door mode
-  in `claims.extra`.
-- Add negative tests for a swapped serving leaf, a wrong nonce, an unpinned
-  measurement, a non-zero RTMR3, a `webpki` mode, and a rotated mesh CA.
-- Handle mesh CA rotation as a lease-invalidating event.
+## Requests To The Provider
 
-## Open Questions For The Provider
-
-1. When will the operator key be removed (RTMR3 pinned to zero) and the
-   control-plane state disk encrypted?
-2. When will production run signed releases, and what notice will precede
-   production measurement changes, including emergency changes?
-3. Can nonce-bound NVIDIA evidence be verified by relying parties?
-4. How are mesh CA rotations published?
-5. Which production model IDs are stable?
+1. **Operator key.** Provide a timeline for removing the key. *Done when:* a
+   signed release on `api.confidential.ai` reports RTMR3 = 0 in the front-door
+   quote and in every workload quote.
+2. **State disk.** Provide a timeline for encrypting the RKE2 state disk.
+   *Done when:* a signed release ships a node image that encrypts the disk, and
+   the threat model reflects the change.
+3. **Kubernetes API writes.** State whether anyone, including the deployment
+   pipeline, keeps Kubernetes API write access after items 1 and 2. *Done
+   when:* either the threat model states that no party can write to the API, or
+   the release allowlist pins `env` and `mounts` exactly for `gateway`,
+   `sglang-router`, and `inference-worker-*`, and `gateway-state-mounter` no
+   longer runs mutable code with privileges.
+4. **Remaining privileged paths.** After items 1 to 3, list in the threat model
+   every remaining path by which staff or the host could read pod memory, logs,
+   or plaintext traffic, or state explicitly that none remain. *Done when:* the
+   updated threat model is published.
+5. **GPU boot gate in production.** *Done when:* a signed `v0.13.28` or later
+   release is served on `api.confidential.ai`.
