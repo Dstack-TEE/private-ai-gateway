@@ -3,15 +3,31 @@ import {
   resolveAciProviderConfig,
   resolveAciProviderProfile,
   type AccountApiKeyAuth,
-  type AciModel,
   type AciFetch,
+  type AciModel,
   type AciProvider,
-  type AciProviderConfigInput,
   type AciProviderProfile,
 } from "@phala/aci-provider";
-import type { AuthHook, Config, Plugin, PluginModule, PluginOptions } from "@opencode-ai/plugin";
+import type { AuthHook, Config, Plugin, PluginModule } from "@opencode-ai/plugin";
 
 import { createAciInspectTool } from "./inspect.ts";
+import { pluginConfig, type OpenCodeAciPluginOptions } from "./options.ts";
+import {
+  createOpenCodeAciV2Plugin,
+  createOpenCodeAccountAuthMethodV2,
+  mapOpenCodeModelV2,
+  OPENCODE_ACI_PACKAGE,
+  type CreateOpenCodeAciV2PluginOptions,
+} from "./v2.ts";
+
+export {
+  createOpenCodeAciV2Plugin,
+  createOpenCodeAccountAuthMethodV2,
+  mapOpenCodeModelV2,
+  OPENCODE_ACI_PACKAGE,
+  type CreateOpenCodeAciV2PluginOptions,
+};
+export type { OpenCodeAciPluginOptions } from "./options.ts";
 
 const OPENAI_COMPATIBLE_PACKAGE = "@ai-sdk/openai-compatible";
 
@@ -19,11 +35,6 @@ type OpenCodeProviderConfig = NonNullable<Config["provider"]>[string];
 type OpenCodeCommandConfig = NonNullable<Config["command"]>[string];
 export type OpenCodeModelConfig = NonNullable<OpenCodeProviderConfig["models"]>[string];
 
-type AciReceiptOptions = NonNullable<AciProviderConfigInput["receipts"]>;
-
-export type OpenCodeAciPluginOptions = Omit<AciProviderConfigInput, "receipts"> & {
-  receipts?: Omit<AciReceiptOptions, "verification">;
-};
 export type OpenCodeAciAuthMethod = AuthHook["methods"][number];
 
 export interface CreateOpenCodeAciPluginOptions {
@@ -31,20 +42,6 @@ export interface CreateOpenCodeAciPluginOptions {
   defaults?: OpenCodeAciPluginOptions;
   accountAuth?: AccountApiKeyAuth;
   authMethods?: readonly OpenCodeAciAuthMethod[];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function pluginConfig(options: PluginOptions | undefined): OpenCodeAciPluginOptions {
-  if (!options) return {};
-  return {
-    baseURL: options.baseURL,
-    ...(isRecord(options.models) ? { models: options.models } : {}),
-    ...(isRecord(options.trust) ? { trust: options.trust } : {}),
-    ...(isRecord(options.receipts) ? { receipts: options.receipts } : {}),
-  };
 }
 
 export function mapOpenCodeModel(model: AciModel): OpenCodeModelConfig {
@@ -153,10 +150,11 @@ export function createOpenCodeAciPlugin({
     };
     const inspectToolName =
       profile.providerId === "aci" ? "aci_inspect" : `${profile.providerId}_aci_inspect`;
+    const inspectTool = await createAciInspectTool(() => active, profile.label);
 
     return {
       tool: {
-        [inspectToolName]: createAciInspectTool(() => active, profile.label),
+        [inspectToolName]: inspectTool,
       },
       async config(config) {
         const baseURL = options.baseURL ?? defaults.baseURL;
@@ -228,8 +226,13 @@ export function createOpenCodeAciPlugin({
 
 export const AciProviderPlugin = createOpenCodeAciPlugin();
 
-const plugin: PluginModule = {
+/** OpenCode V2 plugin definition for the vendor-neutral ACI provider. */
+export const AciProviderPluginV2 = createOpenCodeAciV2Plugin({
   id: "@phala/opencode-provider-aci",
+});
+
+const plugin: PluginModule & typeof AciProviderPluginV2 = {
+  ...AciProviderPluginV2,
   server: AciProviderPlugin,
 };
 

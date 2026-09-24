@@ -1,9 +1,12 @@
 import { expect, test } from "bun:test";
 import { createPhalaCloudAccountAuth } from "@phala/aci-provider/phala-cloud";
-import { createOpenCodeAccountAuthMethod } from "@phala/opencode-provider-aci";
+import {
+  createOpenCodeAccountAuthMethod,
+  createOpenCodeAccountAuthMethodV2,
+} from "@phala/opencode-provider-aci";
 
-test("maps the shared Phala account flow into OpenCode native auth", async () => {
-  const responses = [
+function fakeResponses() {
+  return [
     Response.json({
       device_code: "device-secret",
       user_code: "ABCD-EFGH",
@@ -18,6 +21,10 @@ test("maps the shared Phala account flow into OpenCode native auth", async () =>
       workspace: { name: "Confidential AI", slug: "confidential-ai" },
     }),
   ];
+}
+
+test("maps the shared Phala account flow into OpenCode native auth", async () => {
+  const responses = fakeResponses();
   const method = createOpenCodeAccountAuthMethod(
     createPhalaCloudAccountAuth({
       baseURL: "https://cloud.example",
@@ -44,4 +51,33 @@ test("maps the shared Phala account flow into OpenCode native auth", async () =>
       workspaceSlug: "confidential-ai",
     },
   });
+});
+
+test("maps the shared Phala account flow into OpenCode V2 auth", async () => {
+  const responses = fakeResponses();
+  const method = createOpenCodeAccountAuthMethodV2(
+    createPhalaCloudAccountAuth({
+      baseURL: "https://cloud.example",
+      clientId: "opencode",
+      fetch: async () => {
+        const response = responses.shift();
+        if (!response) throw new Error("unexpected request");
+        return response;
+      },
+    }),
+  );
+
+  const authorization = await method.authorize();
+  expect(authorization.mode).toBe("auto");
+  expect(authorization.url).toContain("ABCD-EFGH");
+  const credential = await authorization.callback;
+  expect(credential.type).toBe("oauth");
+  expect(credential.access).toBe("llm-key");
+  expect(credential.metadata).toEqual({
+    keyId: "42",
+    username: "alice",
+    workspaceName: "Confidential AI",
+    workspaceSlug: "confidential-ai",
+  });
+  expect(method.label(credential)).toBe("alice");
 });

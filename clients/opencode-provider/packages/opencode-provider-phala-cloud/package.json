@@ -57,10 +57,10 @@
     "@phala/opencode-provider-aci": "^0.7.3"
   },
   "peerDependencies": {
-    "@opencode-ai/plugin": ">=1.18.23 <2"
+    "@opencode-ai/plugin": ">=1.18.29 <2"
   },
   "engines": {
     "bun": ">=1.4.0",
-    "opencode": ">=1.18.23 <2"
+    "opencode": ">=1.18.29 <3"
   }
 }

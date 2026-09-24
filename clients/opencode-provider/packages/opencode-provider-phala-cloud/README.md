@@ -1,7 +1,7 @@
 # `opencode-provider-phala-cloud`
 
-Phala Cloud's native OpenCode provider. OpenCode `1.18.24` or newer is
-recommended. Install it globally through OpenCode's official plugin command:
+Phala Cloud's native OpenCode provider. OpenCode `1.18.29` (V1) and OpenCode 2
+are supported. Install it globally through OpenCode's official plugin command:
 
 ```sh
 opencode plugin opencode-provider-phala-cloud --global
@@ -42,6 +42,6 @@ history keeps the latest 32 receipt-bearing requests by default and is cleared
 when OpenCode exits. Gateway receipt and session artifacts have their own
 server-side retention.
 
-Do not add a separate `provider.phala` block. The plugin registers the provider,
-model catalog, verified fetch, and auth loader through OpenCode's native
-server-plugin API.
+Do not add a separate `provider.phala` block. The plugin registers the
+provider, model catalog, verified transport, and credentials through
+OpenCode's native plugin API on both V1 and V2.

@@ -8,19 +8,23 @@ receipt before the response stream can finish.
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": [
-    [
-      "@phala/opencode-provider-aci",
-      {
+  "plugins": [
+    {
+      "package": "@phala/opencode-provider-aci",
+      "options": {
         "baseURL": "https://gateway.example.com/v1",
         "trust": {
           "acceptedComposeHashes": ["<reviewed-compose-sha256>"],
         },
       },
-    ],
+    },
   ],
 }
 ```
+
+On OpenCode 1 the same package keeps working through the V1 tuple form
+(`"plugin": [["@phala/opencode-provider-aci", { ... }]]`). The default export
+exposes both the V2 `setup` definition and the V1 `server` hook object.
 
 After adding the configured plugin tuple above, restart OpenCode and use its
 native provider and model pickers:
@@ -38,9 +42,12 @@ variables are not copied into OpenCode's auth store.
 
 The plugin discovers the public `/v1/models` catalog over the verified
 connection without sending the inference API key. OpenCode stores the key and
-attaches it to model requests through its native auth loader. The plugin uses
-OpenCode's server-plugin, provider config, auth, model, and disposal hooks; it
-does not maintain parallel config or credential files.
+attaches it to model requests through its native credential flow. The plugin
+uses OpenCode's V1 server-plugin hooks or its V2 provider, integration, tool,
+command, and `aisdk` hooks; on V2 the verified transport is installed by
+replacing the AI SDK provider inside the SDK hook, because a V2 provider
+transform cannot carry a `fetch` function. It does not maintain parallel config
+or credential files.
 
 Capability flags come only from the catalog. The plugin does not create
 model-family variants or rewrite reasoning parameters; OpenCode's official

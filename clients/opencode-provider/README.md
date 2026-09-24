@@ -8,10 +8,12 @@
   supplies the Phala Cloud endpoint and identity.
 
 Both branded packages support direct API keys. Only the Phala Cloud package
-adds its device login; RedPill does not currently expose account OAuth. All
-packages use OpenCode's v1 server-plugin manifest and run on Bun. The provider
-is created by the plugin, so plugin installation or initialization failure
-cannot leave a separately configured ordinary HTTPS provider behind.
+adds its device login; RedPill does not currently expose account OAuth. Every
+package default-exports one definition that supports both OpenCode V1
+(`server`) and OpenCode V2 (`id` and `setup`), so OpenCode `1.18.29` or newer
+and OpenCode 2 both load it. The provider is created by the plugin, so plugin
+installation or initialization failure cannot leave a separately configured
+ordinary HTTPS provider behind.
 
 Install through OpenCode's native plugin command:
 
