@@ -344,7 +344,6 @@ fn effective_uid() -> libc::uid_t {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
@@ -392,6 +391,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn full_accept_queue_cannot_block_a_client_indefinitely() {
+        use std::time::Instant;
         let temp = tempfile::tempdir().unwrap();
         let endpoint = temp.path().join(SOCKET_FILE);
         let address = SockAddr::unix(&endpoint).unwrap();
