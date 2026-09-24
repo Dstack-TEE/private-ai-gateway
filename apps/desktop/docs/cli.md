@@ -51,6 +51,23 @@ start protection. `start` waits for verified protection. `stop` stops protection
 and restores managed agent configuration but keeps management available.
 `service stop` shuts down the backend. Closing the desktop app does not stop it.
 
+## Settings
+
+Settings live in `config.toml` and the user's credentials in `credentials.toml`; see
+[Settings files](configuration.md) for their locations, keys, live reload,
+syncing and the upgrade from 0.1.
+
+```sh
+pap settings show                  # settings in effect and both file paths; never secrets
+pap settings set appearance dark   # edits config.toml in place, keeping comments
+pap settings schema > config.schema.json
+```
+
+`settings set` changes go through the backend like the desktop Settings page.
+Hand edits of either file apply as soon as they are saved; an invalid edit is
+reported with its line and column in `settings show`, `status` and `doctor`
+while the previous settings stay in effect.
+
 ## Web UI
 
 The backend service can also serve the desktop renderer to a browser, like the
@@ -65,7 +82,7 @@ printf '%s\n' "$PASSWORD" | pap settings set webUiPassword --value-stdin --yes
 pap settings set webUiPassword    # or type it twice at a hidden prompt
 pap settings set webUi true
 pap settings set webUiPort 4182   # default; must differ from the Local API (4180) and 4181
-pap settings show                 # preferences, the web UI address or bind error, and passwordSet
+pap settings show                 # settings, file paths, the web UI address or bind error, and passwordSet
 pap settings set webUi false      # closes the listener and ends every browser session
 ```
 
@@ -74,8 +91,9 @@ composition rules. It is never accepted as a command-line argument: pass it on
 stdin with `--value-stdin` (one trailing newline is dropped) or at the hidden
 prompt. Changing it ends every browser session. While the web UI is off,
 `pap settings set webUiPassword ""` removes it. Turning the web UI on without a
-password fails with a hint to set one, and saved settings from an older version
-that are on without a password leave the listener closed until one is set.
+password fails with a hint to set one, and settings that turn it on without a
+password (for example a hand edit of `config.toml`) leave the listener closed
+until one is set.
 
 Its port may be any of 1–65535, while the Local API requires 1024 or above: the
 Local API port is written into every connected agent's configuration and must
@@ -94,8 +112,7 @@ keys:
 Changing the address, port or client host moves the listener at once and ends
 every browser session. If the address cannot be opened (for example, `Port 4182
 is already in use on 127.0.0.1`), the service keeps running and reports the
-error in `pap status`, `pap settings show` and the desktop Settings page. Saved
-settings that fail validation leave the web UI closed.
+error in `pap status`, `pap settings show` and the desktop Settings page.
 
 Open `http://HOST:PORT/` (the client host or, without one, the listen address)
 and sign in with the password. The desktop Web UI settings have **Open in
@@ -126,9 +143,9 @@ in with a fresh session cookie while every other session ends.
 Security model:
 
 - The password is stored only as an Argon2id hash (19 MiB, 2 passes, 1 lane:
-  the OWASP minimum) in the owner-only `preferences.json`. Management reads of
-  preferences, `status`, `settings show`, diagnostics and logs never include
-  the password or its hash; they show only `passwordSet`.
+  the OWASP minimum) in the owner-only `credentials.toml`. Settings reads,
+  `status`, `settings show`, diagnostics and logs never include the password
+  or its hash; they show only `passwordSet`.
 - Sessions are server-side. The browser holds only a 256-bit random token in a
   `pap_session_<port>` cookie with `HttpOnly; SameSite=Strict; Path=/` and a
   12-hour `Max-Age`; the service stores only its SHA-256 digest, so page
@@ -250,14 +267,16 @@ restored from disk.
 ### Reset Settings
 
 `pap settings reset --yes` stops protection, disconnects managed agents, and
-restores backend preferences, the default Local API listener, and the production
-OS policy. Profiles, credentials, the local client key and usage history are kept.
+returns every setting in `config.toml` except the profiles and the active
+profile to its default (including the Local API listener and the production OS
+policy), and removes the web UI password. Profiles, their API keys, the local
+client key and usage history are kept.
 The same operation is available under Settings > Advanced in the desktop, which
 also disables Open at Login. CLI installation and system notification permission
 are unchanged. Failures are reported; retry after resolving the reported conflict.
 
 Human `status` summarizes the backend PID/version, active profile and service,
-saved credential presence (not unlock status), Local API exposure, production OS
+saved credential presence, a settings file error, Local API exposure, production OS
 policy, TEE identity/checks, catalog size and current-session usage. Retained
 catalogs are labeled cached when protection is inactive. Reported costs are
 session totals, not a billing reconciliation. Request contents and tokens are
@@ -317,8 +336,10 @@ human message text or assume all failures are retryable.
 
 `doctor` reports every independent check, even when some fail. In that case it
 prints the partial report on stdout and exits nonzero; the `errors` object
-identifies failed checks. `credentialPolicy` describes policy, not an actual
-credential-store unlock probe. The `update` check is advisory: when the release
+identifies failed checks. `settings` names the settings files; an invalid file
+is an error. `warnings` lists problems that do not fail `doctor`: a
+`credentials.toml` other users can read (`credentials`) and profiles without a
+saved API key (`profileCredentials`). The `update` check is advisory: when the release
 feed is unreachable it reports an `error` inside `update` without failing
 `doctor`.
 
@@ -333,7 +354,7 @@ feed is unreachable it reports an `error` inside `update` without failing
 | Agent configuration review and restoration | `agents list/connect/disconnect/disconnect-all` |
 | Verified model catalog | `models list --refresh` |
 | Usage, filtering, pagination, CSV and deletion | `usage list/show/export/clear` |
-| Shared preferences and Local API settings | `settings show/set` |
+| Settings (`config.toml`) and its schema | `settings show/set/schema` |
 | Local inference token | `token show/rotate` |
 | Configuration backups and redacted diagnostics | `profiles import/export`, `diagnostics` |
 | CLI registration and app opening | `cli status/install/uninstall`, `app open` |
@@ -348,5 +369,4 @@ in the desktop UI or OS installer. `doctor` also reports whether the saved updat
 channel (`settings set updateChannel beta|stable`) has a newer release and the
 exact upgrade steps for this installation; see
 [Updates by installation](distribution.md#updates-by-installation). Shared notification preferences are available
-through `settings`; they do not grant OS notification permission. CLI-only use
-still requires an accessible OS credential store. There is no plaintext fallback.
+through `settings`; they do not grant OS notification permission.

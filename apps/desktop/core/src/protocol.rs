@@ -10,9 +10,9 @@ use serde_json::Value;
 
 use crate::{
     account::LoginPresentation,
+    config::{Appearance, Config, NotificationPreferences, UpdateChannel, WebUiConfig},
     contracts::*,
     maintenance::{ImportResult, ProfileBackup},
-    preferences::{Appearance, NotificationPreferences, Preferences, UpdateChannel, WebUiConfig},
     usage::{UsagePage, UsageQuery},
 };
 
@@ -193,8 +193,9 @@ commands! {
     } -> AgentStatus;
     DisconnectAllAgents -> Vec<AgentStatus>;
     ResetSettings -> AppState;
-    Preferences -> Preferences;
-    SetPreference(change: Preference) -> Preferences;
+    /// The settings in effect (`config.toml`); never includes a secret.
+    Settings -> Config;
+    SetPreference(change: Preference) -> Config;
 }
 
 /// Encodes a response the connection handler produces for `C` itself.
@@ -226,7 +227,7 @@ pub enum Preference {
 }
 
 impl Preference {
-    pub fn apply(self, saved: &mut Preferences) {
+    pub fn apply(self, saved: &mut Config) {
         match self {
             Self::AutoCliRegistration(enabled) => saved.auto_cli_registration = Some(enabled),
             Self::Notifications(config) => saved.notifications = config,
@@ -291,13 +292,12 @@ impl RpcError {
             "Select or verify",
             "No verified",
             "The connection preview",
+            "config.toml",
+            "credentials.toml",
         ] {
             if message.starts_with(prefix) && message.len() < 512 {
                 return Self::new("invalid_state", message);
             }
-        }
-        if message.contains("credential store") {
-            return Self::new("credential_store_unavailable", "The OS credential store is unavailable or locked. Unlock it in your user session and retry.");
         }
         Self::new("operation_failed", "The operation could not complete. Check the protection status and supplied configuration before retrying.")
     }

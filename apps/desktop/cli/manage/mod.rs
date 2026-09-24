@@ -7,8 +7,8 @@ use std::{
 use clap::{CommandFactory, FromArgMatches};
 use desktop_core::{
     client::Client,
+    config::{Appearance, UpdateChannel},
     contracts::*,
-    preferences::{Appearance, UpdateChannel},
     protocol::{export_path, rpc, Preference},
     usage::UsageQuery,
 };
@@ -47,6 +47,9 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                     .map_err(|_| "Cannot encode command schema")?,
             ));
         }
+        Action::Settings {
+            command: Settings::Schema,
+        } => return finish_output(write_text(desktop_core::config::schema().trim_end())),
         _ => {}
     }
     let client = Client::new();
@@ -215,7 +218,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                         provider: service_provider(*provider),
                     };
                     // Validate before reading a credential or making a request.
-                    desktop_core::service_config::resolve_profile(profile.clone(), None)?;
+                    desktop_core::config::resolve_profile(profile.clone(), None)?;
                     confirm(
                         cli,
                         "Save this profile? This selects it as active and may restart protection.",
@@ -279,8 +282,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                         provider: provider.map(service_provider).unwrap_or(saved.provider),
                         remote_url: url.clone().unwrap_or_else(|| saved.remote_url.clone()),
                     };
-                    let resolved =
-                        desktop_core::service_config::resolve_profile(profile.clone(), None)?;
+                    let resolved = desktop_core::config::resolve_profile(profile.clone(), None)?;
                     let target_changed = resolved.provider != saved.provider
                         || resolved.remote_url != saved.remote_url;
                     let credential_saved = saved.credential_saved;
@@ -384,8 +386,18 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                 }
                 Settings::Show => {
                     let state = client.state()?;
-                    json!({"preferences": client.call(rpc::Preferences)?, "localApi": state.local_api, "webUi": state.web_ui})
+                    let files = state.config_files;
+                    json!({
+                        "files": {
+                            "config": files.config_path,
+                            "credentials": files.credentials_path,
+                            "error": files.error,
+                        },
+                        "settings": client.call(rpc::Settings)?,
+                        "webUi": state.web_ui,
+                    })
                 }
+                Settings::Schema => unreachable!(),
                 Settings::Set {
                     key: SettingsKey::WebUiPassword,
                     value: input,
@@ -442,7 +454,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                     | SettingsKey::WebUiListenAddress
                     | SettingsKey::WebUiAllowNetworkAccess
                     | SettingsKey::WebUiClientHost => {
-                        let mut config = client.call(rpc::Preferences)?.web_ui;
+                        let mut config = client.call(rpc::Settings)?.web_ui;
                         match key {
                             SettingsKey::WebUi => config.enabled = parse_bool(input)?,
                             SettingsKey::WebUiPort => {
@@ -479,7 +491,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                             }
                             _ => unreachable!(),
                         }
-                        desktop_core::local_api::resolve(config.clone())?;
+                        desktop_core::config::resolve_local_api(config.clone())?;
                         value(client.call(rpc::SaveLocalApi { config })?)?
                     }
                 }
@@ -606,7 +618,7 @@ fn open_web_ui(cli: &Cli, client: &Client) -> Result<Value, String> {
             ),
         )?;
         // The same change `settings set webUi true` makes.
-        let mut config = client.call(rpc::Preferences)?.web_ui;
+        let mut config = client.call(rpc::Settings)?.web_ui;
         config.enabled = true;
         status = client.call(rpc::SaveWebUi { config })?.web_ui;
     }
@@ -737,6 +749,8 @@ fn doctor(client: &Client) -> Value {
         desktop_core::transport::endpoint_path()
             .map_err(|_| "Cannot resolve management endpoint".to_string()),
     );
+    let mut warnings = Map::new();
+    let settings = settings_diagnostics(client, &mut errors, &mut warnings);
     // Update availability is advisory: an offline check never fails the doctor.
     let update =
         update_notice().map_or_else(|error| json!({ "error": error }), |notice| json!(notice));
@@ -747,9 +761,78 @@ fn doctor(client: &Client) -> Value {
         "cli": cli,
         "backendExecutable": backend_executable,
         "endpoint": endpoint,
-        "credentialPolicy": "OS credential store; no plaintext fallback",
+        "settings": settings,
         "errors": errors,
+        "warnings": warnings,
     })
+}
+
+/// The settings files as the running backend sees them, or as this user's
+/// environment resolves them. An invalid file fails the doctor; a
+/// credentials file other users can read and profiles without a saved key warn.
+fn settings_diagnostics(
+    client: &Client,
+    errors: &mut Map<String, Value>,
+    warnings: &mut Map<String, Value>,
+) -> Value {
+    let running = client.is_running().unwrap_or(false);
+    let state = running.then(|| client.state().ok()).flatten();
+    let (config, credentials, error) = match &state {
+        Some(state) => (
+            state.config_files.config_path.clone(),
+            state.config_files.credentials_path.clone(),
+            state.config_files.error.clone(),
+        ),
+        None => {
+            let paths = desktop_core::config::config_path()
+                .and_then(|config| Ok((config, desktop_core::config::credentials_path()?)));
+            let (config, credentials) = match paths {
+                Ok(paths) => paths,
+                Err(error) => {
+                    errors.insert("settings".into(), json!(error));
+                    return Value::Null;
+                }
+            };
+            let error = desktop_core::config::load().err();
+            (
+                config.to_string_lossy().into_owned(),
+                credentials.to_string_lossy().into_owned(),
+                error,
+            )
+        }
+    };
+    if let Some(error) = &error {
+        errors.insert("settings".into(), json!(error));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = std::fs::symlink_metadata(&credentials) {
+            if metadata.permissions().mode() & 0o077 != 0 {
+                warnings.insert(
+                    "credentials".into(),
+                    json!(format!(
+                        "{credentials} can be read by other users; run `chmod 600 {credentials}`"
+                    )),
+                );
+            }
+        }
+    }
+    if let Some(state) = &state {
+        let missing: Vec<_> = state
+            .profiles
+            .iter()
+            .filter(|profile| !profile.credential_saved)
+            .map(|profile| profile.name.as_str())
+            .collect();
+        if !missing.is_empty() {
+            warnings.insert(
+                "profileCredentials".into(),
+                json!(format!("No saved API key for: {}", missing.join(", "))),
+            );
+        }
+    }
+    json!({ "config": config, "credentials": credentials, "error": error })
 }
 
 fn update_notice() -> Result<desktop_core::updates::UpdateNotice, String> {
@@ -826,7 +909,7 @@ fn read_key(cli: &Cli, stdin: bool) -> Result<String, String> {
         }
         rpassword::prompt_password("API key: ").map_err(|_| "Cannot read credential")?
     };
-    desktop_core::service_config::validate_api_key(&key)
+    desktop_core::config::validate_api_key(&key)
 }
 /// Reads a new web UI password from stdin or a hidden prompt. An explicit `""`
 /// removes it; any other command-line value is refused so it never reaches argv.

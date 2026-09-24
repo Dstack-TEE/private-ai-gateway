@@ -93,7 +93,9 @@ fn test_runtime(
         manager,
         proxy,
         usage,
-        secrets: Arc::new(agent_bridge::secrets::MemoryStore::default()),
+        settings: Arc::new(Settings::open(directory.join("settings"), directory).0),
+        settings_watcher: Mutex::new(None),
+        local_state: Arc::new(LocalState::open(directory)),
         credentials: ClientCredentials::from_files(TokenFiles::new(directory)),
         account_login: tokio::sync::Mutex::new(None),
         account_save: Mutex::new(None),
@@ -221,121 +223,85 @@ fn completed_authorization_is_staged_until_explicit_save_and_bound_to_its_provid
         );
         assert!(runtime.state().unwrap().profiles.is_empty());
         assert!(runtime.account_login.lock().await.is_none());
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        assert!(!directory.path().join("settings/credentials.toml").exists());
     });
 }
 
 #[test]
 fn offline_removal_queues_cleanup_and_uncommitted_retirement_preserves_active_key() {
-    const CHILD: &str = "PAP_TEST_CREDENTIAL_CLEANUP";
-    if std::env::var_os(CHILD).is_none() {
-        let home = tempfile::tempdir().unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "controller::tests::offline_removal_queues_cleanup_and_uncommitted_retirement_preserves_active_key", "--nocapture"])
-            .env(CHILD, "1").env(desktop_core::paths::HOME_OVERRIDE_ENV, home.path()).output().unwrap();
-        assert!(
-            output.status.success(),
-            "{} {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return;
-    }
+    use desktop_core::contracts::{ProfileAuth, ServiceProvider};
     let executor = tokio::runtime::Runtime::new().unwrap();
-    let directory = app_data_dir().unwrap();
-    std::fs::create_dir_all(&directory).unwrap();
-    let mut runtime = test_runtime(&executor, &directory);
-    std::fs::write(directory.join("account-cleanup.pending"), "invalid JSON").unwrap();
-    assert!(runtime.cleanup_manifest().unwrap().is_empty());
-    assert!(!directory.join("account-cleanup.pending").exists());
-    assert!(runtime.cleanup_manifest().unwrap().is_empty());
-    let mut profile = service_config::resolve_profile(
-        ConfidentialProfileInput {
-            id: "profile-test".into(),
-            name: "Test".into(),
-            provider: desktop_core::contracts::ServiceProvider::Redpill,
-            remote_url: "https://tee.redpill.ai".into(),
-        },
-        Some(1),
-    )
-    .unwrap();
-    profile.credential_ref = Some("credential-old".into());
-    profile.credential_saved = true;
-    profile.auth = desktop_core::contracts::ProfileAuth::OAuth {
-        account_id: "user_test".into(),
-        account_name: None,
-        images: None,
-        scope: None,
-    };
-    let entry = service_config::profile_credential_entry(&profile).unwrap();
-    runtime.secrets.set(&entry, "old-secret").unwrap();
-    let config = StartConfig {
-        remote_url: profile.remote_url.clone(),
-        require_production_os: true,
-    };
-    runtime.manager.set_service_configuration(
-        config,
-        vec![profile.clone()],
-        profile.id.clone(),
-        true,
-        false,
-    );
-    struct NoCredentialAccess;
-    impl agent_bridge::secrets::SecretStore for NoCredentialAccess {
-        fn get(&self, _: &str) -> Result<Option<String>, String> {
-            panic!("Empty cleanup must not read saved profile credentials");
-        }
-        fn set(&self, _: &str, _: &str) -> Result<(), String> {
-            panic!("Empty cleanup must not write credentials");
-        }
-        fn delete(&self, _: &str) -> Result<(), String> {
-            panic!("Empty cleanup must not delete credentials");
-        }
-    }
-    let secrets = runtime.secrets.clone();
-    Arc::get_mut(&mut runtime).unwrap().secrets = Arc::new(NoCredentialAccess);
-    executor.block_on(runtime.cleanup_retired()).unwrap();
-    Arc::get_mut(&mut runtime).unwrap().secrets = secrets;
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = test_runtime(&executor, directory.path());
     runtime
-        .queue_retired(RetiredCredential {
-            profile_id: profile.id.clone(),
-            action: "revoke".into(),
-            provider: profile.provider,
-            key: "old-secret".into(),
-            entry: entry.clone(),
-            revoke: true,
+        .update_config(|settings| {
+            settings.upsert(
+                "profile-test".into(),
+                settings_config::Profile {
+                    name: "Test".into(),
+                    provider: ServiceProvider::Redpill,
+                    remote_url: "https://tee.redpill.ai".into(),
+                    auth: ProfileAuth::OAuth {
+                        account_id: "user_test".into(),
+                        account_name: None,
+                        images: None,
+                        scope: None,
+                    },
+                    verified_at: Some(1),
+                },
+            )
         })
         .unwrap();
-    // A new local ref can select the same stable provider secret.
-    let mut reselected = profile.clone();
-    reselected.credential_ref = Some("credential-new".into());
-    let selected_entry = service_config::profile_credential_entry(&reselected).unwrap();
-    runtime.secrets.set(&selected_entry, "old-secret").unwrap();
-    let config = runtime.state().unwrap().config;
-    runtime.manager.set_service_configuration(
-        config,
-        vec![reselected],
-        profile.id.clone(),
-        true,
-        false,
-    );
+    runtime
+        .set_profile_key("profile-test", Some("old-secret"))
+        .unwrap();
+    runtime.publish_service_configuration(false).unwrap();
+    assert!(runtime.state().unwrap().api_key_saved);
     executor.block_on(runtime.cleanup_retired()).unwrap();
-    assert!(runtime.secrets.get(&entry).unwrap().is_none());
+
+    // A revocation of the key still in use is dropped without contacting the provider.
+    let retired = |key: &str| RetiredCredential {
+        profile_id: "profile-test".into(),
+        action: "revoke".into(),
+        provider: ServiceProvider::Redpill,
+        key: key.into(),
+        revoke: true,
+    };
+    runtime.queue_retired(retired("old-secret")).unwrap();
+    runtime.queue_retired(retired("old-secret")).unwrap();
+    assert_eq!(runtime.local_state.read().unwrap().account_cleanup.len(), 1);
+    executor.block_on(runtime.cleanup_retired()).unwrap();
+    assert!(runtime
+        .local_state
+        .read()
+        .unwrap()
+        .account_cleanup
+        .is_empty());
     assert_eq!(
-        runtime.secrets.get(&selected_entry).unwrap().as_deref(),
+        runtime.load_profile_key("profile-test").unwrap().as_deref(),
         Some("old-secret")
     );
+
+    // Removing the profile offline deletes its key and queues the revocation.
     executor
-        .block_on(runtime.delete_profile(profile.id))
+        .block_on(runtime.delete_profile("profile-test".into()))
         .unwrap();
     assert!(runtime.state().unwrap().profiles.is_empty());
-    assert!(runtime.secrets.get(&entry).unwrap().is_none());
-    let entries = runtime.cleanup_manifest().unwrap();
-    assert_eq!(entries.len(), 1);
-    let pending: RetiredCredential =
-        serde_json::from_str(&runtime.secrets.get(&entries[0]).unwrap().unwrap()).unwrap();
-    assert_eq!(pending.action, "revoke");
-    assert!(directory.join("account-cleanup.pending").exists());
+    assert!(runtime.load_profile_key("profile-test").unwrap().is_none());
+    let pending: Vec<_> = runtime
+        .local_state
+        .read()
+        .unwrap()
+        .account_cleanup
+        .into_values()
+        .collect();
+    assert_eq!(pending, vec![retired("old-secret")]);
+    // Device-local: kept with this machine's state, never in the syncable credentials.
+    let state = std::fs::read_to_string(directory.path().join("local-state.json")).unwrap();
+    assert!(state.contains("\"accountCleanup\""));
+    let credentials =
+        std::fs::read_to_string(directory.path().join("settings/credentials.toml")).unwrap();
+    assert!(!credentials.contains("old-secret"));
 }
 
 #[test]
@@ -493,7 +459,7 @@ fn finished_local_listener_can_restart_at_the_same_address() {
             port: listener.local_addr().unwrap().port(),
             ..Default::default()
         };
-        let resolved = local_api::resolve(config.clone()).unwrap();
+        let resolved = settings_config::resolve_local_api(config.clone()).unwrap();
         // Stands in for a child forked by another thread: it keeps the socket
         // listening after the endpoint drops its own handle, until it execs.
         let inherited = listener.try_clone().unwrap();
@@ -851,7 +817,7 @@ fn occupied_listener_preserves_previous_endpoint_and_serializes_mutations() {
             port: old_listener.local_addr().unwrap().port(),
             ..ListenConfig::default()
         };
-        let original = local_api::resolve(config.clone()).unwrap();
+        let original = settings_config::resolve_local_api(config.clone()).unwrap();
         let runtime = test_runtime(&executor, temp.path());
         runtime
             .manager
@@ -889,7 +855,7 @@ fn occupied_listener_preserves_previous_endpoint_and_serializes_mutations() {
             .rebind_local_api(
                 candidate.clone(),
                 original.clone(),
-                local_api::resolve(candidate).unwrap()
+                settings_config::resolve_local_api(candidate).unwrap()
             )
             .await
             .is_err());

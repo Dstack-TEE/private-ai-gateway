@@ -61,12 +61,12 @@ impl DesktopRuntime {
                     app_data_dir()?,
                     self.helper_path.clone(),
                     endpoint,
-                    self.secrets.clone(),
+                    self.local_state.clone(),
                 )?
             }
             #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
             {
-                Projector::new(self.helper_path.clone(), endpoint, self.secrets.clone())?
+                Projector::new(self.helper_path.clone(), endpoint, self.local_state.clone())?
             }
         };
         Ok(

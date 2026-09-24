@@ -53,7 +53,7 @@ config: StartConfig, profiles: Array<ConfidentialProfile>, activeProfileId: stri
  * agent projection and readiness state; the proxy still requires a live
  * verified session before forwarding.
  */
-catalog?: CatalogSummary, webUi: WebUiStatus, };
+catalog?: CatalogSummary, webUi: WebUiStatus, configFiles: ConfigFiles, };
 export type VerificationCheck = { id: string, section: string, title: string, status: "pass" | "fail" | "skip" | "info", detail: string, };
 export type ServiceIdentity = { teeType: string, trustLevel: string, keysetDigest: string, keysetNotAfter: number, tlsSpki?: string, source: SourceProvenance, serving: string, supportedE2eeVersions: Array<string>, };
 export type SourceProvenance = { repoUrl?: string, repoCommit?: string, imageDigest?: string, };
@@ -110,7 +110,8 @@ export type StartConfig = { remoteUrl: string, requireProductionOs: boolean, };
 export type ListenConfig = { listenAddress: string, allowNetworkAccess: boolean, port: number, clientHost?: string, };
 /**
  * The service-hosted browser UI. It is off until the user enables it and
- * listens on loopback unless network access is explicitly allowed.
+ * listens on loopback unless network access is explicitly allowed. It
+ * cannot turn on without a sign-in password (`pap settings set webUiPassword`).
  */
 export type WebUiConfig = { enabled: boolean, listenAddress: string, allowNetworkAccess: boolean, port: number, clientHost?: string, };
 /**
@@ -125,6 +126,19 @@ url?: string, error?: string,
  * Whether a sign-in password is set. The password itself never leaves the service.
  */
 passwordSet: boolean, };
+/**
+ * The settings files the backend reads. Never carries their contents.
+ */
+export type ConfigFiles = { configPath: string, credentialsPath: string,
+/**
+ * Why the current file contents are not in effect (the previous settings
+ * stay in effect), with the file, line and column.
+ */
+error?: string,
+/**
+ * Changes whenever applied settings change, including external edits.
+ */
+revision: number, };
 export type ListenAddress = { address: string, name: string, };
 export type Appearance = "system" | "light" | "dark";
 export type UpdateChannel = "beta" | "stable";
@@ -142,6 +156,9 @@ commands: Array<string>,
  * Portable archive to extract into a fresh directory.
  */
 downloadUrl: string | null, channelPublished: boolean, };
+/**
+ * Desktop notifications. The OS permission is managed by the desktop app.
+ */
 export type NotificationPreferences = { enabled: boolean, gateway: boolean, localApi: boolean, verification: boolean, };
 export type LaunchPreferences = { openAtLogin: boolean, connectOnLaunch: boolean, };
 export type ProfileBackup = { version: number, profiles: Array<ProfileConfiguration>, };

@@ -1,9 +1,6 @@
 use super::*;
 use crate::web_ui;
-use desktop_core::{
-    contracts::WebUiStatus,
-    preferences::{self, WebUiConfig},
-};
+use desktop_core::{config::WebUiConfig, contracts::WebUiStatus};
 
 const NEEDS_PASSWORD: &str = "Web UI needs a sign-in password. Set one in Settings or with `pap settings set webUiPassword`, then turn it on.";
 
@@ -17,7 +14,8 @@ impl DesktopRuntime {
         if self.instance.is_none() {
             return Err("Web UI settings can change only in the primary backend instance".into());
         }
-        let listen = web_ui::validate(&config, self.manager.snapshot()?.local_api.port)?;
+        let listen =
+            settings_config::validate_web_ui(&config, self.manager.snapshot()?.local_api.port)?;
         if config.enabled && !self.web_ui.has_password() {
             return Err(NEEDS_PASSWORD.into());
         }
@@ -27,7 +25,10 @@ impl DesktopRuntime {
             client_host: listen.config.client_host,
             ..config
         };
-        preferences::update(|saved| saved.web_ui = config.clone())?;
+        self.update_config(|saved| {
+            saved.web_ui = config.clone();
+            Ok(())
+        })?;
         self.apply_web_ui(&config);
         self.manager.snapshot()
     }
@@ -45,7 +46,7 @@ impl DesktopRuntime {
             let started = self
                 .manager
                 .snapshot()
-                .and_then(|state| web_ui::validate(config, state.local_api.port))
+                .and_then(|state| settings_config::validate_web_ui(config, state.local_api.port))
                 .and_then(|listen| {
                     // Wait for the closing listener when the new one reuses its port.
                     let reopening = previous.is_some_and(|bind| bind.port() == listen.bind.port());
@@ -68,12 +69,15 @@ impl DesktopRuntime {
         }
         let hash = match password {
             Some(password) => Some(web_ui::password::hash(&password)?),
-            None if preferences::load()?.web_ui.enabled => {
+            None if self.settings.config()?.web_ui.enabled => {
                 return Err("Web UI is on. Turn it off before removing its password.".into());
             }
             None => None,
         };
-        preferences::update(|saved| saved.web_ui_password_hash = hash.clone())?;
+        self.update_credentials(|saved| {
+            saved.web_ui.password_hash = hash.clone();
+            Ok(())
+        })?;
         self.web_ui.set_password(hash);
         let mut status = self.manager.snapshot()?.web_ui;
         status.password_set = self.web_ui.has_password();

@@ -105,7 +105,6 @@ arch=${values([metadata.arch])}
 url='https://github.com/Dstack-TEE/private-ai-gateway'
 license=('Apache-2.0')
 depends=${values(metadata.depends)}
-optdepends=('gnome-keyring: secure credential storage through Secret Service')
 provides=${values(provides)}
 conflicts=${values(metadata.conflicts)}
 options=('!strip' '!debug')

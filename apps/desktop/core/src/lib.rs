@@ -1,6 +1,6 @@
 //! The client side of Private AI Proxy, shared by the desktop shell, the CLI
 //! and the backend: renderer and IPC contracts, the management protocol and
-//! its client, the IPC transport, backend launch, preferences, app paths and
+//! its client, the IPC transport, backend launch, the settings file, app paths and
 //! owner-only file primitives. It links no server or database; its only HTTP
 //! client is the release-channel update check.
 
@@ -11,17 +11,15 @@ pub mod agent_access;
 pub mod agents;
 pub mod brand;
 pub mod client;
+pub mod config;
 pub mod contracts;
 pub mod launch;
 pub mod listen;
-pub mod local_api;
 pub mod lock;
 pub mod maintenance;
 pub mod paths;
-pub mod preferences;
 pub mod private_fs;
 pub mod protocol;
-pub mod service_config;
 pub mod transport;
 pub mod ui_api;
 pub mod updates;

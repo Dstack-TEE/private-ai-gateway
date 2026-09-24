@@ -5,6 +5,7 @@ mod credentials;
 mod endpoint;
 mod lifecycle;
 mod profiles;
+mod settings_files;
 mod web_ui;
 
 use std::{
@@ -19,24 +20,25 @@ use agent_bridge::{
     agents::Projector,
     catalog::Catalog,
     proxy::{self, ProxyEvent, ProxyState},
-    secrets::{KeyringStore, SecretStore},
     tokens::{TokenFiles, TokenSet, LOCAL_TOOLS_AGENT},
 };
 use desktop_core::{
     agents::Agent,
+    config::{self as settings_config, Config},
     contracts::{
         AgentPreview, AgentStatus, AppState, ConfidentialProfileInput, ConnectOptions,
         ListenConfig, RequestActivity, ServiceProvider, StartConfig,
     },
     listen::ResolvedListen,
-    local_api, lock,
-    paths::app_data_dir,
-    service_config,
+    lock,
+    paths::{app_data_dir, config_dir},
     usage::{UsagePage, UsageQuery},
 };
 use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
 
 use crate::{
+    local_state::{LocalState, RetiredCredential},
+    settings::{Credentials, Settings},
     usage::UsageStore,
     verifier_session::{SessionManager, VerifierLauncher},
 };
@@ -63,7 +65,9 @@ pub struct DesktopRuntime {
     manager: Arc<SessionManager>,
     proxy: Arc<ProxyState>,
     usage: Arc<UsageStore>,
-    secrets: Arc<dyn SecretStore>,
+    settings: Arc<Settings>,
+    settings_watcher: Mutex<Option<crate::settings::Watcher>>,
+    local_state: Arc<LocalState>,
     credentials: ClientCredentials,
     endpoint: EndpointRuntime,
     agent_policy: Mutex<()>,
@@ -85,16 +89,6 @@ struct SavedConfiguration<'a> {
     reconnect: bool,
     // Keep mutations serialized until the post-save restart has completed.
     _operation: tokio::sync::MutexGuard<'a, ()>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct RetiredCredential {
-    profile_id: String,
-    action: String,
-    provider: desktop_core::contracts::ServiceProvider,
-    key: String,
-    entry: String,
-    revoke: bool,
 }
 
 struct ClientCredentials(Mutex<ClientCredentialState>);
@@ -220,34 +214,18 @@ impl DesktopRuntime {
                 desktop_core::diagnostic!("Cannot stage the credential helper: {error}");
             }
         }
-        let secrets: Arc<dyn SecretStore> = Arc::new(KeyringStore);
-        let (mut settings, mut settings_error) = match service_config::load() {
-            Ok(settings) => (settings, None),
-            Err(error) => (service_config::ServiceSettings::default(), Some(error)),
-        };
-        let runtime_config = match settings.runtime_config() {
-            Ok(config) => config,
-            Err(error) => {
-                settings_error = Some(error);
-                settings = service_config::ServiceSettings::default();
-                settings.runtime_config().map_err(|error| {
-                    format!("The built-in Confidential AI profile is invalid: {error}")
-                })?
-            }
-        };
-        let credential_saved = settings
-            .active_profile()
-            .is_ok_and(|profile| profile.credential_saved);
-
-        let (local, local_error) = match local_api::load() {
-            Ok(config) => (config, None),
-            Err(error) => (
-                local_api::resolve(ListenConfig::default()).map_err(|fallback| {
-                    format!("The built-in Local API settings are invalid: {fallback}")
-                })?,
-                Some(error),
-            ),
-        };
+        let (settings, mut settings_problems) = Settings::open(config_dir()?, &data_dir);
+        let settings = Arc::new(settings);
+        let local_state = Arc::new(LocalState::open(&data_dir));
+        settings_problems.extend(local_state.read().err());
+        let snapshot = settings.snapshot()?;
+        let runtime_config = snapshot.config.runtime_config();
+        let profiles = settings.profile_views(&snapshot);
+        let credential_saved = profiles.iter().any(|profile| {
+            profile.id == snapshot.config.active_profile && profile.credential_saved
+        });
+        let local = settings_config::resolve_local_api(snapshot.config.local_api.clone())
+            .map_err(|error| format!("The Local API settings are invalid: {error}"))?;
         let (listener, launch_error) = match proxy::bind_std(local.bind) {
             Ok(listener) => (Some(listener), None),
             Err(error) => (None, Some(error)),
@@ -274,8 +252,9 @@ impl DesktopRuntime {
         let initial_state = AppState {
             local_api: local.config.clone(),
             config: runtime_config,
-            profiles: settings.profiles.clone(),
-            active_profile_id: settings.active_profile_id.clone(),
+            profiles,
+            active_profile_id: snapshot.config.active_profile.clone(),
+            config_files: settings.files(),
             ..AppState::default()
         };
         let manager = Arc::new(
@@ -294,7 +273,9 @@ impl DesktopRuntime {
             manager: manager.clone(),
             proxy: proxy.clone(),
             usage,
-            secrets,
+            settings,
+            settings_watcher: Mutex::new(None),
+            local_state,
             credentials: ClientCredentials::new()?,
             account_login: tokio::sync::Mutex::new(None),
             account_save: Mutex::new(None),
@@ -330,19 +311,27 @@ impl DesktopRuntime {
                 Err("The Local API listener was not created".to_string()),
             ),
         }
-        // Opening the app must not touch the OS credential store. The active
-        // key is loaded only when verification or protection actually uses it.
+        // The active key is loaded only when verification or protection uses it.
         manager.set_api_key_saved(credential_saved);
         proxy.set_api_key(None);
-        for error in [usage_error, local_error, settings_error]
-            .into_iter()
-            .flatten()
-        {
+        for error in usage_error.into_iter().chain(settings_problems) {
             manager.report_error(error);
         }
         if runtime.instance.is_some() {
-            match desktop_core::preferences::load() {
-                Ok(saved) => runtime.apply_web_ui(&saved.web_ui),
+            runtime
+                .web_ui
+                .set_password(snapshot.credentials.web_ui.password_hash.clone());
+            runtime.apply_web_ui(&snapshot.config.web_ui);
+            match crate::settings::spawn_watcher(
+                &runtime.settings,
+                Arc::downgrade(&runtime),
+                &task_runtime,
+            ) {
+                Ok(watcher) => {
+                    if let Ok(mut slot) = runtime.settings_watcher.lock() {
+                        *slot = Some(watcher);
+                    }
+                }
                 Err(error) => runtime.report_error(error),
             }
             runtime.initialize_startup_tokens();
@@ -407,7 +396,11 @@ impl DesktopRuntime {
                 if runtime.exiting.load(Ordering::Acquire) {
                     break;
                 }
-                if app_data_dir().is_ok_and(|path| path.join("account-cleanup.pending").exists()) {
+                if runtime
+                    .local_state
+                    .read()
+                    .is_ok_and(|state| !state.account_cleanup.is_empty())
+                {
                     if let Ok(_operation) = runtime.lifecycle.try_lock() {
                         if let Err(error) = runtime.cleanup_retired().await {
                             runtime.manager.report_error(error);
@@ -500,17 +493,6 @@ fn with_client_token(
         tokens.insert(token, LOCAL_TOOLS_AGENT.to_string());
     }
     Ok(tokens)
-}
-
-fn restore_secret_entry(
-    secrets: &dyn SecretStore,
-    entry: &str,
-    value: Option<&str>,
-) -> Result<(), String> {
-    match value {
-        Some(value) => secrets.set(entry, value),
-        None => secrets.delete(entry),
-    }
 }
 
 #[cfg(test)]

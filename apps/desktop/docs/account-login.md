@@ -10,7 +10,7 @@ selects its workspace. RedPill displays a standard workspace selector and Save,
 including when only one workspace is available. Failed persistence
 keeps the authorization available through Retry, without signing in again.
 Manual keys and ordinary profile edits use Save. Persistence does not start gateway verification. Preset service endpoints are hidden. The runtime owns the
-browser authorization, verification and OS credential store; the renderer only
+browser authorization, verification and `credentials.toml`; the renderer only
 receives presentation and non-secret account metadata.
 
 ## Authorization

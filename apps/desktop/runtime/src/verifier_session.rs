@@ -22,14 +22,13 @@ use crate::usage::UsageStore;
 use aci_protocol::types::ServiceCapabilities;
 use agent_bridge::catalog::{Catalog, EndpointInventory};
 use agent_bridge::proxy::{ProxyEvent, ProxyState, Session};
+use desktop_core::config as settings_config;
 use desktop_core::contracts::{
     AppState, CatalogSummary, ConfidentialProfile, ListenConfig, ModelSummary, RequestActivity,
     ServiceIdentity, SourceProvenance, StartConfig, UsageSummary, VerificationCheck,
 };
 use desktop_core::listen::ResolvedListen;
-use desktop_core::local_api;
 use desktop_core::now_secs;
-use desktop_core::service_config;
 use serde_json::{Map, Value};
 use tokio::{runtime::Handle, sync::watch};
 
@@ -212,7 +211,7 @@ impl SessionManager {
         verification_only: bool,
         reset_catalog_history: bool,
     ) -> Result<AppState, String> {
-        let config = service_config::resolve_runtime_config(config)?;
+        let config = settings_config::resolve_runtime_config(config)?;
         let remote_url = config.remote_url.clone();
 
         let mut runtime = self.lock()?;
@@ -426,7 +425,7 @@ impl SessionManager {
         Ok(state)
     }
 
-    /// What survives a stop or restart of the verifier: settings, key status,
+    /// What survives a stop or restart of the verifier: settings and their files, key status,
     /// the local endpoint, and recent activity. The catalog does not: it
     /// belongs to a verified session.
     fn carried(previous: &AppState) -> AppState {
@@ -448,6 +447,7 @@ impl SessionManager {
             usage_revision: previous.usage_revision,
             catalog: previous.catalog.clone(),
             web_ui: previous.web_ui.clone(),
+            config_files: previous.config_files.clone(),
             ..AppState::default()
         }
     }
@@ -520,6 +520,7 @@ impl SessionManager {
         self.publish();
     }
 
+    /// Replaces the saved profiles without touching the session.
     pub fn update_profile_list(
         &self,
         profiles: Vec<ConfidentialProfile>,
@@ -527,10 +528,17 @@ impl SessionManager {
         config: StartConfig,
     ) {
         self.update(|state| {
+            state.api_key_saved = profiles
+                .iter()
+                .any(|profile| profile.id == active_profile_id && profile.credential_saved);
             state.profiles = profiles;
             state.active_profile_id = active_profile_id;
             state.config = config;
         });
+    }
+
+    pub fn set_config_files(&self, files: desktop_core::contracts::ConfigFiles) {
+        self.update(|state| state.config_files = files);
     }
 
     /// Record whether the stable local endpoint is bound. A failure blocks
@@ -555,7 +563,7 @@ impl SessionManager {
     }
 
     pub fn local_api(&self) -> Result<ResolvedListen, String> {
-        local_api::resolve(self.lock()?.state.local_api.clone())
+        settings_config::resolve_local_api(self.lock()?.state.local_api.clone())
     }
 
     pub fn is_running(&self) -> Result<bool, String> {

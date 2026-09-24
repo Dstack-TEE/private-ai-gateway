@@ -116,12 +116,8 @@ try {
   await waitForExit(gate, 10_000);
   assert.equal(gate.exitCode, 0);
 
-  await mkdir(data, { recursive: true });
-  await writeFile(path.join(data, "local-api.json"), JSON.stringify({
-    listenAddress: "127.0.0.1",
-    allowNetworkAccess: false,
-    port: await reservePort(),
-  }));
+  await mkdir(path.join(data, "Config"), { recursive: true });
+  await writeFile(path.join(data, "Config", "config.toml"), `[localApi]\nport = ${await reservePort()}\n`);
   const started = JSON.parse((await execute(pap, ["--json", "service", "start"], { env, timeout: 20_000, windowsHide: true })).stdout);
   assert.ok(Number.isInteger(started.processId) && started.processId > 0);
 } finally {

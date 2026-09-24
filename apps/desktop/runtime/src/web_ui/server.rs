@@ -461,6 +461,7 @@ async fn events<B: Backend>(
     }
     let shutdown = state.shutdown.clone();
     let auth = state.auth.clone();
+    let (backend, host) = (state.backend.clone(), state.host.clone());
     let stream = async_stream::stream! {
         for event in snapshot {
             yield Ok(sse(&event));
@@ -474,6 +475,13 @@ async fn events<B: Backend>(
                         break;
                     }
                     let current = states.borrow_and_update().clone();
+                    if projection.settings_changed(&current) {
+                        if let Ok((_, events)) = ui_api::preference_events(&backend, &host).await {
+                            for event in events {
+                                yield Ok(sse(&event));
+                            }
+                        }
+                    }
                     for event in projection.project(&current) {
                         yield Ok(sse(&event));
                     }

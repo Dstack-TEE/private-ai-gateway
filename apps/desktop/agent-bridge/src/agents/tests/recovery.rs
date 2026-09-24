@@ -487,7 +487,7 @@ fn disconnected_provider_ownership_does_not_follow_a_new_config_path() {
 }
 
 #[test]
-fn claude_takes_over_credentials_via_the_keyring_and_restores_them() {
+fn claude_takes_over_credentials_via_the_secret_store_and_restores_them() {
     let sandbox = sandbox("claude");
     let path = sandbox.home.join(".claude").join("settings.json");
     write(

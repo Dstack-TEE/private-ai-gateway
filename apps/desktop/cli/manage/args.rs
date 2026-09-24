@@ -71,7 +71,7 @@ pub(super) enum Action {
         #[command(subcommand)]
         command: Usage,
     },
-    /// Inspect or change desktop and Local API settings.
+    /// Inspect or change settings (config.toml; API keys and passwords are in credentials.toml).
     Settings {
         #[command(subcommand)]
         command: Settings,
@@ -430,8 +430,10 @@ impl fmt::Display for SettingsKey {
 pub(super) enum Settings {
     /// Stop protection and reset backend settings, preserving profiles, keys and usage.
     Reset,
-    /// Show desktop preferences, Local API settings and web UI status.
+    /// Show the settings in effect, the settings file paths and web UI status. Never shows secrets.
     Show,
+    /// Print the JSON Schema of config.toml for editors and validators.
+    Schema,
     /// Change one setting. This may restart the Local API or protection.
     Set {
         #[arg(value_enum)]

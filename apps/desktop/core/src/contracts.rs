@@ -2,6 +2,7 @@
 //! generated from them; run `npm run generate:contracts` after changing one.
 
 pub use crate::agents::{AgentPreview, AgentStatus, ConnectOptions};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -141,7 +142,7 @@ pub struct CatalogSummary {
     pub removed: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum ServiceProvider {
     Phala,
@@ -175,7 +176,7 @@ pub enum AccountSaveResult {
     Failed { error: String },
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountScope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -226,15 +227,16 @@ pub enum AccountBalanceTarget {
     },
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 pub struct AccountImages {
     pub user: Option<String>,
     pub organization: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "kind")]
 pub enum ProfileAuth {
+    #[default]
     #[serde(rename = "apiKey")]
     ApiKey,
     #[serde(rename = "oauth")]
@@ -255,6 +257,12 @@ pub enum ProfileAuth {
         #[ts(optional)]
         scope: Option<Box<AccountScope>>,
     },
+}
+
+impl ProfileAuth {
+    pub fn is_api_key(&self) -> bool {
+        matches!(self, Self::ApiKey)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -350,6 +358,23 @@ pub struct AppState {
     pub catalog: Option<CatalogSummary>,
     #[serde(default)]
     pub web_ui: WebUiStatus,
+    #[serde(default)]
+    pub config_files: ConfigFiles,
+}
+
+/// The settings files the backend reads. Never carries their contents.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(optional_fields)]
+pub struct ConfigFiles {
+    pub config_path: String,
+    pub credentials_path: String,
+    /// Why the current file contents are not in effect (the previous settings
+    /// stay in effect), with the file, line and column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Changes whenever applied settings change, including external edits.
+    pub revision: u64,
 }
 
 /// Listener state of the service-hosted web UI. Never carries the password, its hash or session tokens.
@@ -375,8 +400,8 @@ pub struct WebUiStatus {
     pub password_set: bool,
 }
 
-impl From<&crate::preferences::WebUiConfig> for WebUiStatus {
-    fn from(config: &crate::preferences::WebUiConfig) -> Self {
+impl From<&crate::config::WebUiConfig> for WebUiStatus {
+    fn from(config: &crate::config::WebUiConfig) -> Self {
         Self {
             enabled: config.enabled,
             listen_address: config.listen_address.clone(),
@@ -436,15 +461,16 @@ impl Default for AppState {
             local_api: ListenConfig::default(),
             api_key_saved: false,
             catalog: None,
-            web_ui: WebUiStatus::from(&crate::preferences::WebUiConfig::default()),
+            web_ui: WebUiStatus::from(&crate::config::WebUiConfig::default()),
+            config_files: ConfigFiles::default(),
         }
     }
 }
 
 /// A TCP listener shared by the Local API and the web UI. Non-loopback
 /// addresses require `allow_network_access`; see [`crate::listen::resolve`].
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 #[ts(optional_fields)]
 pub struct ListenConfig {
     pub listen_address: String,
@@ -466,7 +492,7 @@ impl Default for ListenConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct StartConfig {
     pub remote_url: String,
@@ -545,8 +571,8 @@ mod typescript {
         account::LoginPresentation,
         agent_access::AgentAccessStatus,
         agents::{AgentRepairAction, ConfigChange},
+        config::{Appearance, NotificationPreferences, UpdateChannel, WebUiConfig},
         maintenance::{ImportResult, ProfileBackup, ProfileConfiguration},
-        preferences::{Appearance, NotificationPreferences, UpdateChannel, WebUiConfig},
         ui_api::{LaunchPreferences, ListenAddress, Method},
         updates::{Installation, UpdateInfo, UpdateNotice},
         usage::{UsageModelPoint, UsagePage, UsagePoint, UsageQuery},
@@ -598,6 +624,7 @@ mod typescript {
             ListenConfig,
             WebUiConfig,
             WebUiStatus,
+            ConfigFiles,
             ListenAddress,
             Appearance,
             UpdateChannel,

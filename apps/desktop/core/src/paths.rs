@@ -1,5 +1,6 @@
-//! Where Private AI Proxy keeps per-user state, resolved identically by the
-//! desktop shell, the CLI, the backend and the credential helper.
+//! Where Private AI Proxy keeps per-user settings and state, resolved
+//! identically by the desktop shell, the CLI, the backend and the credential
+//! helper.
 
 use std::{env, path::PathBuf};
 
@@ -9,6 +10,13 @@ use crate::brand::APP_IDENTIFIER;
 pub const HOME_OVERRIDE_ENV: &str = "PRIVATE_AI_PROXY_HOME";
 /// Exact app-data override used by sandboxed desktop distributions.
 pub const APP_DATA_OVERRIDE_ENV: &str = "PRIVATE_AI_PROXY_DATA_DIR";
+/// Exact override for the settings directory (`config.toml`, `credentials.toml`).
+pub const CONFIG_OVERRIDE_ENV: &str = "PRIVATE_AI_PROXY_CONFIG_DIR";
+/// The settings directory name under `$XDG_CONFIG_HOME` on Linux.
+const CONFIG_DIR_NAME: &str = "private-ai-proxy";
+/// The settings subdirectory of the app directory where the platform has no
+/// separate settings location, like VS Code's `Code/User`.
+const CONFIG_SUBDIR: &str = "Config";
 
 /// The per-user app data directory (tokens, connection record, locks),
 /// resolved the same way by the desktop shell and the
@@ -35,6 +43,34 @@ pub fn app_data_dir() -> Result<PathBuf, String> {
         )?
     };
     Ok(base.join(APP_IDENTIFIER))
+}
+
+/// The per-user settings directory. It holds only `config.toml`,
+/// `credentials.toml` and the schema, never state, so it can be synced on its
+/// own. Linux follows the XDG base directories
+/// (`$XDG_CONFIG_HOME/private-ai-proxy`). macOS (including the Mac App Store
+/// container) keeps one directory per app in Application Support, so settings
+/// get their own `Config` subdirectory there, as VS Code keeps its synced
+/// settings in `Application Support/Code/User`; an explicit data or home
+/// override (tests) does the same.
+pub fn config_dir() -> Result<PathBuf, String> {
+    if let Some(path) = env_path(CONFIG_OVERRIDE_ENV) {
+        return if path.is_absolute() {
+            Ok(path)
+        } else {
+            Err("The settings directory override must be an absolute path".to_string())
+        };
+    }
+    if cfg!(any(target_os = "macos", windows))
+        || env_path(APP_DATA_OVERRIDE_ENV).is_some()
+        || env_path(HOME_OVERRIDE_ENV).is_some()
+    {
+        return Ok(app_data_dir()?.join(CONFIG_SUBDIR));
+    }
+    let base = env_path("XDG_CONFIG_HOME")
+        .filter(|path| path.is_absolute())
+        .map_or_else(|| home_dir().map(|home| home.join(".config")), Ok)?;
+    Ok(base.join(CONFIG_DIR_NAME))
 }
 
 pub fn env_path(name: &str) -> Option<PathBuf> {

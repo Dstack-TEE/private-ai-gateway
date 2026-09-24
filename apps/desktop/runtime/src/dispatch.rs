@@ -4,10 +4,7 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use desktop_core::{
-    preferences,
-    protocol::{encode, rpc, Call, Command, RpcError, BUILD_VERSION},
-};
+use desktop_core::protocol::{encode, rpc, Call, Command, RpcError, BUILD_VERSION};
 use serde_json::Value;
 
 use crate::controller::DesktopRuntime;
@@ -141,14 +138,10 @@ pub(crate) async fn dispatch(
             respond::<rpc::DisconnectAllAgents, _>(runtime.disconnect_all_agents())
         }
         Command::ResetSettings => respond::<rpc::ResetSettings, _>(runtime.reset_settings().await),
-        Command::Preferences => respond::<rpc::Preferences, _>(
-            preferences::load().map(preferences::Preferences::shared),
-        ),
-        Command::SetPreference(change) => respond::<rpc::SetPreference, _>(
-            preferences::update(|saved| change.apply(saved))
-                .and_then(|()| preferences::load())
-                .map(preferences::Preferences::shared),
-        ),
+        Command::Settings => respond::<rpc::Settings, _>(runtime.settings()),
+        Command::SetPreference(change) => {
+            respond::<rpc::SetPreference, _>(runtime.set_preference(change))
+        }
     }
 }
 

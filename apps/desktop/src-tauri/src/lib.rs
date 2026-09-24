@@ -17,7 +17,7 @@ mod window_state;
 use std::sync::Arc;
 
 use desktop_core::{
-    client::Client, contracts::CommandRegistration, preferences::Appearance, protocol::rpc,
+    client::Client, config::Appearance, contracts::CommandRegistration, protocol::rpc,
 };
 use tauri::{
     webview::{PageLoadEvent, WebviewWindowBuilder},
@@ -149,7 +149,7 @@ async fn register_cli_on_startup(app: &AppHandle) {
     }
     let enabled = run_blocking(move || {
         Ok(reader
-            .call(rpc::Preferences)?
+            .call(rpc::Settings)?
             .auto_cli_registration
             .unwrap_or(true))
     })
@@ -312,7 +312,7 @@ pub fn run() {
                     .plugin(tauri_plugin_updater::Builder::new().build())?;
             }
             let client = Client::attach(tauri::async_runtime::handle().inner().clone())?;
-            if let Ok(preferences) = client.call(rpc::Preferences) {
+            if let Ok(preferences) = client.call(rpc::Settings) {
                 apply_appearance(app.handle(), preferences.appearance);
             }
             app.manage(client.clone());
@@ -393,6 +393,20 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 while states.changed().await.is_ok() {
                     let state = states.borrow().clone();
+                    if projection.settings_changed(&state) {
+                        // An edit of config.toml, for example: reapply preferences.
+                        let (client, host) = (client.clone(), host.clone());
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(error) =
+                                desktop_core::ui_api::refresh_preferences(&client, &host).await
+                            {
+                                desktop_core::diagnostic!(
+                                    "Cannot refresh desktop preferences: {}",
+                                    error.message()
+                                );
+                            }
+                        });
+                    }
                     for event in projection.project(&state) {
                         let _ = desktop_core::ui_api::Host::emit(&host, event);
                     }

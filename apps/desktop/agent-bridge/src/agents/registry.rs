@@ -84,7 +84,7 @@ impl AgentIntegration for Agent {
     fn note(self, connect: bool) -> &'static str {
         if !connect {
             return "Proxy provider definitions are retained. Default routing and credentials taken \
-                    over at connect come back from the system credential store; edits made \
+                    over at connect are restored; edits made \
                     since are left in place. The agent's local token is revoked.";
         }
         match self {

@@ -9,7 +9,7 @@ use std::{path::Path, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
-use crate::preferences::{self, UpdateChannel};
+use crate::config::{self, UpdateChannel};
 
 /// The channel feed configured for release builds; development builds have none.
 pub const RELEASE_FEED: Option<&str> = option_env!("TAURI_UPDATER_ENDPOINT");
@@ -52,11 +52,11 @@ pub fn selected_channel(current_version: &str) -> UpdateChannel {
         } else {
             UpdateChannel::Stable
         };
-    match preferences::load() {
+    match config::load() {
         Ok(saved) => saved.update_channel.unwrap_or(default),
         Err(error) => {
             crate::diagnostic!(
-                "Could not read update preferences; using the build channel: {error}"
+                "Could not read the update channel; using the build channel: {error}"
             );
             default
         }

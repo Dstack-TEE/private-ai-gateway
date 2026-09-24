@@ -1,6 +1,6 @@
 mod permission;
 use desktop_core::{
-    client::Client, contracts::AppState, preferences::NotificationPreferences, protocol::rpc,
+    client::Client, config::NotificationPreferences, contracts::AppState, protocol::rpc,
 };
 use std::{
     sync::{Arc, Mutex},
@@ -20,7 +20,7 @@ pub struct Configuration {
 }
 
 pub fn initialize(app: &AppHandle) {
-    match app.state::<Arc<Client>>().call(rpc::Preferences) {
+    match app.state::<Arc<Client>>().call(rpc::Settings) {
         Ok(preferences) => {
             if let Ok(mut current) = app.state::<Settings>().0.lock() {
                 *current = preferences.notifications;

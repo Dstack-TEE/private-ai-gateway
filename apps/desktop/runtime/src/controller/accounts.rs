@@ -5,18 +5,7 @@ impl DesktopRuntime {
         &self,
         pending: &mut crate::account_login::PendingLogin,
     ) -> Result<(), String> {
-        let profile = self
-            .manager
-            .snapshot()?
-            .profiles
-            .into_iter()
-            .find(|p| p.id == pending.profile_id() && p.credential_saved);
-        let key = match profile {
-            Some(profile) => self
-                .secrets
-                .get(&service_config::profile_credential_entry(&profile)?)?,
-            None => None,
-        };
+        let key = self.load_profile_key(pending.profile_id())?;
         pending.protect_saved_key(key.as_deref()).await;
         pending.cancel().await
     }
@@ -188,10 +177,8 @@ impl DesktopRuntime {
         {
             return Err("Connect RedPill to select a workspace".into());
         }
-        let entry = service_config::profile_credential_entry(profile)?;
         let key = self
-            .secrets
-            .get(&entry)?
+            .load_profile_key(&profile.id)?
             .ok_or("This profile has no saved credential")?;
         crate::account_login::account_details(&key).await
     }
@@ -227,12 +214,11 @@ impl DesktopRuntime {
                 if !matches!(profile.auth, ProfileAuth::OAuth { .. }) || !profile.credential_saved {
                     return Err("Connect the account to view its balance".into());
                 }
-                let entry = service_config::profile_credential_entry(profile)?;
+                let credential = profile.credential_ref.clone().unwrap_or_default();
                 self.balances
-                    .get(format!("profile:{profile_id}:{entry}"), async {
+                    .get(format!("profile:{profile_id}:{credential}"), async {
                         let key = self
-                            .secrets
-                            .get(&entry)?
+                            .load_profile_key(&profile_id)?
                             .ok_or("This profile has no saved credential")?;
                         crate::account_login::account_balance(&profile.provider, &key).await
                     })

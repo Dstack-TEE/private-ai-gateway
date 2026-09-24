@@ -24,32 +24,7 @@ pub use auth::Auth;
 #[cfg(feature = "web-ui")]
 pub use throttle::Throttle;
 
-use desktop_core::{
-    listen::{self, ResolvedListen},
-    preferences::{self, WebUiConfig},
-};
-
-/// Checks the port policy and the shared listener rules; non-loopback fails closed.
-/// Unlike the Local API, privileged ports are allowed: agents never store this
-/// port, and a failed bind only disables the optional web UI (see docs/cli.md).
-pub fn validate(config: &WebUiConfig, local_api_port: u16) -> Result<ResolvedListen, String> {
-    let port = config.port;
-    if port == 0 {
-        return Err("Web UI port must be between 1 and 65535".into());
-    }
-    if port == local_api_port {
-        return Err(format!(
-            "Web UI port {port} is used by the Local API; choose another port"
-        ));
-    }
-    if port == crate::account_login::CALLBACK_ADDRESS.port() {
-        return Err(format!(
-            "Web UI port {port} is reserved for account connection callbacks; choose another port"
-        ));
-    }
-    // The prefix keeps these messages through the management error allowlist.
-    listen::resolve(config.listen()).map_err(|error| format!("Web UI: {error}"))
-}
+use desktop_core::listen::ResolvedListen;
 
 pub struct WebUi {
     auth: Arc<Auth>,
@@ -62,14 +37,8 @@ pub struct WebUi {
 
 impl WebUi {
     pub(crate) fn new(handle: Handle) -> Self {
-        let auth = Auth::default();
-        match preferences::load() {
-            Ok(saved) => auth.set_password(saved.web_ui_password_hash),
-            // Without a readable password the web UI stays closed.
-            Err(error) => desktop_core::diagnostic!("{error}"),
-        }
         Self {
-            auth: Arc::new(auth),
+            auth: Arc::default(),
             #[cfg(feature = "web-ui")]
             throttle: Arc::default(),
             running: Mutex::new(None),
@@ -131,53 +100,5 @@ impl WebUi {
     /// Applies a saved password change; every browser session ends.
     pub(crate) fn set_password(&self, hash: Option<String>) {
         self.auth.set_password(hash);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use desktop_core::preferences::WEB_UI_DEFAULT_PORT;
-
-    #[test]
-    fn ports_cannot_collide_with_local_services() {
-        let config = |port| WebUiConfig {
-            enabled: true,
-            port,
-            ..WebUiConfig::default()
-        };
-        assert_eq!(
-            validate(&config(WEB_UI_DEFAULT_PORT), 4180)
-                .unwrap()
-                .endpoint,
-            "http://127.0.0.1:4182"
-        );
-        assert!(validate(&config(0), 4180).is_err());
-        assert!(validate(&config(4180), 4180).is_err());
-        assert!(validate(&config(4181), 4180).is_err());
-        assert!(validate(&config(5000), 5000).is_err());
-    }
-
-    #[test]
-    fn network_listening_needs_confirmation_and_a_reachable_host() {
-        let mut config = WebUiConfig {
-            enabled: true,
-            listen_address: "192.168.1.20".into(),
-            ..WebUiConfig::default()
-        };
-        assert!(validate(&config, 4180)
-            .unwrap_err()
-            .contains("explicit confirmation"));
-        config.allow_network_access = true;
-        assert_eq!(
-            validate(&config, 4180).unwrap().endpoint,
-            "http://192.168.1.20:4182"
-        );
-        config.listen_address = "0.0.0.0".into();
-        assert!(validate(&config, 4180).unwrap_err().contains("Client host"));
-        config.client_host = Some("Studio.local".into());
-        let listen = validate(&config, 4180).unwrap();
-        assert_eq!(listen.bind.to_string(), "0.0.0.0:4182");
-        assert_eq!(listen.endpoint, "http://studio.local:4182");
     }
 }

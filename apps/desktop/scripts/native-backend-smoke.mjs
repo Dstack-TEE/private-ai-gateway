@@ -70,8 +70,8 @@ try {
   assert.ok(address && typeof address !== "string");
   await new Promise((resolve) => server.close(resolve));
   const data = path.join(home, ".private-ai-proxy");
-  await mkdir(data, { mode: 0o700 });
-  await writeFile(path.join(data, "local-api.json"), JSON.stringify({ listenAddress: "127.0.0.1", allowNetworkAccess: false, port: address.port }), { mode: 0o600 });
+  await mkdir(path.join(data, "Config"), { recursive: true, mode: 0o700 });
+  await writeFile(path.join(data, "Config", "config.toml"), `[localApi]\nport = ${address.port}\n`, { mode: 0o600 });
   const backend = start("private-ai-proxy-service");
   let state;
   for (let count = 0; count < 100; count++) {
@@ -98,7 +98,7 @@ try {
   assert.equal(ui.exitCode, null);
   assert.equal((await cli("status")).backend.instanceId, instance);
   await cli("settings", "set", "appearance", "dark", "--yes");
-  assert.equal((await cli("settings", "show")).preferences.appearance, "dark");
+  assert.equal((await cli("settings", "show")).settings.appearance, "dark");
   await stop(ui);
   await cli("service", "stop", "--yes");
   assert.equal((await cli("status")).status, "not_running");

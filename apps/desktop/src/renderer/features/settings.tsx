@@ -10,6 +10,7 @@ import { AppearanceControl } from "../components/appearance";
 import { ExportDiagnostics } from "../components/maintenance";
 import { ErrorAlert } from "../components/error-alert";
 import { Item, ItemActions, ItemContent, ItemTitle, ItemDescription } from "../components/ui/item";
+import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
 import { SettingsSection, SettingsList, SettingsLink, SettingsToggle } from "../components/settings";
 import type { DistributionCapabilities, AppState, LaunchPreferences, WebUiStatus } from "../../shared/contracts";
@@ -112,6 +113,11 @@ export function SettingsView({
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   return (
     <div className="page-body max-w-230 min-h-full mt-0 mr-auto mb-0 ml-auto settings-page">
+      {state.configFiles.error && <Alert variant="destructive" className="mb-5">
+        <AlertTitle>Settings file not applied</AlertTitle>
+        <AlertDescription className="whitespace-pre-wrap font-mono text-xs">{state.configFiles.error}</AlertDescription>
+        <AlertDescription>The previous settings stay in effect until the file is fixed.</AlertDescription>
+      </Alert>}
 
       <SettingsSection title="General">
           {distribution.launchAtLogin && <SettingsToggle label="Open at Login" checked={launchPreferences?.openAtLogin ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("openAtLogin", !launchPreferences?.openAtLogin)} />}
@@ -133,6 +139,12 @@ export function SettingsView({
           <SettingsToggle label="Allow development OS" checked={allowDevelopmentOs} developmentMode={allowDevelopmentOs} disabled={locked} onToggle={() => onPolicy(!allowDevelopmentOs)} />
           {distribution.nativeUpdates && <UpdateChannelControl updates={updates} />}
           {distribution.cliRegistration && <CliRegistrationControl />}
+          {state.configFiles.configPath && <Item>
+            <ItemContent>
+              <ItemTitle>Settings file</ItemTitle>
+              <ItemDescription className="break-all">{state.configFiles.configPath}. API keys and the web UI password are in credentials.toml beside it.</ItemDescription>
+            </ItemContent>
+          </Item>}
           <ExportDiagnostics api={desktopApi} onMessage={setDiagnosticMessage} />
           <SettingsLink title="Reset settings" disabled={locked} onClick={onResetSettings} />
           </SettingsList>

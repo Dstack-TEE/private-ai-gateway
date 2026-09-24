@@ -15,7 +15,7 @@ Gateway server. Build and submission instructions live in [Mac App Store](mac-ap
 | Agent discovery, config projection, token issuance / revocation | Shared projector | Same | Shared |
 | Home filesystem access | Ordinary Home | NSOpenPanel selection and persistent security-scoped bookmark | Sandbox requirement |
 | Agent credentials | Bundled helper / native file reference | Authorized Home token files / native file reference | Sandbox parent boundary |
-| Upstream API keys and OAuth secrets | OS credential store | OS credential store | Shared; never projected into Home |
+| Settings and upstream API keys / OAuth secrets | `config.toml` and owner-only `credentials.toml` in the settings directory ([Settings files](configuration.md)) | Same, in the app container's `Config` subdirectory | Shared; never projected into Home |
 | App update | Tauri signed background updater | App Store | Channel requirement |
 | CLI registration | Available | Disabled | No shared-location code installation in MAS |
 | OAuth, manual key entry, account balance | Available | Available | Shared |

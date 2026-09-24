@@ -22,6 +22,7 @@ interactive terminal outside JSON modes.
 
 - [Architecture](docs/client-architecture.md)
 - [CLI](docs/cli.md)
+- [Settings files](docs/configuration.md)
 - [CLI distribution](docs/cli-distribution.md)
 - [Account login](docs/account-login.md)
 - [Distribution architecture](docs/distribution.md)
@@ -36,8 +37,8 @@ interactive terminal outside JSON modes.
 | `src/renderer` | React UI and native-window content |
 | `src-tauri` | Tauri application, system integration, tray, menus, dialogs, updates |
 | `cli` | The only command-line surface (arguments, output, completions, schema), ACI relying-party verifier, local streaming proxy, and the `private-ai-proxy-service` entry point |
-| `core` | Client side shared by the app, CLI and backend: contracts, management protocol and client, IPC transport, preferences, paths |
-| `runtime` | Persistent backend: controller, management server, verifier sessions, usage, account login, web UI |
+| `core` | Client side shared by the app, CLI and backend: contracts, management protocol and client, IPC transport, the `config.toml` model, paths |
+| `runtime` | Persistent backend: controller, settings files, management server, verifier sessions, usage, account login, web UI |
 | `agent-bridge` | Coding-agent bridge: Local API proxy, agent tokens, catalog, reversible agent configuration, and the `private-ai-proxy-helper` binary |
 | `gateway/src/endpoint-support.json` | Published model endpoint inventory; released apps fetch this path, so it stays put |
 | `../../crates/aci-protocol` | Shared ACI wire types and deterministic encoding rules |
@@ -138,9 +139,10 @@ Tauri application; there is no in-page mock API or Playwright screenshot suite.
 ## Profiles And Credentials
 
 Profiles contain a name, provider, service endpoint, and authentication method.
-Provider credentials are stored only in the OS credential store. The renderer,
-profile JSON, agent configuration, command arguments, and diagnostics never
-receive the raw saved credential.
+Settings live in `config.toml` and provider credentials only in the owner-only
+`credentials.toml` beside it; see [Settings files](docs/configuration.md). The
+renderer, `config.toml`, agent configuration, command arguments, and diagnostics
+never receive the raw saved credential.
 
 Phala and RedPill support account login or manual API keys. Custom ACI services
 use manual keys. Saving a profile does not claim that the endpoint is verified;
