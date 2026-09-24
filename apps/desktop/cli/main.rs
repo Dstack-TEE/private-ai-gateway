@@ -3,7 +3,7 @@ mod manage;
 
 use clap::{FromArgMatches, Subcommand};
 use private_ai_proxy::{args, audit, send, serve, sessions, verify};
-use std::{io::IsTerminal, path::Path};
+use std::{ffi::OsStr, io::IsTerminal, path::Path};
 
 #[tokio::main]
 async fn main() {
@@ -63,16 +63,44 @@ async fn main() {
 /// `aci` is a legacy alias of this executable. Interactive use gets a one-line
 /// nudge toward `pap`; machine-readable modes and redirected stderr never do.
 fn legacy_alias_hint() {
-    let invoked_as_aci = std::env::args_os().next().is_some_and(|name| {
-        Path::new(&name)
-            .file_stem()
-            .is_some_and(|stem| stem == "aci")
-    });
     let machine_output = std::env::args_os()
         .skip(1)
         .take_while(|arg| arg != "--")
         .any(|arg| arg == "--json" || arg == "--json-events");
-    if invoked_as_aci && !machine_output && std::io::stderr().is_terminal() {
+    if invoked_as_aci(
+        std::env::args_os().next().as_deref(),
+        std::env::var_os("PRIVATE_AI_PROXY_ALIAS").as_deref(),
+    ) && !machine_output
+        && std::io::stderr().is_terminal()
+    {
         tracing::info!("note: `aci` is a legacy alias; use `pap` or `private-ai-proxy` instead.");
+    }
+}
+
+/// Symlinks and the npm launcher name the alias in `argv[0]`; Windows `.cmd`
+/// shims, which cannot, name it in `PRIVATE_AI_PROXY_ALIAS`.
+fn invoked_as_aci(argv0: Option<&OsStr>, alias: Option<&OsStr>) -> bool {
+    alias == Some(OsStr::new("aci"))
+        || argv0.is_some_and(|name| Path::new(name).file_stem() == Some(OsStr::new("aci")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_alias_channel_is_recognized() {
+        let name = |value: &'static str| Some(OsStr::new(value));
+        // Linux packages and `pap cli install` symlinks, and the npm launcher's argv0.
+        assert!(invoked_as_aci(name("/usr/bin/aci"), None));
+        assert!(invoked_as_aci(name("aci"), None));
+        // A Windows `.cmd` shim runs the executable by its own path.
+        assert!(invoked_as_aci(
+            name(r"C:\pap\private-ai-proxy.exe"),
+            name("aci")
+        ));
+        assert!(!invoked_as_aci(name("/usr/bin/pap"), None));
+        assert!(!invoked_as_aci(name("private-ai-proxy"), name("pap")));
+        assert!(!invoked_as_aci(None, None));
     }
 }

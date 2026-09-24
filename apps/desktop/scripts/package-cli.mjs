@@ -3,25 +3,15 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { artifactName } from "./release-artifacts.mjs";
 import { UNIVERSAL_MACOS_TARGET } from "./build-config.mjs";
-import {
-  chmod,
-  copyFile,
-  mkdir,
-  mkdtemp,
-  readFile,
-  readdir,
-  readlink,
-  rm,
-  stat,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
+import { aliases, aliasLinks, buildLinuxPackages, releaseVersionParts } from "./package-linux.mjs";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import semver from "semver";
 
 export const binaries = ["private-ai-proxy", "private-ai-proxy-service", "private-ai-proxy-helper"];
-export const aliases = ["pap", "aci"];
+// The shim `pap cli install` writes (cli/manage/install.rs): it names the
+// alias in PRIVATE_AI_PROXY_ALIAS because a .cmd file cannot set argv[0].
+export const windowsAliasScript = '@echo off\r\nsetlocal\r\nset "PRIVATE_AI_PROXY_ALIAS=%~n0"\r\n"%~dp0private-ai-proxy.exe" %*\r\n';
 
 const scriptPath = fileURLToPath(import.meta.url);
 const appRoot = path.resolve(path.dirname(scriptPath), "..");
@@ -31,21 +21,6 @@ export async function assertWebBundle(root = appRoot) {
   if (!(await stat(index).catch(() => undefined))?.isFile()) {
     throw new Error(`Missing embedded web UI ${index}; run npm run build:web before building or packaging the CLI`);
   }
-}
-
-export function releaseVersionParts(version) {
-  const parsed = semver.parse(version);
-  if (!parsed || semver.valid(version) !== version || parsed.build.length > 0) {
-    throw new Error(`CLI package version must be SemVer, got ${JSON.stringify(version)}`);
-  }
-  const base = `${parsed.major}.${parsed.minor}.${parsed.patch}`;
-  const prerelease = parsed.prerelease.length > 0 ? parsed.prerelease.join(".") : undefined;
-  return {
-    arch: prerelease ? `${base}${prerelease.replace(/[^0-9A-Za-z.]+/g, ".")}` : base,
-    deb: prerelease ? `${base}~${prerelease}` : base,
-    rpmVersion: base,
-    rpmRelease: prerelease ? `0.${prerelease.replace(/[^0-9A-Za-z.]+/g, ".")}.1` : "1",
-  };
 }
 
 export async function stagePortable({ sourceDir, targetTriple, platform, destination }) {
@@ -70,7 +45,7 @@ export async function stagePortable({ sourceDir, targetTriple, platform, destina
   }
   if (platform === "windows") {
     for (const alias of aliases) {
-      await writeFile(path.join(destination, `${alias}.cmd`), '@echo off\r\n"%~dp0private-ai-proxy.exe" %*\r\n');
+      await writeFile(path.join(destination, `${alias}.cmd`), windowsAliasScript);
     }
   } else {
     for (const alias of aliases) {
@@ -79,30 +54,16 @@ export async function stagePortable({ sourceDir, targetTriple, platform, destina
   }
 }
 
-// Names the package manager that owns a Linux install, so update notices can
-// print its upgrade command (see core/src/updates.rs).
-export const packageManagerMarker = "usr/share/private-ai-proxy/package-manager";
-
-export async function writePackageManagerMarker(packageRoot, packageManager) {
-  const marker = path.join(packageRoot, packageManagerMarker);
-  await mkdir(path.dirname(marker), { recursive: true });
-  await writeFile(marker, `${packageManager}\n`);
-}
-
-export async function stageLinuxPackageRoot(portableDirectory, packageRoot, packageManager) {
-  const libexec = path.join(packageRoot, "usr/libexec/private-ai-proxy");
-  const bin = path.join(packageRoot, "usr/bin");
-  await mkdir(libexec, { recursive: true });
-  await mkdir(bin, { recursive: true });
-  for (const name of binaries) {
-    const target = path.join(libexec, name);
-    await copyFile(path.join(portableDirectory, name), target);
-    await chmod(target, 0o755);
-  }
-  for (const name of ["private-ai-proxy", ...aliases]) {
-    await symlink("../libexec/private-ai-proxy/private-ai-proxy", path.join(bin, name));
-  }
-  await writePackageManagerMarker(packageRoot, packageManager);
+// Linux packages keep the executables in libexec behind a /usr/bin symlink;
+// the CLI canonicalizes itself before it locates its siblings.
+export function linuxContents(portable) {
+  const libexec = "/usr/libexec/private-ai-proxy";
+  return [
+    { dst: libexec, type: "dir" },
+    ...binaries.map((name) => ({ src: path.join(portable, name), dst: `${libexec}/${name}`, file_info: { mode: 0o755 } })),
+    { src: "../libexec/private-ai-proxy/private-ai-proxy", dst: "/usr/bin/private-ai-proxy", type: "symlink" },
+    ...aliasLinks,
+  ];
 }
 
 async function main() {
@@ -129,10 +90,9 @@ async function main() {
     artifacts.push(archive);
 
     if (options.platform === "linux") {
-      const packageRoot = path.join(scratch, "package-root");
-      await stageLinuxPackageRoot(portable, packageRoot, "deb");
-      artifacts.push(await createDeb(options, packageRoot));
-      artifacts.push(await createRpm(options, scratch, portable));
+      artifacts.push(...await buildLinuxPackages({
+        kind: "cli", version: options.version, arch: options.arch, contents: linuxContents(portable), output: options.output,
+      }));
     }
 
     for (const artifact of artifacts) {
@@ -191,100 +151,6 @@ function createArchive(platform, parent, directory, output) {
   } else {
     execFileSync("tar", ["-c", "-z", "-f", output, "-C", parent, directory], { stdio: "inherit" });
   }
-}
-
-async function createDeb(options, packageRoot) {
-  const { deb } = releaseVersionParts(options.version);
-  const architecture = options.arch === "x64" ? "amd64" : "arm64";
-  const controlDir = path.join(packageRoot, "DEBIAN");
-  await mkdir(controlDir, { recursive: true });
-  await chmod(controlDir, 0o755);
-  const installedSize = Math.max(1, Math.ceil((await treeSize(packageRoot)) / 1024));
-  await writeFile(
-    path.join(controlDir, "control"),
-    `Package: private-ai-proxy-cli\nVersion: ${deb}\nSection: utils\nPriority: optional\nArchitecture: ${architecture}\nInstalled-Size: ${installedSize}\nMaintainer: Dstack <support@dstack.org>\nHomepage: https://github.com/Dstack-TEE/private-ai-gateway\nDescription: Private AI Proxy command line client and user backend\n`,
-  );
-  await copyInstallerScript("deb-pre-install.sh", path.join(controlDir, "preinst"));
-  await copyInstallerScript("linux-pre-remove.sh", path.join(controlDir, "prerm"));
-  const output = path.join(options.output, artifactName({
-    version: options.version,
-    platform: options.platform,
-    arch: options.arch,
-    suffix: ".deb",
-    cli: true,
-  }));
-  execFileSync("dpkg-deb", ["--build", "--root-owner-group", packageRoot, output], { stdio: "inherit" });
-  return output;
-}
-
-async function createRpm(options, scratch, portable) {
-  const { rpmVersion, rpmRelease } = releaseVersionParts(options.version);
-  const architecture = options.arch === "x64" ? "x86_64" : "aarch64";
-  const topDir = path.join(scratch, "rpmbuild");
-  const sources = path.join(topDir, "SOURCES");
-  const specs = path.join(topDir, "SPECS");
-  await mkdir(sources, { recursive: true });
-  await mkdir(specs, { recursive: true });
-  for (const name of binaries) {
-    await copyFile(path.join(portable, name), path.join(sources, name));
-  }
-  const preInstall = await rpmScriptlet("rpm-pre-install.sh");
-  const preRemove = await rpmScriptlet("linux-pre-remove.sh");
-  const spec = path.join(specs, "private-ai-proxy-cli.spec");
-  await writeFile(
-    spec,
-    `Name: private-ai-proxy-cli\nVersion: ${rpmVersion}\nRelease: ${rpmRelease}\nSummary: Private AI Proxy command line client and user backend\nLicense: Apache-2.0\nURL: https://github.com/Dstack-TEE/private-ai-gateway\nBuildArch: ${architecture}\nAutoReqProv: no\n\n%description\nPrivate AI Proxy CLI, user-owned backend, verifier, and credential helper.\n\n%install\nrm -rf %{buildroot}\nmkdir -p %{buildroot}/usr/libexec/private-ai-proxy %{buildroot}/usr/bin\ninstall -m 0755 %{_sourcedir}/private-ai-proxy-service %{buildroot}/usr/libexec/private-ai-proxy/private-ai-proxy-service\ninstall -m 0755 %{_sourcedir}/private-ai-proxy %{buildroot}/usr/libexec/private-ai-proxy/private-ai-proxy\ninstall -m 0755 %{_sourcedir}/private-ai-proxy-helper %{buildroot}/usr/libexec/private-ai-proxy/private-ai-proxy-helper\nln -s ../libexec/private-ai-proxy/private-ai-proxy %{buildroot}/usr/bin/private-ai-proxy\nln -s private-ai-proxy %{buildroot}/usr/bin/pap\nln -s private-ai-proxy %{buildroot}/usr/bin/aci\nmkdir -p %{buildroot}/usr/share/private-ai-proxy\nprintf 'rpm\\n' > %{buildroot}/${packageManagerMarker}\n\n%pre\n${preInstall}\n\n%preun\n${preRemove}\n\n%files\n/usr/bin/private-ai-proxy\n/usr/bin/pap\n/usr/bin/aci\n/usr/libexec/private-ai-proxy/private-ai-proxy\n/usr/libexec/private-ai-proxy/private-ai-proxy-service\n/usr/libexec/private-ai-proxy/private-ai-proxy-helper\n%dir /usr/share/private-ai-proxy\n/${packageManagerMarker}\n`,
-  );
-  execFileSync("rpmbuild", ["-bb", "--define", `_topdir ${topDir}`, "--target", architecture, spec], {
-    stdio: "inherit",
-  });
-  const rpm = (await walk(path.join(topDir, "RPMS"))).find((file) => file.endsWith(".rpm"));
-  if (!rpm) {
-    throw new Error("rpmbuild did not produce an RPM package");
-  }
-  const output = path.join(options.output, artifactName({
-    version: options.version,
-    platform: options.platform,
-    arch: options.arch,
-    suffix: ".rpm",
-    cli: true,
-  }));
-  await copyFile(rpm, output);
-  return output;
-}
-
-async function copyInstallerScript(name, destination) {
-  await copyFile(path.join(appRoot, "src-tauri/installer", name), destination);
-  await chmod(destination, 0o755);
-}
-
-async function rpmScriptlet(name) {
-  const script = await readFile(path.join(appRoot, "src-tauri/installer", name), "utf8");
-  return script.replace(/^#![^\n]*\n/, "")
-    .replaceAll('"@PACKAGE_NAME@"', '"private-ai-proxy-cli"')
-    .replaceAll('"private-ai-proxy"', '"private-ai-proxy-cli"')
-    .replaceAll("%", "%%").trimEnd();
-}
-
-async function treeSize(root) {
-  let size = 0;
-  for (const entry of await readdir(root, { withFileTypes: true })) {
-    const file = path.join(root, entry.name);
-    if (entry.isDirectory()) size += await treeSize(file);
-    else if (entry.isFile()) size += (await stat(file)).size;
-    else if (entry.isSymbolicLink()) size += (await readlink(file)).length;
-  }
-  return size;
-}
-
-async function walk(root) {
-  const files = [];
-  for (const entry of await readdir(root, { withFileTypes: true })) {
-    const file = path.join(root, entry.name);
-    if (entry.isDirectory()) files.push(...await walk(file));
-    else files.push(file);
-  }
-  return files;
 }
 
 export async function writeChecksum(file) {

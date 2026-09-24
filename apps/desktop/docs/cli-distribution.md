@@ -66,20 +66,37 @@ executables plus the `pap` and `aci` shortcuts. The optional web UI renderer
 is embedded in `private-ai-proxy-service`; it adds no loose runtime files or
 native desktop shell. Windows uses ZIP with `.cmd` forwarding scripts; macOS and Linux archives use tar.gz with
 symlinks.
+
 Extract each version into a fresh directory rather than overlaying older files.
 Run `pap cli install` from a stable extracted location when PATH registration
 is wanted.
 
+Every alias tells the executable its name, so `aci` can print its legacy note.
+Symlinks (Linux packages, archives and `pap cli install` on macOS and Linux)
+carry it in `argv[0]`, and the npm package's `aci` entry passes it as `argv0`
+to the native binary. A `.cmd` script cannot set `argv[0]`, so the Windows
+shims, written like npm's `cmd-shim` with `setlocal` and `%~dp0`, set
+`PRIVATE_AI_PROXY_ALIAS=%~n0` for the executable instead. `pap cli install`
+replaces the shims earlier releases wrote, which lack that line, as its own;
+that migration is removed in 0.3.
+
 Linux also publishes CLI-only DEB, RPM, and Arch Linux packages. They install the three real
-executables under `/usr/libexec/private-ai-proxy` and a package-owned
-`/usr/bin/private-ai-proxy` symlink. This relies on `private-ai-proxy` canonicalizing itself before it
-locates `private-ai-proxy-service`. Package lifecycle scripts reject an unrelated owner of
-`/usr/bin/private-ai-proxy` and refuse replacement or removal while an exact bundled backend,
-verifier, or helper executable is still running. They do not invoke a user backend as
-root. Run `pap --yes service stop` as the owning user before a manual package
-upgrade. The in-app updater pauses the user-owned backend before invoking the native
-installer and preserves an active session so protection can resume after fresh
-verification when the app restarts.
+executables under `/usr/libexec/private-ai-proxy` and package-owned
+`/usr/bin/private-ai-proxy`, `pap` and `aci` symlinks. This relies on `private-ai-proxy` canonicalizing itself before it
+locates `private-ai-proxy-service`. [nfpm](https://nfpm.goreleaser.com/) builds
+every Linux package, desktop and CLI, in all three formats
+(`scripts/package-linux.mjs`). The desktop package includes the CLI, so it
+provides `private-ai-proxy-cli`, and each package conflicts with the other; the
+DEBs also declare `Replaces` so dpkg swaps one for the other (Debian Policy
+7.6.2). RPM and Arch packages declare no `Obsoletes` or `replaces`, which would
+swap them on every system upgrade. The packages have no maintainer scripts (see
+[Distribution](distribution.md#updates-by-installation)): the package manager refuses
+files another package owns, and an upgrade replaces the executables of a running
+backend, which keeps its old build until the next client command restarts it. Run
+`pap --yes service stop` as the owning user to switch at once. The in-app updater
+pauses the user-owned backend before invoking the native installer and preserves an
+active session so protection can resume after fresh verification when the app
+restarts.
 
 The web UI renderer comes from `npm run build:web` in `apps/desktop`, which
 writes `runtime/web-dist` for the CLI package's default `web-ui` feature. Plain
@@ -161,5 +178,5 @@ Install or upgrade a downloaded desktop package with:
 sudo pacman -U ./private-ai-proxy-<version>-linux-<arch>.pkg.tar.zst
 ```
 
-The lifecycle guard refuses replacement or removal while the per-user backend
-is running. Stop it as the signed-in user before upgrading manually.
+A running backend keeps its old build until the next client command restarts
+it; run `pap --yes service stop` as the signed-in user to switch at once.

@@ -42,7 +42,7 @@ export const desktopBuilds = [
     arch: "x64",
     target: "",
     bundle_dir: "release/bundle",
-    bundles: "deb,rpm",
+    bundles: "deb",
     packages: [
       { suffix: ".deb", targets: ["linux-x86_64-deb"] },
       { suffix: ".rpm", targets: ["linux-x86_64-rpm"] },
@@ -54,7 +54,7 @@ export const desktopBuilds = [
     arch: "arm64",
     target: "",
     bundle_dir: "release/bundle",
-    bundles: "deb,rpm",
+    bundles: "deb",
     packages: [
       { suffix: ".deb", targets: ["linux-aarch64-deb"] },
       { suffix: ".rpm", targets: ["linux-aarch64-rpm"] },

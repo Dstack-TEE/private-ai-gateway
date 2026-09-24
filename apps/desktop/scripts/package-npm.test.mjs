@@ -6,6 +6,7 @@ import {
   mkdtemp,
   rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -98,7 +99,7 @@ test("packs a thin wrapper and a native package that execute together", {
     );
     assert.deepEqual(
       tarballFiles(wrapperTarball).sort(),
-      ["package/LICENSE", "package/README.md", "package/bin/private-ai-proxy.cjs", "package/package.json"],
+      ["package/LICENSE", "package/README.md", "package/bin/aci.cjs", "package/bin/private-ai-proxy.cjs", "package/package.json"],
     );
 
     // A wrapper installed with --omit=optional has no platform version.
@@ -116,6 +117,13 @@ test("packs a thin wrapper and a native package that execute together", {
     assert.equal(execFileSync(process.execPath, [launcher, "hello", "world"], { encoding: "utf8" }), "native:hello world\n");
     const failed = spawnSync(process.execPath, [launcher, "--fail"], { encoding: "utf8" });
     assert.equal(failed.status, 7);
+    // The binary sees the command name as argv[0]; node stands in to print it.
+    const native = path.join(platformDirectory, "vendor/private-ai-proxy");
+    await rm(native);
+    await symlink(process.execPath, native);
+    const argv0 = (entry) => execFileSync(process.execPath, [path.join(wrapperDirectory, "bin", entry), "-p", "process.argv0"], { encoding: "utf8" });
+    assert.equal(argv0("aci.cjs"), "aci\n");
+    assert.equal(argv0("private-ai-proxy.cjs"), "private-ai-proxy\n");
 
     // A platform version left behind by an incomplete update must not run.
     await rm(platformDirectory, { recursive: true });

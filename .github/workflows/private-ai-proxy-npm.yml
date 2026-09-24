@@ -189,7 +189,7 @@ jobs:
           mkdir -p verified/wrapper
           tar -xzf "$wrapper" -C verified/wrapper
           diff -u \
-            <(printf '%s\n' package/LICENSE package/README.md package/bin/private-ai-proxy.cjs package/package.json | sort) \
+            <(printf '%s\n' package/LICENSE package/README.md package/bin/aci.cjs package/bin/private-ai-proxy.cjs package/package.json | sort) \
             <(tar -tzf "$wrapper" | sort)
           node --input-type=module - verified/wrapper/package/package.json "$VERSION" <<'NODE'
           import { readFile } from "node:fs/promises";

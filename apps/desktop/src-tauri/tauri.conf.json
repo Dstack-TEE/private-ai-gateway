@@ -73,24 +73,6 @@
         "installerIcon": "icons/icon.ico",
         "installerHooks": "installer/windows.nsh"
       }
-    },
-    "linux": {
-      "deb": {
-        "preInstallScript": "installer/deb-pre-install.sh",
-        "preRemoveScript": "installer/linux-pre-remove.sh",
-        "files": {
-          "/usr/bin/pap": "installer/pap.sh",
-          "/usr/bin/aci": "installer/pap.sh"
-        }
-      },
-      "rpm": {
-        "preInstallScript": "installer/rpm-pre-install.sh",
-        "preRemoveScript": "installer/linux-pre-remove.sh",
-        "files": {
-          "/usr/bin/pap": "installer/pap.sh",
-          "/usr/bin/aci": "installer/pap.sh"
-        }
-      }
     }
   }
 }

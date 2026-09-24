@@ -14,7 +14,6 @@
     "build:sidecars": "node scripts/bundle-sidecars.mjs",
     "build:sidecars:debug": "node scripts/bundle-sidecars.mjs --debug",
     "package:cli": "node scripts/package-cli.mjs",
-    "package:arch": "node scripts/package-arch.mjs",
     "check": "npm run prepare:brand && tsc --noEmit && npm run test:agents",
     "check:contracts": "node scripts/generate-contracts.mjs --check",
     "dev": "npm run prepare:brand && npm run build:sidecars:debug && tauri dev --config src-tauri/tauri.brand.conf.json",
@@ -24,7 +23,7 @@
     "generate:contracts": "node scripts/generate-contracts.mjs",
     "test:agents": "node --test scripts/agent-integrations.test.mjs",
     "test:probe": "node --test scripts/probe-model-endpoints.test.mjs",
-    "test:release": "node --test scripts/create-update-manifest.test.mjs scripts/installer-lifecycle.test.mjs scripts/normalize-linux-packages.test.mjs scripts/package-app-store.test.mjs scripts/package-arch.test.mjs scripts/package-cli.test.mjs scripts/npm-install.test.mjs scripts/npm-registry.test.mjs scripts/package-npm.test.mjs scripts/release-channel.test.mjs scripts/release-notes.test.mjs scripts/release-workflow.test.mjs",
+    "test:release": "node --test scripts/create-update-manifest.test.mjs scripts/package-app-store.test.mjs scripts/package-cli.test.mjs scripts/package-linux.test.mjs scripts/npm-install.test.mjs scripts/npm-registry.test.mjs scripts/package-npm.test.mjs scripts/release-channel.test.mjs scripts/release-notes.test.mjs scripts/release-workflow.test.mjs",
     "package:npm": "node scripts/package-npm.mjs"
   },
   "engines": {
