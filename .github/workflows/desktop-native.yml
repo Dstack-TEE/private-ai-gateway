@@ -1,65 +1,13 @@
 name: Desktop Tauri
 
 on:
-  workflow_call:
-    inputs:
-      release_version:
-        description: Optional update version matching the channel
-        required: false
-        type: string
-      release_channel:
-        description: Update channel
-        required: false
-        default: beta
-        type: string
-      release_summary:
-        description: Markdown bullets or paragraphs for What's changed
-        required: false
-        default: ''
-        type: string
-      release_platforms:
-        description: Comma-separated package targets, or all
-        required: false
-        default: all
-        type: string
-      publish_release:
-        description: Publish the signed version and advance the desktop update channel
-        required: false
-        default: false
-        type: boolean
-      package_only:
-        description: Skip full verification for a non-release package smoke build
-        required: false
-        default: false
-        type: boolean
   workflow_dispatch:
     inputs:
-      release_version:
-        description: 'Optional update version matching the channel (for example 0.1.2-beta.1)'
-        required: false
-        type: string
-      release_channel:
-        description: Update channel (stable must be explicitly selected)
-        required: true
-        default: beta
-        type: choice
-        options:
-          - beta
-          - stable
-      release_summary:
-        description: Markdown bullets or paragraphs for What's changed (required for stable)
-        required: false
-        type: string
       release_platforms:
         description: Comma-separated package targets, or all (macos-arm64, macos-x64, windows-arm64, windows-x64, linux-arm64, linux-x64)
         required: true
         default: all
         type: string
-      publish_release:
-        description: Publish the signed version and advance the desktop update channel
-        required: true
-        default: false
-        type: boolean
       package_only:
         description: Skip full verification for a non-release package smoke build
         required: true
@@ -68,7 +16,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/desktop-native.yml'
-      - '.github/workflows/desktop-release.yml'
+      - '.github/workflows/desktop-mac-app-store.yml'
       - '.github/workflows/desktop-update-feed.yml'
       - '.github/workflows/private-ai-proxy-npm.yml'
       - 'apps/desktop/**'
@@ -76,9 +24,11 @@ on:
   push:
     branches:
       - main
+    # release-please tags the merged release PR commit.
+    tags:
+      - 'desktop-v*'
     paths:
       - '.github/workflows/desktop-native.yml'
-      - '.github/workflows/desktop-release.yml'
       - '.github/workflows/desktop-update-feed.yml'
       - '.github/workflows/private-ai-proxy-npm.yml'
       - 'apps/desktop/**'
@@ -93,8 +43,8 @@ env:
   PAP_RUST_CACHE_NAMESPACE: ubuntu-24.04
 
 concurrency:
-  group: desktop-${{ github.event_name }}-${{ github.ref }}-${{ inputs.release_version || 'ci' }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+  group: desktop-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   verify:
@@ -248,10 +198,12 @@ jobs:
 
   select-platforms:
     name: Select release platforms
-    if: ${{ github.event_name == 'workflow_dispatch' || inputs.release_version != '' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/desktop-v') }}
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.platforms.outputs.matrix }}
+      version: ${{ steps.platforms.outputs.version }}
+      channel: ${{ steps.platforms.outputs.channel }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -268,45 +220,60 @@ jobs:
         name: Build package matrix
         working-directory: apps/desktop
         env:
+          GH_TOKEN: ${{ github.token }}
           PACKAGE_ONLY: ${{ inputs.package_only }}
-          PUBLISH_RELEASE: ${{ inputs.publish_release }}
-          RELEASE_CHANNEL: ${{ inputs.release_channel || 'beta' }}
           RELEASE_PLATFORMS: ${{ inputs.release_platforms || 'all' }}
-          RELEASE_REF: ${{ github.ref }}
-          RELEASE_SUMMARY: ${{ inputs.release_summary || '' }}
-          RELEASE_VERSION: ${{ inputs.release_version || '' }}
         run: |
           set -euo pipefail
-          node --input-type=module -e '
-            import { validateReleaseRequest } from "./scripts/release-channel.mjs";
-            validateReleaseRequest({
-              version: process.env.RELEASE_VERSION,
-              channel: process.env.RELEASE_CHANNEL,
-              platforms: process.env.RELEASE_PLATFORMS,
-              ref: process.env.RELEASE_REF,
-              publish: process.env.PUBLISH_RELEASE === "true",
-              packageOnly: process.env.PACKAGE_ONLY === "true",
-              summary: process.env.RELEASE_SUMMARY,
-            });
-          '
+          version="$(node --input-type=module -e 'import { appVersion } from "./scripts/release-channel.mjs"; process.stdout.write(appVersion())')"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          # Tags are releases: release-please creates them on main at the
+          # commit that sets their version.
+          if [[ "$GITHUB_REF" == refs/tags/desktop-v* ]]; then
+            if [[ "$GITHUB_REF_NAME" != "desktop-v$version" || "$PACKAGE_ONLY" == true || "$RELEASE_PLATFORMS" != all ]]; then
+              echo "$GITHUB_REF_NAME must build every platform of the committed version $version" >&2
+              exit 1
+            fi
+            comparison="$(gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_REF_NAME...main" --jq .status)"
+            if [[ "$comparison" != ahead && "$comparison" != identical ]]; then
+              echo "$GITHUB_REF_NAME is not contained in main" >&2
+              exit 1
+            fi
+            channel="$(node --input-type=module -e 'import { versionRelease } from "./scripts/release-channel.mjs"; process.stdout.write(versionRelease(process.argv[1]).channel)' "$version")"
+            printf 'channel=%s\n' "$channel" >> "$GITHUB_OUTPUT"
+          fi
           matrix="$(node scripts/select-release-platforms.mjs "$RELEASE_PLATFORMS")"
           node --input-type=module -e 'const value = JSON.parse(process.argv[1]); if (!Array.isArray(value.include) || value.include.length === 0) process.exit(1)' "$matrix"
           printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
 
+  # Stable releases upload the App Store build first. This workflow's run
+  # number increases with every run, as CFBundleVersion must.
+  mac-app-store:
+    needs: select-platforms
+    if: needs.select-platforms.outputs.channel == 'stable'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/desktop-mac-app-store.yml
+    with:
+      build_number: '${{ github.run_number }}'
+      upload: true
+    secrets: inherit
+
   package:
     name: Package (${{ matrix.platform }})
     needs: [verify, verify-linux-arm64, select-platforms]
-    if: ${{ always() && needs.select-platforms.result == 'success' && ((needs.verify.result == 'success' && needs.verify-linux-arm64.result == 'success') || inputs.package_only == true) && (github.event_name == 'workflow_dispatch' || inputs.release_version != '') }}
+    if: ${{ always() && needs.select-platforms.result == 'success' && ((needs.verify.result == 'success' && needs.verify-linux-arm64.result == 'success') || inputs.package_only == true) }}
     environment:
-      name: ${{ inputs.release_version != '' && 'desktop-release' || 'desktop-build' }}
+      name: ${{ needs.select-platforms.outputs.channel != '' && 'desktop-release' || 'desktop-build' }}
     env:
-      DESKTOP_RELEASE_VERSION: ${{ inputs.release_version }}
+      # Empty for test packages.
+      RELEASE_CHANNEL: ${{ needs.select-platforms.outputs.channel }}
+      VERSION: ${{ needs.select-platforms.outputs.version }}
       PAP_BUILD_TARGET: ${{ matrix.target }}
       PAP_BUNDLE_DIR: ${{ github.workspace }}/apps/desktop/target/${{ matrix.bundle_dir }}
       PAP_RUST_CACHE_NAMESPACE: ${{ matrix.os }}
-      DESKTOP_RELEASE_CHANNEL: ${{ inputs.release_channel || 'beta' }}
-      TAURI_UPDATER_PUBLIC_KEY: ${{ inputs.release_version && vars.TAURI_UPDATER_PUBLIC_KEY || '' }}
-      TAURI_UPDATER_ENDPOINT: ${{ inputs.release_version && format('https://github.com/Dstack-TEE/private-ai-gateway/releases/download/desktop-updates-{0}/latest.json', inputs.release_channel || 'beta') || '' }}
+      TAURI_UPDATER_PUBLIC_KEY: ${{ needs.select-platforms.outputs.channel && vars.TAURI_UPDATER_PUBLIC_KEY || '' }}
+      TAURI_UPDATER_ENDPOINT: ${{ needs.select-platforms.outputs.channel && format('https://github.com/Dstack-TEE/private-ai-gateway/releases/download/desktop-updates-{0}/latest.json', needs.select-platforms.outputs.channel) || '' }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.select-platforms.outputs.matrix) }}
@@ -339,7 +306,7 @@ jobs:
         working-directory: apps/desktop
         run: npm ci
       - name: Import optional Windows code-signing certificate
-        if: runner.os == 'Windows' && inputs.release_version != ''
+        if: runner.os == 'Windows' && env.RELEASE_CHANNEL != ''
         shell: pwsh
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
@@ -378,18 +345,17 @@ jobs:
             throw
           }
       - name: Validate updater release configuration
-        if: inputs.release_version != ''
+        if: env.RELEASE_CHANNEL != ''
         working-directory: apps/desktop
         shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           set -euo pipefail
-          node --input-type=module -e 'import { releaseChannel } from "./scripts/release-channel.mjs"; releaseChannel(process.env.DESKTOP_RELEASE_VERSION, process.env.DESKTOP_RELEASE_CHANNEL)'
           test -n "$TAURI_UPDATER_PUBLIC_KEY"
           test -n "$TAURI_SIGNING_PRIVATE_KEY"
       - name: Prepare Apple notarization key
-        if: runner.os == 'macOS' && inputs.release_version != ''
+        if: runner.os == 'macOS' && env.RELEASE_CHANNEL != ''
         shell: bash
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -416,12 +382,12 @@ jobs:
           echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
 
       - name: Build production macOS package
-        if: runner.os == 'macOS' && inputs.release_version != ''
+        if: runner.os == 'macOS' && env.RELEASE_CHANNEL != ''
         working-directory: apps/desktop
         env:
           TAURI_BUNDLER_DMG_IGNORE_CI: 'true'
-          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.release_version && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.release_version && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ needs.select-platforms.outputs.channel && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ needs.select-platforms.outputs.channel && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
@@ -429,7 +395,7 @@ jobs:
         run: npm run dist -- --bundles ${{ matrix.bundles }}
 
       - name: Build ad-hoc macOS package
-        if: runner.os == 'macOS' && inputs.release_version == ''
+        if: runner.os == 'macOS' && env.RELEASE_CHANNEL == ''
         working-directory: apps/desktop
         env:
           TAURI_BUNDLER_DMG_IGNORE_CI: 'true'
@@ -440,8 +406,8 @@ jobs:
         if: runner.os != 'macOS'
         working-directory: apps/desktop
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.release_version && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.release_version && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ needs.select-platforms.outputs.channel && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ needs.select-platforms.outputs.channel && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
         run: npm run dist -- --bundles ${{ matrix.bundles }}
 
       # Tauri writes SemVer prereleases verbatim, which dpkg and rpm order after
@@ -451,9 +417,9 @@ jobs:
         if: runner.os == 'Linux'
         working-directory: apps/desktop
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.release_version && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.release_version && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
-        run: node scripts/package-linux.mjs "$PAP_BUNDLE_DIR" "${DESKTOP_RELEASE_VERSION:-0.1.0}" '${{ matrix.cli_arch }}' release
+          TAURI_SIGNING_PRIVATE_KEY: ${{ needs.select-platforms.outputs.channel && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ needs.select-platforms.outputs.channel && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+        run: node scripts/package-linux.mjs "$PAP_BUNDLE_DIR" "$VERSION" '${{ matrix.cli_arch }}' release
 
       - name: Verify Windows Authenticode signatures
         if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE_THUMBPRINT != ''
@@ -499,7 +465,7 @@ jobs:
           baseline=2.35
           scratch="$(mktemp -d "$RUNNER_TEMP/glibc-baseline.XXXXXX")"
           trap 'rm -rf "$scratch"' EXIT
-          dpkg-deb -x "release/private-ai-proxy-${DESKTOP_RELEASE_VERSION:-0.1.0}-linux-${{ matrix.cli_arch }}.deb" "$scratch"
+          dpkg-deb -x "release/private-ai-proxy-${VERSION}-linux-${{ matrix.cli_arch }}.deb" "$scratch"
           executables=(
             "$scratch/usr/bin/private-ai-proxy-desktop"
             "$scratch/usr/bin/private-ai-proxy"
@@ -528,7 +494,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="${DESKTOP_RELEASE_VERSION:-0.1.0}"
+          version="$VERSION"
           target_triple="$(rustc -vV | sed -n 's/^host: //p')"
           test -n "$target_triple"
           source_args=()
@@ -550,7 +516,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="${DESKTOP_RELEASE_VERSION:-0.1.0}"
+          version="$VERSION"
           base="private-ai-proxy-cli-${version}-${{ matrix.cli_platform }}-${{ matrix.cli_arch }}"
           scratch="$(mktemp -d "$RUNNER_TEMP/cli-archive.XXXXXX")"
           trap 'rm -rf "$scratch"' EXIT
@@ -579,7 +545,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="${DESKTOP_RELEASE_VERSION:-0.1.0}"
+          version="$VERSION"
           scratch="$(mktemp -d "$RUNNER_TEMP/linux-native.XXXXXX")"
           trap 'rm -rf "$scratch"' EXIT
           extract() {
@@ -602,7 +568,7 @@ jobs:
           test "$(cat "$scratch/desktop-arch/usr/share/private-ai-proxy/package-manager")" = pacman
           node scripts/packaged-sidecars-smoke.mjs "$scratch/desktop-arch/usr/bin"
       - name: Notarize production macOS disk image
-        if: runner.os == 'macOS' && inputs.release_version != ''
+        if: runner.os == 'macOS' && env.RELEASE_CHANNEL != ''
         working-directory: apps/desktop
         shell: bash
         env:
@@ -620,8 +586,8 @@ jobs:
           xcrun stapler staple "$dmg"
           cli_scratch="$(mktemp -d "$RUNNER_TEMP/pap-cli-notary.XXXXXX")"
           trap 'rm -rf "$cli_scratch"' EXIT
-          tar -xzf "release/private-ai-proxy-cli-${DESKTOP_RELEASE_VERSION:-0.1.0}-macos-${{ matrix.cli_arch }}.tar.gz" -C "$cli_scratch"
-          cli_directory="$cli_scratch/private-ai-proxy-cli-${DESKTOP_RELEASE_VERSION:-0.1.0}-macos-${{ matrix.cli_arch }}"
+          tar -xzf "release/private-ai-proxy-cli-${VERSION}-macos-${{ matrix.cli_arch }}.tar.gz" -C "$cli_scratch"
+          cli_directory="$cli_scratch/private-ai-proxy-cli-${VERSION}-macos-${{ matrix.cli_arch }}"
           for executable in "$cli_directory"/*; do codesign --verify --strict "$executable"; done
           ditto -c -k --keepParent "$cli_directory" "$cli_scratch/cli.zip"
           xcrun notarytool submit "$cli_scratch/cli.zip" \
@@ -730,7 +696,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          packages=("release/private-ai-proxy-${DESKTOP_RELEASE_VERSION:-0.1.0}-linux-${{ matrix.cli_arch }}.deb")
+          packages=("release/private-ai-proxy-${VERSION}-linux-${{ matrix.cli_arch }}.deb")
           package=$(dpkg-deb -f "${packages[0]}" Package)
           if dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'install ok installed'; then
             echo 'Refusing to replace an existing installation'
@@ -774,8 +740,6 @@ jobs:
         if: runner.os == 'macOS'
         working-directory: apps/desktop
         shell: bash
-        env:
-          SIGNED_RELEASE: ${{ inputs.release_version != '' }}
         run: |
           set -euo pipefail
           mkdir -p release
@@ -791,7 +755,7 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$app_bundle/Contents/Info.plist")" = Icon
           codesign --verify --deep --strict --verbose=2 "$app_bundle"
           codesign_details="$(codesign --display --verbose=4 "$app_bundle" 2>&1)"
-          if [[ "$SIGNED_RELEASE" == "true" ]]; then
+          if [[ -n "$RELEASE_CHANNEL" ]]; then
             grep -q '^Authority=Developer ID Application:' <<<"$codesign_details"
             if grep -q '^Signature=adhoc$' <<<"$codesign_details"; then
               echo 'Production package was signed ad-hoc instead of with Developer ID'
@@ -875,9 +839,9 @@ jobs:
           cleanup_registration
           hdiutil verify "$dmg"
           node scripts/verify-dmg-layout.mjs "$dmg"
-          base="private-ai-proxy-${DESKTOP_RELEASE_VERSION:-0.1.0}-macos-${{ matrix.cli_arch }}"
+          base="private-ai-proxy-${VERSION}-macos-${{ matrix.cli_arch }}"
           cp "$dmg" "release/$base.dmg"
-          if [[ -n "$DESKTOP_RELEASE_VERSION" ]]; then
+          if [[ -n "$RELEASE_CHANNEL" ]]; then
             updater="$(find "$PAP_BUNDLE_DIR/macos" -maxdepth 1 -name '*.app.tar.gz' -print -quit)"
             test -n "$updater"
             mv "$updater" "release/$base.app.tar.gz"
@@ -886,7 +850,7 @@ jobs:
       - name: Upload desktop package
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: private-ai-proxy-${{ inputs.release_version && (inputs.release_channel || 'beta') || 'test' }}-${{ inputs.release_version || '0.1.0' }}-${{ github.sha }}-${{ matrix.platform }}
+          name: private-ai-proxy-${{ env.RELEASE_CHANNEL || 'test' }}-${{ env.VERSION }}-${{ github.sha }}-${{ matrix.platform }}
           if-no-files-found: error
           retention-days: 14
           path: |
@@ -897,11 +861,11 @@ jobs:
             ${{ env.PAP_BUNDLE_DIR }}/nsis/*.sig
 
       - name: Remove Apple notarization key
-        if: always() && runner.os == 'macOS' && inputs.release_version != ''
+        if: always() && runner.os == 'macOS' && env.RELEASE_CHANNEL != ''
         shell: bash
         run: rm -f "${APPLE_API_KEY_PATH:-}"
       - name: Remove Windows code-signing certificate
-        if: always() && runner.os == 'Windows' && inputs.release_version != ''
+        if: always() && runner.os == 'Windows' && env.RELEASE_CHANNEL != ''
         shell: pwsh
         run: |
           if (![string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_IMPORTED_THUMBPRINTS)) {
@@ -914,16 +878,17 @@ jobs:
           }
       - *save-rust-cache
 
-  draft-release:
-    if: ${{ always() && inputs.release_version != '' && needs.package.result == 'success' }}
-    needs: package
+  release:
+    needs: [select-platforms, package, mac-app-store]
+    if: ${{ always() && needs.select-platforms.outputs.channel != '' && needs.package.result == 'success' && (needs.mac-app-store.result == 'success' || needs.mac-app-store.result == 'skipped') }}
     environment: desktop-release
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     env:
-      VERSION: ${{ inputs.release_version }}
-      CHANNEL: ${{ inputs.release_channel || 'beta' }}
+      CHANNEL: ${{ needs.select-platforms.outputs.channel }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.select-platforms.outputs.version }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -939,43 +904,37 @@ jobs:
       - name: Install release tooling
         working-directory: apps/desktop
         run: npm ci --ignore-scripts
-      - name: Create signed update manifest and draft release
-        shell: bash
+      # release-please created the draft with the changelog as its notes.
+      - name: Attach signed assets and the update manifest
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_PLATFORMS: ${{ inputs.release_platforms || 'all' }}
-          RELEASE_SUMMARY: ${{ inputs.release_summary || '' }}
         run: |
           set -euo pipefail
-          node apps/desktop/scripts/create-update-manifest.mjs release-artifacts "$VERSION" "$GITHUB_REPOSITORY" "$CHANNEL" "$RELEASE_PLATFORMS"
+          test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = true
+          node apps/desktop/scripts/create-update-manifest.mjs release-artifacts "$VERSION" "$GITHUB_REPOSITORY" "$CHANNEL" all
           node apps/desktop/scripts/release-assets.mjs release-artifacts > release-assets.list
           mapfile -d '' assets < release-assets.list
-          node apps/desktop/scripts/release-notes.mjs release-artifacts "$GITHUB_REPOSITORY" "$GITHUB_SHA" > release-notes.md
-          title="$(node --input-type=module -e 'import { releaseTitle } from "./apps/desktop/scripts/release-channel.mjs"; process.stdout.write(releaseTitle(process.env.VERSION, process.env.CHANNEL))')"
-          release_args=()
-          if [[ "$CHANNEL" == beta ]]; then release_args+=(--prerelease); fi
-          gh release create "desktop-v$VERSION" "${assets[@]}" "${release_args[@]}" --draft --latest=false --target "$GITHUB_SHA" --title "$title" --notes-file release-notes.md
+          gh release upload "$TAG" "${assets[@]}" --clobber
       - name: Publish desktop version
-        if: inputs.publish_release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          latest_args=(--latest=false)
-          if [[ "$CHANNEL" == stable ]]; then latest_args=(--latest); fi
-          gh release edit "desktop-v$VERSION" --draft=false "${latest_args[@]}"
+          prerelease=true latest=false
+          if [[ "$CHANNEL" == stable ]]; then prerelease=false latest=true; fi
+          gh release edit "$TAG" --draft=false --prerelease="$prerelease" --latest="$latest" --title "Private AI Proxy v$VERSION"
 
   update-feed:
-    if: inputs.publish_release && inputs.release_version != ''
-    needs: draft-release
+    needs: release
+    if: needs.release.result == 'success'
     permissions:
       contents: write
     uses: ./.github/workflows/desktop-update-feed.yml
     with:
-      tag: desktop-v${{ inputs.release_version }}
+      tag: ${{ github.ref_name }}
 
   publish-npm:
-    if: inputs.publish_release && inputs.release_version != ''
     needs: update-feed
+    if: needs.update-feed.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     permissions:
@@ -985,7 +944,7 @@ jobs:
       - name: Dispatch trusted npm publisher
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: desktop-v${{ inputs.release_version }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           workflow=private-ai-proxy-npm.yml

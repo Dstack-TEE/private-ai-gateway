@@ -1,3 +1,5 @@
+import { appVersion } from "./release-channel.mjs";
+
 export const DIRECT_DISTRIBUTION = "direct";
 export const MAC_APP_STORE_DISTRIBUTION = "mac-app-store";
 export const MAC_APP_STORE_SIDECARS = Object.freeze([
@@ -37,10 +39,9 @@ export function validateAppStoreBuildNumber(value) {
   return value;
 }
 
+// App Store builds of one marketing version differ only in CFBundleVersion.
+// The backend handshake compares build versions, so it carries that number.
 export function runtimeBuildVersion(env = process.env) {
-  const explicit = env.PAP_BUILD_VERSION?.trim();
-  if (explicit) return explicit;
-  const release = env.DESKTOP_RELEASE_VERSION?.trim();
   const build = env.APPLE_APP_STORE_BUILD_NUMBER?.trim();
-  return release && build ? `${release}+${build}` : release;
+  return build ? `${appVersion()}+${build}` : undefined;
 }

@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { execFileSync } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import {
+  appVersion,
   publishedRelease,
   releaseChannel,
-  releaseTitle,
   shouldAdvance,
-  validateReleaseRequest,
+  versionRelease,
 } from "./release-channel.mjs";
 import { runtimeBuildVersion } from "./distribution.mjs";
 
@@ -18,43 +21,32 @@ test("channels require canonical matching versions and release metadata", () => 
   assert.throws(() => publishedRelease("desktop-v0.2.0-beta.1", false));
   assert.throws(() => publishedRelease("desktop-v0.2.0", true));
   assert.equal(publishedRelease("desktop-v0.2.0-beta.1", true).channel, "beta");
-  assert.equal(releaseTitle("0.2.0", "stable"), "Private AI Proxy v0.2.0");
+  assert.equal(versionRelease("0.2.0").channel, "stable");
+  assert.equal(versionRelease("0.2.0-beta.3").channel, "beta");
+  assert.throws(() => versionRelease("0.2.0-rc.1"));
 });
 
 test("runtime build identity distinguishes App Store builds without changing the marketing version", () => {
-  assert.equal(runtimeBuildVersion({ DESKTOP_RELEASE_VERSION: "0.1.4", APPLE_APP_STORE_BUILD_NUMBER: "11" }), "0.1.4+11");
-  assert.equal(runtimeBuildVersion({ DESKTOP_RELEASE_VERSION: "0.1.4" }), "0.1.4");
-  assert.equal(runtimeBuildVersion({ PAP_BUILD_VERSION: "local-build", DESKTOP_RELEASE_VERSION: "0.1.4", APPLE_APP_STORE_BUILD_NUMBER: "11" }), "local-build");
+  assert.equal(runtimeBuildVersion({ APPLE_APP_STORE_BUILD_NUMBER: "11" }), `${appVersion()}+11`);
+  assert.equal(runtimeBuildVersion({}), undefined);
 });
 
-test("stable release requests come from main and cover every platform", () => {
-  assert.equal(validateReleaseRequest({ version: "", publish: false }), undefined);
-  assert.throws(() => validateReleaseRequest({ version: "", publish: true }), /requires a release version/);
-  assert.throws(() => validateReleaseRequest({ version: "0.2.0-beta.1", packageOnly: true }), /package_only/);
-  assert.throws(() => validateReleaseRequest({ version: "0.2.0", channel: "stable", ref: "refs/heads/feature", platforms: "all" }), /from main/);
-  assert.throws(() => validateReleaseRequest({ version: "0.2.0", channel: "stable", ref: "refs/heads/main", platforms: "macos-arm64" }), /every supported platform/);
-  assert.throws(() => validateReleaseRequest({ version: "0.2.0", channel: "stable", ref: "refs/heads/main", platforms: "all" }), /release summary/);
-  assert.throws(() => validateReleaseRequest({ version: "0.2.0-beta.1", summary: "## Heading" }), /must not contain Markdown headings/);
-  assert.throws(
-    () => validateReleaseRequest({ version: "0.2.0-beta.1", channel: "beta", ref: "refs/heads/feature", platforms: "all", publish: true }),
-    /Published releases must be built from main/,
-  );
-  assert.throws(
-    () => validateReleaseRequest({ version: "0.2.0-beta.1", channel: "beta", ref: "refs/heads/main", platforms: "macos-arm64", publish: true }),
-    /Published releases must include every supported platform/,
-  );
-  assert.equal(
-    validateReleaseRequest({ version: "0.2.0", channel: "stable", ref: "refs/heads/main", platforms: "all", publish: true, summary: "- Initial stable release" }).tag,
-    "desktop-v0.2.0",
-  );
-  assert.equal(
-    validateReleaseRequest({ version: "0.2.0-beta.1", channel: "beta", ref: "refs/heads/feature", platforms: "macos-arm64" }).tag,
-    "desktop-v0.2.0-beta.1",
-  );
-  assert.equal(
-    validateReleaseRequest({ version: "0.2.0-beta.1", channel: "beta", ref: "refs/heads/main", platforms: "all", publish: true }).tag,
-    "desktop-v0.2.0-beta.1",
-  );
+test("release-please bumps every manifest that carries the app version", async () => {
+  const appRoot = new URL("..", import.meta.url);
+  const read = async (file) => JSON.parse(await readFile(new URL(file, appRoot), "utf8"));
+  const config = (await read("release-please-config.json")).packages["apps/desktop"];
+  const version = (await read(".release-please-manifest.json"))["apps/desktop"];
+  const files = config["extra-files"].map((file) => `${file.path} ${file.jsonpath}`);
+  // Cargo checks Cargo.lock itself: every build runs with --locked.
+  const metadata = JSON.parse(execFileSync("cargo", ["metadata", "--no-deps", "--format-version", "1"], { cwd: appRoot, encoding: "utf8" }));
+  assert.equal(appVersion(), version);
+  assert.equal((await read("package.json")).version, version);
+  for (const crate of metadata.packages) {
+    const manifest = path.relative(metadata.workspace_root, crate.manifest_path).split(path.sep).join("/");
+    assert.equal(crate.version, version, crate.name);
+    assert.ok(files.includes(`${manifest} $.package.version`), manifest);
+    assert.ok(files.includes(`Cargo.lock $.package[?(@.name.value == '${crate.name}')].version`), crate.name);
+  }
 });
 
 test("feeds advance using SemVer; the beta feed also carries stable releases", () => {

@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Private AI Proxy",
-  "version": "0.1.0",
+  "version": "0.2.0-beta.0",
   "identifier": "org.dstack.private-ai-proxy",
   "build": {
     "frontendDist": "../dist",
@@ -46,7 +46,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
+    "targets": [
+      "app",
+      "dmg"
+    ],
     "category": "DeveloperTool",
     "shortDescription": "Private AI Proxy desktop application",
     "externalBin": [

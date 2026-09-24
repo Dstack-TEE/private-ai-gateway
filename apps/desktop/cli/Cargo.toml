@@ -1,6 +1,6 @@
 [package]
 name = "private-ai-proxy"
-version = "0.1.0"
+version = "0.2.0-beta.0"
 description = "Private AI Proxy command-line client and user backend"
 license = "Apache-2.0"
 edition = "2021"

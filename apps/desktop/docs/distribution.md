@@ -31,23 +31,40 @@ remain at native API and process boundaries, not throughout product components.
 
 ## Release orchestration
 
-`Desktop stable release` is the standard production entry for a coordinated
-desktop release. It validates the stable version, App Store build number, release
-summary and `main` ref before any signing work. It then calls the MAS and Direct
-workflows through same-repository reusable workflow references. GitHub resolves
-those references at the caller commit, so both distributions build the same source
-revision with the same marketing version.
+Versions, changelog and tags come from
+[release-please](https://github.com/googleapis/release-please)
+(`release-please-config.json`, `.release-please-manifest.json`). On every push
+to `main` that touches `apps/desktop`, `Desktop release PR` keeps a release PR
+open. The PR carries the next version in `package.json`,
+`src-tauri/tauri.conf.json`, every workspace `Cargo.toml` and `Cargo.lock`,
+plus the new `CHANGELOG.md` section built from Conventional Commit titles.
+Merging the PR tags the merge commit `desktop-v<version>` and creates a draft
+GitHub release with that changelog section as its notes.
 
-The MAS package is signed, validated and uploaded first. Only after that succeeds
-does the Direct workflow build all six targets, publish the GitHub release, advance
-the updater feed and dispatch the dedicated npm publisher at the immutable release
-tag. The parent waits for that workflow so npm remains part of the coordinated
-result while using the exact workflow identity authorized for OIDC trusted
-publishing. A MAS failure therefore cannot leave a newly public Direct release; a
-later Direct failure can leave only an uploaded, unsubmitted App Store build. The
-child workflows retain their focused verification and recovery entry points, but
-coordinated stable publication uses the top-level workflow. Windows Authenticode
-remains optional and does not block the coordinated release.
+- **Beta** is the default: versions go `x.y.z-beta.1`, `-beta.2`, and so on
+  (release-please `versioning: prerelease`).
+- **Stable**: merge a commit whose message has the footer
+  `Release-As: x.y.z`. The next release PR then proposes `x.y.z`. Afterwards,
+  betas continue from the next version.
+
+The tag runs `Desktop Tauri` (`desktop-native.yml`) at the tagged commit. The
+tag must match the committed version and be contained in `main`. The run
+verifies and builds all six targets. For a stable version it also calls
+`Desktop Mac App Store`, which signs, validates and uploads the App Store build.
+Its CFBundleVersion is this workflow's run number, which increases with every
+run as App Store Connect requires. Once every package (and the App Store upload)
+has succeeded, the run:
+
+1. attaches the signed assets, `latest.json` and `SHA256SUMS` to the draft;
+2. publishes it (stable releases become Latest);
+3. advances the updater feeds;
+4. dispatches the dedicated npm publisher at the release tag and waits for it.
+   npm checks the top-level workflow identity for OIDC trusted publishing.
+
+A MAS failure therefore cannot leave a newly public Direct release. A later
+Direct failure can leave only an uploaded, unsubmitted App Store build. To
+recover, re-run the failed jobs of the tag's run. Windows Authenticode remains
+optional and does not block the release.
 
 ## Updates by installation
 

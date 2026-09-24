@@ -3,10 +3,6 @@ name: Desktop Mac App Store
 on:
   workflow_call:
     inputs:
-      version:
-        description: Mac App Store marketing version
-        required: true
-        type: string
       build_number:
         description: Increasing CFBundleVersion
         required: true
@@ -19,7 +15,6 @@ on:
   pull_request:
     paths:
       - '.github/workflows/desktop-mac-app-store.yml'
-      - '.github/workflows/desktop-release.yml'
       - 'apps/desktop/**'
       - 'crates/aci-protocol/**'
   push:
@@ -27,15 +22,10 @@ on:
       - main
     paths:
       - '.github/workflows/desktop-mac-app-store.yml'
-      - '.github/workflows/desktop-release.yml'
       - 'apps/desktop/**'
       - 'crates/aci-protocol/**'
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Mac App Store marketing version (for example 0.1.2)'
-        required: true
-        type: string
       build_number:
         description: 'Increasing CFBundleVersion (for example 123 or 123.1)'
         required: true
@@ -116,20 +106,19 @@ jobs:
           cargo clippy --locked --all-targets --package private-ai-proxy-runtime --features mac-app-store -- -D warnings
           cargo test --locked --package private-ai-proxy-core --features mac-app-store
           cargo test --locked --package private-ai-proxy-runtime --features mac-app-store
-          export TAURI_CONFIG="$(cat src-tauri/tauri.appstore.conf.json)"
+          TAURI_CONFIG="$(cat src-tauri/tauri.appstore.conf.json)"
+          export TAURI_CONFIG
           cargo clippy --locked --all-targets --package private-ai-proxy-desktop --features mac-app-store -- -D warnings
           cargo test --locked --package private-ai-proxy-desktop --features mac-app-store
 
   package:
-    if: inputs.version != ''
+    if: inputs.build_number != ''
     needs: verify
     runs-on: macos-26
     timeout-minutes: 120
     environment: mac-app-store
     env:
       APPLE_APP_STORE_BUILD_NUMBER: ${{ inputs.build_number }}
-      DESKTOP_RELEASE_CHANNEL: stable
-      DESKTOP_RELEASE_VERSION: ${{ inputs.version }}
       UPLOAD_APP_STORE: ${{ inputs.upload }}
       APPLE_APPLICATION_IDENTITY: ${{ vars.MAC_APP_STORE_APPLICATION_IDENTITY }}
       APPLE_INSTALLER_IDENTITY: ${{ vars.MAC_APP_STORE_INSTALLER_IDENTITY }}
@@ -217,12 +206,16 @@ jobs:
         working-directory: apps/desktop
         run: |
           node --input-type=module -e '
-            import semver from "semver";
+            import { appendFileSync } from "node:fs";
             import { validateAppStoreBuildNumber } from "./scripts/distribution.mjs";
-            const version = process.env.DESKTOP_RELEASE_VERSION;
-            if (!semver.valid(version) || semver.prerelease(version) !== null) throw new Error("version must be a stable semantic version");
+            import { appVersion, releaseChannel } from "./scripts/release-channel.mjs";
+            const version = appVersion();
+            releaseChannel(version, "stable");
             validateAppStoreBuildNumber(process.env.APPLE_APP_STORE_BUILD_NUMBER);
-            if (process.env.UPLOAD_APP_STORE === "true" && process.env.GITHUB_REF !== "refs/heads/main") throw new Error("App Store uploads must run from main");
+            if (process.env.UPLOAD_APP_STORE === "true" && !["refs/tags/desktop-v" + version, "refs/heads/main"].includes(process.env.GITHUB_REF)) {
+              throw new Error("App Store uploads must run from main or the release tag");
+            }
+            appendFileSync(process.env.GITHUB_ENV, "APP_VERSION=" + version + "\n");
           '
       - name: Import App Store signing material
         shell: bash
@@ -272,7 +265,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          package="release/private-ai-proxy-${DESKTOP_RELEASE_VERSION}-mac-app-store.pkg"
+          package="release/private-ai-proxy-${APP_VERSION}-mac-app-store.pkg"
           node scripts/package-app-store.mjs \
             --app "$APPLE_APP_STORE_APP" \
             --profile "$APPLE_APP_STORE_PROFILE" \
@@ -283,7 +276,7 @@ jobs:
       - name: Upload package artifact
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: private-ai-proxy-${{ inputs.version }}-${{ inputs.build_number }}-mac-app-store
+          name: private-ai-proxy-mac-app-store-${{ inputs.build_number }}
           path: apps/desktop/release/*-mac-app-store.pkg
           if-no-files-found: error
           retention-days: 14

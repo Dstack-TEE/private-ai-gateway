@@ -1,0 +1,36 @@
+name: Desktop release PR
+
+# release-please keeps a release PR open with the next version and changelog.
+# Merging it tags the commit and creates a draft release; the tag builds and
+# publishes the release (desktop-native.yml).
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'apps/desktop/**'
+
+permissions: {}
+
+concurrency:
+  group: desktop-release-please
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: desktop-release
+    steps:
+      # Events created with GITHUB_TOKEN start no workflows. A GitHub App token
+      # lets the release PR run CI and the release tag start the build.
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          client-id: ${{ vars.DESKTOP_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.DESKTOP_RELEASE_APP_PRIVATE_KEY }}
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: apps/desktop/release-please-config.json
+          manifest-file: apps/desktop/.release-please-manifest.json
