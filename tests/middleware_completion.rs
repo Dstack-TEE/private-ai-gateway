@@ -75,6 +75,7 @@ impl UpstreamBackend for RecordingUpstream {
             body: serde_json::from_slice(&req.body).unwrap(),
         });
         Ok(UpstreamResponse {
+            response_attestation: None,
             status_code: self.status,
             body: self.body.clone(),
             headers: HashMap::from([("content-type".to_string(), self.content_type.to_string())]),
@@ -114,6 +115,7 @@ impl UpstreamBackend for MockUpstream {
             headers.insert(name.to_string(), value.to_string());
         }
         Ok(UpstreamResponse {
+            response_attestation: None,
             status_code: self.status,
             body: self.body.clone(),
             headers,
@@ -122,6 +124,7 @@ impl UpstreamBackend for MockUpstream {
     }
     async fn models(&self) -> Result<UpstreamResponse, UpstreamError> {
         Ok(UpstreamResponse {
+            response_attestation: None,
             status_code: 200,
             body: b"{}".to_vec(),
             headers: HashMap::new(),
@@ -218,6 +221,7 @@ impl UpstreamBackend for TeeAwareUpstream {
         let mut headers = HashMap::new();
         headers.insert("content-type".to_string(), "application/json".to_string());
         Ok(UpstreamResponse {
+            response_attestation: None,
             status_code: self.status,
             body: br#"{"choices":[]}"#.to_vec(),
             headers,
@@ -2633,6 +2637,7 @@ impl UpstreamBackend for SequencedUpstream {
             _ => br#"{"error":{"message":"capacity"}}"#.to_vec(),
         };
         Ok(UpstreamResponse {
+            response_attestation: None,
             status_code: status,
             body,
             headers,
@@ -2671,6 +2676,7 @@ impl UpstreamBackend for SequencedUpstream {
     }
     async fn models(&self) -> Result<UpstreamResponse, UpstreamError> {
         Ok(UpstreamResponse {
+            response_attestation: None,
             status_code: 200,
             body: b"{}".to_vec(),
             headers: HashMap::new(),

@@ -28,6 +28,7 @@ use futures_util::{stream, Stream};
 use crate::aci::receipt::UpstreamVerifiedEvent;
 
 mod chutes;
+mod near;
 mod openai;
 mod router;
 mod tls;
@@ -35,6 +36,7 @@ mod tls;
 pub use chutes::{
     ChutesProviderBackend, ChutesSessionStore, ChutesVerifiedDiscovery, ChutesVerifiedInstance,
 };
+pub use near::{NearAiBackend, EVENT_UPSTREAM_RESPONSE_ATTESTED};
 pub use openai::OpenAICompatibleBackend;
 pub use router::{ModelRoute, ModelRouterBackend};
 pub use tls::{observing_spki_client, SpkiObservations};
@@ -76,6 +78,10 @@ pub struct UpstreamResponse {
     /// several (Chutes: the serving instance id). Lets the receipt cite that
     /// instance's attested session; `None` for single-channel backends.
     pub served_instance_id: Option<String>,
+    /// Per-response enclave attestation to record in the receipt (NEAR AI:
+    /// the serving enclave's signature and whether it bound). `None` when the
+    /// backend has none.
+    pub response_attestation: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 pub type UpstreamBodyStream = Pin<Box<dyn Stream<Item = Result<Bytes, UpstreamError>> + Send>>;

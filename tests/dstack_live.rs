@@ -74,6 +74,7 @@ impl UpstreamBackend for LiveStubUpstream {
         let mut headers = HashMap::new();
         headers.insert("content-type".to_string(), "application/json".to_string());
         Ok(UpstreamResponse {
+            response_attestation: None,
             status_code: 200,
             body: CHAT_RESPONSE.to_vec(),
             headers,

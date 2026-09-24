@@ -89,12 +89,14 @@ fn receipt_custody_fixture(
     (keyset, evidence)
 }
 
-/// The scope token a stub verifier declares. Only routers declare a scope in
-/// production (near.ai / Tinfoil / SecretAI); per-model and per-instance verifiers omit it
-/// and the seam accepts `None`. Stubs mirror that so the real accept paths run.
+/// The scope token a stub verifier declares. Routers declare a scope in
+/// production (Tinfoil / SecretAI), and so does NEAR AI (model); other per-model
+/// and per-instance verifiers omit it and the seam accepts `None`. Stubs mirror
+/// that so the real accept paths run.
 fn declared_scope(provider: &str) -> Option<&'static str> {
     match provider {
-        "near-ai" | "tinfoil" | "secret-ai" => Some("router"),
+        "tinfoil" | "secret-ai" => Some("router"),
+        "near-ai" => Some("model"),
         _ => None,
     }
 }
@@ -574,7 +576,7 @@ async fn router_shares_one_channel_verification_across_models() {
     // (one external run) and event_for re-tags it with the requesting model. A
     // per-model provider must NOT share — each model is its own channel.
     for (provider, scope, expected_runs) in [
-        ("near-ai", AttestationScope::PerRouter, "1"),
+        ("tinfoil", AttestationScope::PerRouter, "1"),
         ("phala-direct", AttestationScope::PerModel, "2"),
     ] {
         // The stub declares the provider's scope (routers) or omits it (per-model)
@@ -695,19 +697,23 @@ async fn scope_seam_rejects_mismatched_missing_and_unknown_scopes() {
     }
 
     // Router declaring the wrong (model) scope → rejected.
-    let mismatch = verify_with_scope("near-ai", AttestationScope::PerRouter, Some("model")).await;
+    let mismatch = verify_with_scope("tinfoil", AttestationScope::PerRouter, Some("model")).await;
     assert_eq!(mismatch.result, VerificationResult::Failed);
     assert!(mismatch.reason.unwrap().contains("per-router"));
 
     // Router declaring no scope at all → rejected (it must declare).
-    let missing = verify_with_scope("near-ai", AttestationScope::PerRouter, None).await;
+    let missing = verify_with_scope("tinfoil", AttestationScope::PerRouter, None).await;
     assert_eq!(missing.result, VerificationResult::Failed);
     assert!(missing.reason.unwrap().contains("did not declare"));
 
     // Any verifier returning a garbage token → rejected.
-    let unknown = verify_with_scope("near-ai", AttestationScope::PerRouter, Some("galaxy")).await;
+    let unknown = verify_with_scope("tinfoil", AttestationScope::PerRouter, Some("galaxy")).await;
     assert_eq!(unknown.result, VerificationResult::Failed);
     assert!(unknown.reason.unwrap().contains("unrecognized"));
+
+    // NEAR AI declares the per-model scope its model-scoped report carries.
+    let near = verify_with_scope("near-ai", AttestationScope::PerModel, Some("model")).await;
+    assert_eq!(near.result, VerificationResult::Verified);
 
     // Per-instance provider declaring its matching scope → accepted.
     let instance =

@@ -29,6 +29,7 @@ impl UpstreamBackend for NoopUpstream {
 
     async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
         Ok(UpstreamResponse {
+            response_attestation: None,
             status_code: 200,
             body: b"{}".to_vec(),
             headers: HashMap::new(),

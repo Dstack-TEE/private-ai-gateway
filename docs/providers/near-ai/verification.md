@@ -1,12 +1,49 @@
 # NEAR AI — attested session verification & binding
 
 - **TEE:** Intel TDX (CPU) + NVIDIA Confidential Compute (GPU)
-- **Session binding:** `tls_spki_sha256`
+- **Session binding:** `tls_spki_sha256` (router); per-enclave sessions bound per response by `provider_tee` signatures
 - **Verifier:** bridge (`verify_nearai`) → vendored `confidential_verifier`
   (`NearAICloudVerifier.verify_gateway_component` → `_verify_component`) + an external
   dstack-verifier service (`DSTACK_VERIFIER_URL`).
 - **Status:** sound (the `report_data` binding was fixed in commit `ca7ddbd`).
 - **Audit:** see [review.md](review.md).
+
+## Per-enclave binding (model scope)
+
+The bridge verifies NEAR's router as below **and** every model enclave NEAR
+reports for the requested model (`/v1/attestation/report?…&provider=near`), with
+the same component checks: TDX quote, event log and OS image (dstack verifier),
+compose hash, `report_data` binding of the enclave's signing key, TLS fingerprint
+and nonce, and NVIDIA GPU evidence (NRAS, nonce-matched). The result is
+model-scoped (`attested_scope: "model"`) and lists the verified enclave signers.
+
+The backend seals the router's shared session plus one session per verified
+enclave signer. After a buffered completion, `NearAiBackend` fetches
+`GET /v1/signature/{chat_id}?signing_algo=ecdsa` and requires:
+
+- `signature_kind` is `provider_tee` (the serving enclave signed, not the router);
+- the signed text is exactly `<model>:<sha256(request.forwarded bytes)>:<sha256(response.received bytes)>`;
+- the EIP-191 signer recovers to the reported `signing_address`.
+
+On success the receipt cites that enclave's session, whose claims carry the
+enclave's GPU, TCB and OS verdicts (the router's TCB and OS verdicts fold in,
+since the router relays the traffic). Every outcome is recorded in an
+`upstream.response_attested` receipt event with the signature, so a verifier can
+re-check it offline. A signer outside the verified set, a `gateway` signature,
+or a streamed completion cites the router session.
+
+Requests to NEAR carry `x-no-aliasing: true` and `accept-encoding: identity`,
+which NEAR requires for enclave-signed responses.
+
+**Operational note.** The dstack verifier resolves OS images from
+`download.dstack.org/os-images/mr_<hash>.tar.gz`. Some NEAR model enclaves run
+`dstack-nvidia-0.5.11`, which that server does not carry (404). The image is
+published on the `Dstack-TEE/meta-dstack` v0.5.11 release; its
+`sha256(sha256sum.txt)` equals the reported `os_image_hash`
+(`a6eafc5f…7b02`). Preload it into the verifier's image cache
+(`images/<os_image_hash>/`: `bzImage`, `initramfs.cpio.gz`, `ovmf.fd`,
+`metadata.json`, `sha256sum.txt`) after checking that hash, or the enclave fails
+the OS check and only the router is verified.
 
 ## What is verified
 

@@ -175,9 +175,11 @@ impl UpstreamProvider {
     /// must choose its scope rather than inherit a default.
     pub(crate) fn attestation_scope(self) -> AttestationScope {
         match self {
-            UpstreamProvider::NearAi | UpstreamProvider::Tinfoil | UpstreamProvider::SecretAi => {
-                AttestationScope::PerRouter
-            }
+            UpstreamProvider::Tinfoil | UpstreamProvider::SecretAi => AttestationScope::PerRouter,
+            // NEAR AI's report carries per-model enclave evidence, verified per
+            // model; its router channel is shared, and per-enclave sessions are
+            // sealed from the model-scoped result.
+            UpstreamProvider::NearAi => AttestationScope::PerModel,
             UpstreamProvider::Chutes => AttestationScope::PerInstance,
             UpstreamProvider::PhalaDirect => AttestationScope::PerModel,
             // Plain cloud APIs (OpenAI-compatible, Anthropic) have no verifier
