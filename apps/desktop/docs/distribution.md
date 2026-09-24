@@ -69,7 +69,9 @@ does for existing Mac apps.
 
 Once every package and the App Store upload have succeeded, the run:
 
-1. attaches the signed assets, `latest.json` and `SHA256SUMS` to the draft;
+1. attaches the signed assets, `latest.json` and `SHA256SUMS` to the draft.
+   Every file in `SHA256SUMS` gets a signed SLSA build provenance attestation
+   (`gh attestation verify <file> --repo Dstack-TEE/private-ai-gateway`);
 2. publishes it (stable releases become Latest);
 3. advances the updater feeds;
 4. dispatches the dedicated npm publisher at the release tag and waits for it.

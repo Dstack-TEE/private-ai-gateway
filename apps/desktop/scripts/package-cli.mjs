@@ -1,10 +1,9 @@
 #!/usr/bin/env node
-import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { artifactName } from "./release-artifacts.mjs";
 import { UNIVERSAL_MACOS_TARGET } from "./build-config.mjs";
 import { aliases, aliasLinks, buildLinuxPackages, releaseVersionParts } from "./package-linux.mjs";
-import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, rm, stat, symlink } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -61,6 +60,8 @@ export function linuxContents(portable) {
     ...binaries.map((name) => ({ src: path.join(portable, name), dst: `${libexec}/${name}`, file_info: { mode: 0o755 } })),
     { src: "../libexec/private-ai-proxy/private-ai-proxy", dst: "/usr/bin/private-ai-proxy", type: "symlink" },
     ...aliasLinks,
+    // systemd.unit(5): packages install user units in /usr/lib/systemd/user.
+    { src: path.join(appRoot, "src-tauri/installer/private-ai-proxy.service"), dst: "/usr/lib/systemd/user/private-ai-proxy.service", file_info: { mode: 0o644 } },
   ];
 }
 
@@ -93,10 +94,7 @@ async function main() {
       }));
     }
 
-    for (const artifact of artifacts) {
-      await writeChecksum(artifact);
-      console.log(`Packaged ${artifact}`);
-    }
+    for (const artifact of artifacts) console.log(`Packaged ${artifact}`);
   } finally {
     await rm(scratch, { recursive: true, force: true });
   }
@@ -149,11 +147,6 @@ function createArchive(platform, parent, directory, output) {
   } else {
     execFileSync("tar", ["-c", "-z", "-f", output, "-C", parent, directory], { stdio: "inherit" });
   }
-}
-
-export async function writeChecksum(file) {
-  const digest = createHash("sha256").update(await readFile(file)).digest("hex");
-  await writeFile(`${file}.sha256`, `${digest}  ${path.basename(file)}\n`);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === scriptPath) {

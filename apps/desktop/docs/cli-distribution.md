@@ -99,6 +99,22 @@ pauses the user-owned backend before invoking the native installer and preserves
 active session so protection can resume after fresh verification when the app
 restarts.
 
+The CLI-only packages also install an optional systemd user unit,
+`/usr/lib/systemd/user/private-ai-proxy.service`, as Syncthing's packages do.
+Nothing enables it. Without it, the first command starts the backend. To start
+the backend at login instead, stop any backend a command started, then enable
+the unit:
+
+```sh
+pap --yes service stop
+systemctl --user enable --now private-ai-proxy
+```
+
+`Restart=on-failure` restarts a crashed backend but not one stopped with `pap
+service stop`. After a package upgrade, run `systemctl --user restart
+private-ai-proxy`. The desktop package ships no unit, because the app manages
+its own backend.
+
 The web UI renderer comes from `npm run build:web` in `apps/desktop`, which
 writes `runtime/web-dist` for the CLI package's default `web-ui` feature. Plain
 Cargo builds work without it and print a warning; enabling the web UI in such a

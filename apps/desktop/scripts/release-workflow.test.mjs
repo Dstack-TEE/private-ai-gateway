@@ -31,11 +31,11 @@ test("release-please tags start one same-revision release graph", async () => {
   assert.equal(direct.on.push.tags, undefined);
 
   assert.equal(direct.jobs["mac-app-store"].uses, "./.github/workflows/desktop-mac-app-store.yml");
-  assert.equal(direct.jobs["mac-app-store"].if, "needs.select-platforms.outputs.channel == 'stable'");
-  assert.equal(direct.jobs["mac-app-store"].with.build_number, "${{ needs.select-platforms.outputs.app_store_build_number }}");
+  assert.equal(direct.jobs["mac-app-store"].if, "needs.version.outputs.channel == 'stable'");
+  assert.equal(direct.jobs["mac-app-store"].with.build_number, "${{ needs.version.outputs.app_store_build_number }}");
   assert.equal(appStore.on.workflow_dispatch?.inputs, undefined);
   assert.equal(appStore.on.workflow_call.inputs.build_number.type, "string");
-  assert.deepEqual(direct.jobs.release.needs, ["select-platforms", "package", "mac-app-store"]);
+  assert.deepEqual(direct.jobs.release.needs, ["version", "package", "mac-app-store"]);
   assert.equal(direct.jobs.release.permissions.contents, "write");
 
   assert.equal(direct.jobs["update-feed"].uses, "./.github/workflows/desktop-update-feed.yml");

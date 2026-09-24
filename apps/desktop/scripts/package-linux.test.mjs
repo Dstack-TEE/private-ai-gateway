@@ -161,6 +161,8 @@ test("CLI packages keep executables in libexec, alias symlinks and their package
     assert.match(listing, /\.\/usr\/bin\/pap -> private-ai-proxy$/m);
     assert.match(listing, /\.\/usr\/bin\/aci -> private-ai-proxy$/m);
     for (const name of binaries) assert.match(listing, new RegExp(`-rwxr-xr-x root/root .* \\./usr/libexec/private-ai-proxy/${name}$`, "m"));
+    // An optional user unit that nothing enables.
+    assert.match(listing, /-rw-r--r-- root\/root .* \.\/usr\/lib\/systemd\/user\/private-ai-proxy\.service$/m);
     const extracted = path.join(root, "deb");
     execFileSync("dpkg-deb", ["-x", deb, extracted]);
     assert.equal(await readFile(path.join(extracted, "usr/share/private-ai-proxy/package-manager"), "utf8"), "deb\n");
