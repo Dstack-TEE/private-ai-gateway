@@ -1,5 +1,5 @@
 import React from "react";
-import { useErrorAlert } from "../lib/error-alert";
+import { toastError } from "../lib/error-message";
 import { ExternalLink, FolderLock, LoaderCircle, TriangleAlert } from "lucide-react";
 import claudeCodeIcon from "@lobehub/icons-static-svg/icons/claudecode-color.svg";
 import codexIcon from "@lobehub/icons-static-svg/icons/codex-color.svg";
@@ -202,8 +202,7 @@ export function AgentRow({
 }
 
 function AgentWebsite({ agent }: { agent: AgentStatus }): React.JSX.Element {
-  const reportError = useErrorAlert("Could not open agent website");
   return <Button variant="outline" onClick={() => {
-    void desktopApi.openAgentWebsite(agent.id).catch(reportError);
+    void desktopApi.openAgentWebsite(agent.id).catch((error: unknown) => toastError("Could not open agent website", error));
   }}>Website<ExternalLink size={14} aria-hidden="true" /></Button>;
 }

@@ -3,12 +3,14 @@ import { Download, Upload } from "lucide-react";
 import type { DesktopApi } from "../../shared/contracts";
 import { IconButton } from "./controls";
 import { SettingsLink } from "./settings";
-import { showErrorAlert } from "../lib/error-alert";
+import { useConfirm } from "./confirm";
+import { toastError } from "../lib/error-message";
 
 export function ProfileTransfer({ api, disabled, onBusy, onMessage }: {
   api: DesktopApi; disabled: boolean; onBusy(busy: boolean): void; onMessage(message: string, failed: boolean): void;
 }) {
   const [busy, setBusy] = useState(false);
+  const confirm = useConfirm();
   const run = async (importing: boolean) => {
     if (busy) return;
     setBusy(true); onBusy(true);
@@ -17,7 +19,7 @@ export function ProfileTransfer({ api, disabled, onBusy, onMessage }: {
         const backup = await api.selectProfileBackup();
         if (!backup) return;
         const names = backup.profiles.slice(0, 5).map((profile) => profile.name).join(", ");
-        if (!await api.confirm({ title: `Import ${backup.profiles.length} profile configurations?`, message: `${names}${backup.profiles.length > 5 ? ", ..." : ""}\nExisting profiles will not be overwritten. Imported profiles need credentials and verification before use.`, confirmLabel: "Import" })) return;
+        if (!await confirm({ title: `Import ${backup.profiles.length} profile configurations?`, message: `${names}${backup.profiles.length > 5 ? ", ..." : ""}\nExisting profiles will not be overwritten. Imported profiles need credentials and verification before use.`, confirmLabel: "Import" })) return;
         const result = await api.importProfiles(backup);
         onMessage(`${result.imported} imported, ${result.skipped} duplicates skipped.`, false);
       } else {
@@ -41,7 +43,7 @@ export function ExportDiagnostics({ api, onMessage }: { api: DesktopApi; onMessa
     try {
       await api.saveDiagnosticsExport();
       onMessage("Diagnostics exported without keys, URLs, local paths or request content.");
-    } catch { await showErrorAlert("Could not export diagnostics", "Choose a new file name and check write permissions.", api); }
+    } catch { toastError("Could not export diagnostics", "Choose a new file name and check write permissions."); }
     finally { setBusy(false); }
   };
   return <SettingsLink title={busy ? "Exporting diagnostics" : "Export diagnostics"} aria-label="Export diagnostics" disabled={busy} onClick={() => void run()} />;

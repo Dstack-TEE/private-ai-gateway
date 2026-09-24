@@ -9,12 +9,13 @@ import { Button } from "../components/ui/button";
 import { ActionItem } from "../components/action-item";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
 import { ProfileTransfer } from "../components/maintenance";
-import { Field, FieldGroup, FieldLabel } from "../components/ui/field";
-import { ErrorAlert } from "../components/error-alert";
-import { useErrorAlert } from "../lib/error-alert";
+import { Field, FieldError, FieldGroup, FieldLabel } from "../components/ui/field";
+import { Alert, AlertDescription } from "../components/ui/alert";
 import { Input } from "../components/ui/input";
 import { IconButton } from "../components/controls";
-import { Sheet, SheetActions } from "../components/sheet";
+import { AppDialog } from "../components/app-dialog";
+import { useConfirm } from "../components/confirm";
+import { DialogFooter } from "../components/ui/dialog";
 import { FormField } from "../components/settings";
 import { ChoiceSelect } from "../components/choice-select";
 import type { ConfidentialProfile, ConfidentialProfileInput, AppState, ServiceProvider } from "../../shared/contracts";
@@ -24,100 +25,63 @@ import { ServiceLogo } from "../components/brand";
 import { serviceHost } from "../lib/format";
 import { DEFAULT_SERVICE_PRESET, SERVICE_PROVIDER_OPTIONS, servicePreset, serviceProviderOption, serviceProviderPreset } from "../lib/services";
 
-export function ProfilesSheet({
+export function ProfilesDialog({
   state,
   busy,
-  initialEditorProfileId,
+  running,
+  repair,
   onActivate,
+  onSave,
+  onDelete,
   onClose,
 }: {
   state: AppState;
   busy: boolean;
-  initialEditorProfileId?: string;
+  running: boolean;
+  /** Opens the active profile's editor on top, for protection that needs its credential. */
+  repair: boolean;
   onActivate(profileId: string): Promise<string | undefined>;
+  onSave(profile: ConfidentialProfileInput, key?: string): Promise<string | undefined>;
+  onDelete(profileId: string): Promise<string | undefined>;
   onClose(): void;
 }): React.JSX.Element {
-  const [openError, setOpenError] = useState<string>();
-  const openEditor = useCallback((profileId?: string) => {
-    setOpenError(undefined);
-    void desktopApi.openNativeDialog("profile-editor", { profileId }).catch((error: unknown) => setOpenError(errorMessage(error)));
-  }, []);
-  const requestedEditor = useRef<string | undefined>(undefined);
-  useEffect(() => {
-    if (!initialEditorProfileId || requestedEditor.current === initialEditorProfileId) return;
-    requestedEditor.current = initialEditorProfileId;
-    openEditor(initialEditorProfileId);
-  }, [initialEditorProfileId, openEditor]);
-  return (
-    <ProfileListSheet
-      state={state}
-      busy={busy}
-      onActivate={onActivate}
-      onNew={() => openEditor()}
-      onEdit={openEditor}
-      error={openError}
-      onClose={onClose}
-    />
-  );
-}
-
-function ProfileListSheet({
-  state,
-  busy,
-  onActivate,
-  onNew,
-  onEdit,
-  onClose,
-  error: openError,
-}: {
-  state: AppState;
-  busy: boolean;
-  onActivate(profileId: string): Promise<string | undefined>;
-  onNew(): void;
-  onEdit(profileId: string): void;
-  onClose(): void;
-  error?: string;
-}): React.JSX.Element {
+  const [editor, setEditor] = useState<{ profileId?: string } | undefined>(() => repair && state.activeProfileId ? { profileId: state.activeProfileId } : undefined);
+  const editingProfile = state.profiles.find((profile) => profile.id === editor?.profileId);
   const [transferBusy, setTransferBusy] = useState(false);
   const [transferMessage, setTransferMessage] = useState<string>();
+  const [error, setError] = useState<string>();
   const frozen = busy || transferBusy;
   const [workingProfileId, setWorkingProfileId] = useState<string>();
-  const reportError = useErrorAlert("Profile action failed", openError);
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   const activeProfileAvailable = profileIsAvailable(activeProfile, state);
   const activeConnection = activeProfile && connectionRequirement(activeProfile);
 
-  const activate = async (profileId: string): Promise<boolean> => {
-    if (profileId === state.activeProfileId) return true;
+  const select = async (profileId: string) => {
+    if (profileId === state.activeProfileId) {
+      onClose();
+      return;
+    }
     setWorkingProfileId(profileId);
+    setError(undefined);
     try {
       const message = await onActivate(profileId);
-      if (message) {
-        reportError(message);
-        return false;
-      }
-      return true;
-    } catch (error) {
-      reportError(error);
-      return false;
+      if (message) setError(message);
+      else onClose();
     } finally {
       setWorkingProfileId(undefined);
     }
   };
-  const select = async (profileId: string) => {
-    if (!await activate(profileId)) return;
-    onClose();
-  };
+  const closeEditor = () => setEditor(undefined);
   return (
-    <Sheet title="Profiles" className="profiles-sheet w-[min(560px,_calc(var(--window-dialog-width,_100vw)_-_32px))] h-[min(500px,_calc(var(--window-dialog-height,_100vh)_-_32px))] [&[open]]:flex [&[open]]:flex-col" dismissible={!workingProfileId && !transferBusy} onClose={onClose}>
-      <p className="sheet-text mt-3 text-sm [&.error]:text-destructive">Choose the service used when protection starts.</p>
+    <AppDialog title="Profiles" className="sm:max-w-xl" dismissible={!workingProfileId && !transferBusy} onClose={onClose}>
+      <p className="text-sm">Choose the service used when protection starts.</p>
       {!activeProfileAvailable && (
-        <p className="banner sheet-banner profile-availability mt-2.5 flex items-start gap-1.75 rounded-lg bg-[var(--warning-bg)] px-3 py-2.25 text-warning wrap-anywhere">
+        <p className="banner profile-availability flex items-start gap-1.75 rounded-lg bg-[var(--warning-bg)] px-3 py-2.25 text-warning wrap-anywhere">
           <TriangleAlert size={15} aria-hidden="true" />
           {activeProfile ? `${activeConnection} for “${activeProfile.name}” to start protection.` : "Add a profile to start protection."}
         </p>
       )}
-      <div className="profile-list min-h-0 mt-3.5 flex-auto overflow-auto bg-card border border-border rounded-2xl" role="list" aria-label="AI service profiles">
+      {state.profiles.length > 0 && <div className="profile-list min-h-0 flex-auto overflow-auto bg-card border border-border rounded-2xl" role="list" aria-label="AI service profiles">
         {state.profiles.map((profile) => {
           const active = profile.id === state.activeProfileId;
           const working = profile.id === workingProfileId;
@@ -135,21 +99,25 @@ function ProfileListSheet({
                 <span><strong>{profile.name}</strong><small>{serviceHost(profile.remoteUrl)} · {status}</small></span>
                 {working ? <LoaderCircle className="is-spinning animate-control-spin motion-reduce:animate-none" size={16} aria-hidden="true" /> : active ? <Check size={16} aria-hidden="true" /> : null}
               </ActionItem>
-              <IconButton size="icon-sm" aria-haspopup="dialog" label={`Edit ${profile.name}`} disabled={frozen || Boolean(workingProfileId)} onClick={() => onEdit(profile.id)}><Pencil /></IconButton>
+              <IconButton size="icon-sm" aria-haspopup="dialog" label={`Edit ${profile.name}`} disabled={frozen || Boolean(workingProfileId)} onClick={() => setEditor({ profileId: profile.id })}><Pencil /></IconButton>
             </div>
           );
         })}
-      </div>
+      </div>}
       {transferMessage && <p role="status" className="text-sm text-muted-foreground">{transferMessage}</p>}
-      <SheetActions leading={
-        <div className="flex items-center gap-2">
-        <Button type="button" variant="outline" aria-haspopup="dialog" disabled={frozen || Boolean(workingProfileId)} onClick={onNew}><Plus size={15} />New Profile</Button>
-        <ProfileTransfer api={desktopApi} disabled={busy || Boolean(workingProfileId)} onBusy={setTransferBusy} onMessage={(message, failed) => { if (failed) reportError(message); setTransferMessage(failed ? undefined : message); }} />
+      {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
+      <DialogFooter>
+        <div className="flex items-center gap-2 sm:mr-auto">
+          <Button type="button" variant="outline" aria-haspopup="dialog" disabled={frozen || Boolean(workingProfileId)} onClick={() => setEditor({})}><Plus size={15} />New Profile</Button>
+          <ProfileTransfer api={desktopApi} disabled={busy || Boolean(workingProfileId)} onBusy={setTransferBusy} onMessage={(message, failed) => { setError(failed ? message : undefined); setTransferMessage(failed ? undefined : message); }} />
         </div>
-      }>
         <Button type="button" variant="outline" disabled={Boolean(workingProfileId) || transferBusy} onClick={onClose}>Done</Button>
-      </SheetActions>
-    </Sheet>
+      </DialogFooter>
+      {editor && (!editor.profileId || editingProfile) && <ProfileEditorDialog
+        state={state} busy={busy} running={running} profile={editingProfile}
+        onSave={onSave} onDelete={onDelete} onComplete={closeEditor} onDeleted={closeEditor} onClose={closeEditor}
+      />}
+    </AppDialog>
   );
 }
 
@@ -167,7 +135,7 @@ function randomUuid(): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-export function ProfileEditorSheet({
+export function ProfileEditorDialog({
   state,
   busy,
   running,
@@ -203,7 +171,9 @@ export function ProfileEditorSheet({
   const saveInFlight = useRef(false);
   const autoSaveAttempt = useRef<string | undefined>(undefined);
   const [authMethod, setAuthMethod] = useState<"account" | "apiKey">(profile?.auth.kind === "apiKey" ? "apiKey" : "account");
-  const reportError = useErrorAlert(isNew ? "Could not create profile" : "Profile action failed");
+  const [error, setError] = useState<string>();
+  const reportError = useCallback((failure: unknown) => setError(errorMessage(failure)), []);
+  const confirm = useConfirm();
   const account = useAccountLogin(desktopApi, reportError);
   const { session: login, auth: authorized } = account;
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<number>();
@@ -218,8 +188,9 @@ export function ProfileEditorSheet({
   const signIn = async () => {
     pendingWorkspaceSave.current = undefined;
     setSelectedWorkspaceId(undefined);
+    setError(undefined);
     try {
-      if (running && !await desktopApi.confirm({ title: "Connect and restart protection?", message: "Connecting this account restarts protection. In-flight requests may be interrupted.", confirmLabel: "Continue" })) return;
+      if (running && !await confirm({ title: "Connect and restart protection?", message: "Connecting this account restarts protection. In-flight requests may be interrupted.", confirmLabel: "Continue" })) return;
       await account.start(draft);
     } catch (error) { reportError(error); }
   };
@@ -286,10 +257,11 @@ export function ProfileEditorSheet({
   const removeProfile = async () => {
     if (working || frozen) return;
     setSaving(true);
+    setError(undefined);
     try {
       const current = await desktopApi.getState();
       const needsStop = !current.configurationVerification && ["verified", "blocked", "verifying"].includes(current.status);
-      const confirmed = await desktopApi.confirm({
+      const confirmed = await confirm({
         title: `Delete “${draft.name}”?`,
         message: needsStop ? "Protection will stop and connected agent configurations will be restored. This profile will be deleted and its account credential revoked." : "The profile will be deleted. An account credential will also be revoked at its provider.",
         confirmLabel: needsStop ? "Stop and Delete" : "Delete Profile",
@@ -306,8 +278,9 @@ export function ProfileEditorSheet({
     if (saveInFlight.current || working || frozen || needsAccountLogin || needsWorkspace) return;
     saveInFlight.current = true;
     setSaving(true);
+    setError(undefined);
     try {
-      if (!authorized && running && profile?.id === state.activeProfileId && !await desktopApi.confirm({ title: "Save and reconnect?", message: "Saving this active profile restarts protection. In-flight requests may be interrupted.", confirmLabel: "Save and Reconnect" })) return;
+      if (!authorized && running && profile?.id === state.activeProfileId && !await confirm({ title: "Save and reconnect?", message: "Saving this active profile restarts protection. In-flight requests may be interrupted.", confirmLabel: "Save and Reconnect" })) return;
       if (!authorized && authMethod === "account" && draft.provider === "redpill"
         && workspaceId !== undefined && workspaceId !== savedScope?.workspaceId) {
         pendingWorkspaceSave.current = workspaceId;
@@ -326,7 +299,7 @@ export function ProfileEditorSheet({
       else onComplete();
     } catch (error) { reportError(error); }
     finally { saveInFlight.current = false; setSaving(false); }
-  }, [working, frozen, needsAccountLogin, needsWorkspace, authorized, running, profile?.id, state.activeProfileId, login, authMethod, draft, state.config.requireProductionOs, workspaceId, account.consume, startAfterSave, onComplete, onSave, apiKeyDraft, savedScope?.workspaceId, account.start, reportError]);
+  }, [working, frozen, needsAccountLogin, needsWorkspace, authorized, running, profile?.id, state.activeProfileId, login, authMethod, draft, state.config.requireProductionOs, workspaceId, account.consume, startAfterSave, onComplete, onSave, apiKeyDraft, savedScope?.workspaceId, account.start, reportError, confirm]);
 
   useEffect(() => {
     if (!authorized || !login || working || frozen || autoSaveAttempt.current === login.id) return;
@@ -343,9 +316,9 @@ export function ProfileEditorSheet({
   }, [authorized, login, draft.provider, workspaces, working, frozen, save, reportError]);
 
   return (
-    <Sheet title={isNew ? "New profile" : "Edit profile"} className="profile-editor-sheet w-[min(480px,_calc(var(--window-dialog-width,_100vw)_-_32px))] [&_.sheet-scroll]:min-h-0 [&_.sheet-scroll]:overflow-y-auto [&_.sheet-footer]:flex-none [&[open]]:flex [&[open]]:flex-col [&_form]:min-h-0 [&_form]:flex [&_form]:flex-col form-sheet [&_>_.sheet-heading]:px-5 [&_>_.field-note]:mx-5 [&_.sheet-footer]:mx-5 [&_form_>_[data-slot=field-error]]:mx-5 [&_.sheet-scroll]:px-5" dismissible={!saving && !account.working} onClose={() => void closeEditor()}>
-      <form className="mt-4" onSubmit={(event) => { event.preventDefault(); void save(); }}>
-        <div className="sheet-scroll py-1">
+    <AppDialog title={isNew ? "New profile" : "Edit profile"} className="sm:max-w-lg" dismissible={!saving && !account.working} onClose={() => void closeEditor()}>
+      <form className="flex min-h-0 flex-col gap-4" onSubmit={(event) => { event.preventDefault(); void save(); }}>
+        <div className="-mx-6 min-h-0 overflow-y-auto px-6 py-1">
         <FieldGroup className="gap-4 [&_[data-slot=field]]:gap-2">
         <Field>
         <FieldLabel id="profile-provider-label">Provider</FieldLabel>
@@ -399,7 +372,7 @@ export function ProfileEditorSheet({
                       ...(!authorized && savedScope?.workspaceId != null && !workspaces?.some((item) => item.id === savedScope.workspaceId)
                         ? [{ value: String(savedScope.workspaceId), label: savedScope.workspace ?? "Current workspace", disabled: true }] : []),
                     ]} disabled={working || frozen || !workspaces?.length} onChange={(value) => setSelectedWorkspaceId(Number(value))} />
-                    {!authorized && <ErrorAlert title="Could not load account workspaces" error={workspaceError} />}
+                    {!authorized && <FieldError>{workspaceError && `Could not load account workspaces. ${workspaceError}`}</FieldError>}
                   </FormField>}
                 </> : <Button type="button" variant="default" size="lg" className="w-full [&_.service-logo]:size-4" disabled={working || frozen || !draft.name.trim()} onClick={() => void signIn()}><ServiceLogo url={draft.remoteUrl} />Connect {selectedProviderName}</Button>}
               </FieldGroup>
@@ -415,11 +388,13 @@ export function ProfileEditorSheet({
           </Tabs>
         </FieldGroup>
         </div>
-        <SheetActions leading={!isNew && <Button type="button" variant="destructive" disabled={working || frozen} onClick={() => void removeProfile()}><Trash2 size={14} />Delete Profile</Button>}>
+        <FieldError>{error}</FieldError>
+        <DialogFooter>
+          {!isNew && <Button type="button" variant="destructive" className="sm:mr-auto" disabled={working || frozen} onClick={() => void removeProfile()}><Trash2 size={14} />Delete Profile</Button>}
           <Button type="button" variant="outline" onClick={() => void closeEditor()} disabled={saving || account.working}>Cancel</Button>
           {!needsAccountLogin && <Button type="submit" variant="default" disabled={working || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || needsWorkspace || (!authorized && !savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Saving…" : authorized && draft.provider === "phala" ? "Retry" : "Save"}</Button>}
-        </SheetActions>
+        </DialogFooter>
       </form>
-    </Sheet>
+    </AppDialog>
   );
 }

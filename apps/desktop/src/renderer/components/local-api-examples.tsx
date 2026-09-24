@@ -2,18 +2,16 @@ import { useEffect, useMemo, useState } from "react";
 import { Check, Copy } from "lucide-react";
 import type { ModelSummary, DesktopApi } from "../../shared/contracts";
 import { localApiExample, type ExampleLanguage } from "../lib/local-api-example";
-import { Sheet, DismissSheetAction } from "./sheet";
+import { AppDialog, DoneFooter } from "./app-dialog";
 import { IconButton } from "./controls";
-import { Field, FieldLabel } from "./ui/field";
-import { useErrorAlert } from "../lib/error-alert";
+import { Field, FieldError, FieldLabel } from "./ui/field";
 import { ChoiceSelect } from "./choice-select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 
-export function LocalApiExamples({ endpoint, models: catalogModels, api, onCopy, onClose, onReady }: {
+export function LocalApiExamplesDialog({ endpoint, models: catalogModels, api, onCopy, onClose }: {
   api: Pick<DesktopApi, "getClientKey" | "onClientKeyChange">;
   endpoint?: string; models: ModelSummary[];
   onCopy(value: string): Promise<void>; onClose(): void;
-  onReady?(error?: string): void;
 }) {
   const models = catalogModels.filter((model) => model.supportedEndpoints?.includes("/v1/chat/completions") ?? true);
   const [language, setLanguage] = useState<ExampleLanguage>("javascript");
@@ -21,12 +19,7 @@ export function LocalApiExamples({ endpoint, models: catalogModels, api, onCopy,
   const [copied, setCopied] = useState<string>();
   const [copying, setCopying] = useState(false);
   const [error, setError] = useState<string>();
-  const reportError = useErrorAlert("Local API example unavailable", onReady ? undefined : error);
   const [apiKey, setApiKey] = useState<string>();
-  useEffect(() => {
-    if (apiKey !== undefined) onReady?.();
-    else if (error) onReady?.(error);
-  }, [apiKey, error, onReady]);
   useEffect(() => {
     let active = true;
     let generation = 0;
@@ -56,16 +49,16 @@ export function LocalApiExamples({ endpoint, models: catalogModels, api, onCopy,
     if (!code || copying) return;
     setCopying(true);
     try { await onCopy(code); setCopied(code); }
-    catch { reportError("Could not copy the example."); }
+    catch { setError("Could not copy the example."); }
     finally { setCopying(false); }
   };
-  return <Sheet title="Local API examples" className="local-api-examples-sheet w-[min(720px,_calc(var(--window-dialog-width,_100vw)_-_32px))] h-[min(560px,_calc(var(--window-dialog-height,_100vh)_-_32px))] [&[open]]:flex [&[open]]:flex-col" onClose={onClose}>
-    <Field className="mt-4">
+  return <AppDialog title="Local API examples" className="sm:max-w-3xl" onClose={onClose}>
+    <Field>
       <FieldLabel htmlFor="example-model">Model</FieldLabel>
       <ChoiceSelect id="example-model" label="Model" className="w-full" value={model} disabled={models.length === 0} onChange={setSelection}
         options={models.length ? models.map((entry) => ({ value: entry.id, label: entry.name || entry.id })) : [{ value: "", label: "No verified models" }]} />
     </Field>
-    <Tabs value={language} className="mt-4 min-h-0 flex-1" onValueChange={(value) => { if (value === "curl" || value === "python" || value === "javascript") setLanguage(value); }}>
+    <Tabs value={language} className="min-h-0 flex-1" onValueChange={(value) => { if (value === "curl" || value === "python" || value === "javascript") setLanguage(value); }}>
       <div className="flex items-center justify-between gap-2">
         <TabsList aria-label="Code language"><TabsTrigger value="javascript">JavaScript</TabsTrigger><TabsTrigger value="python">Python</TabsTrigger><TabsTrigger value="curl">cURL</TabsTrigger></TabsList>
         <IconButton label="Copy example" disabled={!code || copying} onClick={() => void copy()}>{copied === code && code ? <Check /> : <Copy />}</IconButton>
@@ -74,7 +67,8 @@ export function LocalApiExamples({ endpoint, models: catalogModels, api, onCopy,
         <pre className="p-4 text-xs leading-relaxed"><code>{code ?? "Local API example unavailable."}</code></pre>
       </TabsContent>
     </Tabs>
+    <FieldError>{error}</FieldError>
     <span className="sr-only" role="status">{copied === code && code ? "Example copied" : ""}</span>
-    <DismissSheetAction onClose={onClose} />
-  </Sheet>;
+    <DoneFooter />
+  </AppDialog>;
 }

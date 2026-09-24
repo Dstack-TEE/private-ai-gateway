@@ -2,34 +2,19 @@ import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { confirm, open, save } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 
-import type {
-  Appearance,
-  DistributionCapabilities,
-  AppState,
-  ProfileBackup,
-  UiMethod,
-} from "../../shared/contracts";
+import type { DistributionCapabilities, ProfileBackup, UiMethod } from "../../shared/contracts";
 import { createDesktopApi, type UiPlatform, type UiTransport } from "./create-api";
 
 declare global {
   interface Window {
-    __PAP_INITIAL_STATE__?: AppState;
-    __PAP_INITIAL_APPEARANCE__?: Appearance;
     __PAP_DISTRIBUTION__?: DistributionCapabilities;
   }
 }
 
-const commandOverrides: Partial<Record<UiMethod, string>> = {
-  getAccountDetails: "account_details",
-  getAccountBalance: "account_balance",
-  previewAgent: "preview_agent_connection",
-  applyAgent: "apply_agent_connection",
-};
-
 const transport: UiTransport = {
-  call: (method, params = {}) => invoke(commandOverrides[method] ?? snakeCase(method), params),
+  call: (method, params = {}) => invoke(commandName(method), params),
   subscribe,
 };
 
@@ -72,33 +57,19 @@ const platform: UiPlatform = {
   exportDiagnostics: (path) => invoke("export_diagnostics", { path }),
   requestNotificationPermission: () => invoke("request_notification_permission"),
   openNotificationSettings: () => invoke("open_notification_settings"),
-  openNativeDialog: (kind, options) => invoke("open_native_dialog", {
-    kind,
-    repair: options?.repair ?? false,
-    recordId: options?.recordId,
-    profileId: options?.profileId,
-  }),
-  closeNativeDialog: () => invoke("close_native_dialog"),
-  nativeDialogReady: () => invoke("native_dialog_ready"),
   mainWindowReady: () => invoke("main_window_ready"),
   openAboutLink: (target) => invoke("open_about_link", { target }),
   openWebUi: () => invoke("open_web_ui"),
   openAgentWebsite: (agentId) => invoke("open_agent_website", { agentId }),
   openApiKeyPage: (provider) => invoke("open_api_key_page", { provider }),
-  confirm: (options) => confirm(options.message, {
-    title: options.title,
-    kind: "warning",
-    okLabel: options.confirmLabel,
-    cancelLabel: options.cancelLabel ?? "Cancel",
-  }),
-  showErrorAlert: (title, message) => invoke("show_error_alert", { title, message }),
   presentAccountLogin: () => undefined,
   openOrganization: (organizationSlug) => invoke("open_organization", { organizationSlug }),
   openTopUp: (provider, scopeSlug) => invoke("open_top_up", { provider, scopeSlug }),
 };
 
-function snakeCase(name: string): string {
-  return name.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+/** Tauri command names are the snake_case Rust function names of the shared UI methods. */
+function commandName(method: UiMethod): string {
+  return method.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
 }
 
 function subscribe<T>(event: string, listener: (payload: T) => void): () => void {
@@ -126,18 +97,12 @@ function subscribe<T>(event: string, listener: (payload: T) => void): () => void
 }
 
 export async function createBackend() {
-  const initialAppState = window.__PAP_INITIAL_STATE__;
-  delete window.__PAP_INITIAL_STATE__;
-  const initialAppearance = window.__PAP_INITIAL_APPEARANCE__;
-  delete window.__PAP_INITIAL_APPEARANCE__;
   const distributionCapabilities = window.__PAP_DISTRIBUTION__;
   delete window.__PAP_DISTRIBUTION__;
   if (!distributionCapabilities) throw new Error("Distribution capabilities were not initialized");
   return {
     desktopApi: createDesktopApi(transport, platform),
     distributionCapabilities,
-    initialAppearance,
-    initialAppState,
     signOut: undefined,
   };
 }

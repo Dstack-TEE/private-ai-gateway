@@ -1,6 +1,6 @@
 import React from "react";
 import { Check, LockOpen, RefreshCw, ShieldCheck, ShieldX } from "lucide-react";
-import { Sheet, DismissSheetAction } from "../components/sheet";
+import { AppDialog, DoneFooter } from "../components/app-dialog";
 import type { AppState, VerificationCheck } from "../../shared/contracts";
 import { hasLiveVerification } from "../lib/protection";
 import { formatTimestamp, hardwareName, shorten, trustName } from "../lib/format";
@@ -34,8 +34,11 @@ const CHECK_TITLES: Record<string, string> = {
   "upstream-2": "Upstream session evidence",
 };
 
-export function PrivacyVerificationSheet({ state, onClose }: { state: AppState; onClose(): void }): React.JSX.Element {
-  return <Sheet title="Privacy verification" className="privacy-sheet w-[min(680px,_calc(var(--window-dialog-width,_100vw)_-_32px))] h-[min(680px,_calc(var(--window-dialog-height,_100vh)_-_32px))]" onClose={onClose}><PrivacyVerification state={state} /><DismissSheetAction onClose={onClose} /></Sheet>;
+export function PrivacyDialog({ state, onClose }: { state: AppState; onClose(): void }): React.JSX.Element {
+  return <AppDialog title="Privacy verification" className="sm:max-w-2xl" onClose={onClose}>
+    <div className="-mx-6 min-h-0 overflow-y-auto px-6"><PrivacyVerification state={state} /></div>
+    <DoneFooter />
+  </AppDialog>;
 }
 
 function PrivacyVerification({ state }: { state: AppState }): React.JSX.Element {
@@ -72,7 +75,7 @@ function PrivacyVerification({ state }: { state: AppState }): React.JSX.Element 
   const verdictTone = verified ? "success" : state.status === "blocked" || state.status === "error" ? "danger" : "neutral";
   const VerdictIcon = verified ? ShieldCheck : state.status === "verifying" ? RefreshCw : ShieldX;
   return (
-    <section className="privacy-content mt-3.5" aria-label="Privacy">
+    <section aria-label="Privacy">
       <VerificationVerdict
         tone={verdictTone}
         icon={VerdictIcon}

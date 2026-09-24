@@ -8,7 +8,7 @@
 
 use tauri::AppHandle;
 
-/// Emitted to the window when a menu item asks it to show a section.
+/// Emitted to the window when a menu item asks it to show a page or dialog.
 pub const NAVIGATE_EVENT: &str = "pap://navigate";
 
 #[cfg(target_os = "macos")]
@@ -76,13 +76,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             &PredefinedMenuItem::minimize(app, None)?,
             &PredefinedMenuItem::maximize(app, None)?,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(
-                app,
-                "close-window",
-                "Close Window",
-                true,
-                Some("CmdOrCtrl+W"),
-            )?,
+            &PredefinedMenuItem::close_window(app, None)?,
         ],
     )?;
     let documentation =
@@ -100,17 +94,6 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         &[&application, &edit, &view, &window, &help],
     )?)?;
     app.on_menu_event(|app, event| match event.id().as_ref() {
-        "close-window" => {
-            if let Some(window) = app
-                .webview_windows()
-                .into_values()
-                .find(|window| window.is_focused().unwrap_or(false))
-            {
-                if let Err(error) = crate::native_dialog::request_close(&window) {
-                    desktop_core::diagnostic!("Cannot close the active window: {error}");
-                }
-            }
-        }
         "settings" => {
             crate::tray::show_window(app);
             let _ = app.emit(NAVIGATE_EVENT, "settings");
@@ -122,7 +105,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
                 if let Err(error) =
                     crate::commands::desktop::open_about_link(app.clone(), target).await
                 {
-                    crate::report_surface_error(&app, crate::SurfaceErrorScope::Settings, error);
+                    crate::notifications::report_failure(&app, "Link not opened", error);
                 }
             });
         }

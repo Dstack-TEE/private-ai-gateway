@@ -13,10 +13,11 @@ import { Hint } from "../components/hint";
 import { agentName, currency, formatTokens, outcomeOf, usageTokens } from "../lib/usage-presentation";
 import { USAGE_PAGE_SIZES, USAGE_SEARCH_DEFAULTS, usageDateBounds, usageDateLabel, usageDateSearch, usageDateSelection, type UsageSearch } from "../lib/usage-dates";
 import { Field, FieldLabel, FieldSet, FieldLegend } from "../components/ui/field";
-import { ErrorAlert } from "../components/error-alert";
+import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Card, CardHeader, CardTitle, CardDescription, CardAction, CardContent } from "../components/ui/card";
 import { IconButton } from "../components/controls";
-import { Sheet, DismissSheetAction } from "../components/sheet";
+import { AppDialog, DoneFooter } from "../components/app-dialog";
+import { desktopApi } from "../lib/environment";
 import { ChoiceSelect } from "../components/choice-select";
 import type { AgentStatus, AppState, RequestActivity, UsagePage } from "../../shared/contracts";
 import { formatTimestamp } from "../lib/format";
@@ -89,7 +90,7 @@ export function UsageView({
 
   return (
     <div className="usage-page max-w-230 min-h-full mt-0 mr-auto mb-0 ml-auto">
-      <ErrorAlert title="Could not load usage" error={error} />
+      {error && <Alert variant="destructive" className="mb-4"><AlertTitle>Could not load usage</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
       <div className="usage-toolbar grid grid-cols-[minmax(150px,_0.8fr)_minmax(210px,_1.25fr)_auto] items-end gap-2.5 [&_select]:w-full [&_select]:min-w-0 max-[780px]:grid-cols-2 max-[440px]:grid-cols-1" role="group" aria-label="Usage filters">
         <Field><FieldLabel htmlFor="usage-agent">Agent</FieldLabel><ChoiceSelect id="usage-agent" label="Agent" className="w-full" value={agent} onChange={(value) => filter({ agent: value || undefined })} options={[{ value: "", label: "All agents" }, ...agentOptions.map((entry) => ({ value: entry, label: agentName(entry) }))]} /></Field>
         <Field><FieldLabel htmlFor="usage-model">Model</FieldLabel><ChoiceSelect id="usage-model" label="Model" className="w-full" value={model} onChange={(value) => filter({ model: value || undefined })} options={[{ value: "", label: "All models" }, ...modelOptions.map((entry) => ({ value: entry, label: entry }))]} /></Field>
@@ -242,12 +243,17 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
   );
 }
 
-export function UsageEvidenceSheet({ activity, onClose }: { activity: RequestActivity; onClose(): void }): React.JSX.Element {
+/** Refreshes the record on open: its receipt may have been verified since the list loaded. */
+export function UsageProofDialog({ activity: listed, onClose }: { activity: RequestActivity; onClose(): void }): React.JSX.Element {
+  const { data: activity = listed, error } = useQuery({
+    queryKey: ["usage-record", listed.id], queryFn: () => desktopApi.getUsageRecord(listed.id), initialData: listed,
+  });
   return (
-    <Sheet title="Usage proof" className="usage-evidence-sheet w-[min(540px,_calc(var(--window-dialog-width,_100vw)_-_32px))] h-[min(500px,_calc(var(--window-dialog-height,_100vh)_-_32px))]" headingClassName="usage-proof-heading [&>span:last-child]:min-w-0 [&>span:last-child]:grid [&>span:last-child]:gap-0.5 [&_small]:text-muted-foreground [&_small]:text-xs" description={formatTimestamp(activity.at * 1_000, true)} onClose={onClose}>
-      <div className="proof-card p-0 mt-4 flex flex-col gap-5 [&_.evidence]:text-sm [&_.evidence]:gap-y-4.5 [&_[data-slot=verification-verdict]]:shrink-0"><Evidence activity={activity} /></div>
-      <DismissSheetAction onClose={onClose} />
-    </Sheet>
+    <AppDialog title="Usage proof" description={formatTimestamp(activity.at * 1_000, true)} className="sm:max-w-xl" onClose={onClose}>
+      {error && <Alert variant="destructive"><AlertTitle>Could not refresh this record</AlertTitle><AlertDescription>{errorMessage(error)}</AlertDescription></Alert>}
+      <div className="-mx-6 flex min-h-0 flex-col gap-5 overflow-y-auto px-6 [&_.evidence]:text-sm [&_.evidence]:gap-y-4.5 [&_[data-slot=verification-verdict]]:shrink-0"><Evidence activity={activity} /></div>
+      <DoneFooter />
+    </AppDialog>
   );
 }
 

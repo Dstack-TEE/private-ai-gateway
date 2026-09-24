@@ -78,10 +78,15 @@ protection problems, is stored under that key.
 
 ## Module boundaries
 
-- Renderer `index.tsx` owns bootstrap; `app.tsx` composes the window. `features/`
-  contains pages and forms, `windows/` adapts them to native windows, `hooks/`
-  owns reusable interactions, and `lib/` contains presentation rules and the
-  live desktop API binding. Features never import the app or windows.
+- Renderer `index.tsx` owns bootstrap; `app.tsx` composes the window and its
+  dialogs. `features/` contains pages and dialogs, `hooks/` owns reusable
+  interactions, and `lib/` contains presentation rules and the live desktop API
+  binding. Features never import the app.
+- Dialogs are shadcn `Dialog`s in the one window, in the desktop app and the web
+  UI alike; decisions use `AlertDialog`. Tray and menu items show the window and
+  send `pap://navigate` for the page or dialog. Failures show inline in their form
+  or page, as a toast for other in-window actions, and as a system notification
+  for tray and menu actions.
 - Runtime `controller.rs` owns shared state and launch; its private modules group
   lifecycle, profiles, account login, credentials, agents and local endpoints.
   The same locks and transaction guards span these implementation modules.

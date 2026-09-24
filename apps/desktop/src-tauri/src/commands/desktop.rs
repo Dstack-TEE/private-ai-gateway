@@ -105,79 +105,8 @@ pub(crate) fn show_edit_menu(window: tauri::WebviewWindow, editable: bool) -> Re
 }
 
 #[tauri::command]
-pub(crate) async fn show_error_alert(
-    window: tauri::WebviewWindow,
-    title: String,
-    message: String,
-) -> Result<(), String> {
-    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-
-    if title.trim().is_empty() || title.chars().count() > 120 {
-        return Err("Invalid alert title".to_string());
-    }
-    if message.trim().is_empty() || message.chars().count() > 4_096 {
-        return Err("Invalid alert message".to_string());
-    }
-
-    let app = window.app_handle().clone();
-    let parent = if window.is_visible().unwrap_or(false) {
-        Some(window)
-    } else {
-        app.get_webview_window("main")
-            .filter(|main| main.is_visible().unwrap_or(false))
-    };
-    let (sent, received) = tokio::sync::oneshot::channel();
-    let alert = app
-        .dialog()
-        .message(message)
-        .title(title)
-        .kind(MessageDialogKind::Error)
-        .buttons(MessageDialogButtons::Ok);
-    let alert = match parent.as_ref() {
-        Some(parent) => alert.parent(parent),
-        None => alert,
-    };
-    alert.show(move |_| {
-        let _ = sent.send(());
-    });
-    received
-        .await
-        .map_err(|_| "The system alert could not be displayed".to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn open_native_dialog(
-    app: AppHandle,
-    kind: String,
-    repair: bool,
-    record_id: Option<String>,
-    profile_id: Option<String>,
-) -> Result<(), String> {
-    run_blocking(move || {
-        native_dialog::open(
-            &app,
-            &kind,
-            repair,
-            record_id.as_deref(),
-            profile_id.as_deref(),
-        )
-    })
-    .await
-}
-
-#[tauri::command]
-pub(crate) fn native_dialog_ready(window: tauri::WebviewWindow) -> Result<(), String> {
-    native_dialog::ready(&window)
-}
-
-#[tauri::command]
 pub(crate) fn main_window_ready(window: tauri::WebviewWindow) -> Result<(), String> {
     tray::main_window_ready(&window)
-}
-
-#[tauri::command]
-pub(crate) fn close_native_dialog(window: tauri::WebviewWindow) -> Result<(), String> {
-    native_dialog::close(&window)
 }
 
 #[tauri::command]

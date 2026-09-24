@@ -1,8 +1,6 @@
 import type {
-  Appearance,
   CliRegistration,
   DistributionCapabilities,
-  AppState,
   ProfileBackup,
   ServiceProvider,
   UiMethod,
@@ -10,7 +8,6 @@ import type {
   UpdateNotice,
   WebBootstrap,
 } from "../../shared/contracts";
-import { showBrowserDialog } from "../components/browser-dialog";
 import { showSignIn } from "../components/sign-in";
 import { createDesktopApi, type UiPlatform, type UiTransport } from "./create-api";
 
@@ -26,8 +23,6 @@ let ended = false;
 export async function createBackend(): Promise<{
   desktopApi: ReturnType<typeof createDesktopApi>;
   distributionCapabilities: DistributionCapabilities;
-  initialAppState: AppState | undefined;
-  initialAppearance: Appearance | undefined;
   signOut: (() => Promise<void>) | undefined;
 }> {
   const bootstrap = await signIn();
@@ -36,8 +31,6 @@ export async function createBackend(): Promise<{
   return {
     desktopApi: createDesktopApi(transport, createPlatform(bootstrap)),
     distributionCapabilities: bootstrap.distribution,
-    initialAppState: undefined,
-    initialAppearance: undefined,
     signOut,
   };
 }
@@ -96,19 +89,6 @@ function createPlatform(bootstrap: WebBootstrap): UiPlatform {
     },
     requestNotificationPermission: async () => ({ permission: "unsupported", alertsEnabled: false }),
     openNotificationSettings: async () => undefined,
-    openNativeDialog: async (kind, options) => {
-      const state = await rpc<AppState>("getState");
-      emit("pap://dialog-open", {
-        kind: kind === "setup-profile" ? "profile-editor" : kind,
-        state,
-        repair: options?.repair ?? false,
-        recordId: options?.recordId,
-        profileId: options?.profileId,
-        startAfterSave: kind === "setup-profile",
-      });
-    },
-    closeNativeDialog: async () => emit("pap://dialog-dismissed", undefined),
-    nativeDialogReady: async () => undefined,
     mainWindowReady: async () => undefined,
     openWebUi: async () => {
       throw new Error("The web UI is already open in this browser");
@@ -120,13 +100,6 @@ function createPlatform(bootstrap: WebBootstrap): UiPlatform {
     }[target]),
     openAgentWebsite: async (agentId) => openAllowed(agentWebsites[agentId]),
     openApiKeyPage: async (provider) => openAllowed(apiKeyPages[provider]),
-    confirm: (options) => showBrowserDialog({
-      ...options,
-      cancelLabel: options.cancelLabel ?? "Cancel",
-    }),
-    showErrorAlert: async (title, message) => {
-      await showBrowserDialog({ title, message, confirmLabel: "OK" });
-    },
     presentAccountLogin: (login) => {
       // The login sheet keeps a manual link, so a blocked or rejected tab must not fail the login.
       try {

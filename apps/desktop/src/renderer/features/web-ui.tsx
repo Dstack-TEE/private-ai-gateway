@@ -1,11 +1,13 @@
 import React, { useState } from "react";
 import { Button } from "../components/ui/button";
-import { Field, FieldContent, FieldDescription, FieldGroup, FieldSeparator, FieldTitle } from "../components/ui/field";
+import { Field, FieldContent, FieldDescription, FieldError, FieldGroup, FieldSeparator, FieldTitle } from "../components/ui/field";
 import { Input } from "../components/ui/input";
 import { ListenerFields } from "../components/listen-address";
 import { FormField, SettingsList, SettingsToggle } from "../components/settings";
-import { Sheet, SheetActions } from "../components/sheet";
-import { useErrorAlert } from "../lib/error-alert";
+import { AppDialog } from "../components/app-dialog";
+import { useConfirm } from "../components/confirm";
+import { DialogFooter } from "../components/ui/dialog";
+import { errorMessage } from "../lib/error-message";
 import { localAddressKind } from "../lib/local-api-config";
 import { desktopApi, web } from "../lib/environment";
 import type { AppState, WebUiConfig, WebUiStatus } from "../../shared/contracts";
@@ -23,7 +25,7 @@ function sameConfig(left: WebUiConfig, right: WebUiConfig): boolean {
     && left.port === right.port && (left.clientHost ?? "") === (right.clientHost ?? "");
 }
 
-export function WebUiSheet({
+export function WebUiDialog({
   state,
   onSave,
   onSetPassword,
@@ -43,13 +45,15 @@ export function WebUiSheet({
   const addressKind = localAddressKind(draft.listenAddress);
   const networkAccess = Boolean(addressKind && addressKind !== "loopback");
   const [saving, setSaving] = useState(false);
-  const reportError = useErrorAlert("Web UI action failed");
+  const [error, setError] = useState<string>();
+  const confirm = useConfirm();
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     setSaving(true);
+    setError(undefined);
     try {
       if (!addressKind) {
-        reportError("Enter a valid IPv4 or IPv6 listen address.");
+        setError("Enter a valid IPv4 or IPv6 listen address.");
         return;
       }
       const config = { ...draft, allowNetworkAccess: networkAccess };
@@ -57,28 +61,28 @@ export function WebUiSheet({
       const newPassword = changingPassword && Boolean(password || confirmation);
       if (newPassword) {
         if ([...password].length < MIN_PASSWORD_LENGTH) {
-          reportError(`Use a password of at least ${MIN_PASSWORD_LENGTH} characters.`);
+          setError(`Use a password of at least ${MIN_PASSWORD_LENGTH} characters.`);
           return;
         }
         if (password !== confirmation) {
-          reportError("The passwords do not match.");
+          setError("The passwords do not match.");
           return;
         }
         if (web && !currentPassword) {
-          reportError("Enter the current password to change it.");
+          setError("Enter the current password to change it.");
           return;
         }
       }
       if (config.enabled && !status.passwordSet && !newPassword) {
-        reportError("Set a password to turn on the web UI.");
+        setError("Set a password to turn on the web UI.");
         return;
       }
-      if (configChanged && networkAccess && !await desktopApi.confirm({
+      if (configChanged && networkAccess && !await confirm({
         title: "Allow network access?",
         message: `Listen on ${draft.listenAddress}:${draft.port}? The web UI uses unencrypted HTTP, and a signed-in browser can change every setting and read the client key. Only use a trusted network, and never expose this port to the internet. An SSH tunnel or Tailscale is safer.`,
         confirmLabel: "Allow and Save",
       })) return;
-      if (web && status.enabled && !config.enabled && !await desktopApi.confirm({
+      if (web && status.enabled && !config.enabled && !await confirm({
         title: "Turn off the web UI?",
         message: "This browser session ends now. Turn the web UI on again from the desktop app or with pap settings set webUi true.",
         confirmLabel: "Turn Off",
@@ -86,7 +90,7 @@ export function WebUiSheet({
       if (newPassword) {
         const message = await onSetPassword(password, web ? currentPassword : undefined);
         if (message) {
-          reportError(message);
+          setError(message);
           return;
         }
         setChangingPassword(false);
@@ -95,19 +99,19 @@ export function WebUiSheet({
         setConfirmation("");
       }
       const message = configChanged ? await onSave(config) : undefined;
-      if (message) reportError(message);
+      if (message) setError(message);
       else onClose();
     } catch (saveError) {
-      reportError(saveError);
+      setError(errorMessage(saveError));
     } finally {
       setSaving(false);
     }
   };
-  const openInBrowser = () => void desktopApi.openWebUi().catch(reportError);
+  const openInBrowser = () => void desktopApi.openWebUi().catch((failure: unknown) => setError(errorMessage(failure)));
   return (
-    <Sheet title="Web UI settings" className="web-ui-sheet w-[min(520px,_calc(var(--window-dialog-width,_100vw)_-_32px))] [&_.sheet-scroll]:min-h-0 [&_.sheet-scroll]:overflow-y-auto [&_.sheet-footer]:flex-none [&[open]]:flex [&[open]]:flex-col [&_form]:min-h-0 [&_form]:flex [&_form]:flex-col [&_.sheet-card]:mt-3 form-sheet [&_>_.sheet-heading]:px-5 [&_.sheet-footer]:mx-5 [&_.sheet-scroll]:px-5" dismissible={!saving} onClose={onClose}>
-      <form onSubmit={(event) => void submit(event)}>
-        <div className="sheet-scroll py-4">
+    <AppDialog title="Web UI settings" className="sm:max-w-lg" dismissible={!saving} onClose={onClose}>
+      <form className="flex min-h-0 flex-col gap-4" onSubmit={(event) => void submit(event)}>
+        <div className="-mx-6 min-h-0 overflow-y-auto px-6 py-1">
           <FieldGroup>
             <SettingsList>
               <SettingsToggle label="Web UI" description="Manage this app from a browser. Browsers sign in with the password below." checked={draft.enabled} disabled={saving} onToggle={() => setDraft((current) => ({ ...current, enabled: !current.enabled }))} />
@@ -145,13 +149,13 @@ export function WebUiSheet({
             </Field>
           </FieldGroup>
         </div>
-        <SheetActions leading={
-          <Button type="button" variant="outline" disabled={saving} onClick={() => setDraft((current) => ({ ...DEFAULT_LISTENER, enabled: current.enabled }))}>Use default</Button>
-        }>
+        <FieldError>{error}</FieldError>
+        <DialogFooter>
+          <Button type="button" variant="outline" className="sm:mr-auto" disabled={saving} onClick={() => setDraft((current) => ({ ...DEFAULT_LISTENER, enabled: current.enabled }))}>Use default</Button>
           <Button type="button" variant="outline" onClick={onClose} disabled={saving}>Cancel</Button>
           <Button type="submit" variant="default" disabled={saving}>{saving ? "Saving…" : "Save"}</Button>
-        </SheetActions>
+        </DialogFooter>
       </form>
-    </Sheet>
+    </AppDialog>
   );
 }

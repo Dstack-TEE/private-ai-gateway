@@ -8,7 +8,6 @@ import { UpdateControl, UpdateChannelControl, useUpdates } from "../updates";
 import { Button } from "../components/ui/button";
 import { AppearanceControl } from "../components/appearance";
 import { ExportDiagnostics } from "../components/maintenance";
-import { ErrorAlert } from "../components/error-alert";
 import { Item, ItemActions, ItemContent, ItemTitle, ItemDescription } from "../components/ui/item";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
@@ -33,7 +32,7 @@ function CliRegistrationControl(): React.JSX.Element {
   const change = async () => {
     if (!registration || busy) return;
     try { await mutation.mutateAsync(!registration.installed); }
-    catch { /* ErrorAlert observes the mutation failure. */ }
+    catch { /* The item shows the mutation failure. */ }
   };
   const directory = registration ? parentDirectory(registration.commandPath) : undefined;
   const description = registration?.installed
@@ -41,10 +40,12 @@ function CliRegistrationControl(): React.JSX.Element {
         ? `Installed at ${directory}. This app can resolve private-ai-proxy; terminal PATH may differ.`
         : `Installed at ${directory}. Ensure this directory is in your terminal PATH.`
       : directory ? `Default location: ${directory}` : "Command registration is unavailable.";
-  return <Item><ErrorAlert title="Command registration failed" error={error ?? registration?.startupError} />
+  const failure = error ?? registration?.startupError;
+  return <Item>
     <ItemContent>
       <ItemTitle>private-ai-proxy command</ItemTitle>
       <ItemDescription>{description}</ItemDescription>
+      {failure && <ItemDescription role="alert" className="text-destructive">{failure}</ItemDescription>}
     </ItemContent>
     <ItemActions>
       <Button variant="outline" disabled={busy || !registration} onClick={() => void change()}>
@@ -65,10 +66,11 @@ function webUiSummary(status: WebUiStatus): string {
 
 function SignOutControl({ onSignOut }: { onSignOut(): Promise<void> }): React.JSX.Element {
   const mutation = useMutation({ mutationFn: onSignOut });
-  return <Item><ErrorAlert title="Could not sign out" error={mutation.error ? errorMessage(mutation.error) : undefined} />
+  return <Item>
     <ItemContent>
       <ItemTitle>This browser</ItemTitle>
       <ItemDescription>Signing out ends this browser session. Sign in again with the web UI password.</ItemDescription>
+      {mutation.error && <ItemDescription role="alert" className="text-destructive">Could not sign out. {errorMessage(mutation.error)}</ItemDescription>}
     </ItemContent>
     <ItemActions>
       <Button variant="outline" disabled={mutation.isPending} onClick={() => mutation.mutate()}>

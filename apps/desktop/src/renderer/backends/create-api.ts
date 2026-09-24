@@ -4,7 +4,6 @@ import type {
   AgentStatus,
   Appearance,
   CliRegistration,
-  ConfirmationOptions,
   DesktopApi,
   AppState,
   ListenConfig,
@@ -46,16 +45,11 @@ export interface UiPlatform {
   exportDiagnostics(path: string): Promise<void>;
   requestNotificationPermission(): Promise<Pick<NotificationConfiguration, "permission" | "alertsEnabled">>;
   openNotificationSettings(): Promise<void>;
-  openNativeDialog: DesktopApi["openNativeDialog"];
-  closeNativeDialog(): Promise<void>;
-  nativeDialogReady(): Promise<void>;
   mainWindowReady(): Promise<void>;
   openAboutLink: DesktopApi["openAboutLink"];
   openWebUi(): Promise<void>;
   openAgentWebsite(agentId: string): Promise<void>;
   openApiKeyPage(provider: ServiceProvider): Promise<void>;
-  confirm(options: ConfirmationOptions): Promise<boolean>;
-  showErrorAlert(title: string, message: string): Promise<void>;
   presentAccountLogin(login: LoginPresentation): void;
   openOrganization(organizationSlug: string): Promise<void>;
   openTopUp(provider: ServiceProvider, scopeSlug?: string): Promise<void>;
@@ -104,24 +98,13 @@ export function createDesktopApi(transport: UiTransport, platform: UiPlatform): 
     resetSettings: () => call<AppState>("resetSettings"),
     onSettingsReset: (listener) => subscribe("pap://settings-reset", listener),
     onStateChange: (listener) => subscribe("pap://state", listener),
-    onSurfaceError: (listener) => subscribe("pap://surface-error", listener),
     onNavigate: (listener) => subscribe("pap://navigate", listener),
     onAgentsChange: (listener) => subscribe("pap://agents-changed", listener),
-    onProfileRepairRequest: (listener) => subscribe("pap://profile-repair", listener),
-    onUsageProofRequest: (listener) => subscribe("pap://usage-proof", listener),
     onClientKeyChange: (listener) => subscribe("pap://client-key-changed", listener),
-    openNativeDialog: platform.openNativeDialog,
-    closeNativeDialog: platform.closeNativeDialog,
-    nativeDialogReady: platform.nativeDialogReady,
     mainWindowReady: platform.mainWindowReady,
-    onNativeDialogOpen: (listener) => subscribe("pap://dialog-open", listener),
-    onNativeDialogDismissed: (listener) => subscribe("pap://dialog-dismissed", listener),
-    onNativeCloseRequest: (listener) => subscribe("pap://dialog-close-requested", listener),
     openAboutLink: platform.openAboutLink,
     openAgentWebsite: platform.openAgentWebsite,
     openApiKeyPage: platform.openApiKeyPage,
-    confirm: platform.confirm,
-    showErrorAlert: platform.showErrorAlert,
     start: (config: StartConfig) => call<AppState>("start", { config }),
     saveConfiguration: (profile, requireProductionOs, key) => call("saveConfiguration", { profile, requireProductionOs, key }),
     completeAccountLogin: (id, callbackUrl) => call("completeAccountLogin", { id, callbackUrl }),

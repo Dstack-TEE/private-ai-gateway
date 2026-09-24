@@ -12,12 +12,10 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use tauri_plugin_opener::OpenerExt;
 
-#[cfg(all(target_os = "macos", feature = "mac-app-store"))]
-use crate::native_dialog;
 use crate::{apply_appearance, autostart, notifications, run_blocking, tray, updates};
 
 #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
-pub(crate) static AGENT_ACCESS_REQUEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static AGENT_ACCESS_REQUEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Clone)]
 pub(crate) struct TauriHost {
@@ -164,7 +162,7 @@ async fn request_agent_access(window: WebviewWindow, client: Arc<Client>) -> Res
     let Ok(_request) = AGENT_ACCESS_REQUEST.try_lock() else {
         return Ok(());
     };
-    if window.label() != "main" || native_dialog::has_active_dialog(window.app_handle()) {
+    if window.label() != "main" {
         return Ok(());
     }
     if desktop_core::agent_access::status() != AgentAccessStatus::Authorized {

@@ -6,7 +6,8 @@ import { Button } from "./components/ui/button";
 import { ToggleGroup, ToggleGroupItem } from "./components/ui/toggle-group";
 import { FieldLabel } from "./components/ui/field";
 import { Item, ItemContent, ItemTitle, ItemDescription, ItemActions } from "./components/ui/item";
-import { useErrorAlert } from "./lib/error-alert";
+import { useConfirm } from "./components/confirm";
+import { toastError } from "./lib/error-message";
 
 /** `checks` is false only where the App Store owns updates. */
 export function useUpdates(api: DesktopApi, checks: boolean) {
@@ -26,7 +27,7 @@ export function useUpdates(api: DesktopApi, checks: boolean) {
   const currentVersion = installedVersion ?? info?.currentVersion;
   const busy = operation ?? (checking ? "checking" : undefined);
   const error = checkError ? "Could not prepare software updates. Retrying automatically." : undefined;
-  const reportError = useErrorAlert("Software update unavailable", undefined, api);
+  const confirm = useConfirm();
   const refresh = useCallback(async () => {
     await client.cancelQueries({ queryKey: ["app-update"] });
     return refetch();
@@ -46,7 +47,7 @@ export function useUpdates(api: DesktopApi, checks: boolean) {
       client.setQueryData<UpdateInfo | undefined>(["app-update"], (current) => current ? { ...current, channel: saved, version: null } : current);
       await refresh();
     } catch {
-      if (mounted.current) reportError("Could not save update channel.");
+      if (mounted.current) toastError("Software update unavailable", "Could not save update channel.");
     } finally {
       inFlight.current = false;
       if (mounted.current) setBusy(undefined);
@@ -63,12 +64,12 @@ export function useUpdates(api: DesktopApi, checks: boolean) {
       const latest = await refresh();
       if (latest.error) throw latest.error;
       if (!latest.data?.version) return;
-      if (!await api.confirm({ title: "Restart to update?", message: `Version ${latest.data.version} is ready. Protection will pause during the restart and resume only after fresh verification. In-flight requests may be interrupted.`, confirmLabel: "Restart to update" })) return;
+      if (!await confirm({ title: "Restart to update?", message: `Version ${latest.data.version} is ready. Protection will pause during the restart and resume only after fresh verification. In-flight requests may be interrupted.`, confirmLabel: "Restart to update" })) return;
       installAttempted = true;
       await api.restartToUpdate();
     } catch (failure) {
       if (mounted.current) {
-        reportError(failure);
+        toastError("Software update unavailable", failure);
         retry = installAttempted;
       }
     } finally {

@@ -79,6 +79,22 @@ pub fn open_notification_settings(app: AppHandle) -> Result<(), String> {
     }
 }
 
+/// Reports a failed tray or menu action. Those run while the window is often
+/// hidden, so the system notification is the one place to explain them.
+pub fn report_failure(app: &AppHandle, title: &str, error: impl std::fmt::Display) {
+    let message = error.to_string();
+    desktop_core::diagnostic!("{title}: {message}");
+    if let Err(error) = app
+        .notification()
+        .builder()
+        .title(title)
+        .body(message)
+        .show()
+    {
+        desktop_core::diagnostic!("Cannot submit notification: {error}");
+    }
+}
+
 pub struct Observer {
     faults: [bool; 2],
     session: Option<String>,
