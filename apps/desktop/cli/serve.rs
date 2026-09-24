@@ -19,6 +19,7 @@ use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
 use axum::Router;
+use desktop_core::diagnostic;
 use desktop_runtime::verifier_session::{IdentityEvent, VerifierEvent, VerifierEventSink};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -28,12 +29,6 @@ use crate::checks::{BodyDigest, EstablishedIdentity, RequiredClaim};
 use crate::client::AciClient;
 use crate::sessions::audit_current_sessions;
 use crate::verify::{verify_service, ServiceVerification};
-
-macro_rules! diagnostic {
-    ($($arg:tt)*) => {
-        desktop_core::diagnostic(format_args!($($arg)*))
-    };
-}
 
 mod audit;
 mod control;

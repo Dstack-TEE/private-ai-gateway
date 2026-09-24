@@ -124,7 +124,7 @@ pub(super) fn start(
             Err(_) => Err(()),
         };
         if result.is_err() {
-            crate::diagnostic(format_args!("The web UI listener on {address} stopped"));
+            desktop_core::diagnostic!("The web UI listener on {address} stopped");
         }
     });
     Ok(())

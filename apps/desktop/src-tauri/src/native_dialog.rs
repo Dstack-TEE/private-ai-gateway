@@ -278,13 +278,13 @@ pub fn open(
         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
             api.prevent_close();
             if let Err(error) = request_close(&dialog) {
-                eprintln!("Cannot request dialog close: {error}");
+                desktop_core::diagnostic!("Cannot request dialog close: {error}");
             }
         }
         #[cfg(not(target_os = "macos"))]
         if matches!(event, tauri::WindowEvent::Destroyed) {
             if let Err(error) = main.set_enabled(true).and_then(|_| main.set_focus()) {
-                eprintln!("Cannot restore the dialog parent: {error}");
+                desktop_core::diagnostic!("Cannot restore the dialog parent: {error}");
             }
         }
     });

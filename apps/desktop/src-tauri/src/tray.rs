@@ -370,7 +370,7 @@ fn sync_inner(app: &AppHandle, state: &AppState) {
         let _ = menu.toggle.set_enabled(protection_action_enabled(state));
         let _ = menu.endpoint.set_enabled(state.proxy_url.is_some());
         if let Err(error) = sync_profiles(app, state, &menu) {
-            eprintln!("Cannot refresh tray profiles: {error}");
+            desktop_core::diagnostic!("Cannot refresh tray profiles: {error}");
         }
         let protected = state.is_protected();
         if menu.protected_icon.load(Ordering::Relaxed) != protected {
@@ -380,7 +380,7 @@ fn sync_inner(app: &AppHandle, state: &AppState) {
                 protected,
                 menu.dark_icon.load(Ordering::Relaxed),
             ) {
-                eprintln!("Cannot update tray protection state: {error}");
+                desktop_core::diagnostic!("Cannot update tray protection state: {error}");
             }
         }
     }
@@ -402,7 +402,7 @@ pub(crate) fn set_dark(app: &AppHandle, dark: bool) -> tauri::Result<()> {
                     menu.protected_icon.load(Ordering::Relaxed),
                     dark,
                 ) {
-                    eprintln!("Cannot update tray system theme: {error}");
+                    desktop_core::diagnostic!("Cannot update tray system theme: {error}");
                 }
             }
         }

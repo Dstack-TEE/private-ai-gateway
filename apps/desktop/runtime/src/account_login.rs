@@ -333,9 +333,9 @@ impl PendingLogin {
             {
                 // Pending credentials also expire server-side. Offline cleanup
                 // must not trap the user in an editor or prevent a fresh login.
-                crate::diagnostic(format_args!(
+                desktop_core::diagnostic!(
                     "Pending authorization cleanup deferred to server expiry"
-                ));
+                );
             }
         }
         Ok(())

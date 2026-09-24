@@ -752,9 +752,7 @@ impl SessionManager {
                 return;
             };
             if let Err(error) = manager.apply_inventory(generation, epoch) {
-                crate::diagnostic(format_args!(
-                    "Cannot apply model endpoint inventory: {error}"
-                ));
+                desktop_core::diagnostic!("Cannot apply model endpoint inventory: {error}");
             }
         });
     }

@@ -107,7 +107,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
                 .find(|window| window.is_focused().unwrap_or(false))
             {
                 if let Err(error) = crate::native_dialog::request_close(&window) {
-                    eprintln!("Cannot close the active window: {error}");
+                    desktop_core::diagnostic!("Cannot close the active window: {error}");
                 }
             }
         }

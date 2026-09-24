@@ -26,8 +26,19 @@ pub mod ui_api;
 pub mod updates;
 pub mod usage;
 
-/// Write a best-effort backend diagnostic without letting a detached stderr
-/// pipe turn an otherwise recoverable request error into a process panic.
+/// Write a best-effort diagnostic line to stderr, formatted like `eprintln!`.
+///
+/// Unlike `eprintln!`, a closed or detached stderr (a GUI process, a service
+/// whose log pipe went away) never turns the write into a panic.
+#[macro_export]
+macro_rules! diagnostic {
+    ($($arg:tt)*) => {
+        $crate::diagnostic(::std::format_args!($($arg)*))
+    };
+}
+
+/// The function behind [`diagnostic!`]; call the macro instead.
+#[doc(hidden)]
 pub fn diagnostic(args: std::fmt::Arguments<'_>) {
     let stderr = std::io::stderr();
     diagnostic_to(&mut stderr.lock(), args);

@@ -50,7 +50,7 @@ pub(crate) fn report_surface_error(
     error: impl std::fmt::Display,
 ) {
     let message = error.to_string();
-    eprintln!("{scope:?}: {message}");
+    desktop_core::diagnostic!("{scope:?}: {message}");
     let _ = app.emit("pap://surface-error", SurfaceError { scope, message });
 }
 
@@ -173,7 +173,7 @@ async fn register_cli_on_startup(app: &AppHandle) {
 fn configure_account_return(app: &tauri::App) {
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     if let Err(error) = app.deep_link().register_all() {
-        eprintln!("Cannot register app return link: {error}");
+        desktop_core::diagnostic!("Cannot register app return link: {error}");
     }
     let handle = app.handle().clone();
     app.deep_link().on_open_url(move |event| {
@@ -185,10 +185,10 @@ fn configure_account_return(app: &tauri::App) {
         let app = handle.clone();
         if let Err(error) = handle.run_on_main_thread(move || {
             if let Err(error) = native_dialog::focus_account_editor(&app) {
-                eprintln!("Cannot focus account editor: {error}");
+                desktop_core::diagnostic!("Cannot focus account editor: {error}");
             }
         }) {
-            eprintln!("Cannot return to account editor: {error}");
+            desktop_core::diagnostic!("Cannot return to account editor: {error}");
         }
     });
 }
@@ -296,7 +296,9 @@ pub fn run() {
                 app_data::prepare(&data_dir)?;
                 std::env::set_var(desktop_core::paths::APP_DATA_OVERRIDE_ENV, &data_dir);
                 if let Err(error) = desktop_core::agent_access::prepare_for_service() {
-                    eprintln!("Cannot prepare Agent Home access for the backend: {error}");
+                    desktop_core::diagnostic!(
+                        "Cannot prepare Agent Home access for the backend: {error}"
+                    );
                 }
             }
             #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -355,10 +357,10 @@ pub fn run() {
                         if let Err(error) =
                             desktop_core::ui_api::refresh_preferences(&client, &host).await
                         {
-                            desktop_core::diagnostic(format_args!(
+                            desktop_core::diagnostic!(
                                 "Cannot refresh desktop preferences: {}",
                                 error.message()
-                            ));
+                            );
                         }
                     });
                 }
@@ -368,15 +370,15 @@ pub fn run() {
                 }
             });
             if let Err(error) = tray::setup(app.handle()) {
-                eprintln!("The system tray is unavailable: {error}");
+                desktop_core::diagnostic!("The system tray is unavailable: {error}");
             } else {
                 #[cfg(any(target_os = "windows", target_os = "linux"))]
                 if let Err(error) = tray_theme::setup(app.handle()) {
-                    eprintln!("Cannot observe system tray appearance: {error}");
+                    desktop_core::diagnostic!("Cannot observe system tray appearance: {error}");
                 }
             }
             if let Err(error) = menu::setup(app.handle()) {
-                eprintln!("The application menu is unavailable: {error}");
+                desktop_core::diagnostic!("The application menu is unavailable: {error}");
             }
 
             let handle = app.handle().clone();
@@ -411,7 +413,9 @@ pub fn run() {
             if let Some(client) = _app.try_state::<Arc<Client>>() {
                 if client.is_running().unwrap_or(false) {
                     if let Err(error) = client.shutdown() {
-                        eprintln!("Cannot stop the App Store backend during exit: {error}");
+                        desktop_core::diagnostic!(
+                            "Cannot stop the App Store backend during exit: {error}"
+                        );
                     }
                 }
             }

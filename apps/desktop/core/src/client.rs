@@ -150,7 +150,7 @@ impl Client {
                 client.states.send_replace(state);
             }
             Err(error) => {
-                crate::diagnostic(format_args!("Cannot start the PAP backend: {error}"));
+                crate::diagnostic!("Cannot start the PAP backend: {error}");
                 client.report_disconnect(error);
             }
         }

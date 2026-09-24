@@ -3,6 +3,7 @@
 
 use std::io::{self, Write};
 
+use desktop_core::diagnostic;
 use desktop_runtime::verifier_session::{IdentityEvent, IdentitySourceProvenance, VerifierEvent};
 use serde_json::{json, Value};
 

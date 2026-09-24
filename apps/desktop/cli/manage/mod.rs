@@ -680,7 +680,7 @@ fn agent_change(
         return value(preview);
     }
     if !cli.yes && !cli.json && !cli.non_interactive && io::stdin().is_terminal() {
-        desktop_core::diagnostic(format_args!("{}", output::details(&value(&preview)?)));
+        desktop_core::diagnostic!("{}", output::details(&value(&preview)?));
     }
     confirm(cli, "Apply these agent configuration changes?")?;
     value(client.call(rpc::ApplyAgent {

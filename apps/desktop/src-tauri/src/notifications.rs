@@ -26,7 +26,7 @@ pub fn initialize(app: &AppHandle) {
                 *current = preferences.notifications;
             }
         }
-        Err(error) => eprintln!("Cannot load notification preferences: {error}"),
+        Err(error) => desktop_core::diagnostic!("Cannot load notification preferences: {error}"),
     }
 }
 
@@ -151,7 +151,7 @@ impl Observer {
         };
         for (title, body) in self.next(state, background, config, Instant::now()) {
             if let Err(error) = app.notification().builder().title(title).body(body).show() {
-                eprintln!("Cannot submit notification: {error}");
+                desktop_core::diagnostic!("Cannot submit notification: {error}");
             }
         }
     }

@@ -55,9 +55,9 @@ pub fn selected_channel(current_version: &str) -> UpdateChannel {
     match preferences::load() {
         Ok(saved) => saved.update_channel.unwrap_or(default),
         Err(error) => {
-            crate::diagnostic(format_args!(
+            crate::diagnostic!(
                 "Could not read update preferences; using the build channel: {error}"
-            ));
+            );
             default
         }
     }
