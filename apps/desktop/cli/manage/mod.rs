@@ -9,7 +9,7 @@ use desktop_core::{
     client::Client,
     config::{Appearance, UpdateChannel},
     contracts::*,
-    protocol::{export_path, rpc, Preference},
+    protocol::{export_path, rpc, NotificationKind, Preference},
     usage::UsageQuery,
 };
 use serde::Serialize;
@@ -529,17 +529,15 @@ fn set_setting(
         SettingsKey::NotificationsEnabled
         | SettingsKey::NotificationsGateway
         | SettingsKey::NotificationsLocalApi
-        | SettingsKey::NotificationsVerification => {
-            let mut notifications = client.call(rpc::Settings)?.notifications;
-            let enabled = parse_bool(input)?;
-            match key {
-                SettingsKey::NotificationsEnabled => notifications.enabled = enabled,
-                SettingsKey::NotificationsGateway => notifications.gateway = enabled,
-                SettingsKey::NotificationsLocalApi => notifications.local_api = enabled,
-                _ => notifications.verification = enabled,
-            }
-            value(set(Preference::Notifications(notifications))?)
-        }
+        | SettingsKey::NotificationsVerification => value(set(Preference::Notification {
+            kind: match key {
+                SettingsKey::NotificationsEnabled => NotificationKind::Enabled,
+                SettingsKey::NotificationsGateway => NotificationKind::Gateway,
+                SettingsKey::NotificationsLocalApi => NotificationKind::LocalApi,
+                _ => NotificationKind::Verification,
+            },
+            enabled: parse_bool(input)?,
+        })?),
         SettingsKey::Notifications => value(set(Preference::Notifications(
             serde_json::from_str(input).map_err(|_| {
                 "Expected notification settings as a JSON object with boolean values"

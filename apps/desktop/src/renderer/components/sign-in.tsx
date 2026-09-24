@@ -66,7 +66,7 @@ function SignIn({ notice, signIn, onSignedIn }: { notice?: string; signIn(passwo
               {error && <FieldError id={errorId}>{error}</FieldError>}
             </Field>
             <Button type="submit" disabled={busy || !password}>{busy ? "Signing In…" : "Sign In"}</Button>
-            <FieldDescription>Set the password in the desktop app under Settings › Web UI, or with pap settings set webUiPassword.</FieldDescription>
+            <FieldDescription>Set the password in the desktop app under Settings › Web UI, or with pap settings set web-ui.password.</FieldDescription>
           </FieldGroup>
         </form>
       </CardContent>

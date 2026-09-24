@@ -497,8 +497,9 @@ fn a_synced_config_on_a_second_device_keeps_its_values_and_gets_this_devices_sec
     let (config_dir, data) = (root.path().join("config"), root.path().join("data"));
     write_legacy(&data);
     // Another device already upgraded and synced the settings directory. Its
-    // `work` profile is the same service, `home` points elsewhere, and it has
-    // a password but no API keys.
+    // `work` profile is the same service signed in to another account, `home`
+    // is the same service with a manual key, and it has a password but no
+    // API keys.
     fs::create_dir_all(&config_dir).unwrap();
     let synced = "# Synced from my laptop\n\
         active-profile = \"work\"\n\
@@ -508,11 +509,12 @@ fn a_synced_config_on_a_second_device_keeps_its_values_and_gets_this_devices_sec
         name = \"Work laptop\"\n\
         provider = \"redpill\"\n\
         remote-url = \"https://tee.redpill.ai\"\n\
+        auth = { kind = \"oauth\", account-id = \"user_2\" }\n\
         \n\
         [profiles.home]\n\
         name = \"Home\"\n\
         provider = \"custom\"\n\
-        remote-url = \"https://other.example\"\n";
+        remote-url = \"https://gateway.example\"\n";
     fs::write(config_dir.join(CONFIG_FILE), synced).unwrap();
     let laptop_hash = crate::web_ui::password::hash("laptop password").unwrap();
     fs::write(
@@ -530,7 +532,7 @@ fn a_synced_config_on_a_second_device_keeps_its_values_and_gets_this_devices_sec
     assert_eq!(config.local_api.port, 4180);
     assert!(!config.connect_on_launch);
     assert_eq!(config.profiles["work"].name, "Work laptop");
-    assert_eq!(config.profiles["home"].remote_url, "https://other.example");
+    assert!(config.profiles["home"].auth.is_api_key());
     assert_eq!(
         config.profiles.keys().collect::<Vec<_>>(),
         ["work", "home", "spare"]
@@ -538,17 +540,17 @@ fn a_synced_config_on_a_second_device_keeps_its_values_and_gets_this_devices_sec
     let text = fs::read_to_string(config_dir.join(CONFIG_FILE)).unwrap();
     assert!(text.starts_with(synced), "{text}");
     // credentials.toml: the synced password stays; this device's key for the
-    // same service is imported, the one for a different service is not.
+    // same service and account is imported, the one for another account is not.
     let credentials = read_credentials(&config_dir);
     assert_eq!(
         credentials.web_ui.password_hash.as_deref(),
         Some(laptop_hash.as_str())
     );
-    assert_eq!(credentials.profiles["work"].api_key, "sk-work");
-    assert!(!credentials.profiles.contains_key("home"));
+    assert_eq!(credentials.profiles["home"].api_key, "sk-home");
+    assert!(!credentials.profiles.contains_key("work"));
     assert_eq!(
-        settings.profile_key("work").unwrap().as_deref(),
-        Some("sk-work")
+        settings.profile_key("home").unwrap().as_deref(),
+        Some("sk-home")
     );
     // Device-local state is always this device's.
     let local = local_state::load(&data.join(LOCAL_STATE_FILE)).unwrap();
@@ -559,7 +561,7 @@ fn a_synced_config_on_a_second_device_keeps_its_values_and_gets_this_devices_sec
     assert!(local.account_cleanup.contains_key("7f3e"));
     assert_eq!(problems.len(), 2, "{problems:?}");
     assert!(problems[0].contains("already existed"), "{}", problems[0]);
-    assert!(problems[1].contains("Home"), "{}", problems[1]);
+    assert!(problems[1].contains("Work"), "{}", problems[1]);
     assert_eq!(settings.files().warnings, problems);
     assert!(!secrets_pending(&data));
     for name in LEGACY_FILES {
@@ -568,7 +570,7 @@ fn a_synced_config_on_a_second_device_keeps_its_values_and_gets_this_devices_sec
     // The key that was not imported stays in the store.
     assert_eq!(
         keychain.entries.borrow().keys().collect::<Vec<_>>(),
-        ["service-profile-home-api-key"]
+        ["service-profile-credential-0b1c-api-key"]
     );
 }
 
@@ -608,16 +610,23 @@ fn a_crash_between_steps_resumes_without_losing_anything() {
     assert!(!secrets_pending(&data));
 
     // Crash in step 2 after the secrets were written, before the store
-    // entries were deleted and the step was recorded.
+    // entries were deleted and the step was recorded; meanwhile the user
+    // replaced the home key. The rerun deletes every entry whose value the
+    // files already hold, so no plaintext copy stays behind, and keeps the one
+    // that no longer matches.
     fs::remove_file(data.join(BACKUP_DIR).join(COMPLETE_FILE)).unwrap();
+    let path = config_dir.join(CREDENTIALS_FILE);
+    let replaced = fs::read_to_string(&path)
+        .unwrap()
+        .replace("\"sk-home\"", "\"sk-home-new\"");
+    fs::write(&path, &replaced).unwrap();
     let restored = self::keychain();
-    let before = fs::read_to_string(config_dir.join(CREDENTIALS_FILE)).unwrap();
     let (_, problems) = start(&config_dir, &data, &restored);
     assert!(problems.is_empty(), "{problems:?}");
-    assert!(restored.reads.borrow().is_empty(), "already imported");
+    assert_eq!(fs::read_to_string(&path).unwrap(), replaced);
     assert_eq!(
-        fs::read_to_string(config_dir.join(CREDENTIALS_FILE)).unwrap(),
-        before
+        restored.entries.borrow().keys().collect::<Vec<_>>(),
+        ["service-profile-home-api-key"]
     );
     assert!(!secrets_pending(&data));
 
@@ -629,7 +638,7 @@ fn a_crash_between_steps_resumes_without_losing_anything() {
     assert!(!secrets_pending(&data));
     assert_eq!(
         read_credentials(&config_dir).profiles["home"].api_key,
-        "sk-home"
+        "sk-home-new"
     );
 }
 
@@ -649,6 +658,117 @@ fn unreadable_old_files_are_reported_and_kept() {
     let config = read_config(&config_dir);
     assert!(config.profiles.is_empty());
     assert_eq!(config.appearance, Appearance::Dark);
+}
+
+#[test]
+fn a_disconnect_before_the_credential_import_fails_instead_of_dropping_the_key() {
+    use agent_bridge::{
+        agents::{helper_binary_name, AgentError, Projector},
+        catalog::Catalog,
+    };
+    use desktop_core::agents::{Agent, ConnectOptions};
+    use std::sync::Arc;
+
+    let root = tempfile::tempdir().unwrap();
+    let (home, config_dir, data) = (
+        root.path().join("home"),
+        root.path().join("config"),
+        root.path().join("data"),
+    );
+    let helper = home.join("Private AI Proxy.app").join(helper_binary_name());
+    for path in [&helper, &data.join("helpers").join(helper_binary_name())] {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+    let local = Arc::new(LocalState::open(&data));
+    let projector = Projector::new_for_home(
+        home.clone(),
+        data.clone(),
+        helper,
+        "http://127.0.0.1:4180",
+        local.clone(),
+    )
+    .unwrap();
+    let claude = home.join(".claude").join("settings.json");
+    fs::create_dir_all(claude.parent().unwrap()).unwrap();
+    fs::write(
+        &claude,
+        r#"{"env":{"ANTHROPIC_AUTH_TOKEN":"sk-ant-original"}}"#,
+    )
+    .unwrap();
+    let catalog = Catalog::from_remote(
+        &serde_json::json!({ "data": [{ "id": "openai/gpt-oss-20b", "context_length": 131072 }] }),
+        1,
+    )
+    .unwrap();
+    let options = ConnectOptions {
+        default_model: Some("openai/gpt-oss-20b".into()),
+    };
+    let apply = |connect: bool| {
+        let catalog = connect.then_some(&catalog);
+        projector
+            .preview(Agent::ClaudeCode, connect, catalog, &options)
+            .and_then(|preview| {
+                projector.apply(
+                    Agent::ClaudeCode,
+                    connect,
+                    &preview.revision,
+                    catalog,
+                    &options,
+                )
+            })
+    };
+    apply(true).unwrap();
+
+    // As in 0.1: the original key is parked in the credential store, not in
+    // local-state.json, and the store times out on the first 0.2 start.
+    let parked = std::mem::take(&mut local.read().unwrap().agent_restore);
+    assert_eq!(parked.values().collect::<Vec<_>>(), ["sk-ant-original"]);
+    local
+        .update(|secrets| {
+            secrets.agent_restore.clear();
+            Ok(())
+        })
+        .unwrap();
+    fs::write(data.join(PREFERENCES_FILE), "{}").unwrap();
+    let entries: Vec<(&str, &str)> = parked
+        .iter()
+        .map(|(entry, value)| (entry.as_str(), value.as_str()))
+        .collect();
+    let locked = FakeKeychain {
+        unavailable: true,
+        ..FakeKeychain::with(&entries)
+    };
+    let (settings, _) = Settings::open(config_dir.clone(), &data);
+    local.set_importing(secrets_pending(&data));
+    let notices = import_secrets(&settings, &local, &data, &locked).unwrap();
+    assert!(
+        notices[0].contains("retried on the next start"),
+        "{notices:?}"
+    );
+
+    // The disconnect fails like one while 0.1's store was unavailable, and
+    // the agent's configuration keeps what it had.
+    let connected = fs::read(&claude).unwrap();
+    assert!(matches!(apply(false), Err(AgentError::CredentialStore)));
+    assert_eq!(fs::read(&claude).unwrap(), connected);
+
+    // The next start imports the key; the disconnect then puts it back.
+    drop(settings);
+    let (settings, _) = Settings::open(config_dir, &data);
+    let unlocked = FakeKeychain::with(&entries);
+    import_secrets(&settings, &local, &data, &unlocked).unwrap();
+    assert!(!local.importing());
+    apply(false).unwrap();
+    let restored: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&claude).unwrap()).unwrap();
+    assert_eq!(restored["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-ant-original");
+    assert!(unlocked.entries.borrow().is_empty());
 }
 
 #[test]

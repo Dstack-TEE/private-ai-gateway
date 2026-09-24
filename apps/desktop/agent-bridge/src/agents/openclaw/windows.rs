@@ -99,8 +99,12 @@ mod tests {
 
     /// A new file in this test's own temporary directory with the given DACL.
     fn fixture(path: &Path, sddl: &str) {
-        std::fs::write(path, b"").unwrap();
-        windows_acl::set_dacl(path, sddl).unwrap();
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true);
+        let file = windows_acl::allow_dacl_change(&mut options)
+            .open(path)
+            .unwrap();
+        windows_acl::set_dacl(&file, sddl).unwrap();
     }
 
     #[test]

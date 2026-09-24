@@ -3,7 +3,7 @@
 //! credentials: provider API keys and the web UI password hash. Like Cargo's
 //! `credentials.toml` and AWS's `credentials` file it is plain TOML, always
 //! owner-only (0600 on Unix, a protected owner-only DACL on Windows; see
-//! `private_fs::tighten_private`). Both
+//! `private_fs::write_private_atomic`). Both
 //! files describe the user, not this device, so the settings directory can be
 //! synced; device-local secrets are in `crate::local_state`.
 //!
@@ -397,7 +397,7 @@ impl Settings {
 
 /// Writes the change from `from` to `to` into `dir/name` as it is on disk now
 /// (a new file starts with its header), refusing a result that does not
-/// parse; `credentials.toml` is left owner-only.
+/// parse; `credentials.toml` is replaced by an owner-only file.
 pub(crate) fn write<T: Serialize>(
     dir: &Path,
     name: &str,
@@ -422,17 +422,19 @@ pub(crate) fn write<T: Serialize>(
     parse(&text).map_err(|error| format!("{error}. Fix {name} before changing settings."))?;
     private_fs::create_private_dir(dir)
         .map_err(|error| format!("Cannot create the settings directory: {error}"))?;
-    private_fs::write_atomic(&path, &text, Some(current.as_deref())).map_err(|error| {
+    let private = name == CREDENTIALS_FILE;
+    let replace = if private {
+        private_fs::write_private_atomic
+    } else {
+        private_fs::write_atomic
+    };
+    replace(&path, &text, Some(current.as_deref())).map_err(|error| {
         if private_fs::ChangedOnDisk::is(&error) {
             format!("{name} changed on disk while saving; review it and retry")
         } else {
             format!("Cannot save {name}: {error}")
         }
     })?;
-    if name == CREDENTIALS_FILE {
-        private_fs::tighten_private(&path)
-            .map_err(|error| format!("Cannot make {name} owner-only: {error}"))?;
-    }
     Ok(())
 }
 

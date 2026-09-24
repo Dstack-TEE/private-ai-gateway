@@ -150,9 +150,12 @@ directory on macOS and Linux. On Windows every write gives it a protected DACL
 granting access only to you, LocalSystem and Administrators (what
 `icacls /inheritance:r` sets and OpenSSH for Windows requires of private keys),
 so it stays owner-only even when `PRIVATE_AI_PROXY_CONFIG_DIR` points outside
-your profile. Every write restores these permissions; `pap doctor` warns when
+your profile. Every write replaces the file with one that is owner-only before
+it moves into place, whatever the permissions of the file it replaces, so
+there is no moment when another user can read it; `pap doctor` warns when
 another user can read the file, on every platform. `local-state.json` in the
-app data directory gets the same treatment. Neither file is ever shown by the app:
+app data directory gets the same treatment, and so do agent tokens, which are
+owner-only from the moment they are created. Neither file is ever shown by the app:
 `settings show`, `status`, diagnostics and logs omit their contents.
 Anyone who can read your files as you can read it, which is also true of an
 unlocked OS keychain for a process running as you.
@@ -173,11 +176,18 @@ steps (`runtime/src/settings/legacy.rs`):
    entry the old files and `agent-connections.json` reference goes to
    `credentials.toml` (API keys) or `local-state.json` (agent restore values,
    pending key revocations). Both are synced to disk and read back, and only
-   then are the imported entries deleted from the store.
-   `migrated-0.1/import-complete` records the step. Each store operation may
-   take at most 60 seconds, which leaves time to answer a macOS Keychain
-   prompt; while the step runs, disconnecting an agent whose original key is
-   still being imported waits instead of dropping that key.
+   then are the entries deleted from the store, including any whose value the
+   files already hold from an interrupted earlier run, so no plaintext copy
+   stays behind. An entry whose value differs from the file (for example a
+   key you replaced since) is left alone.
+   `migrated-0.1/import-complete` records the step once every entry is
+   deleted. Each store operation may take at most 60 seconds, which leaves
+   time to answer a macOS Keychain prompt. Until the step is recorded, even
+   across restarts after a timeout or a denied prompt, disconnecting an agent
+   whose original key has not been imported yet fails with the same "agent
+   credential could not be restored" error 0.1 gave while the credential
+   store was unavailable, and succeeds once the key is imported, instead of
+   dropping that key.
 
 Progress is recorded in the app data directory, never by the existence of
 `config.toml`, because the settings directory may have been synced from
@@ -189,7 +199,9 @@ another device that upgraded first. Values already in the files win:
   kept in `migrated-0.1/`.
 - `credentials.toml`: an existing API key or password hash stays. A 0.1 API
   key is imported only for a profile that has none and uses the same service
-  URL as this device's 0.1 profile of that ID.
+  URL and the same sign-in (a manual key, or the same provider account) as
+  this device's 0.1 profile of that ID, so a key never lands in another
+  account's profile.
 - `local-state.json`: always this device's; existing entries stay.
 
 A step that fails writes nothing that records it: the old files and the
@@ -210,15 +222,34 @@ more, which is harmless).
 ## Removal in 0.3
 
 Compatibility code for upgrades from 0.1, to be removed together once
-upgrading from 0.1 directly to 0.3 is no longer supported:
+upgrading from 0.1 directly to 0.3 is no longer supported. Each item exists
+only for the 0.1 import or the 0.1 command names:
 
 - `runtime/src/settings/legacy.rs` (with its tests) and the `keyring`
   dependency, the only remaining users of the OS credential store.
+- The import's hooks outside that module:
+  - `LocalState::importing`/`set_importing` and the check in its
+    `SecretStore::get` (`runtime/src/local_state.rs`);
+  - `DesktopRuntime::data_dir`, the `set_importing` call in `launch` and
+    `import_legacy_secrets` (`runtime/src/controller.rs`,
+    `runtime/src/controller/settings_files.rs`), and its call at the start of
+    the server's startup task (`runtime/src/server.rs`);
+  - `Settings::import_error`, `import_ready`, `add_import_notices`,
+    `Applied::import_notices` and `IMPORT_PENDING` (`runtime/src/settings.rs`);
+  - the `"Settings from 0.1"` prefix in `RpcError::operation`
+    (`core/src/protocol.rs`).
 - The Keychain access group entitlement of the Mac App Store build (see
   [Mac App Store](mac-app-store.md)), kept only so the backend can import and
   delete what 0.1 saved in the Keychain.
-- The deprecated flat `pap settings set` names (`webUi`, `connectOnLaunch`,
-  `notifications` as JSON, and so on) in `cli/manage/args.rs`.
+- The 0.1 flat `pap settings set` names (`webUi`, `connectOnLaunch`, …): the
+  hidden `alias`es and `SettingsKeyArg::deprecation` in `cli/manage/args.rs`,
+  and the hidden `notifications` key that takes a JSON object
+  (`SettingsKey::Notifications`, its branch in `cli/manage/mod.rs`).
 - `src-tauri/src/autostart/migration.rs`, the bridge from the
   tauri-plugin-autostart login item.
 - The legacy default window size shim in `src-tauri/src/window_state.rs`.
+
+Not on this list: the `aci` command stays a documented legacy alias with its
+one-line hint. It predates the 0.1 settings format (it is the command name of
+the earlier ACI clients), so it is not part of the 0.1 upgrade path, and
+removing it would break existing scripts for no migration benefit.

@@ -42,7 +42,7 @@ retrying after the app is moved. Removing the command there disables automatic
 registration until the user installs it again.
 
 With the backend running, CLI-only users can disable the same preference with
-`pap --yes settings set autoCliRegistration false` before `pap cli uninstall`.
+`pap --yes settings set auto-cli-registration false` before `pap cli uninstall`.
 
 The registration is idempotent and never replaces an unrelated command. To
 register manually without opening the app:

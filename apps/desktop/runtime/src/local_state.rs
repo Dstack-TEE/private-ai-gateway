@@ -58,8 +58,7 @@ pub fn load(path: &Path) -> Result<LocalSecrets, String> {
 pub fn save(path: &Path, secrets: &LocalSecrets) -> Result<(), String> {
     let text = serde_json::to_string_pretty(secrets)
         .map_err(|_| format!("Cannot encode {LOCAL_STATE_FILE}"))?;
-    private_fs::write_atomic(path, &text, None)
-        .and_then(|()| private_fs::tighten_private(path))
+    private_fs::write_private_atomic(path, &text, None)
         .map_err(|error| format!("Cannot save {LOCAL_STATE_FILE}: {error}"))
 }
 
@@ -123,7 +122,7 @@ impl SecretStore for LocalState {
     fn get(&self, entry: &str) -> Result<Option<String>, String> {
         let value = self.read()?.agent_restore.get(entry).cloned();
         if value.is_none() && self.importing.load(Ordering::Acquire) {
-            return Err("Saved agent credentials from 0.1 are still being imported".to_string());
+            return Err("Saved agent credentials from 0.1 are not imported from the system credential store yet".to_string());
         }
         Ok(value)
     }

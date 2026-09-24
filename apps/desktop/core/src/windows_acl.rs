@@ -8,14 +8,15 @@
 //! Allocated SID strings and SDDL conversion:
 //! https://learn.microsoft.com/windows/win32/api/sddl/nf-sddl-convertsidtostringsidw
 //! https://learn.microsoft.com/windows/win32/api/sddl/nf-sddl-convertstringsecuritydescriptortosecuritydescriptorw
-//! https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-setfilesecurityw
+//! https://learn.microsoft.com/windows/win32/api/aclapi/nf-aclapi-setsecurityinfo
 
 use std::{
     ffi::c_void,
-    io,
+    fs, io,
     mem::{offset_of, size_of},
     os::windows::{
         ffi::OsStrExt,
+        fs::OpenOptionsExt,
         io::{AsRawHandle, FromRawHandle, OwnedHandle},
     },
     path::Path,
@@ -23,20 +24,20 @@ use std::{
 };
 
 use windows_sys::Win32::{
-    Foundation::{LocalFree, ERROR_SUCCESS, INVALID_HANDLE_VALUE},
+    Foundation::{LocalFree, ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE},
     Security::{
         Authorization::{
             ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-            GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
+            GetSecurityInfo, SetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
         },
         GetAce, GetLengthSid, GetSecurityDescriptorDacl, GetSecurityDescriptorLength, IsValidAcl,
-        IsValidSecurityDescriptor, IsValidSid, SetFileSecurityW, ACCESS_ALLOWED_ACE, ACE_HEADER,
-        ACL, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-        PROTECTED_DACL_SECURITY_INFORMATION, PSID,
+        IsValidSecurityDescriptor, IsValidSid, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
+        DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+        PSID,
     },
     Storage::FileSystem::{
         CreateFileW, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
     },
 };
 
@@ -123,20 +124,35 @@ pub fn open_for_inspection(path: &Path) -> io::Result<OwnedHandle> {
     Ok(unsafe { OwnedHandle::from_raw_handle(raw) })
 }
 
-/// Replaces the DACL of `path` with a protected one (no inherited entries)
-/// granting full access to the current user and [`TRUSTED_SIDS`] only: the
-/// owner-only DACL of the IPC endpoint, plus the trusted system principals.
-pub fn restrict_to_current_user(path: &Path) -> io::Result<()> {
+/// Lets a file being created through `options` have its DACL replaced
+/// through the resulting handle (read, write and `WRITE_DAC` access).
+pub fn allow_dacl_change(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
+    options.access_mode(GENERIC_READ | GENERIC_WRITE | WRITE_DAC)
+}
+
+/// Opens an existing `path` itself (never a link target) to replace its DACL.
+pub fn open_for_dacl_change(path: &Path) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .access_mode(READ_CONTROL | WRITE_DAC)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+/// Gives an open file (with `WRITE_DAC` access) a protected DACL granting
+/// full access to the current user and [`TRUSTED_SIDS`] only: the owner-only
+/// DACL of the IPC endpoint, plus the trusted system principals.
+pub fn restrict_to_current_user(file: &fs::File) -> io::Result<()> {
     let user = crate::transport::current_user_sid()?;
     set_dacl(
-        path,
+        file,
         &format!("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{user})"),
     )
 }
 
-/// Replaces the DACL of `path` with the one an SDDL string describes; `D:P`
-/// makes it protected from inheritance.
-pub fn set_dacl(path: &Path, sddl: &str) -> io::Result<()> {
+/// Replaces the DACL of an open file (with `WRITE_DAC` access) with the one
+/// an SDDL string describes; `D:P` protects it from inheritance. Working on
+/// the handle, not the path, means the file checked is the file changed.
+pub fn set_dacl(file: &fs::File, sddl: &str) -> io::Result<()> {
     let sddl: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
     let mut descriptor = null_mut();
     if unsafe {
@@ -151,16 +167,32 @@ pub fn set_dacl(path: &Path, sddl: &str) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     let descriptor = LocalAllocation(descriptor);
-    let path = wide(path)?;
-    if unsafe {
-        SetFileSecurityW(
-            path.as_ptr(),
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            descriptor.0,
-        )
-    } == 0
+    let (mut present, mut defaulted, mut dacl) = (0, 0, null_mut());
+    if unsafe { GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut dacl, &mut defaulted) }
+        == 0
     {
         return Err(io::Error::last_os_error());
+    }
+    if present == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the security descriptor has no DACL",
+        ));
+    }
+    // A null DACL (`D:NO_ACCESS_CONTROL`) passes through as null.
+    let status = unsafe {
+        SetSecurityInfo(
+            file.as_raw_handle(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            dacl,
+            null(),
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(status as i32));
     }
     Ok(())
 }
@@ -302,7 +334,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("credentials.toml");
         std::fs::write(&path, "").unwrap();
-        restrict_to_current_user(&path).unwrap();
+        restrict_to_current_user(&open_for_dacl_change(&path).unwrap()).unwrap();
         let acl = read(&open_for_inspection(&path).unwrap()).unwrap();
         assert!(!acl.readable_by_others(), "{acl:?}");
         let mut sids: Vec<_> = acl.aces.iter().map(|ace| ace.sid.as_str()).collect();

@@ -40,18 +40,24 @@ impl DesktopRuntime {
     /// Imports this device's 0.1 credential store entries (see
     /// `settings::legacy`). Called once the service is listening, so a slow
     /// or prompting credential store never delays its readiness.
+    ///
+    /// It does not take the lifecycle lock, which would hold every other
+    /// operation behind a Keychain prompt for up to a minute per entry. It
+    /// needs no ordering with them: it only adds keys for profiles that have
+    /// none, through the settings store's own lock and compare-and-replace
+    /// write, so a key saved meanwhile wins, and a profile without a key
+    /// cannot be protecting yet. Connect on launch runs after it.
     pub(crate) fn import_legacy_secrets(&self) {
-        if !self.local_state.importing() {
+        if !self.settings.import_ready() || !self.local_state.importing() {
             return;
         }
-        let result = crate::settings::legacy::import_secrets(
+        let notices = crate::settings::legacy::import_secrets(
             &self.settings,
             &self.local_state,
             &self.data_dir,
             &crate::settings::legacy::OsKeychain,
-        );
-        self.local_state.set_importing(false);
-        let notices = result.unwrap_or_else(|error| {
+        )
+        .unwrap_or_else(|error| {
             vec![format!(
                 "Settings: Saved credentials could not be imported from 0.1: {error}. The import is retried on the next start."
             )]

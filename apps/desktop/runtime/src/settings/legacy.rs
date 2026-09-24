@@ -22,10 +22,12 @@
 //!    startup path): the credential store entries the old files and
 //!    `agent-connections.json` reference go to `credentials.toml` (user
 //!    credentials) and `local-state.json` (device-local secrets), and only
-//!    then are they deleted from the store. `migrated-0.1/import-complete`
-//!    records the step. Every store operation has a deadline, because a macOS
-//!    Keychain entry created by the 0.1 app can make the service wait for an
-//!    authorization prompt.
+//!    then are they deleted from the store, together with entries whose value
+//!    the files already hold from an interrupted run.
+//!    `migrated-0.1/import-complete` records the step once all are deleted.
+//!    Every store operation has a deadline, because a macOS Keychain entry
+//!    created by the 0.1 app can make the service wait for an authorization
+//!    prompt.
 //!
 //! Values already in the files win, so a synced `config.toml` is never
 //! overwritten and a rerun after a crash is harmless:
@@ -35,7 +37,8 @@
 //!   0.1 settings.
 //! - `credentials.toml`: an existing API key or password hash stays. A 0.1 API
 //!   key is imported only for a profile that has none and uses the same
-//!   service URL as this device's 0.1 profile of that ID.
+//!   service URL and sign-in (manual key, or the same account) as this
+//!   device's 0.1 profile of that ID.
 //! - `local-state.json`: existing entries stay.
 //!
 //! A failed step writes nothing that records it, keeps the old files and the
@@ -55,7 +58,7 @@ use desktop_core::{
         self, Appearance, Config, NotificationPreferences, Profile, UpdateChannel, WebUiConfig,
         CONFIG_FILE, CONFIG_HEADER, CREDENTIALS_FILE,
     },
-    contracts::{ConfidentialProfile, ListenConfig, ServiceProvider},
+    contracts::{ConfidentialProfile, ListenConfig, ProfileAuth, ServiceProvider},
     private_fs,
 };
 use indexmap::IndexMap;
@@ -334,17 +337,36 @@ fn read_setting<T>(
     .transpose()
 }
 
-/// Whether step 2 still has to run on this device.
+/// Whether saved credentials from 0.1 may still be in the credential store:
+/// step 1 has not run, or step 2 has not been recorded.
 pub(crate) fn secrets_pending(data_dir: &Path) -> bool {
     let backup = data_dir.join(BACKUP_DIR);
-    backup.is_dir() && !backup.join(COMPLETE_FILE).exists()
+    LEGACY_FILES.iter().any(|name| data_dir.join(name).exists())
+        || (backup.is_dir() && !backup.join(COMPLETE_FILE).exists())
 }
 
 /// Step 2: imports the credential store entries this device's 0.1 files
-/// reference and that the files do not already cover. Returns notices for
-/// anything the user has to redo. The step is recorded as done unless the
-/// store failed or timed out; then it reruns on the next start.
+/// reference and deletes them from the store. Returns notices for anything
+/// the user has to redo. The step is recorded as done unless the store
+/// failed or timed out; then it reruns on the next start.
+///
+/// Until it is recorded, an agent restore value missing from
+/// `local-state.json` may still be in the store, so [`LocalState`] reports it
+/// as unavailable rather than absent: a disconnect then fails and is retried,
+/// as it did in 0.1 while the credential store was unavailable
+/// (`AgentError::CredentialStore`), instead of dropping the user's key.
 pub(crate) fn import_secrets(
+    settings: &Settings,
+    local: &LocalState,
+    data_dir: &Path,
+    keychain: &dyn Keychain,
+) -> Result<Vec<String>, String> {
+    let result = import_pending_secrets(settings, local, data_dir, keychain);
+    local.set_importing(secrets_pending(data_dir));
+    result
+}
+
+fn import_pending_secrets(
     settings: &Settings,
     local: &LocalState,
     data_dir: &Path,
@@ -378,22 +400,27 @@ pub(crate) fn import_secrets(
     };
     let (mut keys, mut missing, mut elsewhere) = (IndexMap::new(), Vec::new(), Vec::new());
     for profile in service.map(|service| service.profiles).unwrap_or_default() {
-        if !profile.credential_saved || snapshot.credentials.profiles.contains_key(&profile.id) {
-            continue;
-        }
-        let Some(current) = snapshot.config.profiles.get(&profile.id) else {
-            continue;
-        };
-        let same_service =
-            config::normalize_url(&profile.remote_url).is_ok_and(|url| url == current.remote_url);
-        if !same_service {
-            elsewhere.push(profile.name);
+        if !profile.credential_saved {
             continue;
         }
         let entry = format!(
             "service-profile-{}-api-key",
             profile.credential_ref.as_deref().unwrap_or(&profile.id)
         );
+        if let Some(saved) = snapshot.credentials.profiles.get(&profile.id) {
+            import.covered(&entry, &saved.api_key);
+            continue;
+        }
+        let Some(current) = snapshot.config.profiles.get(&profile.id) else {
+            continue;
+        };
+        // The same service and the same account, or the key belongs elsewhere.
+        let same_service =
+            config::normalize_url(&profile.remote_url).is_ok_and(|url| url == current.remote_url);
+        if !same_service || !same_account(&profile.auth, &current.auth) {
+            elsewhere.push(profile.name);
+            continue;
+        }
         match import
             .get(&entry)
             .and_then(|key| config::validate_api_key(&key).ok())
@@ -471,7 +498,7 @@ pub(crate) fn import_secrets(
             format!(" Re-enter the API key for: {}.", missing.join(", "))
         };
         notices.push(format!(
-            "Settings: Saved credentials could not be imported from 0.1 because {failure}.{profiles} The import is retried on the next start."
+            "Settings: Saved credentials from 0.1 could not be fully imported because {failure}.{profiles} The import is retried on the next start."
         ));
     } else {
         // 3. Done on this device.
@@ -490,7 +517,7 @@ pub(crate) fn import_secrets(
     }
     if !elsewhere.is_empty() {
         notices.push(format!(
-            "Settings: {CONFIG_FILE} gives {} another service URL than 0.1 did on this device, so the saved 0.1 API key was not imported. Re-enter it in Settings.",
+            "Settings: {CONFIG_FILE} gives {} another service URL or account than 0.1 did on this device, so the saved 0.1 API key was not imported. Re-enter it in Settings.",
             elsewhere.join(", ")
         ));
     }
@@ -514,9 +541,26 @@ fn parse<T: DeserializeOwned>(
     value
 }
 
+/// Whether two profile credentials come from the same kind of sign-in and,
+/// for account sign-in, the same account.
+fn same_account(left: &ProfileAuth, right: &ProfileAuth) -> bool {
+    match (left, right) {
+        (ProfileAuth::ApiKey, ProfileAuth::ApiKey) => true,
+        (
+            ProfileAuth::OAuth {
+                account_id: left, ..
+            },
+            ProfileAuth::OAuth {
+                account_id: right, ..
+            },
+        ) => left == right,
+        _ => false,
+    }
+}
+
 struct Import<'a> {
     keychain: &'a dyn Keychain,
-    /// Entries now held by the settings files, deleted once those are durable.
+    /// Entries whose values the files now hold, deleted once those are durable.
     imported: Vec<String>,
     /// Entries holding keys that were already replaced; the cleanup records keep them.
     retired: Vec<String>,
@@ -524,6 +568,14 @@ struct Import<'a> {
 }
 
 impl Import<'_> {
+    /// An entry whose value a file already holds (from an earlier, interrupted
+    /// run) is deleted with the imported ones if it still holds that value.
+    fn covered(&mut self, entry: &str, saved: &str) {
+        if self.get(entry).as_deref() == Some(saved) {
+            self.imported.push(entry.to_string());
+        }
+    }
+
     /// Reads one entry; after the first failure the store is not asked again.
     fn get(&mut self, entry: &str) -> Option<String> {
         if self.failure.is_some() {
@@ -545,27 +597,28 @@ impl Import<'_> {
     ) {
         for entry in entries {
             let id = entry.trim_start_matches("account-cleanup-").to_string();
-            if saved.account_cleanup.contains_key(&id) {
-                continue;
-            }
             let Some(value) = self.get(entry) else {
                 continue;
             };
             let Ok(record) = serde_json::from_str::<CleanupRecord>(&value) else {
                 continue;
             };
+            let retired = RetiredCredential {
+                profile_id: record.profile_id,
+                action: record.action,
+                provider: record.provider,
+                key: record.key,
+                revoke: record.revoke,
+            };
+            match saved.account_cleanup.get(&id) {
+                Some(saved) if saved != &retired => continue,
+                Some(_) => {}
+                None => {
+                    found.account_cleanup.insert(id, retired);
+                }
+            }
             self.imported.push(entry.clone());
             self.retired.push(record.entry);
-            found.account_cleanup.insert(
-                id,
-                RetiredCredential {
-                    profile_id: record.profile_id,
-                    action: record.action,
-                    provider: record.provider,
-                    key: record.key,
-                    revoke: record.revoke,
-                },
-            );
         }
     }
 
@@ -582,21 +635,27 @@ impl Import<'_> {
             .flatten()
             .filter_map(|field| field["previous"]["secret_ref"].as_str());
         for entry in entries {
-            if saved.agent_restore.contains_key(entry) || found.agent_restore.contains_key(entry) {
+            if found.agent_restore.contains_key(entry) {
                 continue;
             }
-            if let Some(value) = self.get(entry) {
+            if let Some(saved) = saved.agent_restore.get(entry) {
+                self.covered(entry, saved);
+            } else if let Some(value) = self.get(entry) {
                 self.imported.push(entry.to_string());
                 found.agent_restore.insert(entry.to_string(), value);
             }
         }
     }
 
-    /// Best effort: a leftover entry is unused and harmless.
-    fn delete_imported(&self) {
+    /// Deletes what the files now hold. A failure leaves the step pending, so
+    /// the next start deletes what is left.
+    fn delete_imported(&mut self) {
+        if self.failure.is_some() {
+            return;
+        }
         for entry in self.imported.iter().chain(&self.retired) {
             if let Err(error) = self.keychain.delete(entry) {
-                tracing::warn!("Cannot delete an imported credential store entry: {error}");
+                self.failure = Some(error);
                 return;
             }
         }

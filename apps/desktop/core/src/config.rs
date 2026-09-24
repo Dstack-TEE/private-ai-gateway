@@ -9,8 +9,7 @@
 //! Cargo's `config.toml`, `Tauri.toml` and Helix's `config.toml`; the
 //! management contracts keep their camelCase JSON names, so the nested
 //! contract types are (de)serialized here through serde remote definitions
-//! (<https://serde.rs/remote-derive.html>) that the compiler keeps in step
-//! with them. Unknown keys are ignored and reported, as Cargo reports an
+//! (<https://serde.rs/remote-derive.html>). Unknown keys are ignored and reported, as Cargo reports an
 //! "unused config key", so a file written by a newer version still loads.
 //! Clients only read this file; the backend applies external edits and
 //! performs every write (see `desktop_runtime::settings`).
@@ -196,8 +195,12 @@ impl Default for WebUiConfig {
 }
 
 // The file's names for the management contract types it embeds. Each mirrors
-// its remote type field for field (serde checks this at compile time) and
-// only renames the keys; unknown keys are allowed, unlike in the contracts.
+// its remote type field for field and only renames the keys; unknown keys are
+// allowed, unlike in the contracts. The compiler checks the field names and
+// types against the remote type, but not the serde attributes (`default`,
+// `skip_serializing_if`): keep those in step with the contract type by hand.
+// `every_setting_survives_a_round_trip_through_the_file` catches drift that
+// loses a value.
 
 /// Desktop notifications. The OS permission is managed by the desktop app.
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -860,6 +863,67 @@ auth = { kind = "oauth", account-id = "user_1", scope = { organization-id = "org
         assert!(parse("[profiles.\"a b\"]\nname = \"A\"\nprovider = \"custom\"\nremote-url = \"https://a.example\"\n")
             .unwrap_err()
             .contains("Profile ID"));
+    }
+
+    #[test]
+    fn every_setting_survives_a_round_trip_through_the_file() {
+        let mut config = Config {
+            active_profile: "work".into(),
+            require_production_os: false,
+            connect_on_launch: true,
+            appearance: Appearance::Dark,
+            update_channel: Some(UpdateChannel::Beta),
+            auto_cli_registration: Some(false),
+            notifications: NotificationPreferences {
+                enabled: true,
+                gateway: false,
+                local_api: false,
+                verification: true,
+            },
+            local_api: ListenConfig {
+                port: 5180,
+                ..ListenConfig::default()
+            },
+            web_ui: WebUiConfig {
+                enabled: true,
+                listen_address: "0.0.0.0".into(),
+                allow_network_access: true,
+                port: 4190,
+                client_host: Some("studio.local".into()),
+            },
+            profiles: IndexMap::new(),
+        };
+        config.profiles.insert(
+            "work".into(),
+            Profile {
+                name: "Work".into(),
+                provider: ServiceProvider::Redpill,
+                remote_url: "https://tee.redpill.ai".into(),
+                auth: ProfileAuth::OAuth {
+                    account_id: "user_1".into(),
+                    account_name: Some("Me".into()),
+                    images: Some(AccountImages {
+                        user: Some("https://images.example/me.png".into()),
+                        organization: None,
+                    }),
+                    scope: Some(Box::new(AccountScope {
+                        organization_id: Some("org_1".into()),
+                        organization_slug: Some("org".into()),
+                        organization: Some("Org".into()),
+                        workspace: None,
+                        workspace_slug: None,
+                        workspace_id: Some(7),
+                    })),
+                },
+                verified_at: Some(1_700_000_000),
+            },
+        );
+        let text = toml_edit::ser::to_string(&config).unwrap();
+        assert_eq!(parse(&text).unwrap().value, config, "{text}");
+        assert!(
+            !text.contains("listenAddress") && !text.contains("accountId"),
+            "{text}"
+        );
     }
 
     #[test]

@@ -49,7 +49,7 @@ pap stop
 pap service stop --yes
 ```
 
-`service start` starts the management backend; saved `connectOnLaunch` may also
+`service start` starts the management backend; saved `connect-on-launch` may also
 start protection. `start` waits for verified protection. `stop` stops protection
 and restores managed agent configuration but keeps management available.
 `service stop` shuts down the backend. Closing the desktop app does not stop it.

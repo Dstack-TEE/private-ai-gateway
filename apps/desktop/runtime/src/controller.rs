@@ -219,10 +219,9 @@ impl DesktopRuntime {
         let settings = Arc::new(settings);
         let local_state = Arc::new(LocalState::open(&data_dir));
         settings_problems.extend(local_state.read().err());
-        // The credential store import runs once the service is listening.
-        local_state.set_importing(
-            settings.import_ready() && crate::settings::legacy::secrets_pending(&data_dir),
-        );
+        // Until the 0.1 credential store import (run once the service is
+        // listening) is recorded, missing agent restore values may still be there.
+        local_state.set_importing(crate::settings::legacy::secrets_pending(&data_dir));
         let snapshot = settings.snapshot()?;
         let runtime_config = snapshot.config.runtime_config();
         let profiles = settings.profile_views(&snapshot);
