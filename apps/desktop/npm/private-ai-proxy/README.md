@@ -16,6 +16,12 @@ architecture.
 Do not install with `--omit=optional`: the platform-specific executable is
 delivered as an optional dependency.
 
+Install `private-ai-proxy` (the stable release), `private-ai-proxy@beta`, or an
+exact version such as `private-ai-proxy@0.1.7`. Do not use a prerelease range
+such as `private-ai-proxy@^0.1.7-beta.2`: the platform-specific versions share
+this package name (for example `0.1.7-linux-x64`), so such a range can resolve
+to a platform payload instead of the installable package.
+
 ## Use
 
 ```sh
