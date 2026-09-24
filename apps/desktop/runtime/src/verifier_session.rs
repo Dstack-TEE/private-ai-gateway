@@ -1,5 +1,5 @@
 //! The verifier session state machine: verifier lifecycle and the
-//! platform-neutral protection state (`GatewayState`) clients observe.
+//! platform-neutral protection state (`AppState`) clients observe.
 //!
 //! The stable local endpoint and verifier both run in the service process. A
 //! session is only opened for requests once the verifier's identity and the
@@ -23,8 +23,8 @@ use aci_protocol::types::ServiceCapabilities;
 use agent_bridge::catalog::{Catalog, EndpointInventory};
 use agent_bridge::proxy::{ProxyEvent, ProxyState, Session};
 use desktop_core::contracts::{
-    CatalogSummary, ConfidentialProfile, GatewayIdentity, GatewayState, ListenConfig, ModelSummary,
-    RequestActivity, SourceProvenance, StartGatewayConfig, UsageSummary, VerificationCheck,
+    AppState, CatalogSummary, ConfidentialProfile, ListenConfig, ModelSummary, RequestActivity,
+    ServiceIdentity, SourceProvenance, StartConfig, UsageSummary, VerificationCheck,
 };
 use desktop_core::listen::ResolvedListen;
 use desktop_core::local_api;
@@ -41,7 +41,7 @@ pub struct SessionManager {
     usage: Arc<UsageStore>,
     launcher: Arc<dyn VerifierLauncher>,
     task_runtime: Handle,
-    state_tx: watch::Sender<GatewayState>,
+    state_tx: watch::Sender<AppState>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -125,7 +125,7 @@ struct RuntimeState {
     session_id: String,
     /// Last published catalog, kept across sessions to report removed models.
     last_catalog: Option<CatalogSummary>,
-    state: GatewayState,
+    state: AppState,
 }
 
 impl SessionManager {
@@ -138,7 +138,7 @@ impl SessionManager {
         usage: Arc<UsageStore>,
         launcher: Arc<dyn VerifierLauncher>,
         task_runtime: Handle,
-        mut state: GatewayState,
+        mut state: AppState,
     ) -> Self {
         match usage.active_session() {
             Ok(Some((id, started_at))) => {
@@ -185,32 +185,32 @@ impl SessionManager {
         }
     }
 
-    pub fn snapshot(&self) -> Result<GatewayState, String> {
+    pub fn snapshot(&self) -> Result<AppState, String> {
         Ok(self.lock()?.state.clone())
     }
 
-    pub fn subscribe(&self) -> watch::Receiver<GatewayState> {
+    pub fn subscribe(&self) -> watch::Receiver<AppState> {
         self.state_tx.subscribe()
     }
 
-    pub fn start(self: &Arc<Self>, config: StartGatewayConfig) -> Result<GatewayState, String> {
+    pub fn start(self: &Arc<Self>, config: StartConfig) -> Result<AppState, String> {
         self.start_inner(config, false, false)
     }
 
     pub fn begin_verification(
         self: &Arc<Self>,
-        config: StartGatewayConfig,
+        config: StartConfig,
         reset_catalog_history: bool,
-    ) -> Result<GatewayState, String> {
+    ) -> Result<AppState, String> {
         self.start_inner(config, true, reset_catalog_history)
     }
 
     fn start_inner(
         self: &Arc<Self>,
-        config: StartGatewayConfig,
+        config: StartConfig,
         verification_only: bool,
         reset_catalog_history: bool,
-    ) -> Result<GatewayState, String> {
+    ) -> Result<AppState, String> {
         let config = service_config::resolve_runtime_config(config)?;
         let remote_url = config.remote_url.clone();
 
@@ -241,7 +241,7 @@ impl SessionManager {
         if reset_catalog_history {
             runtime.last_catalog = None;
         }
-        runtime.state = GatewayState {
+        runtime.state = AppState {
             status: "verifying".to_string(),
             configuration_verification: verification_only,
             progress: Some("Starting the verifier".to_string()),
@@ -255,7 +255,7 @@ impl SessionManager {
             } else {
                 UsageSummary::default()
             },
-            config: StartGatewayConfig {
+            config: StartConfig {
                 remote_url,
                 require_production_os: config.require_production_os,
             },
@@ -336,7 +336,7 @@ impl SessionManager {
         &self,
         session_id: &str,
         budget: Duration,
-    ) -> Result<GatewayState, String> {
+    ) -> Result<AppState, String> {
         let mut states = self.state_tx.subscribe();
         tokio::time::timeout(budget, async {
             loop {
@@ -364,7 +364,7 @@ impl SessionManager {
         .map_err(|_| "Service verification timed out".to_string())?
     }
 
-    pub fn restore_snapshot(&self, mut state: GatewayState) {
+    pub fn restore_snapshot(&self, mut state: AppState) {
         let Ok(mut runtime) = self.lock() else {
             return;
         };
@@ -381,11 +381,11 @@ impl SessionManager {
 
     /// Stop the verifier task in any state, including while verifying. Requests
     /// already forwarded are revoked; no new request is accepted.
-    pub fn stop(&self) -> Result<GatewayState, String> {
+    pub fn stop(&self) -> Result<AppState, String> {
         self.stop_with_reconnect(false)
     }
 
-    pub fn stop_with_reconnect(&self, reconnecting: bool) -> Result<GatewayState, String> {
+    pub fn stop_with_reconnect(&self, reconnecting: bool) -> Result<AppState, String> {
         let mut runtime = self.lock()?;
         let task = runtime.task.take();
         runtime.generation = runtime.generation.wrapping_add(1);
@@ -428,8 +428,8 @@ impl SessionManager {
     /// What survives a stop or restart of the verifier: settings, key status,
     /// the local endpoint, and recent activity. The catalog does not: it
     /// belongs to a verified session.
-    fn carried(previous: &GatewayState) -> GatewayState {
-        GatewayState {
+    fn carried(previous: &AppState) -> AppState {
+        AppState {
             wake_monitor_available: previous.wake_monitor_available,
             config: previous.config.clone(),
             client_key_revision: previous.client_key_revision,
@@ -447,7 +447,7 @@ impl SessionManager {
             usage_revision: previous.usage_revision,
             catalog: previous.catalog.clone(),
             web_ui: previous.web_ui.clone(),
-            ..GatewayState::default()
+            ..AppState::default()
         }
     }
 
@@ -492,7 +492,7 @@ impl SessionManager {
 
     pub fn set_service_configuration(
         &self,
-        config: StartGatewayConfig,
+        config: StartConfig,
         profiles: Vec<ConfidentialProfile>,
         active_profile_id: String,
         api_key_saved: bool,
@@ -523,7 +523,7 @@ impl SessionManager {
         &self,
         profiles: Vec<ConfidentialProfile>,
         active_profile_id: String,
-        config: StartGatewayConfig,
+        config: StartConfig,
     ) {
         self.update(|state| {
             state.profiles = profiles;
@@ -636,7 +636,7 @@ impl SessionManager {
     }
 
     /// Refresh discovery without revoking the current verified session.
-    pub async fn refresh_catalog(self: &Arc<Self>) -> Result<GatewayState, String> {
+    pub async fn refresh_catalog(self: &Arc<Self>) -> Result<AppState, String> {
         let (generation, epoch) = {
             let runtime = self.lock()?;
             if !runtime.identity_ready {
@@ -787,7 +787,7 @@ impl SessionManager {
         Ok(())
     }
 
-    fn update(&self, change: impl FnOnce(&mut GatewayState)) {
+    fn update(&self, change: impl FnOnce(&mut AppState)) {
         let Ok(mut runtime) = self.lock() else {
             return;
         };

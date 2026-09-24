@@ -1,10 +1,10 @@
 import React, { useEffect, useState } from "react";
 import { RefreshCw, ShieldCheck, ShieldX } from "lucide-react";
 import { SwitchControl } from "./controls";
-import type { GatewayState } from "../../shared/contracts";
+import type { AppState } from "../../shared/contracts";
 import { isProtected } from "../lib/protection";
 
-export function ProtectionStatus({ state, label }: { state: GatewayState; label: string }): React.JSX.Element {
+export function ProtectionStatus({ state, label }: { state: AppState; label: string }): React.JSX.Element {
   const active = isProtected(state);
   const since = active ? state.protectedSince : undefined;
   const [now, setNow] = useState(() => Date.now());
@@ -45,7 +45,7 @@ export function ProtectedControl({
   iconOnly = false,
   onToggle,
 }: {
-  state: GatewayState;
+  state: AppState;
   busy: boolean;
   running: boolean;
   endpointDown: boolean;

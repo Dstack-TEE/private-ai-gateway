@@ -342,7 +342,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
         Action::Models {
             command: Models::List { refresh },
         } => {
-            let state: GatewayState = if *refresh {
+            let state: AppState = if *refresh {
                 client.call(rpc::RefreshCatalog)?
             } else {
                 client.state()?

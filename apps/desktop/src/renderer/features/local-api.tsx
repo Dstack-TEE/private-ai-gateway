@@ -10,7 +10,7 @@ import { Item } from "../components/ui/item";
 import { InputGroup, InputGroupInput, InputGroupAddon, InputGroupButton } from "../components/ui/input-group";
 import { IconButton } from "../components/controls";
 import { Sheet, SheetActions } from "../components/sheet";
-import type { GatewayState, ListenConfig } from "../../shared/contracts";
+import type { AppState, ListenConfig } from "../../shared/contracts";
 import { maskClientKey } from "../lib/format";
 import { desktopApi } from "../lib/environment";
 import { cn } from "../lib/utils";
@@ -100,7 +100,7 @@ export function LocalApiSheet({
   onSave,
   onClose,
 }: {
-  state: GatewayState;
+  state: AppState;
   frozen: boolean;
   clientKey: string;
   clientKeyVisible: boolean;

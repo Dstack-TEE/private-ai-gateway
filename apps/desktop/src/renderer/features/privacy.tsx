@@ -1,7 +1,7 @@
 import React from "react";
 import { Check, LockOpen, RefreshCw, ShieldCheck, ShieldX } from "lucide-react";
 import { Sheet, DismissSheetAction } from "../components/sheet";
-import type { GatewayState, VerificationCheck } from "../../shared/contracts";
+import type { AppState, VerificationCheck } from "../../shared/contracts";
 import { hasLiveVerification } from "../lib/protection";
 import { formatTimestamp, hardwareName, shorten, trustName } from "../lib/format";
 import { Detail } from "../components/detail";
@@ -34,11 +34,11 @@ const CHECK_TITLES: Record<string, string> = {
   "upstream-2": "Upstream session evidence",
 };
 
-export function PrivacyVerificationSheet({ state, onClose }: { state: GatewayState; onClose(): void }): React.JSX.Element {
+export function PrivacyVerificationSheet({ state, onClose }: { state: AppState; onClose(): void }): React.JSX.Element {
   return <Sheet title="Privacy verification" className="privacy-sheet w-[min(680px,_calc(var(--window-dialog-width,_100vw)_-_32px))] h-[min(680px,_calc(var(--window-dialog-height,_100vh)_-_32px))]" onClose={onClose}><PrivacyVerification state={state} /><DismissSheetAction onClose={onClose} /></Sheet>;
 }
 
-function PrivacyVerification({ state }: { state: GatewayState }): React.JSX.Element {
+function PrivacyVerification({ state }: { state: AppState }): React.JSX.Element {
   const verified = hasLiveVerification(state);
   const identity = state.identity;
   const checks = state.checks;

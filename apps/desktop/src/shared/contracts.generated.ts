@@ -1,6 +1,6 @@
 // Generated from the Rust contracts by `npm run generate:contracts`. Do not edit.
 
-export type GatewayState = { backendInstance?: string, clientKeyRevision: number, clientKeyAvailable?: boolean,
+export type AppState = { backendInstance?: string, clientKeyRevision: number, clientKeyAvailable?: boolean,
 /**
  * Client connection state; the backend leaves this unset.
  */
@@ -26,7 +26,7 @@ proxyUrl?: string,
 /**
  * Why the local endpoint could not be bound; blocks starting and connecting.
  */
-endpointError?: string, identity?: GatewayIdentity, checks: Array<VerificationCheck>, activity: Array<RequestActivity>,
+endpointError?: string, identity?: ServiceIdentity, checks: Array<VerificationCheck>, activity: Array<RequestActivity>,
 /**
  * Stable id and complete persisted totals for the current protection run.
  */
@@ -47,7 +47,7 @@ usageRevision: number, error?: string,
 /**
  * The configuration the next start (window or tray toggle) will use.
  */
-config: StartGatewayConfig, profiles: Array<ConfidentialProfile>, activeProfileId: string, localApi: ListenConfig, apiKeySaved: boolean,
+config: StartConfig, profiles: Array<ConfidentialProfile>, activeProfileId: string, localApi: ListenConfig, apiKeySaved: boolean,
 /**
  * The most recently verified catalog. A stopped gateway may retain it for
  * agent projection and readiness state; the proxy still requires a live
@@ -55,7 +55,7 @@ config: StartGatewayConfig, profiles: Array<ConfidentialProfile>, activeProfileI
  */
 catalog?: CatalogSummary, webUi: WebUiStatus, };
 export type VerificationCheck = { id: string, section: string, title: string, status: "pass" | "fail" | "skip" | "info", detail: string, };
-export type GatewayIdentity = { teeType: string, trustLevel: string, keysetDigest: string, keysetNotAfter: number, tlsSpki?: string, source: SourceProvenance, serving: string, supportedE2eeVersions: Array<string>, };
+export type ServiceIdentity = { teeType: string, trustLevel: string, keysetDigest: string, keysetNotAfter: number, tlsSpki?: string, source: SourceProvenance, serving: string, supportedE2eeVersions: Array<string>, };
 export type SourceProvenance = { repoUrl?: string, repoCommit?: string, imageDigest?: string, };
 /**
  * One request seen by the local gateway: forwarded through the verifier (with
@@ -102,7 +102,7 @@ export type AccountLoginDetails = { auth: ProfileAuth, workspaces: Array<Account
 export type AccountBalance = { balanceUsd: string, canTopUp: boolean, organizationId: string | null, grantedUsd: string | null, scope: AccountScope, };
 export type AccountBalanceTarget = { "kind": "login", id: string, } | { "kind": "profile", profileId: string, };
 export type LoginPresentation = { id: string, url: string, userCode: string | null, };
-export type StartGatewayConfig = { remoteUrl: string, requireProductionOs: boolean, };
+export type StartConfig = { remoteUrl: string, requireProductionOs: boolean, };
 /**
  * A TCP listener shared by the Local API and the web UI. Non-loopback
  * addresses require `allow_network_access`; see [`crate::listen::resolve`].

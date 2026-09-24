@@ -135,7 +135,7 @@ impl DesktopRuntime {
         profile: ConfidentialProfileInput,
         require_production_os: bool,
         workspace_id: Option<i64>,
-    ) -> Result<GatewayState, String> {
+    ) -> Result<AppState, String> {
         let mut slot = self.account_login.lock().await;
         let credential = slot
             .as_mut()

@@ -1,10 +1,10 @@
 import { errorMessage } from "./error-message";
 import { brand } from "../generated/brand";
 import type { Tone } from "./tone";
-import type { ConfidentialProfile, GatewayState } from "../../shared/contracts";
+import type { ConfidentialProfile, AppState } from "../../shared/contracts";
 import { serviceKeyLabel } from "./services";
 
-export const INITIAL_STATE: GatewayState = {
+export const INITIAL_STATE: AppState = {
   clientKeyRevision: 0,
   reconnecting: false,
   sessionActive: false,
@@ -32,7 +32,7 @@ export const INITIAL_STATE: GatewayState = {
   webUi: { enabled: false, listenAddress: "127.0.0.1", allowNetworkAccess: false, port: 4182 },
 };
 
-export function unavailableState(error: unknown): GatewayState {
+export function unavailableState(error: unknown): AppState {
   return {
     ...INITIAL_STATE,
     status: "error",
@@ -42,11 +42,11 @@ export function unavailableState(error: unknown): GatewayState {
   };
 }
 
-export function profileIsAvailable(profile: ConfidentialProfile | undefined, state: GatewayState): boolean {
+export function profileIsAvailable(profile: ConfidentialProfile | undefined, state: AppState): boolean {
   return Boolean(profile && profile.credentialSaved && (profile.id !== state.activeProfileId || state.apiKeySaved));
 }
 
-export function protectionFlags(state: GatewayState) {
+export function protectionFlags(state: AppState) {
   const verified = !state.configurationVerification && state.status === "verified";
   return {
     busy: state.status === "verifying",
@@ -56,18 +56,18 @@ export function protectionFlags(state: GatewayState) {
   };
 }
 
-export function isProtected(state: GatewayState): boolean {
+export function isProtected(state: AppState): boolean {
   return state.status === "verified" && !state.configurationVerification && state.apiKeySaved && !state.endpointError;
 }
 
-export function hasLiveVerification(state: GatewayState): boolean {
+export function hasLiveVerification(state: AppState): boolean {
   // The runtime admits a session only after sidecar verification and catalog loading.
   return isProtected(state)
     && state.identity?.trustLevel === "hardware_verified";
 }
 
 // One headline, one line of detail, one tone: the protection status.
-export function presentation(state: GatewayState): {
+export function presentation(state: AppState): {
   title: string;
   detail: string;
   tone: Tone;

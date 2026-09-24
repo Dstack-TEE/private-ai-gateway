@@ -17,7 +17,7 @@ import { IconButton } from "../components/controls";
 import { Sheet, SheetActions } from "../components/sheet";
 import { FormField } from "../components/settings";
 import { ChoiceSelect } from "../components/choice-select";
-import type { ConfidentialProfile, ConfidentialProfileInput, GatewayState, ServiceProvider } from "../../shared/contracts";
+import type { ConfidentialProfile, ConfidentialProfileInput, AppState, ServiceProvider } from "../../shared/contracts";
 import { desktopApi, distributionCapabilities } from "../lib/environment";
 import { profileIsAvailable } from "../lib/protection";
 import { ServiceLogo } from "../components/brand";
@@ -31,7 +31,7 @@ export function ProfilesSheet({
   onActivate,
   onClose,
 }: {
-  state: GatewayState;
+  state: AppState;
   busy: boolean;
   initialEditorProfileId?: string;
   onActivate(profileId: string): Promise<string | undefined>;
@@ -70,7 +70,7 @@ function ProfileListSheet({
   onClose,
   error: openError,
 }: {
-  state: GatewayState;
+  state: AppState;
   busy: boolean;
   onActivate(profileId: string): Promise<string | undefined>;
   onNew(): void;
@@ -179,7 +179,7 @@ export function ProfileEditorSheet({
   onDeleted,
   onClose,
 }: {
-  state: GatewayState;
+  state: AppState;
   busy: boolean;
   running: boolean;
   profile?: ConfidentialProfile;

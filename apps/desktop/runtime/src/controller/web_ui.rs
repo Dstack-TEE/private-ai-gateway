@@ -10,7 +10,7 @@ impl DesktopRuntime {
         self.admission.clone()
     }
 
-    pub fn save_web_ui(self: &Arc<Self>, config: WebUiConfig) -> Result<GatewayState, String> {
+    pub fn save_web_ui(self: &Arc<Self>, config: WebUiConfig) -> Result<AppState, String> {
         let _operation = self.configuration_change()?;
         if self.instance.is_none() {
             return Err("Web UI settings can change only in the primary backend instance".into());

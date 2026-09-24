@@ -2,13 +2,13 @@ import { useAgents } from "./hooks/use-agents";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { cliRegistrationQuery, usagePageQuery } from "./lib/page-queries";
-import { useGatewayState } from "./lib/use-gateway-state";
+import { useAppState } from "./lib/use-app-state";
 import { useWindowReady } from "./lib/use-window-ready";
 import { errorMessage } from "./lib/error-message";
 import { showErrorAlert } from "./lib/error-alert";
 import { brand } from "./generated/brand";
 import { useUpdates } from "./updates";
-import type { AgentStatus, ConfidentialProfile, GatewayState, LaunchPreferences, RequestActivity, SurfaceErrorScope } from "../shared/contracts";
+import type { AgentStatus, ConfidentialProfile, AppState, LaunchPreferences, RequestActivity, SurfaceErrorScope } from "../shared/contracts";
 import { PageHeader, Sidebar } from "./components/navigation";
 import type { SettingsTarget, View } from "./components/navigation";
 import { desktopApi, distributionCapabilities } from "./lib/environment";
@@ -26,13 +26,13 @@ const errorTitles: Record<SurfaceErrorScope, string> = {
 export function App({ initialView = "overview" }: { initialView?: View }): React.JSX.Element {
   const updates = useUpdates(desktopApi, distributionCapabilities.nativeUpdates || distributionCapabilities.channel === "web");
   const [view, setView] = useState<View>(initialView);
-  const gateway = useGatewayState(desktopApi, INITIAL_STATE);
-  const state = gateway.error ? unavailableState(gateway.error) : gateway.data ?? INITIAL_STATE;
-  const setState = gateway.setState;
-  const stateLoaded = !gateway.isLoading;
+  const appState = useAppState(desktopApi, INITIAL_STATE);
+  const state = appState.error ? unavailableState(appState.error) : appState.data ?? INITIAL_STATE;
+  const setState = appState.setState;
+  const stateLoaded = !appState.isLoading;
   const [allowDevelopmentOs, setAllowDevelopmentOs] = useState(false);
   const client = useQueryClient();
-  const backendReady = Boolean(gateway.data) && state.backendConnected !== false;
+  const backendReady = Boolean(appState.data) && state.backendConnected !== false;
   useEffect(() => {
     if (!backendReady) return;
     // Prefetch shares page caches; failures are presented when the page is opened.
@@ -168,7 +168,7 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
   }, []);
 
 
-  const applyStateAction = async (action: () => Promise<GatewayState | void>, notice?: string): Promise<string | undefined> => {
+  const applyStateAction = async (action: () => Promise<AppState | void>, notice?: string): Promise<string | undefined> => {
     try {
       const next = await action();
       if (next) {
@@ -180,7 +180,7 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
     }
   };
 
-  const runAction = async (scope: SurfaceErrorScope, action: () => Promise<GatewayState | void>, notice?: string) => {
+  const runAction = async (scope: SurfaceErrorScope, action: () => Promise<AppState | void>, notice?: string) => {
     const message = await applyStateAction(action, notice);
     if (message) reportSurfaceError(scope, message);
     return message;
@@ -191,7 +191,7 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
     void desktopApi.openNativeDialog("profiles", { repair }).catch((error: unknown) => reportSurfaceError(scope, error));
   };
 
-  const toggleGateway = () => {
+  const toggleProtection = () => {
     const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
     if (!running && !busy && !state.reconnecting && !profileIsAvailable(activeProfile, state)) {
       if (state.profiles.length === 0) {
@@ -305,7 +305,7 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
           running={running}
           endpointDown={endpointDown}
           developmentMode={allowDevelopmentOs}
-          onToggle={toggleGateway}
+          onToggle={toggleProtection}
         />
         <div className="content flex-auto min-w-0 min-h-0 overflow-auto pt-4 pr-6 pb-6 pl-6 [&_>_[role=alert]]:mb-4 max-[780px]:p-4 max-[440px]:p-3" id={`page-${view}`} key={view}>
         {view === "overview" && (
@@ -328,7 +328,7 @@ export function App({ initialView = "overview" }: { initialView?: View }): React
             clientKey={clientKey}
             clientKeyVisible={clientKeyVisible}
             copied={copied}
-            onToggle={toggleGateway}
+            onToggle={toggleProtection}
             onStartBackend={() => void startBackend()}
             onSettings={() => openSettings("confidential")}
             onPrivacy={() => openSettings("privacy")}

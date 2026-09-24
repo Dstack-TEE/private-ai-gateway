@@ -3,7 +3,7 @@ use std::sync::Arc;
 use desktop_core::{
     agent_access::AgentAccessStatus,
     client::Client,
-    contracts::{AgentStatus, GatewayState},
+    contracts::{AgentStatus, AppState},
     preferences::{Appearance, NotificationPreferences},
     protocol::rpc,
     ui_api::{self as shared, Backend, Event, Host, Method},
@@ -94,7 +94,7 @@ impl Host for TauriHost {
         notifications::set_cached_preferences(self.app(), preferences)
     }
 
-    async fn reset_settings(&self, backend: &impl Backend) -> Result<GatewayState, String> {
+    async fn reset_settings(&self, backend: &impl Backend) -> Result<AppState, String> {
         let prepared = self.app().state::<updates::PreparedUpdate>();
         let mut prepared = prepared
             .0

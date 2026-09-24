@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 use super::{throttle::THROTTLE_REFILL, Auth, Throttle};
 use crate::controller::DesktopRuntime;
 use desktop_core::{
-    contracts::{DistributionCapabilities, DistributionChannel, GatewayState, WebBootstrap},
+    contracts::{AppState, DistributionCapabilities, DistributionChannel, WebBootstrap},
     listen::{self, url_host, ResolvedListen},
     protocol::{Command, RpcError, BUILD_VERSION},
     ui_api::{self, Backend, Event, Host, Method, StateEventProjection},
@@ -81,7 +81,7 @@ struct WebState<B> {
     host: WebHost,
     auth: Arc<Auth>,
     throttle: Arc<Throttle>,
-    states: watch::Receiver<GatewayState>,
+    states: watch::Receiver<AppState>,
     /// Accepted `Host` values; see [`allowed_hosts`].
     hosts: Arc<[String]>,
     shutdown: CancellationToken,
@@ -484,7 +484,7 @@ mod tests {
     impl Backend for FakeBackend {
         async fn execute(&self, command: Command) -> Result<Value, String> {
             match command {
-                Command::Stop => Ok(serde_json::to_value(GatewayState::default()).unwrap()),
+                Command::Stop => Ok(serde_json::to_value(AppState::default()).unwrap()),
                 _ => Err("invalid_state: Stop protection before changing this".into()),
             }
         }
@@ -494,7 +494,7 @@ mod tests {
         router: Router,
         auth: Arc<Auth>,
         shutdown: CancellationToken,
-        _states: watch::Sender<GatewayState>,
+        _states: watch::Sender<AppState>,
     }
 
     fn fixture() -> Fixture {
@@ -511,7 +511,7 @@ mod tests {
         .unwrap();
         let auth = Arc::new(Auth::default());
         let shutdown = CancellationToken::new();
-        let (states, receiver) = watch::channel(GatewayState::default());
+        let (states, receiver) = watch::channel(AppState::default());
         let router = router(WebState {
             backend: FakeBackend,
             host: WebHost {

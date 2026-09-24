@@ -1,5 +1,5 @@
 use crate::{
-    contracts::{ConfidentialProfile, ConfidentialProfileInput, GatewayState, ServiceProvider},
+    contracts::{AppState, ConfidentialProfile, ConfidentialProfileInput, ServiceProvider},
     service_config::{self, ServiceSettings},
 };
 use serde::{Deserialize, Serialize};
@@ -152,7 +152,7 @@ pub fn json_content(data: &impl Serialize) -> Result<String, String> {
 }
 
 /// An allowlist of typed fields; never serialize state, raw errors or stderr.
-pub fn diagnostics(state: &GatewayState, version: &str) -> serde_json::Value {
+pub fn diagnostics(state: &AppState, version: &str) -> serde_json::Value {
     let status = match state.status.as_str() {
         "verified" | "verifying" | "blocked" | "stopped" | "error" => state.status.as_str(),
         _ => "unknown",
@@ -254,7 +254,7 @@ mod tests {
     }
     #[test]
     fn diagnostic_allowlist_omits_untrusted_strings() {
-        let mut state = GatewayState {
+        let mut state = AppState {
             error: Some("SECRET".into()),
             remote_url: Some("https://SECRET".into()),
             endpoint_error: Some("/home/SECRET".into()),

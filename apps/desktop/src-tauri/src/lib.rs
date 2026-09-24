@@ -51,7 +51,7 @@ pub(crate) fn report_surface_error(
 ) {
     let message = error.to_string();
     eprintln!("{scope:?}: {message}");
-    let _ = app.emit("gateway://surface-error", SurfaceError { scope, message });
+    let _ = app.emit("pap://surface-error", SurfaceError { scope, message });
 }
 
 pub(crate) async fn run_blocking<T: Send + 'static>(
@@ -229,7 +229,7 @@ pub fn run() {
         .manage(notifications::Settings::default())
         .invoke_handler(tauri::generate_handler![
             commands::ui::start_backend_service,
-            commands::ui::get_gateway_state,
+            commands::ui::get_state,
             commands::ui::reset_settings,
             commands::settings::read_profile_backup,
             commands::ui::import_profiles,
@@ -246,7 +246,7 @@ pub fn run() {
             updates::restart_to_update,
             commands::ui::get_launch_preferences,
             commands::ui::set_launch_preference,
-            commands::ui::start_gateway,
+            commands::ui::start,
             commands::ui::begin_account_login,
             commands::ui::complete_account_login,
             commands::ui::save_configuration,
@@ -259,7 +259,7 @@ pub fn run() {
             commands::ui::cancel_account_login,
             commands::ui::activate_profile,
             commands::ui::delete_profile,
-            commands::ui::stop_gateway,
+            commands::ui::stop,
             commands::desktop::copy_text,
             commands::desktop::show_edit_menu,
             commands::desktop::show_error_alert,
@@ -348,7 +348,7 @@ pub fn run() {
             let client_for_events = client.clone();
             window.on_window_event(move |event| {
                 if matches!(event, WindowEvent::Focused(true)) {
-                    let _ = window_for_events.emit("gateway://agents-changed", ());
+                    let _ = window_for_events.emit("pap://agents-changed", ());
                     let host = ui_api::TauriHost::new(window_for_events.clone());
                     let client = client_for_events.clone();
                     tauri::async_runtime::spawn(async move {

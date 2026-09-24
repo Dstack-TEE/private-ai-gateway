@@ -3,7 +3,7 @@ import { Bot, ChartNoAxesColumn, LayoutGrid, RotateCw, Settings } from "lucide-r
 import { brand } from "../generated/brand";
 import { Badge } from "./ui/badge";
 import { SidebarProvider, SidebarMenu, SidebarMenuItem, SidebarMenuButton } from "./ui/sidebar";
-import type { GatewayState } from "../../shared/contracts";
+import type { AppState } from "../../shared/contracts";
 import { macOS } from "../lib/environment";
 import { BrandMark } from "./brand";
 import { presentation } from "../lib/protection";
@@ -96,7 +96,7 @@ export function PageHeader({
   onToggle,
 }: {
   view: View;
-  state: GatewayState;
+  state: AppState;
   busy: boolean;
   running: boolean;
   endpointDown: boolean;

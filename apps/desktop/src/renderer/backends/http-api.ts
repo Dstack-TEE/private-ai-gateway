@@ -2,7 +2,7 @@ import type {
   Appearance,
   CliRegistration,
   DistributionCapabilities,
-  GatewayState,
+  AppState,
   ProfileBackup,
   ServiceProvider,
   UiMethod,
@@ -26,7 +26,7 @@ let ended = false;
 export async function createBackend(): Promise<{
   desktopApi: ReturnType<typeof createDesktopApi>;
   distributionCapabilities: DistributionCapabilities;
-  initialGatewayState: GatewayState | undefined;
+  initialAppState: AppState | undefined;
   initialAppearance: Appearance | undefined;
   signOut: (() => Promise<void>) | undefined;
 }> {
@@ -37,7 +37,7 @@ export async function createBackend(): Promise<{
   return {
     desktopApi: createDesktopApi(transport, createPlatform(bootstrap)),
     distributionCapabilities: bootstrap.distribution,
-    initialGatewayState: undefined,
+    initialAppState: undefined,
     initialAppearance: undefined,
     signOut,
   };
@@ -98,8 +98,8 @@ function createPlatform(bootstrap: WebBootstrap): UiPlatform {
     requestNotificationPermission: async () => ({ permission: "unsupported", alertsEnabled: false }),
     openNotificationSettings: async () => undefined,
     openNativeDialog: async (kind, options) => {
-      const state = await rpc<GatewayState>("getState");
-      emit("gateway://dialog-open", {
+      const state = await rpc<AppState>("getState");
+      emit("pap://dialog-open", {
         kind: kind === "setup-profile" ? "profile-editor" : kind,
         state,
         repair: options?.repair ?? false,
@@ -108,7 +108,7 @@ function createPlatform(bootstrap: WebBootstrap): UiPlatform {
         startAfterSave: kind === "setup-profile",
       });
     },
-    closeNativeDialog: async () => emit("gateway://dialog-dismissed", undefined),
+    closeNativeDialog: async () => emit("pap://dialog-dismissed", undefined),
     nativeDialogReady: async () => undefined,
     mainWindowReady: async () => undefined,
     openAboutLink: async (target) => openAllowed({

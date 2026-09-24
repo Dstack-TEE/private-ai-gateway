@@ -112,14 +112,14 @@ impl SessionManager {
 
 /// Record the verifier's identity and checks; the status is decided by the
 /// caller once the catalog is in.
-pub(super) fn apply_identity_event(state: &mut GatewayState, event: &IdentityEvent) {
+pub(super) fn apply_identity_event(state: &mut AppState, event: &IdentityEvent) {
     state.identity = Some(parse_identity(event));
     state.checks = parse_checks(Some(&event.verification));
     state.error = None;
 }
 
-pub(super) fn parse_identity(event: &IdentityEvent) -> GatewayIdentity {
-    GatewayIdentity {
+pub(super) fn parse_identity(event: &IdentityEvent) -> ServiceIdentity {
+    ServiceIdentity {
         tee_type: event.tee_type.clone(),
         trust_level: event.trust_level.clone(),
         keyset_digest: event.keyset_digest.clone(),
@@ -163,7 +163,7 @@ pub(super) fn parse_checks(value: Option<&Value>) -> Vec<VerificationCheck> {
         .collect()
 }
 
-pub(super) fn merge_activity(state: &mut GatewayState, mut incoming: RequestActivity) {
+pub(super) fn merge_activity(state: &mut AppState, mut incoming: RequestActivity) {
     if incoming.path == "/v1/models" {
         return;
     }

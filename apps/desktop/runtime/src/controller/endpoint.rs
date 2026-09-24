@@ -30,7 +30,7 @@ impl DesktopRuntime {
     pub async fn save_local_api_config(
         self: &Arc<Self>,
         config: ListenConfig,
-    ) -> Result<GatewayState, String> {
+    ) -> Result<AppState, String> {
         let _operation = self.configuration_change()?;
         if self.instance.is_none() {
             return Err("Change Local API settings in the primary app instance".to_string());
@@ -77,7 +77,7 @@ impl DesktopRuntime {
         config: ListenConfig,
         current: ResolvedListen,
         resolved: ResolvedListen,
-    ) -> Result<GatewayState, String> {
+    ) -> Result<AppState, String> {
         let needs_bind =
             current.bind != resolved.bind || self.manager.snapshot()?.proxy_url.is_none();
         if !needs_bind {
@@ -151,7 +151,7 @@ impl DesktopRuntime {
         )
     }
 
-    pub async fn reset_settings(self: &Arc<Self>) -> Result<GatewayState, String> {
+    pub async fn reset_settings(self: &Arc<Self>) -> Result<AppState, String> {
         let _operation = self.configuration_change()?;
         if self.instance.is_none() {
             return Err("Reset settings in the primary backend instance".into());

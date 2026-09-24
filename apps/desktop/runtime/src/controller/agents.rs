@@ -144,7 +144,7 @@ impl DesktopRuntime {
         self.manager.report_error(message);
     }
 
-    pub async fn refresh_catalog(self: &Arc<Self>) -> Result<GatewayState, String> {
+    pub async fn refresh_catalog(self: &Arc<Self>) -> Result<AppState, String> {
         self.manager.clone().refresh_catalog().await
     }
 

@@ -9,8 +9,8 @@ use crate::{
     agent_access,
     client::Client,
     contracts::{
-        AccountBalanceTarget, AccountSaveResult, AgentStatus, ConfidentialProfileInput,
-        ConnectOptions, GatewayState, ListenConfig, ServiceProvider, StartGatewayConfig,
+        AccountBalanceTarget, AccountSaveResult, AgentStatus, AppState, ConfidentialProfileInput,
+        ConnectOptions, ListenConfig, ServiceProvider, StartConfig,
     },
     maintenance::ProfileBackup,
     preferences::{Appearance, NotificationPreferences, Preferences, WebUiConfig},
@@ -81,12 +81,12 @@ methods! {
     GetUpdateNotice => "getUpdateNotice",
 }
 
-pub const APPEARANCE_EVENT: &str = "gateway://appearance";
-pub const LAUNCH_PREFERENCES_EVENT: &str = "gateway://launch-preferences";
-pub const SETTINGS_RESET_EVENT: &str = "gateway://settings-reset";
-pub const STATE_EVENT: &str = "gateway://state";
-pub const CLIENT_KEY_CHANGED_EVENT: &str = "gateway://client-key-changed";
-pub const AGENTS_CHANGED_EVENT: &str = "gateway://agents-changed";
+pub const APPEARANCE_EVENT: &str = "pap://appearance";
+pub const LAUNCH_PREFERENCES_EVENT: &str = "pap://launch-preferences";
+pub const SETTINGS_RESET_EVENT: &str = "pap://settings-reset";
+pub const STATE_EVENT: &str = "pap://state";
+pub const CLIENT_KEY_CHANGED_EVENT: &str = "pap://client-key-changed";
+pub const AGENTS_CHANGED_EVENT: &str = "pap://agents-changed";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -113,14 +113,14 @@ pub struct StateEventProjection {
 }
 
 impl StateEventProjection {
-    pub fn new(state: &GatewayState) -> Self {
+    pub fn new(state: &AppState) -> Self {
         Self {
             client_key_revision: state.client_key_revision,
             backend_instance: state.backend_instance.clone(),
         }
     }
 
-    pub fn project(&mut self, state: &GatewayState) -> Vec<Event> {
+    pub fn project(&mut self, state: &AppState) -> Vec<Event> {
         let mut events = Vec::with_capacity(2);
         if state.client_key_revision != self.client_key_revision
             || state.backend_instance != self.backend_instance
@@ -195,7 +195,7 @@ pub trait Backend: Clone + Send + Sync + 'static {
     }
 
     /// The last known state when the backend cannot be reached.
-    fn disconnected_state(&self) -> Option<GatewayState> {
+    fn disconnected_state(&self) -> Option<AppState> {
         None
     }
 }
@@ -210,7 +210,7 @@ impl Backend for Arc<Client> {
         blocking(Client::ensure_service).await
     }
 
-    fn disconnected_state(&self) -> Option<GatewayState> {
+    fn disconnected_state(&self) -> Option<AppState> {
         let cached = self.cached_state();
         (cached.backend_connected == Some(false)).then_some(cached)
     }
@@ -268,7 +268,7 @@ pub trait Host: Clone + Send + Sync + 'static {
     fn reset_settings(
         &self,
         backend: &impl Backend,
-    ) -> impl Future<Output = Result<GatewayState, String>> + Send {
+    ) -> impl Future<Output = Result<AppState, String>> + Send {
         call(backend, rpc::ResetSettings)
     }
 
@@ -463,7 +463,7 @@ pub async fn invoke(
 async fn save_account_login(
     backend: &impl Backend,
     input: SaveLoginParams,
-) -> Result<GatewayState, String> {
+) -> Result<AppState, String> {
     let operation_id = uuid::Uuid::new_v4().to_string();
     let result = |operation_id: String| rpc::AccountSaveResult { operation_id };
     let initial = call(
@@ -600,7 +600,7 @@ struct LaunchPreferenceParams {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StartParams {
-    config: StartGatewayConfig,
+    config: StartConfig,
 }
 
 #[derive(Deserialize)]

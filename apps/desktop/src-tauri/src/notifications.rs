@@ -1,6 +1,6 @@
 mod permission;
 use desktop_core::{
-    client::Client, contracts::GatewayState, preferences::NotificationPreferences, protocol::rpc,
+    client::Client, contracts::AppState, preferences::NotificationPreferences, protocol::rpc,
 };
 use std::{
     sync::{Arc, Mutex},
@@ -87,7 +87,7 @@ pub struct Observer {
 }
 
 impl Observer {
-    pub fn new(state: &GatewayState) -> Self {
+    pub fn new(state: &AppState) -> Self {
         Self {
             faults: [false; 2],
             session: state.session_id.clone(),
@@ -97,7 +97,7 @@ impl Observer {
     }
     fn next(
         &mut self,
-        state: &GatewayState,
+        state: &AppState,
         background: bool,
         config: NotificationPreferences,
         now: Instant,
@@ -141,7 +141,7 @@ impl Observer {
         }
         result
     }
-    pub fn update(&mut self, app: &AppHandle, state: &GatewayState) {
+    pub fn update(&mut self, app: &AppHandle, state: &AppState) {
         let background = !app
             .webview_windows()
             .values()
@@ -162,7 +162,7 @@ mod tests {
     use super::*;
     #[test]
     fn categories_deduplicate_and_respect_foreground_and_master_switch() {
-        let mut state = GatewayState::default();
+        let mut state = AppState::default();
         let mut observer = Observer::new(&state);
         let now = Instant::now();
         let config = NotificationPreferences {

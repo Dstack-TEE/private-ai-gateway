@@ -1,5 +1,5 @@
 use super::*;
-use desktop_core::contracts::{GatewayState, UsageSummary};
+use desktop_core::contracts::{AppState, UsageSummary};
 
 struct NoVerifier;
 impl VerifierLauncher for NoVerifier {
@@ -87,7 +87,7 @@ fn test_runtime(
         usage.clone(),
         Arc::new(NoVerifier),
         executor.handle().clone(),
-        GatewayState::default(),
+        AppState::default(),
     ));
     Arc::new(DesktopRuntime {
         manager,
@@ -269,7 +269,7 @@ fn offline_removal_queues_cleanup_and_uncommitted_retirement_preserves_active_ke
     };
     let entry = service_config::profile_credential_entry(&profile).unwrap();
     runtime.secrets.set(&entry, "old-secret").unwrap();
-    let config = StartGatewayConfig {
+    let config = StartConfig {
         remote_url: profile.remote_url.clone(),
         require_production_os: true,
     };
@@ -462,7 +462,7 @@ fn update_restart_preserves_only_an_active_protection_session() {
                 .usage
                 .save_active_session("update-session", 123)
                 .unwrap();
-            runtime.manager.restore_snapshot(GatewayState {
+            runtime.manager.restore_snapshot(AppState {
                 status: "verified".into(),
                 session_id: Some("update-session".into()),
                 session_active: true,
@@ -594,11 +594,11 @@ fn recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them() {
     };
     let files = TokenFiles::new(&credential_directory);
     let token = files.read(agent.id()).unwrap().unwrap();
-    let verified = GatewayState {
+    let verified = AppState {
         status: "verified".into(),
         api_key_saved: true,
         session_active: true,
-        config: StartGatewayConfig {
+        config: StartConfig {
             remote_url: "https://inference.phala.com".into(),
             require_production_os: true,
         },
@@ -649,7 +649,7 @@ fn recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them() {
     assert!(runtime.proxy.tokens().agent_for(&token).is_none());
     assert_eq!(std::fs::read(&path).unwrap(), projected);
     for status in ["error", "stopped"] {
-        runtime.manager.restore_snapshot(GatewayState {
+        runtime.manager.restore_snapshot(AppState {
             status: status.into(),
             ..verified.clone()
         });
@@ -691,7 +691,7 @@ fn network_loss_revokes_session_and_manual_stop_cancels_recovery() {
     let executor = tokio::runtime::Runtime::new().unwrap();
     let directory = tempfile::tempdir().unwrap();
     let runtime = test_runtime(&executor, directory.path());
-    runtime.manager.restore_snapshot(GatewayState {
+    runtime.manager.restore_snapshot(AppState {
         status: "verified".into(),
         session_id: Some("network-session".into()),
         session_active: true,
@@ -700,7 +700,7 @@ fn network_loss_revokes_session_and_manual_stop_cancels_recovery() {
             requests: 7,
             ..Default::default()
         },
-        config: StartGatewayConfig {
+        config: StartConfig {
             remote_url: "https://inference.phala.com".into(),
             require_production_os: true,
         },
@@ -904,9 +904,9 @@ fn occupied_listener_preserves_previous_endpoint_and_serializes_mutations() {
 
 #[test]
 fn only_live_protection_allows_agent_projection() {
-    let mut state = GatewayState {
+    let mut state = AppState {
         api_key_saved: true,
-        ..GatewayState::default()
+        ..AppState::default()
     };
     for status in ["stopped", "verifying", "blocked", "error"] {
         state.status = status.to_string();

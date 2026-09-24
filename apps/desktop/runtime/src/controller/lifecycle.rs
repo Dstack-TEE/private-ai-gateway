@@ -109,16 +109,13 @@ impl DesktopRuntime {
         self.start_inner(state.config).map(|_| ())
     }
 
-    pub fn start(self: &Arc<Self>, config: StartGatewayConfig) -> Result<GatewayState, String> {
+    pub fn start(self: &Arc<Self>, config: StartConfig) -> Result<AppState, String> {
         let _operation = self.configuration_change()?;
         self.recovery.cancel();
         self.start_inner(config)
     }
 
-    pub(super) fn start_inner(
-        self: &Arc<Self>,
-        config: StartGatewayConfig,
-    ) -> Result<GatewayState, String> {
+    pub(super) fn start_inner(self: &Arc<Self>, config: StartConfig) -> Result<AppState, String> {
         let _guard = self
             .agent_policy
             .lock()
@@ -147,17 +144,17 @@ impl DesktopRuntime {
         }
     }
 
-    pub fn stop(&self) -> Result<GatewayState, String> {
+    pub fn stop(&self) -> Result<AppState, String> {
         let _operation = self.configuration_change()?;
         self.recovery.cancel();
         self.stop_inner()
     }
 
-    pub(super) fn stop_inner(&self) -> Result<GatewayState, String> {
+    pub(super) fn stop_inner(&self) -> Result<AppState, String> {
         self.stop_with_reconnect(false)
     }
 
-    pub(super) fn stop_with_reconnect(&self, reconnecting: bool) -> Result<GatewayState, String> {
+    pub(super) fn stop_with_reconnect(&self, reconnecting: bool) -> Result<AppState, String> {
         let _guard = self
             .agent_policy
             .lock()

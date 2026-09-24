@@ -133,23 +133,23 @@ macro_rules! commands {
 // backend (`desktop_runtime::dispatch`) handles each; admission is decided in
 // `desktop_runtime::server::execute`.
 commands! {
-    State -> GatewayState;
+    State -> AppState;
     /// Streams state snapshots on a dedicated connection.
-    Watch -> GatewayState;
-    Start(config: StartGatewayConfig) -> GatewayState;
-    Stop -> GatewayState;
+    Watch -> AppState;
+    Start(config: StartConfig) -> AppState;
+    Stop -> AppState;
     /// Answered by the connection under exclusive lifecycle admission.
     Shutdown { instance_id: String, mode: ShutdownMode } -> ();
     Verify {
         profile: ConfidentialProfileInput,
         require_production_os: bool,
         key: Option<String>,
-    } -> GatewayState;
+    } -> AppState;
     SaveConfiguration {
         profile: ConfidentialProfileInput,
         require_production_os: bool,
         key: Option<String>,
-    } -> GatewayState;
+    } -> AppState;
     CompleteAccountLogin { id: String, callback_url: String } -> ();
     BeginAccountLogin { profile: ConfidentialProfileInput } -> LoginPresentation;
     SaveAccountLogin {
@@ -164,9 +164,9 @@ commands! {
     AccountBalance { target: AccountBalanceTarget } -> Option<AccountBalance>;
     PollAccountLogin { id: String } -> Option<AccountLoginDetails>;
     CancelAccountLogin { id: String } -> ();
-    ActivateProfile { profile_id: String } -> GatewayState;
-    DeleteProfile { profile_id: String } -> GatewayState;
-    ClearApiKey -> GatewayState;
+    ActivateProfile { profile_id: String } -> AppState;
+    DeleteProfile { profile_id: String } -> AppState;
+    ClearApiKey -> AppState;
     ImportProfiles(backup: ProfileBackup) -> ImportResult;
     ExportProfiles { path: String } -> ();
     ExportProfilesContent -> String;
@@ -178,11 +178,11 @@ commands! {
     ClearUsage -> u64;
     ClientKey -> String;
     RotateClientKey -> String;
-    SaveLocalApi(config: ListenConfig) -> GatewayState;
-    SaveWebUi(config: WebUiConfig) -> GatewayState;
+    SaveLocalApi(config: ListenConfig) -> AppState;
+    SaveWebUi(config: WebUiConfig) -> AppState;
     /// Mint a one-time web UI login link. Only the authenticated IPC endpoint can ask.
     WebUiLogin -> WebUiLogin;
-    RefreshCatalog -> GatewayState;
+    RefreshCatalog -> AppState;
     Agents -> Vec<AgentStatus>;
     PreviewAgent { agent_id: String, connect: bool, options: ConnectOptions } -> AgentPreview;
     ApplyAgent {
@@ -192,7 +192,7 @@ commands! {
         options: ConnectOptions,
     } -> AgentStatus;
     DisconnectAllAgents -> Vec<AgentStatus>;
-    ResetSettings -> GatewayState;
+    ResetSettings -> AppState;
     Preferences -> Preferences;
     SetPreference(change: Preference) -> Preferences;
 }
@@ -400,7 +400,7 @@ mod tests {
         let frames = [
             (Command::State, r#"{"method":"state"}"#),
             (
-                Command::Start(StartGatewayConfig {
+                Command::Start(StartConfig {
                     remote_url: "https://tee.example".into(),
                     require_production_os: true,
                 }),

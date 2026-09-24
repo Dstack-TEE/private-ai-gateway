@@ -31,7 +31,7 @@ pub struct SourceProvenance {
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(optional_fields)]
-pub struct GatewayIdentity {
+pub struct ServiceIdentity {
     pub tee_type: String,
     pub trust_level: String,
     pub keyset_digest: String,
@@ -171,7 +171,7 @@ impl ServiceProvider {
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum AccountSaveResult {
     Running,
-    Complete { state: Box<GatewayState> },
+    Complete { state: Box<AppState> },
     Failed { error: String },
 }
 
@@ -286,7 +286,7 @@ pub struct ConfidentialProfileInput {
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(optional_fields)]
-pub struct GatewayState {
+pub struct AppState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_instance: Option<String>,
     #[serde(default)]
@@ -317,7 +317,7 @@ pub struct GatewayState {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub identity: Option<GatewayIdentity>,
+    pub identity: Option<ServiceIdentity>,
     pub checks: Vec<VerificationCheck>,
     pub activity: Vec<RequestActivity>,
     /// Stable id and complete persisted totals for the current protection run.
@@ -338,7 +338,7 @@ pub struct GatewayState {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// The configuration the next start (window or tray toggle) will use.
-    pub config: StartGatewayConfig,
+    pub config: StartConfig,
     pub profiles: Vec<ConfidentialProfile>,
     pub active_profile_id: String,
     pub local_api: ListenConfig,
@@ -386,7 +386,7 @@ impl From<&crate::preferences::WebUiConfig> for WebUiStatus {
     }
 }
 
-impl GatewayState {
+impl AppState {
     pub fn is_protected(&self) -> bool {
         self.status == "verified"
             && !self.configuration_verification
@@ -402,7 +402,7 @@ impl GatewayState {
     }
 }
 
-impl Default for GatewayState {
+impl Default for AppState {
     fn default() -> Self {
         Self {
             status: "stopped".to_string(),
@@ -426,7 +426,7 @@ impl Default for GatewayState {
             session_usage: UsageSummary::default(),
             usage_revision: 0,
             error: None,
-            config: StartGatewayConfig::default(),
+            config: StartConfig::default(),
             profiles: Vec::new(),
             active_profile_id: String::new(),
             local_api: ListenConfig::default(),
@@ -464,12 +464,12 @@ impl Default for ListenConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct StartGatewayConfig {
+pub struct StartConfig {
     pub remote_url: String,
     pub require_production_os: bool,
 }
 
-impl Default for StartGatewayConfig {
+impl Default for StartConfig {
     fn default() -> Self {
         Self {
             remote_url: crate::brand::SERVICE_DEFAULT_URL.to_string(),
@@ -580,9 +580,9 @@ mod typescript {
         );
         for declaration in declarations!(
             &config,
-            GatewayState,
+            AppState,
             VerificationCheck,
-            GatewayIdentity,
+            ServiceIdentity,
             SourceProvenance,
             RequestActivity,
             UsageSummary,
@@ -599,7 +599,7 @@ mod typescript {
             AccountBalance,
             AccountBalanceTarget,
             LoginPresentation,
-            StartGatewayConfig,
+            StartConfig,
             ListenConfig,
             WebUiConfig,
             WebUiStatus,

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::{
-    contracts::{ConfidentialProfile, ConfidentialProfileInput, ProfileAuth, StartGatewayConfig},
+    contracts::{ConfidentialProfile, ConfidentialProfileInput, ProfileAuth, StartConfig},
     paths::app_data_dir,
     private_fs::{self, write_atomic},
 };
@@ -46,8 +46,8 @@ impl ServiceSettings {
             .ok_or_else(|| "The active Confidential AI profile does not exist".to_string())
     }
 
-    pub fn runtime_config(&self) -> Result<StartGatewayConfig, String> {
-        Ok(StartGatewayConfig {
+    pub fn runtime_config(&self) -> Result<StartConfig, String> {
+        Ok(StartConfig {
             remote_url: self
                 .profiles
                 .iter()
@@ -152,9 +152,7 @@ pub fn resolve_profile(
     })
 }
 
-pub fn resolve_runtime_config(
-    mut config: StartGatewayConfig,
-) -> Result<StartGatewayConfig, String> {
+pub fn resolve_runtime_config(mut config: StartConfig) -> Result<StartConfig, String> {
     config.remote_url = normalize_url(&config.remote_url)?;
     Ok(config)
 }

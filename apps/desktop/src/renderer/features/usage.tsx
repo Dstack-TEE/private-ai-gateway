@@ -17,7 +17,7 @@ import { Card, CardHeader, CardTitle, CardDescription, CardAction, CardContent }
 import { IconButton } from "../components/controls";
 import { Sheet, DismissSheetAction } from "../components/sheet";
 import { ChoiceSelect } from "../components/choice-select";
-import type { AgentStatus, GatewayState, RequestActivity, UsagePage } from "../../shared/contracts";
+import type { AgentStatus, AppState, RequestActivity, UsagePage } from "../../shared/contracts";
 import { formatTimestamp } from "../lib/format";
 import { VerificationVerdict } from "../components/verification-verdict";
 
@@ -48,7 +48,7 @@ export function UsageView({
   agents,
   onInspect,
 }: {
-  state: GatewayState;
+  state: AppState;
   agents: AgentStatus[];
   onInspect(activity: RequestActivity): void;
 }): React.JSX.Element {

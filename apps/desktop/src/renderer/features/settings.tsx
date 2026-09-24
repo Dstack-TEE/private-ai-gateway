@@ -12,7 +12,7 @@ import { ErrorAlert } from "../components/error-alert";
 import { Item, ItemActions, ItemContent, ItemTitle, ItemDescription } from "../components/ui/item";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
 import { SettingsSection, SettingsList, SettingsLink, SettingsToggle } from "../components/settings";
-import type { DistributionCapabilities, GatewayState, LaunchPreferences, WebUiStatus } from "../../shared/contracts";
+import type { DistributionCapabilities, AppState, LaunchPreferences, WebUiStatus } from "../../shared/contracts";
 import { desktopApi, signOut } from "../lib/environment";
 import { localEndpoint, parentDirectory, serviceHost } from "../lib/format";
 import { localAddressKind } from "../lib/local-api-config";
@@ -114,7 +114,7 @@ export function SettingsView({
 }: {
   updates: ReturnType<typeof useUpdates>;
   distribution: DistributionCapabilities;
-  state: GatewayState;
+  state: AppState;
   busy: boolean;
   running: boolean;
   allowDevelopmentOs: boolean;

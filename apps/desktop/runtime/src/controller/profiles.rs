@@ -6,7 +6,7 @@ impl DesktopRuntime {
         profile: ConfidentialProfileInput,
         require_production_os: bool,
         key: Option<String>,
-    ) -> Result<GatewayState, String> {
+    ) -> Result<AppState, String> {
         let saved = self
             .persist_configuration(profile, require_production_os, key, None, false)
             .await?;
@@ -18,7 +18,7 @@ impl DesktopRuntime {
         profile: ConfidentialProfileInput,
         require_production_os: bool,
         key: Option<String>,
-    ) -> Result<GatewayState, String> {
+    ) -> Result<AppState, String> {
         let saved = self
             .persist_configuration(profile, require_production_os, key, None, true)
             .await?;
@@ -28,7 +28,7 @@ impl DesktopRuntime {
     pub(super) fn finish_configuration(
         self: &Arc<Self>,
         saved: SavedConfiguration<'_>,
-    ) -> Result<GatewayState, String> {
+    ) -> Result<AppState, String> {
         if saved.reconnect {
             self.start_inner(saved.config)
         } else {
@@ -103,7 +103,7 @@ impl DesktopRuntime {
             current.active_profile_id,
             current.config.require_production_os,
         )?;
-        let config = StartGatewayConfig {
+        let config = StartConfig {
             remote_url: candidate.remote_url.clone(),
             require_production_os,
         };
@@ -246,7 +246,7 @@ impl DesktopRuntime {
         })
     }
 
-    pub fn activate_profile(self: &Arc<Self>, profile_id: String) -> Result<GatewayState, String> {
+    pub fn activate_profile(self: &Arc<Self>, profile_id: String) -> Result<AppState, String> {
         let _operation = self.configuration_change()?;
         let previous = self.manager.snapshot()?;
         if previous.status == "verifying" {
@@ -294,7 +294,7 @@ impl DesktopRuntime {
         }
     }
 
-    pub async fn delete_profile(&self, profile_id: String) -> Result<GatewayState, String> {
+    pub async fn delete_profile(&self, profile_id: String) -> Result<AppState, String> {
         let _operation = self.configuration_change()?;
         if self.manager.is_running()? {
             return Err("Stop protection before deleting a profile".to_string());
@@ -369,7 +369,7 @@ impl DesktopRuntime {
         self.manager.snapshot()
     }
 
-    pub async fn clear_api_key(&self) -> Result<GatewayState, String> {
+    pub async fn clear_api_key(&self) -> Result<AppState, String> {
         let _operation = self.configuration_change()?;
         if self.manager.is_running()? {
             return Err("Stop protection before deleting a profile credential".to_string());

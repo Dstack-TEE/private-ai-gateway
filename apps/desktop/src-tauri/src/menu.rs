@@ -9,7 +9,7 @@
 use tauri::AppHandle;
 
 /// Emitted to the window when a menu item asks it to show a section.
-pub const NAVIGATE_EVENT: &str = "gateway://navigate";
+pub const NAVIGATE_EVENT: &str = "pap://navigate";
 
 #[cfg(target_os = "macos")]
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
