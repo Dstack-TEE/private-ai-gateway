@@ -221,9 +221,10 @@ more, which is harmless).
 
 ## Removal in 0.3
 
-Compatibility code for upgrades from 0.1, to be removed together once
-upgrading from 0.1 directly to 0.3 is no longer supported. Each item exists
-only for the 0.1 import or the 0.1 command names:
+The single list of compatibility code to remove in 0.3, once upgrading from
+0.1 directly to 0.3 is no longer supported. Each item exists only for
+installations of 0.1 or for command-line options deprecated in 0.2; other
+documents link here instead of keeping their own lists.
 
 - `runtime/src/settings/legacy.rs` (with its tests) and the `keyring`
   dependency, the only remaining users of the OS credential store.
@@ -245,6 +246,13 @@ only for the 0.1 import or the 0.1 command names:
   hidden `alias`es and `SettingsKeyArg::deprecation` in `cli/manage/args.rs`,
   and the hidden `notifications` key that takes a JSON object
   (`SettingsKey::Notifications`, its branch in `cli/manage/mod.rs`).
+- The hidden `pap send --api-key` option (`cli/args.rs`) and its warning in
+  `cli/send.rs`; `--api-key-stdin` and `ACI_API_KEY` replace it.
+- The DEB `prerm` for `failed-upgrade` (`src-tauri/installer/deb-prerm.sh`),
+  which lets an upgrade continue when the `prerm` of an installed package up
+  to 0.1.7-beta refuses it because Private AI Proxy is running.
+- `pap cli install` replacing the Windows `.cmd` shims earlier releases wrote
+  (`LEGACY_SCRIPT` in `cli/manage/install.rs`).
 - `src-tauri/src/autostart/migration.rs`, the bridge from the
   tauri-plugin-autostart login item.
 - The legacy default window size shim in `src-tauri/src/window_state.rs`.

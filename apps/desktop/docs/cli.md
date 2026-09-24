@@ -32,7 +32,8 @@ The same binary includes the ACI protocol commands:
 `send` reads the API key from the `ACI_API_KEY` environment variable or, with
 `--api-key-stdin`, from stdin (as `docker login --password-stdin` does), never
 from an argument that other local processes can see. The old `--api-key KEY`
-option is hidden, still works with a warning, and will be removed in 0.3.
+option is hidden, still works with a warning, and will be removed in 0.3
+(see [Removal in 0.3](configuration.md#removal-in-03)).
 
 `private-ai-proxy` (and the legacy `aci` alias) accept these same commands. They are compiled from
 this package's ACI modules, not forwarded to another executable. `serve` is standalone;

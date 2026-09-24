@@ -79,7 +79,7 @@ shims, written like npm's `cmd-shim` with `setlocal` and `%~dp0`, set
 `PRIVATE_AI_PROXY_ALIAS=%~n0` for the executable instead; processes the CLI
 starts never inherit it. `pap cli install` replaces the shims earlier releases
 wrote, which lack that line, as its own; that migration is removed in 0.3 (see
-[Planned removals](distribution.md#planned-removals-03)).
+[Removal in 0.3](configuration.md#removal-in-03)).
 
 Linux also publishes CLI-only DEB, RPM, and Arch Linux packages. They install the three real
 executables under `/usr/libexec/private-ai-proxy` and package-owned

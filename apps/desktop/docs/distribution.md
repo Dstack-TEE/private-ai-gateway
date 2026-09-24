@@ -121,12 +121,9 @@ pacman runs only the new package's scripts on upgrade.
 
 ### Planned removals (0.3)
 
-These exist only for installations of 0.1.x and go in 0.3, with the other 0.3
-removals listed in [Settings files](configuration.md):
-
-- The DEB `prerm` for `failed-upgrade` (`src-tauri/installer/deb-prerm.sh`).
-- `pap cli install` replacing the Windows `.cmd` shims earlier releases wrote
-  (`LEGACY_SCRIPT` in `cli/manage/install.rs`).
+The packaging compatibility code for installations of 0.1.x (the DEB `prerm`
+for `failed-upgrade`, the Windows `.cmd` shim migration) is listed with every
+other 0.3 removal in [Removal in 0.3](configuration.md#removal-in-03).
 
 A feed advances only after its release is public and every manifest URL
 responds, so a feed never names an unpublished asset. Assets are replaced one
