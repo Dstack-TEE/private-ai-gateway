@@ -39,12 +39,8 @@ export interface NotificationConfiguration {
   alertsEnabled?: boolean;
 }
 
-export interface ConfirmationOptions {
-  title: string;
-  message: string;
-  confirmLabel: string;
-  cancelLabel?: string;
-}
+/** What a tray or menu item asks the main window to show or open. */
+export type NavigationTarget = "settings" | "agents" | "profiles" | "profile-setup" | "documentation" | "github";
 
 export interface DesktopApi {
   startBackendService(): Promise<AppState>;
@@ -77,10 +73,7 @@ export interface DesktopApi {
   selectProfileBackup(): Promise<ProfileBackup | null>;
   saveProfileExport(): Promise<void>;
   saveDiagnosticsExport(): Promise<void>;
-  readProfileBackup(path: string): Promise<ProfileBackup>;
   importProfiles(backup: ProfileBackup): Promise<ImportResult>;
-  exportProfiles(path: string): Promise<void>;
-  exportDiagnostics(path: string): Promise<void>;
   saveNotificationSettings(config: NotificationPreferences): Promise<void>;
   requestNotificationPermission(): Promise<Pick<NotificationConfiguration, "permission" | "alertsEnabled">>;
   openNotificationSettings(): Promise<void>;
@@ -88,28 +81,14 @@ export interface DesktopApi {
   resetSettings(): Promise<AppState>;
   onSettingsReset(listener: () => void): () => void;
   onStateChange(listener: (state: AppState) => void): () => void;
-  onSurfaceError(listener: (error: SurfaceError) => void): () => void;
-  /** A native menu asked the main window to show a section. */
-  onNavigate(listener: (section: "settings" | "agents") => void): () => void;
+  onNavigate(listener: (target: NavigationTarget) => void): () => void;
   onAgentsChange(listener: () => void): () => void;
-  onProfileRepairRequest(listener: () => void): () => void;
-  onUsageProofRequest(listener: (recordId: string) => void): () => void;
   onClientKeyChange(listener: (available: boolean) => void): () => void;
-  openNativeDialog(kind: "profiles" | "profile-editor" | "setup-profile" | "privacy" | "local-api" | "usage-proof" | "local-api-example" | "notifications" | "web-ui", options?: { repair?: boolean; recordId?: string; profileId?: string }): Promise<void>;
-  nativeDialogReady(): Promise<void>;
   mainWindowReady(): Promise<void>;
-  onNativeDialogOpen(listener: (request: { state: AppState; repair: boolean; recordId?: string | null; profileId?: string | null; startAfterSave?: boolean }) => void): () => void;
-  onNativeDialogDismissed(listener: () => void): () => void;
-  onNativeCloseRequest(listener: () => void): () => void;
-  closeNativeDialog(): Promise<void>;
   /** Open a documented, allowlisted project resource in the system browser. */
   openAboutLink(target: "documentation" | "github" | "aci"): Promise<void>;
   openAgentWebsite(agentId: string): Promise<void>;
   openApiKeyPage(provider: ServiceProvider): Promise<void>;
-  /** Use the platform confirmation dialog for destructive actions. */
-  confirm(options: ConfirmationOptions): Promise<boolean>;
-  /** Show a platform-native error alert for an explicit user action that failed. */
-  showErrorAlert(title: string, message: string): Promise<void>;
   start(config: StartConfig): Promise<AppState>;
   saveConfiguration(profile: ConfidentialProfileInput, requireProductionOs: boolean, key?: string): Promise<AppState>;
   completeAccountLogin(id: string, callbackUrl: string): Promise<void>;
@@ -136,11 +115,4 @@ export interface DesktopApi {
     revision: string,
     options: ConnectOptions,
   ): Promise<AgentStatus>;
-}
-
-export type SurfaceErrorScope = "protection" | "profiles" | "local-api" | "agents" | "usage" | "settings";
-
-export interface SurfaceError {
-  scope: SurfaceErrorScope;
-  message: string;
 }

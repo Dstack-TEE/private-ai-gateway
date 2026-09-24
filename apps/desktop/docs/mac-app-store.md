@@ -158,8 +158,8 @@ References: [SDK requirements](https://developer.apple.com/support/third-party-S
   replaces its states with actual installed Agents without connecting them.
   Keep toggles disabled until the scan completes. Test wrong folders, symlinked
   Home, relaunch and system reboot, recoverable stale app bookmarks, regeneration
-  of the backend bookmark, revoked permission and moved Home. Verify no
-  duplicate/blank sheets when native dialogs are already open. Check the inherited
+  of the backend bookmark, revoked permission and moved Home. Verify a second
+  Enable while the picker is open presents no second picker. Check the inherited
   service can resolve access under its actual signature and every start has a
   matching stop; failed restoration must withdraw Agent token authority without
   touching inaccessible configuration. Disconnect and Reset retain Home access.

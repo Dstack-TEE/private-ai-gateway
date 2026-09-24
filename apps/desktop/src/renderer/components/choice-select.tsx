@@ -1,9 +1,8 @@
-import { useRef, useState } from "react";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 
 type Choice = { value: string; label: string; disabled?: boolean };
 
-/** Shared Select composition, including portal ownership inside native dialog content. */
+/** Shared Select composition for a flat list of choices. */
 export function ChoiceSelect({ id, label, describedBy, value, options, disabled, size, className, onChange }: {
   id?: string;
   label: string;
@@ -15,15 +14,12 @@ export function ChoiceSelect({ id, label, describedBy, value, options, disabled,
   className?: string;
   onChange(value: string): void;
 }) {
-  const trigger = useRef<HTMLButtonElement>(null);
-  const [container, setContainer] = useState<HTMLDialogElement | null>(null);
   return <Select items={options} value={value} disabled={disabled}
-    onValueChange={(next) => { if (next !== null) onChange(next); }}
-    onOpenChange={(open) => { if (open) setContainer(trigger.current?.closest("dialog") ?? null); }}>
-    <SelectTrigger ref={trigger} id={id} aria-label={label} aria-describedby={describedBy} size={size} className={className}>
+    onValueChange={(next) => { if (next !== null) onChange(next); }}>
+    <SelectTrigger id={id} aria-label={label} aria-describedby={describedBy} size={size} className={className}>
       <SelectValue />
     </SelectTrigger>
-    <SelectContent container={container ?? undefined} alignItemWithTrigger={container === null}>
+    <SelectContent>
       <SelectGroup>{options.map((option) => <SelectItem key={option.value} value={option.value} disabled={option.disabled}>{option.label}</SelectItem>)}</SelectGroup>
     </SelectContent>
   </Select>;

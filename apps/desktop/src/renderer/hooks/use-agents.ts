@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { AgentStatus, DesktopApi } from "../../shared/contracts";
-import { errorMessage } from "../lib/error-message";
+import { errorMessage, toastError } from "../lib/error-message";
 import { agentIntegrationsLocked, completeAgentStatuses, createAgentAccessAction, readAgentIntegrations, type AgentIntegrations } from "../lib/agent-integrations";
-import { showErrorAlert } from "../lib/error-alert";
 
 type Options = {
   requiresAuthorization: boolean;
@@ -47,7 +46,7 @@ export function useAgents(api: DesktopApi, { requiresAuthorization, active, revi
     try {
       await accessAction.run();
     } catch (error) {
-      await showErrorAlert("Agent access could not be granted", errorMessage(error), api);
+      toastError("Agent access could not be granted", error);
     }
   };
 
@@ -88,7 +87,7 @@ export function useAgents(api: DesktopApi, { requiresAuthorization, active, revi
       void loadAgents();
     }
     if (failure) {
-      await showErrorAlert(`${agent.name} could not ${attemptedConnection ? "connect" : "disconnect"}`, failure, api);
+      toastError(`${agent.name} could not ${attemptedConnection ? "connect" : "disconnect"}`, failure);
     }
   };
   const problem = agentsError ? errorMessage(agentsError) : undefined;

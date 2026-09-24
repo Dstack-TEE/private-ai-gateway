@@ -1,6 +1,6 @@
-//! Tauri commands served by the shared UI API. Each keeps its own command name
-//! so capabilities still grant it per window; its arguments are passed through
-//! unchanged as the method parameters the web UI sends.
+//! Tauri commands served by the shared UI API. Each command is its method's
+//! name in snake_case, so capabilities grant it individually; its arguments are
+//! passed through unchanged as the method parameters the web UI sends.
 
 use std::sync::Arc;
 
@@ -36,8 +36,8 @@ ui_commands! {
     begin_account_login => BeginAccountLogin,
     poll_account_login => PollAccountLogin,
     save_account_login => SaveAccountLogin,
-    account_details => GetAccountDetails,
-    account_balance => GetAccountBalance,
+    get_account_details => GetAccountDetails,
+    get_account_balance => GetAccountBalance,
     cancel_account_login => CancelAccountLogin,
     get_client_key => GetClientKey,
     rotate_client_key => RotateClientKey,
@@ -51,8 +51,8 @@ ui_commands! {
     list_agents => ListAgents,
     get_agent_access => GetAgentAccess,
     request_agent_access => RequestAgentAccess,
-    preview_agent_connection => PreviewAgent,
-    apply_agent_connection => ApplyAgent,
+    preview_agent => PreviewAgent,
+    apply_agent => ApplyAgent,
     get_appearance => GetAppearance,
     set_appearance => SetAppearance,
     get_launch_preferences => GetLaunchPreferences,

@@ -194,7 +194,6 @@ The browser UI degrades desktop-only integration:
 | Feature | Web behavior |
 | --- | --- |
 | Profile import and exports | Browser file picker and downloads; browser paths are never sent to the service. |
-| Native child windows and dialogs | In-page modal sheets and dialogs. |
 | Clipboard and external links | Browser clipboard and allowlisted HTTPS tabs. |
 | Open at Login, tray/menu state | Hidden. Protect on launch remains shared with the backend. |
 | OS notifications | Hidden. |

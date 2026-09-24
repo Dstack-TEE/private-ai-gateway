@@ -3,17 +3,13 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider } from "@tanstack/react-router";
 import { queryClient } from "./lib/query-client";
 import { TooltipProvider } from "./components/ui/tooltip";
+import { Toaster } from "./components/ui/sonner";
 import { AppearanceProvider } from "./components/appearance";
+import { ConfirmProvider } from "./components/confirm";
 import { NotificationsProvider } from "./components/notifications";
 import { installNativeInteractions } from "./lib/native-interactions";
-import { DialogCloseProvider } from "./components/dialog-close";
-import { desktopApi, query, web } from "./lib/environment";
-import { NativeWindowContent } from "./windows/native";
+import { desktopApi, web } from "./lib/environment";
 import { router } from "./router";
-
-function WindowContent(): React.JSX.Element {
-  return query.has("native-dialog") ? <NativeWindowContent /> : <NotificationsProvider api={desktopApi}><RouterProvider router={router} />{web && <NativeWindowContent />}</NotificationsProvider>;
-}
 
 export function Renderer(): React.JSX.Element {
   const [settingsRevision, setSettingsRevision] = useState(0);
@@ -24,5 +20,8 @@ export function Renderer(): React.JSX.Element {
   }), []);
   // Browsers keep their own context menu, reload and drop behavior.
   useEffect(() => web ? undefined : installNativeInteractions(desktopApi), []);
-  return <QueryClientProvider client={queryClient}><TooltipProvider><AppearanceProvider key={settingsRevision} api={desktopApi}><DialogCloseProvider api={desktopApi}><WindowContent /></DialogCloseProvider></AppearanceProvider></TooltipProvider></QueryClientProvider>;
+  return <QueryClientProvider client={queryClient}><TooltipProvider><AppearanceProvider key={settingsRevision} api={desktopApi}><ConfirmProvider>
+    <NotificationsProvider api={desktopApi}><RouterProvider router={router} /></NotificationsProvider>
+    <Toaster />
+  </ConfirmProvider></AppearanceProvider></TooltipProvider></QueryClientProvider>;
 }

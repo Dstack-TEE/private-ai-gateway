@@ -1,11 +1,9 @@
-import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { DesktopApi, ListenConfig } from "../../shared/contracts";
 import { localAddressKind } from "../lib/local-api-config";
 import { Combobox, ComboboxContent, ComboboxEmpty, ComboboxInput, ComboboxItem, ComboboxList } from "./ui/combobox";
-import { ErrorAlert } from "./error-alert";
 import { NetworkWarning } from "./network-warning";
-import { Field, FieldLabel } from "./ui/field";
+import { Field, FieldError, FieldLabel } from "./ui/field";
 import { Input } from "./ui/input";
 import { FormField } from "./settings";
 
@@ -51,21 +49,18 @@ export function ListenAddress({ api, id, value, disabled, onChange }: {
     queryKey: ["listen-addresses"], queryFn: () => api.listListenAddresses(), staleTime: 0,
   });
   const error = addressError ? "Network interfaces unavailable. Enter an IP address manually." : undefined;
-  const [container, setContainer] = useState<HTMLDialogElement | null>(null);
-  const input = useRef<HTMLInputElement>(null);
   const options = [...new Set(["127.0.0.1", "::1", ...addresses.map((item) => item.address), "0.0.0.0", "::"])];
   return <>
     <Combobox items={options} inputValue={value} onInputValueChange={onChange} value={value}
-      onValueChange={(next) => { if (next) onChange(next); }}
-      onOpenChange={(open) => { if (open) setContainer(input.current?.closest("dialog") ?? null); }}>
-      <ComboboxInput ref={input} id={id} aria-label="Listen address" triggerLabel="Choose listen address" required disabled={disabled} autoComplete="off" spellCheck={false} />
-      <ComboboxContent container={container}>
+      onValueChange={(next) => { if (next) onChange(next); }}>
+      <ComboboxInput id={id} aria-label="Listen address" triggerLabel="Choose listen address" required disabled={disabled} autoComplete="off" spellCheck={false} />
+      <ComboboxContent>
         <ComboboxEmpty>No matching address. You can enter an IP address.</ComboboxEmpty>
         <ComboboxList>{(address: string) => <ComboboxItem key={address} value={address}>
           <span>{address}</span><span className="ml-auto truncate text-muted-foreground">{address === "0.0.0.0" || address === "::" ? "All interfaces" : addresses.find((item) => item.address === address)?.name}</span>
         </ComboboxItem>}</ComboboxList>
       </ComboboxContent>
     </Combobox>
-    <ErrorAlert title="Could not detect network interfaces" error={error} />
+    <FieldError>{error}</FieldError>
   </>;
 }

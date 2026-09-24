@@ -5,14 +5,12 @@ mod app_data;
 mod autostart;
 mod distribution;
 mod menu;
-mod native_dialog;
 mod notifications;
 mod tray;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 mod tray_theme;
 mod ui_api;
 mod updates;
-mod window_state;
 
 use std::sync::Arc;
 
@@ -26,33 +24,6 @@ use tauri::{
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_shell::ShellExt;
-
-#[derive(Clone, Copy, Debug, serde::Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum SurfaceErrorScope {
-    Protection,
-    Profiles,
-    LocalApi,
-    Agents,
-    Usage,
-    Settings,
-}
-
-#[derive(Clone, serde::Serialize)]
-struct SurfaceError {
-    scope: SurfaceErrorScope,
-    message: String,
-}
-
-pub(crate) fn report_surface_error(
-    app: &AppHandle,
-    scope: SurfaceErrorScope,
-    error: impl std::fmt::Display,
-) {
-    let message = error.to_string();
-    desktop_core::diagnostic!("{scope:?}: {message}");
-    let _ = app.emit("pap://surface-error", SurfaceError { scope, message });
-}
 
 pub(crate) async fn run_blocking<T: Send + 'static>(
     operation: impl FnOnce() -> Result<T, String> + Send + 'static,
@@ -181,15 +152,8 @@ fn configure_account_return(app: &tauri::App) {
         if !event.urls().iter().any(|url| url.as_str() == expected) {
             return;
         }
+        // The profile editor that started the sign-in is still open in the window.
         tray::show_window(&handle);
-        let app = handle.clone();
-        if let Err(error) = handle.run_on_main_thread(move || {
-            if let Err(error) = native_dialog::focus_account_editor(&app) {
-                desktop_core::diagnostic!("Cannot focus account editor: {error}");
-            }
-        }) {
-            desktop_core::diagnostic!("Cannot return to account editor: {error}");
-        }
     });
 }
 
@@ -223,7 +187,6 @@ pub fn run() {
         )
         .manage(updates::PreparedUpdate::default())
         .manage(CliStartup::default())
-        .manage(native_dialog::DialogCache::default())
         .manage(tray::MainWindowPresentation::default())
         .plugin(tauri_plugin_notification::init())
         .manage(notifications::Settings::default())
@@ -252,8 +215,8 @@ pub fn run() {
             commands::ui::save_configuration,
             commands::ui::poll_account_login,
             commands::ui::save_account_login,
-            commands::ui::account_details,
-            commands::ui::account_balance,
+            commands::ui::get_account_details,
+            commands::ui::get_account_balance,
             commands::accounts::open_top_up,
             commands::accounts::open_organization,
             commands::ui::cancel_account_login,
@@ -262,13 +225,9 @@ pub fn run() {
             commands::ui::stop,
             commands::desktop::copy_text,
             commands::desktop::show_edit_menu,
-            commands::desktop::show_error_alert,
-            commands::desktop::open_native_dialog,
-            commands::desktop::native_dialog_ready,
             commands::desktop::main_window_ready,
             commands::desktop::open_agent_website,
             commands::desktop::open_api_key_page,
-            commands::desktop::close_native_dialog,
             commands::ui::query_usage,
             commands::ui::get_usage_record,
             commands::desktop::open_about_link,
@@ -280,8 +239,8 @@ pub fn run() {
             commands::desktop::open_web_ui,
             commands::ui::list_listen_addresses,
             commands::ui::list_agents,
-            commands::ui::preview_agent_connection,
-            commands::ui::apply_agent_connection,
+            commands::ui::preview_agent,
+            commands::ui::apply_agent,
             commands::ui::get_agent_access,
             commands::ui::request_agent_access,
             commands::settings::get_cli_registration,
@@ -345,7 +304,6 @@ pub fn run() {
                     }
                 })
                 .build()?;
-            window_state::migrate_legacy_default(app, &window, config.width, config.height)?;
             window.set_title(desktop_core::brand::PRODUCT_NAME)?;
             let window_for_events = window.clone();
             let app_for_events = app.handle().clone();

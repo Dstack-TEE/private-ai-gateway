@@ -8,7 +8,8 @@
 
 use tauri::AppHandle;
 
-/// Emitted to the window when a menu item asks it to show a section.
+/// Emitted to the window when a menu item asks it to show a page or dialog, or
+/// to open a documentation link the way Settings does.
 pub const NAVIGATE_EVENT: &str = "pap://navigate";
 
 #[cfg(target_os = "macos")]
@@ -19,7 +20,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID,
             WINDOW_SUBMENU_ID,
         },
-        Emitter, Manager,
+        Emitter,
     };
 
     let about = AboutMetadata {
@@ -28,6 +29,8 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         authors: Some(vec![ORGANIZATION_NAME.to_string()]),
         ..AboutMetadata::default()
     };
+    // The accelerator sends the same navigate request as the renderer's
+    // shortcut elsewhere; the window ignores it while a modal dialog is open.
     let settings = MenuItem::with_id(app, "settings", "Settings…", true, Some("CmdOrCtrl+,"))?;
     let application = Submenu::with_items(
         app,
@@ -76,13 +79,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             &PredefinedMenuItem::minimize(app, None)?,
             &PredefinedMenuItem::maximize(app, None)?,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(
-                app,
-                "close-window",
-                "Close Window",
-                true,
-                Some("CmdOrCtrl+W"),
-            )?,
+            &PredefinedMenuItem::close_window(app, None)?,
         ],
     )?;
     let documentation =
@@ -100,31 +97,14 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         &[&application, &edit, &view, &window, &help],
     )?)?;
     app.on_menu_event(|app, event| match event.id().as_ref() {
-        "close-window" => {
-            if let Some(window) = app
-                .webview_windows()
-                .into_values()
-                .find(|window| window.is_focused().unwrap_or(false))
-            {
-                if let Err(error) = crate::native_dialog::request_close(&window) {
-                    desktop_core::diagnostic!("Cannot close the active window: {error}");
-                }
-            }
-        }
         "settings" => {
             crate::tray::show_window(app);
             let _ = app.emit(NAVIGATE_EVENT, "settings");
         }
         "documentation" | "github" => {
-            let app = app.clone();
-            let target = event.id().as_ref().to_string();
-            tauri::async_runtime::spawn(async move {
-                if let Err(error) =
-                    crate::commands::desktop::open_about_link(app.clone(), target).await
-                {
-                    crate::report_surface_error(&app, crate::SurfaceErrorScope::Settings, error);
-                }
-            });
+            // A failure shows in the window, which may be minimized.
+            crate::tray::show_window(app);
+            let _ = app.emit(NAVIGATE_EVENT, event.id().as_ref());
         }
         _ => {}
     });

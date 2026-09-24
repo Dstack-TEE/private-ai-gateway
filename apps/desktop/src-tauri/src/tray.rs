@@ -97,7 +97,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             "toggle" => toggle_or_open_settings(app),
             "open" => show_window(app),
-            "settings" | "agents" => {
+            "settings" | "agents" | "profiles" => {
                 show_window(app);
                 let _ = app.emit(crate::menu::NAVIGATE_EVENT, event.id().as_ref());
             }
@@ -109,7 +109,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
                 show_window(app);
                 let _ = app.emit("pap://confirm-stop-all", ());
             }
-            id if matches!(id, "profiles" | "copy-key" | "copy-endpoint")
+            id if matches!(id, "copy-key" | "copy-endpoint")
                 || id.starts_with("profile:")
                 || id.starts_with("agent:") =>
             {
@@ -140,10 +140,6 @@ fn perform_action(app: &AppHandle, id: String) {
                     app.clipboard()
                         .write_text(client.call(rpc::ClientKey)?)
                         .map_err(|_| "Cannot copy the client key")?;
-                }
-                "profiles" => {
-                    show_window(&app);
-                    crate::native_dialog::open_profiles(&app, false)?;
                 }
                 _ if id.starts_with("profile:") => {
                     client.call(rpc::ActivateProfile {
@@ -178,16 +174,10 @@ fn perform_action(app: &AppHandle, id: String) {
             }
             Ok(())
         })();
+        // Like other tray apps, a failed menu action is logged; the menu and the
+        // window show the state that actually applies.
         if let Err(error) = result {
-            let scope = if id.starts_with("agent:") {
-                crate::SurfaceErrorScope::Agents
-            } else if id.starts_with("profile:") || id == "profiles" {
-                crate::SurfaceErrorScope::Profiles
-            } else {
-                crate::SurfaceErrorScope::LocalApi
-            };
-            crate::report_surface_error(&app, scope, error);
-            show_window(&app);
+            desktop_core::diagnostic!("Tray action {id} failed: {error}");
         }
         let state = client.state().unwrap_or_else(|_| client.cached_state());
         sync(&app, &state);
@@ -296,19 +286,11 @@ fn toggle_or_open_settings(app: &AppHandle) {
         if !should_stop(&state) && !active_profile_ready(&state) {
             sync(&app, &state);
             show_window(&app);
-            let opened = if state.profiles.is_empty() {
-                crate::native_dialog::open(&app, "setup-profile", false, None, None)
-            } else {
-                crate::native_dialog::open_profiles(&app, true)
-            };
-            if let Err(error) = opened {
-                crate::report_surface_error(&app, crate::SurfaceErrorScope::Profiles, error);
-            }
+            let _ = app.emit(crate::menu::NAVIGATE_EVENT, "profile-setup");
             return;
         }
         if let Err(error) = client.toggle() {
-            crate::report_surface_error(&app, crate::SurfaceErrorScope::Protection, error);
-            show_window(&app);
+            desktop_core::diagnostic!("Tray protection toggle failed: {error}");
         }
         let state = client.state().unwrap_or_else(|_| client.cached_state());
         sync(&app, &state);
@@ -332,11 +314,7 @@ fn sync_autostart(app: &AppHandle) {
         if let Err(error) = result {
             let menu = app.state::<TrayMenu>();
             let _ = menu.autostart.set_checked(!checked);
-            crate::report_surface_error(
-                &app,
-                crate::SurfaceErrorScope::Settings,
-                format!("Open at Login could not be changed: {}", error.message()),
-            );
+            desktop_core::diagnostic!("Open at Login could not be changed: {}", error.message());
             // Keep open windows in sync with the preference that actually applies.
             if let Ok(preferences) = desktop_core::ui_api::launch_preferences(&client, &host).await
             {
@@ -494,9 +472,11 @@ pub fn show_window(app: &AppHandle) {
         let Some(window) = handle.get_webview_window("main") else {
             return;
         };
-        set_dock_visibility(true);
+        set_dock_visibility(&handle, true);
+        // Focusing skips a minimized window, so restore it first.
+        let _ = window.unminimize();
         let _ = window.show();
-        activate_app();
+        // On macOS this also activates the app.
         let _ = window.set_focus();
     });
 }
@@ -507,28 +487,25 @@ pub fn hide_window(app: &AppHandle) {
         if let Some(window) = handle.get_webview_window("main") {
             let _ = window.hide();
         }
-        set_dock_visibility(false);
+        set_dock_visibility(&handle, false);
     });
 }
 
+/// A hidden window leaves only the menu bar item, like other tray apps.
 #[cfg(target_os = "macos")]
-#[allow(deprecated)]
-fn set_dock_visibility(visible: bool) {
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
-
-    if let Some(marker) = MainThreadMarker::new() {
-        let policy = if visible {
-            NSApplicationActivationPolicy::Regular
-        } else {
-            NSApplicationActivationPolicy::Accessory
-        };
-        NSApplication::sharedApplication(marker).setActivationPolicy(policy);
+fn set_dock_visibility(app: &AppHandle, visible: bool) {
+    let policy = if visible {
+        tauri::ActivationPolicy::Regular
+    } else {
+        tauri::ActivationPolicy::Accessory
+    };
+    if let Err(error) = app.set_activation_policy(policy) {
+        desktop_core::diagnostic!("Cannot change the Dock presence: {error}");
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn set_dock_visibility(_visible: bool) {}
+fn set_dock_visibility(_app: &AppHandle, _visible: bool) {}
 
 fn should_stop(state: &AppState) -> bool {
     state.should_stop_protection()
@@ -583,20 +560,6 @@ fn active_profile_ready(state: &AppState) -> bool {
             .iter()
             .any(|profile| profile.id == state.active_profile_id && profile.credential_saved)
 }
-
-#[cfg(target_os = "macos")]
-#[allow(deprecated)]
-fn activate_app() {
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::NSApplication;
-
-    if let Some(marker) = MainThreadMarker::new() {
-        NSApplication::sharedApplication(marker).activateIgnoringOtherApps(true);
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn activate_app() {}
 
 #[cfg(test)]
 mod tests {

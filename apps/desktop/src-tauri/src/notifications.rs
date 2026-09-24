@@ -150,6 +150,8 @@ impl Observer {
             return;
         };
         for (title, body) in self.next(state, background, config, Instant::now()) {
+            // On Linux the plugin sends from a spawned task, so a delivery
+            // failure there never reaches this result.
             if let Err(error) = app.notification().builder().title(title).body(body).show() {
                 desktop_core::diagnostic!("Cannot submit notification: {error}");
             }

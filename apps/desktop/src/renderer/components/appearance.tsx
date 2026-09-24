@@ -1,11 +1,10 @@
 import { createContext, useContext, useEffect, useLayoutEffect, type PropsWithChildren } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { initialAppearance } from "../lib/environment";
 import { Hint } from "./hint";
 import type { Appearance, DesktopApi } from "../../shared/contracts";
 import { Item, ItemContent, ItemTitle, ItemActions } from "./ui/item";
 import { FieldLabel } from "./ui/field";
-import { useErrorAlert } from "../lib/error-alert";
+import { toastError } from "../lib/error-message";
 import { Monitor, Sun, Moon } from "lucide-react";
 import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group";
 
@@ -13,17 +12,14 @@ const AppearanceContext = createContext({ value: "system" as Appearance, ready: 
 
 export function AppearanceProvider({ api, children }: PropsWithChildren<{ api: DesktopApi }>) {
   const client = useQueryClient();
-  const { data, isPending } = useQuery({
-    queryKey: ["appearance"], queryFn: () => api.getAppearance(), initialData: initialAppearance,
-  });
-  const value = data ?? initialAppearance ?? "system";
-  const ready = initialAppearance !== undefined || !isPending;
-  const reportError = useErrorAlert("Appearance settings unavailable", undefined, api);
+  const { data, isPending } = useQuery({ queryKey: ["appearance"], queryFn: () => api.getAppearance() });
+  const value = data ?? "system";
+  const ready = !isPending;
   const mutation = useMutation({
     mutationFn: (next: Appearance) => api.setAppearance(next),
     onMutate: () => client.cancelQueries({ queryKey: ["appearance"] }),
     onSuccess: (_, next) => { client.setQueryData(["appearance"], next); },
-    onError: () => reportError("Could not save appearance settings."),
+    onError: () => toastError("Appearance settings unavailable", "Could not save appearance settings."),
   });
   const busy = mutation.isPending;
   useEffect(() => api.onAppearanceChange((next) => { void client.cancelQueries({ queryKey: ["appearance"] }).then(() => client.setQueryData(["appearance"], next)); }), [api, client]);

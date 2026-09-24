@@ -4,15 +4,17 @@ import { Button } from "../components/ui/button";
 import { ListenerFields } from "../components/listen-address";
 import { localAddressKind } from "../lib/local-api-config";
 import { Hint } from "../components/hint";
-import { Field, FieldGroup, FieldLabel, FieldDescription, FieldSeparator } from "../components/ui/field";
-import { useErrorAlert } from "../lib/error-alert";
+import { Field, FieldGroup, FieldLabel, FieldDescription, FieldError, FieldSeparator } from "../components/ui/field";
 import { Item } from "../components/ui/item";
 import { InputGroup, InputGroupInput, InputGroupAddon, InputGroupButton } from "../components/ui/input-group";
 import { IconButton } from "../components/controls";
-import { Sheet, SheetActions } from "../components/sheet";
+import { AppDialog } from "../components/app-dialog";
+import { useConfirm } from "../components/confirm";
+import { DialogFooter } from "../components/ui/dialog";
 import type { AppState, ListenConfig } from "../../shared/contracts";
 import { maskClientKey } from "../lib/format";
 import { desktopApi } from "../lib/environment";
+import { errorMessage } from "../lib/error-message";
 import { cn } from "../lib/utils";
 
 export function LocalApiPanel({
@@ -87,13 +89,12 @@ function CopyRow({
   );
 }
 
-export function LocalApiSheet({
+export function LocalApiDialog({
   state,
   frozen,
   clientKey,
   clientKeyVisible,
   copied,
-  externalError,
   onCopy,
   onToggleKey,
   onRotate,
@@ -105,7 +106,7 @@ export function LocalApiSheet({
   clientKey: string;
   clientKeyVisible: boolean;
   copied?: string;
-  externalError?: string;
+  /** Rejects when the value was not copied. */
   onCopy(label: string, value: string): Promise<void>;
   onToggleKey(): void;
   onRotate(): Promise<string | undefined>;
@@ -116,51 +117,56 @@ export function LocalApiSheet({
   const addressKind = localAddressKind(draft.listenAddress);
   const networkAccess = Boolean(addressKind && addressKind !== "loopback");
   const [saving, setSaving] = useState(false);
-  const reportError = useErrorAlert("Local API action failed", externalError);
+  const [error, setError] = useState<string>();
+  const confirm = useConfirm();
   const rotateKey = async () => {
     setSaving(true);
+    setError(undefined);
     try {
-      const confirmed = await desktopApi.confirm({
+      const confirmed = await confirm({
         title: "Rotate local API key?",
         message: "The old client key will stop working immediately. Update your tools with the new key. Agent credentials do not change. In-flight requests may be interrupted.",
         confirmLabel: "Rotate key",
       });
-      if (confirmed) {
-        const message = await onRotate();
-        if (message) reportError(message);
-      }
-    } catch (error) {
-      reportError(error);
+      if (confirmed) setError(await onRotate());
+    } catch (failure) {
+      setError(errorMessage(failure));
     } finally {
       setSaving(false);
     }
   };
+  const copyKey = async () => {
+    setError(undefined);
+    try { await onCopy("Client key", clientKey); }
+    catch (failure) { setError(errorMessage(failure)); }
+  };
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     setSaving(true);
+    setError(undefined);
     try {
       if (!addressKind) {
-        reportError("Enter a valid IPv4 or IPv6 listen address.");
+        setError("Enter a valid IPv4 or IPv6 listen address.");
         return;
       }
-      if (networkAccess && !await desktopApi.confirm({
+      if (networkAccess && !await confirm({
         title: "Allow network access?",
         message: `Listen on ${draft.listenAddress}:${draft.port}? The local API uses unencrypted HTTP. Only use a trusted network, and never expose this port to the internet.`,
         confirmLabel: "Allow and Save",
       })) return;
       const message = await onSave({ ...draft, allowNetworkAccess: networkAccess });
-      if (message) reportError(message);
+      if (message) setError(message);
       else onClose();
     } catch (saveError) {
-      reportError(saveError);
+      setError(errorMessage(saveError));
     } finally {
       setSaving(false);
     }
   };
   return (
-    <Sheet title="Local API settings" className="local-api-sheet w-[min(560px,_calc(var(--window-dialog-width,_100vw)_-_32px))] h-[min(512px,_calc(var(--window-dialog-height,_100vh)_-_32px))] [&_.sheet-card]:mt-3 form-sheet [&_>_.sheet-heading]:px-5 [&_>_.field-note]:mx-5 [&_.sheet-footer]:mx-5 [&_form_>_[data-slot=field-error]]:mx-5 [&_.sheet-scroll]:px-5" dismissible={!saving} onClose={onClose}>
-      <form onSubmit={(event) => void submit(event)}>
-        <div className="sheet-scroll py-4">
+    <AppDialog title="Local API settings" className="sm:max-w-xl" dismissible={!saving} onClose={onClose}>
+      <form className="flex min-h-0 flex-col gap-4" onSubmit={(event) => void submit(event)}>
+        <div className="-mx-6 min-h-0 overflow-y-auto px-6 py-1">
           <FieldGroup>
           <ListenerFields api={desktopApi} idPrefix="local" value={draft} minPort={1024} clientHostNote="Optional host for client URLs and agent configs. Does not change the listener." disabled={frozen || saving} onChange={setDraft} />
           <FieldSeparator />
@@ -170,21 +176,22 @@ export function LocalApiSheet({
               <InputGroupInput id="local-client-key" className="mono font-mono text-xs" type={clientKeyVisible ? "text" : "password"} value={clientKey} readOnly />
               <InputGroupAddon align="inline-end">
                 <Hint content={clientKeyVisible ? "Hide client key" : "Reveal client key"}><InputGroupButton size="icon-xs" aria-label={clientKeyVisible ? "Hide client key" : "Reveal client key"} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff /> : <Eye />}</InputGroupButton></Hint>
-                <Hint content="Copy client key"><InputGroupButton size="icon-xs" aria-label="Copy client key" disabled={saving || !clientKey} onClick={() => void onCopy("Client key", clientKey)}>{copied === "Client key" ? <Check /> : <Copy />}</InputGroupButton></Hint>
+                <Hint content="Copy client key"><InputGroupButton size="icon-xs" aria-label="Copy client key" disabled={saving || !clientKey} onClick={() => void copyKey()}>{copied === "Client key" ? <Check /> : <Copy />}</InputGroupButton></Hint>
                 <Hint content="Rotate key"><InputGroupButton size="icon-xs" aria-label="Rotate key" disabled={frozen || saving} onClick={() => void rotateKey()}><RefreshCw /></InputGroupButton></Hint>
               </InputGroupAddon>
             </InputGroup>
             {copied === "Client key" && <FieldDescription role="status">Copied</FieldDescription>}
+            {!clientKey && <FieldError>Client key unavailable. Rotate the key to restore access.</FieldError>}
           </Field>
           </FieldGroup>
         </div>
-        <SheetActions leading={
-          <Button type="button" variant="outline" disabled={frozen || saving} onClick={() => setDraft({ listenAddress: "127.0.0.1", allowNetworkAccess: false, port: 4180 })}>Use default</Button>
-        }>
+        <FieldError>{error}</FieldError>
+        <DialogFooter>
+          <Button type="button" variant="outline" className="sm:mr-auto" disabled={frozen || saving} onClick={() => setDraft({ listenAddress: "127.0.0.1", allowNetworkAccess: false, port: 4180 })}>Use default</Button>
           <Button type="button" variant="outline" onClick={onClose} disabled={saving}>{frozen ? "Done" : "Cancel"}</Button>
           <Button type="submit" variant="default" disabled={frozen || saving}>{saving ? "Saving…" : "Save"}</Button>
-        </SheetActions>
+        </DialogFooter>
       </form>
-    </Sheet>
+    </AppDialog>
   );
 }
