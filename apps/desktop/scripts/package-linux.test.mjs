@@ -100,7 +100,9 @@ test("the Tauri payload ships as DEB, RPM and Arch packages with signed updater 
     assert.match(debListing(deb), /\.\/usr\/share\/applications\/Private AI Proxy\.desktop$/m);
     assert.doesNotMatch(debListing(deb), /package-manager/);
     const brand = JSON.parse(await readFile(path.join(appRoot, "brand/dstack/brand.json"), "utf8"));
-    assert.equal(output("dpkg-deb", ["-f", deb, "Maintainer"]), brand.organizationName);
+    // Debian Policy 5.6.2: a name and an email address, in every format.
+    const maintainer = `${brand.organizationName} <${brand.supportEmail}>`;
+    assert.equal(output("dpkg-deb", ["-f", deb, "Maintainer"]), maintainer);
     assert.equal(output("dpkg-deb", ["-f", deb, "Homepage"]), brand.homepageUrl);
     assert.equal(output("dpkg-deb", ["-f", deb, "Description"]), `${brand.bundle.shortDescription}\n ${brand.bundle.longDescription}`);
     // Every entry carries SOURCE_DATE_EPOCH (2026-01-01), so builds are reproducible.
@@ -112,6 +114,7 @@ test("the Tauri payload ships as DEB, RPM and Arch packages with signed updater 
     if (available("rpm")) {
       const query = (format) => output("rpm", ["-qp", "--qf", format, rpm]);
       assert.equal(query("%{NAME} %{EPOCH}:%{VERSION}-%{RELEASE}"), "private-ai-proxy (none):1.2.3~beta.4-1");
+      assert.equal(query("%{PACKAGER}"), maintainer);
       assert.equal(
         query("[%{FILENAMES}|%{FILEMODES:perms}|%{FILELINKTOS}\n]").replace(/\|l[-rwx]{9}\|/g, "|link|"),
         "/usr/bin/aci|link|private-ai-proxy\n/usr/bin/pap|link|private-ai-proxy\n/usr/bin/private-ai-proxy|-rwxr-xr-x|\n/usr/share/applications/Private AI Proxy.desktop|-rw-r--r--|",
@@ -123,6 +126,7 @@ test("the Tauri payload ships as DEB, RPM and Arch packages with signed updater 
       assert.equal(output("rpm", ["-qp", "--scripts", rpm]), "");
     }
     const info = pkginfo(arch);
+    assert.match(info, new RegExp(`^packager = ${maintainer}$`, "m"));
     assert.match(info, /^pkgver = 1\.2\.3beta\.4-1$/m);
     assert.match(info, /^provides = private-ai-proxy-cli=1\.2\.3beta\.4$/m);
     assert.match(info, /^conflict = private-ai-proxy-cli$/m);

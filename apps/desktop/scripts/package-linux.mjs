@@ -39,6 +39,8 @@ const debPrerm = path.join(appRoot, "src-tauri/installer/deb-prerm.sh");
 const brand = JSON.parse(await readFile(path.join(appRoot, "brand", process.env.PRIVATE_AI_PROXY_BRAND ?? "dstack", "brand.json"), "utf8"));
 const desktopName = brand.productName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 const cliName = `${desktopName}-cli`;
+// Debian Policy 5.6.2: the maintainer is a name and an email address.
+const maintainer = `${brand.organizationName} <${brand.supportEmail}>`;
 
 const linuxPackages = {
   desktop: {
@@ -126,7 +128,7 @@ function nfpmConfig(kind, packager, { version, arch, contents, marker, mtime }) 
     mtime,
     section: "utils",
     priority: "optional",
-    maintainer: brand.organizationName,
+    maintainer,
     homepage: brand.homepageUrl,
     license: "Apache-2.0",
     description: definition.description,
@@ -143,7 +145,7 @@ function nfpmConfig(kind, packager, { version, arch, contents, marker, mtime }) 
     ],
     overrides: { deb: { scripts: { preremove: debPrerm } } },
     deb: { compression: "xz" },
-    archlinux: { packager: brand.organizationName },
+    archlinux: { packager: maintainer },
   };
 }
 

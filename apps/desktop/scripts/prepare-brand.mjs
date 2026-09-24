@@ -57,6 +57,7 @@ const required = {
   tagline: "string",
   homepageUrl: "string",
   supportUrl: "string",
+  supportEmail: "string",
   "service.name": "string",
   "service.defaultUrl": "string",
   "service.keyLabel": "string",
