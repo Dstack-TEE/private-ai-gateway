@@ -60,7 +60,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), CallError> {
                         return true;
                     }
                 };
-                let text = match render_output(&state, cli) {
+                let text = match render_output(&AppStateWire::from(state), cli) {
                     Ok(text) => text,
                     Err(error) => {
                         output_error = Some(OutputError::Message(error));
@@ -89,7 +89,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), CallError> {
             command: Service::Status,
         } => {
             if client.is_running()? {
-                json!({"backend": client.version()?, "gateway": client.state()?})
+                json!({"backend": client.version()?, "gateway": AppStateWire::from(client.state()?)})
             } else {
                 json!({"backend": null, "status": "not_running"})
             }
@@ -129,7 +129,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), CallError> {
                 return Err("Profile selection was changed by another client.".into());
             }
             if state.status == VerificationStatus::Verified && !state.configuration_verification {
-                value(state)?
+                value(AppStateWire::from(state))?
             } else {
                 let started = if state.status == VerificationStatus::Verifying
                     && !state.configuration_verification
@@ -152,7 +152,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), CallError> {
                     }
                     match state.status {
                         VerificationStatus::Verified if !state.configuration_verification => {
-                            break value(state)?
+                            break value(AppStateWire::from(state))?
                         }
                         VerificationStatus::Verifying => {}
                         _ => return Err(

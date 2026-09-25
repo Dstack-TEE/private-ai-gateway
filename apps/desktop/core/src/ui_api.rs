@@ -275,9 +275,7 @@ pub async fn invoke(
         }
         Method::SaveAccountLogin => {
             let input: SaveLoginParams = params(input)?;
-            Ok(value(AppStateWire::from(
-                save_account_login(backend, input).await?,
-            ))?)
+            Ok(value(save_account_login(backend, input).await?)?)
         }
         Method::GetOrganizationUrl => {
             let input: OrganizationParams = params(input)?;
@@ -352,7 +350,7 @@ pub async fn invoke(
 async fn save_account_login(
     backend: &impl Backend,
     input: SaveLoginParams,
-) -> Result<AppState, CallError> {
+) -> Result<AppStateWire, CallError> {
     let operation_id = uuid::Uuid::new_v4().to_string();
     let result = |operation_id: String| rpc::AccountSaveResult { operation_id };
     let initial = call(

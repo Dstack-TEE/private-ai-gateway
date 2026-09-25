@@ -37,8 +37,8 @@ pub(crate) async fn run_blocking<T: Send + 'static>(
 /// The native theme of an appearance; `None` follows the system. The webview's
 /// `prefers-color-scheme` follows it: macOS WKWebView inherits the window's
 /// appearance, WebView2 takes it as its preferred color scheme, and WebKitGTK
-/// follows the GTK dark-theme preference (with `None`, the GTK theme rather
-/// than the desktop's color-scheme setting).
+/// follows GTK's dark-theme preference, which does not always track the
+/// desktop's dark style (see "Appearance" in docs/configuration.md).
 fn native_theme(appearance: Appearance) -> Option<tauri::Theme> {
     match appearance {
         Appearance::System => None,
@@ -279,7 +279,6 @@ pub fn run() {
                 .map(|saved| saved.appearance)
                 .unwrap_or_default();
             let window = WebviewWindowBuilder::from_config(app, config)?
-                .theme(native_theme(appearance))
                 .initialization_script(distribution::initialization_script())
                 .on_page_load(|window, payload| {
                     if matches!(payload.event(), PageLoadEvent::Finished) {
@@ -287,6 +286,12 @@ pub fn run() {
                     }
                 })
                 .build()?;
+            // A new window follows the system, so only a saved light or dark
+            // appearance is set, before the page loads. (On Linux the window
+            // builder's theme does not apply; `set_theme` does everywhere.)
+            if let Some(theme) = native_theme(appearance) {
+                window.set_theme(Some(theme))?;
+            }
             let window_for_events = window.clone();
             let app_for_events = app.handle().clone();
             let client_for_events = client.clone();

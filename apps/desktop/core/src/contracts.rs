@@ -228,7 +228,7 @@ impl From<ServiceProvider> for ServiceProviderInfo {
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum AccountSaveResult {
     Running,
-    Complete { state: Box<AppState> },
+    Complete { state: Box<AppStateWire> },
     Failed { error: String },
 }
 

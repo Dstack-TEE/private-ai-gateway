@@ -325,6 +325,14 @@ catalogs are labeled cached when protection is inactive. Reported costs are
 session totals, not a billing reconciliation. Request contents and tokens are
 never included in this summary. `--json` retains the full existing state shape.
 
+Every command that prints a state (`status`, `status --watch`, `start`, `stop`,
+profile, settings and web UI changes, and account sign-in) prints it as the
+management API sends it: the state's fields plus `protection`, the
+presentation derived from them (`phase`, such as `protected` or
+`profileRequired`; `title`; `tone`; and `action`, the operation the
+protection switch offers). `protection` is additive and always describes the
+state it accompanies.
+
 Read-only commands do not start a missing backend. A successful `status` means
 the query succeeded, not that protection is active: inspect `gateway.status`
 and `gateway.configurationVerification` in JSON. Connection and configuration

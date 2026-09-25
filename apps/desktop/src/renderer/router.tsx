@@ -1,7 +1,7 @@
 import { createBrowserHistory, createMemoryHistory, createRootRoute, createRoute, createRouter, redirect, stripSearchParams } from "@tanstack/react-router";
 import { Bot, ChartNoAxesColumn, LayoutGrid, Settings, type LucideIcon } from "lucide-react";
 import { AppLayout } from "./app";
-import { RouteError } from "./components/route-error";
+import { PageError, WindowError } from "./components/route-error";
 import { SignInPage } from "./components/sign-in";
 import { AgentsPage } from "./features/agents";
 import { OverviewPage } from "./features/overview";
@@ -24,6 +24,7 @@ const signInRoute = createRoute({
   path: "/sign-in",
   validateSearch: (search: Record<string, unknown>): { redirect?: string } => ({ redirect: returnPath(search.redirect) }),
   component: SignInPage,
+  errorComponent: WindowError,
 });
 
 // Every page needs a session in the web UI (TanStack Router authenticated
@@ -43,6 +44,7 @@ const appRoute = createRoute({
     if (!live) throw redirect({ to: "/sign-in", search: { redirect: location.href }, state: { notice }, replace: true });
   },
   component: AppLayout,
+  errorComponent: WindowError,
 });
 // The sidebar lists the pages with a title, in this order.
 const overviewRoute = createRoute({ getParentRoute: () => appRoute, path: "/", component: OverviewPage, staticData: { title: "Overview", icon: LayoutGrid } });
@@ -72,7 +74,7 @@ export const router = createRouter({
   // The web UI has real URLs. The desktop window has no address bar or deep
   // links, so its location stays in memory and the webview keeps loading index.html.
   history: web ? createBrowserHistory() : createMemoryHistory(),
-  defaultErrorComponent: RouteError,
+  defaultErrorComponent: PageError,
 });
 
 // A session that ends, here or on the server, returns to sign-in; nothing
