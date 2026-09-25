@@ -139,16 +139,20 @@ not configure a provider or access credentials.
 
 ## Release Contract
 
-Releases are cut by merging the release-please PR. The release tag then builds,
-publishes and distributes every channel; see
-[Release orchestration](distribution.md#release-orchestration). The npm
-publisher publishes everything as versions of the one `private-ai-proxy`
-package, as `@openai/codex` does. It uploads the six `<version>-<os>-<cpu>`
-platform versions first, under per-platform dist-tags. It then waits until the
-public registry serves all of them and a fresh install of the wrapper resolves
-them. Only then does it publish the wrapper under `latest` or `beta`, because
-trusted publishing cannot move a dist-tag after the fact. See
-[`apps/desktop/npm/README.md`](../npm/README.md#release) for the full order.
+Releases are cut by merging the release-please PR. The release tag then builds
+and publishes the GitHub release, the updater feeds, the Mac App Store build
+(stable only) and npm; see
+[Release orchestration](distribution.md#release-orchestration). The official
+shell installers read the updater feeds. The Homebrew tap
+[`Dstack-TEE/homebrew-private-ai`](https://github.com/Dstack-TEE/homebrew-private-ai)
+is not part of the tag pipeline: its own workflow opens an update pull request
+for each stable release, and a maintainer merges it. The npm publisher
+publishes everything as versions of the one `private-ai-proxy` package, as
+`@openai/codex` does. It uploads the six `<version>-<os>-<cpu>` platform
+versions first, under per-platform dist-tags, then the wrapper under `latest`
+or `beta`, because trusted publishing cannot move a dist-tag after the fact.
+See [`apps/desktop/npm/README.md`](../npm/README.md#release) for why that order
+needs no registry wait.
 
 `Desktop Tauri` is also the package-smoke entry point. A manual run on a branch
 builds unsigned test packages of the committed version and never creates a

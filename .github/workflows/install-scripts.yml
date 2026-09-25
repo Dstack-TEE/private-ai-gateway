@@ -18,7 +18,7 @@ permissions:
   contents: read
 
 env:
-  PAP_INSTALL_TEST_VERSION: 0.1.4
+  PAP_INSTALL_TEST_VERSION: 0.2.0-beta.2
 
 jobs:
   unix:
@@ -40,9 +40,9 @@ jobs:
           set -euo pipefail
           root="$RUNNER_TEMP/private-ai-proxy"
           bin="$RUNNER_TEMP/bin"
-          scripts/install-private-ai-proxy.sh --version "$PAP_INSTALL_TEST_VERSION" --install-dir "$root" --bin-dir "$bin"
+          scripts/install-private-ai-proxy.sh --channel beta --version "$PAP_INSTALL_TEST_VERSION" --install-dir "$root" --bin-dir "$bin"
           test "$("$bin/pap" --version)" = "private-ai-proxy $PAP_INSTALL_TEST_VERSION"
-          scripts/install-private-ai-proxy.sh --version "$PAP_INSTALL_TEST_VERSION" --install-dir "$root" --bin-dir "$bin"
+          scripts/install-private-ai-proxy.sh --channel beta --version "$PAP_INSTALL_TEST_VERSION" --install-dir "$root" --bin-dir "$bin"
           test "$("$bin/private-ai-proxy" --version)" = "private-ai-proxy $PAP_INSTALL_TEST_VERSION"
           test "$("$bin/aci" --version)" = "private-ai-proxy $PAP_INSTALL_TEST_VERSION"
 
@@ -58,9 +58,9 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $installDir = Join-Path $env:RUNNER_TEMP 'Private AI Proxy CLI'
-          .\scripts\install-private-ai-proxy.ps1 -Version $env:PAP_INSTALL_TEST_VERSION -InstallDir $installDir
+          .\scripts\install-private-ai-proxy.ps1 -Channel beta -Version $env:PAP_INSTALL_TEST_VERSION -InstallDir $installDir
           if ((& "$installDir\pap.cmd" --version).Trim() -ne "private-ai-proxy $env:PAP_INSTALL_TEST_VERSION") { throw 'pap version mismatch' }
-          .\scripts\install-private-ai-proxy.ps1 -Version $env:PAP_INSTALL_TEST_VERSION -InstallDir $installDir
+          .\scripts\install-private-ai-proxy.ps1 -Channel beta -Version $env:PAP_INSTALL_TEST_VERSION -InstallDir $installDir
           if ((& "$installDir\private-ai-proxy.exe" --version).Trim() -ne "private-ai-proxy $env:PAP_INSTALL_TEST_VERSION") { throw 'CLI version mismatch' }
           if ((& "$installDir\aci.cmd" --version).Trim() -ne "private-ai-proxy $env:PAP_INSTALL_TEST_VERSION") { throw 'aci version mismatch' }
           & "$installDir\private-ai-proxy.exe" --yes cli uninstall | Out-Null

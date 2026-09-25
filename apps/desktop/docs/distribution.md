@@ -48,9 +48,14 @@ GitHub release with that changelog section as its notes.
   `feat` on a patch-level beta moves to the next minor version but keeps the
   beta number: `0.2.1-beta.3` becomes `0.3.0-beta.3`. That is release-please's
   prerelease strategy, not a skipped release.
-- **Stable**: merge a commit whose message has the footer
-  `Release-As: x.y.z`. The next release PR then proposes `x.y.z`. Afterwards,
-  betas continue from the next version.
+- **Stable**: the prerelease strategy only ever proposes another beta, so
+  going from `0.2.0-beta.N` to `0.2.0` needs a commit on `main` whose message
+  has the footer `Release-As: 0.2.0`
+  ([release-please: Release-As](https://github.com/googleapis/release-please#how-do-i-change-the-version-number)).
+  The commit must change a file under `apps/desktop/`, because
+  `Desktop release PR` runs only for pushes that do; an empty commit, as in the
+  release-please README example, does not start it. The next release PR then
+  proposes `0.2.0`. Afterwards, betas continue from the next version.
 
 The tag starts `Desktop release` (`desktop-release.yml`), which runs only for
 release tags and calls `Desktop Tauri` (`desktop-native.yml`) at the tagged
@@ -63,10 +68,11 @@ The App Store build's CFBundleVersion is `100 + <Desktop release run number>`.
 A Mac app's build number must increase with every upload, across versions, and
 is at most three integers and 18 characters
 ([TN2420](https://developer.apple.com/library/archive/technotes/tn2420/_index.html)).
-The run number increases only on release tags, from 4 after three earlier
-manual runs of the workflow file, and a re-run keeps it. Beta tags use a run
-number but upload nothing, so the first App Store upload is `100 +` the run
-number of the first stable tag, at least 104. The offset
+The run number increases only on release tags, and a re-run keeps it. Runs
+1–3 were manual runs of the workflow file, and the `0.2.0-beta.1` and
+`0.2.0-beta.2` tags used runs 4 and 5. Beta tags use a run number but upload
+nothing, so the first App Store upload is `100 +` the run number of the first
+stable tag, at least 106. The offset
 starts above the hand-numbered builds 1–17, as Xcode Cloud's
 [next build number](https://developer.apple.com/documentation/xcode/setting-the-next-build-number-for-xcode-cloud-builds)
 does for existing Mac apps.
@@ -77,8 +83,12 @@ Once every package and the App Store upload have succeeded, the run:
    Every file in `SHA256SUMS` gets a signed SLSA build provenance attestation
    (`gh attestation verify <file> --repo Dstack-TEE/private-ai-gateway`);
 2. publishes it (stable releases become Latest);
-3. advances the updater feeds, retrying the idempotent publish up to three times
-   on a transient GitHub failure;
+3. advances the updater feeds. The publish is idempotent, so after a transient
+   GitHub failure use **Re-run failed jobs**, which also runs the npm publish
+   that the failure skipped. Dispatching `desktop-update-feed.yml` on the tag
+   instead leaves `publish-npm` skipped in the release run; then also dispatch
+   `private-ai-proxy-npm.yml` on the tag with `release_tag` set to the tag and
+   `publish` enabled;
 4. dispatches the dedicated npm publisher at the release tag and waits for it.
    npm checks the top-level workflow identity for OIDC trusted publishing.
 

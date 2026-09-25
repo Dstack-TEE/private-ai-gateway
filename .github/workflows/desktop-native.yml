@@ -971,7 +971,7 @@ jobs:
     needs: update-feed
     if: ${{ !cancelled() && needs.update-feed.result == 'success' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    timeout-minutes: 45
     permissions:
       actions: write
       contents: read

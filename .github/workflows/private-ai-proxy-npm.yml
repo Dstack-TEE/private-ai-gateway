@@ -136,16 +136,16 @@ jobs:
           node apps/desktop/scripts/package-npm.mjs wrapper \
             --version "$VERSION" \
             --output npm-packages
+      # package-npm.test.mjs covers the generated manifests; this checks that
+      # each tarball holds exactly the expected files and the released binaries.
       - name: Verify npm tarballs
         env:
           VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
-          while read -r platform npm_platform arch _ binary_extension; do
+          while read -r platform npm_platform arch binary_extension; do
             if [[ "$binary_extension" == none ]]; then binary_extension=""; fi
-            target="${npm_platform}-${arch}"
-            package_version="${VERSION}-${target}"
-            tarball="npm-packages/private-ai-proxy-${package_version}.tgz"
+            tarball="npm-packages/private-ai-proxy-${VERSION}-${npm_platform}-${arch}.tgz"
             source="extracted/${platform}-${arch}/private-ai-proxy-cli-${VERSION}-${platform}-${arch}"
             destination="verified/${platform}-${arch}"
             mkdir -p "$destination"
@@ -156,56 +156,19 @@ jobs:
             for binary in private-ai-proxy private-ai-proxy-helper private-ai-proxy-service; do
               cmp "$source/${binary}${binary_extension}" "$destination/package/vendor/${binary}${binary_extension}"
             done
-            node --input-type=module -e '
-              import { readFile } from "node:fs/promises";
-              const [file, version, platform, arch] = process.argv.slice(1);
-              const manifest = JSON.parse(await readFile(file, "utf8"));
-              if (manifest.name !== "private-ai-proxy" || manifest.version !== version) {
-                throw new Error("platform package identity mismatch");
-              }
-              if (JSON.stringify(manifest.os) !== JSON.stringify([platform])) throw new Error("platform package os mismatch");
-              if (JSON.stringify(manifest.cpu) !== JSON.stringify([arch])) throw new Error("platform package cpu mismatch");
-              const libc = platform === "linux" ? ["glibc"] : undefined;
-              if (JSON.stringify(manifest.libc) !== JSON.stringify(libc)) throw new Error("platform package libc mismatch");
-              if (manifest.scripts !== undefined) throw new Error("platform package must not have scripts");
-            ' "$destination/package/package.json" "$package_version" "$npm_platform" "$arch"
           done <<'TARGETS'
-          macos darwin arm64 tar.gz none
-          macos darwin x64 tar.gz none
-          linux linux arm64 tar.gz none
-          linux linux x64 tar.gz none
-          windows win32 arm64 zip .exe
-          windows win32 x64 zip .exe
+          macos darwin arm64 none
+          macos darwin x64 none
+          linux linux arm64 none
+          linux linux x64 none
+          windows win32 arm64 .exe
+          windows win32 x64 .exe
           TARGETS
 
           wrapper="npm-packages/private-ai-proxy-${VERSION}.tgz"
-          mkdir -p verified/wrapper
-          tar -xzf "$wrapper" -C verified/wrapper
           diff -u \
             <(printf '%s\n' package/LICENSE package/README.md package/bin/aci.cjs package/bin/private-ai-proxy.cjs package/package.json | sort) \
             <(tar -tzf "$wrapper" | sort)
-          node --input-type=module - verified/wrapper/package/package.json "$VERSION" <<'NODE'
-          import { readFile } from "node:fs/promises";
-          const [file, version] = process.argv.slice(2);
-          const manifest = JSON.parse(await readFile(file, "utf8"));
-          if (manifest.name !== "private-ai-proxy" || manifest.version !== version) throw new Error("wrapper package identity mismatch");
-          const targets = [
-            "darwin-arm64",
-            "darwin-x64",
-            "linux-arm64",
-            "linux-x64",
-            "win32-arm64",
-            "win32-x64",
-          ];
-          const expected = Object.fromEntries(targets.map((target) => [
-            `private-ai-proxy-${target}`,
-            `npm:private-ai-proxy@${version}-${target}`,
-          ]));
-          if (JSON.stringify(manifest.optionalDependencies) !== JSON.stringify(expected)) {
-            throw new Error("wrapper optional dependency map mismatch");
-          }
-          if (manifest.scripts !== undefined) throw new Error("wrapper must not have scripts");
-          NODE
       - name: Smoke-test a global npm installation
         env:
           VERSION: ${{ steps.release.outputs.version }}
@@ -228,22 +191,22 @@ jobs:
           path: npm-packages/*.tgz
 
   # Trusted publishing (OIDC) only authorizes `npm publish`; `npm dist-tag` is
-  # not available to this job. The wrapper therefore moves the channel tag as it
-  # publishes, so it is published only after every platform version it aliases
-  # is served by the public registry and a fresh install of the wrapper tarball
-  # resolves them.
+  # not available to this job, so the wrapper moves the channel tag as it
+  # publishes. Every version shares one packument, which the registry writes
+  # whole, and the platform versions are published first, so any packument
+  # that lists the new wrapper also lists its platform versions. Publishing the
+  # wrapper last is therefore enough; there is nothing to wait for.
   publish:
     if: inputs.publish
     needs: package
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 15
     environment: npm
     permissions:
       contents: read
       id-token: write
     env:
       REGISTRY_HELPER: apps/desktop/scripts/npm-registry.mjs
-      REGISTRY_WAIT_SECONDS: 900
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -262,7 +225,8 @@ jobs:
       # Like @openai/codex (.github/workflows/rust-release.yml), each platform
       # version of the one package gets its own dist-tag, `<os>-<cpu>` or
       # `beta-<os>-<cpu>`, so `latest` and `beta` only ever name the wrapper.
-      # Every tarball updates the same packument, so publish serially.
+      # Every tarball updates the same packument, so publish serially. Trusted
+      # publishing generates provenance without `--provenance`.
       - name: Publish platform versions
         env:
           DIST_TAG: ${{ needs.package.outputs.dist_tag }}
@@ -288,30 +252,9 @@ jobs:
             if [[ "$state" == published ]]; then
               echo "private-ai-proxy@${VERSION}-${target} already exists with matching contents; skipping"
             else
-              npm publish "$tarball" --access public --provenance --tag "$platform_tag"
+              npm publish "$tarball" --access public --tag "$platform_tag"
             fi
           done
-      - name: Wait for the registry to serve every platform version
-        env:
-          VERSION: ${{ needs.package.outputs.version }}
-        run: |
-          set -euo pipefail
-          node "$REGISTRY_HELPER" wait --timeout-seconds "$REGISTRY_WAIT_SECONDS" \
-            npm-packages/private-ai-proxy-"${VERSION}"-*.tgz
-      - name: Install the wrapper against the public platform versions
-        env:
-          VERSION: ${{ needs.package.outputs.version }}
-        run: |
-          set -euo pipefail
-          smoke="$RUNNER_TEMP/npm-registry-smoke"
-          mkdir -p "$smoke"
-          : > "$smoke/npmrc"
-          NPM_CONFIG_USERCONFIG="$smoke/npmrc" npm install --global \
-            --prefix "$smoke/prefix" --cache "$smoke/cache" \
-            --registry https://registry.npmjs.org \
-            --ignore-scripts --no-audit --no-fund \
-            "$(realpath "npm-packages/private-ai-proxy-${VERSION}.tgz")"
-          test "$("$smoke/prefix/bin/private-ai-proxy" --version)" = "private-ai-proxy $VERSION"
       - name: Publish wrapper with the channel dist-tag
         env:
           DIST_TAG: ${{ needs.package.outputs.dist_tag }}
@@ -323,21 +266,5 @@ jobs:
           if [[ "$state" == published ]]; then
             echo "private-ai-proxy@${VERSION} already exists with matching contents; skipping"
           else
-            npm publish "$tarball" --access public --provenance --tag "$DIST_TAG"
+            npm publish "$tarball" --access public --tag "$DIST_TAG"
           fi
-      - name: Install the published release
-        env:
-          VERSION: ${{ needs.package.outputs.version }}
-        run: |
-          set -euo pipefail
-          node "$REGISTRY_HELPER" wait --timeout-seconds "$REGISTRY_WAIT_SECONDS" \
-            "npm-packages/private-ai-proxy-${VERSION}.tgz"
-          smoke="$RUNNER_TEMP/npm-release-smoke"
-          mkdir -p "$smoke"
-          : > "$smoke/npmrc"
-          NPM_CONFIG_USERCONFIG="$smoke/npmrc" npm install --global \
-            --prefix "$smoke/prefix" --cache "$smoke/cache" \
-            --registry https://registry.npmjs.org \
-            --ignore-scripts --no-audit --no-fund \
-            "private-ai-proxy@${VERSION}"
-          test "$("$smoke/prefix/bin/private-ai-proxy" --version)" = "private-ai-proxy $VERSION"

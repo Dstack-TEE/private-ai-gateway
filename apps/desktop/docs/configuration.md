@@ -258,7 +258,6 @@ documents link here instead of keeping their own lists.
   (`LEGACY_SCRIPT` in `cli/manage/install.rs`).
 - `src-tauri/src/autostart/migration.rs`, the bridge from the
   tauri-plugin-autostart login item.
-- The legacy default window size shim in `src-tauri/src/window_state.rs`.
 - The per-platform update manifests `latest-<os>-<arch>.json` that clients up
   to 0.1.7-beta.4 read (see [Updates by installation](distribution.md#updates-by-installation)):
   the legacy branch of `updateFeeds` in `scripts/update-feeds.mjs`. Delete the

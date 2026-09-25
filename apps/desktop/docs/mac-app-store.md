@@ -77,9 +77,10 @@ increase with every upload, across versions
 Releases number it `100 + <Desktop release run number>` (see
 [Release orchestration](distribution.md#release-orchestration)).
 `Desktop release` runs only for `desktop-v*` tags, so its run number counts
-beta and stable release tags alike, from 4. Only stable tags upload, so the
-first upload is `100 +` the run number of the first stable tag, at least 104,
-and builds skip the numbers of beta tags. There is no manual upload path; a new
+beta and stable release tags alike; the `0.2.0-beta.1` and `0.2.0-beta.2` tags
+used runs 4 and 5. Only stable tags upload, so the first upload is `100 +` the
+run number of the first stable tag, at least 106, and builds skip the numbers
+of beta tags. There is no manual upload path; a new
 build number needs a new release tag. ASC confirms uniqueness and ordering; the
 repository validates syntax only. For a local unsigned build of a stable
 version on macOS:
