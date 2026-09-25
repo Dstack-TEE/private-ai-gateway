@@ -33,6 +33,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./v2": {
+      "types": "./dist/v2.d.ts",
+      "import": "./dist/v2.js",
+      "default": "./dist/v2.js"
     }
   },
   "publishConfig": {
@@ -52,17 +57,16 @@
     "prepublishOnly": "npm run check && npm test && npm run lint && npm run format:check"
   },
   "dependencies": {
+    "@ai-sdk/openai-compatible": "^2.0.0",
+    "@opencode-ai/plugin": "^1.18.32",
+    "@opencode/plugin": "^2.0.0",
     "@phala/aci-provider": "^0.7.3"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "1.18.24",
-    "@opencode-ai/sdk": "1.18.24"
-  },
-  "peerDependencies": {
-    "@opencode-ai/plugin": ">=1.18.23 <2"
+    "@opencode-ai/sdk": "1.18.32"
   },
   "engines": {
     "bun": ">=1.4.0",
-    "opencode": ">=1.18.23 <2"
+    "opencode": ">=1.18.29 <3"
   }
 }

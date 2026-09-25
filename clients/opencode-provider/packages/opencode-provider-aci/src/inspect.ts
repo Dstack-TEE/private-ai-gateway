@@ -1,4 +1,4 @@
-import { tool, type ToolDefinition } from "@opencode-ai/plugin";
+import type { ToolDefinition } from "@opencode-ai/plugin";
 import { formatAciInspection, inspectAciProvider, type AciProvider } from "@phala/aci-provider";
 
 function providerOrThrow(getProvider: () => AciProvider | undefined): AciProvider {
@@ -7,10 +7,11 @@ function providerOrThrow(getProvider: () => AciProvider | undefined): AciProvide
   return provider;
 }
 
-export function createAciInspectTool(
+export async function createAciInspectTool(
   getProvider: () => AciProvider | undefined,
   providerLabel = "ACI provider",
-): ToolDefinition {
+): Promise<ToolDefinition> {
+  const { tool } = await import("@opencode-ai/plugin");
   return tool({
     description:
       "Inspect the local ACI verified connection, attestation, receipt history, or an attested session. This is read-only and returns verification metadata, never prompts or responses.",

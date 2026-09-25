@@ -8,10 +8,12 @@
   supplies the Phala Cloud endpoint and identity.
 
 Both branded packages support direct API keys. Only the Phala Cloud package
-adds its device login; RedPill does not currently expose account OAuth. All
-packages use OpenCode's v1 server-plugin manifest and run on Bun. The provider
-is created by the plugin, so plugin installation or initialization failure
-cannot leave a separately configured ordinary HTTPS provider behind.
+adds its device login; RedPill does not currently expose account OAuth. Every
+package default-exports one definition that supports both OpenCode V1
+(`server`) and OpenCode V2 (`id` and `setup`), so OpenCode `1.18.29` or newer
+and OpenCode 2 both load it. The provider is created by the plugin, so plugin
+installation or initialization failure cannot leave a separately configured
+ordinary HTTPS provider behind.
 
 Install through OpenCode's native plugin command:
 
@@ -33,6 +35,8 @@ verified connection and attestation, lists retained receipts, verifies a
 receipt, or verifies a content-addressed session without returning prompts,
 responses, or raw evidence. Provider-scoped commands expose those actions as
 `/<id>-attestation`, `/<id>-receipts`, `/<id>-receipt [receipt-id]`, and
-`/<id>-session <session-id>`. OpenCode commands are prompt templates: they ask
-the selected model to invoke that local tool and return its output. Verification
-remains automatic and fail closed; the commands are an inspection surface only.
+`/<id>-session <session-id>`. On OpenCode V2 the commands inspect the verified
+connection directly and post the result; on V1 they are prompt templates that
+ask the selected model to invoke that local tool and return its output.
+Verification remains automatic and fail closed; the commands are an inspection
+surface only.
