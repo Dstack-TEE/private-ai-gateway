@@ -6,7 +6,7 @@ import { cliRegistrationQuery, usagePageQuery } from "./lib/page-queries";
 import { useAppState } from "./lib/use-app-state";
 import { useWindowReady } from "./lib/use-window-ready";
 import { errorMessage, toastError } from "./lib/error-message";
-import { brand } from "./generated/brand";
+import { brand } from "./brand/brand";
 import { useUpdates } from "./updates";
 import type { AgentStatus, ConfidentialProfile, AppState, LaunchPreferences, NavigationTarget, RequestActivity } from "../shared/contracts";
 import { PageHeader, Sidebar, useView } from "./components/navigation";

@@ -152,7 +152,7 @@ export async function embedProvisioningProfile(profile, app) {
 async function main() {
   if (process.platform !== "darwin") throw new Error("Mac App Store packages must be built on macOS");
   const options = argumentsFrom(process.argv.slice(2));
-  const brand = JSON.parse(await readFile(path.join(appRoot, "brand/dstack/brand.json"), "utf8"));
+  const { identifier } = JSON.parse(await readFile(path.join(appRoot, "src-tauri/tauri.conf.json"), "utf8"));
   await requireFile(path.join(options.app, "Contents/Info.plist"), "Application Info.plist");
   await requireFile(options.profile, "Mac App Store provisioning profile");
   const scratch = await mkdtemp(path.join(os.tmpdir(), "private-ai-proxy-app-store-"));
@@ -160,7 +160,7 @@ async function main() {
     const decodedProfile = path.join(scratch, "profile.plist");
     run("security", ["cms", "-D", "-i", options.profile, "-o", decodedProfile]);
     const profile = readProvisioningProfile(decodedProfile);
-    const entitlements = appStoreEntitlements(profile, brand.bundle.identifier);
+    const entitlements = appStoreEntitlements(profile, identifier);
     const mainEntitlements = path.join(scratch, "main.entitlements");
     const childEntitlements = path.join(scratch, "child.entitlements");
     await writePlist(mainEntitlements, entitlements.main);
@@ -170,7 +170,7 @@ async function main() {
     const executableDirectory = path.join(options.app, "Contents/MacOS");
     const infoPlist = path.join(options.app, "Contents/Info.plist");
     const info = JSON.parse(run("plutil", ["-convert", "json", "-o", "-", infoPlist], { capture: true }));
-    const executables = validateAppStoreManifest(info, brand.bundle.identifier);
+    const executables = validateAppStoreManifest(info, identifier);
     await validateBundledCode(options.app, executables);
     const mainExecutable = info.CFBundleExecutable;
     const children = MAC_APP_STORE_SIDECARS;

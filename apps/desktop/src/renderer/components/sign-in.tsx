@@ -1,6 +1,6 @@
 import { useId, useLayoutEffect, useState, type FormEvent } from "react";
 import { createRoot } from "react-dom/client";
-import { brand } from "../generated/brand";
+import { brand } from "../brand/brand";
 import { errorMessage } from "../lib/error-message";
 import { Button } from "./ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";

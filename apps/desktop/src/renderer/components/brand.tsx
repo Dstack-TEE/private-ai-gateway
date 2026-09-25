@@ -1,6 +1,6 @@
 import React from "react";
 import { Network } from "lucide-react";
-import { brand } from "../generated/brand";
+import { brand } from "../brand/brand";
 import { useAppearance } from "./appearance";
 import { macOS } from "../lib/environment";
 import { servicePreset } from "../lib/services";

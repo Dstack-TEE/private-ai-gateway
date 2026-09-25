@@ -20,7 +20,7 @@ const execute = promisify(execFile);
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const targetTriple = execFileSync("rustc", ["-vV"], { encoding: "utf8", timeout: 10_000 }).match(/^host: (.+)$/m)?.[1];
 assert.ok(targetTriple?.includes("windows"), "Expected a Windows Rust host target");
-const { identifier } = JSON.parse(await readFile(path.join(appRoot, "src-tauri/tauri.brand.conf.json"), "utf8"));
+const { identifier } = JSON.parse(await readFile(path.join(appRoot, "src-tauri/tauri.conf.json"), "utf8"));
 assert.match(identifier, /^[A-Za-z0-9.-]+$/);
 
 const scratch = await mkdtemp(path.join(os.tmpdir(), "pap-windows-gate-"));

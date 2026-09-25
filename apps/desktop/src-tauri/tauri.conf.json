@@ -51,7 +51,10 @@
       "dmg"
     ],
     "category": "DeveloperTool",
-    "shortDescription": "Private AI Proxy desktop application",
+    "shortDescription": "Verified local AI proxy",
+    "longDescription": "Routes coding agents through a hardware-verified confidential AI service with a signed proof for every answer.",
+    "publisher": "Dstack TEE",
+    "homepage": "https://dstack.org",
     "externalBin": [
       "binaries/private-ai-proxy",
       "binaries/private-ai-proxy-service",
@@ -66,7 +69,22 @@
     ],
     "macOS": {
       "hardenedRuntime": true,
-      "minimumSystemVersion": "13.0"
+      "minimumSystemVersion": "13.0",
+      "dmg": {
+        "background": "installer/brand-dmg-background.png",
+        "windowSize": {
+          "width": 660,
+          "height": 440
+        },
+        "appPosition": {
+          "x": 180,
+          "y": 230
+        },
+        "applicationFolderPosition": {
+          "x": 480,
+          "y": 230
+        }
+      }
     },
     "windows": {
       "nsis": {
@@ -74,7 +92,17 @@
         "headerImage": "installer/brand-header.bmp",
         "sidebarImage": "installer/brand-sidebar.bmp",
         "installerIcon": "icons/icon.ico",
-        "installerHooks": "installer/windows.nsh"
+        "installerHooks": "installer/windows.nsh",
+        "uninstallerIcon": "icons/icon.ico"
+      }
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "org.dstack.private-ai-proxy"
+        ]
       }
     }
   }
