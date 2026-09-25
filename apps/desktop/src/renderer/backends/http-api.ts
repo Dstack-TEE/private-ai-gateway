@@ -1,129 +1,122 @@
-import type {
-  CliRegistration,
-  DistributionCapabilities,
-  ProfileBackup,
-  ServiceProvider,
-  UiMethod,
-  UpdateInfo,
-  UpdateNotice,
-  WebBootstrap,
+import {
+  ABOUT_LINKS,
+  AGENT_WEBSITES,
+  API_KEY_PAGES,
+  WEB_DISTRIBUTION,
+  type ProfileBackup,
+  type UiMethod,
+  type UpdateInfo,
+  type UpdateNotice,
+  type WebBootstrap,
 } from "../../shared/contracts";
-import { showSignIn } from "../components/sign-in";
-import { createDesktopApi, type UiPlatform, type UiTransport } from "./create-api";
+import { createDesktopApi, type Backend, type UiPlatform, type UiTransport, type WebSession } from "./create-api";
 
 type EventListener = (payload: never) => void;
 
-/** Why the last session ended, shown once on the sign-in page after a reload. */
-const noticeKey = "private-ai-proxy-web-notice";
 const sessionEnded = "Your web UI session ended or expired. Sign in again.";
 const signedOut = "You signed out. Sign in again to continue.";
 const listeners = new Map<string, Set<EventListener>>();
-let ended = false;
+const endListeners = new Set<(notice: string) => void>();
+let events: EventSource | undefined;
+/** A session was confirmed and has not ended since, so its end is announced once. */
+let signedIn = false;
 
-export async function createBackend(): Promise<{
-  desktopApi: ReturnType<typeof createDesktopApi>;
-  distributionCapabilities: DistributionCapabilities;
-  signOut: (() => Promise<void>) | undefined;
-}> {
-  const bootstrap = await signIn();
+export function createBackend(): Backend {
   const transport: UiTransport = { call: rpc, subscribe };
-  readEvents();
-  return {
-    desktopApi: createDesktopApi(transport, createPlatform(bootstrap)),
-    distributionCapabilities: bootstrap.distribution,
+  const session: WebSession = {
+    check,
+    signIn,
     signOut,
-  };
-}
-
-function createPlatform(bootstrap: WebBootstrap): UiPlatform {
-  const registration: CliRegistration = {
-    executable: "private-ai-proxy",
-    commandPath: "pap",
-    installed: true,
-    onPath: true,
+    onEnded: (listener) => {
+      endListeners.add(listener);
+      return () => endListeners.delete(listener);
+    },
   };
   return {
-    showEditMenu: async () => undefined,
-    getAppVersion: async () => bootstrap.version,
-    setUpdateChannel: async (channel) => channel,
-    // The backend's own installation owns updates; the browser only announces them.
-    prepareUpdate: async (): Promise<UpdateInfo> => {
-      const notice = await rpc<UpdateNotice>("get_update_notice");
-      return {
-        enabled: false,
-        systemManaged: true,
-        currentVersion: notice.currentVersion,
-        channel: notice.channel,
-        version: notice.version,
-        channelPublished: notice.channelPublished,
-        upgradeCommands: notice.commands,
-        downloadUrl: notice.downloadUrl,
-      };
-    },
-    restartToUpdate: async () => undefined,
-    getCliRegistration: async () => registration,
-    setCliRegistration: async () => registration,
-    stopAllAndQuit: async () => undefined,
-    copyText: async (text) => {
-      // Absent outside secure contexts, such as plain HTTP on a network address.
-      if (!window.isSecureContext) throw new Error("Copying needs 127.0.0.1 or HTTPS in this browser. Select and copy the text instead.");
-      await navigator.clipboard.writeText(text);
-    },
-    selectProfileBackup,
-    saveProfileExport: async () => download(
-      "private-ai-proxy-profiles.json",
-      await rpc<string>("export_profiles_content"),
-    ),
-    saveDiagnosticsExport: async () => download(
-      "private-ai-proxy-diagnostics.json",
-      await rpc<string>("export_diagnostics_content"),
-    ),
-    requestNotificationPermission: async () => ({ permission: "unsupported", alertsEnabled: false }),
-    openNotificationSettings: async () => undefined,
-    mainWindowReady: async () => undefined,
-    openWebUi: async () => {
-      throw new Error("The web UI is already open in this browser");
-    },
-    openAboutLink: async (target) => openAllowed({
-      documentation: "https://github.com/Dstack-TEE/private-ai-gateway#readme",
-      github: "https://github.com/Dstack-TEE/private-ai-gateway",
-      aci: "https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/attested-confidential-inference.md",
-    }[target]),
-    openAgentWebsite: async (agentId) => openAllowed(agentWebsites[agentId]),
-    openApiKeyPage: async (provider) => openAllowed(apiKeyPages[provider]),
-    presentAccountLogin: (login) => {
-      // The login sheet keeps a manual link, so a blocked or rejected tab must not fail the login.
-      try {
-        openAllowed(login.url);
-      } catch {
-        return;
-      }
-    },
-    openOrganization: async (organizationSlug) => openAllowed(
-      await rpc<string>("get_organization_url", { organizationSlug }),
-    ),
-    openTopUp: async (provider, scopeSlug) => openAllowed(
-      await rpc<string>("get_top_up_url", { provider, scopeSlug }),
-    ),
+    desktopApi: createDesktopApi(transport, platform),
+    distributionCapabilities: WEB_DISTRIBUTION,
+    session,
   };
 }
 
-/**
- * Loads the bootstrap with this browser's session cookie, showing the password
- * sign-in page first when there is no live session.
- */
-async function signIn(): Promise<WebBootstrap> {
+const unavailable = async (): Promise<never> => {
+  throw new Error("This is only available in the desktop app");
+};
+
+const platform: UiPlatform = {
+  showEditMenu: async () => undefined,
+  getAppVersion: async () => (await request<WebBootstrap>("/api/bootstrap", { method: "GET" })).version,
+  setUpdateChannel: async (channel) => channel,
+  // The backend's own installation owns updates; the browser only announces them.
+  prepareUpdate: async (): Promise<UpdateInfo> => {
+    const notice = await rpc<UpdateNotice>("get_update_notice");
+    return {
+      enabled: false,
+      systemManaged: true,
+      currentVersion: notice.currentVersion,
+      channel: notice.channel,
+      version: notice.version,
+      channelPublished: notice.channelPublished,
+      upgradeCommands: notice.commands,
+      downloadUrl: notice.downloadUrl,
+    };
+  },
+  restartToUpdate: async () => undefined,
+  getCliRegistration: unavailable,
+  setCliRegistration: unavailable,
+  stopAllAndQuit: async () => undefined,
+  copyText: async (text) => {
+    // Absent outside secure contexts, such as plain HTTP on a network address.
+    if (!window.isSecureContext) throw new Error("Copying needs 127.0.0.1 or HTTPS in this browser. Select and copy the text instead.");
+    await navigator.clipboard.writeText(text);
+  },
+  selectProfileBackup,
+  saveProfileExport: async () => download(
+    "private-ai-proxy-profiles.json",
+    await rpc<string>("export_profiles_content"),
+  ),
+  saveDiagnosticsExport: async () => download(
+    "private-ai-proxy-diagnostics.json",
+    await rpc<string>("export_diagnostics_content"),
+  ),
+  requestNotificationPermission: async () => ({ permission: "unsupported", alertsEnabled: false }),
+  openNotificationSettings: async () => undefined,
+  mainWindowReady: async () => undefined,
+  openWebUi: async () => {
+    throw new Error("The web UI is already open in this browser");
+  },
+  openAboutLink: async (target) => openAllowed(ABOUT_LINKS[target]),
+  openAgentWebsite: async (agentId) => openAllowed(AGENT_WEBSITES[agentId]),
+  openApiKeyPage: async (provider) => openAllowed(API_KEY_PAGES[provider]),
+  presentAccountLogin: (login) => {
+    // The login sheet keeps a manual link, so a blocked or rejected tab must not fail the login.
+    try {
+      openAllowed(login.url);
+    } catch {
+      return;
+    }
+  },
+  openOrganization: async (organizationSlug) => openAllowed(
+    await rpc<string>("get_organization_url", { organizationSlug }),
+  ),
+  openTopUp: async (provider, scopeSlug) => openAllowed(
+    await rpc<string>("get_top_up_url", { provider, scopeSlug }),
+  ),
+};
+
+async function check(): Promise<boolean> {
+  // Confirmed sessions are remembered until they end, so navigating costs no request.
+  if (signedIn) return true;
   const response = await fetch("/api/bootstrap", { cache: "no-store", credentials: "same-origin" });
   // Signed-in requests are never throttled, so 429 also means there is no session.
-  if (response.status !== 401 && response.status !== 429) return read<WebBootstrap>(response);
-  const notice = sessionStorage.getItem(noticeKey) ?? undefined;
-  sessionStorage.removeItem(noticeKey);
-  await showSignIn(notice, openSession);
-  return request<WebBootstrap>("/api/bootstrap", { method: "GET" });
+  if (response.status === 401 || response.status === 429) return false;
+  await read<WebBootstrap>(response);
+  signedIn = true;
+  events ??= readEvents();
+  return true;
 }
 
-/** Exchanges the web UI password for an `HttpOnly` session cookie. */
-async function openSession(password: string): Promise<void> {
+async function signIn(password: string): Promise<void> {
   const response = await fetch("/api/session", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -133,29 +126,25 @@ async function openSession(password: string): Promise<void> {
   });
   if (response.ok) return;
   const payload: unknown = await response.json().catch(() => undefined);
-  throw new Error(isErrorPayload(payload) ? payload.error.message : "Sign-in failed. Try again.");
+  throw errorFrom(payload, "Sign-in failed. Try again.");
 }
 
-/** Ends this browser's session on the server, then returns to the sign-in page. */
+/** Ends this browser's session on the server. */
 async function signOut(): Promise<void> {
   await request<undefined>("/api/session", { method: "DELETE" });
-  restartSignIn(signedOut);
+  endSession(signedOut);
 }
 
-/** The session cannot be recovered in place; reload into the sign-in page. */
-function endSession(text: string): never {
-  restartSignIn(text);
-  throw new Error(text);
-}
-
-function restartSignIn(text: string): void {
-  ended = true;
-  sessionStorage.setItem(noticeKey, text);
-  window.location.reload();
+function endSession(notice: string): void {
+  events?.close();
+  events = undefined;
+  if (!signedIn) return;
+  signedIn = false;
+  for (const listener of endListeners) listener(notice);
 }
 
 async function rpc<T>(method: UiMethod, params: Record<string, unknown> = {}): Promise<T> {
-  const response = await request<{ result?: T; error?: { message?: string } }>(
+  const response = await request<{ result: T }>(
     `/api/rpc/${encodeURIComponent(method)}`,
     {
       method: "POST",
@@ -163,30 +152,32 @@ async function rpc<T>(method: UiMethod, params: Record<string, unknown> = {}): P
       body: JSON.stringify(params),
     },
   );
-  if (response.error) throw new Error(response.error.message || "Management request failed");
-  return response.result as T;
+  return response.result;
 }
 
 async function request<T>(path: string, init: RequestInit): Promise<T> {
   return read<T>(await fetch(path, { ...init, cache: "no-store", credentials: "same-origin" }));
 }
 
+/** Answers are `{"result": …}`, or `{"error": {code, message}}` with the status of its code. */
 async function read<T>(response: Response): Promise<T> {
   const payload: unknown = await response.json().catch(() => undefined);
-  if (response.status === 401) endSession(sessionEnded);
-  if (!response.ok) {
-    const message = isErrorPayload(payload) ? payload.error.message : "Web UI request failed";
-    throw new Error(message);
+  if (response.status === 401) {
+    endSession(sessionEnded);
+    throw new Error(sessionEnded);
   }
+  if (!response.ok) throw errorFrom(payload, "Web UI request failed");
   return payload as T;
 }
 
-function isErrorPayload(value: unknown): value is { error: { message: string } } {
-  if (!value || typeof value !== "object" || !("error" in value)) return false;
-  const error = value.error;
-  return Boolean(
-    error && typeof error === "object" && "message" in error && typeof error.message === "string",
-  );
+function errorFrom(payload: unknown, fallback: string): Error {
+  if (payload && typeof payload === "object" && "error" in payload) {
+    const error = payload.error;
+    if (error && typeof error === "object" && "message" in error && typeof error.message === "string") {
+      return new Error(error.message);
+    }
+  }
+  return new Error(fallback);
 }
 
 function subscribe<T>(event: string, listener: (payload: T) => void): () => void {
@@ -202,7 +193,7 @@ function emit(event: string, payload: unknown): void {
 }
 
 /** The server sends a full state snapshot on every connection, so reconnecting loses nothing. */
-function readEvents(): void {
+function readEvents(): EventSource {
   const source = new EventSource("/api/events");
   source.addEventListener("message", (message) => {
     let decoded: unknown;
@@ -216,19 +207,21 @@ function readEvents(): void {
   // EventSource retries dropped connections itself but stops at an error
   // response, such as after the session ended.
   source.addEventListener("error", () => {
-    if (source.readyState === EventSource.CLOSED && !ended) window.setTimeout(() => void resumeEvents(), 1_000);
+    if (source.readyState === EventSource.CLOSED && events === source) window.setTimeout(() => void resumeEvents(source), 1_000);
   });
+  return source;
 }
 
 /** Reopens the stream while the session lives; an ended session returns to sign-in. */
-async function resumeEvents(): Promise<void> {
+async function resumeEvents(closed: EventSource): Promise<void> {
+  if (events !== closed) return;
   try {
     await request("/api/bootstrap", { method: "GET" });
   } catch {
-    if (!ended) window.setTimeout(() => void resumeEvents(), 5_000);
+    if (events === closed) window.setTimeout(() => void resumeEvents(closed), 5_000);
     return;
   }
-  readEvents();
+  if (events === closed) events = readEvents();
 }
 
 function isWebEvent(value: unknown): value is { event: string; payload: unknown } {
@@ -282,7 +275,7 @@ function isProfileBackup(value: unknown): value is ProfileBackup {
   ));
 }
 
-function download(name: string, content: string): void {
+function download(name: string, content: string): boolean {
   const url = URL.createObjectURL(new Blob([content], { type: "application/json" }));
   const link = document.createElement("a");
   link.href = url;
@@ -291,6 +284,7 @@ function download(name: string, content: string): void {
   link.click();
   link.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  return true;
 }
 
 function openAllowed(url: string | undefined): void {
@@ -299,17 +293,3 @@ function openAllowed(url: string | undefined): void {
   if (parsed.protocol !== "https:") throw new Error("Only secure external links are allowed");
   window.open(parsed.href, "_blank", "noopener,noreferrer");
 }
-
-const agentWebsites: Record<string, string> = {
-  codex: "https://developers.openai.com/codex/cli/",
-  "claude-code": "https://code.claude.com",
-  opencode: "https://opencode.ai",
-  pi: "https://pi.dev",
-  hermes: "https://hermes-agent.nousresearch.com",
-  openclaw: "https://openclaw.ai",
-  "oh-my-pi": "https://omp.sh",
-};
-const apiKeyPages: Partial<Record<ServiceProvider, string>> = {
-  phala: "https://cloud.phala.com/dashboard",
-  redpill: "https://www.redpill.ai/dashboard",
-};

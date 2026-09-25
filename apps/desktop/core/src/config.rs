@@ -36,6 +36,8 @@ pub const CREDENTIALS_FILE: &str = "credentials.toml";
 pub const SCHEMA_FILE: &str = "config.schema.json";
 /// Clear of the Local API (4180) and the account callback (4181).
 pub const WEB_UI_DEFAULT_PORT: u16 = 4182;
+/// The shortest web UI password, in characters (NIST SP 800-63B).
+pub const WEB_UI_PASSWORD_MIN_LENGTH: usize = 12;
 const MAX_PROFILES: usize = 50;
 const MAX_KEY_LEN: usize = 512;
 
@@ -58,7 +60,7 @@ pub struct Config {
     pub active_profile: String,
     /// Refuse services whose attestation reports a development OS image.
     pub require_production_os: bool,
-    /// Start protection when the backend starts.
+    /// Protect on launch: start protection when the backend starts.
     pub connect_on_launch: bool,
     pub appearance: Appearance,
     /// Release channel for update checks. Defaults to the channel of the running build.

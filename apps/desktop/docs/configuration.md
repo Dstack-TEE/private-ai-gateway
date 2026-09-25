@@ -5,7 +5,7 @@ directory, which holds nothing else:
 
 | File | Holds | Permissions |
 | --- | --- | --- |
-| `config.toml` | Profiles (without keys), the active profile, the Local API and web UI listeners, appearance, notifications, update channel, connect on launch, command registration | Owner-only when created; never holds a secret |
+| `config.toml` | Profiles (without keys), the active profile, the Local API and web UI listeners, appearance, notifications, update channel, Protect on launch (`connect-on-launch`), command registration | Owner-only when created; never holds a secret |
 | `credentials.toml` | The user's credentials: provider API keys (manual and account sign-in) and the web UI password hash | Always owner-only: `0600` on macOS and Linux, a protected owner-only DACL on Windows |
 | `config.schema.json` | The JSON Schema of `config.toml`, rewritten by each version | Generated |
 

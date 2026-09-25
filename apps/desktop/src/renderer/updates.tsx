@@ -46,8 +46,8 @@ export function useUpdates(api: DesktopApi, checks: boolean) {
       if (!mounted.current) return;
       client.setQueryData<UpdateInfo | undefined>(["app-update"], (current) => current ? { ...current, channel: saved, version: null } : current);
       await refresh();
-    } catch {
-      if (mounted.current) toastError("Software update unavailable", "Could not save update channel.");
+    } catch (error) {
+      if (mounted.current) toastError("Could not change the update channel", error);
     } finally {
       inFlight.current = false;
       if (mounted.current) setBusy(undefined);
@@ -64,12 +64,12 @@ export function useUpdates(api: DesktopApi, checks: boolean) {
       const latest = await refresh();
       if (latest.error) throw latest.error;
       if (!latest.data?.version) return;
-      if (!await confirm({ title: "Restart to update?", message: `Version ${latest.data.version} is ready. Protection will pause during the restart and resume only after fresh verification. In-flight requests may be interrupted.`, confirmLabel: "Restart to update" })) return;
+      if (!await confirm({ title: "Restart to update?", message: `Version ${latest.data.version} is ready. Protection will pause during the restart and resume only after fresh verification. In-flight requests may be interrupted.`, confirmLabel: "Restart to Update" })) return;
       installAttempted = true;
       await api.restartToUpdate();
     } catch (failure) {
       if (mounted.current) {
-        toastError("Software update unavailable", failure);
+        toastError("Could not install the update", failure);
         retry = installAttempted;
       }
     } finally {
@@ -117,7 +117,7 @@ export function UpdateControl({ updates, productName, desktop }: { updates: Retu
     </ItemContent>
     <ItemActions className="ml-auto max-w-full flex-wrap justify-end text-right">
       <span className="text-sm font-medium tabular-nums" data-slot="app-version">{currentVersion ? `v${currentVersion}` : "Version unavailable"}</span>
-      {ready ? <Button disabled={Boolean(busy)} onClick={() => void updates.restart()}><RotateCw aria-hidden="true" />Restart to update</Button> : <ItemDescription className="max-w-sm text-right" role="status">{label}</ItemDescription>}
+      {ready ? <Button disabled={Boolean(busy)} onClick={() => void updates.restart()}><RotateCw aria-hidden="true" />Restart to Update</Button> : <ItemDescription className="max-w-sm text-right" role="status">{label}</ItemDescription>}
       {ready && <span role="status" className="sr-only">{label}</span>}
     </ItemActions>
   </Item>;

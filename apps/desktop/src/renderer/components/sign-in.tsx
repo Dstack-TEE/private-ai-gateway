@@ -1,27 +1,18 @@
 import { useId, useLayoutEffect, useState, type FormEvent } from "react";
-import { createRoot } from "react-dom/client";
+import { useLocation, useRouter, useSearch } from "@tanstack/react-router";
 import { brand } from "../brand/brand";
 import { errorMessage } from "../lib/error-message";
+import { session } from "../lib/environment";
 import { Button } from "./ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "./ui/field";
 import { Input } from "./ui/input";
 
-/** Shows the web UI sign-in page until `signIn` accepts a password. */
-export function showSignIn(notice: string | undefined, signIn: (password: string) => Promise<void>): Promise<void> {
-  return new Promise((resolve) => {
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
-    root.render(<SignIn notice={notice} signIn={signIn} onSignedIn={() => {
-      root.unmount();
-      container.remove();
-      resolve();
-    }} />);
-  });
-}
-
-function SignIn({ notice, signIn, onSignedIn }: { notice?: string; signIn(password: string): Promise<void>; onSignedIn(): void }) {
+/** The web UI's `/sign-in` page: exchanges the password for a session, then returns to the page asked for. */
+export function SignInPage() {
+  const router = useRouter();
+  const { redirect } = useSearch({ from: "/sign-in" });
+  const notice = useLocation({ select: (location) => location.state.notice });
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -39,8 +30,9 @@ function SignIn({ notice, signIn, onSignedIn }: { notice?: string; signIn(passwo
     setBusy(true);
     setError(undefined);
     try {
-      await signIn(password);
-      onSignedIn();
+      if (!session) throw new Error("Sign-in is only needed in the web UI");
+      await session.signIn(password);
+      router.history.push(redirect ?? "/");
     } catch (signInError) {
       setError(errorMessage(signInError));
       setBusy(false);
@@ -49,7 +41,7 @@ function SignIn({ notice, signIn, onSignedIn }: { notice?: string; signIn(passwo
   return <main className="grid min-h-svh place-items-center bg-background p-4 text-foreground">
     <Card className="w-full max-w-sm">
       <CardHeader>
-        {/* Not BrandMark: this renders before the backend, so it must not import the environment. */}
+        {/* Saved appearance needs a session, so the mark follows the system theme like the page. */}
         <picture className="mb-2 block size-10" aria-hidden="true">
           <source media="(prefers-color-scheme: dark)" srcSet={brand.appIcon.dark} />
           <img className="size-full object-contain" src={brand.appIcon.light} alt="" />

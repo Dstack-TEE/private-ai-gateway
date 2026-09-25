@@ -78,7 +78,9 @@ protection problems, is stored under that key.
 
 ## Module boundaries
 
-- Renderer `index.tsx` owns bootstrap; `app.tsx` composes the window and its
+- Renderer `index.tsx` owns bootstrap and `router.tsx` the routes: in the web UI
+  every page is behind a session check (`beforeLoad` redirects to `/sign-in`,
+  TanStack Router's authenticated routes); `app.tsx` composes the window and its
   dialogs. `features/` contains pages and dialogs, `hooks/` owns reusable
   interactions, and `lib/` contains presentation rules and the live desktop API
   binding. Features never import the app.
@@ -98,6 +100,10 @@ protection problems, is stored under that key.
 - `core/src/ui_methods.rs` is the one list of renderer methods; it generates
   `ui_api::Method`, the Tauri command functions, their invoke handler and the
   Tauri app manifest, while `src-tauri/capabilities` grants them to windows.
+  `src-tauri/src/native_commands.rs` lists the shell's own commands for the
+  same handler and manifest, and a test checks that the capability grants
+  exactly the desktop commands. Event names, project links and web UI defaults
+  come from Rust as generated constants in `src/shared/contracts.generated.ts`.
   A method is either the management command of the same name or composed by a
   `Host` (tray state, Open at Login, notifications) from commands. The names
   are the Tauri command names and the web RPC paths, so the renderer, the CLI
@@ -115,9 +121,10 @@ protection problems, is stored under that key.
   and `start` explicitly launch it without opening a window.
 - Closing or quitting the UI leaves the backend and protection running. The tray's
   Stop All and Quit action requests confirmation, then shuts down the backend.
-- A disconnected UI offers Start backend. It does not silently restart a service
+- The desktop shell starts the backend in the background; until it answers,
+  the window shows it as starting. A disconnected UI offers Start Backend. It does not silently restart a service
   during an updater operation or replay an earlier mutation.
-- Connect on launch belongs to backend startup, not opening/reopening a UI.
+- Protect on launch (`connect-on-launch`) belongs to backend startup, not opening/reopening a UI.
   Login startup remains an explicit desktop OS preference.
 - Native wake monitoring also belongs to the backend: IOKit on macOS, power
   callbacks on Windows, and login1 on Linux. Recovery does not need an open UI.
@@ -160,7 +167,8 @@ names the process and its executable), `POST /api/rpc/{command}` with the
 command's parameters as a JSON object, and `GET /api/events`, a server-sent
 event stream that starts with a state snapshot. Errors are
 `{"error": {"code", "message"}}` with a stable code and the HTTP status of its
-Docker `errdefs` class. It is separate from the local inference HTTP API. An
+Docker `errdefs` class; Tauri commands reject with the same `{code, message}`
+and `--json` reports the same code. It is separate from the local inference HTTP API. An
 inference key never authorizes administration.
 
 The local endpoint is a Unix socket or a Windows named pipe; peers are

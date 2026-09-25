@@ -1,15 +1,26 @@
 import { getVersion } from "@tauri-apps/api/app";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { open, save } from "@tauri-apps/plugin-dialog";
 
-import type { DistributionCapabilities, ProfileBackup } from "../../shared/contracts";
-import { createDesktopApi, type UiPlatform, type UiTransport } from "./create-api";
+import type { DistributionCapabilities } from "../../shared/contracts";
+import { createDesktopApi, type Backend, type UiPlatform, type UiTransport } from "./create-api";
 
 declare global {
   interface Window {
     __PAP_DISTRIBUTION__?: DistributionCapabilities;
+  }
+}
+
+/** Commands reject with the serialized API error `{code, message}`; the renderer shows the message. */
+async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> {
+  try {
+    return await tauriInvoke<T>(command, args);
+  } catch (error) {
+    if (error && typeof error === "object" && "message" in error && typeof error.message === "string") {
+      throw new Error(error.message);
+    }
+    throw error instanceof Error ? error : new Error(String(error));
   }
 }
 
@@ -28,30 +39,10 @@ const platform: UiPlatform = {
   setCliRegistration: (installed) => invoke("set_cli_registration", { installed }),
   stopAllAndQuit: () => invoke("stop_all_and_quit"),
   copyText: (text) => invoke("copy_text", { text }),
-  selectProfileBackup: async () => {
-    const path = await open({
-      title: "Import Profile Configurations",
-      multiple: false,
-      filters: [{ name: "JSON", extensions: ["json"] }],
-    });
-    return path ? invoke<ProfileBackup>("read_profile_backup", { path }) : null;
-  },
-  saveProfileExport: async () => {
-    const path = await save({
-      title: "Export Profiles to a New File (No Keys)",
-      defaultPath: "private-ai-proxy-profiles.json",
-      filters: [{ name: "JSON", extensions: ["json"] }],
-    });
-    if (path) await invoke("export_profiles", { path });
-  },
-  saveDiagnosticsExport: async () => {
-    const path = await save({
-      title: "Export Redacted Diagnostics to a New File",
-      defaultPath: "private-ai-proxy-diagnostics.json",
-      filters: [{ name: "JSON", extensions: ["json"] }],
-    });
-    if (path) await invoke("export_diagnostics", { path });
-  },
+  // The shell shows the system file panels and reads or writes the chosen file.
+  selectProfileBackup: () => invoke("select_profile_backup"),
+  saveProfileExport: () => invoke("export_profiles"),
+  saveDiagnosticsExport: () => invoke("export_diagnostics"),
   requestNotificationPermission: () => invoke("request_notification_permission"),
   openNotificationSettings: () => invoke("open_notification_settings"),
   mainWindowReady: () => invoke("main_window_ready"),
@@ -88,13 +79,13 @@ function subscribe<T>(event: string, listener: (payload: T) => void): () => void
   };
 }
 
-export async function createBackend() {
+export function createBackend(): Backend {
   const distributionCapabilities = window.__PAP_DISTRIBUTION__;
   delete window.__PAP_DISTRIBUTION__;
   if (!distributionCapabilities) throw new Error("Distribution capabilities were not initialized");
   return {
     desktopApi: createDesktopApi(transport, platform),
     distributionCapabilities,
-    signOut: undefined,
+    session: undefined,
   };
 }

@@ -5,7 +5,11 @@
 
 use std::sync::Arc;
 
-use desktop_core::{client::Client, ui_api::Method};
+use desktop_core::{
+    client::{CallError, Client},
+    protocol,
+    ui_api::Method,
+};
 use serde_json::Value;
 use tauri::{
     ipc::{InvokeBody, Request},
@@ -25,7 +29,7 @@ macro_rules! ui_commands {
             window: WebviewWindow,
             client: State<'_, Arc<Client>>,
             request: Request<'_>,
-        ) -> Result<Value, String> {
+        ) -> Result<Value, CallError> {
             crate::ui_api::invoke(window, client, Method::$method, params(&request)?).await
         }
     )+};
@@ -33,9 +37,9 @@ macro_rules! ui_commands {
 
 desktop_core::renderer_methods!(ui_commands);
 
-fn params(request: &Request<'_>) -> Result<Value, String> {
+fn params(request: &Request<'_>) -> Result<Value, CallError> {
     match request.body() {
         InvokeBody::Json(params) => Ok(params.clone()),
-        InvokeBody::Raw(_) => Err("Invalid management request".into()),
+        InvokeBody::Raw(_) => Err(CallError::Api(protocol::Error::invalid_request())),
     }
 }

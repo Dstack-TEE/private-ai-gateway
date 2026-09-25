@@ -1,3 +1,5 @@
+#[macro_use]
+mod native_commands;
 mod commands;
 
 #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
@@ -12,16 +14,15 @@ mod tray_theme;
 mod ui_api;
 mod updates;
 
-use std::sync::Arc;
-
 use desktop_core::{
-    client::Client, config::Appearance, contracts::CommandRegistration, protocol::rpc,
+    client::Client,
+    config::Appearance,
+    contracts::{AppState, CommandRegistration},
 };
 use tauri::{
     webview::{PageLoadEvent, WebviewWindowBuilder},
-    AppHandle, Emitter, Manager, State, WindowEvent,
+    AppHandle, Emitter, Manager, WindowEvent,
 };
-use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_shell::ShellExt;
 
@@ -75,6 +76,20 @@ async fn run_cli_command(
         .map_err(|_| "The private-ai-proxy command returned an invalid response".to_string())
 }
 
+/// The backend instance the shell last saw. A backend that (re)connected needs
+/// the preferences it holds applied.
+#[derive(Default)]
+struct BackendInstance(Option<String>);
+
+impl BackendInstance {
+    /// Whether `state` comes from a backend other than the last one seen.
+    fn connected(&mut self, state: &AppState) -> bool {
+        let connected = state.backend_instance.is_some() && state.backend_instance != self.0;
+        self.0.clone_from(&state.backend_instance);
+        connected
+    }
+}
+
 #[derive(Default)]
 struct CliStartup(tokio::sync::Mutex<CliStartupState>);
 
@@ -114,13 +129,13 @@ async fn register_cli_on_startup(app: &AppHandle) {
     if state.attempted {
         return;
     }
-    let reader = app.state::<Arc<Client>>().inner().clone();
+    let reader = app.state::<std::sync::Arc<Client>>().inner().clone();
     if reader.cached_state().backend_connected == Some(false) {
         return;
     }
     let enabled = run_blocking(move || {
         Ok(reader
-            .call(rpc::Settings)?
+            .call(desktop_core::protocol::rpc::Settings)?
             .auto_cli_registration
             .unwrap_or(true))
     })
@@ -158,36 +173,19 @@ fn configure_account_return(app: &tauri::App) {
 }
 
 /// The invoke handler: every renderer method (`desktop_core::renderer_methods!`)
-/// and the shell's own commands.
+/// and the shell's own commands (`native_commands!`).
 macro_rules! invoke_handler {
     (
         commands { $($command:ident => $command_variant:ident),+ $(,)? }
         host { $($host:ident => $host_variant:ident),+ $(,)? }
     ) => {
-        tauri::generate_handler![
-            $(commands::ui::$command,)+
-            $(commands::ui::$host,)+
-            commands::settings::read_profile_backup,
-            commands::settings::export_profiles,
-            commands::settings::export_diagnostics,
-            notifications::request_notification_permission,
-            notifications::open_notification_settings,
-            updates::prepare_update,
-            updates::set_update_channel,
-            updates::restart_to_update,
-            commands::accounts::open_top_up,
-            commands::accounts::open_organization,
-            commands::desktop::copy_text,
-            commands::desktop::show_edit_menu,
-            commands::desktop::main_window_ready,
-            commands::desktop::open_agent_website,
-            commands::desktop::open_api_key_page,
-            commands::desktop::open_about_link,
-            commands::desktop::open_web_ui,
-            commands::settings::get_cli_registration,
-            commands::settings::set_cli_registration,
-            commands::desktop::stop_all_and_quit
-        ]
+        native_commands!(generate_handler [$(commands::ui::$command,)+ $(commands::ui::$host,)+])
+    };
+}
+
+macro_rules! generate_handler {
+    ([$($renderer:tt)*] $($($segment:ident)::+),+ $(,)?) => {
+        tauri::generate_handler![$($renderer)* $($($segment)::+),+]
     };
 }
 
@@ -247,20 +245,11 @@ pub fn run() {
                 app.handle()
                     .plugin(tauri_plugin_updater::Builder::new().build())?;
             }
-            let client = Client::attach(tauri::async_runtime::handle().inner().clone())?;
-            if let Ok(preferences) = client.call(rpc::Settings) {
-                apply_appearance(app.handle(), preferences.appearance);
-            }
+            // Starting the backend can take a while (the first launch after an
+            // update); it runs in the background while the window shows the
+            // backend as starting. Preferences apply once it answers.
+            let client = Client::attach(tauri::async_runtime::handle().inner().clone());
             app.manage(client.clone());
-            #[cfg(target_os = "macos")]
-            let registration_app = app.handle().clone();
-            #[cfg(target_os = "macos")]
-            if distribution::CAPABILITIES.cli_registration {
-                tauri::async_runtime::spawn(async move {
-                    register_cli_on_startup(&registration_app).await;
-                });
-            }
-            notifications::initialize(app.handle());
 
             configure_account_return(app);
 
@@ -287,7 +276,7 @@ pub fn run() {
             let client_for_events = client.clone();
             window.on_window_event(move |event| {
                 if matches!(event, WindowEvent::Focused(true)) {
-                    let _ = window_for_events.emit("pap://agents-changed", ());
+                    let _ = window_for_events.emit(desktop_core::ui_api::AGENTS_CHANGED_EVENT, ());
                     let host = ui_api::TauriHost::new(window_for_events.clone());
                     let client = client_for_events.clone();
                     tauri::async_runtime::spawn(async move {
@@ -322,11 +311,25 @@ pub fn run() {
             let host = ui_api::TauriHost::new(window.clone());
             tray::sync(&handle, &initial);
             let mut alerts = notifications::Observer::new(&initial);
+            // A backend that was already running may have answered before
+            // this subscription: handle the current state as a change too.
+            let mut backend = BackendInstance::default();
+            states.mark_changed();
             tauri::async_runtime::spawn(async move {
                 while states.changed().await.is_ok() {
-                    let state = states.borrow().clone();
-                    if projection.settings_changed(&state) {
-                        // An edit of config.toml, for example: reapply preferences.
+                    let state = states.borrow_and_update().clone();
+                    let connected = backend.connected(&state);
+                    // Registration runs once per launch; see `CliStartup`.
+                    #[cfg(target_os = "macos")]
+                    if connected && distribution::CAPABILITIES.cli_registration {
+                        let app = handle.clone();
+                        tauri::async_runtime::spawn(async move {
+                            register_cli_on_startup(&app).await;
+                        });
+                    }
+                    if projection.settings_changed(&state) || connected {
+                        // A backend that (re)connected, or an edit of
+                        // config.toml, for example: reapply preferences.
                         let (client, host) = (client.clone(), host.clone());
                         tauri::async_runtime::spawn(async move {
                             if let Err(error) =
@@ -355,7 +358,7 @@ pub fn run() {
         #[cfg(any(feature = "mac-app-store", target_os = "windows", target_os = "linux"))]
         tauri::RunEvent::Exit => {
             #[cfg(feature = "mac-app-store")]
-            if let Some(client) = _app.try_state::<Arc<Client>>() {
+            if let Some(client) = _app.try_state::<std::sync::Arc<Client>>() {
                 if client.is_running().unwrap_or(false) {
                     if let Err(error) = client.shutdown() {
                         tracing::warn!("Cannot stop the App Store backend during exit: {error}");
@@ -371,5 +374,31 @@ pub fn run() {
     });
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_backend_that_answered_before_the_subscription_counts_as_connected() {
+        let (sender, _) = tokio::sync::watch::channel(AppState::default());
+        let answered = |instance: &str| AppState {
+            backend_instance: Some(instance.into()),
+            ..AppState::default()
+        };
+        sender.send_replace(answered("first"));
+        let mut states = sender.subscribe();
+        states.mark_changed();
+        assert!(states.has_changed().unwrap());
+        let mut backend = BackendInstance::default();
+        assert!(backend.connected(&states.borrow_and_update()));
+        // Later states of the same backend, including a disconnection that
+        // keeps its instance, are not a new connection; a replacement is.
+        assert!(!backend.connected(&answered("first")));
+        assert!(backend.connected(&answered("second")));
+    }
+}
+
+#[cfg(test)]
+mod capability_tests;
 #[cfg(test)]
 mod cli_startup_tests;

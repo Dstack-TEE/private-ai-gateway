@@ -413,16 +413,10 @@ impl Error {
     }
 }
 
-/// The rendering every client shows and the CLI prints: `code: message`.
+/// The message; the code travels beside it in every serialized error.
 impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let code = serde_json::to_value(self.code).map_err(|_| fmt::Error)?;
-        write!(
-            formatter,
-            "{}: {}",
-            code.as_str().unwrap_or_default(),
-            self.message
-        )
+        formatter.write_str(&self.message)
     }
 }
 
@@ -509,11 +503,11 @@ mod tests {
     }
 
     #[test]
-    fn errors_render_their_code_and_hide_unauthored_details() {
+    fn errors_serialize_their_code_and_hide_unauthored_details() {
         let error = Error::invalid_state("Stop protection before deleting a profile");
         assert_eq!(
             error.to_string(),
-            "invalid_state: Stop protection before deleting a profile"
+            "Stop protection before deleting a profile"
         );
         assert_eq!(
             serde_json::to_value(&error).unwrap(),

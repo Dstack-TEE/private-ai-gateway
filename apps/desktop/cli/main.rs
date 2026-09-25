@@ -2,6 +2,7 @@
 mod manage;
 
 use clap::{FromArgMatches, Subcommand};
+use desktop_core::client::CallError;
 use private_ai_proxy::{args, audit, send, serve, sessions, verify};
 use std::{ffi::OsStr, io::IsTerminal, path::Path};
 
@@ -40,6 +41,7 @@ async fn main() {
                     serve::run(a, production).await
                 }
             }
+            .map_err(CallError::Local)
         }
         // Management calls block on the local API; keep them off the async workers.
         Err(_) => tokio::task::spawn_blocking(move || manage::run_matches(&matches, command))
@@ -51,10 +53,7 @@ async fn main() {
         Ok(code) => code,
         Err(error) => {
             if json {
-                eprintln!(
-                    "{}",
-                    serde_json::json!({"error":{"code":"command_failed","message":error}})
-                );
+                eprintln!("{}", json_error(error));
             } else {
                 eprintln!("private-ai-proxy: {error}");
             }
@@ -62,6 +61,16 @@ async fn main() {
         }
     };
     std::process::exit(code);
+}
+
+/// A failure as `--json` reports it: the backend's error code, or
+/// `command_failed` for one reported by the CLI itself.
+fn json_error(error: CallError) -> serde_json::Value {
+    let (code, message) = match error {
+        CallError::Api(error) => (serde_json::json!(error.code), error.message),
+        CallError::Local(message) => (serde_json::json!("command_failed"), message),
+    };
+    serde_json::json!({ "error": { "code": code, "message": message } })
 }
 
 /// `aci` is a legacy alias of this executable. Interactive use gets a one-line
@@ -77,7 +86,7 @@ fn legacy_alias_hint() {
     ) && !machine_output
         && std::io::stderr().is_terminal()
     {
-        tracing::info!("note: `aci` is a legacy alias; use `pap` or `private-ai-proxy` instead.");
+        eprintln!("note: `aci` is a legacy alias; use `pap` or `private-ai-proxy` instead.");
     }
 }
 

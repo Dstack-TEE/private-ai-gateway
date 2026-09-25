@@ -1,12 +1,9 @@
 import { toast } from "sonner";
 
+/** The message of a failed call; both transports report authored messages. */
 export function errorMessage(error: unknown): string {
-  const raw = error instanceof Error ? error.message : typeof error === "string" ? error : "";
-  const message = raw.replace(/^[a-z][a-z0-9_]*:\s+/, "");
-  if (!message || /undefined|desktop bridge/i.test(message)) {
-    return "Desktop bridge unavailable";
-  }
-  return message;
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  return message || "The operation could not complete. Try again.";
 }
 
 /** Reports a failed action that has no form or page area to explain it. */

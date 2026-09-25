@@ -1,4 +1,6 @@
-//! Diagnostics are `tracing` events. Every process prints this app's own
+//! Diagnostics are `tracing` events; what the CLI tells its user (results,
+//! prompts, hints such as deprecation warnings) is printed directly and never
+//! goes through this. Every process prints this app's own
 //! events at `INFO` and above to stderr as bare lines. The detached service
 //! also appends them, plus its libraries' warnings and errors, to a daily log
 //! file under [`crate::paths::logs_dir`], because its stderr goes away with

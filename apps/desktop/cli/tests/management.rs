@@ -790,7 +790,9 @@ fn two_cli_clients_share_state_and_disconnect_does_not_stop_service() {
         .unwrap();
     assert_eq!(rejected.status.code(), Some(1));
     let rejected: Value = serde_json::from_slice(&rejected.stderr).unwrap();
-    assert!(rejected["error"]["message"]
+    // The backend's code, not `command_failed`; the message is text only.
+    assert_eq!(rejected["error"]["code"], "revision_conflict");
+    assert!(!rejected["error"]["message"]
         .as_str()
         .unwrap()
         .contains("revision_conflict"));

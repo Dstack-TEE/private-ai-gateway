@@ -125,13 +125,11 @@ fn resolve(profile: &ProfileConfiguration) -> Result<ConfidentialProfile, String
     )
 }
 
-pub fn write_json(path: &Path, data: &impl Serialize) -> Result<(), String> {
-    write_export(path, &json_content(data)?)
-}
-
+/// Exports to a path given on the command line (`--output`): only the
+/// completed file is published, and an existing destination is refused
+/// atomically. The desktop app writes files chosen in its save panel itself.
 pub fn write_export(path: &Path, text: &str) -> Result<(), String> {
     use std::io::Write;
-    // Publish only the completed file, and atomically refuse any existing destination.
     private_fs::publish(path, Publish::NoClobber, |file| {
         file.write_all(text.as_bytes())
     })
@@ -185,15 +183,15 @@ mod tests {
     fn export_never_replaces_an_existing_destination() {
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("profiles.json");
-        write_json(&destination, &serde_json::json!({"original":true})).unwrap();
+        write_export(&destination, "original").unwrap();
         let original = std::fs::read(&destination).unwrap();
-        assert!(write_json(&destination, &serde_json::json!({"replacement":true})).is_err());
+        assert!(write_export(&destination, "replacement").is_err());
         assert_eq!(std::fs::read(&destination).unwrap(), original);
         #[cfg(unix)]
         {
             let link = directory.path().join("link.json");
             std::os::unix::fs::symlink(&destination, &link).unwrap();
-            assert!(write_json(&link, &serde_json::json!({})).is_err());
+            assert!(write_export(&link, "").is_err());
             assert_eq!(std::fs::read(&destination).unwrap(), original);
         }
     }

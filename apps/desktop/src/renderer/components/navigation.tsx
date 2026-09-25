@@ -25,7 +25,7 @@ export type View = (typeof PAGES)[number]["id"];
 
 /** The page for the matched route; unknown paths redirect to the overview. */
 export function useView(): View {
-  return useMatches({ select: (matches) => PAGES.find((page) => page.to === matches.at(-1)?.routeId)?.id ?? "overview" });
+  return useMatches({ select: (matches) => PAGES.find((page) => page.to === matches.at(-1)?.fullPath)?.id ?? "overview" });
 }
 
 export function Sidebar({
@@ -81,8 +81,8 @@ export function Sidebar({
       </nav>
       </SidebarProvider>
       {updateReady && <div className="mt-auto pt-4">
-        <Badge variant="outline" className="h-8 w-full gap-2 text-sm hover:bg-muted [&>svg]:size-4!" render={<button type="button" disabled={updateBusy} />} aria-label="Restart to update" onClick={onRestartUpdate}>
-          <RotateCw aria-hidden="true" /><span className="max-[620px]:hidden">Restart to update</span>
+        <Badge variant="outline" className="h-8 w-full gap-2 text-sm hover:bg-muted [&>svg]:size-4!" render={<button type="button" disabled={updateBusy} />} aria-label="Restart to Update" onClick={onRestartUpdate}>
+          <RotateCw aria-hidden="true" /><span className="max-[620px]:hidden">Restart to Update</span>
         </Badge>
       </div>}
     </aside>

@@ -2,7 +2,8 @@
 
 export type AppState = { backendInstance?: string, clientKeyRevision: number, clientKeyAvailable?: boolean,
 /**
- * Client connection state; the backend leaves this unset.
+ * Client connection state; the backend leaves this unset. `false`
+ * without an `error` while the client is still starting the backend.
  */
 backendConnected?: boolean, wakeMonitorAvailable?: boolean,
 /**
@@ -242,8 +243,29 @@ export type DistributionChannel = "direct" | "macAppStore" | "web";
  */
 export type DistributionCapabilities = { channel: DistributionChannel, nativeUpdates: boolean, cliRegistration: boolean, accountPortalLinks: boolean, sandboxHomeAccess: boolean, launchAtLogin: boolean, notifications: boolean, webUi: boolean, };
 /**
- * `GET /api/bootstrap` on the web UI.
+ * `GET /api/bootstrap` on the web UI; it also tells whether this browser has
+ * a session.
  */
-export type WebBootstrap = { version: string, distribution: DistributionCapabilities, };
+export type WebBootstrap = { version: string, };
+/**
+ * A project resource Settings, the Help menu and the tray link to. The
+ * renderer receives the URLs as generated constants.
+ */
+export type AboutLink = "documentation" | "github" | "aci";
 /** A method the shared UI API accepts (`ui_api::Method`). */
 export type UiMethod = "get_state" | "start" | "stop" | "activate_profile" | "delete_profile" | "save_configuration" | "complete_account_login" | "begin_account_login" | "poll_account_login" | "get_account_details" | "get_account_balance" | "cancel_account_login" | "get_client_key" | "rotate_client_key" | "save_local_api_config" | "save_web_ui" | "set_web_ui_password" | "import_profiles" | "export_profiles_content" | "export_diagnostics_content" | "query_usage" | "get_usage_record" | "list_agents" | "preview_agent" | "apply_agent" | "start_backend_service" | "save_account_login" | "get_organization_url" | "get_top_up_url" | "list_listen_addresses" | "get_agent_access" | "request_agent_access" | "get_appearance" | "set_appearance" | "get_launch_preferences" | "set_launch_preference" | "get_notification_settings" | "save_notification_settings" | "reset_settings" | "get_update_notice";
+export const APPEARANCE_EVENT: string = "pap://appearance";
+export const LAUNCH_PREFERENCES_EVENT: string = "pap://launch-preferences";
+export const SETTINGS_RESET_EVENT: string = "pap://settings-reset";
+export const STATE_EVENT: string = "pap://state";
+export const CLIENT_KEY_CHANGED_EVENT: string = "pap://client-key-changed";
+export const AGENTS_CHANGED_EVENT: string = "pap://agents-changed";
+export const NAVIGATE_EVENT: string = "pap://navigate";
+export const CONFIRM_STOP_ALL_EVENT: string = "pap://confirm-stop-all";
+export const ABOUT_LINKS: Record<AboutLink, string> = {"documentation":"https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/quickstart.md","github":"https://github.com/Dstack-TEE/private-ai-gateway","aci":"https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/attested-confidential-inference.md"};
+export const AGENT_WEBSITES: Readonly<Record<string, string>> = {"claude-code":"https://code.claude.com","codex":"https://developers.openai.com/codex/cli/","hermes":"https://hermes-agent.nousresearch.com","pi":"https://pi.dev","oh-my-pi":"https://omp.sh","opencode":"https://opencode.ai","openclaw":"https://openclaw.ai"};
+export const API_KEY_PAGES: Partial<Record<ServiceProvider, string>> = {"phala":"https://cloud.phala.com/dashboard","redpill":"https://www.redpill.ai/dashboard"};
+export const WEB_UI_PASSWORD_MIN_LENGTH: number = 12;
+export const WEB_DISTRIBUTION: DistributionCapabilities = {"channel":"web","nativeUpdates":false,"cliRegistration":false,"accountPortalLinks":true,"sandboxHomeAccess":false,"launchAtLogin":false,"notifications":false,"webUi":true};
+export const DEFAULT_LOCAL_API_CONFIG: ListenConfig = {"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4180};
+export const DEFAULT_WEB_UI_CONFIG: WebUiConfig = {"enabled":false,"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4182};

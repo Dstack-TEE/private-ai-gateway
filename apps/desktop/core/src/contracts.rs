@@ -151,6 +151,8 @@ pub enum ServiceProvider {
 }
 
 impl ServiceProvider {
+    pub const ALL: [Self; 3] = [Self::Phala, Self::Redpill, Self::Custom];
+
     pub const fn label(self) -> &'static str {
         match self {
             Self::Phala => "Phala",
@@ -301,7 +303,8 @@ pub struct AppState {
     pub client_key_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_key_available: Option<bool>,
-    /// Client connection state; the backend leaves this unset.
+    /// Client connection state; the backend leaves this unset. `false`
+    /// without an `error` while the client is still starting the backend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_connected: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -557,11 +560,27 @@ pub struct DistributionCapabilities {
     pub web_ui: bool,
 }
 
-/// `GET /api/bootstrap` on the web UI.
+impl DistributionCapabilities {
+    /// The web UI's, which the renderer receives as a generated constant: the
+    /// backend's own installation owns updates and the browser has no OS
+    /// integration.
+    pub const WEB: Self = Self {
+        channel: DistributionChannel::Web,
+        native_updates: false,
+        cli_registration: false,
+        account_portal_links: true,
+        sandbox_home_access: false,
+        launch_at_login: false,
+        notifications: false,
+        web_ui: true,
+    };
+}
+
+/// `GET /api/bootstrap` on the web UI; it also tells whether this browser has
+/// a session.
 #[derive(Clone, Debug, Serialize, TS)]
 pub struct WebBootstrap {
     pub version: String,
-    pub distribution: DistributionCapabilities,
 }
 
 #[cfg(test)]
@@ -572,12 +591,16 @@ mod typescript {
 
     use super::*;
     use crate::{
-        account::LoginPresentation,
+        account::{api_key_page, LoginPresentation},
         agent_access::AgentAccessStatus,
-        agents::{AgentRepairAction, ConfigChange},
-        config::{Appearance, NotificationPreferences, UpdateChannel, WebUiConfig},
+        agents::{Agent, AgentRepairAction, ConfigChange},
+        brand::AboutLink,
+        config::{
+            Appearance, NotificationPreferences, UpdateChannel, WebUiConfig,
+            WEB_UI_PASSWORD_MIN_LENGTH,
+        },
         maintenance::{ImportResult, ProfileBackup, ProfileConfiguration},
-        ui_api::{LaunchPreferences, ListenAddress, Method},
+        ui_api::{self, LaunchPreferences, ListenAddress, Method},
         updates::{Installation, UpdateInfo, UpdateNotice},
         usage::{UsageModelPoint, UsagePage, UsagePoint, UsageQuery},
     };
@@ -655,6 +678,7 @@ mod typescript {
             DistributionChannel,
             DistributionCapabilities,
             WebBootstrap,
+            AboutLink,
         ) {
             output.push_str(&declaration);
         }
@@ -662,10 +686,82 @@ mod typescript {
             "/** A method the shared UI API accepts (`ui_api::Method`). */\nexport type UiMethod = {};\n",
             methods.join(" | ")
         ));
+        for (name, value) in [
+            ("APPEARANCE_EVENT", ui_api::APPEARANCE_EVENT),
+            ("LAUNCH_PREFERENCES_EVENT", ui_api::LAUNCH_PREFERENCES_EVENT),
+            ("SETTINGS_RESET_EVENT", ui_api::SETTINGS_RESET_EVENT),
+            ("STATE_EVENT", ui_api::STATE_EVENT),
+            ("CLIENT_KEY_CHANGED_EVENT", ui_api::CLIENT_KEY_CHANGED_EVENT),
+            ("AGENTS_CHANGED_EVENT", ui_api::AGENTS_CHANGED_EVENT),
+            ("NAVIGATE_EVENT", ui_api::NAVIGATE_EVENT),
+            ("CONFIRM_STOP_ALL_EVENT", ui_api::CONFIRM_STOP_ALL_EVENT),
+        ] {
+            output.push_str(&constant(name, "string", serde_json::json!(value)));
+        }
+        let links: serde_json::Map<_, _> = AboutLink::ALL
+            .into_iter()
+            .map(|link| (name(&link), link.url().into()))
+            .collect();
+        output.push_str(&constant(
+            "ABOUT_LINKS",
+            "Record<AboutLink, string>",
+            links.into(),
+        ));
+        let websites: serde_json::Map<_, _> = Agent::ALL
+            .into_iter()
+            .map(|agent| (agent.id().to_string(), agent.website().into()))
+            .collect();
+        output.push_str(&constant(
+            "AGENT_WEBSITES",
+            "Readonly<Record<string, string>>",
+            websites.into(),
+        ));
+        let api_key_pages: serde_json::Map<_, _> = ServiceProvider::ALL
+            .into_iter()
+            .filter_map(|provider| Some((name(&provider), api_key_page(provider)?.into())))
+            .collect();
+        output.push_str(&constant(
+            "API_KEY_PAGES",
+            "Partial<Record<ServiceProvider, string>>",
+            api_key_pages.into(),
+        ));
+        output.push_str(&constant(
+            "WEB_UI_PASSWORD_MIN_LENGTH",
+            "number",
+            WEB_UI_PASSWORD_MIN_LENGTH.into(),
+        ));
+        output.push_str(&constant(
+            "WEB_DISTRIBUTION",
+            "DistributionCapabilities",
+            serde_json::to_value(DistributionCapabilities::WEB).unwrap(),
+        ));
+        output.push_str(&constant(
+            "DEFAULT_LOCAL_API_CONFIG",
+            "ListenConfig",
+            serde_json::to_value(ListenConfig::default()).unwrap(),
+        ));
+        output.push_str(&constant(
+            "DEFAULT_WEB_UI_CONFIG",
+            "WebUiConfig",
+            serde_json::to_value(WebUiConfig::default()).unwrap(),
+        ));
         output
             .lines()
             .map(|line| format!("{}\n", line.trim_end()))
             .collect()
+    }
+
+    /// A value the Rust side owns, as a typed TypeScript constant.
+    fn constant(name: &str, ty: &str, value: serde_json::Value) -> String {
+        format!("export const {name}: {ty} = {value};\n")
+    }
+
+    /// The serialized name of a unit enum variant.
+    fn name(value: &impl Serialize) -> String {
+        serde_json::to_value(value)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap()
     }
 
     #[test]

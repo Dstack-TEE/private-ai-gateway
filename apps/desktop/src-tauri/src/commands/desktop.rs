@@ -1,31 +1,39 @@
-use crate::*;
+use std::sync::Arc;
 
-#[tauri::command]
-pub(crate) async fn open_agent_website(app: AppHandle, agent_id: String) -> Result<(), String> {
-    use tauri_plugin_opener::OpenerExt;
-    let url = desktop_core::agents::Agent::from_id(&agent_id)?.website();
-    run_blocking(move || {
+use desktop_core::{
+    agents::Agent,
+    brand::AboutLink,
+    client::{CallError, Client},
+    contracts::ServiceProvider,
+};
+use tauri::{AppHandle, Manager, State, WebviewWindow};
+use tauri_plugin_clipboard_manager::ClipboardExt;
+use tauri_plugin_opener::OpenerExt;
+
+use crate::{distribution, open_account_url, run_blocking, tray};
+
+async fn open_url(app: AppHandle, url: String, failure: &'static str) -> Result<(), CallError> {
+    Ok(run_blocking(move || {
         app.opener()
             .open_url(url, None::<&str>)
-            .map_err(|_| "Cannot open the agent website".to_string())
+            .map_err(|_| failure.to_string())
     })
-    .await
+    .await?)
 }
 
 #[tauri::command]
-pub(crate) async fn open_about_link(app: AppHandle, target: String) -> Result<(), String> {
-    use tauri_plugin_opener::OpenerExt;
-    let url = match target.as_str() {
-        "documentation" => desktop_core::brand::SUPPORT_URL,
-        "github" => "https://github.com/Dstack-TEE/private-ai-gateway",
-        "aci" => "https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/attested-confidential-inference.md",
-        _ => return Err("Unknown resource".to_string()),
-    };
-    run_blocking(move || {
-        app.opener()
-            .open_url(url, None::<&str>)
-            .map_err(|_| "Cannot open the resource in your browser".to_string())
-    })
+pub(crate) async fn open_agent_website(app: AppHandle, agent_id: String) -> Result<(), CallError> {
+    let url = Agent::from_id(&agent_id)?.website();
+    open_url(app, url.into(), "Cannot open the agent website").await
+}
+
+#[tauri::command]
+pub(crate) async fn open_about_link(app: AppHandle, target: AboutLink) -> Result<(), CallError> {
+    open_url(
+        app,
+        target.url().into(),
+        "Cannot open the resource in your browser",
+    )
     .await
 }
 
@@ -35,41 +43,38 @@ pub(crate) async fn open_about_link(app: AppHandle, target: String) -> Result<()
 pub(crate) async fn open_web_ui(
     app: AppHandle,
     client: State<'_, Arc<Client>>,
-) -> Result<(), String> {
-    use tauri_plugin_opener::OpenerExt;
+) -> Result<(), CallError> {
     distribution::require(
         distribution::CAPABILITIES.web_ui,
         "The web UI is unavailable in this distribution",
     )?;
     let client = client.inner().clone();
-    run_blocking(move || {
-        let url = client
+    let url = run_blocking(move || {
+        client
             .state()?
             .web_ui
             .url
-            .ok_or_else(|| "The web UI is not listening".to_string())?;
-        app.opener()
-            .open_url(url, None::<&str>)
-            .map_err(|_| "Cannot open the web UI in your browser".to_string())
+            .ok_or_else(|| "The web UI is not listening".to_string())
     })
-    .await
+    .await?;
+    open_url(app, url, "Cannot open the web UI in your browser").await
 }
 
 #[tauri::command]
-pub(crate) async fn copy_text(app: AppHandle, text: String) -> Result<(), String> {
+pub(crate) async fn copy_text(app: AppHandle, text: String) -> Result<(), CallError> {
     if text.is_empty() || text.len() > 4_096 {
-        return Err("Invalid clipboard text".to_string());
+        return Err("Invalid clipboard text".into());
     }
-    run_blocking(move || {
+    Ok(run_blocking(move || {
         app.clipboard()
             .write_text(text)
             .map_err(|_| "Cannot copy text".to_string())
     })
-    .await
+    .await?)
 }
 
 #[tauri::command]
-pub(crate) fn show_edit_menu(window: tauri::WebviewWindow, editable: bool) -> Result<(), String> {
+pub(crate) fn show_edit_menu(window: WebviewWindow, editable: bool) -> Result<(), CallError> {
     use tauri::menu::{Menu, PredefinedMenuItem};
     let app = window.app_handle();
     let menu = Menu::new(app).map_err(|_| "Cannot create editing menu")?;
@@ -101,19 +106,19 @@ pub(crate) fn show_edit_menu(window: tauri::WebviewWindow, editable: bool) -> Re
     .map_err(|_| "Cannot build editing menu")?;
     window
         .popup_menu(&menu)
-        .map_err(|_| "Cannot open editing menu".to_string())
+        .map_err(|_| "Cannot open editing menu".into())
 }
 
 #[tauri::command]
-pub(crate) fn main_window_ready(window: tauri::WebviewWindow) -> Result<(), String> {
-    tray::main_window_ready(&window)
+pub(crate) fn main_window_ready(window: WebviewWindow) -> Result<(), CallError> {
+    Ok(tray::main_window_ready(&window)?)
 }
 
 #[tauri::command]
 pub(crate) async fn stop_all_and_quit(
     app: AppHandle,
     client: State<'_, Arc<Client>>,
-) -> Result<(), String> {
+) -> Result<(), CallError> {
     let client = client.inner().clone();
     run_blocking(move || client.shutdown()).await?;
     app.exit(0);
@@ -123,18 +128,13 @@ pub(crate) async fn stop_all_and_quit(
 #[tauri::command]
 pub(crate) async fn open_api_key_page(
     app: AppHandle,
-    provider: desktop_core::contracts::ServiceProvider,
-) -> Result<(), String> {
+    provider: ServiceProvider,
+) -> Result<(), CallError> {
     distribution::require(
         distribution::CAPABILITIES.account_portal_links,
         "Account portal links are unavailable in this distribution",
     )?;
-    let url = match provider {
-        desktop_core::contracts::ServiceProvider::Phala => "https://cloud.phala.com/dashboard",
-        desktop_core::contracts::ServiceProvider::Redpill => "https://www.redpill.ai/dashboard",
-        desktop_core::contracts::ServiceProvider::Custom => {
-            return Err("Custom providers do not have a built-in API key page".into())
-        }
-    };
-    open_account_url(app, url.to_string()).await
+    let url = desktop_core::account::api_key_page(provider)
+        .ok_or("Custom providers do not have a built-in API key page")?;
+    Ok(open_account_url(app, url.to_string()).await?)
 }

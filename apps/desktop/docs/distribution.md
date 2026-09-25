@@ -296,7 +296,8 @@ uses `/private/tmp`.
 ## Removed duplication and retained boundaries
 
 The macOS Direct LaunchAgent plugin is removed. A one-time Direct-only upgrade
-bridge reuses its pinned `auto-launch` 0.5.0 public query/disable implementation.
+bridge queries and removes that registration with `auto-launch`'s LaunchAgent
+mode, the same crate Windows and Linux use for Open at Login.
 The verified tauri-plugin-autostart 2.5.1 contract uses `app.package_info().name`
 for both label and `~/Library/LaunchAgents/{name}.plist`, with the canonical
 executable followed by `--autostart` in ProgramArguments. No path is guessed.

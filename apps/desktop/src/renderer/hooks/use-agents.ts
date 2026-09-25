@@ -46,7 +46,7 @@ export function useAgents(api: DesktopApi, { requiresAuthorization, active, revi
     try {
       await accessAction.run();
     } catch (error) {
-      toastError("Agent access could not be granted", error);
+      toastError("Could not grant agent access", error);
     }
   };
 

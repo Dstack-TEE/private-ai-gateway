@@ -142,7 +142,7 @@ export function Overview({
               <span className={authorizingAgents ? "invisible" : undefined}>Enable</span>
               {authorizingAgents && <LoaderCircle aria-hidden="true" className="absolute animate-spin" />}
             </Button>
-          : <Link to="/agents" className={cn(buttonVariants({ variant: "outline", size: "sm" }), "min-w-20")}>View all</Link>}>
+          : <Link to="/agents" className={cn(buttonVariants({ variant: "outline", size: "sm" }), "min-w-20")}>View All</Link>}>
           <div className="preview-list [&_>_:last-child]:border-b-0 overview-agent-list [--agent-row-height:calc(2rem_+_1.25rem_+_2px)] grid grid-rows-[repeat(3,_minmax(var(--agent-row-height),_auto))] gap-3 [&_>_.empty-state]:row-span-full">
             {agentAccessStatus === "authorized" && !agents.some((agent) => agent.installed) ? <EmptyState text={agentProblem ? "Agent detection unavailable" : "No installed agents found"} />
               : previewAgents.map((agent) => (
@@ -161,7 +161,7 @@ export function Overview({
         <OverviewModule
           title="Recent usage"
           description="Latest requests in this session."
-          action={<Link to="/usage" className={cn(buttonVariants({ variant: "outline", size: "sm" }))}>View all</Link>}
+          action={<Link to="/usage" className={cn(buttonVariants({ variant: "outline", size: "sm" }))}>View All</Link>}
           scrollable
         >
           <div className="preview-list flex-1 min-h-0 overflow-y-auto overscroll-contain [&_>_:last-child]:border-b-0" role="region" tabIndex={0} aria-label="Recent requests">
@@ -219,10 +219,10 @@ function StatusSurface({
           <ProtectionStatus state={state} label={verdict.title} />
         </div>
         <div className="status-profile-actions col-span-full row-start-2 self-end flex items-center gap-2 min-w-0">
-        {backendDisconnected ? <Button variant="outline" size="sm" disabled={connectingBackend} onClick={onStartBackend}><RefreshCw className={connectingBackend ? "animate-control-spin" : undefined} aria-hidden="true" />{connectingBackend ? "Starting" : "Start backend"}</Button> : <>
-        <Button id="overview-profile" variant="outline" size="sm" className="status-profile w-[min(128px,_100%)] min-w-0 [&_>_span:not(.service-logo):not(.service-custom-icon)]:min-w-0 [&_>_span:not(.service-logo):not(.service-custom-icon)]:flex-1 [&_>_span:not(.service-logo):not(.service-custom-icon)]:overflow-hidden [&_>_span:not(.service-logo):not(.service-custom-icon)]:text-left [&_>_span:not(.service-logo):not(.service-custom-icon)]:text-ellipsis [&_>_span:not(.service-logo):not(.service-custom-icon)]:whitespace-nowrap [&_>_svg]:flex-none [&_.service-logo]:w-5 [&_.service-logo]:h-5 [&_.service-custom-icon]:w-5 [&_.service-custom-icon]:h-5" aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Set up profile"} aria-haspopup="dialog" onClick={onSettings}>
+        {backendDisconnected ? <Button variant="outline" size="sm" disabled={connectingBackend} onClick={onStartBackend}><RefreshCw className={connectingBackend ? "animate-control-spin" : undefined} aria-hidden="true" />{connectingBackend ? "Starting…" : "Start Backend"}</Button> : <>
+        <Button id="overview-profile" variant="outline" size="sm" className="status-profile w-[min(128px,_100%)] min-w-0 [&_>_span:not(.service-logo):not(.service-custom-icon)]:min-w-0 [&_>_span:not(.service-logo):not(.service-custom-icon)]:flex-1 [&_>_span:not(.service-logo):not(.service-custom-icon)]:overflow-hidden [&_>_span:not(.service-logo):not(.service-custom-icon)]:text-left [&_>_span:not(.service-logo):not(.service-custom-icon)]:text-ellipsis [&_>_span:not(.service-logo):not(.service-custom-icon)]:whitespace-nowrap [&_>_svg]:flex-none [&_.service-logo]:w-5 [&_.service-logo]:h-5 [&_.service-custom-icon]:w-5 [&_.service-custom-icon]:h-5" aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Set Up Profile"} aria-haspopup="dialog" onClick={onSettings}>
           {activeProfile ? <ServiceLogo url={activeProfile.remoteUrl} /> : <Plus aria-hidden="true" />}
-          <span>{activeProfile?.name ?? "Set up"}</span>
+          <span>{activeProfile?.name ?? "Set Up"}</span>
           {activeProfile && <ChevronDown aria-hidden="true" />}
         </Button>
         {activeProfile?.auth.kind === "oauth" && <AccountBalanceValue api={accountApi} provider={activeProfile.provider} target={{ kind: "profile", profileId: activeProfile.id }} credentialRef={activeProfile.credentialRef} enabled={protectedNow} />}

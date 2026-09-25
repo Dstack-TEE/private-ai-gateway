@@ -11,7 +11,7 @@ import { IconButton } from "../components/controls";
 import { AppDialog } from "../components/app-dialog";
 import { useConfirm } from "../components/confirm";
 import { DialogFooter } from "../components/ui/dialog";
-import type { AppState, ListenConfig } from "../../shared/contracts";
+import { DEFAULT_LOCAL_API_CONFIG, type AppState, type ListenConfig } from "../../shared/contracts";
 import { maskClientKey } from "../lib/format";
 import { desktopApi } from "../lib/environment";
 import { errorMessage } from "../lib/error-message";
@@ -81,7 +81,7 @@ function CopyRow({
         onClick={() => value && void onCopy(copyLabel, value)}
       >
         <span className="row-title text-xs font-normal text-muted-foreground">{title}</span>
-        <code className="row-note block w-full flex-none overflow-hidden text-ellipsis whitespace-nowrap text-sm text-foreground">{displayValue ?? "Unavailable"}</code>
+        <code className="block w-full flex-none overflow-hidden text-ellipsis whitespace-nowrap text-sm text-foreground">{displayValue ?? "Unavailable"}</code>
         <span className={cn("copy-feedback absolute right-13.5 top-1/2 -translate-y-1/2 text-xs font-semibold text-muted-foreground opacity-0 transition-opacity duration-150", isCopied && "text-primary opacity-100")}>{isCopied ? "Copied" : "Copy"}</span>
       </Button>
       {children}
@@ -126,7 +126,7 @@ export function LocalApiDialog({
       const confirmed = await confirm({
         title: "Rotate local API key?",
         message: "The old client key will stop working immediately. Update your tools with the new key. Agent credentials do not change. In-flight requests may be interrupted.",
-        confirmLabel: "Rotate key",
+        confirmLabel: "Rotate Key",
       });
       if (confirmed) setError(await onRotate());
     } catch (failure) {
@@ -187,7 +187,7 @@ export function LocalApiDialog({
         </div>
         <FieldError>{error}</FieldError>
         <DialogFooter>
-          <Button type="button" variant="outline" className="sm:mr-auto" disabled={frozen || saving} onClick={() => setDraft({ listenAddress: "127.0.0.1", allowNetworkAccess: false, port: 4180 })}>Use default</Button>
+          <Button type="button" variant="outline" className="sm:mr-auto" disabled={frozen || saving} onClick={() => setDraft(DEFAULT_LOCAL_API_CONFIG)}>Use Default</Button>
           <Button type="button" variant="outline" onClick={onClose} disabled={saving}>{frozen ? "Done" : "Cancel"}</Button>
           <Button type="submit" variant="default" disabled={frozen || saving}>{saving ? "Saving…" : "Save"}</Button>
         </DialogFooter>

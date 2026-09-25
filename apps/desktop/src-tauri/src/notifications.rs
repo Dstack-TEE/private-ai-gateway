@@ -1,9 +1,7 @@
 mod permission;
-use desktop_core::{
-    client::Client, config::NotificationPreferences, contracts::AppState, protocol::rpc,
-};
+use desktop_core::{client::CallError, config::NotificationPreferences, contracts::AppState};
 use std::{
-    sync::{Arc, Mutex},
+    sync::Mutex,
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, Manager};
@@ -17,17 +15,6 @@ pub struct Configuration {
     preferences: NotificationPreferences,
     #[serde(flatten)]
     system: permission::PermissionStatus,
-}
-
-pub fn initialize(app: &AppHandle) {
-    match app.state::<Arc<Client>>().call(rpc::Settings) {
-        Ok(preferences) => {
-            if let Ok(mut current) = app.state::<Settings>().0.lock() {
-                *current = preferences.notifications;
-            }
-        }
-        Err(error) => tracing::warn!("Cannot load notification preferences: {error}"),
-    }
 }
 
 pub async fn configuration(
@@ -55,27 +42,29 @@ pub fn set_cached_preferences(
 #[tauri::command]
 pub async fn request_notification_permission(
     app: AppHandle,
-) -> Result<permission::PermissionStatus, String> {
+) -> Result<permission::PermissionStatus, CallError> {
     permission::request(&app).await?;
     Ok(permission::query(&app).await)
 }
 
 #[tauri::command]
-pub fn open_notification_settings(app: AppHandle) -> Result<(), String> {
+pub fn open_notification_settings(app: AppHandle) -> Result<(), CallError> {
     use tauri_plugin_opener::OpenerExt;
-    #[cfg(target_os = "macos")]
-    let url = "x-apple.systempreferences:com.apple.Notifications-Settings.extension";
-    #[cfg(target_os = "windows")]
-    let url = "ms-settings:notifications";
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    return app
-        .opener()
+    let url = system_notification_settings()
+        .ok_or("Open Notifications in your desktop environment's settings.")?;
+    app.opener()
         .open_url(url, None::<&str>)
-        .map_err(|_| "Could not open system notification settings".into());
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let _ = app.opener();
-        Err("Open Notifications in your desktop environment's settings.".into())
+        .map_err(|_| "Could not open system notification settings".into())
+}
+
+/// The system's notification settings page, where the platform has one.
+fn system_notification_settings() -> Option<&'static str> {
+    if cfg!(target_os = "macos") {
+        Some("x-apple.systempreferences:com.apple.Notifications-Settings.extension")
+    } else if cfg!(target_os = "windows") {
+        Some("ms-settings:notifications")
+    } else {
+        None
     }
 }
 

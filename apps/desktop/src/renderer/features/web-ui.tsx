@@ -10,10 +10,7 @@ import { DialogFooter } from "../components/ui/dialog";
 import { errorMessage } from "../lib/error-message";
 import { localAddressKind } from "../lib/local-api-config";
 import { desktopApi, web } from "../lib/environment";
-import type { AppState, WebUiConfig, WebUiStatus } from "../../shared/contracts";
-
-const DEFAULT_LISTENER = { listenAddress: "127.0.0.1", allowNetworkAccess: false, port: 4182 } as const;
-const MIN_PASSWORD_LENGTH = 12;
+import { DEFAULT_WEB_UI_CONFIG, WEB_UI_PASSWORD_MIN_LENGTH as MIN_PASSWORD_LENGTH, type AppState, type WebUiConfig, type WebUiStatus } from "../../shared/contracts";
 
 /** The saved settings behind a status, without listener results. */
 export function webUiConfig({ enabled, listenAddress, allowNetworkAccess, port, clientHost }: WebUiStatus): WebUiConfig {
@@ -151,7 +148,7 @@ export function WebUiDialog({
         </div>
         <FieldError>{error}</FieldError>
         <DialogFooter>
-          <Button type="button" variant="outline" className="sm:mr-auto" disabled={saving} onClick={() => setDraft((current) => ({ ...DEFAULT_LISTENER, enabled: current.enabled }))}>Use default</Button>
+          <Button type="button" variant="outline" className="sm:mr-auto" disabled={saving} onClick={() => setDraft((current) => ({ ...DEFAULT_WEB_UI_CONFIG, enabled: current.enabled }))}>Use Default</Button>
           <Button type="button" variant="outline" onClick={onClose} disabled={saving}>Cancel</Button>
           <Button type="submit" variant="default" disabled={saving}>{saving ? "Saving…" : "Save"}</Button>
         </DialogFooter>

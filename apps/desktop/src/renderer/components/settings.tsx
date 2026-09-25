@@ -12,16 +12,13 @@ export function SettingsList({ children }: PropsWithChildren): React.JSX.Element
   </ItemGroup>;
 }
 
-export function SettingsSection({ title, children }: PropsWithChildren<{ title: string }>): React.JSX.Element {
+/** A titled group of rows; `detail` is a short summary beside the title. */
+export function SettingsSection({ title, detail, children }: PropsWithChildren<{ title: string; detail?: ReactNode }>): React.JSX.Element {
   const id = useId();
   return <section className="group mt-5 [&:first-child]:mt-0" aria-labelledby={id}>
-    <h2 className="group-title mx-0.5 mb-2 flex min-h-5 items-center gap-2 text-sm font-semibold" id={id}>{title}</h2>
+    <h2 className="mx-0.5 mb-2 flex min-h-5 items-center gap-2 text-sm font-semibold" id={id}>{title}{detail && <span className="ml-auto truncate text-xs font-normal text-muted-foreground">{detail}</span>}</h2>
     <SettingsList>{children}</SettingsList>
   </section>;
-}
-
-export function RowContent({ title, description, descriptionId }: { title: ReactNode; description?: ReactNode; descriptionId?: string }): React.JSX.Element {
-  return <span className="row-main min-w-0 flex-auto flex flex-wrap items-center gap-y-0.5 gap-x-2"><span className="row-title">{title}</span>{description && <span className="row-note flex-[1_0_100%] block text-muted-foreground text-xs wrap-anywhere [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [code&]:overflow-hidden [code&]:text-ellipsis [code&]:whitespace-nowrap" id={descriptionId}>{description}</span>}</span>;
 }
 
 export function SettingsLink({ title, description, external = false, ...props }: Omit<ComponentProps<typeof ActionItem>, "title" | "children" | "className"> & { title: string; description?: ReactNode; external?: boolean }): React.JSX.Element {

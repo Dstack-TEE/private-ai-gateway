@@ -1,19 +1,43 @@
 //! Product identity; see "Branding" in apps/desktop/README.md.
 
+use serde::{Deserialize, Serialize};
+
 /// `productName` in src-tauri/tauri.conf.json.
 pub const PRODUCT_NAME: &str = "Private AI Proxy";
 /// `bundle.publisher` in src-tauri/tauri.conf.json.
 pub const ORGANIZATION_NAME: &str = "Dstack TEE";
 /// `byline` in src/renderer/brand/brand.ts.
 pub const BYLINE: &str = "by dstack TEE";
-pub const SUPPORT_URL: &str =
-    "https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/quickstart.md";
 pub const SERVICE_NAME: &str = "RedPill";
 /// `service.defaultUrl` in src/renderer/brand/brand.ts.
 pub const SERVICE_DEFAULT_URL: &str = "https://tee.redpill.ai";
 /// `identifier` in src-tauri/tauri.conf.json. It names the per-user app data
 /// directory and credential namespace on every platform.
 pub const APP_IDENTIFIER: &str = "org.dstack.private-ai-proxy";
+
+/// A project resource Settings, the Help menu and the tray link to. The
+/// renderer receives the URLs as generated constants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub enum AboutLink {
+    Documentation,
+    Github,
+    Aci,
+}
+
+impl AboutLink {
+    pub const ALL: [Self; 3] = [Self::Documentation, Self::Github, Self::Aci];
+
+    pub const fn url(self) -> &'static str {
+        match self {
+            Self::Documentation => {
+                "https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/quickstart.md"
+            }
+            Self::Github => "https://github.com/Dstack-TEE/private-ai-gateway",
+            Self::Aci => "https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/attested-confidential-inference.md",
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

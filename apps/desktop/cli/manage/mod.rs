@@ -6,7 +6,7 @@ use std::{
 
 use clap::{CommandFactory, FromArgMatches};
 use desktop_core::{
-    client::Client,
+    client::{CallError, Client},
     config::{Appearance, UpdateChannel},
     contracts::*,
     protocol::{export_path, rpc, NotificationKind, Preference},
@@ -26,12 +26,12 @@ pub fn cli_command() -> clap::Command {
     Cli::command()
 }
 
-pub fn run_matches(matches: &clap::ArgMatches, command: clap::Command) -> Result<(), String> {
+pub fn run_matches(matches: &clap::ArgMatches, command: clap::Command) -> Result<(), CallError> {
     let cli = Cli::from_arg_matches(matches).map_err(|error| error.to_string())?;
     execute(&cli, command)
 }
 
-fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
+fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), CallError> {
     match &cli.command {
         Action::Completions { shell } => {
             let name = command.get_name().to_owned();
@@ -71,7 +71,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
             });
             return match output_error {
                 Some(error) => finish_output(Err(error)),
-                None => watched,
+                None => Ok(watched?),
             };
         }
         Action::Status { watch: false }
@@ -392,7 +392,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                 value_stdin,
             } => {
                 if let Some(warning) = key.deprecation() {
-                    tracing::warn!("{warning}");
+                    eprintln!("{warning}");
                 }
                 set_setting(cli, &client, key.key, input.as_deref(), *value_stdin)?
             }
@@ -503,7 +503,7 @@ fn set_setting(
     key: SettingsKey,
     input: Option<&str>,
     value_stdin: bool,
-) -> Result<Value, String> {
+) -> Result<Value, CallError> {
     if key == SettingsKey::WebUiPassword {
         confirm(
             cli,
@@ -594,7 +594,7 @@ fn set_setting(
 
 /// Opens or prints the web UI address. It carries no secret: the page asks for
 /// the web UI password.
-fn open_web_ui(cli: &Cli, client: &Client) -> Result<Value, String> {
+fn open_web_ui(cli: &Cli, client: &Client) -> Result<Value, CallError> {
     Client::ensure_service()?;
     let mut status = client.state()?.web_ui;
     if !status.enabled {
@@ -629,32 +629,11 @@ fn open_web_ui(cli: &Cli, client: &Client) -> Result<Value, String> {
     Ok(json!({ "url": url, "browserOpened": opened }))
 }
 
-/// Open `url` in the user's browser without waiting for it.
+/// Open `url` in the user's browser without waiting for it. The launcher runs
+/// detached with null stdio, so a text-mode fallback browser cannot take over
+/// this shell.
 fn open_browser(url: &str) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    let mut command = desktop_core::launch::child_command("open");
-    #[cfg(target_os = "macos")]
-    command.arg(url);
-    #[cfg(windows)]
-    let mut command = desktop_core::launch::child_command("rundll32.exe");
-    #[cfg(windows)]
-    command.args(["url.dll,FileProtocolHandler", url]);
-    #[cfg(not(any(target_os = "macos", windows)))]
-    let mut command = desktop_core::launch::child_command("xdg-open");
-    #[cfg(not(any(target_os = "macos", windows)))]
-    command.arg(url);
-    // Without a terminal, a text-mode fallback browser cannot take over this shell.
-    let mut child = command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|_| "Cannot open a browser".to_string())?;
-    // Reap the short-lived OS launcher without blocking the caller.
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
+    open::that_detached(url).map_err(|_| "Cannot open a browser".to_string())
 }
 
 fn new_export_path(path: &std::path::Path) -> Result<PathBuf, String> {
@@ -693,7 +672,7 @@ fn agent_change(
     model: Option<String>,
     dry_run: bool,
     revision: Option<&str>,
-) -> Result<Value, String> {
+) -> Result<Value, CallError> {
     let options = ConnectOptions {
         default_model: model,
     };
@@ -718,7 +697,7 @@ fn agent_change(
         return value(preview);
     }
     if !cli.yes && !cli.json && !cli.non_interactive && io::stdin().is_terminal() {
-        tracing::info!("{}", output::details(&value(&preview)?));
+        eprintln!("{}", output::details(&value(&preview)?));
     }
     confirm(cli, "Apply these agent configuration changes?")?;
     value(client.call(rpc::ApplyAgent {
@@ -964,7 +943,7 @@ fn read_web_ui_password(
 fn parse_bool(value: &str) -> Result<bool, String> {
     value.parse().map_err(|_| "Expected true or false".into())
 }
-fn value(input: impl Serialize) -> Result<Value, String> {
+fn value(input: impl Serialize) -> Result<Value, CallError> {
     serde_json::to_value(input).map_err(|_| "Cannot encode output".into())
 }
 
@@ -1003,10 +982,10 @@ fn write_bytes(bytes: &[u8]) -> Result<(), OutputError> {
     }
 }
 
-fn finish_output(result: Result<(), OutputError>) -> Result<(), String> {
+fn finish_output(result: Result<(), OutputError>) -> Result<(), CallError> {
     match result {
         Ok(()) | Err(OutputError::BrokenPipe) => Ok(()),
-        Err(OutputError::Message(error)) => Err(error),
+        Err(OutputError::Message(error)) => Err(CallError::Local(error)),
     }
 }
 

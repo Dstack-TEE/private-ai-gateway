@@ -23,7 +23,7 @@ use hyper::{
     header, Method, Request, StatusCode,
 };
 use hyper_util::rt::TokioIo;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::watch;
 
@@ -68,6 +68,14 @@ impl CallError {
             Self::Api(error) => error,
             Self::Local(message) => protocol::Error::new(ErrorCode::OperationFailed, message),
         }
+    }
+}
+
+/// Serialized as the API error `{"code", "message"}`, so every transport
+/// (the HTTP API, Tauri commands, `--json`) reports failures in one shape.
+impl Serialize for CallError {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.clone().into_api().serialize(serializer)
     }
 }
 
@@ -231,19 +239,39 @@ impl Client {
         }
     }
 
-    pub fn attach(handle: tokio::runtime::Handle) -> Result<Arc<Self>, String> {
+    /// A client that starts the backend when needed and then follows its
+    /// state, both on `handle`'s blocking pool, so it returns at once. Until
+    /// the backend answers, the state reports it disconnected without an
+    /// error: starting.
+    pub fn attach(handle: tokio::runtime::Handle) -> Arc<Self> {
         let client = Arc::new(Self::new());
-        match Self::ensure_service().and_then(|()| client.state().map_err(String::from)) {
-            Ok(state) => {
-                client.states.send_replace(state);
-            }
-            Err(error) => {
-                tracing::error!("Cannot start the PAP backend: {error}");
-                client.report_disconnect(error);
-            }
-        }
+        client
+            .states
+            .send_modify(|state| state.backend_connected = Some(false));
         let weak = Arc::downgrade(&client);
-        handle.spawn_blocking(move || loop {
+        handle.spawn_blocking(move || {
+            let Some(client) = weak.upgrade() else {
+                return;
+            };
+            match Self::ensure_service().and_then(|()| client.state().map_err(String::from)) {
+                Ok(state) => {
+                    client.states.send_replace(state);
+                }
+                Err(error) => {
+                    tracing::error!("Cannot start the PAP backend: {error}");
+                    client.report_disconnect(error);
+                }
+            }
+            drop(client);
+            Self::follow(weak);
+        });
+        client
+    }
+
+    /// Mirrors the backend's state until the client is dropped, reconnecting
+    /// after each disconnection.
+    fn follow(weak: std::sync::Weak<Self>) {
+        loop {
             if weak.strong_count() == 0 {
                 break;
             }
@@ -262,8 +290,7 @@ impl Client {
             }
             drop(client);
             std::thread::sleep(Duration::from_secs(1));
-        });
-        Ok(client)
+        }
     }
 
     fn report_disconnect(&self, error: String) {
@@ -739,9 +766,14 @@ mod tests {
         }
         assert!(crate::launch::service_executable().is_err());
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let client = super::Client::attach(runtime.handle().clone()).unwrap();
+        let client = super::Client::attach(runtime.handle().clone());
+        let mut states = client.subscribe();
+        // Starting: disconnected without an error, until startup fails.
+        assert_eq!(states.borrow().backend_connected, Some(false));
+        runtime
+            .block_on(states.wait_for(|state| state.error.is_some()))
+            .unwrap();
         assert_eq!(client.cached_state().backend_connected, Some(false));
-        assert!(client.cached_state().error.is_some());
         assert!(client.state_or_cached().unwrap().error.is_some());
         drop(client);
         runtime.shutdown_timeout(std::time::Duration::from_secs(3));
