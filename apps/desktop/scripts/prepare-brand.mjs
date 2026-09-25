@@ -17,7 +17,7 @@
 // tracked tauri.conf.json stays neutral. Required source assets and their
 // recorded hashes are checked before generated files are written.
 import { execFileSync } from "node:child_process";
-import { releaseChannel } from "./release-channel.mjs";
+import { appVersion, versionRelease } from "./release-channel.mjs";
 import { distribution, MAC_APP_STORE_DISTRIBUTION, validateAppStoreBuildNumber } from "./distribution.mjs";
 import { createHash } from "node:crypto";
 import { copyFile, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -229,8 +229,6 @@ ${rust("APP_IDENTIFIER", brand.bundle.identifier)}
 // carries the same values. Only scalar product metadata goes here; the window
 // list stays in the tracked config, and the window title is set at run time
 // from the Rust brand module.
-const releaseVersion = process.env.DESKTOP_RELEASE_VERSION?.trim();
-const release = releaseVersion ? releaseChannel(releaseVersion, process.env.DESKTOP_RELEASE_CHANNEL || "beta") : undefined;
 const appStoreBuildNumber = process.env.APPLE_APP_STORE_BUILD_NUMBER?.trim();
 const updaterKey = process.env.TAURI_UPDATER_PUBLIC_KEY?.trim();
 const updaterEndpoint = process.env.TAURI_UPDATER_ENDPOINT?.trim();
@@ -239,7 +237,7 @@ const nativeUpdater = Boolean(updaterKey);
 if (buildDistribution === MAC_APP_STORE_DISTRIBUTION && (updaterKey || updaterEndpoint)) {
   throw new Error("Mac App Store builds cannot include the native updater");
 }
-if (buildDistribution === MAC_APP_STORE_DISTRIBUTION && release && release.channel !== "stable") {
+if (appStoreBuildNumber && versionRelease(appVersion()).channel !== "stable") {
   throw new Error("Mac App Store releases must use a stable version");
 }
 if (buildDistribution !== MAC_APP_STORE_DISTRIBUTION && appStoreBuildNumber) {
@@ -250,7 +248,7 @@ if (Boolean(updaterKey) !== Boolean(updaterEndpoint)) {
   throw new Error("Set both TAURI_UPDATER_PUBLIC_KEY and TAURI_UPDATER_ENDPOINT, or neither");
 }
 if (updaterEndpoint) {
-  if (!release) throw new Error("Updater-enabled builds require a release version and channel");
+  const release = versionRelease(appVersion());
   const endpoint = new URL(updaterEndpoint);
   if (!endpoint.pathname.endsWith(`/${release.feedTag}/latest.json`)) throw new Error("Updater endpoint does not match the release channel");
   if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password) {
@@ -266,7 +264,6 @@ await writeFile(
     {
       productName: brand.productName,
       identifier: brand.bundle.identifier,
-      ...(releaseVersion ? { version: releaseVersion } : {}),
       plugins: {
         "deep-link": { desktop: { schemes: [brand.bundle.identifier] } },
         ...(nativeUpdater ? { updater: { pubkey: updaterKey, endpoints: [updaterEndpoint] } } : {}),

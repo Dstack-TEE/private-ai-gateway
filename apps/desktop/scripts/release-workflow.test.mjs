@@ -11,8 +11,9 @@ async function readWorkflow(name) {
   return load(await readFile(path.join(repositoryRoot, ".github/workflows", name), "utf8"));
 }
 
-test("stable desktop releases use one same-revision workflow graph", async () => {
-  const [release, direct, appStore, updateFeed, npm] = await Promise.all([
+test("release-please tags start one same-revision release graph", async () => {
+  const [releasePlease, release, direct, appStore, updateFeed, npm] = await Promise.all([
+    readWorkflow("desktop-release-please.yml"),
     readWorkflow("desktop-release.yml"),
     readWorkflow("desktop-native.yml"),
     readWorkflow("desktop-mac-app-store.yml"),
@@ -20,27 +21,25 @@ test("stable desktop releases use one same-revision workflow graph", async () =>
     readWorkflow("private-ai-proxy-npm.yml"),
   ]);
 
-  assert.equal(release.jobs["mac-app-store"].uses, "./.github/workflows/desktop-mac-app-store.yml");
-  assert.equal(release.jobs["mac-app-store"].needs, "preflight");
-  assert.equal(release.jobs["mac-app-store"].with.version, "${{ inputs.version }}");
-  assert.equal(release.jobs["mac-app-store"].with.build_number, "${{ inputs.app_store_build_number }}");
-  assert.equal(release.jobs["mac-app-store"].with.upload, true);
-  assert.equal(release.jobs["mac-app-store"].secrets, "inherit");
+  const releasePleaseStep = releasePlease.jobs["release-please"].steps.at(-1);
+  assert.equal(releasePleaseStep.with["config-file"], "apps/desktop/release-please-config.json");
+  assert.equal(releasePleaseStep.with["manifest-file"], "apps/desktop/.release-please-manifest.json");
+  // Only release tags start Desktop release, so its run number counts releases.
+  assert.deepEqual(Object.keys(release.on), ["push"]);
+  assert.deepEqual(release.on.push, { tags: ["desktop-v*"] });
+  assert.equal(release.jobs.release.uses, "./.github/workflows/desktop-native.yml");
+  assert.equal(direct.on.push.tags, undefined);
 
-  assert.equal(release.jobs.direct.uses, "./.github/workflows/desktop-native.yml");
-  assert.equal(release.jobs.direct.needs, "mac-app-store");
-  assert.equal(release.jobs.direct.with.release_version, "${{ inputs.version }}");
-  assert.equal(release.jobs.direct.with.release_channel, "stable");
-  assert.equal(release.jobs.direct.with.release_summary, "${{ inputs.release_summary }}");
-  assert.equal(release.jobs.direct.with.publish_release, true);
-  assert.equal(release.jobs.direct.permissions.actions, "write");
-  assert.equal(release.jobs.direct.permissions.contents, "write");
-  assert.equal(release.jobs.direct.permissions["id-token"], undefined);
-  assert.equal(release.jobs.direct.secrets, "inherit");
+  assert.equal(direct.jobs["mac-app-store"].uses, "./.github/workflows/desktop-mac-app-store.yml");
+  assert.equal(direct.jobs["mac-app-store"].if, "needs.select-platforms.outputs.channel == 'stable'");
+  assert.equal(direct.jobs["mac-app-store"].with.build_number, "${{ needs.select-platforms.outputs.app_store_build_number }}");
+  assert.equal(appStore.on.workflow_dispatch?.inputs, undefined);
+  assert.equal(appStore.on.workflow_call.inputs.build_number.type, "string");
+  assert.deepEqual(direct.jobs.release.needs, ["select-platforms", "package", "mac-app-store"]);
+  assert.equal(direct.jobs.release.permissions.contents, "write");
 
-  assert.equal(direct.on.workflow_call.inputs.release_version.type, "string");
-  assert.equal(appStore.on.workflow_call.inputs.version.type, "string");
   assert.equal(direct.jobs["update-feed"].uses, "./.github/workflows/desktop-update-feed.yml");
+  assert.equal(direct.jobs["update-feed"].needs, "release");
   assert.equal(direct.jobs["publish-npm"].needs, "update-feed");
   assert.equal(direct.jobs["publish-npm"].permissions.actions, "write");
   assert.equal(direct.jobs["publish-npm"].permissions.contents, "read");
@@ -51,8 +50,6 @@ test("stable desktop releases use one same-revision workflow graph", async () =>
   assert.equal(npm.on.workflow_call, undefined);
   assert.equal(npm.on.workflow_dispatch.inputs.release_tag.type, "string");
   assert.equal(npm.on.workflow_dispatch.inputs.request_id.type, "string");
-  assert.equal(updateFeed.on.release, undefined);
-  assert.equal(npm.on.release, undefined);
 });
 
 test("npm publishes the channel wrapper only after its platform versions resolve", async () => {

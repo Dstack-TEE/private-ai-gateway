@@ -114,42 +114,31 @@ not configure a provider or access credentials.
 
 ## Release Contract
 
-`Desktop stable release` is the coordinated stable production entry. It validates
-the request once, uploads the matching Mac App Store build, then calls `Desktop
-Tauri` for all Direct targets from the same commit and version. The Direct worker
-publishes the GitHub release and updater feed, then dispatches the dedicated npm
-publisher at the immutable release tag and waits for its result. npm validates
-the top-level workflow filename for trusted publishing, so this keeps the single
-configured OIDC publisher without storing a write token or duplicating packaging
-logic. Everything is published as versions of the one `private-ai-proxy`
-package, as `@openai/codex` does: the npm publisher uploads the six
-`<version>-<os>-<cpu>` platform versions first under per-platform dist-tags,
-waits until the public registry serves all of them and a fresh install of the
-wrapper resolves them, and only then publishes the wrapper under `latest` or
-`beta`, because trusted publishing cannot move a dist-tag after the fact. See
+Releases are cut by merging the release-please PR. The release tag then builds,
+publishes and distributes every channel; see
+[Release orchestration](distribution.md#release-orchestration). The npm
+publisher publishes everything as versions of the one `private-ai-proxy`
+package, as `@openai/codex` does. It uploads the six `<version>-<os>-<cpu>`
+platform versions first, under per-platform dist-tags. It then waits until the
+public registry serves all of them and a fresh install of the wrapper resolves
+them. Only then does it publish the wrapper under `latest` or `beta`, because
+trusted publishing cannot move a dist-tag after the fact. See
 [`apps/desktop/npm/README.md`](../npm/README.md#release) for the full order.
 
-`Desktop Tauri` remains the reusable Direct release worker and the focused beta,
-package-smoke and recovery entry point. Supplying `release_version` enables updater
-signing, macOS Developer ID signing and notarization, and the protected
-`desktop-release` environment. A run without a release version creates test
-packages only; `package_only` cannot be combined with a version.
+`Desktop Tauri` is also the package-smoke entry point. A manual run on a branch
+builds unsigned test packages of the committed version and never creates a
+release; `package_only` skips the full verification.
 
 - Tags are `desktop-v<semver>` and titles are `Private AI Proxy v<semver>`.
 - Beta versions use `x.y.z-beta.n`; stable versions use `x.y.z`.
-- Stable releases must run from `main`, include all six platform builds, and
-  provide a non-empty `release_summary`.
-- Release notes always contain status, `What's changed`, desktop downloads,
-  standalone CLI downloads, checksums, updater integrity, and build provenance.
+- Release notes are the release's `CHANGELOG.md` section. GitHub lists the
+  assets, including `SHA256SUMS`.
 - Public assets use `private-ai-proxy-<version>-<platform>-<arch>.<format>` or
   `private-ai-proxy-cli-<version>-<platform>-<arch>.<format>`.
 - Stable desktop releases become the repository's Latest release. Beta releases
   and updater-feed releases never replace Latest. Stable releases also advance
   the beta updater feed when they are newer than its latest beta.
 
-`release_summary` accepts Markdown paragraphs or list items, not headings. Pass
-multiline summaries with `gh workflow run -f release_summary="$summary"`; the
-GitHub Actions form exposes this input as a single-line field.
 Windows Authenticode signing is optional. When `WINDOWS_CERTIFICATE` (a base64
 PFX) and `WINDOWS_CERTIFICATE_PASSWORD` are configured in the protected
 environment, CI imports the certificate only for the Windows package job. Tauri

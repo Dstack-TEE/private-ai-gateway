@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import semver from "semver";
 
 const channels = ["beta", "stable"];
@@ -19,28 +20,14 @@ export function feedTag(channel) {
   return `desktop-updates-${channel}`;
 }
 
-export function releaseTitle(version, channel = "beta") {
-  return `Private AI Proxy v${releaseChannel(version, channel).version}`;
+// The version release-please commits to every manifest (release-please-config.json).
+export function appVersion() {
+  return JSON.parse(readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8")).version;
 }
 
-export function validateReleaseRequest({ version = "", channel = "beta", platforms = "all", ref = "", publish = false, packageOnly = false, summary = "" }) {
-  if (!version) {
-    if (publish) throw new Error("Publishing requires a release version");
-    return undefined;
-  }
-  if (packageOnly) throw new Error("package_only cannot be used for a release");
-  const release = releaseChannel(version, channel);
-  const notes = summary.trim();
-  if (notes.length > 8000) throw new Error("Release summary must be 8000 characters or fewer");
-  if (/^#{1,6}\s/m.test(notes)) throw new Error("Release summary must not contain Markdown headings");
-  if (publish && ref !== "refs/heads/main") throw new Error("Published releases must be built from main");
-  if (publish && platforms.trim() !== "all") throw new Error("Published releases must include every supported platform");
-  if (release.channel === "stable") {
-    if (ref !== "refs/heads/main") throw new Error("Stable releases must be built from main");
-    if (platforms.trim() !== "all") throw new Error("Stable releases must include every supported platform");
-    if (!notes) throw new Error("Stable releases require a release summary");
-  }
-  return release;
+// Betas are x.y.z-beta.n; every other release ships on the stable channel.
+export function versionRelease(version) {
+  return releaseChannel(version, semver.valid(version) && semver.prerelease(version) ? "beta" : "stable");
 }
 
 // Mirrors belongs_to_feed in core/src/updates.rs: stable releases are also

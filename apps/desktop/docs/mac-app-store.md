@@ -40,11 +40,13 @@ on a reader-app entitlement.
 
 ## Build and signing prerequisites
 
-Stable production releases start from `Desktop stable release`. Its preflight
-validates the shared marketing version, increasing App Store build number, release
-summary and `main` ref, then calls `Desktop Mac App Store` before the Direct release.
-Both are same-repository reusable workflows resolved at the caller commit, so the
-MAS and Direct artifacts cannot drift to different source revisions.
+A stable release tag runs `Desktop release`, which calls `Desktop Mac App Store`
+through `Desktop Tauri` and publishes the Direct release only after the upload
+succeeds (see
+[Release orchestration](distribution.md#release-orchestration)). The reusable
+workflow resolves at the tagged commit, so the MAS and Direct artifacts cannot
+drift to different source revisions. The marketing version is the committed
+app version.
 
 The `Desktop Mac App Store` worker pins **macos-26** for verification and production
 packaging, retaining `universal-apple-darwin`. It does not use `macos-latest` or
@@ -56,7 +58,7 @@ Configure the protected `mac-app-store` environment using the step-scoped
 settings` mappings in the [workflow](../../../.github/workflows/desktop-mac-app-store.yml).
 Those mappings are the required-setting contract: application and installer
 certificate/password pairs, the application provisioning profile, signing
-identities, and (only with upload enabled) the three ASC API credentials. No
+identities, and the three ASC API credentials. No
 separate installer provisioning profile is used by productbuild.
 
 Both preflights run before checkout, dependency installation and compilation.
@@ -68,16 +70,20 @@ runs with `always()`, including failed preflight runs. Keep the ASC app record,
 explicit App ID `org.dstack.private-ai-proxy`, team, agreements and applicable
 tax/banking details ready; preflight does not verify external account state.
 
-Use a stable marketing version and an increasing CFBundleVersion (1–9999,
-optionally two further components 0–99). ASC must confirm uniqueness/ordering;
-the repository validates syntax only. For a local unsigned build on macOS:
+The committed version must be stable. CFBundleVersion is one to three
+period-separated integers of at most 18 characters, and for a Mac app it must
+increase with every upload, across versions
+([TN2420](https://developer.apple.com/library/archive/technotes/tn2420/_index.html)).
+Releases number it `100 + <Desktop release run number>` (see
+[Release orchestration](distribution.md#release-orchestration)). ASC confirms
+uniqueness and ordering; the repository validates syntax only. For a local unsigned build of a
+stable version on macOS:
 
 ```sh
-DESKTOP_RELEASE_CHANNEL=stable DESKTOP_RELEASE_VERSION=1.0.0 \
 APPLE_APP_STORE_BUILD_NUMBER=1 npm run dist:app-store -- --bundles app
 ```
 
-Choose actual release values; the example is not an ASC reservation. The dedicated
+The build number in the example is not an ASC reservation. The dedicated
 Tauri overlay disables native updates and produces an app rather than a DMG.
 The packaging script checks identifier, Developer Tools category, macOS >=13,
 versions, exact executable inventory, both architectures, profile validity and
@@ -100,11 +106,10 @@ validates those separately on the final app, and `altool --validate-app` validat
 the final pkg before upload. Do not attempt to make the distribution package
 locally runnable or weaken its signature to satisfy CI.
 
-The worker uploads a reviewable pkg artifact by default. Explicit upload is
-restricted to main and performs App Store validation before delivery. The
-coordinated workflow always requests upload and waits for it to succeed before
-publishing Direct. Running repository checks does not invoke either release path
-or upload anything.
+Pull requests, pushes to `main` and manual runs only verify. Packaging and
+upload happen only when a stable release tag calls the workflow; the upload
+must run from that tag and passes App Store validation before delivery. The
+signed pkg is also kept as a workflow artifact for review.
 
 ## Privacy and export compliance
 

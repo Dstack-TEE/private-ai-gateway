@@ -17,6 +17,8 @@ use crate::{
 };
 
 pub const VERSION: u16 = 3;
+/// The committed app version; Mac App Store builds append their build number
+/// (`runtimeBuildVersion` in `scripts/distribution.mjs`).
 pub const BUILD_VERSION: &str = match option_env!("PAP_BUILD_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),

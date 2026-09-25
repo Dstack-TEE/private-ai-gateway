@@ -31,23 +31,84 @@ remain at native API and process boundaries, not throughout product components.
 
 ## Release orchestration
 
-`Desktop stable release` is the standard production entry for a coordinated
-desktop release. It validates the stable version, App Store build number, release
-summary and `main` ref before any signing work. It then calls the MAS and Direct
-workflows through same-repository reusable workflow references. GitHub resolves
-those references at the caller commit, so both distributions build the same source
-revision with the same marketing version.
+Versions, changelog and tags come from
+[release-please](https://github.com/googleapis/release-please)
+(`release-please-config.json`, `.release-please-manifest.json`). On every push
+to `main` that touches `apps/desktop`, `Desktop release PR` keeps a release PR
+open. The PR carries the next version in `package.json`,
+`src-tauri/tauri.conf.json`, every workspace `Cargo.toml` and `Cargo.lock`,
+plus the new `CHANGELOG.md` section built from Conventional Commit titles.
+Merging the PR tags the merge commit `desktop-v<version>` and creates a draft
+GitHub release with that changelog section as its notes.
 
-The MAS package is signed, validated and uploaded first. Only after that succeeds
-does the Direct workflow build all six targets, publish the GitHub release, advance
-the updater feed and dispatch the dedicated npm publisher at the immutable release
-tag. The parent waits for that workflow so npm remains part of the coordinated
-result while using the exact workflow identity authorized for OIDC trusted
-publishing. A MAS failure therefore cannot leave a newly public Direct release; a
-later Direct failure can leave only an uploaded, unsubmitted App Store build. The
-child workflows retain their focused verification and recovery entry points, but
-coordinated stable publication uses the top-level workflow. Windows Authenticode
-remains optional and does not block the coordinated release.
+- **Beta** is the default: versions go `x.y.z-beta.1`, `-beta.2`, and so on
+  (release-please `versioning: prerelease`). After a stable release, a `fix`
+  proposes `x.y.(z+1)-beta.1` and a `feat` proposes `x.(y+1).0-beta.1`. A
+  `feat` on a patch-level beta moves to the next minor version but keeps the
+  beta number: `0.2.1-beta.3` becomes `0.3.0-beta.3`. That is release-please's
+  prerelease strategy, not a skipped release.
+- **Stable**: merge a commit whose message has the footer
+  `Release-As: x.y.z`. The next release PR then proposes `x.y.z`. Afterwards,
+  betas continue from the next version.
+
+The tag starts `Desktop release` (`desktop-release.yml`), which runs only for
+release tags and calls `Desktop Tauri` (`desktop-native.yml`) at the tagged
+commit. The tag must match the committed version and be contained in `main`.
+The run verifies and builds all six targets. For a stable version it also calls
+`Desktop Mac App Store` in parallel, which signs, validates and uploads the App
+Store build. Only stable versions reach the App Store.
+
+The App Store build's CFBundleVersion is `100 + <Desktop release run number>`.
+A Mac app's build number must increase with every upload, across versions, and
+is at most three integers and 18 characters
+([TN2420](https://developer.apple.com/library/archive/technotes/tn2420/_index.html)).
+The run number counts release tags only, and a re-run keeps it. The offset
+starts above the hand-numbered builds 1–17, as Xcode Cloud's
+[next build number](https://developer.apple.com/documentation/xcode/setting-the-next-build-number-for-xcode-cloud-builds)
+does for existing Mac apps.
+
+Once every package and the App Store upload have succeeded, the run:
+
+1. attaches the signed assets, `latest.json` and `SHA256SUMS` to the draft;
+2. publishes it (stable releases become Latest);
+3. advances the updater feeds;
+4. dispatches the dedicated npm publisher at the release tag and waits for it.
+   npm checks the top-level workflow identity for OIDC trusted publishing.
+
+A MAS failure therefore cannot leave a newly public Direct release. A later
+Direct failure can leave only an uploaded, unsubmitted App Store build. To
+recover, re-run the failed jobs of the tag's `Desktop release` run. Windows Authenticode remains
+optional and does not block the release.
+
+### Release GitHub App
+
+Workflows never start from events that `GITHUB_TOKEN` creates. `Desktop release
+PR` therefore acts as a GitHub App, so its release PR runs CI and its tag starts
+the release build. Until both settings below exist, the workflow fails with a
+message naming them.
+
+1. Create a GitHub App owned by the Dstack-TEE organization. Disable its
+   webhook. It needs these repository permissions, with nothing else beyond the
+   mandatory Metadata read:
+   - Contents: read and write (release commits, tags, draft releases);
+   - Pull requests: read and write (the release PR);
+   - Issues: read and write (release PR labels).
+2. Install it only on `Dstack-TEE/private-ai-gateway`.
+3. In the `desktop-release` environment, store the App's client ID as the
+   variable `DESKTOP_RELEASE_APP_CLIENT_ID` and a private key (the whole `.pem`)
+   as the secret `DESKTOP_RELEASE_APP_PRIVATE_KEY`. Keep the environment's
+   deployment rules to `main` and `desktop-v*`, so other branches cannot mint
+   the token.
+
+To rotate the key:
+
+1. Generate a new private key in the App settings.
+2. Replace the secret.
+3. Confirm the next `Desktop release PR` run succeeds.
+4. Delete the old key in the App settings.
+
+Installation tokens last one hour and are minted per run, so nothing else
+expires.
 
 ## Updates by installation
 

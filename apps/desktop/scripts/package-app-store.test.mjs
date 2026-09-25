@@ -97,7 +97,9 @@ test("package manifest requires a stable Universal-era app and valid build versi
   const identifier = manifest.CFBundleIdentifier;
   assert.deepEqual(validateAppStoreManifest(manifest, identifier), [manifest.CFBundleExecutable, ...MAC_APP_STORE_SIDECARS]);
   for (const patch of [
-    { CFBundleVersion: "2026091901" }, { CFBundleVersion: "1.100" },
+    // TN2420's illegal build numbers, four components and more than 18 characters.
+    { CFBundleVersion: "a1" }, { CFBundleVersion: "1.a" }, { CFBundleVersion: ".1" }, { CFBundleVersion: "1." },
+    { CFBundleVersion: "1.10000.1.5" }, { CFBundleVersion: "1".repeat(19) },
     { CFBundleShortVersionString: "1.2.3-beta.1" }, { LSMinimumSystemVersion: "12.0" },
     { CFBundleIdentifier: "com.invalid.desktop-app" }, { CFBundleExecutable: "../outside" },
   ]) assert.throws(() => validateAppStoreManifest({ ...manifest, ...patch }, identifier));
@@ -120,7 +122,6 @@ test("workflow rejects incomplete signing/upload settings before checkout withou
   const steps = workflow.jobs.package.steps;
   const [signing, upload, checkout] = steps;
   assert.match(checkout.uses, /^actions\/checkout@/);
-  assert.equal(upload.if, "inputs.upload");
   const imported = steps.find((step) => step.name === "Import App Store signing material");
   assert.deepEqual(imported.env, signing.env);
   const consumedSettings = new Set([...imported.run.matchAll(/(?:process\.env\.|\$)(MAC_APP_STORE_[A-Z_]+)/g)].map((match) => match[1]));
@@ -135,7 +136,7 @@ test("workflow rejects incomplete signing/upload settings before checkout withou
     // Only synthetic settings enter these processes; never inherit developer credentials.
     env: { PATH: process.env.PATH, ...env }, encoding: "utf8",
   });
-  assert.equal(run(signing, settings).status, 0); // upload=false needs no ASC credentials.
+  assert.equal(run(signing, settings).status, 0);
   const asc = {
     APPLE_API_KEY: "ABCDEFGHIJ",
     APPLE_API_ISSUER: "12345678-1234-1234-1234-123456789abc",
