@@ -44,7 +44,6 @@
     "allow-delete-profile",
     "allow-save-configuration",
     "allow-copy-text",
-    "allow-main-window-ready",
     "allow-open-agent-website",
     "allow-open-api-key-page",
     "allow-query-usage",

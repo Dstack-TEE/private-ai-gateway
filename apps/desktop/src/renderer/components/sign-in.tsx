@@ -7,7 +7,6 @@ import { Button } from "./ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "./ui/field";
 import { Input } from "./ui/input";
-import { useAppearanceTheme } from "./appearance";
 
 /** The web UI's `/sign-in` page: exchanges the password for a session, then returns to the page asked for. */
 export function SignInPage() {
@@ -18,8 +17,6 @@ export function SignInPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const errorId = useId();
-  // Saved appearance needs a session, so the sign-in page follows the system theme.
-  useAppearanceTheme("system");
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setBusy(true);

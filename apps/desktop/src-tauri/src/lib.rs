@@ -19,7 +19,10 @@ use desktop_core::{
     config::Appearance,
     contracts::{AppState, CommandRegistration},
 };
-use tauri::{webview::WebviewWindowBuilder, AppHandle, Emitter, Manager, WindowEvent};
+use tauri::{
+    webview::{PageLoadEvent, WebviewWindowBuilder},
+    AppHandle, Emitter, Manager, WindowEvent,
+};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_shell::ShellExt;
 
@@ -31,12 +34,21 @@ pub(crate) async fn run_blocking<T: Send + 'static>(
         .map_err(|_| "The background operation could not complete. Please try again.")?
 }
 
-fn apply_appearance(app: &AppHandle, appearance: Appearance) {
-    app.set_theme(match appearance {
+/// The native theme of an appearance; `None` follows the system. The webview's
+/// `prefers-color-scheme` follows it: macOS WKWebView inherits the window's
+/// appearance, WebView2 takes it as its preferred color scheme, and WebKitGTK
+/// follows the GTK dark-theme preference (with `None`, the GTK theme rather
+/// than the desktop's color-scheme setting).
+fn native_theme(appearance: Appearance) -> Option<tauri::Theme> {
+    match appearance {
         Appearance::System => None,
         Appearance::Light => Some(tauri::Theme::Light),
         Appearance::Dark => Some(tauri::Theme::Dark),
-    });
+    }
+}
+
+fn apply_appearance(app: &AppHandle, appearance: Appearance) {
+    app.set_theme(native_theme(appearance));
 }
 
 async fn open_account_url(app: AppHandle, url: String) -> Result<(), String> {
@@ -259,10 +271,21 @@ pub fn run() {
                 .iter()
                 .find(|window| window.label == "main")
                 .ok_or("Main window configuration is missing")?;
-            // Created hidden (`visible: false`); the renderer reports when
-            // it has applied the saved appearance (`main_window_ready`).
+            // Created hidden (`visible: false`) in the saved appearance, so
+            // the page paints in it from the start, and shown once the page
+            // has loaded. The settings file is read directly: the backend may
+            // still be starting, and it reapplies the appearance on connecting.
+            let appearance = desktop_core::config::load()
+                .map(|saved| saved.appearance)
+                .unwrap_or_default();
             let window = WebviewWindowBuilder::from_config(app, config)?
+                .theme(native_theme(appearance))
                 .initialization_script(distribution::initialization_script())
+                .on_page_load(|window, payload| {
+                    if matches!(payload.event(), PageLoadEvent::Finished) {
+                        tray::main_window_ready(window.app_handle());
+                    }
+                })
                 .build()?;
             let window_for_events = window.clone();
             let app_for_events = app.handle().clone();

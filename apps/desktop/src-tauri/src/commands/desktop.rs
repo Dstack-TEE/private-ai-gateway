@@ -10,7 +10,7 @@ use tauri::{AppHandle, Manager, State, WebviewWindow};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_opener::OpenerExt;
 
-use crate::{distribution, open_account_url, run_blocking, tray};
+use crate::{distribution, open_account_url, run_blocking};
 
 async fn open_url(app: AppHandle, url: String, failure: &'static str) -> Result<(), CallError> {
     Ok(run_blocking(move || {
@@ -107,11 +107,6 @@ pub(crate) fn show_edit_menu(window: WebviewWindow, editable: bool) -> Result<()
     window
         .popup_menu(&menu)
         .map_err(|_| "Cannot open editing menu".into())
-}
-
-#[tauri::command]
-pub(crate) fn main_window_ready(window: WebviewWindow) -> Result<(), CallError> {
-    Ok(tray::main_window_ready(&window)?)
 }
 
 #[tauri::command]

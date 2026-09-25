@@ -136,21 +136,21 @@ macro_rules! commands {
 // `desktop_runtime::server::execute`. Browsers may call only the commands the
 // renderer method table (`ui_api::Method`) forwards.
 commands! {
-    GetState -> AppState;
-    Start { config: StartConfig } -> AppState;
-    Stop -> AppState;
+    GetState -> AppStateWire;
+    Start { config: StartConfig } -> AppStateWire;
+    Stop -> AppStateWire;
     /// Answered under exclusive lifecycle admission; the service then exits.
     Shutdown { instance_id: String, mode: ShutdownMode } -> ();
     Verify {
         profile: ConfidentialProfileInput,
         require_production_os: bool,
         key: Option<String>,
-    } -> AppState;
+    } -> AppStateWire;
     SaveConfiguration {
         profile: ConfidentialProfileInput,
         require_production_os: bool,
         key: Option<String>,
-    } -> AppState;
+    } -> AppStateWire;
     CompleteAccountLogin { id: String, callback_url: String } -> ();
     BeginAccountLogin { profile: ConfidentialProfileInput } -> LoginPresentation;
     /// Starts saving a signed-in account; poll `AccountSaveResult`.
@@ -166,9 +166,9 @@ commands! {
     GetAccountBalance { target: AccountBalanceTarget } -> Option<AccountBalance>;
     PollAccountLogin { id: String } -> Option<AccountLoginDetails>;
     CancelAccountLogin { id: String } -> ();
-    ActivateProfile { profile_id: String } -> AppState;
-    DeleteProfile { profile_id: String } -> AppState;
-    ClearApiKey -> AppState;
+    ActivateProfile { profile_id: String } -> AppStateWire;
+    DeleteProfile { profile_id: String } -> AppStateWire;
+    ClearApiKey -> AppStateWire;
     ImportProfiles { backup: ProfileBackup } -> ImportResult;
     ExportProfiles { path: String } -> ();
     ExportProfilesContent -> String;
@@ -180,11 +180,11 @@ commands! {
     ClearUsage -> u64;
     GetClientKey -> String;
     RotateClientKey -> String;
-    SaveLocalApiConfig { config: ListenConfig } -> AppState;
-    SaveWebUi { config: WebUiConfig } -> AppState;
+    SaveLocalApiConfig { config: ListenConfig } -> AppStateWire;
+    SaveWebUi { config: WebUiConfig } -> AppStateWire;
     /// Set or clear the web UI sign-in password; every browser session ends.
-    SetWebUiPassword { password: Option<String> } -> AppState;
-    RefreshCatalog -> AppState;
+    SetWebUiPassword { password: Option<String> } -> AppStateWire;
+    RefreshCatalog -> AppStateWire;
     ListAgents -> Vec<AgentStatus>;
     PreviewAgent { agent_id: String, connect: bool, options: ConnectOptions } -> AgentPreview;
     ApplyAgent {
@@ -195,12 +195,12 @@ commands! {
     } -> AgentStatus;
     /// Stops protection and saves whether it requires a production OS image;
     /// the next start uses the saved policy.
-    SetRequireProductionOs { required: bool } -> AppState;
+    SetRequireProductionOs { required: bool } -> AppStateWire;
     /// Connects or disconnects an agent with the configuration a preview
     /// would show, in one step.
     SetAgentConnection { agent_id: String, connect: bool } -> AgentStatus;
     DisconnectAllAgents -> Vec<AgentStatus>;
-    ResetSettings -> AppState;
+    ResetSettings -> AppStateWire;
     /// The settings in effect (`config.toml`); never includes a secret.
     Settings -> Config;
     SetPreference { change: Preference } -> Config;

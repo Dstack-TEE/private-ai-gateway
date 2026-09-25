@@ -81,8 +81,6 @@ const platform: UiPlatform = {
   ),
   requestNotificationPermission: async () => ({ permission: "unsupported", alertsEnabled: false }),
   openNotificationSettings: async () => undefined,
-  // The page is its own window.
-  mainWindowReady: async () => undefined,
   openWebUi: async () => {
     throw new Error("The web UI is already open in this browser");
   },

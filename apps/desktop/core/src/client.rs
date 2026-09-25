@@ -412,7 +412,7 @@ impl Client {
     }
 
     pub fn state(&self) -> Result<AppState, CallError> {
-        self.call(rpc::GetState)
+        self.call(rpc::GetState).map(|answer| answer.state)
     }
 
     pub fn state_or_cached(&self) -> Result<AppState, CallError> {

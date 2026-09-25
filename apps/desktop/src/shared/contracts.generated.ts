@@ -1,8 +1,10 @@
 // Generated from the Rust contracts by `npm run generate:contracts`. Do not edit.
 
 /**
- * `AppState` as it serializes: its fields and the protection derived
- * from them.
+ * `AppState` as the management API answers and publishes it: the state and
+ * the [`Protection`] it presents. Every state-returning command answers one
+ * and every state event carries one, each built from its state with `From`,
+ * so none can carry a presentation of another state.
  */
 export type AppState = { protection: Protection, backendInstance?: string, clientKeyRevision: number, clientKeyAvailable?: boolean,
 /**

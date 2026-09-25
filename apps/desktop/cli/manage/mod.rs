@@ -136,9 +136,11 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), CallError> {
                 {
                     state
                 } else {
-                    client.call(rpc::Start {
-                        config: state.config,
-                    })?
+                    client
+                        .call(rpc::Start {
+                            config: state.config,
+                        })?
+                        .state
                 };
                 let deadline = Instant::now() + Duration::from_secs(*timeout);
                 loop {
@@ -349,7 +351,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), CallError> {
             command: Models::List { refresh },
         } => {
             let state: AppState = if *refresh {
-                client.call(rpc::RefreshCatalog)?
+                client.call(rpc::RefreshCatalog)?.state
             } else {
                 client.state()?
             };
@@ -629,7 +631,7 @@ fn open_web_ui(cli: &Cli, client: &Client) -> Result<Value, CallError> {
         // The same change `settings set web-ui.enabled true` makes.
         let mut config = client.call(rpc::Settings)?.web_ui;
         config.enabled = true;
-        status = client.call(rpc::SaveWebUi { config })?.web_ui;
+        status = client.call(rpc::SaveWebUi { config })?.state.web_ui;
     }
     let url = status.url.ok_or_else(|| {
         format!(

@@ -435,7 +435,7 @@ fn returned_and_published_states_present_their_own_protection() {
             crate::server::execute(&runtime, &admission, executor.handle(), command).unwrap(),
         );
     }
-    presents_itself(serde_json::to_value(&*published.borrow()).unwrap());
+    presents_itself(desktop_core::ui_api::state_event(&published.borrow()).payload);
 }
 
 #[test]

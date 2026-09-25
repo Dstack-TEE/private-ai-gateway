@@ -347,13 +347,9 @@ pub struct ConfidentialProfileInput {
     pub remote_url: String,
 }
 
-/// The backend's state. It serializes with the [`Protection`] it presents
-/// (see the `Serialize` impl below), so every response and event carries a
-/// presentation derived from exactly the state it contains.
-// `remote = "Self"` turns the derived impls into `AppState::serialize` and
-// `AppState::deserialize`, which the trait impls below build on.
+/// The backend's state. Clients receive it as [`AppStateWire`].
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
-#[serde(rename_all = "camelCase", remote = "Self")]
+#[serde(rename_all = "camelCase")]
 #[ts(optional_fields)]
 pub struct AppState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -424,33 +420,22 @@ pub struct AppState {
     pub agents_revision: u64,
 }
 
-impl Serialize for AppState {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        /// The derived fields.
-        struct Fields<'a>(&'a AppState);
-        impl Serialize for Fields<'_> {
-            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                AppState::serialize(self.0, serializer)
-            }
-        }
-        #[derive(Serialize)]
-        struct View<'a> {
-            #[serde(flatten)]
-            state: Fields<'a>,
-            protection: Protection,
-        }
-        View {
-            state: Fields(self),
-            protection: self.protection(),
-        }
-        .serialize(serializer)
-    }
+/// `AppState` as the management API answers and publishes it: the state and
+/// the [`Protection`] it presents. Every state-returning command answers one
+/// and every state event carries one, each built from its state with `From`,
+/// so none can carry a presentation of another state.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[ts(rename = "AppState")]
+pub struct AppStateWire {
+    #[serde(flatten)]
+    pub state: AppState,
+    pub protection: Protection,
 }
 
-/// A serialized `protection` is ignored; it is derived again when needed.
-impl<'de> Deserialize<'de> for AppState {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        AppState::deserialize(deserializer)
+impl From<AppState> for AppStateWire {
+    fn from(state: AppState) -> Self {
+        let protection = state.protection();
+        Self { state, protection }
     }
 }
 
@@ -719,17 +704,6 @@ mod typescript {
 
     const OUTPUT: &str = "src/shared/contracts.generated.ts";
 
-    /// `AppState` as it serializes: its fields and the protection derived
-    /// from them.
-    #[derive(TS)]
-    #[ts(rename = "AppState")]
-    #[allow(dead_code)]
-    struct SerializedAppState {
-        #[ts(flatten)]
-        state: AppState,
-        protection: Protection,
-    }
-
     macro_rules! declarations {
         ($config:expr, $($type:ty),+ $(,)?) => {
             [$(format!(
@@ -751,7 +725,7 @@ mod typescript {
         );
         for declaration in declarations!(
             &config,
-            SerializedAppState,
+            AppStateWire,
             VerificationStatus,
             Protection,
             ProtectionPhase,
@@ -876,14 +850,14 @@ mod typescript {
         output.push_str(&constant(
             "INITIAL_STATE",
             "AppState",
-            serde_json::to_value(AppState::default()).unwrap(),
+            serde_json::to_value(AppStateWire::from(AppState::default())).unwrap(),
         ));
         let mut unavailable = AppState::default();
         unavailable.disconnect("The background service is unavailable.".into());
         output.push_str(&constant(
             "UNAVAILABLE_STATE",
             "AppState",
-            serde_json::to_value(unavailable).unwrap(),
+            serde_json::to_value(AppStateWire::from(unavailable)).unwrap(),
         ));
         output.push_str(&constant(
             "WEB_UI_PASSWORD_MIN_LENGTH",
@@ -946,10 +920,9 @@ mod typescript {
 mod tests {
     use super::*;
 
-    /// Every response and event derives `protection` from the state it
-    /// carries; a received one is never trusted.
+    /// A wire state presents exactly the state it carries.
     #[test]
-    fn a_serialized_state_carries_the_protection_it_presents() {
+    fn a_wire_state_carries_the_protection_it_presents() {
         let mut state = AppState {
             status: VerificationStatus::Verified,
             api_key_saved: true,
@@ -963,13 +936,15 @@ mod tests {
         ];
         for change in changes {
             change(&mut state);
-            let serialized = serde_json::to_value(&state).unwrap();
+            let serialized = serde_json::to_value(AppStateWire::from(state.clone())).unwrap();
+            assert_eq!(
+                serialized["status"],
+                serde_json::to_value(state.status).unwrap()
+            );
             assert_eq!(
                 serialized["protection"],
                 serde_json::to_value(state.protection()).unwrap()
             );
-            let received: AppState = serde_json::from_value(serialized).unwrap();
-            assert_eq!(received.protection(), state.protection());
         }
     }
 }

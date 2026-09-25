@@ -50,7 +50,6 @@ export interface UiPlatform {
   saveDiagnosticsExport(): Promise<boolean>;
   requestNotificationPermission(): Promise<Pick<NotificationConfiguration, "permission" | "alertsEnabled">>;
   openNotificationSettings(): Promise<void>;
-  mainWindowReady(): Promise<void>;
   openAboutLink: DesktopApi["openAboutLink"];
   openWebUi(): Promise<void>;
   openAgentWebsite(agentId: string): Promise<void>;
@@ -122,7 +121,6 @@ export function createDesktopApi(transport: UiTransport, platform: UiPlatform): 
     onNavigate: (listener) => subscribe(NAVIGATE_EVENT, listener),
     onAgentsChange: (listener) => subscribe(AGENTS_CHANGED_EVENT, listener),
     onClientKeyChange: (listener) => subscribe(CLIENT_KEY_CHANGED_EVENT, listener),
-    mainWindowReady: platform.mainWindowReady,
     openAboutLink: platform.openAboutLink,
     openAgentWebsite: platform.openAgentWebsite,
     openApiKeyPage: platform.openApiKeyPage,

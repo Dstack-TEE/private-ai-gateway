@@ -84,7 +84,6 @@ export interface DesktopApi {
   onNavigate(listener: (target: NavigationTarget) => void): () => void;
   onAgentsChange(listener: () => void): () => void;
   onClientKeyChange(listener: (available: boolean) => void): () => void;
-  mainWindowReady(): Promise<void>;
   /** Open a documented, allowlisted project resource in the system browser. */
   openAboutLink(target: AboutLink): Promise<void>;
   openAgentWebsite(agentId: string): Promise<void>;

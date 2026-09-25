@@ -9,7 +9,9 @@ use crate::{
     agent_access,
     client::{CallError, Client},
     config::{Appearance, Config, NotificationPreferences},
-    contracts::{AccountSaveResult, AppState, ConfidentialProfileInput, ServiceProvider},
+    contracts::{
+        AccountSaveResult, AppState, AppStateWire, ConfidentialProfileInput, ServiceProvider,
+    },
     protocol::{self, rpc, Call, Command, Preference},
 };
 
@@ -122,12 +124,17 @@ impl StateEventProjection {
                 json!(state.client_key_available.unwrap_or(true)),
             ));
         }
-        events.push(Event::new(
-            STATE_EVENT,
-            serde_json::to_value(state).unwrap_or(Value::Null),
-        ));
+        events.push(state_event(state));
         events
     }
+}
+
+/// The state event: the state with the protection it presents.
+pub fn state_event(state: &AppState) -> Event {
+    Event::new(
+        STATE_EVENT,
+        serde_json::to_value(AppStateWire::from(state.clone())).unwrap_or(Value::Null),
+    )
 }
 
 #[derive(Clone, Serialize, ts_rs::TS)]
@@ -228,7 +235,7 @@ pub trait Host: Clone + Send + Sync + 'static {
     fn reset_settings(
         &self,
         backend: &impl Backend,
-    ) -> impl Future<Output = Result<AppState, CallError>> + Send {
+    ) -> impl Future<Output = Result<AppStateWire, CallError>> + Send {
         call(backend, rpc::ResetSettings)
     }
 
@@ -247,7 +254,7 @@ pub async fn invoke(
         Method::GetState => match backend.execute(Command::GetState {}).await {
             Ok(state) => Ok(state),
             Err(error) => match backend.disconnected_state() {
-                Some(cached) => Ok(value(cached)?),
+                Some(cached) => Ok(value(AppStateWire::from(cached))?),
                 None => Err(error),
             },
         },
@@ -268,7 +275,9 @@ pub async fn invoke(
         }
         Method::SaveAccountLogin => {
             let input: SaveLoginParams = params(input)?;
-            Ok(value(save_account_login(backend, input).await?)?)
+            Ok(value(AppStateWire::from(
+                save_account_login(backend, input).await?,
+            ))?)
         }
         Method::GetOrganizationUrl => {
             let input: OrganizationParams = params(input)?;

@@ -272,10 +272,7 @@ async fn events<B: Backend>(
     let mut projection = StateEventProjection::new(&initial);
     let mut receiver = api.host.events.subscribe();
     let mut snapshot = vec![
-        Event::new(
-            ui_api::STATE_EVENT,
-            serde_json::to_value(&initial).unwrap_or(Value::Null),
-        ),
+        ui_api::state_event(&initial),
         Event::new(
             ui_api::CLIENT_KEY_CHANGED_EVENT,
             json!(initial.client_key_available.unwrap_or(true)),

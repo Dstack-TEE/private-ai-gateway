@@ -458,18 +458,15 @@ pub struct MainWindowPresentation {
     requested: AtomicBool,
 }
 
-pub fn main_window_ready(window: &tauri::WebviewWindow) -> Result<(), String> {
-    if window.label() != "main" {
-        return Err("Only the main window can announce its content is ready".into());
-    }
-    let app = window.app_handle();
+/// The main window's page has loaded; a request to show it that came earlier
+/// shows it now.
+pub fn main_window_ready(app: &AppHandle) {
     let presentation = app.state::<MainWindowPresentation>();
     if !presentation.ready.swap(true, Ordering::SeqCst)
         && presentation.requested.load(Ordering::SeqCst)
     {
         show_window(app);
     }
-    Ok(())
 }
 
 pub fn show_window(app: &AppHandle) {
