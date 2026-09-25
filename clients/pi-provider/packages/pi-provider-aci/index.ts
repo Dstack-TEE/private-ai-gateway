@@ -25,6 +25,7 @@ import type {
 import * as piAi from "@earendil-works/pi-ai";
 import {
   createProvider as createPiProvider,
+  type Context,
   type Model,
   type Provider,
 } from "@earendil-works/pi-ai";
@@ -54,6 +55,7 @@ import { createAccountOAuthAuth, createApiKeyAuth } from "./src/auth.ts";
 import { PROVIDER_VERSION } from "./src/constants.ts";
 import { DEFAULT_PROFILE, resolveProfile, type ProviderProfile } from "./src/profile.ts";
 import { mapAciModelToPi, resolveModelCompatOverride } from "./src/models.ts";
+import { contextForResolvedPi } from "./src/pi-context.ts";
 import { isAciProjectConfigApproved } from "./src/project-trust.ts";
 import {
   closeAciProvider,
@@ -214,11 +216,30 @@ function nativeAciProvider(state: AciRuntimeState): Provider<"openai-completions
         if (state.modelAudit.get(model.id) === "unauditable") {
           throw new Error(unauditableModelMessage(state.profile.label, model.id));
         }
-        return streams.stream(model, context, { ...options, fetch });
+        return streams.stream(model, contextForResolvedPi(piAi, context) as Context, {
+          ...options,
+          fetch,
+        });
       },
       streamSimple: (model, context, options) => {
         if (state.modelAudit.get(model.id) === "unauditable") {
           throw new Error(unauditableModelMessage(state.profile.label, model.id));
+        }
+        const prepared = contextForResolvedPi(piAi, context);
+        // pi-ai < 0.86 streamSimple estimates system-message content as blocks
+        // and throws on a transcript. Map reasoning here and call stream(),
+        // which still understands the folded Context shape.
+        if (prepared !== context) {
+          const reasoning = options?.reasoning;
+          const clamp = (piAi as { clampThinkingLevel?: (model: unknown, level: string) => string })
+            .clampThinkingLevel;
+          const clamped = reasoning && typeof clamp === "function" ? clamp(model, reasoning) : reasoning;
+          const reasoningEffort = !clamped || clamped === "off" ? undefined : clamped;
+          return streams.stream(model, prepared as Context, {
+            ...options,
+            fetch,
+            ...(reasoningEffort ? { reasoningEffort } : {}),
+          });
         }
         return streams.streamSimple(model, context, { ...options, fetch });
       },
