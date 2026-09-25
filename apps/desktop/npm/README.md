@@ -52,6 +52,15 @@ until `0.2.0` is published, `^0.2.0-beta.1` resolves to `0.2.0-beta.2-win32-x64`
 rather than to the wrapper `0.2.0-beta.2`. Install `private-ai-proxy`,
 `private-ai-proxy@latest`, `private-ai-proxy@beta` or an exact version.
 
+A publish sets exactly one dist-tag, and trusted publishing cannot run
+`npm dist-tag` (see [Trusted publishing](#trusted-publishing)). A stable
+release therefore moves only `latest`; `beta` keeps naming the last prerelease
+until the next beta is published. Right after `0.2.0` ships,
+`npm install private-ai-proxy@beta` still installs `0.2.0-beta.N`, an older
+version than `latest`. Install `private-ai-proxy` to get the newest stable
+release. The desktop updater's beta feed differs: a stable release also
+advances it when it is newer.
+
 ### Linux libc
 
 The Linux binaries require glibc 2.35 or newer. There is no musl build, so
@@ -95,13 +104,14 @@ After a versioned `desktop-v*` release is published, the Direct release worker
 dispatches the `Private AI Proxy npm packages` workflow at that release tag and
 waits for it. The publish job lives in its own top-level workflow so that its
 GitHub OIDC identity matches the npm trusted publisher. A manual workflow
-dispatch remains available for a package-only review or an idempotent retry
-against an already published Desktop release.
+dispatch remains available for a package-only review, or to finish an
+interrupted publish against an already published Desktop release.
 
-The workflow verifies the GitHub release checksums, checks every tarball
-allowlist and manifest, and compares every packaged native binary
-byte-for-byte with the release archive. It then does a real npm install of the
-wrapper plus the Linux x64 platform version. npm is therefore a downstream
+The workflow verifies the GitHub release checksums, checks every tarball's file
+list, and compares every packaged native binary byte-for-byte with the release
+archive. `scripts/package-npm.test.mjs` covers the generated manifests. The
+workflow then does a real npm install of the wrapper plus the Linux x64
+platform version from the local tarballs. npm is therefore a downstream
 packaging channel for the same CLI binaries, version and source release, not a
 separate build.
 
@@ -109,31 +119,26 @@ Publishing runs in this order:
 
 1. Publish the six platform versions, one at a time because they update the
    same packument, each with its own dist-tag (see above).
-2. Wait up to 15 minutes until the public registry serves every platform
-   version's document and lists the version, with the expected integrity, in
-   the install packument. Otherwise the job fails.
-3. Install the local wrapper tarball globally with an anonymous configuration
-   and a fresh cache, so its optional dependencies resolve from the public
-   registry, and run `private-ai-proxy --version`.
-4. Publish the wrapper with the channel dist-tag: `latest` for stable releases
+2. Publish the wrapper with the channel dist-tag: `latest` for stable releases
    and `beta` for prereleases.
-5. Wait for the wrapper to be served, then install
-   `private-ai-proxy@<version>` from the registry with a fresh cache and run
-   `--version`.
 
-After a publish, the registry can take several minutes to serve the new
-version. The channel tag must not point at a wrapper whose platform versions
-are not yet resolvable, or `npm install private-ai-proxy` fails for every user
-of that channel. Trusted publishing only authorizes `npm publish`, not
-`npm dist-tag`, so the wrapper cannot be staged under an internal tag and
-promoted later. The channel tag moves when the wrapper is published, which is
-why the wrapper goes last, and only after steps 2 and 3 pass. Codex publishes
-its platform versions first for the same reason but does not wait for them.
+The channel tag must never point at a wrapper whose platform versions are not
+resolvable, or `npm install private-ai-proxy` fails for every user of that
+channel. Trusted publishing only authorizes `npm publish`, not `npm dist-tag`,
+so the channel tag moves when the wrapper is published, and the wrapper goes
+last. That order alone is enough: every version is part of the one
+`private-ai-proxy` packument, and npm resolves the wrapper and its aliased
+platform versions from the same packument response. A response that already
+lists the new wrapper also lists the platform versions published before it.
+Codex publishes in the same order without waiting in between. The job does not
+install from the registry after publishing: the CDN caches the packument for
+several minutes, and the local tarball install above already proves the
+packages.
 
-On a retry, an existing version is skipped only when its registry integrity
-matches the local tarball. The registry waits and install checks then run
-again. Registry lookups are anonymous and live in
-`apps/desktop/scripts/npm-registry.mjs`.
+Before each publish, `apps/desktop/scripts/npm-registry.mjs` looks the version
+up anonymously. An existing version is skipped only when its registry
+integrity matches the local tarball, so re-running the failed job finishes an
+interrupted publish; different contents fail the job.
 
 ### Trusted publishing
 
@@ -141,13 +146,17 @@ again. Registry lookups are anonymous and live in
 `Dstack-TEE/private-ai-gateway`, workflow `private-ai-proxy-npm.yml`, and the
 protected `npm` environment. Because every version shares the one package name,
 this single trusted publisher covers the whole release. The publish job uses
-Node 24, requests `id-token: write`, and publishes with provenance from a
-GitHub-hosted runner. It uses no npm publish token. OIDC authentication covers
+Node 24, requests `id-token: write`, and publishes from a GitHub-hosted runner,
+which makes npm generate provenance attestations automatically
+([npm trusted publishing](https://docs.npmjs.com/trusted-publishers#automatic-provenance-generation)).
+It uses no npm publish token. OIDC authentication covers
 `npm publish` and `npm stage publish` only
 ([npm trusted publishing limitations](https://docs.npmjs.com/trusted-publishers#limitations-and-future-improvements)),
 so the workflow never runs `npm dist-tag`.
 
 The desktop release and the stable and beta updater feeds are updated by the
-desktop workflow. npm is updated by the workflow above. Homebrew and the
-official shell installers are separate distribution projects, and this release
-workflow does not update them until those channels are implemented.
+desktop workflow. npm is updated by the workflow above. The official shell
+installers read the updater feeds, so they need no release step. The Homebrew
+tap [`Dstack-TEE/homebrew-private-ai`](https://github.com/Dstack-TEE/homebrew-private-ai)
+is not part of the tag pipeline: its own scheduled workflow opens an update
+pull request for each stable release, and a maintainer merges it.
