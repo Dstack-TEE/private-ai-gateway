@@ -44,14 +44,11 @@ jobs:
         working-directory: apps/desktop
         run: npm ci --ignore-scripts
       # The script is idempotent: it re-reads both feeds and uploads only what
-      # is still behind, so a transient GitHub API or asset upload failure is
-      # retried by running it again.
+      # is still behind. After a transient GitHub API or asset upload failure,
+      # use "Re-run failed jobs" on the release run or dispatch this workflow
+      # on the tag.
       - name: Validate and advance the selected channel
-        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
+        timeout-minutes: 10
         env:
           GH_TOKEN: ${{ github.token }}
-        with:
-          max_attempts: 3
-          retry_wait_seconds: 30
-          timeout_minutes: 10
-          command: node apps/desktop/scripts/publish-update-feed.mjs
+        run: node apps/desktop/scripts/publish-update-feed.mjs
