@@ -140,9 +140,7 @@ pub fn spawn_background() -> Result<BackgroundService, String> {
         .stderr(Stdio::piped());
     // Inherit runtime-selection variables unchanged. A child-only data override
     // would move its socket away from the parent's Linux or macOS endpoint.
-    configure_background_command(&mut command);
-    let mut child = command
-        .spawn()
+    let mut child = spawn_detached(&mut command)
         .map_err(|error| format!("Cannot start PAP service: {error}"))?;
     let stderr = child
         .stderr
@@ -186,9 +184,11 @@ pub fn wait_for_exit(pid: u32, timeout: Duration) -> Result<(), String> {
     wait_for_exit_native(pid, timeout)
 }
 
+/// Starts the service in its own session, so it outlives the terminal or app
+/// that started it.
 #[cfg(all(unix, not(all(target_os = "macos", feature = "mac-app-store"))))]
-fn configure_background_command(command: &mut Command) {
-    use std::{io, os::unix::process::CommandExt};
+fn spawn_detached(command: &mut Command) -> io::Result<Child> {
+    use std::os::unix::process::CommandExt;
 
     // SAFETY: `setsid` is async-signal-safe and the closure performs no other
     // work between fork and exec.
@@ -201,23 +201,42 @@ fn configure_background_command(command: &mut Command) {
             }
         });
     }
+    command.spawn()
 }
 
+/// Starts the service without a console and outside the caller's job, so it
+/// outlives the terminal or app that started it.
 #[cfg(windows)]
-fn configure_background_command(command: &mut Command) {
+fn spawn_detached(command: &mut Command) -> io::Result<Child> {
     use std::os::windows::process::CommandExt;
-    use windows_sys::Win32::System::Threading::{
-        CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS,
+    use windows_sys::Win32::{
+        Foundation::ERROR_ACCESS_DENIED,
+        System::Threading::{
+            CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS,
+        },
     };
 
-    command.creation_flags(CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+    let detached = CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS;
+    match command
+        .creation_flags(detached | CREATE_BREAKAWAY_FROM_JOB)
+        .spawn()
+    {
+        // A job without `JOB_OBJECT_LIMIT_BREAKAWAY_OK` refuses the breakaway
+        // with ERROR_ACCESS_DENIED; the service then starts inside it.
+        Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+            command.creation_flags(detached).spawn()
+        }
+        result => result,
+    }
 }
 
 #[cfg(any(
     all(target_os = "macos", feature = "mac-app-store"),
     not(any(unix, windows))
 ))]
-fn configure_background_command(_: &mut Command) {}
+fn spawn_detached(command: &mut Command) -> io::Result<Child> {
+    command.spawn()
+}
 
 #[cfg(target_os = "linux")]
 fn wait_for_exit_native(pid: u32, timeout: Duration) -> Result<(), String> {
@@ -232,10 +251,13 @@ fn wait_for_exit_native(pid: u32, timeout: Duration) -> Result<(), String> {
     let raw_fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0_u32) };
     if raw_fd == -1 {
         let error = io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::ESRCH) {
-            return Ok(());
-        }
-        return Err(format!("Cannot observe PAP service process {pid}: {error}"));
+        return match error.raw_os_error() {
+            Some(libc::ESRCH) => Ok(()),
+            // Kernels before 5.3, and seccomp filters that deny the call, as
+            // std's `Command` falls back on them.
+            Some(libc::ENOSYS | libc::EPERM) => wait_for_exit_polling(pid, timeout),
+            _ => Err(format!("Cannot observe PAP service process {pid}: {error}")),
+        };
     }
     // SAFETY: the successful syscall returned a new descriptor owned here.
     let pid_fd = unsafe { OwnedFd::from_raw_fd(raw_fd as libc::c_int) };
@@ -401,6 +423,12 @@ fn wait_for_exit_native(pid: u32, timeout: Duration) -> Result<(), String> {
     if pid > libc::pid_t::MAX as u32 {
         return Err(format!("Process ID is outside the native range: {pid}"));
     }
+    wait_for_exit_polling(pid, timeout)
+}
+
+/// Polls for the process with signal zero where no exit notification exists.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn wait_for_exit_polling(pid: u32, timeout: Duration) -> Result<(), String> {
     let started = Instant::now();
 
     loop {

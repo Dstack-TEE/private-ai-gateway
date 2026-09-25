@@ -164,6 +164,31 @@ fn a_concurrent_edit_is_never_overwritten() {
     assert_eq!(current.config.appearance, Appearance::Dark);
 }
 
+#[cfg(unix)]
+#[test]
+fn a_linked_config_file_is_saved_to_its_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = open(dir.path());
+    let target = dir.path().join("dotfiles-config.toml");
+    fs::write(&target, "appearance = \"dark\"\n").unwrap();
+    let link = dir.path().join("config").join(CONFIG_FILE);
+    fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    settings.reload().unwrap();
+
+    settings
+        .update_config(|config| {
+            config.connect_on_launch = true;
+            Ok(())
+        })
+        .unwrap();
+    assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "appearance = \"dark\"\nconnect-on-launch = true\n"
+    );
+}
+
 #[test]
 fn credentials_stay_owner_only_and_errors_never_quote_values() {
     let dir = tempfile::tempdir().unwrap();

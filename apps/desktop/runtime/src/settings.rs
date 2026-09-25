@@ -426,6 +426,14 @@ pub(crate) fn write<T: Serialize>(
     private_fs::create_private_dir(dir)
         .map_err(|error| format!("Cannot create the settings directory: {error}"))?;
     let private = name == CREDENTIALS_FILE;
+    // A `config.toml` that a dotfile manager (GNU Stow, chezmoi) links in is
+    // saved to the link's target, as editors save it; credentials never
+    // follow a link.
+    let path = match fs::symlink_metadata(&path) {
+        Ok(metadata) if !private && metadata.is_symlink() => fs::canonicalize(&path)
+            .map_err(|error| format!("Cannot resolve the {name} link: {error}"))?,
+        _ => path,
+    };
     let replace = if private {
         private_fs::write_private_atomic
     } else {

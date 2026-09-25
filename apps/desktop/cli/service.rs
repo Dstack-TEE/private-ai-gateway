@@ -41,8 +41,13 @@ fn main() {
     }
 }
 
-/// One file per day in the logs directory, the last week kept.
+/// One file per day in the logs directory, the last week kept. Panics are
+/// logged like any other error, so a panicking task's message reaches the
+/// file instead of only a stderr that went away with the starting client.
 fn init_logging() {
+    std::panic::set_hook(Box::new(|panic| {
+        tracing::error!("Private AI Proxy backend {panic}");
+    }));
     let file = desktop_core::paths::logs_dir().and_then(|directory| {
         desktop_core::private_fs::create_private_dir(&directory)
             .map_err(|error| error.to_string())?;

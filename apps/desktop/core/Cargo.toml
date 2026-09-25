@@ -49,6 +49,7 @@ objc2 = { version = "0.6", optional = true }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSError", "NSString", "NSURL"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
+backon = { version = "1", default-features = false, features = ["std", "std-blocking-sleep"] }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_Threading"] }
 
 [dev-dependencies]

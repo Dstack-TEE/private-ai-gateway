@@ -120,7 +120,8 @@ pap --yes service stop && systemctl --user restart private-ai-proxy
 ```
 
 A plain `systemctl --user restart` would find that backend holding the instance
-lock and fail until the unit's start limit stops retrying. The desktop package
+lock: the unit's backend exits with status 75 (already running), and
+`RestartPreventExitStatus=75` keeps systemd from retrying it. The desktop package
 ships no unit, because the app manages its own backend.
 
 The web UI renderer comes from `npm run build:web` in `apps/desktop`, which

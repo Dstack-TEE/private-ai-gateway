@@ -55,10 +55,14 @@ pap service stop --yes
 protection. `stop` stops protection and restores managed agent configuration
 but keeps management available.
 `service stop` shuts down the backend. Closing the desktop app does not stop it.
-Stopping (or SIGTERM) first restores the coding-agent configuration; if that
-fails, the backend refuses to stop so agents are not left pointing at a stopped
-Local API. `service stop` then reports that it keeps running, and the service
-log has the reason. Mac App Store builds stop anyway. Shutdown is bounded:
+Stopping first restores the coding-agent configuration; if that fails, `service
+stop` is refused so agents are not left pointing at a stopped Local API: it
+reports that the backend keeps running, and the service log has the reason. Mac
+App Store builds stop anyway. A signal (SIGTERM or SIGINT, as systemd, launchd
+and `kill` send) always stops the backend, since a service manager would kill it
+next; a restore that failed is logged and retried when the backend next starts.
+On Windows, signing out or shutting down ends the windowless backend without
+this sequence; the next start restores what it left. Shutdown is bounded:
 running commands get 10 seconds, then open connections and leftover background
 tasks 5 seconds each, and the process exits at the latest 30 seconds after the
 shutdown began.

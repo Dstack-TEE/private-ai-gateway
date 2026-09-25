@@ -164,8 +164,16 @@ pub(super) fn endpoint_path(data_dir: &Path, file: &str) -> io::Result<PathBuf> 
         ));
     }
 
+    // A client started over SSH, `su` or cron must find the backend a
+    // desktop session started, even when its session sets no or another
+    // user's `XDG_RUNTIME_DIR` or `TMPDIR`. On Linux, systemd-logind's
+    // `/run/user/$UID` (where `XDG_RUNTIME_DIR` normally points) follows it.
     #[cfg(target_os = "linux")]
-    if let Some(runtime) = env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
+    for runtime in env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .into_iter()
+        .chain([PathBuf::from(format!("/run/user/{}", effective_uid()))])
+    {
         if is_private_runtime_base(&runtime) {
             let endpoint = runtime_endpoint(&runtime, hash, file);
             if socket_path_fits(&endpoint) {
@@ -174,9 +182,9 @@ pub(super) fn endpoint_path(data_dir: &Path, file: &str) -> io::Result<PathBuf> 
         }
     }
 
+    // The per-user temporary directory `NSTemporaryDirectory` returns.
     #[cfg(target_os = "macos")]
-    {
-        let runtime = env::temp_dir();
+    if let Some(runtime) = darwin_user_temp_dir() {
         let endpoint = runtime_endpoint(&runtime, hash, file);
         if is_safe_temporary_base(&runtime) && socket_path_fits(&endpoint) {
             return Ok(endpoint);
@@ -210,6 +218,29 @@ fn app_container_runtime_base(data_dir: &Path) -> Option<PathBuf> {
     }
     let container_data = library.parent()?;
     (container_data.file_name()? == OsStr::new("Data")).then(|| container_data.to_path_buf())
+}
+
+/// `confstr(_CS_DARWIN_USER_TEMP_DIR)`: the user's `/var/folders/…/T/`,
+/// whatever `TMPDIR` says.
+#[cfg(target_os = "macos")]
+fn darwin_user_temp_dir() -> Option<PathBuf> {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+    let mut buffer = vec![0_u8; libc::PATH_MAX as usize];
+    // SAFETY: `buffer` is writable for the length passed.
+    let length = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_TEMP_DIR,
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+        )
+    };
+    // The length includes the terminating NUL; a longer value was truncated.
+    if length == 0 || length > buffer.len() {
+        return None;
+    }
+    buffer.truncate(length - 1);
+    Some(PathBuf::from(OsString::from_vec(buffer)))
 }
 
 fn runtime_endpoint(base: &Path, hash: u64, file: &str) -> PathBuf {

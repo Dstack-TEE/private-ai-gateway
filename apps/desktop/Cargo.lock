@@ -4992,6 +4992,7 @@ name = "private-ai-proxy-core"
 version = "0.1.7-beta.4"
 dependencies = [
  "axum",
+ "backon",
  "http-body-util",
  "hyper",
  "hyper-util",

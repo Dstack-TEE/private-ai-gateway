@@ -147,13 +147,14 @@ pub fn readable_by_others(path: &Path) -> io::Result<Option<bool>> {
     }
 }
 
-/// Persist Unix directory entries through an O_DIRECTORY, O_NOFOLLOW handle.
+/// Persist Unix directory entries through an O_DIRECTORY handle. A symlinked
+/// directory is followed, as writing the entries into it was.
 #[cfg(unix)]
 pub fn sync_dir(dir: &Path) -> io::Result<()> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
     use std::os::unix::fs::OpenOptionsExt;
-    options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW);
+    options.custom_flags(libc::O_DIRECTORY);
     options.open(dir)?.sync_all()
 }
 
@@ -289,23 +290,53 @@ pub fn publish(
     temporary.as_file().sync_all()?;
     // Publish through a closed handle: nothing can observe the destination
     // while it is still open for writing.
-    let temporary = temporary.into_temp_path();
-    match mode {
-        Publish::Replace => temporary.persist(path),
-        Publish::NoClobber => temporary.persist_noclobber(path),
+    persist(temporary.into_temp_path(), path, mode)?;
+    sync_dir(dir)
+}
+
+/// Moves a finished temporary file to `path`. On Windows another process
+/// briefly holding the destination (an antivirus scanner, a search indexer,
+/// an editor) fails the move with ERROR_ACCESS_DENIED or
+/// ERROR_SHARING_VIOLATION, so the move is retried for about two seconds, as
+/// graceful-fs (under npm's write-file-atomic) retries renames.
+fn persist(temporary: tempfile::TempPath, path: &Path, mode: Publish) -> io::Result<()> {
+    let mut temporary = Some(temporary);
+    // A failed move hands the temporary file back for the next attempt.
+    #[cfg_attr(windows, allow(unused_mut))]
+    let mut attempt = || {
+        let temporary_path = temporary
+            .take()
+            .ok_or_else(|| io::Error::other("the temporary file is gone"))?;
+        match mode {
+            Publish::Replace => temporary_path.persist(path),
+            Publish::NoClobber => temporary_path.persist_noclobber(path),
+        }
+        .map_err(|failure| {
+            temporary = Some(failure.path);
+            failure.error
+        })
+    };
+    #[cfg(windows)]
+    {
+        use backon::{BlockingRetryable, ExponentialBuilder};
+        use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION};
+
+        attempt
+            .retry(
+                ExponentialBuilder::default()
+                    .with_min_delay(std::time::Duration::from_millis(10))
+                    .with_max_delay(std::time::Duration::from_millis(100))
+                    .with_max_times(20),
+            )
+            .when(|error| {
+                [ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION]
+                    .iter()
+                    .any(|code| error.raw_os_error() == Some(*code as i32))
+            })
+            .call()
     }
-    .map_err(|error| error.error)?;
-    sync_parent(dir)
-}
-
-#[cfg(unix)]
-fn sync_parent(dir: &Path) -> io::Result<()> {
-    fs::File::open(dir)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_parent(_dir: &Path) -> io::Result<()> {
-    Ok(())
+    #[cfg(not(windows))]
+    attempt()
 }
 
 #[cfg(all(test, unix))]
@@ -337,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_dir_opens_only_real_directories() {
+    fn sync_dir_opens_only_directories() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("dir");
         create_private_dir(&dir).unwrap();
@@ -346,8 +377,5 @@ mod tests {
         let file = temp.path().join("file");
         fs::write(&file, "").unwrap();
         assert!(sync_dir(&file).is_err());
-        let link = temp.path().join("link");
-        symlink(&dir, &link).unwrap();
-        assert!(sync_dir(&link).is_err());
     }
 }
