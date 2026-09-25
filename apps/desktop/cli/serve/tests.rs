@@ -80,8 +80,7 @@ async fn blocked_after_entry_checks_delivers_nothing() {
             .unwrap()
     });
     reached.notified().await;
-    state.blocked.store(true, Ordering::SeqCst);
-    state.revoke_deliveries();
+    state.snapshot().delivery.cancel();
     resume.notify_one();
     let response = request.await.unwrap();
     assert_eq!(response.status().as_u16(), 503);
@@ -177,7 +176,7 @@ async fn non_post_requests_are_refused_while_blocked() {
     let base = spawn_server(upstream).await;
     let (tx, _rx) = mpsc::unbounded_channel();
     let state = state_over(base, tx);
-    state.blocked.store(true, Ordering::SeqCst);
+    state.snapshot().delivery.cancel();
     let proxy = spawn_server(build_proxy_router(state)).await;
     let resp = reqwest::Client::new()
         .get(format!("{proxy}/v1/models"))
@@ -234,10 +233,12 @@ async fn keyset_change_and_verification_failure_have_distinct_events() {
     Arc::get_mut(&mut state).unwrap().event_sink = Arc::new(move |event| {
         let _ = events.send(event);
     });
-    let previous = state.delivery.lock().unwrap().clone();
+    let previous = state.snapshot().delivery;
     let mut headers = HeaderMap::new();
     headers.insert("x-aci-keyset-digest", "new-keyset".parse().unwrap());
-    rotation_gate(&state, "old-keyset", &headers);
+    rotation_gate(&state, &state.snapshot(), &headers);
+    // A second response under the already-blocked identity reports nothing.
+    rotation_gate(&state, &state.snapshot(), &headers);
     assert!(previous.is_cancelled());
     assert!(matches!(
         received.recv().await.unwrap(),
@@ -256,6 +257,80 @@ async fn keyset_change_and_verification_failure_have_distinct_events() {
     ));
 }
 
+/// A replacement for the fixture identity, adopted as a concurrent
+/// re-verification would.
+fn adopt_fixture_identity(state: &ProxyState) {
+    let report = vector_report();
+    let identity = crate::checks::established_identity(&report).unwrap();
+    state.adopt(report, identity);
+}
+
+/// Forwards under the current identity succeed without re-verification.
+async fn assert_forwards_without_reverification(state: &Arc<ProxyState>) {
+    assert!(!state.is_blocked());
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    let client = reqwest::Client::new();
+    for _ in 0..3 {
+        let resp = client
+            .get(format!("{proxy}/v1/models"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+    }
+    assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 0);
+}
+
+/// A rotation observed under an identity that a concurrent re-verification
+/// has since replaced neither blocks the new identity nor reports
+/// `keyset_changed`, which would make the managed backend rebuild a session
+/// that is already current.
+#[tokio::test]
+async fn a_rotation_observed_under_a_replaced_identity_is_ignored() {
+    let upstream = spawn_server(Router::new().fallback(|| async { StatusCode::OK })).await;
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut state = state_over(upstream, tx);
+    let mut events = capture_events(&mut state);
+    let observed = state.snapshot();
+    adopt_fixture_identity(&state);
+    let mut headers = HeaderMap::new();
+    headers.insert("x-aci-keyset-digest", "rotated-keyset".parse().unwrap());
+    rotation_gate(&state, &observed, &headers);
+
+    assert!(observed.delivery.is_cancelled());
+    assert!(blocked_codes(&mut events).is_empty());
+    assert_forwards_without_reverification(&state).await;
+}
+
+/// The expiry path: a request observes the old identity expired, another
+/// request's re-verification adopts a new identity, and only then does the
+/// first request act on its expired observation. That closes only the old
+/// identity's gate; the request itself and later ones are served under the
+/// new identity.
+#[tokio::test]
+async fn an_expiry_observed_under_a_replaced_identity_does_not_block_its_successor() {
+    let upstream = spawn_server(Router::new().fallback(|| async { StatusCode::OK })).await;
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let state = state_over(upstream, tx);
+    state.trusted.lock().unwrap().not_after = 0;
+    let expired = state.snapshot();
+    adopt_fixture_identity(&state);
+
+    let response = proxy_observed(
+        state.clone(),
+        expired.clone(),
+        Method::GET,
+        "/v1/models".parse().unwrap(),
+        HeaderMap::new(),
+        Bytes::new(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(expired.delivery.is_cancelled());
+    assert_forwards_without_reverification(&state).await;
+}
+
 #[test]
 fn identity_event_carries_the_verified_workload_summary() {
     let report = vector_report();
@@ -270,8 +345,8 @@ fn identity_event_carries_the_verified_workload_summary() {
         ),
         Some(json!({
             "remote_url": "https://tee.example",
-            "proxy_url": "http://127.0.0.1:4181",
-            "control_url": "http://127.0.0.1:4182",
+            "proxy_url": "http://127.0.0.1:4180",
+            "control_url": "http://127.0.0.1:4183",
             "policy": {},
         })),
     );
@@ -280,7 +355,7 @@ fn identity_event_carries_the_verified_workload_summary() {
     assert_eq!(event["tee_type"], "tdx");
     assert_eq!(event["keyset_digest"], report.workload_keyset_digest);
     assert_eq!(event["tls_spki"], "sha256:observed");
-    assert_eq!(event["control_url"], "http://127.0.0.1:4182");
+    assert_eq!(event["control_url"], "http://127.0.0.1:4183");
 }
 
 fn state_over(base_url: String, tx: mpsc::UnboundedSender<RequestOutcome>) -> Arc<ProxyState> {
@@ -1126,7 +1201,6 @@ fn default_control_port_is_clear_of_the_desktop_listeners() {
         .parse::<std::net::SocketAddr>()
         .unwrap()
         .port();
-    assert_ne!(port, desktop_core::account::CALLBACK_PORT);
     assert_ne!(port, desktop_core::config::WEB_UI_DEFAULT_PORT);
 }
 
@@ -1172,10 +1246,12 @@ static PINNED_KEY: std::sync::LazyLock<TestKey> = std::sync::LazyLock::new(TestK
 type TlsStream = rustls::StreamOwned<rustls::ServerConnection, std::net::TcpStream>;
 
 /// A local TLS upstream: connection `n` presents `key_for(n)`; a handshake
-/// the client completes is counted in `completed` and handed to `serve`.
+/// the client completes is counted in `completed` and handed to `serve`, one
+/// it aborts is counted in `aborted`.
 struct TlsUpstream {
     base: String,
     completed: Arc<AtomicUsize>,
+    aborted: Arc<AtomicUsize>,
 }
 
 fn spawn_tls_upstream(
@@ -1187,19 +1263,21 @@ fn spawn_tls_upstream(
     let upstream = TlsUpstream {
         base: format!("https://{}", listener.local_addr().unwrap()),
         completed: Arc::new(AtomicUsize::new(0)),
+        aborted: Arc::new(AtomicUsize::new(0)),
     };
-    let completed = upstream.completed.clone();
+    let (completed, aborted) = (upstream.completed.clone(), upstream.aborted.clone());
     let serve = Arc::new(serve);
     std::thread::spawn(move || {
         for (index, stream) in listener.incoming().enumerate() {
             let Ok(mut stream) = stream else { continue };
             let config = key_for(index).server_config();
-            let (serve, completed) = (serve.clone(), completed.clone());
+            let (serve, completed, aborted) = (serve.clone(), completed.clone(), aborted.clone());
             std::thread::spawn(move || {
                 let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
                 let mut conn = rustls::ServerConnection::new(config).unwrap();
                 while conn.is_handshaking() {
                     if conn.complete_io(&mut stream).is_err() {
+                        aborted.fetch_add(1, Ordering::SeqCst);
                         return;
                     }
                 }
@@ -1271,8 +1349,12 @@ async fn a_repin_drops_connections_made_under_the_old_pin() {
     assert_eq!(upstream.completed.load(Ordering::SeqCst), 1);
 
     client.pin(&host, &[ROTATED_KEY.spki()]).unwrap();
-    assert!(client.get(&url, None).await.is_err());
-    assert_eq!(client.pin_rejections(&host), 1);
+    let refused = client
+        .request(reqwest::Method::GET, &url)
+        .send()
+        .await
+        .unwrap_err();
+    assert!(crate::aci::tls::is_pin_mismatch(&refused), "{refused:?}");
 }
 
 /// A base URL on a local port nothing listens on: connecting is refused.
@@ -1354,7 +1436,7 @@ async fn a_refused_port_on_a_pinned_host_does_not_reverify() {
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 502);
-    assert!(!state.blocked.load(Ordering::SeqCst));
+    assert!(!state.is_blocked());
     assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 0);
     assert!(blocked_codes(&mut events).is_empty());
     assert_eq!(state.client.pinned_spkis(&state.host), pin);
@@ -1410,9 +1492,9 @@ async fn a_post_failing_after_its_handshake_is_never_replayed() {
             &format!("{}/v1/models", upstream.base),
         )
         .send()
-        .await;
-    assert!(refused.is_err());
-    assert_eq!(state.client.pin_rejections(&state.host), 1);
+        .await
+        .unwrap_err();
+    assert!(is_pin_mismatch(&refused));
     hang_up.store(true, Ordering::SeqCst);
 
     assert_eq!(post.await.unwrap().unwrap().status().as_u16(), 502);
@@ -1447,7 +1529,6 @@ async fn a_refused_pin_on_an_unverifiable_host_fails_closed() {
         .await
         .unwrap()
         .contains("upstream connection failed"));
-    assert_eq!(state.client.pin_rejections(&state.host), 1);
     // The refusal went through the rotation path (`keyset_changed`, one
     // re-verify attempt whose unpinned fetch completed a handshake), and its
     // failure is reported like any failed re-verification.
@@ -1455,7 +1536,7 @@ async fn a_refused_pin_on_an_unverifiable_host_fails_closed() {
     assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 1);
     assert_eq!(upstream.completed.load(Ordering::SeqCst), 1);
     assert_eq!(state.client.pinned_spkis(&state.host), stale);
-    assert!(state.blocked.load(Ordering::SeqCst));
+    assert!(state.is_blocked());
 }
 
 /// Single flight: requests that queue behind an in-flight heal share its
@@ -1495,7 +1576,8 @@ async fn requests_queued_behind_a_heal_share_one_reverification() {
     assert_eq!(queued, vec![503; QUEUED]);
     assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 1);
     assert_eq!(upstream.completed.load(Ordering::SeqCst), 1);
-    assert!(!blocked_codes(&mut events).contains(&keyset_changed()));
+    // The shared failure is reported once, by the request that ran it.
+    assert_eq!(blocked_codes(&mut events), vec![None]);
 }
 
 /// A request refused by a pin that another request's heal is replacing
@@ -1509,7 +1591,7 @@ async fn refused_while_another_heal_completes(
     let mut state = state_over(upstream.base.clone(), tx);
     let mut events = capture_events(&mut state);
     state.client.pin(&state.host, &[PINNED_KEY.spki()]).unwrap();
-    let admitted = state.delivery_token();
+    let admitted = state.snapshot().delivery;
 
     let proxy = spawn_server(build_proxy_router(state.clone())).await;
     // Another request's heal holds the re-verify funnel.
@@ -1519,17 +1601,19 @@ async fn refused_while_another_heal_completes(
             .get(format!("{proxy}/v1/models"))
             .send(),
     );
-    wait_until(|| state.client.pin_rejections(&state.host) == 1).await;
-    // That heal completes: the rotated key is pinned and every delivery
-    // admitted under the previous verification is revoked.
+    wait_until(|| upstream.aborted.load(Ordering::SeqCst) == 1).await;
+    // That heal completes: the rotated key is pinned and a freshly verified
+    // identity is adopted under a new delivery gate.
     state
         .client
         .pin(&state.host, &[ROTATED_KEY.spki()])
         .unwrap();
+    let mut report = vector_report();
+    let identity = crate::checks::established_identity(&report).unwrap();
     if identity_changed {
-        state.trusted.lock().unwrap().keyset_digest = "rotated-keyset".to_string();
+        report.workload_keyset_digest = "rotated-keyset".to_string();
     }
-    state.revoke_deliveries();
+    state.adopt(report, identity);
     drop(heal);
 
     let resp = request.await.unwrap().unwrap();
@@ -1591,6 +1675,50 @@ async fn a_managed_pin_refusal_hands_off_to_the_session_rebuild() {
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 503);
+    assert_eq!(blocked_codes(&mut received), vec![keyset_changed()]);
+}
+
+/// A normal rotation in managed mode: a response advertises a new keyset,
+/// the backend stops this verifier to rebuild the session, and requests
+/// arriving meanwhile are refused as retryable. None of them may report a
+/// verification failure: a `Blocked` without a code after `keyset_changed`
+/// would turn the rebuild into a hard block with no reconnect.
+#[tokio::test]
+async fn a_managed_rotation_is_not_reported_as_a_failed_verification() {
+    let upstream = spawn_server(Router::new().fallback(|| async { StatusCode::OK })).await;
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut state = state_over(upstream, tx);
+    let (events, mut received) = mpsc::unbounded_channel();
+    let shutdown = state.shutdown.clone();
+    Arc::get_mut(&mut state).unwrap().event_sink = Arc::new(move |event| {
+        if matches!(&event, VerifierEvent::Blocked { code: Some(code), .. } if code == "keyset_changed")
+        {
+            shutdown.cancel();
+        }
+        let _ = events.send(event);
+    });
+    let mut headers = HeaderMap::new();
+    headers.insert("x-aci-keyset-digest", "rotated-keyset".parse().unwrap());
+    rotation_gate(&state, &state.snapshot(), &headers);
+
+    let proxy = spawn_server(build_proxy_router(state)).await;
+    let client = reqwest::Client::new();
+    let requests = (0..4).map(|_| {
+        let request = client.get(format!("{proxy}/v1/models"));
+        async move {
+            let resp = request.send().await.unwrap();
+            (resp.status().as_u16(), resp.text().await.unwrap())
+        }
+    });
+    let responses = futures_util::future::join_all(requests).await;
+    for (status, body) in responses {
+        assert_eq!(status, 503);
+        assert!(
+            body.contains("retry once the gateway is verified again"),
+            "{body}"
+        );
+        assert!(!body.contains("re-verification failed"), "{body}");
+    }
     assert_eq!(blocked_codes(&mut received), vec![keyset_changed()]);
 }
 

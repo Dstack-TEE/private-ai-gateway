@@ -1,8 +1,9 @@
 //! HTTPS client for Private AI Proxy's ACI commands.
 //!
-//! Normal WebPKI validation plus per-hostname recording of the observed
-//! leaf SPKI sha256 (the spec 9.1(6) channel check) and optional
-//! per-hostname pin enforcement, fail closed on mismatch.
+//! No WebPKI chain validation: ACI's root of trust is the attested keyset
+//! (§1.1), not a CA. The handshake records the observed leaf SPKI sha256
+//! per hostname (the spec 9.1(6) channel check) and enforces a registered
+//! per-hostname pin set, fail closed on mismatch.
 
 use std::sync::{Arc, RwLock};
 
@@ -116,7 +117,13 @@ impl AciClient {
     /// to `host`; a handshake presenting any other key fails closed. Pooled
     /// connections are dropped with the previous client, so no later request
     /// rides a connection established under the old pin set.
+    /// An empty set is refused: leaving the host unpinned would accept any key.
     pub fn pin(&self, host: &str, spkis: &[String]) -> Result<(), String> {
+        if spkis.is_empty() {
+            return Err(format!(
+                "no attested TLS key to pin for {host}; refusing to connect unpinned (fail closed)"
+            ));
+        }
         let http = build_http(&self.observations)?;
         self.observations.pin(host, spkis);
         *self.http.write().expect("HTTP client lock poisoned") = http;
@@ -126,11 +133,6 @@ impl AciClient {
     /// The pin set currently enforced for `host`; empty when unpinned.
     pub fn pinned_spkis(&self, host: &str) -> Vec<String> {
         self.observations.pinned_spkis(host)
-    }
-
-    /// How many handshakes to `host` the pin has refused so far.
-    pub fn pin_rejections(&self, host: &str) -> u64 {
-        self.observations.pin_rejections(host)
     }
 
     /// A request builder on the pinned/recording transport. The local proxy

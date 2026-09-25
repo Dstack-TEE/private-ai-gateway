@@ -122,7 +122,7 @@ without restarting the service:
 printf '%s\n' "$PASSWORD" | pap settings set web-ui.password --value-stdin --yes
 pap settings set web-ui.password      # or type it twice at a hidden prompt
 pap settings set web-ui.enabled true
-pap settings set web-ui.port 4182     # default; must differ from the Local API (4180) and 4181
+pap settings set web-ui.port 4182     # default; must differ from the Local API (4180)
 pap settings show                     # settings, file paths, the web UI address or bind error, and passwordSet
 pap settings set web-ui.enabled false # closes the listener and ends every browser session
 ```
@@ -243,7 +243,7 @@ The browser UI degrades desktop-only integration:
 | OS notifications | Hidden. |
 | Software updates | Settings > About announces a newer release in the saved channel with the exact upgrade steps for the backend's installation; it never installs anything. |
 | CLI registration | Hidden. |
-| RedPill loopback OAuth | Use **Paste callback link** when the browser cannot reach port 4181 on the service machine. Phala device flow is unchanged. |
+| RedPill loopback OAuth | Use **Paste callback link** when the browser cannot reach the sign-in's loopback callback on the service machine. Phala device flow is unchanged. |
 
 ### Remote Access
 

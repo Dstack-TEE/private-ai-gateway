@@ -191,19 +191,37 @@ fn connection_named_headers_are_hop_by_hop() {
 
 #[test]
 fn a_squatted_port_is_refused_before_anything_starts() {
+    // Other tests in this binary spawn child processes. On macOS std marks a
+    // new socket close-on-exec in a second call after creating it
+    // (rust-lang/rust#24237), so a child spawned in between inherits the
+    // squatter and keeps its port bound after it is dropped here. The rebind
+    // assertion therefore runs in a process of its own.
+    const CHILD: &str = "PAP_TEST_SQUATTED_PORT";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "proxy::tests::a_squatted_port_is_refused_before_anything_starts",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     let squatter = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = squatter.local_addr().unwrap();
     let error = bind_std(addr).unwrap_err();
     assert!(error.contains("Cannot listen"));
     drop(squatter);
-    let rebound = (0..20).find_map(|_| match bind_std(addr) {
-        Ok(listener) => Some(listener),
-        Err(_) => {
-            std::thread::sleep(Duration::from_millis(10));
-            None
-        }
-    });
-    assert!(rebound.is_some());
+    assert!(bind_std(addr).is_ok());
 }
 
 #[tokio::test]

@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::{CertificateError, DigitallySignedStruct, Error as RustlsError, SignatureScheme};
+use rustls::{
+    CertificateError, DigitallySignedStruct, Error as RustlsError, OtherError, SignatureScheme,
+};
 use sha2::{Digest, Sha256};
 use x509_parser::prelude::parse_x509_certificate;
 
@@ -47,9 +49,44 @@ pub fn observing_spki_client(
 pub struct SpkiObservations {
     observed: Mutex<HashMap<String, String>>,
     pins: Mutex<HashMap<String, Vec<String>>>,
-    /// Handshakes each host's pin refused, so a caller can tell a stale pin
-    /// from any other connect failure (DNS, refused port, timeout).
-    rejections: Mutex<HashMap<String, u64>>,
+}
+
+/// A handshake presented a leaf key outside the pin set registered for its
+/// host. The verifier returns it as the documented custom-verifier error
+/// (`CertificateError::Other`), so the refusal is attributable to the one
+/// request whose handshake it failed; see [`is_pin_mismatch`].
+#[derive(Debug)]
+pub struct PinMismatch;
+
+impl fmt::Display for PinMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("server TLS key is not in the pinned set")
+    }
+}
+
+impl std::error::Error for PinMismatch {}
+
+/// Whether `error` (for example a `reqwest::Error`) failed because the TLS
+/// pin refused this request's handshake. The connector surfaces the
+/// handshake's `rustls::Error` as the payload of (possibly nested)
+/// `io::Error`s, which `source()` skips, so an `io::Error` link is descended
+/// through `io::Error::get_ref` and every other link through `source()`.
+pub fn is_pin_mismatch(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut next = Some(error);
+    while let Some(error) = next {
+        if let Some(RustlsError::InvalidCertificate(CertificateError::Other(OtherError(inner)))) =
+            error.downcast_ref::<RustlsError>()
+        {
+            return inner.is::<PinMismatch>();
+        }
+        next = match error.downcast_ref::<std::io::Error>() {
+            Some(io) => io
+                .get_ref()
+                .map(|inner| inner as &(dyn std::error::Error + 'static)),
+            None => error.source(),
+        };
+    }
+    false
 }
 
 impl SpkiObservations {
@@ -86,33 +123,15 @@ impl SpkiObservations {
             .unwrap_or_default()
     }
 
-    /// How many handshakes to `host` the pin has refused so far. A caller
-    /// compares the count around a send to learn whether its own connect
-    /// failure was a pin refusal.
-    pub fn pin_rejections(&self, host: &str) -> u64 {
-        self.rejections
-            .lock()
-            .expect("pin rejection map poisoned")
-            .get(&host.to_ascii_lowercase())
-            .copied()
-            .unwrap_or(0)
-    }
-
     /// Enforce any pin registered for `host`, then record the SPKI observed.
     /// A rejected handshake records nothing: the observation map feeds
     /// transcripts, which must never report a key that was refused.
     fn observe(&self, host: String, spki: String) -> Result<(), RustlsError> {
         if let Some(expected) = self.pins.lock().expect("SPKI pin map poisoned").get(&host) {
             if !expected.contains(&spki) {
-                *self
-                    .rejections
-                    .lock()
-                    .expect("pin rejection map poisoned")
-                    .entry(host)
-                    .or_default() += 1;
-                return Err(RustlsError::InvalidCertificate(
-                    CertificateError::ApplicationVerificationFailure,
-                ));
+                return Err(RustlsError::InvalidCertificate(CertificateError::Other(
+                    OtherError(Arc::new(PinMismatch)),
+                )));
             }
         }
         self.observed
@@ -198,7 +217,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_pin_set_accepts_any_member_and_counts_refusals() {
+    fn a_pin_set_accepts_any_member() {
         let observations = SpkiObservations::default();
         let (a, b) = ("aa".repeat(32), "bb".repeat(32));
         observations.pin("Host.Example", &[b.to_ascii_uppercase(), a.clone()]);
@@ -210,11 +229,9 @@ mod tests {
         assert!(observations
             .observe("host.example".into(), b.clone())
             .is_ok());
-        assert_eq!(observations.pin_rejections("host.example"), 0);
 
         let refused = observations.observe("host.example".into(), "cc".repeat(32));
         assert!(refused.is_err());
-        assert_eq!(observations.pin_rejections("host.example"), 1);
         // A refused key is never reported as observed.
         assert_eq!(observations.observed_spki("host.example"), Some(b));
     }

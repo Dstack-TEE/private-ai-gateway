@@ -106,7 +106,11 @@ impl DesktopRuntime {
             None
         };
         self.endpoint.stop().await?;
-        let listener = match prepared.map(Ok).unwrap_or_else(|| rebind(resolved.bind)) {
+        let bound = match prepared {
+            Some(listener) => Ok(listener),
+            None => proxy::bind_std(resolved.bind),
+        };
+        let listener = match bound {
             Ok(listener) => listener,
             Err(error) => {
                 if let Err(restore_error) = self.restore_endpoint(current.clone()) {
@@ -114,7 +118,7 @@ impl DesktopRuntime {
                         .set_endpoint(current.config, Err(restore_error.to_string()));
                     return Err(format!("{error}; {restore_error}").into());
                 }
-                return Err(error);
+                return Err(error.into());
             }
         };
         let resolved = match self.save_local_api(config) {
@@ -158,7 +162,7 @@ impl DesktopRuntime {
         self: &Arc<Self>,
         previous: ResolvedListen,
     ) -> Result<(), Error> {
-        let listener = rebind(previous.bind).map_err(|error| {
+        let listener = proxy::bind_std(previous.bind).map_err(|error| {
             format!(
                 "The new Local API settings failed and the previous listener could not be restored: {error}"
             )
@@ -204,9 +208,4 @@ impl DesktopRuntime {
             .await;
         Ok(self.manager.snapshot()?)
     }
-}
-
-/// Binds a port whose Local API listener was just stopped.
-fn rebind(address: std::net::SocketAddr) -> Result<std::net::TcpListener, Error> {
-    Ok(proxy::bind_std(address)?)
 }

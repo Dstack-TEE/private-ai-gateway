@@ -9,7 +9,7 @@ use oauth2::{
 
 impl CallbackState {
     pub(super) async fn accept(&self, uri: &Uri, headers: &HeaderMap) -> Result<(), CallbackError> {
-        let result = match callback_code(uri, headers, &self.expected) {
+        let result = match callback_code(uri, headers, &self.expected, self.address) {
             Ok(code) => Ok(code),
             Err(CallbackError::Declined) => {
                 Err(Error::account("Account: Authorization was declined."))
@@ -40,6 +40,9 @@ pub(super) enum CallbackError {
 
 pub(super) struct CallbackState {
     pub(super) expected: String,
+    /// The loopback address the callback listener bound; its port is in the
+    /// redirect URI.
+    pub(super) address: SocketAddr,
     pub(super) sender: Mutex<Option<oneshot::Sender<Result<String, Error>>>>,
 }
 
@@ -115,12 +118,16 @@ pub(super) fn installation_id(profile_id: &str) -> Result<Uuid, Error> {
 pub(super) type RedpillClient =
     BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet>;
 
-pub(super) fn redpill_client(authorize: Url, token: Url) -> Result<RedpillClient, Error> {
+pub(super) fn redpill_client(
+    authorize: Url,
+    token: Url,
+    callback: SocketAddr,
+) -> Result<RedpillClient, Error> {
     Ok(BasicClient::new(ClientId::new(REDPILL_CLIENT_ID.into()))
         .set_auth_uri(AuthUrl::from_url(authorize))
         .set_token_uri(TokenUrl::from_url(token))
         .set_redirect_uri(
-            RedirectUrl::new(callback_url()).map_err(|_| "Invalid account callback URL")?,
+            RedirectUrl::new(callback_url(callback)).map_err(|_| "Invalid account callback URL")?,
         ))
 }
 
@@ -161,10 +168,10 @@ pub(super) fn callback_code(
     uri: &Uri,
     headers: &HeaderMap,
     expected: &str,
+    address: SocketAddr,
 ) -> Result<String, CallbackError> {
     if uri.path() != CALLBACK_PATH
-        || headers.get("host").and_then(|v| v.to_str().ok())
-            != Some(CALLBACK_ADDRESS.to_string().as_str())
+        || headers.get("host").and_then(|v| v.to_str().ok()) != Some(address.to_string().as_str())
     {
         return Err(CallbackError::Invalid);
     }

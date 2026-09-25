@@ -951,6 +951,15 @@ fn settings_files_are_edited_in_place_and_hand_edits_apply_live() {
             std::thread::sleep(Duration::from_millis(100));
         }
     };
+    // A hand edit is saved the way editors and this store save: written
+    // beside the file and renamed over it, so the watcher never reads a
+    // truncated file. (`fs::write` truncates first; a runner stalled past the
+    // debounce window between truncate and write would apply an empty file.)
+    let save = |contents: &str| {
+        let staged = data.join("config.toml.edit");
+        fs::write(&staged, contents).unwrap();
+        fs::rename(&staged, &config).unwrap();
+    };
     let edited = |line: &str| {
         text.replacen(
             "appearance = \"dark\"\n",
@@ -958,15 +967,11 @@ fn settings_files_are_edited_in_place_and_hand_edits_apply_live() {
             1,
         )
     };
-    fs::write(&config, edited("connect-on-launch = true")).unwrap();
+    save(&edited("connect-on-launch = true"));
     wait(&|show| show["settings"]["connect-on-launch"] == true);
 
     // An unknown key warns but never rejects the file.
-    fs::write(
-        &config,
-        edited("connect-on-launch = true\nfuture-option = 1"),
-    )
-    .unwrap();
+    save(&edited("connect-on-launch = true\nfuture-option = 1"));
     let show = wait(&|show| {
         show["files"]["warnings"]
             .as_array()
@@ -987,7 +992,7 @@ fn settings_files_are_edited_in_place_and_hand_edits_apply_live() {
     assert!(doctor["errors"]["settings"].is_null(), "{doctor}");
 
     // A broken edit keeps the last good settings and names the position.
-    fs::write(&config, edited("connect-on-launch = \"yes\"")).unwrap();
+    save(&edited("connect-on-launch = \"yes\""));
     let show = wait(&|show| show["files"]["error"].is_string());
     let error = show["files"]["error"].as_str().unwrap();
     assert!(error.starts_with("config.toml:"), "{error}");
@@ -1002,7 +1007,7 @@ fn settings_files_are_edited_in_place_and_hand_edits_apply_live() {
     assert!(!refused.status.success());
     assert!(String::from_utf8_lossy(&refused.stderr).contains("config.toml:"));
 
-    fs::write(&config, &text).unwrap();
+    save(&text);
     let show = wait(&|show| show["files"]["error"].is_null());
     assert_eq!(show["settings"]["connect-on-launch"], false);
 

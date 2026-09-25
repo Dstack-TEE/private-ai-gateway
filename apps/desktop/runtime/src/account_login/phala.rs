@@ -11,7 +11,9 @@ pub(super) async fn phala(
 /// Polls Phala's device authorization (RFC 8628). Its endpoints take JSON and
 /// nest errors under `detail`, as Phala's own CLI expects, rather than the
 /// form bodies and top-level errors of RFC 8628 §3.4-3.5 that the `oauth2`
-/// crate speaks, so the polling is written out here.
+/// crate speaks, so the polling is written out here. Phala's CLI polls the
+/// same way (`extractRfc8628Error`,
+/// https://github.com/Phala-Network/phala-cloud/blob/main/cli/src/commands/login/error-handling.ts).
 pub(super) async fn phala_at(
     client: Client,
     device: String,
