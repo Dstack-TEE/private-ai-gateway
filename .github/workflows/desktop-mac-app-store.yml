@@ -50,7 +50,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
-          components: rustfmt, clippy
+          components: clippy
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
@@ -66,12 +66,12 @@ jobs:
         run: |
           xcodebuild -version
           npm ci
-      - name: Verify renderer and packaging contracts
+      # Desktop Tauri (desktop-native.yml) runs `npm run check`, the release
+      # script tests and cargo fmt for the same changes; this job covers what
+      # only compiles on macOS.
+      - name: Check the App Store smoke script
         working-directory: apps/desktop
-        run: |
-          npm run check
-          npm run test:release
-          node --check scripts/macos-app-store-smoke.mjs
+        run: node --check scripts/macos-app-store-smoke.mjs
       - name: Verify Direct macOS upgrade
         working-directory: apps/desktop
         run: |
@@ -88,7 +88,6 @@ jobs:
       - name: Verify App Store sources
         working-directory: apps/desktop
         run: |
-          cargo fmt --all -- --check
           cargo clippy --locked --all-targets --package private-ai-proxy-core --features mac-app-store -- -D warnings
           cargo clippy --locked --all-targets --package private-ai-proxy-runtime --features mac-app-store -- -D warnings
           cargo test --locked --package private-ai-proxy-core --features mac-app-store

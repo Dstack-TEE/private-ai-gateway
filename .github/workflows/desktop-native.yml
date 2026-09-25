@@ -116,20 +116,14 @@ jobs:
       - name: Stage Tauri sidecars
         working-directory: apps/desktop
         run: npm run build:sidecars:debug
+      # Desktop Mac App Store (desktop-mac-app-store.yml) checks the
+      # mac-app-store feature on macOS, and CI (ci.yml) tests aci-protocol.
       - name: Verify Rust sources
         working-directory: apps/desktop
         run: |
           cargo fmt --all -- --check
           cargo clippy --locked --workspace --all-targets -- -D warnings
           cargo test --locked --workspace
-          app_store_config="$(cat src-tauri/tauri.appstore.conf.json)"
-          cargo clippy --locked --all-targets --package private-ai-proxy-core --features mac-app-store -- -D warnings
-          cargo clippy --locked --all-targets --package private-ai-proxy-runtime --features mac-app-store -- -D warnings
-          cargo test --locked --package private-ai-proxy-core --features mac-app-store
-          cargo test --locked --package private-ai-proxy-runtime --features mac-app-store
-          TAURI_CONFIG="$app_store_config" cargo clippy --locked --all-targets --package private-ai-proxy-desktop --features mac-app-store -- -D warnings
-          TAURI_CONFIG="$app_store_config" cargo test --locked --package private-ai-proxy-desktop --features mac-app-store
-          cargo test --locked --manifest-path ../../crates/aci-protocol/Cargo.toml
       - &save-rust-cache
         name: Save Rust dependencies
         if: always() && !cancelled() && steps.rust-cache.outputs.cache-primary-key != '' && steps.rust-cache.outputs.cache-hit != 'true'
@@ -160,8 +154,8 @@ jobs:
       - *save-rust-cache
 
   # Native Windows library tests on every change: the ACL, named-pipe and
-  # file-replacement code only compiles and runs there, and otherwise runs
-  # only in package builds.
+  # file-replacement code only compiles and runs there. Packages build after
+  # it; the windows-arm64 package job runs the same tests on arm64.
   verify-windows-x64:
     name: Verify libraries (windows-x64)
     if: ${{ inputs.package_only != true }}
@@ -247,8 +241,8 @@ jobs:
 
   package:
     name: Package (${{ matrix.platform }})
-    needs: [verify, verify-linux-arm64, version]
-    if: ${{ always() && needs.version.result == 'success' && ((needs.verify.result == 'success' && needs.verify-linux-arm64.result == 'success') || inputs.package_only == true) }}
+    needs: [verify, verify-linux-arm64, verify-windows-x64, version]
+    if: ${{ always() && needs.version.result == 'success' && ((needs.verify.result == 'success' && needs.verify-linux-arm64.result == 'success' && needs.verify-windows-x64.result == 'success') || inputs.package_only == true) }}
     environment:
       name: ${{ needs.version.outputs.channel != '' && 'desktop-release' || 'desktop-build' }}
     env:
@@ -595,15 +589,18 @@ jobs:
           cargo test --release --locked --package private-ai-proxy-runtime --target "$(rustc -vV | sed -n 's/^host: //p')" --lib
           cargo test --release --locked --package private-ai-proxy-runtime --target "$(rustc -vV | sed -n 's/^host: //p')" --lib -- --ignored legacy_keychain_import_round_trip
 
+      # verify-windows-x64 already tested these libraries on x64.
       - name: Test Windows desktop libraries
         if: runner.os == 'Windows'
         working-directory: apps/desktop
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --release --locked --package private-ai-proxy-agent-bridge --lib
-          cargo test --release --locked --package private-ai-proxy-core --lib
-          cargo test --release --locked --package private-ai-proxy-runtime --lib
+          if [[ '${{ matrix.cli_arch }}' == arm64 ]]; then
+            cargo test --release --locked --package private-ai-proxy-agent-bridge --lib
+            cargo test --release --locked --package private-ai-proxy-core --lib
+            cargo test --release --locked --package private-ai-proxy-runtime --lib
+          fi
           cargo test --release --locked --package private-ai-proxy-desktop --lib
 
       - name: Check installed Windows sidecars without UI
