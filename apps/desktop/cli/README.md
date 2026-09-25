@@ -36,6 +36,15 @@ fixed accepted set, composed with request pins by intersection, and
 `--require-claim <name[=source]>` derives the pin set from the audited
 current sessions, refreshing it when the service refuses a superseded pin.
 
+The TLS channel is pinned to every key the verified keyset attests for the
+host. A keyset rotation blocks forwarding until a fresh verification passes:
+a changed `X-ACI-Keyset-Digest` on a response triggers it, and so does a
+handshake the pin refuses, since a rotated TLS key aborts the connection
+before any response exists. A failed re-verification keeps the old pin.
+After a successful one, the refused request is sent once more if the
+identity it was admitted under still holds, and otherwise gets a retryable
+503.
+
 All five commands accept `--require-production-os`. Under that strict policy,
 the client reads the RTMR3-bound `os-image-hash` and requires it to be in the
 verifier's reviewed production-image allowlist. Development and unknown hashes

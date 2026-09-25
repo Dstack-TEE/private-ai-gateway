@@ -54,6 +54,7 @@ pub async fn run(args: SendArgs, require_production_os: bool) -> Result<i32, Str
         return Err("service verification failed; not sending the prompt (fail closed)".into());
     }
 
+    let pins = verification.attested_spkis();
     let ServiceVerification {
         mut transcript,
         report,
@@ -61,12 +62,12 @@ pub async fn run(args: SendArgs, require_production_os: bool) -> Result<i32, Str
         client,
         base_url,
         host,
-        observed_spki,
+        ..
     } = verification;
 
-    // Enforce the just-verified SPKI on every further connection to this host.
-    if let Some(spki) = &observed_spki {
-        client.pin(&host, spki);
+    // Enforce the just-verified TLS keys on every further connection to this host.
+    if !pins.is_empty() {
+        client.pin(&host, &pins)?;
     }
 
     let model = match &args.model {

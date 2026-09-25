@@ -28,6 +28,19 @@ pub struct ServiceVerification {
     pub observed_spki: Option<String>,
 }
 
+impl ServiceVerification {
+    /// The pin set for every later connection to this host: each TLS key the
+    /// verified keyset attests for it (§9.1(6) accepts any of them, so a
+    /// VERIFIED run's observed key is among them). Empty without an identity.
+    pub fn attested_spkis(&self) -> Vec<String> {
+        self.identity
+            .iter()
+            .flat_map(|identity| identity.keyset.tls_keys_for_host(&self.host))
+            .map(|key| key.spki_sha256_hex.clone())
+            .collect()
+    }
+}
+
 pub async fn verify_service(
     base_url: &str,
     nonce_arg: Option<&str>,

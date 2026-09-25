@@ -12,7 +12,7 @@ use crate::transcript::Transcript;
 use agent_bridge::proxy::ProxyEvent;
 use axum::routing::{get, post};
 use axum::Json;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use tokio::sync::mpsc;
 
 /// The one-line summary over the self-consistent fixtures, without any
@@ -1128,4 +1128,508 @@ fn default_control_port_is_clear_of_the_desktop_listeners() {
         .port();
     assert_ne!(port, desktop_core::account::CALLBACK_PORT);
     assert_ne!(port, desktop_core::config::WEB_UI_DEFAULT_PORT);
+}
+
+/// A self-signed key for the local TLS upstream below, generated per test
+/// run. It protects nothing: the tests only need handshakes a pin can accept
+/// or refuse.
+struct TestKey {
+    config: Arc<rustls::ServerConfig>,
+    spki: String,
+}
+
+impl TestKey {
+    fn generate() -> Self {
+        crate::install_crypto_provider();
+        let rcgen::CertifiedKey { cert, signing_key } =
+            rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(signing_key.serialize_der());
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.der().clone()], key.into())
+            .unwrap();
+        Self {
+            spki: crate::aci::tls::leaf_spki_sha256_hex(cert.der()).unwrap(),
+            config: Arc::new(config),
+        }
+    }
+
+    fn server_config(&self) -> Arc<rustls::ServerConfig> {
+        self.config.clone()
+    }
+
+    fn spki(&self) -> String {
+        self.spki.clone()
+    }
+}
+
+/// The key the service rotated to: outside every pin set below.
+static ROTATED_KEY: std::sync::LazyLock<TestKey> = std::sync::LazyLock::new(TestKey::generate);
+
+/// The key a request was pinned to before the rotation.
+static PINNED_KEY: std::sync::LazyLock<TestKey> = std::sync::LazyLock::new(TestKey::generate);
+
+type TlsStream = rustls::StreamOwned<rustls::ServerConnection, std::net::TcpStream>;
+
+/// A local TLS upstream: connection `n` presents `key_for(n)`; a handshake
+/// the client completes is counted in `completed` and handed to `serve`.
+struct TlsUpstream {
+    base: String,
+    completed: Arc<AtomicUsize>,
+}
+
+fn spawn_tls_upstream(
+    key_for: impl Fn(usize) -> &'static TestKey + Send + 'static,
+    serve: impl Fn(usize, TlsStream) + Send + Sync + 'static,
+) -> TlsUpstream {
+    crate::install_crypto_provider();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let upstream = TlsUpstream {
+        base: format!("https://{}", listener.local_addr().unwrap()),
+        completed: Arc::new(AtomicUsize::new(0)),
+    };
+    let completed = upstream.completed.clone();
+    let serve = Arc::new(serve);
+    std::thread::spawn(move || {
+        for (index, stream) in listener.incoming().enumerate() {
+            let Ok(mut stream) = stream else { continue };
+            let config = key_for(index).server_config();
+            let (serve, completed) = (serve.clone(), completed.clone());
+            std::thread::spawn(move || {
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+                let mut conn = rustls::ServerConnection::new(config).unwrap();
+                while conn.is_handshaking() {
+                    if conn.complete_io(&mut stream).is_err() {
+                        return;
+                    }
+                }
+                completed.fetch_add(1, Ordering::SeqCst);
+                serve(index, rustls::StreamOwned::new(conn, stream));
+            });
+        }
+    });
+    upstream
+}
+
+/// Read one request head (the tests only answer body-less requests);
+/// `false` once the client closed the connection.
+fn read_request_head(stream: &mut TlsStream) -> bool {
+    use std::io::Read;
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") && matches!(stream.read(&mut byte), Ok(1)) {
+        head.push(byte[0]);
+    }
+    !head.is_empty()
+}
+
+/// Answer one request with a 200 that is no attestation report, so a
+/// re-verification against this upstream always fails.
+fn reply_ok(mut stream: TlsStream) {
+    use std::io::Write;
+    read_request_head(&mut stream);
+    let _ =
+        stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok");
+    stream.conn.send_close_notify();
+    let _ = stream.flush();
+}
+
+/// An upstream presenting only the rotated key, answering after `hold` so
+/// other requests can arrive while a re-verification is in flight.
+fn unverifiable_upstream(hold: std::time::Duration) -> TlsUpstream {
+    spawn_tls_upstream(
+        |_| &ROTATED_KEY,
+        move |_, stream| {
+            std::thread::sleep(hold);
+            reply_ok(stream);
+        },
+    )
+}
+
+/// A re-pin drops pooled connections: a keep-alive connection set up under
+/// the old pin set is never reused once its key is no longer pinned.
+#[tokio::test]
+async fn a_repin_drops_connections_made_under_the_old_pin() {
+    use std::io::Write;
+    let upstream = spawn_tls_upstream(
+        |_| &PINNED_KEY,
+        |_, mut stream| {
+            while read_request_head(&mut stream) {
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok");
+                let _ = stream.flush();
+            }
+        },
+    );
+    let client = AciClient::new().unwrap();
+    let host = host_of(&upstream.base).unwrap();
+    let url = format!("{}/v1/models", upstream.base);
+    client.pin(&host, &[PINNED_KEY.spki()]).unwrap();
+    for _ in 0..2 {
+        assert_eq!(client.get(&url, None).await.unwrap().status, 200);
+    }
+    // Both requests rode one keep-alive connection.
+    assert_eq!(upstream.completed.load(Ordering::SeqCst), 1);
+
+    client.pin(&host, &[ROTATED_KEY.spki()]).unwrap();
+    assert!(client.get(&url, None).await.is_err());
+    assert_eq!(client.pin_rejections(&host), 1);
+}
+
+/// A base URL on a local port nothing listens on: connecting is refused.
+fn refused_base(scheme: &str) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    format!("{scheme}://{}", listener.local_addr().unwrap())
+}
+
+fn capture_events(state: &mut Arc<ProxyState>) -> mpsc::UnboundedReceiver<VerifierEvent> {
+    let (events, received) = mpsc::unbounded_channel();
+    Arc::get_mut(state).unwrap().event_sink = Arc::new(move |event| {
+        let _ = events.send(event);
+    });
+    received
+}
+
+/// The codes of the `Blocked` events received so far, in order.
+fn blocked_codes(received: &mut mpsc::UnboundedReceiver<VerifierEvent>) -> Vec<Option<String>> {
+    std::iter::from_fn(|| received.try_recv().ok())
+        .filter_map(|event| match event {
+            VerifierEvent::Blocked { code, .. } => Some(code),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn wait_until(condition: impl Fn() -> bool) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !condition() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("condition not reached");
+}
+
+fn keyset_changed() -> Option<String> {
+    Some("keyset_changed".to_string())
+}
+
+/// A connect failure on a host with no registered pin keeps the 502: there
+/// is no pin that could be stale.
+#[tokio::test]
+async fn a_connect_failure_without_a_pin_keeps_the_502() {
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let state = state_over(refused_base("http"), tx);
+    assert!(state.client.pinned_spkis(&state.host).is_empty());
+
+    let proxy = spawn_server(build_proxy_router(state)).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{proxy}/v1/chat/completions"))
+        .header("content-type", "application/json")
+        .body(REQUEST_BODY.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 502);
+    assert!(resp
+        .text()
+        .await
+        .unwrap()
+        .contains("upstream connection failed"));
+}
+
+/// Only a handshake the pin refused heals: a refused port on a pinned host
+/// is an ordinary outage and keeps the plain 502 with no re-attestation.
+#[tokio::test]
+async fn a_refused_port_on_a_pinned_host_does_not_reverify() {
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut state = state_over(refused_base("https"), tx);
+    let mut events = capture_events(&mut state);
+    let pin = vec![PINNED_KEY.spki()];
+    state.client.pin(&state.host, &pin).unwrap();
+
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    let resp = reqwest::Client::new()
+        .get(format!("{proxy}/v1/models"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 502);
+    assert!(!state.blocked.load(Ordering::SeqCst));
+    assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 0);
+    assert!(blocked_codes(&mut events).is_empty());
+    assert_eq!(state.client.pinned_spkis(&state.host), pin);
+}
+
+/// A POST that fails after its own handshake may already have reached the
+/// service, so it is never healed or replayed — even when another request
+/// on the same client was refused by the pin meanwhile.
+#[tokio::test]
+async fn a_post_failing_after_its_handshake_is_never_replayed() {
+    let request_read = Arc::new(AtomicBool::new(false));
+    let hang_up = Arc::new(AtomicBool::new(false));
+    let (read, hung_up) = (request_read.clone(), hang_up.clone());
+    let upstream = spawn_tls_upstream(
+        |index| {
+            if index == 0 {
+                &PINNED_KEY
+            } else {
+                &ROTATED_KEY
+            }
+        },
+        move |index, mut stream| {
+            if index != 0 {
+                return reply_ok(stream);
+            }
+            // Take the request, then drop the connection without answering.
+            read_request_head(&mut stream);
+            read.store(true, Ordering::SeqCst);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !hung_up.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        },
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut state = state_over(upstream.base.clone(), tx);
+    let mut events = capture_events(&mut state);
+    state.client.pin(&state.host, &[PINNED_KEY.spki()]).unwrap();
+
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    let post = tokio::spawn(
+        reqwest::Client::new()
+            .post(format!("{proxy}/v1/chat/completions"))
+            .header("content-type", "application/json")
+            .body(REQUEST_BODY.to_vec())
+            .send(),
+    );
+    wait_until(|| request_read.load(Ordering::SeqCst)).await;
+    let refused = state
+        .client
+        .request(
+            reqwest::Method::GET,
+            &format!("{}/v1/models", upstream.base),
+        )
+        .send()
+        .await;
+    assert!(refused.is_err());
+    assert_eq!(state.client.pin_rejections(&state.host), 1);
+    hang_up.store(true, Ordering::SeqCst);
+
+    assert_eq!(post.await.unwrap().unwrap().status().as_u16(), 502);
+    assert!(blocked_codes(&mut events).is_empty());
+    assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 0);
+    // Only the POST's own connection completed a handshake: no re-verify
+    // fetch and no replay.
+    assert_eq!(upstream.completed.load(Ordering::SeqCst), 1);
+}
+
+/// The heal never widens trust: a pin refusal blocks like a keyset
+/// rotation and re-verifies, but an upstream that cannot reach VERIFIED
+/// keeps the stale pin and the 502 — no key is adopted on a failed verify.
+#[tokio::test]
+async fn a_refused_pin_on_an_unverifiable_host_fails_closed() {
+    let upstream = unverifiable_upstream(std::time::Duration::ZERO);
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut state = state_over(upstream.base.clone(), tx);
+    let mut events = capture_events(&mut state);
+    let stale = vec![PINNED_KEY.spki()];
+    state.client.pin(&state.host, &stale).unwrap();
+
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    let resp = reqwest::Client::new()
+        .get(format!("{proxy}/v1/models"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 502);
+    assert!(resp
+        .text()
+        .await
+        .unwrap()
+        .contains("upstream connection failed"));
+    assert_eq!(state.client.pin_rejections(&state.host), 1);
+    // The refusal went through the rotation path (`keyset_changed`, one
+    // re-verify attempt whose unpinned fetch completed a handshake), and its
+    // failure is reported like any failed re-verification.
+    assert_eq!(blocked_codes(&mut events), vec![keyset_changed(), None]);
+    assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(upstream.completed.load(Ordering::SeqCst), 1);
+    assert_eq!(state.client.pinned_spkis(&state.host), stale);
+    assert!(state.blocked.load(Ordering::SeqCst));
+}
+
+/// Single flight: requests that queue behind an in-flight heal share its
+/// verdict — on both the POST and the passthrough path — instead of each
+/// attesting the service again.
+#[tokio::test]
+async fn requests_queued_behind_a_heal_share_one_reverification() {
+    const QUEUED: usize = 6;
+    let upstream = unverifiable_upstream(std::time::Duration::from_millis(500));
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut state = state_over(upstream.base.clone(), tx);
+    let mut events = capture_events(&mut state);
+    state.client.pin(&state.host, &[PINNED_KEY.spki()]).unwrap();
+
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    let client = reqwest::Client::new();
+    let first = tokio::spawn(client.get(format!("{proxy}/v1/models")).send());
+    // The pin refusal blocked forwards; its re-verify is now in flight.
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), events.recv()).await,
+        Ok(Some(VerifierEvent::Blocked { code: Some(code), .. })) if code == "keyset_changed"
+    ));
+    let queued = (0..QUEUED).map(|i| {
+        let request = if i % 2 == 0 {
+            client.get(format!("{proxy}/v1/models"))
+        } else {
+            client
+                .post(format!("{proxy}/v1/chat/completions"))
+                .header("content-type", "application/json")
+                .body(REQUEST_BODY.to_vec())
+        };
+        async move { request.send().await.unwrap().status().as_u16() }
+    });
+    let queued = futures_util::future::join_all(queued).await;
+
+    assert_eq!(first.await.unwrap().unwrap().status().as_u16(), 502);
+    assert_eq!(queued, vec![503; QUEUED]);
+    assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(upstream.completed.load(Ordering::SeqCst), 1);
+    assert!(!blocked_codes(&mut events).contains(&keyset_changed()));
+}
+
+/// A request refused by a pin that another request's heal is replacing
+/// waits for that heal instead of starting its own. `identity_changed`
+/// selects whether the heal adopted a new keyset digest.
+async fn refused_while_another_heal_completes(
+    identity_changed: bool,
+) -> (u16, String, TlsUpstream, Vec<Option<String>>) {
+    let upstream = spawn_tls_upstream(|_| &ROTATED_KEY, |_, stream| reply_ok(stream));
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut state = state_over(upstream.base.clone(), tx);
+    let mut events = capture_events(&mut state);
+    state.client.pin(&state.host, &[PINNED_KEY.spki()]).unwrap();
+    let admitted = state.delivery_token();
+
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    // Another request's heal holds the re-verify funnel.
+    let heal = state.reverify.lock().await;
+    let request = tokio::spawn(
+        reqwest::Client::new()
+            .get(format!("{proxy}/v1/models"))
+            .send(),
+    );
+    wait_until(|| state.client.pin_rejections(&state.host) == 1).await;
+    // That heal completes: the rotated key is pinned and every delivery
+    // admitted under the previous verification is revoked.
+    state
+        .client
+        .pin(&state.host, &[ROTATED_KEY.spki()])
+        .unwrap();
+    if identity_changed {
+        state.trusted.lock().unwrap().keyset_digest = "rotated-keyset".to_string();
+    }
+    state.revoke_deliveries();
+    drop(heal);
+
+    let resp = request.await.unwrap().unwrap();
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap();
+    assert!(admitted.is_cancelled());
+    assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 0);
+    (status, body, upstream, blocked_codes(&mut events))
+}
+
+/// When the heal kept the identity, the request is sent once more — under
+/// the current delivery token, since the one it was admitted with was
+/// revoked.
+#[tokio::test]
+async fn a_request_whose_pin_was_healed_elsewhere_is_sent_once_more() {
+    let (status, body, upstream, blocked) = refused_while_another_heal_completes(false).await;
+    assert_eq!(status, 200);
+    assert_eq!(body, "ok");
+    assert_eq!(upstream.completed.load(Ordering::SeqCst), 1);
+    assert!(blocked.is_empty());
+}
+
+/// When the heal replaced the identity, the request admitted under the old
+/// one is refused as retryable, never silently re-sent under the new one.
+#[tokio::test]
+async fn a_request_whose_identity_changed_during_the_heal_is_retryable() {
+    let (status, body, upstream, blocked) = refused_while_another_heal_completes(true).await;
+    assert_eq!(status, 503);
+    assert!(body.contains("identity changed"), "{body}");
+    assert_eq!(upstream.completed.load(Ordering::SeqCst), 0);
+    assert!(blocked.is_empty());
+}
+
+/// In managed mode the backend answers `keyset_changed` by stopping this
+/// verifier and rebuilding the session from a fresh one, so the request
+/// that hit the stale pin is refused as retryable (503), not failed.
+#[tokio::test]
+async fn a_managed_pin_refusal_hands_off_to_the_session_rebuild() {
+    let upstream = unverifiable_upstream(std::time::Duration::ZERO);
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut state = state_over(upstream.base.clone(), tx);
+    let (events, mut received) = mpsc::unbounded_channel();
+    let shutdown = state.shutdown.clone();
+    Arc::get_mut(&mut state).unwrap().event_sink = Arc::new(move |event| {
+        if matches!(&event, VerifierEvent::Blocked { code: Some(code), .. } if code == "keyset_changed")
+        {
+            shutdown.cancel();
+        }
+        let _ = events.send(event);
+    });
+    state.client.pin(&state.host, &[PINNED_KEY.spki()]).unwrap();
+
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{proxy}/v1/chat/completions"))
+        .header("content-type", "application/json")
+        .body(REQUEST_BODY.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 503);
+    assert_eq!(blocked_codes(&mut received), vec![keyset_changed()]);
+}
+
+/// Stale-pin heal against the live service: a bogus pin on the real host
+/// makes every forward's handshake fail closed, exactly as when the service
+/// rotates its attested TLS key. The proxy must re-verify (fresh nonce, full
+/// §9.1 checks incl. the DCAP quote) and re-pin — not wedge in 502 until
+/// restarted. The harness starts from a fixture identity, so the request
+/// that triggered the heal sees the identity change (retryable 503) and the
+/// next one goes through.
+/// Run from apps/desktop with: cargo test --package private-ai-proxy --lib -- --ignored stale_pin
+#[tokio::test]
+#[ignore]
+async fn stale_pin_heals_against_live_service() {
+    let base = "https://inference.phala.com";
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let state = state_over(base.to_string(), tx);
+    let stale = "00".repeat(32);
+    state
+        .client
+        .pin(&state.host, std::slice::from_ref(&stale))
+        .unwrap();
+
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    let client = reqwest::Client::new();
+    let healing = client
+        .get(format!("{proxy}/v1/models"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(healing.status().as_u16(), 503);
+    let resp = client
+        .get(format!("{proxy}/v1/models"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let observed = state.client.observed_spki(&state.host).expect("observed");
+    let pinned = state.client.pinned_spkis(&state.host);
+    assert!(pinned.contains(&observed), "{pinned:?}");
+    assert!(!pinned.contains(&stale));
 }
