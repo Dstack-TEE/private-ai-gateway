@@ -96,7 +96,7 @@ export function OverviewPage(): React.JSX.Element {
         >
           <div className="preview-list flex-1 min-h-0 overflow-y-auto overscroll-contain [&_>_:last-child]:border-b-0" role="region" tabIndex={0} aria-label="Recent requests">
             {recent.length === 0 && (
-              <EmptyState text={state.protection.action.stops || state.sessionActive ? "No requests in this session yet." : "Start protection to begin a new session."} />
+              <EmptyState text={state.protection.action.operation === "stop" || state.sessionActive ? "No requests in this session yet." : "Start protection to begin a new session."} />
             )}
             {recent.map((item) => (
               <React.Fragment key={item.id}><UsageRow activity={item} onOpen={() => shell.openDialog({ kind: "usage-proof", activity: item })} /><Separator className="last:hidden" /></React.Fragment>

@@ -152,6 +152,7 @@ impl DesktopRuntime {
             }
         }
         if self.instance.is_none() {
+            self.report_agents(&statuses);
             return Ok(statuses);
         }
         if let Some(catalog) = catalog.as_ref() {
@@ -171,7 +172,22 @@ impl DesktopRuntime {
             }
         }
         self.publish_agent_tokens(tokens)?;
+        self.report_agents(&statuses);
         Ok(statuses)
+    }
+
+    /// Agents also change without an app action: one is installed or removed,
+    /// or a catalog change needs attention. The backend learns of that only
+    /// by scanning, so a scan that differs from the last one publishes a new
+    /// agents revision for every client.
+    fn report_agents(&self, statuses: &[AgentStatus]) {
+        let Ok(mut reported) = self.reported_agents.lock() else {
+            return;
+        };
+        if reported.as_slice() != statuses {
+            statuses.clone_into(&mut reported);
+            self.manager.agents_changed();
+        }
     }
 
     pub fn preview_agent(

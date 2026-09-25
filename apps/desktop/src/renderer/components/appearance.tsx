@@ -10,26 +10,46 @@ import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group";
 
 const AppearanceContext = createContext({ value: "system" as Appearance, busy: false, change: (_value: Appearance) => {} });
 
-/** Applies an appearance to the document: `system` follows the OS setting. */
+/**
+ * Selects the document's appearance; `public/appearance-init.js` resolves it
+ * to the theme, `system` following the OS setting.
+ */
 export function useAppearanceTheme(value: Appearance) {
   useLayoutEffect(() => {
-    const media = window.matchMedia("(prefers-color-scheme: dark)");
-    const apply = () => document.documentElement.classList.toggle("dark", value === "dark" || (value === "system" && media.matches));
-    apply();
-    media.addEventListener("change", apply);
-    return () => media.removeEventListener("change", apply);
+    const root = document.documentElement;
+    if (value === "system") delete root.dataset.appearance;
+    else root.dataset.appearance = value;
   }, [value]);
 }
 
 /**
+ * How long the hidden desktop window waits for the saved appearance. A
+ * backend that has not answered by then may be hung (its requests time out
+ * only after two minutes), so the window opens in the system appearance; the
+ * appearance event applies the saved one once the backend answers, and the
+ * failed read is retried when the window gains focus.
+ */
+const APPEARANCE_WAIT_MS = 3_000;
+
+/** Rejects once `ms` have passed (`AbortSignal.timeout`). */
+function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {
+  const deadline = AbortSignal.timeout(ms);
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => deadline.addEventListener("abort", () => reject(deadline.reason), { once: true })),
+  ]);
+}
+
+/**
  * The saved appearance. The desktop window is created hidden and shown once
- * the saved appearance is applied, so it never opens in the wrong theme.
+ * the appearance query settles, so it opens in the saved theme when there is
+ * one to read.
  */
 export function AppearanceProvider({ api, children }: PropsWithChildren<{ api: DesktopApi }>) {
   const client = useQueryClient();
-  // A backend that is still starting answers later with an appearance event;
-  // the window shows in the system appearance meanwhile.
-  const { data, isPending } = useQuery({ queryKey: ["appearance"], queryFn: () => api.getAppearance(), retry: false });
+  // A backend that is still starting fails the read at once and sends the
+  // appearance event when it answers.
+  const { data, isPending } = useQuery({ queryKey: ["appearance"], queryFn: () => withDeadline(api.getAppearance(), APPEARANCE_WAIT_MS), retry: false });
   const value = data ?? "system";
   const mutation = useMutation({
     mutationFn: (next: Appearance) => api.setAppearance(next),

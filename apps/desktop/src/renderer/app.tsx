@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useEffectEvent, useRef, useState } from "react";
+import React, { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Outlet, useMatches, useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
@@ -44,11 +44,10 @@ function Window(): React.JSX.Element {
   const navigate = useNavigate();
   const updates = useUpdates(desktopApi, distributionCapabilities.nativeUpdates || distributionCapabilities.channel === "web");
   const appState = useAppState(desktopApi, INITIAL_STATE);
-  const state = appState.error ? unavailableState(appState.error) : appState.data ?? INITIAL_STATE;
+  const state = useMemo(() => appState.error ? unavailableState(appState.error) : appState.data ?? INITIAL_STATE, [appState.error, appState.data]);
   const setState = appState.setState;
   const agents = useAgents(desktopApi, state, distributionCapabilities.sandboxHomeAccess);
   const backendReady = Boolean(appState.data) && state.backendConnected !== false;
-  const starting = state.protection.phase === "starting";
   useEffect(() => {
     if (!backendReady) return;
     // Prefetch shares page caches; failures are presented when the page is opened.
@@ -87,14 +86,6 @@ function Window(): React.JSX.Element {
     if (saved) toast.success(`${saved.name} saved`);
   }, [appState.data, state.profiles]);
 
-  const runAction = async (title: string, action: () => Promise<AppState | void>) => {
-    try {
-      const next = await action();
-      if (next) setState(next);
-    } catch (error) {
-      toastError(title, error);
-    }
-  };
   /** For dialogs that show the failure themselves. */
   const applyStateAction = async (action: () => Promise<AppState | void>): Promise<string | undefined> => {
     try {
@@ -104,6 +95,126 @@ function Window(): React.JSX.Element {
       return errorMessage(error);
     }
   };
+
+  const copyValue = useCallback(async (label: string, value: string) => {
+    await desktopApi.copyText(value);
+    setCopied(label);
+    toast.success(`${label} copied`);
+    window.clearTimeout(copyTimer.current);
+    copyTimer.current = window.setTimeout(() => setCopied((current) => (current === label ? undefined : current)), 1_400);
+  }, []);
+
+  const rotateClientKey = async (): Promise<string | undefined> => {
+    try {
+      client.setQueryData(["client-key"], await desktopApi.rotateClientKey());
+      setClientKeyVisible(true);
+      return undefined;
+    } catch (error) {
+      setClientKeyVisible(false);
+      return errorMessage(error);
+    }
+  };
+
+  // Protection needs a usable profile first: create one, or fix the active one.
+  const openProfileSetup = useCallback(() => {
+    if (state.protection.phase === "starting") return;
+    openDialog(state.profiles.length === 0 ? { kind: "setup-profile" } : { kind: "profiles", repair: state.profiles.some((profile) => profile.id === state.activeProfileId) });
+  }, [state, openDialog]);
+
+  // The shell's actions read only the values in its dependency list, so the
+  // context changes exactly when one of them does.
+  const shell = useMemo<Shell>(() => {
+    const starting = state.protection.phase === "starting";
+    const runAction = async (title: string, action: () => Promise<AppState | void>) => {
+      try {
+        const next = await action();
+        if (next) setState(next);
+      } catch (error) {
+        toastError(title, error);
+      }
+    };
+    const openProfiles = () => {
+      if (starting) return;
+      openDialog(state.profiles.length === 0 ? { kind: "setup-profile" } : { kind: "profiles", repair: false });
+    };
+    const toggleProtection = () => {
+      const { action } = state.protection;
+      if (!action.enabled) return;
+      if (action.operation === "setUpProfile") {
+        openProfileSetup();
+        return;
+      }
+      void runAction(action.operation === "stop" ? "Could not stop protection" : "Could not start protection", () =>
+        action.operation === "stop" ? desktopApi.stop() : desktopApi.start(state.config));
+    };
+    const setRequireProductionOs = async (required: boolean) => {
+      if (applying) return;
+      setApplying(true);
+      try {
+        if (state.protection.action.operation === "stop" && !await confirm({
+          title: required ? "Require production OS?" : "Allow development OS?",
+          message: "Protection stops before the policy changes.",
+          confirmLabel: "Stop and Change",
+        })) return;
+        setState(await desktopApi.setRequireProductionOs(required));
+      } catch (error) { toastError("Could not change the OS policy", error); }
+      finally { setApplying(false); }
+    };
+    const resetSettings = async () => {
+      // A browser has no window of the app to resize.
+      const resetItems = new Intl.ListFormat("en").format([
+        "appearance", "notifications", "startup preferences", "development OS policy", "update channel",
+        "Local API settings", "web UI settings", ...web ? [] : ["window size"],
+      ]);
+      let confirmed: boolean;
+      try {
+        confirmed = await confirm({
+          title: "Reset settings?",
+          message: `${agents.accessStatus === "authorized" ? "Stop protection, disconnect all agents and restore their configurations," : "Stop protection"} and reset ${resetItems}. Profiles, credentials, the Local API key, and usage history are kept. This does not change system notification permission${distributionCapabilities.cliRegistration ? " or remove the pap command" : ""}.`,
+          confirmLabel: "Reset Settings",
+        });
+      } catch (error) {
+        toastError("Could not reset settings", error);
+        return;
+      }
+      if (!confirmed) return;
+      setApplying(true);
+      try {
+        setState(await desktopApi.resetSettings());
+      } catch (error) {
+        toastError("Could not reset settings", error);
+      } finally {
+        setApplying(false);
+      }
+    };
+    const startBackend = async () => {
+      if (startingBackend) return;
+      setStartingBackend(true);
+      try { setState(await desktopApi.startBackendService()); }
+      catch (error) { toastError("Could not start the background service", error); }
+      finally { setStartingBackend(false); }
+    };
+    return {
+      state,
+      agents,
+      updates,
+      clientKey,
+      clientKeyVisible,
+      toggleClientKey: () => setClientKeyVisible((visible) => !visible),
+      copied,
+      copyValue,
+      copy: (label, value) => void runAction(`Could not copy the ${label.toLowerCase()}`, () => copyValue(label, value)),
+      applying,
+      startingBackend: startingBackend || starting,
+      startBackend: () => void startBackend(),
+      toggleProtection,
+      setRequireProductionOs: (required) => void setRequireProductionOs(required),
+      resetSettings: () => void resetSettings(),
+      openDialog,
+      openProfiles,
+      openAboutLink: (target: AboutLink) => void runAction("Could not open the link", () => desktopApi.openAboutLink(target)),
+    };
+  }, [state, agents, updates, clientKey, clientKeyVisible, copied, copyValue, applying, startingBackend, setState, openDialog, openProfileSetup, confirm]);
 
   const requestStopAllAndQuit = useEffectEvent(async () => {
     try {
@@ -121,17 +232,8 @@ function Window(): React.JSX.Element {
   });
   useEffect(() => desktopApi.onStopAllRequest(() => { void requestStopAllAndQuit(); }), []);
 
-  const openProfiles = () => {
-    if (starting) return;
-    openDialog(state.profiles.length === 0 ? { kind: "setup-profile" } : { kind: "profiles", repair: false });
-  };
-  // Protection needs a usable profile first: create one, or fix the active one.
-  const openProfileSetup = () => {
-    if (starting) return;
-    openDialog(state.profiles.length === 0 ? { kind: "setup-profile" } : { kind: "profiles", repair: state.profiles.some((profile) => profile.id === state.activeProfileId) });
-  };
   const showRequested = useEffectEvent((target: NavigationTarget) => {
-    if (target === "profiles") openProfiles();
+    if (target === "profiles") shell.openProfiles();
     else if (target === "profile-setup") openProfileSetup();
     else if (!modalOpen) void navigate({ to: `/${target}` });
   });
@@ -157,109 +259,6 @@ function Window(): React.JSX.Element {
     window.addEventListener("keydown", shortcut);
     return () => window.removeEventListener("keydown", shortcut);
   }, [navigate, modalOpen]);
-
-  const toggleProtection = () => {
-    const { phase, action } = state.protection;
-    if (!action.enabled) return;
-    if (phase === "profileRequired") {
-      openProfileSetup();
-      return;
-    }
-    void runAction(action.stops ? "Could not stop protection" : "Could not start protection", () =>
-      action.stops ? desktopApi.stop() : desktopApi.start(state.config));
-  };
-
-  const setRequireProductionOs = async (required: boolean) => {
-    if (applying) return;
-    setApplying(true);
-    try {
-      if (state.protection.action.stops && !await confirm({
-        title: required ? "Require production OS?" : "Allow development OS?",
-        message: "Protection stops before the policy changes.",
-        confirmLabel: "Stop and Change",
-      })) return;
-      setState(await desktopApi.setRequireProductionOs(required));
-    } catch (error) { toastError("Could not change the OS policy", error); }
-    finally { setApplying(false); }
-  };
-
-  const rotateClientKey = async (): Promise<string | undefined> => {
-    try {
-      client.setQueryData(["client-key"], await desktopApi.rotateClientKey());
-      setClientKeyVisible(true);
-      return undefined;
-    } catch (error) {
-      setClientKeyVisible(false);
-      return errorMessage(error);
-    }
-  };
-
-  const copyValue = async (label: string, value: string) => {
-    await desktopApi.copyText(value);
-    setCopied(label);
-    toast.success(`${label} copied`);
-    window.clearTimeout(copyTimer.current);
-    copyTimer.current = window.setTimeout(() => setCopied((current) => (current === label ? undefined : current)), 1_400);
-  };
-  const copy = (label: string, value: string) => void runAction(`Could not copy the ${label.toLowerCase()}`, () => copyValue(label, value));
-  const openAboutLink = (target: AboutLink) => void runAction("Could not open the link", () => desktopApi.openAboutLink(target));
-
-  // A browser has no window of the app to resize.
-  const resetItems = new Intl.ListFormat("en").format([
-    "appearance", "notifications", "startup preferences", "development OS policy", "update channel",
-    "Local API settings", "web UI settings", ...web ? [] : ["window size"],
-  ]);
-  const resetSettings = async () => {
-    let confirmed: boolean;
-    try {
-      confirmed = await confirm({
-        title: "Reset settings?",
-        message: `${agents.accessStatus === "authorized" ? "Stop protection, disconnect all agents and restore their configurations," : "Stop protection"} and reset ${resetItems}. Profiles, credentials, the Local API key, and usage history are kept. This does not change system notification permission${distributionCapabilities.cliRegistration ? " or remove the pap command" : ""}.`,
-        confirmLabel: "Reset Settings",
-      });
-    } catch (error) {
-      toastError("Could not reset settings", error);
-      return;
-    }
-    if (!confirmed) return;
-    setApplying(true);
-    try {
-      setState(await desktopApi.resetSettings());
-    } catch (error) {
-      toastError("Could not reset settings", error);
-    } finally {
-      setApplying(false);
-    }
-  };
-
-  const startBackend = async () => {
-    if (startingBackend) return;
-    setStartingBackend(true);
-    try { setState(await desktopApi.startBackendService()); }
-    catch (error) { toastError("Could not start the background service", error); }
-    finally { setStartingBackend(false); }
-  };
-
-  const shell: Shell = {
-    state,
-    agents,
-    updates,
-    clientKey,
-    clientKeyVisible,
-    toggleClientKey: () => setClientKeyVisible((visible) => !visible),
-    copied,
-    copyValue,
-    copy,
-    applying,
-    startingBackend: startingBackend || starting,
-    startBackend: () => void startBackend(),
-    toggleProtection,
-    setRequireProductionOs: (required) => void setRequireProductionOs(required),
-    resetSettings: () => void resetSettings(),
-    openDialog,
-    openProfiles,
-    openAboutLink,
-  };
 
   return (
     <ShellContext.Provider value={shell}>

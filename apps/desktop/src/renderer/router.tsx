@@ -1,6 +1,7 @@
 import { createBrowserHistory, createMemoryHistory, createRootRoute, createRoute, createRouter, redirect, stripSearchParams } from "@tanstack/react-router";
 import { Bot, ChartNoAxesColumn, LayoutGrid, Settings, type LucideIcon } from "lucide-react";
 import { AppLayout } from "./app";
+import { RouteError } from "./components/route-error";
 import { SignInPage } from "./components/sign-in";
 import { AgentsPage } from "./features/agents";
 import { OverviewPage } from "./features/overview";
@@ -71,6 +72,7 @@ export const router = createRouter({
   // The web UI has real URLs. The desktop window has no address bar or deep
   // links, so its location stays in memory and the webview keeps loading index.html.
   history: web ? createBrowserHistory() : createMemoryHistory(),
+  defaultErrorComponent: RouteError,
 });
 
 // A session that ends, here or on the server, returns to sign-in; nothing

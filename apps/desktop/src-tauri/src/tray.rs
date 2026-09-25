@@ -13,7 +13,7 @@ use desktop_core::brand::PRODUCT_NAME as APP_NAME;
 use desktop_core::{
     client::Client,
     contracts::{AppState, VerificationStatus},
-    protection::ProtectionPhase,
+    protection::{ProtectionOperation, ProtectionPhase},
     protocol::rpc,
     ui_api::{CONFIRM_STOP_ALL_EVENT, LAUNCH_PREFERENCES_EVENT, NAVIGATE_EVENT},
 };
@@ -40,7 +40,7 @@ struct ProfileMenuItem {
 }
 
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
-    let protection = AppState::default().protection;
+    let protection = AppState::default().protection();
     let toggle = MenuItemBuilder::with_id("toggle", &protection.action.label).build(app)?;
     let status = MenuItemBuilder::with_id("status", &protection.title)
         .enabled(false)
@@ -289,23 +289,28 @@ fn toggle_or_open_settings(app: &AppHandle) {
             show_window(&app);
             return;
         };
-        let protection = &state.protection;
-        if !protection.action.enabled {
+        let action = state.protection().action;
+        if !action.enabled {
             sync(&app, &state);
             return;
         }
-        if protection.phase == ProtectionPhase::ProfileRequired {
-            sync(&app, &state);
-            show_window(&app);
-            let _ = app.emit(NAVIGATE_EVENT, "profile-setup");
-            return;
-        }
-        if let Err(error) = client.toggle() {
-            let title = if protection.action.stops {
-                "Could not stop protection"
-            } else {
-                "Could not start protection"
-            };
+        let result = match action.operation {
+            ProtectionOperation::SetUpProfile => {
+                sync(&app, &state);
+                show_window(&app);
+                let _ = app.emit(NAVIGATE_EVENT, "profile-setup");
+                return;
+            }
+            ProtectionOperation::Stop => client
+                .call(rpc::Stop)
+                .map_err(|error| ("Could not stop protection", error)),
+            ProtectionOperation::Start => client
+                .call(rpc::Start {
+                    config: state.config,
+                })
+                .map_err(|error| ("Could not start protection", error)),
+        };
+        if let Err((title, error)) = result {
             crate::notifications::show_failure(&app, title, &error.to_string());
         }
         sync(
@@ -363,7 +368,7 @@ pub fn sync(app: &AppHandle, state: &AppState) {
 }
 
 fn sync_inner(app: &AppHandle, state: &AppState) {
-    let protection = &state.protection;
+    let protection = state.protection();
     if let Some(menu) = app.try_state::<TrayMenu>() {
         let _ = menu.status.set_text(&protection.title);
         let _ = menu.toggle.set_text(&protection.action.label);

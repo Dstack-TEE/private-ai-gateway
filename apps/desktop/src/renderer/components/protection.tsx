@@ -55,7 +55,7 @@ export function ProtectedControl({
       {developmentMode && !compact && <span className="dev-mode-label text-warning text-xs font-semibold">Dev mode</span>}
       <SwitchControl
         size="default"
-        checked={action.stops}
+        checked={action.operation === "stop"}
         label={action.label}
         disabled={!action.enabled}
         developmentMode={developmentMode}

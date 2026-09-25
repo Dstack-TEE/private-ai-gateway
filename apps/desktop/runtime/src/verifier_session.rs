@@ -206,9 +206,7 @@ impl SessionManager {
     }
 
     pub fn snapshot(&self) -> Result<AppState, String> {
-        let mut state = self.lock()?.state.clone();
-        state.update_protection();
-        Ok(state)
+        Ok(self.lock()?.state.clone())
     }
 
     pub fn subscribe(&self) -> watch::Receiver<AppState> {
@@ -484,9 +482,9 @@ impl SessionManager {
         self.update(|state| state.api_key_saved = saved);
     }
 
-    /// An agent configuration was connected or disconnected.
+    /// The agents the backend reports changed.
     pub fn agents_changed(&self) {
-        self.update(|state| state.agents_revision = state.agents_revision.wrapping_add(1));
+        self.update(|state| state.agents_revision = state.agents_revision.saturating_add(1));
     }
 
     pub fn client_key_changed(&self, available: bool) {
@@ -850,8 +848,7 @@ impl SessionManager {
     /// Every state change goes through here. A new status or error is also
     /// logged, so the service log keeps what clients were shown; the caller
     /// writes it once it holds no lock.
-    fn send(&self, mut state: AppState) -> StateLog {
-        state.update_protection();
+    fn send(&self, state: AppState) -> StateLog {
         let (status, error) = (state.status, state.error.clone());
         let previous = self.state_tx.send_replace(state);
         StateLog {

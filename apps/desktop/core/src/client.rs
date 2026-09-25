@@ -256,10 +256,9 @@ impl Client {
     /// error: starting.
     pub fn attach(handle: tokio::runtime::Handle) -> Arc<Self> {
         let client = Arc::new(Self::new());
-        client.states.send_modify(|state| {
-            state.backend_connected = Some(false);
-            state.update_protection();
-        });
+        client
+            .states
+            .send_modify(|state| state.backend_connected = Some(false));
         let weak = Arc::downgrade(&client);
         handle.spawn_blocking(move || {
             let Some(client) = weak.upgrade() else {
@@ -427,17 +426,6 @@ impl Client {
                     Err(error)
                 }
             }
-        }
-    }
-
-    pub fn toggle(&self) -> Result<AppState, CallError> {
-        let state = self.state()?;
-        if state.should_stop_protection() {
-            self.call(rpc::Stop)
-        } else {
-            self.call(rpc::Start {
-                config: state.config,
-            })
         }
     }
 

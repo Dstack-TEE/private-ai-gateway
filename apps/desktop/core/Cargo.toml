@@ -36,7 +36,9 @@ toml_edit = { version = "0.25", features = ["serde"] }
 tower-service = { version = "0.3", optional = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
-ts-rs = "12"
+# `AppState` derives serde with `remote = "Self"`, which ts-rs does not read;
+# the committed contracts.generated.ts check catches any shape change.
+ts-rs = { version = "12", features = ["no-serde-warnings"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 

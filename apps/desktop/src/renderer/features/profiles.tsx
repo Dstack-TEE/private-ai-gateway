@@ -152,7 +152,7 @@ export function ProfileEditorDialog({
 }): React.JSX.Element {
   const busy = state.status === "verifying";
   // Saving or connecting an account restarts protection that is on.
-  const running = state.protection.action.stops;
+  const running = state.protection.action.operation === "stop";
   const frozen = busy;
   const isNew = !profile;
   const [draft, setDraft] = useState<ConfidentialProfileInput>(() => {

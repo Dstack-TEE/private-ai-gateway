@@ -102,6 +102,7 @@ fn test_runtime(
         balances: crate::balance_cache::BalanceCache::default(),
         endpoint: EndpointRuntime::new(executor.handle().clone()),
         agent_policy: Mutex::new(()),
+        reported_agents: Mutex::new(Vec::new()),
         lifecycle: tokio::sync::Mutex::new(()),
         exiting: AtomicBool::new(false),
         helper_path: directory.join("helper"),
@@ -407,6 +408,34 @@ fn the_production_os_policy_is_saved_for_the_next_start() {
             .config
             .require_production_os
     );
+}
+
+/// Answers and published states derive `protection` from the state they
+/// carry, so a response never presents a stale one.
+#[test]
+fn returned_and_published_states_present_their_own_protection() {
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = test_runtime(&executor, directory.path());
+    let published = runtime.subscribe();
+    let presents_itself = |value: serde_json::Value| {
+        let state: AppState = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            value["protection"],
+            serde_json::to_value(state.protection()).unwrap()
+        );
+    };
+    let admission = runtime.admission();
+    for command in [
+        desktop_core::protocol::Command::Stop {},
+        desktop_core::protocol::Command::SetRequireProductionOs { required: false },
+        desktop_core::protocol::Command::GetState {},
+    ] {
+        presents_itself(
+            crate::server::execute(&runtime, &admission, executor.handle(), command).unwrap(),
+        );
+    }
+    presents_itself(serde_json::to_value(&*published.borrow()).unwrap());
 }
 
 #[test]

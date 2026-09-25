@@ -347,8 +347,13 @@ pub struct ConfidentialProfileInput {
     pub remote_url: String,
 }
 
+/// The backend's state. It serializes with the [`Protection`] it presents
+/// (see the `Serialize` impl below), so every response and event carries a
+/// presentation derived from exactly the state it contains.
+// `remote = "Self"` turns the derived impls into `AppState::serialize` and
+// `AppState::deserialize`, which the trait impls below build on.
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", remote = "Self")]
 #[ts(optional_fields)]
 pub struct AppState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -414,12 +419,39 @@ pub struct AppState {
     pub web_ui: WebUiStatus,
     #[serde(default)]
     pub config_files: ConfigFiles,
-    /// Changes whenever the backend connects or disconnects an agent.
+    /// Changes whenever the agents the backend reports change.
     #[serde(default)]
     pub agents_revision: u64,
-    /// Derived from the other fields; whatever publishes a state recomputes
-    /// it first (`update_protection`).
-    pub protection: Protection,
+}
+
+impl Serialize for AppState {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        /// The derived fields.
+        struct Fields<'a>(&'a AppState);
+        impl Serialize for Fields<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                AppState::serialize(self.0, serializer)
+            }
+        }
+        #[derive(Serialize)]
+        struct View<'a> {
+            #[serde(flatten)]
+            state: Fields<'a>,
+            protection: Protection,
+        }
+        View {
+            state: Fields(self),
+            protection: self.protection(),
+        }
+        .serialize(serializer)
+    }
+}
+
+/// A serialized `protection` is ignored; it is derived again when needed.
+impl<'de> Deserialize<'de> for AppState {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        AppState::deserialize(deserializer)
+    }
 }
 
 /// The settings files the backend reads. Never carries their contents.
@@ -480,8 +512,8 @@ impl From<&crate::config::WebUiConfig> for WebUiStatus {
 }
 
 impl AppState {
-    pub fn update_protection(&mut self) {
-        self.protection = Protection::of(self);
+    pub fn protection(&self) -> Protection {
+        Protection::of(self)
     }
 
     /// The state a client shows once the backend stopped answering.
@@ -491,9 +523,9 @@ impl AppState {
         self.identity = None;
         self.proxy_url = None;
         self.error = Some(error);
-        self.endpoint_error =
-            Some("The background service stopped. Start it with pap service start.".into());
-        self.update_protection();
+        // Every desktop distribution, the App Store one included, offers to
+        // start the service again; not every one has the `pap` command.
+        self.endpoint_error = Some("The background service stopped.".into());
     }
 
     pub fn is_protected(&self) -> bool {
@@ -518,7 +550,7 @@ impl AppState {
 
 impl Default for AppState {
     fn default() -> Self {
-        let mut state = Self {
+        Self {
             status: VerificationStatus::Stopped,
             backend_connected: None,
             backend_instance: None,
@@ -549,10 +581,7 @@ impl Default for AppState {
             web_ui: WebUiStatus::from(&crate::config::WebUiConfig::default()),
             config_files: ConfigFiles::default(),
             agents_revision: 0,
-            protection: Protection::default(),
-        };
-        state.update_protection();
-        state
+        }
     }
 }
 
@@ -682,13 +711,24 @@ mod typescript {
             WEB_UI_PASSWORD_MIN_LENGTH,
         },
         maintenance::{ImportResult, ProfileBackup, ProfileConfiguration},
-        protection::{ProtectionAction, ProtectionPhase, Tone},
+        protection::{ProtectionAction, ProtectionOperation, ProtectionPhase, Tone},
         ui_api::{self, LaunchPreferences, ListenAddress, Method},
         updates::{Installation, UpdateInfo, UpdateNotice},
         usage::{UsageModelPoint, UsagePage, UsagePoint, UsageQuery},
     };
 
     const OUTPUT: &str = "src/shared/contracts.generated.ts";
+
+    /// `AppState` as it serializes: its fields and the protection derived
+    /// from them.
+    #[derive(TS)]
+    #[ts(rename = "AppState")]
+    #[allow(dead_code)]
+    struct SerializedAppState {
+        #[ts(flatten)]
+        state: AppState,
+        protection: Protection,
+    }
 
     macro_rules! declarations {
         ($config:expr, $($type:ty),+ $(,)?) => {
@@ -711,11 +751,12 @@ mod typescript {
         );
         for declaration in declarations!(
             &config,
-            AppState,
+            SerializedAppState,
             VerificationStatus,
             Protection,
             ProtectionPhase,
             ProtectionAction,
+            ProtectionOperation,
             Tone,
             VerificationCheck,
             ServiceIdentity,
@@ -898,5 +939,37 @@ mod typescript {
             current.replace("\r\n", "\n") == expected,
             "{OUTPUT} is stale; run `npm run generate:contracts` in apps/desktop"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every response and event derives `protection` from the state it
+    /// carries; a received one is never trusted.
+    #[test]
+    fn a_serialized_state_carries_the_protection_it_presents() {
+        let mut state = AppState {
+            status: VerificationStatus::Verified,
+            api_key_saved: true,
+            ..AppState::default()
+        };
+        let changes: [fn(&mut AppState); 4] = [
+            |_| {},
+            |state| state.status = VerificationStatus::Stopped,
+            |state| state.endpoint_error = Some("Port in use".into()),
+            |state| state.disconnect("Connection closed".into()),
+        ];
+        for change in changes {
+            change(&mut state);
+            let serialized = serde_json::to_value(&state).unwrap();
+            assert_eq!(
+                serialized["protection"],
+                serde_json::to_value(state.protection()).unwrap()
+            );
+            let received: AppState = serde_json::from_value(serialized).unwrap();
+            assert_eq!(received.protection(), state.protection());
+        }
     }
 }

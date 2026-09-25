@@ -1,6 +1,10 @@
 // Generated from the Rust contracts by `npm run generate:contracts`. Do not edit.
 
-export type AppState = { backendInstance?: string, clientKeyRevision: number, clientKeyAvailable?: boolean,
+/**
+ * `AppState` as it serializes: its fields and the protection derived
+ * from them.
+ */
+export type AppState = { protection: Protection, backendInstance?: string, clientKeyRevision: number, clientKeyAvailable?: boolean,
 /**
  * Client connection state; the backend leaves this unset. `false`
  * without an `error` while the client is still starting the backend.
@@ -51,14 +55,9 @@ config: StartConfig, profiles: Array<ConfidentialProfile>, activeProfileId: stri
  */
 catalog?: CatalogSummary, webUi: WebUiStatus, configFiles: ConfigFiles,
 /**
- * Changes whenever the backend connects or disconnects an agent.
+ * Changes whenever the agents the backend reports change.
  */
-agentsRevision: number,
-/**
- * Derived from the other fields; whatever publishes a state recomputes
- * it first (`update_protection`).
- */
-protection: Protection, };
+agentsRevision: number, };
 /**
  * The verifier's state. `Verifying` lasts until the service identity and
  * the catalog are both in.
@@ -69,15 +68,11 @@ export type Protection = { phase: ProtectionPhase, title: string, tone: Tone, ac
  * What protection is doing, as the user sees it.
  */
 export type ProtectionPhase = "starting" | "reconnecting" | "localApiUnavailable" | "verifyingConfiguration" | "verifying" | "blocked" | "interrupted" | "profileRequired" | "notProtected" | "configurationVerified" | "apiKeyRequired" | "protected";
+export type ProtectionAction = { operation: ProtectionOperation, label: string, enabled: boolean, };
 /**
- * The protection switch in the window and the tray's protection item.
+ * What the protection switch and the tray's protection item do.
  */
-export type ProtectionAction = { label: string, enabled: boolean,
-/**
- * Whether the action stops protection (the switch is on) rather than
- * starting it.
- */
-stops: boolean, };
+export type ProtectionOperation = "start" | "stop" | "setUpProfile";
 export type Tone = "success" | "warning" | "danger" | "neutral";
 export type VerificationCheck = { id: string, section: string, title: string, status: "pass" | "fail" | "skip" | "info", detail: string, };
 export type ServiceIdentity = { teeType: string, trustLevel: string, keysetDigest: string, keysetNotAfter: number, tlsSpki?: string, source: SourceProvenance, serving: string, supportedE2eeVersions: Array<string>, };
@@ -296,8 +291,8 @@ export const API_KEY_PAGES: Partial<Record<ServiceProvider, string>> = {"phala":
 export const SERVICE_PROVIDERS: Readonly<Record<ServiceProvider, ServiceProviderInfo>> = {"phala":{"id":"phala","label":"Phala","presetUrl":"https://inference.phala.com","keyLabel":"Phala API key","accountLogin":true,"workspaces":false,"callbackUrl":false},"redpill":{"id":"redpill","label":"RedPill","presetUrl":"https://tee.redpill.ai","keyLabel":"RedPill API key","accountLogin":true,"workspaces":true,"callbackUrl":true},"custom":{"id":"custom","label":"Custom","presetUrl":null,"keyLabel":"API key","accountLogin":false,"workspaces":false,"callbackUrl":false}};
 export const DEFAULT_SERVICE_PROVIDER: ServiceProvider = "redpill";
 export const BYLINE: string = "by dstack TEE";
-export const INITIAL_STATE: AppState = {"clientKeyRevision":0,"status":"stopped","configurationVerification":false,"checks":[],"activity":[],"reconnecting":false,"sessionActive":false,"sessionUsage":{"requests":0,"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"costUsd":0.0,"protected":0,"blockedLocally":0,"failedProof":0},"usageRevision":0,"config":{"remoteUrl":"https://tee.redpill.ai","requireProductionOs":true},"profiles":[],"activeProfileId":"","localApi":{"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4180},"apiKeySaved":false,"webUi":{"enabled":false,"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4182,"passwordSet":false},"configFiles":{"configPath":"","credentialsPath":"","warnings":[],"revision":0},"agentsRevision":0,"protection":{"phase":"profileRequired","title":"Not protected","tone":"neutral","action":{"label":"Set Up Profile…","enabled":true,"stops":false}}};
-export const UNAVAILABLE_STATE: AppState = {"clientKeyRevision":0,"backendConnected":false,"status":"error","configurationVerification":false,"endpointError":"The background service stopped. Start it with pap service start.","checks":[],"activity":[],"reconnecting":false,"sessionActive":false,"sessionUsage":{"requests":0,"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"costUsd":0.0,"protected":0,"blockedLocally":0,"failedProof":0},"usageRevision":0,"error":"The background service is unavailable.","config":{"remoteUrl":"https://tee.redpill.ai","requireProductionOs":true},"profiles":[],"activeProfileId":"","localApi":{"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4180},"apiKeySaved":false,"webUi":{"enabled":false,"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4182,"passwordSet":false},"configFiles":{"configPath":"","credentialsPath":"","warnings":[],"revision":0},"agentsRevision":0,"protection":{"phase":"localApiUnavailable","title":"Local API unavailable","tone":"danger","action":{"label":"Start Protection","enabled":false,"stops":false}}};
+export const INITIAL_STATE: AppState = {"clientKeyRevision":0,"status":"stopped","configurationVerification":false,"checks":[],"activity":[],"reconnecting":false,"sessionActive":false,"sessionUsage":{"requests":0,"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"costUsd":0.0,"protected":0,"blockedLocally":0,"failedProof":0},"usageRevision":0,"config":{"remoteUrl":"https://tee.redpill.ai","requireProductionOs":true},"profiles":[],"activeProfileId":"","localApi":{"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4180},"apiKeySaved":false,"webUi":{"enabled":false,"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4182,"passwordSet":false},"configFiles":{"configPath":"","credentialsPath":"","warnings":[],"revision":0},"agentsRevision":0,"protection":{"phase":"profileRequired","title":"Not protected","tone":"neutral","action":{"operation":"setUpProfile","label":"Set Up Profile…","enabled":true}}};
+export const UNAVAILABLE_STATE: AppState = {"clientKeyRevision":0,"backendConnected":false,"status":"error","configurationVerification":false,"endpointError":"The background service stopped.","checks":[],"activity":[],"reconnecting":false,"sessionActive":false,"sessionUsage":{"requests":0,"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"costUsd":0.0,"protected":0,"blockedLocally":0,"failedProof":0},"usageRevision":0,"error":"The background service is unavailable.","config":{"remoteUrl":"https://tee.redpill.ai","requireProductionOs":true},"profiles":[],"activeProfileId":"","localApi":{"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4180},"apiKeySaved":false,"webUi":{"enabled":false,"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4182,"passwordSet":false},"configFiles":{"configPath":"","credentialsPath":"","warnings":[],"revision":0},"agentsRevision":0,"protection":{"phase":"localApiUnavailable","title":"Local API unavailable","tone":"danger","action":{"operation":"setUpProfile","label":"Set Up Profile…","enabled":false}}};
 export const WEB_UI_PASSWORD_MIN_LENGTH: number = 12;
 export const WEB_DISTRIBUTION: DistributionCapabilities = {"channel":"web","nativeUpdates":false,"cliRegistration":false,"accountPortalLinks":true,"sandboxHomeAccess":false,"launchAtLogin":false,"notifications":false,"webUi":true};
 export const DEFAULT_LOCAL_API_CONFIG: ListenConfig = {"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4180};

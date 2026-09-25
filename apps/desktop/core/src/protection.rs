@@ -27,7 +27,7 @@ impl std::fmt::Display for VerificationStatus {
 }
 
 /// What protection is doing, as the user sees it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub enum ProtectionPhase {
     /// The desktop shell is still starting the backend; profiles and
@@ -40,35 +40,42 @@ pub enum ProtectionPhase {
     Blocked,
     Interrupted,
     ProfileRequired,
-    #[default]
     NotProtected,
     ConfigurationVerified,
     ApiKeyRequired,
     Protected,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub enum Tone {
     Success,
     Warning,
     Danger,
-    #[default]
     Neutral,
 }
 
-/// The protection switch in the window and the tray's protection item.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+/// What the protection switch and the tray's protection item do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct ProtectionAction {
-    pub label: String,
-    pub enabled: bool,
-    /// Whether the action stops protection (the switch is on) rather than
-    /// starting it.
-    pub stops: bool,
+pub enum ProtectionOperation {
+    Start,
+    /// Stops protection, or cancels its verification or reconnection; the
+    /// switch is on.
+    Stop,
+    /// Starting needs a saved credential for the active profile first.
+    SetUpProfile,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ProtectionAction {
+    pub operation: ProtectionOperation,
+    pub label: String,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Protection {
     pub phase: ProtectionPhase,
@@ -98,25 +105,33 @@ impl Protection {
             }
             ProtectionPhase::Protected => ("Protected", Tone::Success),
         };
-        let stops = state.should_stop_protection();
-        let label = match phase {
-            ProtectionPhase::Reconnecting if stops => "Cancel Reconnection",
-            ProtectionPhase::Verifying => "Cancel Verification",
-            _ if stops => "Stop Protection",
-            ProtectionPhase::ProfileRequired => "Set Up Profile…",
-            _ => "Start Protection",
+        let verifying =
+            state.status == VerificationStatus::Verifying && !state.configuration_verification;
+        let (operation, label) = if state.should_stop_protection() {
+            let label = if state.reconnecting {
+                "Cancel Reconnection"
+            } else if verifying {
+                "Cancel Verification"
+            } else {
+                "Stop Protection"
+            };
+            (ProtectionOperation::Stop, label)
+        } else if active_profile_ready(state) {
+            (ProtectionOperation::Start, "Start Protection")
+        } else {
+            (ProtectionOperation::SetUpProfile, "Set Up Profile…")
         };
         let enabled = phase != ProtectionPhase::Starting
             && !(state.status == VerificationStatus::Verifying && state.configuration_verification)
-            && (stops || state.endpoint_error.is_none());
+            && (operation == ProtectionOperation::Stop || state.endpoint_error.is_none());
         Self {
             phase,
             title: title.into(),
             tone,
             action: ProtectionAction {
+                operation,
                 label: label.into(),
                 enabled,
-                stops,
             },
         }
     }
@@ -193,15 +208,17 @@ mod tests {
             action(&state(VerificationStatus::Verifying, false)).label,
             "Cancel Verification"
         );
-        assert!(action(&state(VerificationStatus::Blocked, true)).stops);
-        assert!(!action(&state(VerificationStatus::Error, true)).stops);
+        assert_eq!(
+            action(&state(VerificationStatus::Blocked, true)).operation,
+            ProtectionOperation::Stop
+        );
         for status in [VerificationStatus::Stopped, VerificationStatus::Error] {
             let mut reconnecting = state(status, true);
             reconnecting.reconnecting = true;
-            assert!(action(&reconnecting).stops);
+            assert_eq!(action(&reconnecting).operation, ProtectionOperation::Stop);
             assert_eq!(action(&reconnecting).label, "Cancel Reconnection");
             reconnecting.configuration_verification = true;
-            assert!(!action(&reconnecting).stops);
+            assert_ne!(action(&reconnecting).operation, ProtectionOperation::Stop);
         }
     }
 
@@ -247,7 +264,7 @@ mod tests {
         assert!(action(&ready).enabled);
 
         ready.status = VerificationStatus::Verifying;
-        assert!(!action(&ready).stops);
+        assert_eq!(action(&ready).operation, ProtectionOperation::Start);
         assert!(!action(&ready).enabled);
 
         ready.status = VerificationStatus::Stopped;
@@ -258,6 +275,21 @@ mod tests {
             ProtectionPhase::ProfileRequired
         );
         assert_eq!(action(&ready).label, "Set Up Profile…");
+
+        // Starting after a failure needs the credential too.
+        ready.status = VerificationStatus::Error;
+        assert_eq!(Protection::of(&ready).phase, ProtectionPhase::Interrupted);
+        assert_eq!(action(&ready).operation, ProtectionOperation::SetUpProfile);
+    }
+
+    #[test]
+    fn verification_can_be_cancelled_while_the_local_api_is_down() {
+        let mut state = state(VerificationStatus::Verifying, true);
+        state.endpoint_error = Some("Port in use".into());
+        let protection = Protection::of(&state);
+        assert_eq!(protection.phase, ProtectionPhase::LocalApiUnavailable);
+        assert_eq!(protection.action.label, "Cancel Verification");
+        assert!(protection.action.enabled);
     }
 
     #[test]

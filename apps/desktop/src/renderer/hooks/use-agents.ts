@@ -25,14 +25,7 @@ export function useAgents(api: DesktopApi, state: AppState, requiresAuthorizatio
   useEffect(() => api.onAgentsChange(() => { void client.invalidateQueries({ queryKey: ["agents"] }); }), [api, client]);
   const accessStatus = requiresAuthorization ? data?.accessStatus : "authorized";
   const changing = useIsMutating({ mutationKey: ["agent-connection"] }) > 0;
-  const requestAccess = async () => {
-    try {
-      await accessAction.run();
-    } catch (failure) {
-      toastError("Could not grant agent access", failure);
-    }
-  };
-  return {
+  return useMemo(() => ({
     agents: completeAgentStatuses(data?.agents ?? []),
     accessStatus,
     authorizing,
@@ -40,8 +33,14 @@ export function useAgents(api: DesktopApi, state: AppState, requiresAuthorizatio
     changing,
     controlsLocked: agentIntegrationsLocked(accessStatus, authorizing),
     problem: error ? errorMessage(error) : undefined,
-    requestAccess,
-  };
+    requestAccess: async () => {
+      try {
+        await accessAction.run();
+      } catch (failure) {
+        toastError("Could not grant agent access", failure);
+      }
+    },
+  }), [data, error, accessStatus, authorizing, changing, accessAction]);
 }
 
 /**

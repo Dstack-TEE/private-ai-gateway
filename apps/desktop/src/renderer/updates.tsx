@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { RotateCw } from "lucide-react";
 import type { DesktopApi, UpdateInfo, UpdateChannel } from "../shared/contracts";
@@ -20,13 +20,6 @@ export function useUpdates(api: DesktopApi, checks: boolean) {
     refetchInterval: (query) => query.state.error ? 60_000 : 6 * 60 * 60_000, staleTime: 15 * 60_000, retry: false,
   });
   const { data: installedVersion } = useQuery({ queryKey: ["app-version"], queryFn: () => api.getAppVersion(), staleTime: Infinity });
-  const info = checkError && snapshot ? { ...snapshot, version: null } : snapshot;
-  const channel = info?.channel;
-  // Only in-app installs restart to update; other installations show their upgrade steps.
-  const ready = Boolean(info?.enabled && info.version);
-  const currentVersion = installedVersion ?? info?.currentVersion;
-  const busy = operation ?? (checking ? "checking" : undefined);
-  const error = checkError ? "Could not prepare software updates. Retrying automatically." : undefined;
   const confirm = useConfirm();
   const refresh = useCallback(async () => {
     await client.cancelQueries({ queryKey: ["app-update"] });
@@ -37,48 +30,58 @@ export function useUpdates(api: DesktopApi, checks: boolean) {
     return () => { mounted.current = false; };
   }, [api]);
 
-  const changeChannel = async (next: UpdateChannel) => {
-    if (inFlight.current || checking || next === channel) return;
-    inFlight.current = true;
-    setBusy("changing");
-    try {
-      const saved = await api.setUpdateChannel(next);
-      if (!mounted.current) return;
-      client.setQueryData<UpdateInfo | undefined>(["app-update"], (current) => current ? { ...current, channel: saved, version: null } : current);
-      await refresh();
-    } catch (error) {
-      if (mounted.current) toastError("Could not change the update channel", error);
-    } finally {
-      inFlight.current = false;
-      if (mounted.current) setBusy(undefined);
-    }
-  };
+  return useMemo(() => {
+    const info = checkError && snapshot ? { ...snapshot, version: null } : snapshot;
+    const channel = info?.channel;
+    // Only in-app installs restart to update; other installations show their upgrade steps.
+    const ready = Boolean(info?.enabled && info.version);
+    const currentVersion = installedVersion ?? info?.currentVersion;
+    const busy = operation ?? (checking ? "checking" : undefined);
+    const error = checkError ? "Could not prepare software updates. Retrying automatically." : undefined;
 
-  const restart = async () => {
-    if (inFlight.current || checking || !ready) return;
-    inFlight.current = true;
-    setBusy("restarting");
-    let retry = false;
-    let installAttempted = false;
-    try {
-      const latest = await refresh();
-      if (latest.error) throw latest.error;
-      if (!latest.data?.version) return;
-      if (!await confirm({ title: "Restart to update?", message: `Version ${latest.data.version} is ready. Protection will pause during the restart and resume only after fresh verification. In-flight requests may be interrupted.`, confirmLabel: "Restart to Update" })) return;
-      installAttempted = true;
-      await api.restartToUpdate();
-    } catch (failure) {
-      if (mounted.current) {
-        toastError("Could not install the update", failure);
-        retry = installAttempted;
+    const changeChannel = async (next: UpdateChannel) => {
+      if (inFlight.current || checking || next === channel) return;
+      inFlight.current = true;
+      setBusy("changing");
+      try {
+        const saved = await api.setUpdateChannel(next);
+        if (!mounted.current) return;
+        client.setQueryData<UpdateInfo | undefined>(["app-update"], (current) => current ? { ...current, channel: saved, version: null } : current);
+        await refresh();
+      } catch (error) {
+        if (mounted.current) toastError("Could not change the update channel", error);
+      } finally {
+        inFlight.current = false;
+        if (mounted.current) setBusy(undefined);
       }
-    } finally {
-      inFlight.current = false;
-      if (mounted.current) setBusy(undefined);
-    }
-    if (retry && mounted.current) void refresh();
-  };
-  return { info, ready, currentVersion, busy, error, channel, checks, changeChannel, restart };
+    };
+
+    const restart = async () => {
+      if (inFlight.current || checking || !ready) return;
+      inFlight.current = true;
+      setBusy("restarting");
+      let retry = false;
+      let installAttempted = false;
+      try {
+        const latest = await refresh();
+        if (latest.error) throw latest.error;
+        if (!latest.data?.version) return;
+        if (!await confirm({ title: "Restart to update?", message: `Version ${latest.data.version} is ready. Protection will pause during the restart and resume only after fresh verification. In-flight requests may be interrupted.`, confirmLabel: "Restart to Update" })) return;
+        installAttempted = true;
+        await api.restartToUpdate();
+      } catch (failure) {
+        if (mounted.current) {
+          toastError("Could not install the update", failure);
+          retry = installAttempted;
+        }
+      } finally {
+        inFlight.current = false;
+        if (mounted.current) setBusy(undefined);
+      }
+      if (retry && mounted.current) void refresh();
+    };
+    return { info, ready, currentVersion, busy, error, channel, checks, changeChannel, restart };
+  }, [api, checks, client, confirm, refresh, snapshot, checkError, checking, installedVersion, operation]);
 }
 
 export function UpdateChannelControl({ updates }: { updates: ReturnType<typeof useUpdates> }): React.JSX.Element {
