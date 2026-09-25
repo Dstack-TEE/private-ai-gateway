@@ -45,6 +45,17 @@ re-verification keeps the old pin. After a successful one, the refused
 request is sent once more if the identity it was admitted under still holds,
 and otherwise gets a retryable 503.
 
+Custody (id-5) is checked when a custody policy is given: repeatable
+`--accept-dstack-kms-root-public-key` together with repeatable
+`--accept-subject app-id:0x<hex>`, the measured dstack app-id. The receipt
+key's dstack KMS signature chain must then end at an accepted root, anchored
+on the app-id the verified event log measures. The report's self-asserted
+`image_digest` is never an anchor: nothing measured corroborates it (spec
+4.1), so any app under the same KMS root could claim it. Without a policy
+id-5 is an honest skip; no trust anchors are built in. The flags sit beside
+`--accept-compose` on `verify`, `audit`, `sessions`, `send` and `serve`, and
+`serve`'s `ready` event reports them under `policy`.
+
 All five commands accept `--require-production-os`. Under that strict policy,
 the client reads the RTMR3-bound `os-image-hash` and requires it to be in the
 verifier's reviewed production-image allowlist. Development and unknown hashes

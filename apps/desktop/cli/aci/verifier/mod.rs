@@ -5,6 +5,7 @@ pub const DEFAULT_DCAP_PCCS_URL: &str = dcap_qvl::PHALA_PCCS_URL;
 mod appraisal;
 mod channel;
 mod dstack;
+mod policy;
 mod quote;
 mod report;
 
@@ -13,6 +14,7 @@ pub use appraisal::{
     CustodyEvidence, FailureCause, Outcome, QuoteSource,
 };
 pub use dstack::{dstack_rtmr3_event, verify_dstack_event_log, DstackEventLog};
+pub use policy::{CustodyPolicy, CustodyPolicyError};
 pub use quote::QuoteStepError;
 pub use report::{
     validate_aci_report_binding, AciReportValidationError, ReportBinding, ValidatedAciReport,
