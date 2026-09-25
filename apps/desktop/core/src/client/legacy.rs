@@ -61,7 +61,13 @@ pub(super) async fn shutdown(expected: Option<&Path>, mode: ShutdownMode) -> Res
         .as_ref()
         .and_then(|response| response.get("outcome"))
     {
-        Some(outcome) if outcome.get("result").is_some() => Ok(hello.process_id),
+        // Busy: its shutdown is already under way, as for the current API.
+        Some(outcome)
+            if outcome.get("result").is_some()
+                || outcome.pointer("/error/code").and_then(Value::as_str) == Some("busy") =>
+        {
+            Ok(hello.process_id)
+        }
         Some(outcome) => Err(
             match outcome.pointer("/error/message").and_then(Value::as_str) {
                 Some(message) => format!("The previous backend did not stop: {message}"),

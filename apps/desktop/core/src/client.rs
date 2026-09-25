@@ -49,6 +49,7 @@ const BACKEND_EXIT_TIMEOUT: Duration = Duration::from_secs(15);
 /// reports it instead of waiting.
 const STARTUP_GATE_WAIT: Duration = Duration::from_secs(5);
 const STARTUP_IN_PROGRESS: &str = "Backend startup or an update is already in progress.";
+const OTHER_BUILD: &str = "A backend of another Private AI Proxy version is running. Run private-ai-proxy service start to replace it.";
 const OTHER_INSTALLATION: &str = "The running backend belongs to another installation. Update it through its owning package manager.";
 
 /// Why a management call failed.
@@ -118,15 +119,7 @@ impl Client {
     }
 
     pub fn version(&self) -> Result<Version, String> {
-        block_on(async {
-            match open_current().await {
-                Ok(connection) => Ok(connection.version),
-                Err(error) if absent(&error) && legacy::is_running().await => Err(
-                    connection_error(io::Error::from(io::ErrorKind::InvalidData)),
-                ),
-                Err(error) => Err(connection_error(error)),
-            }
-        })?
+        block_on(open_current())?.map(|connection| connection.version)
     }
 
     pub fn is_running(&self) -> Result<bool, String> {
@@ -207,7 +200,7 @@ impl Client {
                 {
                     // Another client started a backend at the same time and it
                     // holds the instance lock: wait for that one instead.
-                    if crate::lock::instance(&data).is_ok_and(|lock| lock.is_none()) {
+                    if status.code() == Some(crate::launch::EXIT_ALREADY_RUNNING) {
                         child = None;
                     } else {
                         let diagnostic = running.startup_diagnostic();
@@ -306,7 +299,7 @@ impl Client {
             payload: Value,
         }
         block_on(async {
-            let mut connection = open_current().await.map_err(connection_error)?;
+            let mut connection = open_current().await?;
             let instance = connection.version.instance_id.clone();
             let response = send(
                 &mut connection.sender,
@@ -360,7 +353,7 @@ impl Client {
     /// Runs one command and returns its result as sent.
     pub fn execute(&self, command: Command) -> Result<Value, CallError> {
         block_on(async {
-            let mut connection = open_current().await.map_err(connection_error)?;
+            let mut connection = open_current().await?;
             connection.call(&command).await
         })?
     }
@@ -589,15 +582,16 @@ async fn open() -> io::Result<Connection> {
     Ok(Connection { sender, version })
 }
 
-async fn open_current() -> io::Result<Connection> {
-    let connection = open().await?;
-    if connection.version.version != protocol::BUILD_VERSION {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Incompatible Private AI Proxy backend build; update the client and backend together",
-        ));
+/// A connection to a backend of this build. A backend of another build,
+/// including one that speaks only the legacy protocol, is reported with the
+/// command that replaces it.
+async fn open_current() -> Result<Connection, String> {
+    match open().await {
+        Ok(connection) if connection.version.version == protocol::BUILD_VERSION => Ok(connection),
+        Ok(_) => Err(OTHER_BUILD.into()),
+        Err(error) if absent(&error) && legacy::is_running().await => Err(OTHER_BUILD.into()),
+        Err(error) => Err(connection_error(error)),
     }
-    Ok(connection)
 }
 
 async fn send(

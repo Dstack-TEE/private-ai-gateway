@@ -1,5 +1,5 @@
 use clap::Parser;
-use desktop_runtime::controller::{DesktopRuntime, RuntimeOptions};
+use desktop_runtime::controller::{DesktopRuntime, LaunchError, RuntimeOptions};
 use private_ai_proxy::serve::managed::InProcessVerifierLauncher;
 use std::sync::Arc;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
@@ -108,9 +108,17 @@ async fn run() -> Result<(), String> {
         agent_home,
     };
     // Runtime initialization uses synchronous persistence APIs outside executor workers.
-    let runtime = tokio::task::spawn_blocking(move || DesktopRuntime::launch(options))
+    let runtime = match tokio::task::spawn_blocking(move || DesktopRuntime::launch(options))
         .await
-        .map_err(|_| "Backend initialization failed")??;
+        .map_err(|_| "Backend initialization failed")?
+    {
+        Ok(runtime) => runtime,
+        Err(LaunchError::AlreadyRunning) => {
+            tracing::error!("Private AI Proxy backend: {}", LaunchError::AlreadyRunning);
+            std::process::exit(desktop_core::launch::EXIT_ALREADY_RUNNING);
+        }
+        Err(error) => return Err(error.to_string()),
+    };
     let power_monitor = match desktop_runtime::power::Monitor::start(
         Arc::downgrade(&runtime),
         tokio::runtime::Handle::current(),

@@ -101,18 +101,16 @@ pub fn with_apply_lock<T, E: From<ApplyLockError>>(
 mod tests {
     use super::*;
 
-    #[test]
-    fn instance_lock_is_exclusive_across_handles() {
-        let dir = tempfile::tempdir().unwrap();
-        let first = instance(dir.path()).unwrap();
-        assert!(first.is_some());
-        // A second independent handle (as a second process would open) loses.
-        assert!(instance(dir.path()).unwrap().is_none());
-        drop(first);
-        // A child that another test is spawning holds an inherited copy of the
-        // descriptor until its exec closes it, so release may lag briefly.
+    /// Waits for `acquire` to succeed. Files are opened `O_CLOEXEC`, but a
+    /// child another test is spawning shares their locks between its fork and
+    /// exec (`flock(2)` locks belong to the open file description), so a
+    /// released lock may be taken again only after a moment.
+    fn eventually<T>(mut acquire: impl FnMut() -> Option<T>) -> T {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while instance(dir.path()).unwrap().is_none() {
+        loop {
+            if let Some(lock) = acquire() {
+                return lock;
+            }
             assert!(
                 std::time::Instant::now() < deadline,
                 "lock was not released"
@@ -122,13 +120,24 @@ mod tests {
     }
 
     #[test]
+    fn instance_lock_is_exclusive_across_handles() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = instance(dir.path()).unwrap();
+        assert!(first.is_some());
+        // A second independent handle (as a second process would open) loses.
+        assert!(instance(dir.path()).unwrap().is_none());
+        drop(first);
+        eventually(|| instance(dir.path()).unwrap());
+    }
+
+    #[test]
     fn clients_share_the_startup_gate_and_installers_exclude_them() {
         let dir = tempfile::tempdir().unwrap();
-        let first = startup_shared(dir.path()).unwrap().unwrap();
+        let first = eventually(|| startup_shared(dir.path()).unwrap());
         let second = startup_shared(dir.path()).unwrap().unwrap();
         assert!(startup(dir.path()).unwrap().is_none());
         drop((first, second));
-        let installer = startup(dir.path()).unwrap().unwrap();
+        let installer = eventually(|| startup(dir.path()).unwrap());
         assert!(startup_shared(dir.path()).unwrap().is_none());
         drop(installer);
     }

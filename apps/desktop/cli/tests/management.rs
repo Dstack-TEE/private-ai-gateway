@@ -1131,7 +1131,7 @@ fn a_legacy_backend_is_stopped_over_its_own_protocol() {
             .unwrap()
     };
     let status = command(&["status", "--json"]);
-    assert!(String::from_utf8_lossy(&status.stderr).contains("Incompatible"));
+    assert!(String::from_utf8_lossy(&status.stderr).contains("service start to replace it"));
     assert_success(&command(&["service", "stop", "--yes", "--json"]));
     let request: Value = serde_json::from_str(&server.join().unwrap()).unwrap();
     assert_eq!(

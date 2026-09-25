@@ -190,8 +190,37 @@ impl EndpointRuntime {
     }
 }
 
+/// Why the backend did not launch.
+#[derive(Debug, PartialEq)]
+pub enum LaunchError {
+    /// Another backend owns the instance lock.
+    AlreadyRunning,
+    Failed(String),
+}
+
+impl std::fmt::Display for LaunchError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::AlreadyRunning => "Another Private AI Proxy instance is already running. Stop the existing private-ai-proxy-service process before retrying.",
+            Self::Failed(message) => message,
+        })
+    }
+}
+
+impl From<String> for LaunchError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl From<&str> for LaunchError {
+    fn from(message: &str) -> Self {
+        Self::Failed(message.into())
+    }
+}
+
 impl DesktopRuntime {
-    pub fn launch(options: RuntimeOptions) -> Result<Arc<Self>, String> {
+    pub fn launch(options: RuntimeOptions) -> Result<Arc<Self>, LaunchError> {
         if !options.helper_path.is_absolute() {
             return Err("The credential helper path must be absolute".into());
         }
@@ -199,10 +228,7 @@ impl DesktopRuntime {
         let data_dir = app_data_dir()?;
         let instance = lock::instance(&data_dir)
             .map_err(|error| format!("Cannot take the instance lock: {error}"))?
-            .ok_or_else(|| {
-                "Another Private AI Proxy instance is already running. Stop the existing private-ai-proxy-service process before retrying."
-                    .to_string()
-            })?;
+            .ok_or(LaunchError::AlreadyRunning)?;
         let agent_configuration = options.agent_configuration;
         let agent_access_error = options.agent_access_error;
         #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
@@ -246,9 +272,9 @@ impl DesktopRuntime {
                     )),
                 ),
                 Err(fallback) => {
-                    return Err(format!(
-                        "Cannot initialize usage storage: {error}; {fallback}"
-                    ));
+                    return Err(
+                        format!("Cannot initialize usage storage: {error}; {fallback}").into(),
+                    );
                 }
             },
         };
