@@ -7,9 +7,14 @@
 //! channel. Receipt auditing never delays response delivery.
 //! Only digests and verdicts are retained after the request; bodies never go to disk.
 //! No bodies are logged.
+//!
+//! A keyset rotation normally surfaces through the X-ACI-Keyset-Digest header
+//! on a response (§3.4). When the service rotates its TLS key, the handshake
+//! fails closed against the pin before any response exists, so a send the pin
+//! refused is treated as the same rotation: block, re-verify, and re-pin.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::aci::types::{AttestationReport, PROVIDER_ACI_SESSION_IDS, PROVIDER_ACI_VERIFIED};
@@ -153,8 +158,13 @@ pub struct ProxyState {
     /// Set when an upstream response advertised a keyset digest other than the
     /// trusted one; blocks inference forwards until a fresh verify passes.
     blocked: AtomicBool,
-    /// Serializes the re-verify so a burst of blocked requests reverifies once.
-    reverify: tokio::sync::Mutex<()>,
+    /// Serializes the re-verify so a burst of blocked requests reverifies
+    /// once, and holds the latest attempt's outcome for the requests that
+    /// waited on it.
+    reverify: tokio::sync::Mutex<Result<(), String>>,
+    /// Completed re-verify attempts. A caller that saw an attempt finish while
+    /// it waited shares that attempt's failure instead of attesting again.
+    reverify_attempts: AtomicU64,
     recorded: Mutex<VecDeque<RecordedExchange>>,
     /// `--session`: a fixed §5.3 accepted set composed with every request's
     /// own pins. Never refreshed, so a 412 refusal surfaces as-is.
@@ -213,7 +223,8 @@ impl ProxyState {
                 identity: Arc::new(identity),
             }),
             blocked: AtomicBool::new(false),
-            reverify: tokio::sync::Mutex::new(()),
+            reverify: tokio::sync::Mutex::new(Ok(())),
+            reverify_attempts: AtomicU64::new(0),
             recorded: Mutex::new(VecDeque::new()),
             fixed_pins,
             required_claims,
@@ -270,6 +281,18 @@ impl ProxyState {
             .clone()
     }
 
+    /// Block forwards until a fresh verify re-establishes trust: cancel every
+    /// delivery admitted under the current identity and report the rotation
+    /// (the managed backend rebuilds its session on `keyset_changed`).
+    fn block_for_keyset_change(&self, reason: String) {
+        self.blocked.store(true, Ordering::SeqCst);
+        self.revoke_deliveries();
+        (self.event_sink)(VerifierEvent::Blocked {
+            code: Some("keyset_changed".to_string()),
+            reason,
+        });
+    }
+
     /// When blocked by a keyset change, re-verify the service once and, on
     /// success, re-pin the TLS key and adopt the new identity. Returns `Ok`
     /// when forwarding may proceed.
@@ -277,10 +300,50 @@ impl ProxyState {
         if !self.blocked.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let _guard = self.reverify.lock().await;
+        let attempts = self.reverify_attempts.load(Ordering::SeqCst);
+        self.reverify_blocked(attempts, None).await
+    }
+
+    /// The single re-verify funnel. `attempts` is the count the caller read
+    /// before it started waiting: an attempt that failed since is shared, not
+    /// repeated (single flight).
+    ///
+    /// `refused_pins` heals a stale TLS pin: a send whose handshake that pin
+    /// set rejected blocks like a keyset rotation (the TLS key is part of the
+    /// attested keyset). A key is only ever adopted from a VERIFIED report;
+    /// a failed verify keeps the old pin.
+    async fn reverify_blocked(
+        self: &Arc<Self>,
+        attempts: u64,
+        refused_pins: Option<&[String]>,
+    ) -> Result<(), String> {
+        let mut last = self.reverify.lock().await;
+        // Decided under the lock: when another request's heal already
+        // replaced the refused pin, this one only needs to send again.
+        if let Some(refused) = refused_pins {
+            if !self.blocked.load(Ordering::SeqCst)
+                && self.client.pinned_spkis(&self.host) == refused
+            {
+                self.block_for_keyset_change(
+                    "upstream TLS key is not in the attested pin set; re-verification required"
+                        .to_string(),
+                );
+            }
+        }
         if !self.blocked.load(Ordering::SeqCst) {
             return Ok(());
         }
+        if self.reverify_attempts.load(Ordering::SeqCst) != attempts {
+            if let Err(reason) = &*last {
+                return Err(reason.clone());
+            }
+        }
+        *last = self.reverify().await;
+        self.reverify_attempts.fetch_add(1, Ordering::SeqCst);
+        last.clone()
+    }
+
+    async fn reverify(self: &Arc<Self>) -> Result<(), String> {
         let verification = tokio::select! {
             _ = self.shutdown.cancelled() => {
                 return Err("verifier stopped during re-verification".to_string());
@@ -296,8 +359,10 @@ impl ProxyState {
         if !verification.transcript.verified() {
             return Err("service re-verification did not reach VERIFIED".to_string());
         }
-        if let Some(spki) = &verification.observed_spki {
-            self.client.pin(&self.host, spki);
+        let stale_pins = self.client.pinned_spkis(&self.host);
+        let pins = verification.attested_spkis();
+        if !pins.is_empty() {
+            self.client.pin(&self.host, &pins)?;
         }
         let verification_summary = verification.transcript.to_json(false);
         let keyset_digest = verification.report.workload_keyset_digest.clone();
@@ -323,9 +388,19 @@ impl ProxyState {
         };
         self.blocked.store(false, Ordering::SeqCst);
         (self.event_sink)(identity_event);
-        tracing::info!(
-            "private-ai-proxy serve: re-verified after keyset change; resuming forwards"
-        );
+        let current_pins = self.client.pinned_spkis(&self.host);
+        if !stale_pins.is_empty() && stale_pins != current_pins {
+            tracing::info!(
+                "private-ai-proxy serve: re-verified after keyset change; TLS pin {} -> {}; \
+                 resuming forwards",
+                stale_pins.join(","),
+                current_pins.join(",")
+            );
+        } else {
+            tracing::info!(
+                "private-ai-proxy serve: re-verified after keyset change; resuming forwards"
+            );
+        }
         Ok(())
     }
 }
@@ -495,6 +570,7 @@ async fn initialize(
     }
 
     let verification_summary = verification.transcript.to_json(false);
+    let pins = verification.attested_spkis();
     let ServiceVerification {
         report,
         identity,
@@ -511,9 +587,9 @@ async fn initialize(
         observed_spki.as_deref(),
         verification_summary,
     );
-    // Pin the just-verified TLS key on every future hop to this host.
-    if let Some(spki) = &observed_spki {
-        client.pin(&host, spki);
+    // Pin the just-verified TLS keys on every future hop to this host.
+    if !pins.is_empty() {
+        client.pin(&host, &pins)?;
     }
     let state = ProxyState::new(
         client,
@@ -607,11 +683,7 @@ async fn proxy_request(
         );
     }
     if state.snapshot().keyset_digest != identity_before {
-        tracing::warn!("!! {method} {path} -> 503 identity changed during re-verification; retry");
-        return text_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "service identity changed during re-verification; retry once the gateway is verified again\n",
-        );
+        return identity_changed_response(&method, &path);
     }
     if method == Method::POST {
         proxy_inference(state, uri, headers, body, context).await
@@ -630,17 +702,21 @@ async fn proxy_passthrough(
     context: Option<ForwardContext>,
 ) -> Response {
     let path = uri.path().to_string();
-    let delivery = state.delivery_token();
+    let mut delivery = state.delivery_token();
     let url = join_url(&state.base_url, &uri);
-    let mut req = forward_headers(state.client.request(method.clone(), &url), &headers);
-    if !body.is_empty() {
-        req = req.body(body.to_vec());
-    }
-    let mut resp = match race_delivery(&delivery, req.send()).await {
-        None => return delivery_revoked_response(&path),
-        Some(Ok(resp)) => resp,
-        Some(Err(e)) => return send_error(&state, method, path, e, context),
+    let send = || {
+        let req = forward_headers(state.client.request(method.clone(), &url), &headers);
+        if body.is_empty() {
+            req.send()
+        } else {
+            req.body(body.to_vec()).send()
+        }
     };
+    let mut resp =
+        match send_upstream(&state, &mut delivery, (&method, &path, &context), send).await {
+            Ok(resp) => resp,
+            Err(response) => return *response,
+        };
     let status = resp.status().as_u16();
     let resp_headers = resp.headers().clone();
     rotation_gate(&state, &state.snapshot().keyset_digest, &resp_headers);
@@ -704,7 +780,7 @@ async fn proxy_inference(
     }
 
     let trusted = state.snapshot();
-    let delivery = state.delivery_token();
+    let mut delivery = state.delivery_token();
     let url = join_url(&state.base_url, &uri);
     let active_pins = state.active_pins();
     // A policy-derived set is refreshed only when it actually constrained this
@@ -736,10 +812,16 @@ async fn proxy_inference(
             resume.notified().await;
         }
     }
-    let mut resp = match race_delivery(&delivery, send(request_body.clone())).await {
-        None => return delivery_revoked_response(&path),
-        Some(Ok(resp)) => resp,
-        Some(Err(e)) => return send_error(&state, Method::POST, path, e, context.clone()),
+    let mut resp = match send_upstream(
+        &state,
+        &mut delivery,
+        (&Method::POST, &path, &context),
+        || send(request_body.clone()),
+    )
+    .await
+    {
+        Ok(resp) => resp,
+        Err(response) => return *response,
     };
     // A 412 refusal against a policy-derived pin set means the sessions
     // rotated under us (§8 supersession): refresh the set from the service's
@@ -912,6 +994,82 @@ async fn proxy_inference(
         .unwrap_or_else(|_| internal_error())
 }
 
+/// One upstream send under the delivery gate. A handshake the TLS pin
+/// refused can never reach the §3.4 rotation gate (it aborts before any
+/// response), so that refusal is healed through the keyset-rotation path.
+/// Only a connect-phase failure qualifies: a request that may already have
+/// reached the service is never replayed. Afterwards the request is sent once
+/// more only if the identity it was admitted under still holds; a changed
+/// identity gets the same retryable 503 as `proxy_request`. Any other
+/// failure (DNS, refused port, timeout, a dropped response) stays a 502.
+async fn send_upstream<Fut>(
+    state: &Arc<ProxyState>,
+    delivery: &mut tokio_util::sync::CancellationToken,
+    (method, path, context): (&Method, &str, &Option<ForwardContext>),
+    send: impl Fn() -> Fut,
+) -> Result<reqwest::Response, Box<Response>>
+where
+    Fut: std::future::Future<Output = reqwest::Result<reqwest::Response>>,
+{
+    let failed = |e| {
+        Box::new(send_error(
+            state,
+            method.clone(),
+            path.to_string(),
+            e,
+            context.clone(),
+        ))
+    };
+    let admitted = state.snapshot().keyset_digest;
+    let pins = state.client.pinned_spkis(&state.host);
+    let rejections = state.client.pin_rejections(&state.host);
+    let attempts = state.reverify_attempts.load(Ordering::SeqCst);
+    let error = match race_delivery(delivery, send()).await {
+        None => return Err(Box::new(delivery_revoked_response(path))),
+        Some(Ok(resp)) => return Ok(resp),
+        Some(Err(e)) => e,
+    };
+    // The TLS handshake runs in the connect phase, so a pin refusal is a
+    // connect error; the count tells it apart from DNS, refusal or timeout.
+    if !error.is_connect() || state.client.pin_rejections(&state.host) == rejections {
+        return Err(failed(error));
+    }
+    if let Err(reason) = state.reverify_blocked(attempts, Some(&pins)).await {
+        // A managed verifier stops on `keyset_changed` while the backend
+        // rebuilds its session; the request is retryable, not failed.
+        if state.shutdown.is_cancelled() {
+            return Err(Box::new(delivery_revoked_response(path)));
+        }
+        (state.event_sink)(VerifierEvent::Blocked {
+            code: None,
+            reason: reason.clone(),
+        });
+        tracing::warn!("!! {method} {path} -> 502 stale TLS pin; re-verification failed: {reason}");
+        return Err(failed(error));
+    }
+    if state.snapshot().keyset_digest != admitted {
+        return Err(Box::new(identity_changed_response(method, path)));
+    }
+    // Another request's heal may have revoked the gate this one was admitted
+    // under while keeping the identity; send under the current token.
+    *delivery = state.delivery_token();
+    match race_delivery(delivery, send()).await {
+        None => Err(Box::new(delivery_revoked_response(path))),
+        Some(Ok(resp)) => Ok(resp),
+        Some(Err(e)) => Err(failed(e)),
+    }
+}
+
+/// A re-verification replaced the identity this request was admitted under:
+/// refuse it with a retryable status until the new identity is published.
+fn identity_changed_response(method: &Method, path: &str) -> Response {
+    tracing::warn!("!! {method} {path} -> 503 identity changed during re-verification; retry");
+    text_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "service identity changed during re-verification; retry once the gateway is verified again\n",
+    )
+}
+
 /// Race an upstream send against the delivery gate; `None` means revoked
 /// before (or while) sending, and nothing may be treated as delivered.
 async fn race_delivery<T>(
@@ -939,15 +1097,9 @@ fn delivery_revoked_response(path: &str) -> Response {
 fn rotation_gate(state: &ProxyState, trusted_digest: &str, headers: &HeaderMap) {
     if let Some(observed) = header_str(headers, "x-aci-keyset-digest") {
         if observed != trusted_digest {
-            state.blocked.store(true, Ordering::SeqCst);
-            state.revoke_deliveries();
-            let reason = format!(
+            state.block_for_keyset_change(format!(
                 "upstream keyset digest changed ({observed} != {trusted_digest}); re-verification required"
-            );
-            (state.event_sink)(VerifierEvent::Blocked {
-                code: Some("keyset_changed".to_string()),
-                reason,
-            });
+            ));
             tracing::warn!(
                 "!! upstream X-ACI-Keyset-Digest changed ({observed} != {trusted_digest}); \
                  blocking further inference forwards until re-verify"

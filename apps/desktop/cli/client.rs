@@ -4,7 +4,7 @@
 //! leaf SPKI sha256 (the spec 9.1(6) channel check) and optional
 //! per-hostname pin enforcement, fail closed on mismatch.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use crate::aci::tls::{observing_spki_client, SpkiObservations};
 use futures_util::StreamExt;
@@ -26,12 +26,17 @@ pub fn normalize_base_url(base_url: &str) -> String {
     base_url.trim().trim_end_matches('/').to_string()
 }
 
+/// The URL's host in the form the TLS verifier keys pins and observations
+/// by (a rustls `ServerName`): a lowercase DNS name, or an IP address without
+/// the brackets an IPv6 literal carries in a URL.
 pub fn host_of(url: &str) -> Result<String, String> {
     let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid URL {url:?}: {e}"))?;
-    parsed
-        .host_str()
-        .map(|h| h.to_ascii_lowercase())
-        .ok_or_else(|| format!("URL {url:?} has no host"))
+    match parsed.host() {
+        Some(url::Host::Domain(domain)) => Ok(domain.to_ascii_lowercase()),
+        Some(url::Host::Ipv4(ip)) => Ok(ip.to_string()),
+        Some(url::Host::Ipv6(ip)) => Ok(ip.to_string()),
+        None => Err(format!("URL {url:?} has no host")),
+    }
 }
 
 /// A buffered response with its exact body bytes as read off the wire.
@@ -83,20 +88,22 @@ impl HttpResult {
 }
 
 pub struct AciClient {
-    http: reqwest::Client,
+    /// Replaced on every re-pin: a reqwest `Client` owns its connection pool,
+    /// so a fresh one never reuses a keep-alive connection whose key the new
+    /// pin set no longer allows.
+    http: RwLock<reqwest::Client>,
     observations: Arc<SpkiObservations>,
 }
 
 impl AciClient {
     pub fn new() -> Result<Self, String> {
         let observations = Arc::new(SpkiObservations::default());
-        let http = observing_spki_client(
-            observations.clone(),
-            CONNECT_TIMEOUT_SECONDS,
-            READ_TIMEOUT_SECONDS,
-        )
-        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+        let http = RwLock::new(build_http(&observations)?);
         Ok(Self { http, observations })
+    }
+
+    fn http(&self) -> reqwest::Client {
+        self.http.read().expect("HTTP client lock poisoned").clone()
     }
 
     /// The leaf SPKI sha256 (hex) observed on the most recent TLS handshake to
@@ -105,21 +112,36 @@ impl AciClient {
         self.observations.observed_spki(host)
     }
 
-    /// Enforce `spki_sha256` (hex) on every future TLS handshake to `host`;
-    /// a handshake presenting any other key fails closed.
-    pub fn pin(&self, host: &str, spki_sha256: &str) {
-        self.observations.pin(host, spki_sha256);
+    /// Enforce the pin set `spkis` (sha256 hex) on every future TLS handshake
+    /// to `host`; a handshake presenting any other key fails closed. Pooled
+    /// connections are dropped with the previous client, so no later request
+    /// rides a connection established under the old pin set.
+    pub fn pin(&self, host: &str, spkis: &[String]) -> Result<(), String> {
+        let http = build_http(&self.observations)?;
+        self.observations.pin(host, spkis);
+        *self.http.write().expect("HTTP client lock poisoned") = http;
+        Ok(())
+    }
+
+    /// The pin set currently enforced for `host`; empty when unpinned.
+    pub fn pinned_spkis(&self, host: &str) -> Vec<String> {
+        self.observations.pinned_spkis(host)
+    }
+
+    /// How many handshakes to `host` the pin has refused so far.
+    pub fn pin_rejections(&self, host: &str) -> u64 {
+        self.observations.pin_rejections(host)
     }
 
     /// A request builder on the pinned/recording transport. The local proxy
     /// (`private-ai-proxy serve`) uses it to forward arbitrary methods and paths upstream so
     /// every hop still enforces the attested SPKI pin.
     pub fn request(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
-        self.http.request(method, url)
+        self.http().request(method, url)
     }
 
     pub async fn get(&self, url: &str, bearer: Option<&str>) -> Result<HttpResult, String> {
-        let mut req = self.http.get(url);
+        let mut req = self.http().get(url);
         if let Some(token) = bearer {
             req = req.bearer_auth(token);
         }
@@ -202,7 +224,7 @@ impl AciClient {
     ) -> Result<HttpResult, String> {
         let url = format!("{base_url}/v1/chat/completions");
         let mut req = self
-            .http
+            .http()
             .post(&url)
             .header("content-type", "application/json")
             .header("accept", "text/event-stream, application/json")
@@ -229,6 +251,15 @@ impl AciClient {
             body: wire,
         })
     }
+}
+
+fn build_http(observations: &Arc<SpkiObservations>) -> Result<reqwest::Client, String> {
+    observing_spki_client(
+        observations.clone(),
+        CONNECT_TIMEOUT_SECONDS,
+        READ_TIMEOUT_SECONDS,
+    )
+    .map_err(|e| format!("failed to build HTTP client: {e}"))
 }
 
 /// True for ids safe to embed as one URL path segment (receipt ids, §8.1
@@ -260,6 +291,9 @@ mod tests {
             "api.example.com"
         );
         assert!(host_of("not a url").is_err());
+        // Pins are keyed like rustls server names: no IPv6 brackets.
+        assert_eq!(host_of("https://[::1]:8443/v1").unwrap(), "::1");
+        assert_eq!(host_of("https://127.0.0.1:8443").unwrap(), "127.0.0.1");
     }
 
     /// Live-network check that a registered pin is enforced fail-closed:
@@ -269,7 +303,7 @@ mod tests {
     #[ignore]
     async fn pin_mismatch_fails_closed_live() {
         let client = AciClient::new().unwrap();
-        client.pin("api.redpill.ai", &"00".repeat(32));
+        client.pin("api.redpill.ai", &["00".repeat(32)]).unwrap();
         let err = client
             .get("https://api.redpill.ai/health", None)
             .await
