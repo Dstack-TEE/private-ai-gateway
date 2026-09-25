@@ -63,8 +63,10 @@ The App Store build's CFBundleVersion is `100 + <Desktop release run number>`.
 A Mac app's build number must increase with every upload, across versions, and
 is at most three integers and 18 characters
 ([TN2420](https://developer.apple.com/library/archive/technotes/tn2420/_index.html)).
-The run number increases only on release tags (the first tag gets 104, after
-three earlier manual runs of the workflow file), and a re-run keeps it. The offset
+The run number increases only on release tags, from 4 after three earlier
+manual runs of the workflow file, and a re-run keeps it. Beta tags use a run
+number but upload nothing, so the first App Store upload is `100 +` the run
+number of the first stable tag, at least 104. The offset
 starts above the hand-numbered builds 1–17, as Xcode Cloud's
 [next build number](https://developer.apple.com/documentation/xcode/setting-the-next-build-number-for-xcode-cloud-builds)
 does for existing Mac apps.
