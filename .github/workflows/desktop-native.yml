@@ -19,6 +19,7 @@ on:
       - '.github/workflows/private-ai-proxy-npm.yml'
       - 'apps/desktop/**'
       - 'crates/aci-protocol/**'
+      - 'crates/aci-verifier/**'
   push:
     branches:
       - main
@@ -28,6 +29,7 @@ on:
       - '.github/workflows/private-ai-proxy-npm.yml'
       - 'apps/desktop/**'
       - 'crates/aci-protocol/**'
+      - 'crates/aci-verifier/**'
 
 permissions:
   contents: read
@@ -74,9 +76,9 @@ jobs:
             ${{ env.CARGO_TARGET_DIR }}/*/*/.fingerprint
             ${{ env.CARGO_TARGET_DIR }}/*/*/deps
             ${{ env.CARGO_TARGET_DIR }}/*/*/build
-          key: pap-rust-v2-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_RUST_CACHE_NAMESPACE }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/core/Cargo.toml', 'apps/desktop/agent-bridge/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}
+          key: pap-rust-v2-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_RUST_CACHE_NAMESPACE }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/core/Cargo.toml', 'apps/desktop/agent-bridge/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'crates/aci-protocol/Cargo.toml', 'crates/aci-verifier/Cargo.toml') }}
           restore-keys: |
-            pap-rust-v2-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_RUST_CACHE_NAMESPACE }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/core/Cargo.toml', 'apps/desktop/agent-bridge/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'crates/aci-protocol/Cargo.toml') }}-partial-
+            pap-rust-v2-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_RUST_CACHE_NAMESPACE }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/core/Cargo.toml', 'apps/desktop/agent-bridge/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'crates/aci-protocol/Cargo.toml', 'crates/aci-verifier/Cargo.toml') }}-partial-
             pap-rust-v2-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_RUST_CACHE_NAMESPACE }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-
       - name: Install Linux desktop dependencies
         run: |
@@ -117,7 +119,7 @@ jobs:
         working-directory: apps/desktop
         run: npm run build:sidecars:debug
       # Desktop Mac App Store (desktop-mac-app-store.yml) checks the
-      # mac-app-store feature on macOS, and CI (ci.yml) tests aci-protocol.
+      # mac-app-store feature on macOS, and CI (ci.yml) tests aci-protocol and aci-verifier.
       - name: Verify Rust sources
         working-directory: apps/desktop
         run: |

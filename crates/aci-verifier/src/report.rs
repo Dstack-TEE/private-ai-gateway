@@ -3,10 +3,11 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde_json::Value;
 
-use super::decode_hex_32;
-use crate::aci::digest::sha256_hex;
-use crate::aci::identity;
-use crate::aci::types::{AttestationReport, WorkloadKeyset};
+use aci_protocol::digest::sha256_hex;
+use aci_protocol::identity;
+use aci_protocol::types::{AttestationReport, WorkloadKeyset};
+
+use crate::decode_hex_32;
 
 #[derive(Debug, Clone)]
 pub struct ValidatedAciReport {
@@ -56,13 +57,13 @@ pub struct ReportBinding {
 ///
 /// This is the binding chain alone: it checks neither the vendor quote nor
 /// keyset expiry, which are separate §9.1 steps.
-pub(super) fn verify_report_binding(
+pub(crate) fn verify_report_binding(
     report: &AttestationReport,
     nonce: Option<&str>,
 ) -> Result<ReportBinding, AciReportValidationError> {
     // The digest is over the JCS form of the served object (§3.1): canonicalize
     // exactly what was parsed, unknown members included.
-    let keyset_jcs = crate::aci::digest::jcs_bytes(&report.attestation.workload_keyset)
+    let keyset_jcs = aci_protocol::digest::jcs_bytes(&report.attestation.workload_keyset)
         .map_err(|e| AciReportValidationError::InvalidKeyset(e.to_string()))?;
     let keyset_digest = format!("sha256:{}", sha256_hex_raw(&keyset_jcs));
     if keyset_digest != report.workload_keyset_digest {
@@ -95,14 +96,15 @@ pub(super) fn verify_report_binding(
 }
 
 fn sha256_hex_raw(bytes: &[u8]) -> String {
-    hex::encode(crate::aci::digest::sha256_raw(bytes))
+    hex::encode(aci_protocol::digest::sha256_raw(bytes))
 }
 
 /// Verify the ACI binding chain inside an attestation report (§9.1):
 /// recompute the keyset digest over its JCS form, rebuild the §3.2 statement
 /// for the nonce the caller supplied, check `report_data`, and check keyset
-/// expiry. It deliberately does not verify the vendor quote; the client
-/// appraisal performs that independent hardware-verification step.
+/// expiry. It deliberately does not verify the vendor quote; provider
+/// adapters compose this with their own hardware-verification step (which
+/// must bind the returned `report_data`).
 pub fn validate_aci_report_binding(
     report: &AttestationReport,
     nonce: Option<&str>,
@@ -149,7 +151,7 @@ pub fn validate_aci_report_binding(
     })
 }
 
-pub(super) fn raw_evidence(data: &[u8], content_type: &str, source_url: Option<&str>) -> Value {
+pub fn raw_evidence(data: &[u8], content_type: &str, source_url: Option<&str>) -> Value {
     let mut evidence = serde_json::json!({
         "digest": sha256_hex(data),
         "data": format!("data:{content_type};base64,{}", BASE64.encode(data)),
@@ -163,7 +165,7 @@ pub(super) fn raw_evidence(data: &[u8], content_type: &str, source_url: Option<&
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aci::types::{AttestationEnvelope, SourceProvenance};
+    use aci_protocol::types::{AttestationEnvelope, SourceProvenance};
 
     fn keyset() -> Value {
         serde_json::json!({

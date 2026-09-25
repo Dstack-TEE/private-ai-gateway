@@ -627,6 +627,7 @@ events, and metrics model ids.
 src/main.rs                    binary entrypoint and runtime config
 src/dstack.rs                  dstack SDK KMS key provider and quote provider
 crates/aci-protocol/           shared ACI wire types and deterministic encoding
+crates/aci-verifier/           shared ACI relying-party verifier (spec 9.1) for gateway and proxy
 src/aci/                       gateway ACI keys, receipts, verification, upstreams
 src/aggregator/service.rs      report, forwarding, E2EE, receipt finalization
 src/aggregator/upstream_config.rs runtime upstream config and provider adapters

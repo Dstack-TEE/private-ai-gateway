@@ -1,14 +1,13 @@
-//! The §9.1(1) quote steps, shared by the gateway and the CLI verifier.
+//! The §9.1(1) quote steps.
 //!
-//! `verify_dcap_quote` folds these into one gate; a verifier rendering a
-//! per-check transcript runs them step by step and reports each outcome. Both
-//! go through here, so the order and the comparisons cannot drift.
-
+//! [`appraise_report`](crate::appraise_report) runs them step by step and
+//! reports each outcome; every verifier goes through here, so the order and
+//! the comparisons cannot drift.
 use dcap_qvl::quote::{Quote, Report};
 use serde_json::Value;
 
-use super::decode_hex;
-use crate::aci::identity;
+use crate::decode_hex;
+use aci_protocol::identity;
 
 #[derive(Debug, thiserror::Error)]
 pub enum QuoteStepError {
@@ -38,13 +37,13 @@ pub enum QuoteStepError {
     },
 }
 
-pub(super) struct VerifiedQuote {
+pub(crate) struct VerifiedQuote {
     /// The collateral's TCB status, for the caller to appraise (§8.3).
     pub status: String,
     pub tee_type: &'static str,
 }
 
-pub(super) fn parse_quote_evidence(evidence: &Value) -> Result<(Vec<u8>, Quote), QuoteStepError> {
+pub(crate) fn parse_quote_evidence(evidence: &Value) -> Result<(Vec<u8>, Quote), QuoteStepError> {
     let quote_hex = evidence
         .get("quote")
         .and_then(Value::as_str)
@@ -56,12 +55,12 @@ pub(super) fn parse_quote_evidence(evidence: &Value) -> Result<(Vec<u8>, Quote),
 
 /// Check the quote's 64-byte report-data slot carries `report_data`, and that
 /// `evidence.quote_report_data`, when published, agrees with the quote itself.
-pub(super) fn quote_binds_report_data(
+pub(crate) fn quote_binds_report_data(
     evidence: &Value,
     quote_report: &Report,
     report_data: [u8; 32],
 ) -> Result<(), QuoteStepError> {
-    let slot = super::dcap_report_data(quote_report);
+    let slot = crate::dcap_report_data(quote_report);
     if let Some(published) = evidence.get("quote_report_data").and_then(Value::as_str) {
         let published =
             decode_hex(published).map_err(QuoteStepError::InvalidEvidenceReportDataHex)?;
@@ -79,7 +78,7 @@ pub(super) fn quote_binds_report_data(
 
 /// Verify the quote to its vendor root and confirm the report's claimed
 /// `tee_type` is the one the quote actually carries.
-pub(super) async fn verify_quote_to_root(
+pub(crate) async fn verify_quote_to_root(
     raw_quote: &[u8],
     pccs_url: &str,
     now_secs: u64,

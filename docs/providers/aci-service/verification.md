@@ -18,7 +18,7 @@
 (the spec §4 report) from the worker and verifies it natively:
 
 1. **ACI report binding** (`validate_aci_report_binding`,
-   `src/aci/verifier/report.rs` — the spec §9.1(2–3) chain):
+   `crates/aci-verifier/src/report.rs` — the spec §9.1(2–3) chain):
    the SHA-256 of the served `workload_keyset` object's JCS form must
    equal the reported `workload_keyset_digest`; rebuild the §3.2 statement
    `{"keyset_digest":…,"nonce":…,"purpose":"aci.report_data.v1"}` for the

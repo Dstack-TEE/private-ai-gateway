@@ -5,7 +5,7 @@
 //! fetched, observed channel bound.
 
 use crate::aci::types::AttestationReport;
-use crate::aci::verifier::DEFAULT_DCAP_PCCS_URL;
+use crate::aci::verifier::dcap_qvl::PHALA_PCCS_URL;
 
 use crate::args::VerifyArgs;
 use crate::checks::{
@@ -82,7 +82,7 @@ pub async fn verify_service(
             now_secs: desktop_core::now_secs(),
             expiry_skipped: false,
             quote: QuoteSource::Online {
-                pccs_url: DEFAULT_DCAP_PCCS_URL,
+                pccs_url: PHALA_PCCS_URL,
             },
             channel,
             accepted_composes,

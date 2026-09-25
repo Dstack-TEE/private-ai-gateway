@@ -26,6 +26,7 @@ path = "service.rs"
 
 [dependencies]
 aci-protocol = { path = "../../../crates/aci-protocol" }
+aci-verifier = { path = "../../../crates/aci-verifier" }
 agent-bridge = { package = "private-ai-proxy-agent-bridge", path = "../agent-bridge" }
 async-stream = "0.3"
 axum = "0.8"
@@ -34,7 +35,6 @@ base64 = "0.23"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
-dcap-qvl = { version = "0.6.3", default-features = false, features = ["std", "report", "rustcrypto"] }
 desktop-core = { package = "private-ai-proxy-core", path = "../core", features = ["server"] }
 desktop-runtime = { package = "private-ai-proxy-runtime", path = "../runtime" }
 ed25519-dalek = "2"
@@ -48,7 +48,6 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", 
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
-thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time"] }
 tokio-util = "0.7"
 tracing = "0.1"

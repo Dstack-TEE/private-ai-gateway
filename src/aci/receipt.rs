@@ -6,12 +6,12 @@
 //! member (§7.2). The served encoding is free; verifiers canonicalize what
 //! they parse.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Map, Value};
 
 use super::digest;
 use super::keys::{KeyError, KeyProvider, ALGO_ED25519};
-pub use aci_protocol::receipt::receipt_signing_input;
+pub use aci_protocol::receipt::{receipt_signing_input, ChannelBinding};
 
 pub const RECEIPT_API_VERSION: &str = "aci/1";
 
@@ -90,30 +90,6 @@ impl VerificationResult {
             VerificationResult::Failed => "failed",
         }
     }
-}
-
-/// Channel binding material verified before the aggregator forwards
-/// sensitive bytes to an upstream (§8.2 shapes).
-///
-/// `tag = "type"` serializes this as a flat, self-describing object — e.g.
-/// `{"type":"tls_spki_sha256","origin":..,"spki_sha256":..}` — rather than
-/// serde's default externally tagged form, which would leak Rust variant
-/// names; `rename_all` keeps the discriminator in the snake_case ACI JSON
-/// convention.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ChannelBinding {
-    TlsSpkiSha256 {
-        origin: String,
-        spki_sha256: String,
-    },
-    E2eePublicKeySha256 {
-        provider: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        key_id: Option<String>,
-        algorithm: String,
-        public_key_sha256: String,
-    },
 }
 
 /// One flat event: `type` plus type-specific fields, in insertion order.

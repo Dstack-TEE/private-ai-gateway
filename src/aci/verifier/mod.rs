@@ -31,33 +31,23 @@ pub const DEFAULT_VERIFIER_CONNECT_TIMEOUT_SECONDS: u64 = 10;
 pub const DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS: u64 = 60;
 
 mod aci_service;
-mod appraisal;
-mod dstack;
 mod external;
 mod providers;
-mod quote;
-mod report;
 mod simple;
 #[cfg(test)]
 mod tests;
 
-pub use aci_service::{
-    dcap_report_data, AciServiceUpstreamVerifier, AciServiceVerifierConfigError,
-    AciServiceVerifierPolicy,
+pub use aci_service::{AciServiceUpstreamVerifier, AciServiceVerifierConfigError};
+pub use aci_verifier::{
+    appraise_report, dcap_report_data, dstack_rtmr3_event, validate_aci_report_binding,
+    verify_dstack_event_log, AciReportValidationError, AciServiceVerifierPolicy, Appraisal,
+    AppraisalInputs, ChannelEvidence, CheckId, CheckResult, CustodyEvidence, DstackEventLog,
+    FailureCause, Outcome, QuoteSource, QuoteStepError, ReportBinding, ValidatedAciReport,
 };
-pub use appraisal::{
-    appraise_report, Appraisal, AppraisalInputs, ChannelEvidence, CheckId, CheckResult,
-    CustodyEvidence, FailureCause, Outcome, QuoteSource,
-};
-pub use dstack::{dstack_rtmr3_event, verify_dstack_event_log, DstackEventLog};
 pub use external::ProviderVerifierConfigError;
 pub use providers::{
     ChutesProviderVerifier, NearAiProviderVerifier, PhalaDirectProviderVerifier,
     RoutingUpstreamVerifier, SecretAiProviderVerifier, TinfoilProviderVerifier,
-};
-pub use quote::QuoteStepError;
-pub use report::{
-    validate_aci_report_binding, AciReportValidationError, ReportBinding, ValidatedAciReport,
 };
 pub use simple::{PreverifiedUpstreamVerifier, StaticUpstreamVerifier};
 

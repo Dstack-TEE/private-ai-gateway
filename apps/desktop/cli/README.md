@@ -60,9 +60,11 @@ boot measurements. See
 
 ## Where verification lives
 
-Every relying-party verification step lives in this package's `aci/` modules:
-quote appraisal, the §9.1(2) binding chain, §3.1 TLS selection, and receipt
-signatures. The neutral `aci-protocol` crate supplies only wire types, JCS,
+The spec 9.1 checks run in the shared `aci-verifier` crate, the same
+implementation Gateway uses to verify its upstreams: quote appraisal, the
+§9.1(2) binding chain, provenance, custody, and §3.1 TLS selection. Receipt
+signatures are checked in this package's
+`aci/` modules. The neutral `aci-protocol` crate supplies wire types, JCS,
 attestation-statement construction, and receipt canonicalization. The CLI maps
 verification outcomes to a pass, fail, or honest skip and does not import a
 gateway implementation.

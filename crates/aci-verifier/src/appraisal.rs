@@ -1,18 +1,25 @@
 //! The §9.1 report appraisal: which checks run, in what order, and what each
 //! outcome means.
 //!
-//! The client renders each result as a transcript line and fails closed when
-//! any required check cannot be established.
+//! Both verifiers go through [`appraise_report`] — the gateway folds the
+//! outcomes into one accept/reject, the CLI renders each as a transcript line.
+//! Deciding separately is how the two drift while each keeps passing its own
+//! tests.
 
+use aci_protocol::receipt::ChannelBinding;
+use aci_protocol::types::{AttestationReport, SourceProvenance, WorkloadKeyset};
 use serde_json::Value;
 
-use super::dstack::verify_dstack_compose_measurement;
-use super::quote::{
+use crate::channel::declared_tls_channel_bindings;
+use crate::dstack::{
+    dstack_app_id, verify_dstack_compose_measurement, verify_dstack_event_log,
+    verify_dstack_kms_receipt_custody,
+};
+use crate::policy::AciServiceVerifierPolicy;
+use crate::quote::{
     parse_quote_evidence, quote_binds_report_data, verify_quote_to_root, QuoteStepError,
 };
-use super::report::{verify_report_binding, AciReportValidationError, ReportBinding};
-use super::verify_dstack_event_log;
-use crate::aci::types::{AttestationReport, SourceProvenance, WorkloadKeyset};
+use crate::report::{verify_report_binding, AciReportValidationError, ReportBinding};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CheckId {
@@ -37,6 +44,8 @@ pub enum FailureCause {
     Provenance(String),
     #[error("{0}")]
     Evidence(String),
+    #[error("key custody did not verify: {0}")]
+    Custody(String),
     #[error("{0}")]
     Policy(String),
     #[error("{0}")]
@@ -80,14 +89,20 @@ pub enum QuoteSource<'a> {
     Offline { reason: &'a str },
 }
 
-pub struct CustodyEvidence<'a> {
-    pub reason: &'a str,
+pub enum CustodyEvidence<'a> {
+    DstackKms {
+        policy: &'a AciServiceVerifierPolicy,
+    },
+    Unimplemented {
+        reason: &'a str,
+    },
 }
 
 /// `Unobservable` is an offline audit; `NotObserved` is a live run that could
 /// not see its channel, which §1.1 makes a failure rather than a skip.
 pub enum ChannelEvidence<'a> {
     Observed { host: &'a str, spki_sha256: &'a str },
+    DeclaredFor { origin: &'a str },
     Unobservable { reason: &'a str },
     NotObserved { reason: &'a str },
 }
@@ -110,6 +125,13 @@ pub struct AppraisalInputs<'a> {
 pub struct Appraisal {
     pub results: Vec<CheckResult>,
     pub identity: Option<ReportBinding>,
+    pub channel_bindings: Vec<ChannelBinding>,
+}
+
+impl Appraisal {
+    pub fn first_problem(&self) -> Option<&CheckResult> {
+        self.results.iter().find(|r| !r.passed())
+    }
 }
 
 /// Checks run in dependency order and are returned in §9.1 step order. A step
@@ -131,7 +153,7 @@ pub async fn appraise_report(inputs: AppraisalInputs<'_>) -> Result<Appraisal, S
     // §9.1(1) checks the quote against the report_data the report states;
     // §9.1(2) proves that value is the one the keyset and nonce produce. They
     // are independent, so each reports its own problem.
-    let claimed_report_data = super::decode_hex_32(&report.attestation.report_data_hex);
+    let claimed_report_data = crate::decode_hex_32(&report.attestation.report_data_hex);
     let (quote_result, verified_quote) = match claimed_report_data {
         Ok(claimed) => appraise_quote(&inputs, claimed).await,
         Err(e) => (
@@ -154,14 +176,20 @@ pub async fn appraise_report(inputs: AppraisalInputs<'_>) -> Result<Appraisal, S
     let keyset = identity.as_ref().map(|b| &b.keyset);
     results.push(appraise_expiry(&inputs, keyset));
 
-    results.push(appraise_provenance(&inputs, verified_quote.as_ref()).await);
+    let (provenance_result, app_id) = appraise_provenance(&inputs, verified_quote.as_ref()).await;
+    results.push(provenance_result);
 
-    results.push(appraise_custody(&inputs, keyset));
+    results.push(appraise_custody(&inputs, keyset, app_id.as_deref()));
 
-    results.push(appraise_channel(&inputs, keyset));
+    let (channel_result, channel_bindings) = appraise_channel(&inputs, keyset);
+    results.push(channel_result);
 
     results.sort_by_key(|r| r.id);
-    Ok(Appraisal { results, identity })
+    Ok(Appraisal {
+        results,
+        identity,
+        channel_bindings,
+    })
 }
 
 fn pass(id: CheckId, detail: impl Into<String>) -> CheckResult {
@@ -257,7 +285,7 @@ async fn appraise_quote(
         format!(
             "report_data (32 bytes) = {}\nquote report_data slot (64 bytes) = {}",
             inputs.report.attestation.report_data_hex,
-            hex::encode(super::dcap_report_data(&quote.report))
+            hex::encode(crate::dcap_report_data(&quote.report))
         )
     });
     if let Err(e) = quote_binds_report_data(evidence, &quote.report, claimed_report_data) {
@@ -325,11 +353,11 @@ fn appraise_expiry(inputs: &AppraisalInputs<'_>, keyset: Option<&WorkloadKeyset>
     }
 }
 
-/// §9.1(4). Verify that published provenance is bound into RTMR3.
-pub(super) async fn appraise_provenance(
+/// §9.1(4). Returns the RTMR3-measured app-id, which §9.1(5) anchors on.
+pub(crate) async fn appraise_provenance(
     inputs: &AppraisalInputs<'_>,
     quote_report: Option<&dcap_qvl::quote::Report>,
-) -> CheckResult {
+) -> (CheckResult, Option<Vec<u8>>) {
     let evidence = &inputs.report.attestation.evidence;
     let provenance: &SourceProvenance = &inputs.report.attestation.source_provenance;
     let declared = match (
@@ -342,12 +370,15 @@ pub(super) async fn appraise_provenance(
         // §4.1: a verifier MUST reject a report without acceptable
         // provenance, measured compose or not.
         _ => {
-            return failed_with(
-                CheckId::Provenance,
-                FailureCause::Provenance(
-                    "the report declares no source provenance (spec 4.1)".to_string(),
+            return (
+                failed_with(
+                    CheckId::Provenance,
+                    FailureCause::Provenance(
+                        "the report declares no source provenance (spec 4.1)".to_string(),
+                    ),
+                    "the report declares no source provenance (spec 4.1)",
                 ),
-                "the report declares no source provenance (spec 4.1)",
+                None,
             )
         }
     };
@@ -373,16 +404,17 @@ pub(super) async fn appraise_provenance(
                 "no app_compose",
             ),
         };
-        return result;
+        return (result, None);
     };
     let events = match verify_dstack_event_log(evidence, quote_report) {
         Ok(events) => events,
-        Err(e) => return failed(CheckId::Provenance, FailureCause::Evidence(e)),
+        Err(e) => return (failed(CheckId::Provenance, FailureCause::Evidence(e)), None),
     };
     let measured = match verify_dstack_compose_measurement(evidence, &events) {
         Ok(measured) => measured,
-        Err(e) => return failed(CheckId::Provenance, FailureCause::Evidence(e)),
+        Err(e) => return (failed(CheckId::Provenance, FailureCause::Evidence(e)), None),
     };
+    let app_id = dstack_app_id(&events).ok();
     let explain = inputs
         .explain
         .then(|| format!("sha256(app_compose) = measured compose-hash = {measured}; RTMR3 replay matched the quote"));
@@ -408,40 +440,115 @@ pub(super) async fn appraise_provenance(
             ),
         )
     };
-    result.with_explain(explain)
+    (result.with_explain(explain), app_id)
 }
 
-fn appraise_custody(inputs: &AppraisalInputs<'_>, keyset: Option<&WorkloadKeyset>) -> CheckResult {
+fn appraise_custody(
+    inputs: &AppraisalInputs<'_>,
+    keyset: Option<&WorkloadKeyset>,
+    app_id: Option<&[u8]>,
+) -> CheckResult {
     let subject = keyset.and_then(|k| k.subject.as_deref()).unwrap_or("null");
-    unevaluable(
+    let policy = match &inputs.custody {
+        CustodyEvidence::Unimplemented { reason } => {
+            return unevaluable(
+                CheckId::Custody,
+                format!("{reason}; subject: {subject} (no policy constraints applied)"),
+                "custody policy not implemented",
+            )
+        }
+        CustodyEvidence::DstackKms { policy } => policy,
+    };
+    let Some(keyset) = keyset else {
+        return unreached(
+            CheckId::Custody,
+            "no established keyset to check custody for",
+        );
+    };
+    let Some(app_id) = app_id else {
+        return unreached(
+            CheckId::Custody,
+            "the measured app-id the custody chain anchors on was never established",
+        );
+    };
+    if let Err(e) = verify_dstack_kms_receipt_custody(
+        &inputs.report.attestation.evidence,
+        keyset,
+        app_id,
+        policy,
+    ) {
+        let detail = format!("key custody did not verify: {e}");
+        return failed_with(
+            CheckId::Custody,
+            FailureCause::Evidence(e.to_string()),
+            detail,
+        );
+    }
+    // The policy anchor compares against the measured app-id, not the
+    // report's own claims.
+    if !policy.accepts_measured(keyset, &inputs.report.attestation.source_provenance, app_id) {
+        return failed_with(
+            CheckId::Custody,
+            FailureCause::Policy(format!(
+                "subject {subject} is not acceptable to the verifier policy"
+            )),
+            format!("subject {subject} is not acceptable to the verifier policy"),
+        );
+    }
+    pass(
         CheckId::Custody,
-        format!(
-            "{}; subject: {subject} (no policy constraints applied)",
-            inputs.custody.reason
-        ),
-        "custody policy not implemented",
+        format!("keys held under the dstack KMS chain; subject {subject} accepted"),
     )
 }
 
-fn appraise_channel(inputs: &AppraisalInputs<'_>, keyset: Option<&WorkloadKeyset>) -> CheckResult {
+fn appraise_channel(
+    inputs: &AppraisalInputs<'_>,
+    keyset: Option<&WorkloadKeyset>,
+) -> (CheckResult, Vec<ChannelBinding>) {
+    let none = Vec::new();
     let (host, spki) = match &inputs.channel {
         ChannelEvidence::Unobservable { reason } => {
-            return unevaluable(CheckId::Channel, *reason, "no live channel to bind");
+            let r = unevaluable(CheckId::Channel, *reason, "no live channel to bind");
+            return (r, none);
         }
         ChannelEvidence::NotObserved { reason } => {
-            return failed_with(
+            let r = failed_with(
                 CheckId::Channel,
                 FailureCause::Channel((*reason).to_string()),
                 format!("the channel is not bound to the attested keyset ({reason}); spec 1.1"),
             );
+            return (r, none);
         }
-        ChannelEvidence::Observed { host, spki_sha256 } => (*host, *spki_sha256),
+        ChannelEvidence::Observed { host, spki_sha256 } => (*host, Some(*spki_sha256)),
+        ChannelEvidence::DeclaredFor { origin } => (*origin, None),
     };
     let Some(keyset) = keyset else {
-        return unreached(
+        let r = unreached(
             CheckId::Channel,
             "no decoded keyset to match the channel against (see the binding check)",
         );
+        return (r, none);
+    };
+    let Some(spki) = spki else {
+        // The caller will enforce what the report declares clients pin, so the
+        // deployment's own narrowing decides which entry that is.
+        return match declared_tls_channel_bindings(
+            keyset,
+            &inputs.report.attestation.evidence,
+            host,
+        ) {
+            Ok(bindings) => (
+                pass(
+                    CheckId::Channel,
+                    format!("the entry {host} clients pin is attested in the keyset"),
+                ),
+                bindings,
+            ),
+            Err(e) => (
+                failed(CheckId::Channel, FailureCause::Channel(e.to_string())),
+                none,
+            ),
+        };
     };
     let host = host.to_ascii_lowercase();
     let observed = spki.to_ascii_lowercase();
@@ -485,5 +592,5 @@ fn appraise_channel(inputs: &AppraisalInputs<'_>, keyset: Option<&WorkloadKeyset
             }
         )
     });
-    result.with_explain(explain)
+    (result.with_explain(explain), none)
 }

@@ -14,6 +14,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "aci-verifier"
+version = "0.1.0"
+dependencies = [
+ "aci-protocol",
+ "base64 0.22.1",
+ "dcap-qvl",
+ "dstack-sdk-types",
+ "ed25519-dalek",
+ "hex",
+ "k256",
+ "serde_json",
+ "sha2 0.10.9",
+ "sha3 0.10.9",
+ "thiserror 1.0.69",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3591,6 +3610,7 @@ name = "private-ai-gateway"
 version = "0.1.0"
 dependencies = [
  "aci-protocol",
+ "aci-verifier",
  "aes-gcm",
  "async-stream",
  "async-trait",
@@ -3599,7 +3619,6 @@ dependencies = [
  "bytes",
  "chacha20poly1305",
  "curve25519-dalek",
- "dcap-qvl",
  "dstack-sdk",
  "ed25519-dalek",
  "flate2",

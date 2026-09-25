@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/aci-protocol"]
+members = ["crates/aci-protocol", "crates/aci-verifier"]
 default-members = ["."]
 resolver = "2"
 
@@ -20,6 +20,7 @@ path = "src/main.rs"
 
 [dependencies]
 aci-protocol = { path = "crates/aci-protocol" }
+aci-verifier = { path = "crates/aci-verifier" }
 # Canonical-JSON, types, and serialization.
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -78,9 +79,6 @@ prometheus = "0.13"
 
 # Async traits used by upstream and verifier abstractions.
 async-trait = "0.1"
-
-# Upstream ACI/DCAP verification.
-dcap-qvl = { version = "0.6.3", default-features = false, features = ["std", "report", "rustcrypto"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
