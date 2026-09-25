@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 pub use auth::Auth;
 #[cfg(feature = "web-ui")]
-pub(crate) use server::{routes, Gate};
+pub(crate) use server::{change_password, routes, Gate};
 #[cfg(feature = "web-ui")]
 pub use throttle::Throttle;
 

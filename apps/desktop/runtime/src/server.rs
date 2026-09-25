@@ -18,6 +18,7 @@ use tokio::{
     sync::{RwLock, Semaphore},
 };
 use tokio_util::sync::CancellationToken;
+use tower::limit::GlobalConcurrencyLimitLayer;
 
 use crate::{
     api::{self, Api, ServiceBackend, ServiceHost},
@@ -40,6 +41,8 @@ pub const EXIT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// It covers both drains, the stop steps and the final exit drains.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_IN_PROGRESS: &str = "Shutdown is already in progress";
+/// Requests the local endpoint runs at once; later ones wait for a slot.
+const MAX_REQUESTS: usize = 64;
 
 /// Lifecycle admission shared by every listener of one service.
 pub(crate) struct Admission {
@@ -86,13 +89,17 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
             }
         }
     });
+    // Bounds the requests the local endpoint runs at once, as the removed
+    // NDJSON server bounded its connections; an event stream holds a slot
+    // only until its response starts.
     let api = api::router(Api {
         backend: ServiceBackend(runtime.clone()),
         host: ServiceHost::default(),
         states: runtime.subscribe(),
         shutdown: stopped.clone(),
         listener: api::Listener::Local,
-    });
+    })
+    .layer(GlobalConcurrencyLimitLayer::new(MAX_REQUESTS));
     let server = tokio::spawn(
         axum::serve(LocalListener(listener), api)
             .with_graceful_shutdown(stopped.clone().cancelled_owned())

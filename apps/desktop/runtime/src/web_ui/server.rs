@@ -5,7 +5,7 @@ use std::{
 
 use axum::{
     body::{Body, Bytes},
-    extract::{ConnectInfo, Request, State},
+    extract::{ConnectInfo, Request},
     http::{header, HeaderMap, HeaderValue, Method as HttpMethod, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -161,10 +161,6 @@ pub(crate) fn routes<B: Backend>(routes: Router<Api<B>>) -> Router<Api<B>> {
     routes
         .route("/api/session", post(session).delete(sign_out))
         .route("/api/bootstrap", get(bootstrap))
-        .route(
-            &format!("{}{}", protocol::RPC_PATH, Method::SetWebUiPassword.name()),
-            post(change_password::<B>),
-        )
         .fallback(asset)
 }
 
@@ -226,7 +222,9 @@ impl Gate {
                 ));
             }
         }
-        request.extensions_mut().insert(Caller::Browser { session });
+        request
+            .extensions_mut()
+            .insert(Caller::Browser { session, peer });
         request.extensions_mut().insert(self.clone());
         secure_response(next.run(request).await)
     }
@@ -375,22 +373,22 @@ struct PasswordChange {
     current_password: Option<String>,
 }
 
-/// A browser must prove the current password before changing or clearing it,
-/// and draws from its client's throttle budget to do so. The change ends every
-/// session, so the caller receives a fresh session cookie.
-async fn change_password<B: Backend>(
-    State(api): State<Api<B>>,
-    Extension(gate): Extension<Arc<Gate>>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    jar: CookieJar,
-    body: Bytes,
+/// `set_web_ui_password` from a browser, which `api::rpc` routes here: it must
+/// prove the current password before changing or clearing it, and draws from
+/// its client's throttle budget to do so. The change ends every session, so
+/// the caller receives a fresh session cookie.
+pub(crate) async fn change_password<B: Backend>(
+    api: &Api<B>,
+    gate: &Gate,
+    peer: IpAddr,
+    headers: &HeaderMap,
+    params: serde_json::Value,
 ) -> Response {
-    let Some(change) = api::parameters(&body)
-        .and_then(|params| serde_json::from_value::<PasswordChange>(params).ok())
-    else {
+    let Ok(change) = serde_json::from_value::<PasswordChange>(params) else {
         return api::error(protocol::Error::invalid_request());
     };
-    if !gate.throttle.allow(peer.ip()) {
+    let jar = CookieJar::from_headers(headers);
+    if !gate.throttle.allow(peer) {
         return throttled();
     }
     if gate.auth.has_password() {
@@ -847,6 +845,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn every_spelling_of_the_password_change_needs_the_current_password() {
+        let fixture = fixture();
+        set_password(&fixture.auth, PASSWORD);
+        let token = fixture.auth.sign_in(PASSWORD).unwrap();
+        for (path, status) in [
+            ("/api/rpc/set_web_ui_password", StatusCode::CONFLICT),
+            ("/api/rpc/set_web_ui%5Fpassword", StatusCode::CONFLICT),
+            ("/api/rpc/%73et_web_ui_password", StatusCode::CONFLICT),
+            ("/api/rpc/set%5Fweb%5Fui%5Fpassword", StatusCode::CONFLICT),
+            ("/api/rpc/SET_WEB_UI_PASSWORD", StatusCode::NOT_FOUND),
+            ("/api/rpc/Set_Web_Ui_Password", StatusCode::NOT_FOUND),
+            // U+FF44, a fullwidth "d", and a trailing NUL are other names.
+            (
+                "/api/rpc/set_web_ui_passwor%EF%BD%84",
+                StatusCode::NOT_FOUND,
+            ),
+            ("/api/rpc/set_web_ui_password%00", StatusCode::NOT_FOUND),
+        ] {
+            let response = send(
+                &fixture.router,
+                request(HttpMethod::POST, path)
+                    .header(header::COOKIE, cookie(&token))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({ "password": null }).to_string()))
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(response.status(), status, "{path}");
+            assert!(fixture.auth.has_password(), "{path}");
+        }
+    }
+
+    #[tokio::test]
     async fn rejects_foreign_hosts_origins_and_non_json_mutations() {
         let fixture = fixture();
         let token = fixture.auth.open_session().unwrap();
@@ -1225,7 +1256,13 @@ mod tests {
             json!({ "code": "invalid_state", "message": "Stop protection before changing this" })
         );
         // Commands only the local endpoint's owner may run are unknown here.
-        for name in ["shutdown", "export_profiles", "clear_usage", "notACommand"] {
+        for name in [
+            "shutdown",
+            "sh%75tdown",
+            "export_profiles",
+            "clear_usage",
+            "notACommand",
+        ] {
             let response = call(name, json!({})).await;
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{name}");
             assert_eq!(
@@ -1233,6 +1270,16 @@ mod tests {
                 "method_not_found"
             );
         }
+        // The process identity is for local clients only.
+        let version = send(
+            &fixture.router,
+            request(HttpMethod::GET, protocol::VERSION_PATH)
+                .header(header::COOKIE, cookie(&token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(version.status(), StatusCode::NOT_FOUND);
         let invalid = call("activate_profile", json!({ "profile_id": "p" })).await;
         assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
         assert_eq!(json_body(invalid).await["error"]["code"], "invalid_request");

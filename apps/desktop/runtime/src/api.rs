@@ -116,7 +116,10 @@ pub(crate) enum Caller {
     Owner,
     /// A signed-in browser: renderer methods only.
     #[cfg_attr(not(feature = "web-ui"), allow(dead_code))]
-    Browser { session: String },
+    Browser {
+        session: String,
+        peer: std::net::IpAddr,
+    },
 }
 
 #[derive(Clone)]
@@ -131,16 +134,17 @@ pub(crate) struct Api<B> {
 
 pub(crate) fn router<B: Backend>(api: Api<B>) -> Router {
     let routes = Router::new()
-        .route(protocol::VERSION_PATH, get(version_handler))
         .route(protocol::EVENTS_PATH, get(events::<B>))
         .route(
             &format!("{}{{command}}", protocol::RPC_PATH),
             post(rpc::<B>),
         );
-    #[cfg(feature = "web-ui")]
+    // The process identity (PID, executable path) is for local clients only;
+    // the web UI reads its version from `/api/bootstrap`.
     let routes = match &api.listener {
+        Listener::Local => routes.route(protocol::VERSION_PATH, get(version_handler)),
+        #[cfg(feature = "web-ui")]
         Listener::Web(_) => crate::web_ui::routes(routes),
-        Listener::Local => routes,
     };
     routes
         .layer(middleware::from_fn_with_state(api.clone(), authorize::<B>))
@@ -171,20 +175,27 @@ async fn version_handler() -> Json<&'static Version> {
     Json(version())
 }
 
+/// Resolves the command from the decoded name, so every spelling of a path
+/// reaches the same authorization.
 async fn rpc<B: Backend>(
     State(api): State<Api<B>>,
     Extension(caller): Extension<Caller>,
     Path(name): Path<String>,
+    #[cfg_attr(not(feature = "web-ui"), allow(unused_variables))] headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Response {
     let Some(params) = parameters(&body) else {
         return error(protocol::Error::invalid_request());
     };
-    let result = match Method::from_name(&name) {
-        Some(method) if method.is_command() => match Command::decode(&name, params) {
-            Ok(command) => api.backend.execute(command).await,
-            Err(invalid) => Err(CallError::Api(invalid)),
-        },
+    let method = Method::from_name(&name);
+    // A browser proves the current password; the local owner is the root of trust.
+    #[cfg(feature = "web-ui")]
+    if let (Listener::Web(gate), Caller::Browser { peer, .. }, Some(Method::SetWebUiPassword)) =
+        (&api.listener, &caller, method)
+    {
+        return crate::web_ui::change_password(&api, gate, *peer, &headers, params).await;
+    }
+    let result = match method {
         Some(method) => ui_api::invoke(&api.backend, &api.host, method, params).await,
         None if matches!(caller, Caller::Owner) => match Command::decode(&name, params) {
             Ok(command) => api.backend.execute(command).await,
@@ -240,7 +251,7 @@ async fn events<B: Backend>(
     }
     let session_live = move || match (&api.listener, &caller) {
         #[cfg(feature = "web-ui")]
-        (Listener::Web(gate), Caller::Browser { session }) => gate.session_live(session),
+        (Listener::Web(gate), Caller::Browser { session, .. }) => gate.session_live(session),
         _ => true,
     };
     let (backend, host, shutdown) = (api.backend.clone(), api.host.clone(), api.shutdown.clone());
@@ -394,11 +405,21 @@ mod tests {
         )
         .await;
         assert_eq!((status, body), (StatusCode::OK, json!({ "result": null })));
+        // The owner, the root of trust, sets the web UI password without the old one.
+        let (status, _) = call(
+            &router,
+            "POST",
+            "/api/rpc/set_web_ui%5Fpassword",
+            r#"{"password":null}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
         assert_eq!(
             recorder.0.lock().unwrap().as_slice(),
             [
                 json!({ "command": "get_state", "params": {} }),
                 json!({ "command": "shutdown", "params": { "instanceId": "1-2", "mode": "updateRestart" } }),
+                json!({ "command": "set_web_ui_password", "params": { "password": null } }),
             ]
         );
     }

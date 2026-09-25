@@ -95,11 +95,13 @@ protection problems, is stored under that key.
   modules. Apply, disconnect, recovery and rollback stay together in transactions.
 - OAuth provider/HTTP/billing helpers and verifier events are separate from their
   session owners. Tauri command modules adapt the shared runtime to the API.
-- `core/src/ui_api.rs` is the renderer management table. A method is either the
-  management command of the same name or composed by a `Host` (tray state,
-  Open at Login, notifications) from commands. The names are the Tauri command
-  names and the web RPC paths, so the renderer, the CLI and both transports
-  use one name per command. The desktop shell runs methods with its own host
+- `core/src/ui_methods.rs` is the one list of renderer methods; it generates
+  `ui_api::Method`, the Tauri command functions, their invoke handler and the
+  Tauri app manifest, while `src-tauri/capabilities` grants them to windows.
+  A method is either the management command of the same name or composed by a
+  `Host` (tray state, Open at Login, notifications) from commands. The names
+  are the Tauri command names and the web RPC paths, so the renderer, the CLI
+  and both transports use one name per command. The desktop shell runs methods with its own host
   and sends commands to the service; the service answers browsers' methods with
   its own. The renderer builds one `DesktopApi` from a transport and platform
   primitives.
@@ -153,9 +155,10 @@ directly.
 
 Local management is one HTTP API (`core/src/protocol.rs`) the service serves on
 its private endpoint and, for the web UI, on TCP, as Docker Engine serves one
-API on `unix://` and `tcp://`: `GET /api/version`, `POST /api/rpc/{command}`
-with the command's parameters as a JSON object, and `GET /api/events`, a
-server-sent event stream that starts with a state snapshot. Errors are
+API on `unix://` and `tcp://`: `GET /api/version` (local endpoint only: it
+names the process and its executable), `POST /api/rpc/{command}` with the
+command's parameters as a JSON object, and `GET /api/events`, a server-sent
+event stream that starts with a state snapshot. Errors are
 `{"error": {"code", "message"}}` with a stable code and the HTTP status of its
 Docker `errdefs` class. It is separate from the local inference HTTP API. An
 inference key never authorizes administration.
@@ -184,10 +187,14 @@ Clients check `GET /api/version` on each connection before calling and refuse
 another build. Shutdown names the expected instance ID. Update validation also
 checks that the running executable belongs to the current installation. A
 browser session may run only the renderer's methods; the shutdown, export and
-maintenance commands are the local owner's. The service bounds response and
+maintenance commands are the local owner's. Authorization follows the command
+decoded from the path, never the path's spelling: a browser changing the
+password proves the current one however it names `set_web_ui_password`. The
+local endpoint runs at most 64 requests at once and bounds response and
 event sizes and exports; accept errors such as `EMFILE` back off for a second
 instead of stopping the service, and malformed or disconnected clients close
-only their own connection.
+only their own connection. axum's server sets no header read timeout; the
+endpoint's peers are the same OS user.
 
 The optional web UI is a second, browser-facing transport owned by the service.
 It is off by default and binds `127.0.0.1` unless network access is explicitly
