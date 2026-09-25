@@ -89,11 +89,13 @@ pub enum QuoteSource<'a> {
     Offline { reason: &'a str },
 }
 
+/// `NotConfigured` is a caller with no custody policy: §9.1(5) is recorded as
+/// unevaluable, never passed.
 pub enum CustodyEvidence<'a> {
     DstackKms {
         policy: &'a AciServiceVerifierPolicy,
     },
-    Unimplemented {
+    NotConfigured {
         reason: &'a str,
     },
 }
@@ -462,11 +464,11 @@ fn appraise_custody(
 ) -> CheckResult {
     let subject = keyset.and_then(|k| k.subject.as_deref()).unwrap_or("null");
     let policy = match &inputs.custody {
-        CustodyEvidence::Unimplemented { reason } => {
+        CustodyEvidence::NotConfigured { reason } => {
             return unevaluable(
                 CheckId::Custody,
                 format!("{reason}; subject: {subject} (no policy constraints applied)"),
-                "custody policy not implemented",
+                "no custody policy configured",
             )
         }
         CustodyEvidence::DstackKms { policy } => policy,

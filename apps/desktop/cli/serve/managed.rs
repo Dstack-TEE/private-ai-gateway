@@ -14,6 +14,7 @@ use desktop_runtime::verifier_session::{
 };
 
 use super::{initialize, proxy_request, text_response, ProxyState, Reporter, VerifierOptions};
+use crate::checks::VerifierPolicy;
 
 impl VerifiedService for ProxyState {
     fn call(
@@ -110,7 +111,7 @@ impl VerifierLauncher for InProcessVerifierLauncher {
                 result = initialize(
                     VerifierOptions {
                         base_url: config.remote_url.clone(),
-                        accepted_composes: Vec::new(),
+                        policy: VerifierPolicy::default(),
                         require_production_os: config.require_production_os,
                         enforce_verified: true,
                         fixed_pins: Vec::new(),

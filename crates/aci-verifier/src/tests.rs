@@ -420,7 +420,7 @@ fn provenance_inputs<'a>(
             pccs_url: "https://pccs.invalid",
         },
         accepted_composes,
-        custody: CustodyEvidence::Unimplemented {
+        custody: CustodyEvidence::NotConfigured {
             reason: "not under test",
         },
         channel: ChannelEvidence::Unobservable {

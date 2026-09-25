@@ -37,7 +37,7 @@ pub async fn run(args: SendArgs, require_production_os: bool) -> Result<i32, Str
     let verification = verify_service(
         &args.base_url,
         None,
-        &args.accepted_composes,
+        &args.policy.verifier_policy()?,
         require_production_os,
         false,
     )

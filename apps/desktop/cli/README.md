@@ -70,6 +70,12 @@ attestation-statement construction, and receipt canonicalization. The CLI maps
 verification outcomes to a pass, fail, or honest skip and does not import a
 gateway implementation.
 
+Custody (id-5) is checked when a custody policy is given: repeatable
+`--accept-dstack-kms-root-public-key` together with `--accept-subject`
+(`app-id:0x…`, the measured dstack app-id) or `--accept-image-digest`, the
+same fields Gateway's upstream configuration uses. Without one, id-5 is an
+honest skip.
+
 Differences that are deliberate — the CLI's honest skips, and checks only a
 relying party can run — are recorded in
 [the ACI conformance notes](https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/reviews/aci-spec-conformance-gaps.md).

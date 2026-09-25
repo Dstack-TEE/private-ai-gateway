@@ -2,7 +2,8 @@
 
 use clap::{Args, Subcommand};
 
-use crate::checks::RequiredClaim;
+use crate::aci::verifier::{AciServiceVerifierPolicy, VerifierPolicyError};
+use crate::checks::{RequiredClaim, VerifierPolicy};
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -38,10 +39,10 @@ pub enum Command {
     Serve(ServeArgs),
 }
 
-#[derive(Debug, Args)]
-pub struct VerifyArgs {
-    #[arg(help = "Base URL of the ACI service to verify.")]
-    pub base_url: String,
+/// The verifier policy (spec 1.3) every command that appraises a report runs
+/// under. Names follow the gateway's upstream policy configuration.
+#[derive(Debug, Default, Args)]
+pub struct PolicyArgs {
     #[arg(
         long = "accept-compose",
         value_name = "HEX",
@@ -50,6 +51,74 @@ pub struct VerifyArgs {
                 the provenance yourself."
     )]
     pub accepted_composes: Vec<String>,
+    #[arg(
+        long = "accept-subject",
+        value_name = "app-id:0xHEX",
+        help = "Measured dstack app-id to accept for key custody (spec 9.1(5)); \
+                repeatable. Custody is checked when \
+                --accept-dstack-kms-root-public-key is given with this or \
+                --accept-image-digest; with none of the three, id-5 is skipped."
+    )]
+    pub accepted_subjects: Vec<String>,
+    #[arg(
+        long = "accept-image-digest",
+        value_name = "DIGEST",
+        help = "Source-provenance image digest to accept for key custody \
+                (spec 9.1(5)); repeatable."
+    )]
+    pub accepted_image_digests: Vec<String>,
+    #[arg(
+        long = "accept-dstack-kms-root-public-key",
+        value_name = "HEX",
+        help = "dstack KMS root public key the receipt-key custody chain must end at \
+                (spec 3.3, 9.1(5)); repeatable."
+    )]
+    pub accepted_dstack_kms_root_public_keys: Vec<String>,
+}
+
+impl PolicyArgs {
+    /// Validate the flags once, before any report is fetched.
+    pub fn verifier_policy(&self) -> Result<VerifierPolicy, String> {
+        let custody_configured = !(self.accepted_subjects.is_empty()
+            && self.accepted_image_digests.is_empty()
+            && self.accepted_dstack_kms_root_public_keys.is_empty());
+        let custody = custody_configured
+            .then(|| {
+                AciServiceVerifierPolicy::new(
+                    self.accepted_subjects.clone(),
+                    self.accepted_image_digests.clone(),
+                    self.accepted_dstack_kms_root_public_keys.clone(),
+                )
+            })
+            .transpose()
+            .map_err(|e| match e {
+                VerifierPolicyError::EmptyPolicy => {
+                    "--accept-dstack-kms-root-public-key needs --accept-subject or \
+                     --accept-image-digest"
+                        .to_string()
+                }
+                VerifierPolicyError::EmptyKmsRootPolicy => {
+                    "--accept-subject and --accept-image-digest need \
+                     --accept-dstack-kms-root-public-key"
+                        .to_string()
+                }
+                VerifierPolicyError::InvalidKmsRootPublicKey(e) => {
+                    format!("invalid --accept-dstack-kms-root-public-key: {e}")
+                }
+            })?;
+        Ok(VerifierPolicy {
+            accepted_composes: self.accepted_composes.clone(),
+            custody,
+        })
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct VerifyArgs {
+    #[arg(help = "Base URL of the ACI service to verify.")]
+    pub base_url: String,
+    #[command(flatten)]
+    pub policy: PolicyArgs,
     #[arg(
         long,
         help = "Nonce to send with the attestation request; a fresh random one is \
@@ -76,14 +145,8 @@ pub struct AuditArgs {
         help = "Path to the saved spec 9.1 attestation report JSON."
     )]
     pub report: String,
-    #[arg(
-        long = "accept-compose",
-        value_name = "HEX",
-        help = "Compose hash to accept (spec 1.3 verifier policy); repeatable. Without \
-                it the compose measurement is verified and reported, and you appraise \
-                the provenance yourself."
-    )]
-    pub accepted_composes: Vec<String>,
+    #[command(flatten)]
+    pub policy: PolicyArgs,
     #[arg(
         long,
         value_name = "FILE",
@@ -146,14 +209,8 @@ pub struct AuditArgs {
 pub struct SendArgs {
     #[arg(help = "Base URL of the ACI service to send the request to.")]
     pub base_url: String,
-    #[arg(
-        long = "accept-compose",
-        value_name = "HEX",
-        help = "Compose hash to accept (spec 1.3 verifier policy); repeatable. Without \
-                it the compose measurement is verified and reported, and you appraise \
-                the provenance yourself."
-    )]
-    pub accepted_composes: Vec<String>,
+    #[command(flatten)]
+    pub policy: PolicyArgs,
     #[arg(
         long,
         value_name = "MODEL",
@@ -214,14 +271,8 @@ pub struct SendArgs {
 pub struct SessionsArgs {
     #[arg(help = "Base URL of the ACI service whose attested sessions to audit.")]
     pub base_url: String,
-    #[arg(
-        long = "accept-compose",
-        value_name = "HEX",
-        help = "Compose hash to accept (spec 1.3 verifier policy); repeatable. Without \
-                it the compose measurement is verified and reported, and you appraise \
-                the provenance yourself."
-    )]
-    pub accepted_composes: Vec<String>,
+    #[command(flatten)]
+    pub policy: PolicyArgs,
     #[arg(
         long,
         value_name = "MODEL",
@@ -244,14 +295,8 @@ pub struct SessionsArgs {
 pub struct ServeArgs {
     #[arg(help = "Base URL of the ACI service to proxy to.")]
     pub base_url: String,
-    #[arg(
-        long = "accept-compose",
-        value_name = "HEX",
-        help = "Compose hash to accept (spec 1.3 verifier policy); repeatable. Without \
-                it the compose measurement is verified and reported, and you appraise \
-                the provenance yourself."
-    )]
-    pub accepted_composes: Vec<String>,
+    #[command(flatten)]
+    pub policy: PolicyArgs,
     #[arg(
         long,
         value_name = "ADDR:PORT",

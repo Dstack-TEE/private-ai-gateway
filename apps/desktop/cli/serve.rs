@@ -29,7 +29,7 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 
 use crate::args::ServeArgs;
-use crate::checks::{BodyDigest, EstablishedIdentity, RequiredClaim};
+use crate::checks::{BodyDigest, EstablishedIdentity, RequiredClaim, VerifierPolicy};
 use crate::client::AciClient;
 use crate::sessions::audit_current_sessions;
 use crate::verify::{verify_service, ServiceVerification};
@@ -148,9 +148,9 @@ pub struct ProxyState {
     /// Demand verified attested-session serving (`provider.aci_verified`,
     /// §5.3) on every inference forward. On by default.
     enforce_verified: bool,
-    /// Compose hashes this operator accepts (§1.3), applied on the startup
-    /// verify and on every keyset-change re-verify.
-    accepted_composes: Vec<String>,
+    /// The verifier policy (§1.3), applied on the startup verify and on every
+    /// keyset-change re-verify.
+    policy: VerifierPolicy,
     /// Apply the production dstack OS-image policy on startup and re-verification.
     require_production_os: bool,
     audits: Arc<tokio::sync::Semaphore>,
@@ -197,7 +197,7 @@ impl ProxyState {
         base_url: String,
         host: String,
         enforce_verified: bool,
-        accepted_composes: Vec<String>,
+        policy: VerifierPolicy,
         require_production_os: bool,
         fixed_pins: Vec<String>,
         required_claims: Vec<RequiredClaim>,
@@ -213,7 +213,7 @@ impl ProxyState {
             base_url,
             host,
             enforce_verified,
-            accepted_composes,
+            policy,
             require_production_os,
             audits: Arc::new(tokio::sync::Semaphore::new(16)),
             trusted: Mutex::new(TrustedIdentity {
@@ -351,7 +351,7 @@ impl ProxyState {
             result = verify_service(
                 &self.base_url,
                 None,
-                &self.accepted_composes,
+                &self.policy,
                 self.require_production_os,
                 false,
             ) => result?,
@@ -437,7 +437,7 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
     let (state, ready_identity, base_url) = initialize(
         VerifierOptions {
             base_url: args.base_url.clone(),
-            accepted_composes: args.accepted_composes.clone(),
+            policy: args.policy.verifier_policy()?,
             require_production_os,
             enforce_verified: !args.allow_unverified,
             fixed_pins: args.sessions.clone(),
@@ -475,7 +475,11 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
                 "policy": {
                     "enforce_verified": !args.allow_unverified,
                     "require_production_os": require_production_os,
-                    "accepted_composes": args.accepted_composes,
+                    "accepted_composes": args.policy.accepted_composes,
+                    "accepted_subjects": args.policy.accepted_subjects,
+                    "accepted_image_digests": args.policy.accepted_image_digests,
+                    "accepted_dstack_kms_root_public_keys":
+                        args.policy.accepted_dstack_kms_root_public_keys,
                     "pinned_sessions": state.active_pins(),
                 },
             })),
@@ -532,8 +536,8 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
 /// derives it from its arguments, the managed backend from its verifier config.
 struct VerifierOptions {
     base_url: String,
-    /// Compose hashes accepted on the startup verify and every re-verify (§1.3).
-    accepted_composes: Vec<String>,
+    /// The verifier policy (§1.3) for the startup verify and every re-verify.
+    policy: VerifierPolicy,
     require_production_os: bool,
     /// Demand verified attested-session serving on every inference (§5.3).
     enforce_verified: bool,
@@ -554,7 +558,7 @@ async fn initialize(
     let verification = verify_service(
         &options.base_url,
         None,
-        &options.accepted_composes,
+        &options.policy,
         options.require_production_os,
         false,
     )
@@ -596,7 +600,7 @@ async fn initialize(
         base_url.clone(),
         host,
         options.enforce_verified,
-        options.accepted_composes,
+        options.policy,
         options.require_production_os,
         options.fixed_pins,
         options.required_claims,

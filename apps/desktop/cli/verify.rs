@@ -10,7 +10,7 @@ use crate::aci::verifier::dcap_qvl::PHALA_PCCS_URL;
 use crate::args::VerifyArgs;
 use crate::checks::{
     run_report_checks, ChannelEvidence, EstablishedIdentity, QuoteSource, ReportCheckContext,
-    ReportOutcome,
+    ReportOutcome, VerifierPolicy,
 };
 use crate::client::{host_of, normalize_base_url, random_nonce_hex, AciClient};
 use crate::transcript::Transcript;
@@ -42,7 +42,7 @@ impl ServiceVerification {
 pub async fn verify_service(
     base_url: &str,
     nonce_arg: Option<&str>,
-    accepted_composes: &[String],
+    policy: &VerifierPolicy,
     require_production_os: bool,
     explain: bool,
 ) -> Result<ServiceVerification, String> {
@@ -83,7 +83,7 @@ pub async fn verify_service(
                 pccs_url: PHALA_PCCS_URL,
             },
             channel,
-            accepted_composes,
+            policy,
             require_production_os,
             explain,
         },
@@ -106,7 +106,7 @@ pub async fn run(args: VerifyArgs, require_production_os: bool) -> Result<i32, S
     let verification = verify_service(
         &args.base_url,
         args.nonce.as_deref(),
-        &args.accepted_composes,
+        &args.policy.verifier_policy()?,
         require_production_os,
         args.explain,
     )

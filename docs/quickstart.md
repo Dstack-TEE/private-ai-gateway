@@ -35,17 +35,20 @@ PASS  id-1         hardware quote verifies to TEE vendor root and binds report_d
 PASS  id-2         binding chain: keyset JCS -> digest -> statement for our nonce -> report_data [9.1(2)] — keyset digest sha256:a1b4…c5c6; statement digest for nonce "9b2c…" matches report_data
 PASS  id-3         keyset not expired (now < not_after) [9.1(3)] — now 1783899770 < not_after 1786491770
 PASS  id-4         source provenance connects workload to public code [9.1(4)] — booted compose measured into RTMR3: compose-hash=7c1e…40db; repo=https://github.com/Dstack-TEE/private-ai-gateway.git commit=58b027d… (published, not independently rebuilt)
-SKIP  id-5         private-key custody and subject per policy [9.1(5)] — custody policy not implemented in this CLI yet; subject: null (no policy constraints applied)
+SKIP  id-5         private-key custody and subject per policy [9.1(5)] — no custody policy configured (--accept-dstack-kms-root-public-key with --accept-subject or --accept-image-digest); subject: null (no policy constraints applied)
 PASS  id-6         the channel actually used is bound to the attested keyset (TLS SPKI or E2EE key) [9.1(6)] — observed SPKI 6ff3…9d21 for https://api.redpill.ai is an attested entry clients pin
 
-VERIFIED (5 pass, 1 skipped: custody policy not implemented)
+VERIFIED (5 pass, 1 skipped: no custody policy configured)
 ```
 
 Each line is the status marker, the check id, its title and spec citation,
 then a `—` detail. Statuses are `pass`, `fail`, `skip`, or `info`. A skip is
 never counted as a pass: the verdict line names each skip and its reason.
-Here id-5 is a `skip` — this CLI has no custody policy, so it does not claim
-to have checked private-key custody. The exit code is `0` only on `VERIFIED`.
+Here id-5 is a `skip` — no custody policy was given, so the CLI does not claim
+to have checked private-key custody. Give one with
+`--accept-dstack-kms-root-public-key` and `--accept-subject app-id:0x…` (or
+`--accept-image-digest`) to have id-5 verify the dstack KMS signature chain
+for the receipt key and the measured app-id. The exit code is `0` only on `VERIFIED`.
 
 `--nonce` supplies your own nonce; `--json` emits the transcript as
 structured data.

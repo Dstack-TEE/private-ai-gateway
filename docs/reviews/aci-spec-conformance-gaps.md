@@ -7,11 +7,15 @@ item.
 
 ## Verifier coverage
 
-1. **The `pap` CLI has no custody policy.** §9.1(5) requires the verifier
-   policy to check private-key custody (for this deployment, the dstack KMS
-   signature chain in `attestation.evidence.key_custody`). The independent
-   Private AI Proxy client does not implement that policy, so `pap verify`
-   reports id-5 as an honest `skip`, never a pass.
+1. **The `pap` CLI has no default custody policy.** §9.1(5) requires the
+   verifier policy to check private-key custody (for this deployment, the
+   dstack KMS signature chain in `attestation.evidence.key_custody`). `pap`
+   runs Gateway's custody check (the shared `aci-verifier` crate) only when
+   given a policy — `--accept-dstack-kms-root-public-key` with
+   `--accept-subject` or `--accept-image-digest` — and ships no default trust
+   anchors, so without flags `pap verify` reports id-5 as an honest `skip`,
+   never a pass. Managed profiles in the desktop app carry no custody policy
+   yet.
    The top-line verdict and exit code do not distinguish a skip from a pass:
    a run can end `VERIFIED` (exit 0) with custody unevaluated. The skip and
    its reason are always printed in the transcript and counted in the

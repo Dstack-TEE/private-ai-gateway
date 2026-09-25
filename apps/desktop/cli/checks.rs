@@ -22,8 +22,8 @@ use crate::aci::keys::verify_receipt_signature;
 use crate::aci::receipt::{receipt_signing_input, ChannelBinding};
 use crate::aci::types::{AttestationReport, WorkloadKeyset};
 use crate::aci::verifier::{
-    appraise_report, dstack_rtmr3_event, AppraisalInputs, CheckId, CheckResult, CustodyEvidence,
-    DstackEventLog, Outcome,
+    appraise_report, dstack_rtmr3_event, AciServiceVerifierPolicy, AppraisalInputs, CheckId,
+    CheckResult, CustodyEvidence, DstackEventLog, Outcome,
 };
 pub use crate::aci::verifier::{ChannelEvidence, QuoteSource};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -59,15 +59,23 @@ pub struct ReportCheckContext<'a> {
     pub expiry_skipped: bool,
     pub quote: QuoteSource<'a>,
     pub channel: ChannelEvidence<'a>,
-    /// Verifier policy (§1.3): compose hashes this caller accepts. Empty
-    /// means the measurement is verified and reported, not pinned — the
-    /// operator appraises the provenance themselves.
-    pub accepted_composes: &'a [String],
+    pub policy: &'a VerifierPolicy,
     /// Verifier policy (§1.3): appraise the RTMR3 `os-image-hash` against the
     /// reviewed production allowlist. A separate dstack verifier must first
     /// bind that hash to MRTD/RTMR0-2 for the same evidence.
     pub require_production_os: bool,
     pub explain: bool,
+}
+
+/// The verifier policy (§1.3) a report is appraised under.
+#[derive(Clone, Debug, Default)]
+pub struct VerifierPolicy {
+    /// Compose hashes this caller accepts. Empty means the measurement is
+    /// verified and reported, not pinned — the operator appraises the
+    /// provenance themselves.
+    pub accepted_composes: Vec<String>,
+    /// The §9.1(5) custody policy. Without one, id-5 is an honest skip.
+    pub custody: Option<AciServiceVerifierPolicy>,
 }
 
 /// The workload identity a verified report establishes (§9.1): the keyset
@@ -141,12 +149,13 @@ pub async fn run_report_checks(
         now_secs: cx.now_secs,
         expiry_waived: cx.expiry_skipped,
         quote: cx.quote,
-        accepted_composes: cx.accepted_composes,
-        // §9.1(5) needs a custody policy this CLI does not implement yet
-        // (docs/reviews/aci-spec-conformance-gaps.md item 1).
-        custody: CustodyEvidence::Unimplemented {
-            reason: "custody policy not implemented in this CLI yet \
-                     (no client policy is configured)",
+        accepted_composes: &cx.policy.accepted_composes,
+        custody: match &cx.policy.custody {
+            Some(policy) => CustodyEvidence::DstackKms { policy },
+            None => CustodyEvidence::NotConfigured {
+                reason: "no custody policy configured (--accept-dstack-kms-root-public-key \
+                         with --accept-subject or --accept-image-digest)",
+            },
         },
         channel: cx.channel,
         explain: cx.explain,
@@ -893,6 +902,11 @@ mod tests {
     };
     use crate::transcript::Status;
 
+    static NO_POLICY: VerifierPolicy = VerifierPolicy {
+        accepted_composes: Vec::new(),
+        custody: None,
+    };
+
     fn offline_cx<'a>(nonce: Option<&'a str>, now_secs: u64) -> ReportCheckContext<'a> {
         ReportCheckContext {
             nonce,
@@ -901,7 +915,7 @@ mod tests {
             quote: QuoteSource::Offline {
                 reason: "quote collateral offline",
             },
-            accepted_composes: &[],
+            policy: &NO_POLICY,
             require_production_os: false,
             channel: ChannelEvidence::Unobservable {
                 reason: "offline audit: no live TLS channel observed",
