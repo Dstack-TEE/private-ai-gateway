@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
-import { artifactName, desktopPackages, desktopTargets, manifestTargets } from "./release-artifacts.mjs";
+import { artifactName, desktopPackages, desktopTargets, manifestTargets, releaseAssetNames } from "./release-artifacts.mjs";
 import { updateFeeds } from "./update-feeds.mjs";
 
 test("releases write latest.json to every channel feed and legacy per-platform files to their own", () => {
@@ -26,13 +26,15 @@ test("releases write latest.json to every channel feed and legacy per-platform f
 });
 
 for (const [channel, version] of [["stable", "0.1.2"], ["beta", "0.1.2-beta.10"]]) {
-  test(`${channel} manifests point at the signed packages and reject incomplete releases`, async () => {
+  test(`${channel} manifests point at the signed packages and the release holds exactly its assets`, async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "pap-update-manifest-"));
     const run = () => promisify(execFile)(process.execPath, ["scripts/create-update-manifest.mjs", directory, version, "Dstack-TEE/private-ai-gateway", channel]);
     try {
+      const assets = releaseAssetNames(version).filter((name) => name !== "latest.json");
+      assert.equal(assets.length + 1, 25);
+      for (const file of assets) await writeFile(path.join(directory, file), "fixture");
       for (const specification of desktopPackages) {
         const file = artifactName({ version, ...specification });
-        await writeFile(path.join(directory, file), "fixture");
         await writeFile(path.join(directory, `${file}.sig`), `${file}-signature\n`);
       }
       await run();
@@ -42,6 +44,10 @@ for (const [channel, version] of [["stable", "0.1.2"], ["beta", "0.1.2-beta.10"]
       assert.deepEqual(Object.keys(manifest.platforms).sort(), [...desktopTargets].sort());
       assert.equal(manifest.platforms["windows-aarch64"].url, `https://github.com/Dstack-TEE/private-ai-gateway/releases/download/desktop-v${version}/private-ai-proxy-${version}-windows-arm64.exe`);
       assert.equal(manifest.platforms["darwin-x86_64"].signature, `private-ai-proxy-${version}-macos-x64.app.tar.gz-signature`);
+      // An App Store package must never be published with the Direct release.
+      await writeFile(path.join(directory, `private-ai-proxy-${version}-mac-app-store.pkg`), "fixture");
+      await assert.rejects(run, /Unexpected: private-ai-proxy-.*-mac-app-store\.pkg/);
+      await rm(path.join(directory, `private-ai-proxy-${version}-mac-app-store.pkg`));
       await rm(path.join(directory, `private-ai-proxy-${version}-linux-x64.rpm.sig`));
       await assert.rejects(run);
     } finally {

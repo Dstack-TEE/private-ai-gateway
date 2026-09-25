@@ -867,7 +867,7 @@ jobs:
       - name: Upload desktop package
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: private-ai-proxy-${{ matrix.platform }}
+          name: desktop-package-${{ matrix.platform }}
           if-no-files-found: error
           retention-days: 14
           path: apps/desktop/release/private-ai-proxy-*
@@ -913,7 +913,8 @@ jobs:
           node-version: 24
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
-          pattern: private-ai-proxy-*
+          # Only the Direct package jobs' artifacts; the App Store pkg stays private.
+          pattern: desktop-package-*
           path: release
           merge-multiple: true
       - name: Install release tooling
@@ -921,6 +922,8 @@ jobs:
         run: npm ci --ignore-scripts
       # Tauri signatures ship inside latest.json. SHA256SUMS covers every
       # published file, as GoReleaser's checksum file does.
+      # create-update-manifest also fails unless the directory holds exactly
+      # the 25 release assets.
       - name: Create the update manifest and checksums
         run: |
           set -euo pipefail
