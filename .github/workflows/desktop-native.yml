@@ -169,10 +169,19 @@ jobs:
         id: rust
         with:
           toolchain: stable
+          components: clippy
       - *restore-rust-cache
       - name: Test desktop libraries
         working-directory: apps/desktop
         run: cargo test --locked --package private-ai-proxy-core --package private-ai-proxy-runtime --package private-ai-proxy-agent-bridge --lib
+      # The CLI and the desktop shell have Windows-only code too. Checking the
+      # shell needs no staged sidecars: TAURI_CONFIG merges an empty
+      # externalBin, which only bundling uses.
+      - name: Lint the CLI and the desktop shell
+        working-directory: apps/desktop
+        env:
+          TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
+        run: cargo clippy --locked --all-targets --package private-ai-proxy --package private-ai-proxy-desktop -- -D warnings
       - *save-rust-cache
 
   version:
