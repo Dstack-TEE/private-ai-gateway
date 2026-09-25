@@ -119,6 +119,15 @@ impl Default for Client {
     }
 }
 
+/// What [`Client::watch_connection`] reports.
+pub enum Watched {
+    /// The backend's state, and after that each change.
+    State(Box<AppState>),
+    /// Every event stream of the backend is taken; the watch retries until
+    /// another client closes one.
+    Busy,
+}
+
 impl Client {
     pub fn new() -> Self {
         let (states, _) = watch::channel(AppState::default());
@@ -277,11 +286,13 @@ impl Client {
             if weak.strong_count() == 0 {
                 break;
             }
-            let result = Self::watch_connection(|state| {
+            let result = Self::watch_connection(|watched| {
                 let Some(client) = weak.upgrade() else {
                     return false;
                 };
-                client.states.send_replace(state);
+                if let Watched::State(state) = watched {
+                    client.states.send_replace(*state);
+                }
                 true
             });
             let Some(client) = weak.upgrade() else {
@@ -321,7 +332,7 @@ impl Client {
 
     /// Streams the backend's state from `GET /api/events` until `receive`
     /// returns `false`; each state names the backend instance it came from.
-    pub fn watch_connection(mut receive: impl FnMut(AppState) -> bool) -> Result<(), String> {
+    pub fn watch_connection(mut receive: impl FnMut(Watched) -> bool) -> Result<(), String> {
         #[derive(Deserialize)]
         struct Event {
             event: String,
@@ -339,9 +350,10 @@ impl Client {
                 )
                 .await
                 .map_err(connection_error)?;
-                // Busy: every event stream of the backend is taken; one frees
-                // when another client closes its stream.
                 if response.status() == StatusCode::SERVICE_UNAVAILABLE {
+                    if !receive(Watched::Busy) {
+                        return Ok(());
+                    }
                     tokio::time::sleep(EVENTS_BUSY_RETRY).await;
                     continue;
                 }
@@ -374,7 +386,7 @@ impl Client {
                 });
                 for mut state in states {
                     state.backend_instance = Some(instance.clone());
-                    if !receive(state) {
+                    if !receive(Watched::State(Box::new(state))) {
                         return Ok(());
                     }
                 }

@@ -62,11 +62,11 @@ App Store builds stop anyway. A signal (SIGTERM or SIGINT, as systemd, launchd
 and `kill` send) always stops the backend, since a service manager would kill it
 next; a restore that failed is logged and retried when the backend next starts.
 A signal during a `service stop` waits for it, and stops the backend itself only
-if that stop was refused. On Windows, signing out or shutting down ends the windowless backend without
-this sequence; the next start restores what it left. Shutdown is bounded:
-running commands get 10 seconds, then open connections and leftover background
-tasks 5 seconds each, and the process exits at the latest 30 seconds after the
-shutdown began.
+if that stop was refused. On Windows, signing out or shutting down ends the
+windowless backend without this sequence; the next start restores what it left.
+Shutdown is bounded: running commands get 10 seconds, then open connections and
+leftover background tasks 5 seconds each, and the process exits at the latest 30
+seconds after the shutdown began.
 
 Clients reach the backend through a socket in a per-user directory that does not
 depend on how the session was started: `XDG_RUNTIME_DIR`, else `/run/user/$UID`,

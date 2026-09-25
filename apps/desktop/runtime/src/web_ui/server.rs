@@ -360,10 +360,11 @@ async fn session(
     jar: CookieJar,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let Some(request) = body
-        .ok()
-        .and_then(|body| serde_json::from_slice::<SessionRequest>(&body).ok())
-    else {
+    let body = match body {
+        Ok(body) => body,
+        Err(rejection) => return api::unreadable_body(rejection),
+    };
+    let Ok(request) = serde_json::from_slice::<SessionRequest>(&body) else {
         return api::error(protocol::Error::invalid_request());
     };
     let auth = gate.auth.clone();

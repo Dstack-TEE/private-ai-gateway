@@ -6,7 +6,7 @@ use std::{
 
 use clap::{CommandFactory, FromArgMatches};
 use desktop_core::{
-    client::{CallError, Client},
+    client::{CallError, Client, Watched},
     config::{Appearance, UpdateChannel},
     contracts::*,
     protocol::{export_path, rpc, NotificationKind, Preference},
@@ -49,7 +49,17 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), CallError> {
         Action::Status { watch: true } => {
             let mut previous = None;
             let mut output_error = None;
-            let watched = Client::watch_connection(|state| {
+            let mut waiting = false;
+            let watched = Client::watch_connection(|watched| {
+                let state = match watched {
+                    Watched::State(state) => *state,
+                    Watched::Busy => {
+                        if !std::mem::replace(&mut waiting, true) {
+                            eprintln!("private-ai-proxy: every event stream of the backend is in use; waiting for one to close");
+                        }
+                        return true;
+                    }
+                };
                 let text = match render_output(&state, cli) {
                     Ok(text) => text,
                     Err(error) => {
