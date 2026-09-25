@@ -12,8 +12,9 @@ async function readWorkflow(name) {
 }
 
 test("release-please tags start one same-revision release graph", async () => {
-  const [releasePlease, direct, appStore, updateFeed, npm] = await Promise.all([
+  const [releasePlease, release, direct, appStore, updateFeed, npm] = await Promise.all([
     readWorkflow("desktop-release-please.yml"),
+    readWorkflow("desktop-release.yml"),
     readWorkflow("desktop-native.yml"),
     readWorkflow("desktop-mac-app-store.yml"),
     readWorkflow("desktop-update-feed.yml"),
@@ -23,13 +24,16 @@ test("release-please tags start one same-revision release graph", async () => {
   const releasePleaseStep = releasePlease.jobs["release-please"].steps.at(-1);
   assert.equal(releasePleaseStep.with["config-file"], "apps/desktop/release-please-config.json");
   assert.equal(releasePleaseStep.with["manifest-file"], "apps/desktop/.release-please-manifest.json");
-  assert.deepEqual(direct.on.push.tags, ["desktop-v*"]);
-  assert.equal(direct.on.workflow_call, undefined);
+  // Only release tags start Desktop release, so its run number counts releases.
+  assert.deepEqual(Object.keys(release.on), ["push"]);
+  assert.deepEqual(release.on.push, { tags: ["desktop-v*"] });
+  assert.equal(release.jobs.release.uses, "./.github/workflows/desktop-native.yml");
+  assert.equal(direct.on.push.tags, undefined);
 
   assert.equal(direct.jobs["mac-app-store"].uses, "./.github/workflows/desktop-mac-app-store.yml");
   assert.equal(direct.jobs["mac-app-store"].if, "needs.select-platforms.outputs.channel == 'stable'");
-  assert.equal(direct.jobs["mac-app-store"].with.build_number, "${{ github.run_number }}");
-  assert.equal(direct.jobs["mac-app-store"].with.upload, true);
+  assert.equal(direct.jobs["mac-app-store"].with.build_number, "${{ needs.select-platforms.outputs.app_store_build_number }}");
+  assert.equal(appStore.on.workflow_dispatch?.inputs, undefined);
   assert.equal(appStore.on.workflow_call.inputs.build_number.type, "string");
   assert.deepEqual(direct.jobs.release.needs, ["select-platforms", "package", "mac-app-store"]);
   assert.equal(direct.jobs.release.permissions.contents, "write");

@@ -1,6 +1,8 @@
 name: Desktop Tauri
 
 on:
+  # Desktop release (desktop-release.yml) calls this workflow for release tags.
+  workflow_call:
   workflow_dispatch:
     inputs:
       release_platforms:
@@ -16,6 +18,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/desktop-native.yml'
+      - '.github/workflows/desktop-release.yml'
       - '.github/workflows/desktop-mac-app-store.yml'
       - '.github/workflows/desktop-update-feed.yml'
       - '.github/workflows/private-ai-proxy-npm.yml'
@@ -24,9 +27,6 @@ on:
   push:
     branches:
       - main
-    # release-please tags the merged release PR commit.
-    tags:
-      - 'desktop-v*'
     paths:
       - '.github/workflows/desktop-native.yml'
       - '.github/workflows/desktop-update-feed.yml'
@@ -198,12 +198,13 @@ jobs:
 
   select-platforms:
     name: Select release platforms
-    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/desktop-v') }}
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/desktop-v')) }}
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.platforms.outputs.matrix }}
       version: ${{ steps.platforms.outputs.version }}
       channel: ${{ steps.platforms.outputs.channel }}
+      app_store_build_number: ${{ steps.platforms.outputs.app_store_build_number }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -227,9 +228,10 @@ jobs:
           set -euo pipefail
           version="$(node --input-type=module -e 'import { appVersion } from "./scripts/release-channel.mjs"; process.stdout.write(appVersion())')"
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
-          # Tags are releases: release-please creates them on main at the
-          # commit that sets their version.
-          if [[ "$GITHUB_REF" == refs/tags/desktop-v* ]]; then
+          # Tag pushes (through desktop-release.yml) are releases: release-please
+          # creates them on main at the commit that sets their version. A
+          # manual run at a tag builds test packages.
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/tags/desktop-v* ]]; then
             if [[ "$GITHUB_REF_NAME" != "desktop-v$version" || "$PACKAGE_ONLY" == true || "$RELEASE_PLATFORMS" != all ]]; then
               echo "$GITHUB_REF_NAME must build every platform of the committed version $version" >&2
               exit 1
@@ -241,13 +243,18 @@ jobs:
             fi
             channel="$(node --input-type=module -e 'import { versionRelease } from "./scripts/release-channel.mjs"; process.stdout.write(versionRelease(process.argv[1]).channel)' "$version")"
             printf 'channel=%s\n' "$channel" >> "$GITHUB_OUTPUT"
+            # macOS build numbers must increase across every upload (TN2420).
+            # Desktop release runs once per release tag; like Xcode Cloud's
+            # next build number, its count starts above the hand-numbered
+            # builds 1-17. Re-runs keep the number.
+            printf 'app_store_build_number=%s\n' "$((GITHUB_RUN_NUMBER + 100))" >> "$GITHUB_OUTPUT"
           fi
           matrix="$(node scripts/select-release-platforms.mjs "$RELEASE_PLATFORMS")"
           node --input-type=module -e 'const value = JSON.parse(process.argv[1]); if (!Array.isArray(value.include) || value.include.length === 0) process.exit(1)' "$matrix"
           printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
 
-  # Stable releases upload the App Store build first. This workflow's run
-  # number increases with every run, as CFBundleVersion must.
+  # Stable releases also upload the App Store build, in parallel with the
+  # Direct packages; the release job publishes only after both succeed.
   mac-app-store:
     needs: select-platforms
     if: needs.select-platforms.outputs.channel == 'stable'
@@ -255,8 +262,7 @@ jobs:
       contents: read
     uses: ./.github/workflows/desktop-mac-app-store.yml
     with:
-      build_number: '${{ github.run_number }}'
-      upload: true
+      build_number: ${{ needs.select-platforms.outputs.app_store_build_number }}
     secrets: inherit
 
   package:

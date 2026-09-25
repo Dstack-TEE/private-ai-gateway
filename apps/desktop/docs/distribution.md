@@ -42,18 +42,32 @@ Merging the PR tags the merge commit `desktop-v<version>` and creates a draft
 GitHub release with that changelog section as its notes.
 
 - **Beta** is the default: versions go `x.y.z-beta.1`, `-beta.2`, and so on
-  (release-please `versioning: prerelease`).
+  (release-please `versioning: prerelease`). After a stable release, a `fix`
+  proposes `x.y.(z+1)-beta.1` and a `feat` proposes `x.(y+1).0-beta.1`. A
+  `feat` on a patch-level beta moves to the next minor version but keeps the
+  beta number: `0.2.1-beta.3` becomes `0.3.0-beta.3`. That is release-please's
+  prerelease strategy, not a skipped release.
 - **Stable**: merge a commit whose message has the footer
   `Release-As: x.y.z`. The next release PR then proposes `x.y.z`. Afterwards,
   betas continue from the next version.
 
-The tag runs `Desktop Tauri` (`desktop-native.yml`) at the tagged commit. The
-tag must match the committed version and be contained in `main`. The run
-verifies and builds all six targets. For a stable version it also calls
-`Desktop Mac App Store`, which signs, validates and uploads the App Store build.
-Its CFBundleVersion is this workflow's run number, which increases with every
-run as App Store Connect requires. Once every package (and the App Store upload)
-has succeeded, the run:
+The tag starts `Desktop release` (`desktop-release.yml`), which runs only for
+release tags and calls `Desktop Tauri` (`desktop-native.yml`) at the tagged
+commit. The tag must match the committed version and be contained in `main`.
+The run verifies and builds all six targets. For a stable version it also calls
+`Desktop Mac App Store` in parallel, which signs, validates and uploads the App
+Store build. Only stable versions reach the App Store.
+
+The App Store build's CFBundleVersion is `100 + <Desktop release run number>`.
+A Mac app's build number must increase with every upload, across versions, and
+is at most three integers and 18 characters
+([TN2420](https://developer.apple.com/library/archive/technotes/tn2420/_index.html)).
+The run number counts release tags only, and a re-run keeps it. The offset
+starts above the hand-numbered builds 1–17, as Xcode Cloud's
+[next build number](https://developer.apple.com/documentation/xcode/setting-the-next-build-number-for-xcode-cloud-builds)
+does for existing Mac apps.
+
+Once every package and the App Store upload have succeeded, the run:
 
 1. attaches the signed assets, `latest.json` and `SHA256SUMS` to the draft;
 2. publishes it (stable releases become Latest);
@@ -63,7 +77,7 @@ has succeeded, the run:
 
 A MAS failure therefore cannot leave a newly public Direct release. A later
 Direct failure can leave only an uploaded, unsubmitted App Store build. To
-recover, re-run the failed jobs of the tag's run. Windows Authenticode remains
+recover, re-run the failed jobs of the tag's `Desktop release` run. Windows Authenticode remains
 optional and does not block the release.
 
 ### Release GitHub App

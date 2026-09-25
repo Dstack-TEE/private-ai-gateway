@@ -1,0 +1,19 @@
+name: Desktop release
+
+# release-please pushes desktop-v<version> when its release PR merges. This
+# workflow runs only for those tags, so its run number counts releases and
+# numbers App Store builds (desktop-native.yml).
+on:
+  push:
+    tags:
+      - 'desktop-v*'
+
+permissions: {}
+
+jobs:
+  release:
+    permissions:
+      actions: write
+      contents: write
+    uses: ./.github/workflows/desktop-native.yml
+    secrets: inherit

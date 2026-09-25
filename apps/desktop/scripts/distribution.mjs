@@ -32,9 +32,11 @@ export function takeDistributionArgument(args) {
   return { distribution: distribution(selected), args: remaining };
 }
 
+// CFBundleVersion: up to three period-separated integers, at most 18
+// characters (Apple TN2420, "Numbering Conventions").
 export function validateAppStoreBuildNumber(value) {
-  if (typeof value !== "string" || !/^[1-9]\d{0,3}(?:\.\d{1,2}){0,2}$/.test(value)) {
-    throw new Error("App Store build number must follow CFBundleVersion: 1–9999, optionally followed by two components of 0–99");
+  if (typeof value !== "string" || value.length > 18 || !/^\d+(?:\.\d+){0,2}$/.test(value)) {
+    throw new Error("App Store build number must be one to three period-separated integers of at most 18 characters");
   }
   return value;
 }

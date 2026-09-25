@@ -1,17 +1,14 @@
 name: Desktop Mac App Store
 
 on:
+  # Stable release tags call this through desktop-native.yml to package and
+  # upload; every other trigger only verifies.
   workflow_call:
     inputs:
       build_number:
         description: Increasing CFBundleVersion
         required: true
         type: string
-      upload:
-        description: Upload the signed package to App Store Connect
-        required: false
-        default: false
-        type: boolean
   pull_request:
     paths:
       - '.github/workflows/desktop-mac-app-store.yml'
@@ -25,16 +22,6 @@ on:
       - 'apps/desktop/**'
       - 'crates/aci-protocol/**'
   workflow_dispatch:
-    inputs:
-      build_number:
-        description: 'Increasing CFBundleVersion (for example 123 or 123.1)'
-        required: true
-        type: string
-      upload:
-        description: 'Upload the signed package to App Store Connect'
-        required: true
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -119,7 +106,6 @@ jobs:
     environment: mac-app-store
     env:
       APPLE_APP_STORE_BUILD_NUMBER: ${{ inputs.build_number }}
-      UPLOAD_APP_STORE: ${{ inputs.upload }}
       APPLE_APPLICATION_IDENTITY: ${{ vars.MAC_APP_STORE_APPLICATION_IDENTITY }}
       APPLE_INSTALLER_IDENTITY: ${{ vars.MAC_APP_STORE_INSTALLER_IDENTITY }}
     steps:
@@ -151,7 +137,6 @@ jobs:
                       raise SystemExit(f"Empty Mac App Store payload: {name}")
           PYTHON
       - name: Validate App Store Connect upload settings
-        if: inputs.upload
         shell: bash
         env:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
@@ -212,8 +197,8 @@ jobs:
             const version = appVersion();
             releaseChannel(version, "stable");
             validateAppStoreBuildNumber(process.env.APPLE_APP_STORE_BUILD_NUMBER);
-            if (process.env.UPLOAD_APP_STORE === "true" && !["refs/tags/desktop-v" + version, "refs/heads/main"].includes(process.env.GITHUB_REF)) {
-              throw new Error("App Store uploads must run from main or the release tag");
+            if (process.env.GITHUB_REF !== "refs/tags/desktop-v" + version) {
+              throw new Error("App Store uploads run only from the release tag of the committed version");
             }
             appendFileSync(process.env.GITHUB_ENV, "APP_VERSION=" + version + "\n");
           '
@@ -281,7 +266,6 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - name: Prepare App Store Connect key
-        if: inputs.upload
         shell: bash
         env:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
@@ -296,7 +280,6 @@ jobs:
           printf '%s' "$APPLE_API_PRIVATE_KEY" > "$key_path"
           echo "APPLE_API_KEY_ROOT=$key_root" >> "$GITHUB_ENV"
       - name: Upload to App Store Connect
-        if: inputs.upload
         shell: bash
         env:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
