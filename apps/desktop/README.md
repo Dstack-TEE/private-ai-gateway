@@ -189,7 +189,8 @@ Product identity is committed where each consumer reads it:
   they differ from the config. The identifier names the data directory and
   credential namespace, so a mismatch would split user data.
 - `core/src/brand.rs` and `src/renderer/brand/brand.ts` also hold the byline and
-  service defaults; `brand.rs` has the support link.
+  the default service URL, and the same test checks that they match.
+  `brand.rs` has the support link.
 - `package.json` `bugs.email`: the support contact, used as the Linux package
   maintainer address.
 - Images: `src-tauri/icons/` (from `tauri icon`, plus the Icon Composer project
