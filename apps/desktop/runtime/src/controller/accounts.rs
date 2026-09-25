@@ -82,7 +82,7 @@ impl DesktopRuntime {
                 .await
             {
                 Ok(state) => AccountSaveResult::Complete {
-                    state: Box::new(state),
+                    state: Box::new(state.into()),
                 },
                 Err(error) => AccountSaveResult::Failed {
                     error: desktop_core::protocol::Error::from(error).message,

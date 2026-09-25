@@ -1,5 +1,6 @@
 import type { LucideIcon } from "lucide-react";
-import { toneTextClass, type Tone } from "../lib/tone";
+import { toneTextClass } from "../lib/tone";
+import type { Tone } from "../../shared/contracts";
 import { cn } from "../lib/utils";
 
 const toneClass: Record<Tone, string> = {

@@ -19,7 +19,7 @@ export function ProfileTransfer({ api, disabled, onBusy, onMessage }: {
         const backup = await api.selectProfileBackup();
         if (!backup) return;
         const names = backup.profiles.slice(0, 5).map((profile) => profile.name).join(", ");
-        if (!await confirm({ title: `Import ${backup.profiles.length} profile configurations?`, message: `${names}${backup.profiles.length > 5 ? ", ..." : ""}\nExisting profiles will not be overwritten. Imported profiles need credentials and verification before use.`, confirmLabel: "Import" })) return;
+        if (!await confirm({ title: `Import ${backup.profiles.length} profile configurations?`, message: `${names}${backup.profiles.length > 5 ? ", …" : ""}\nExisting profiles will not be overwritten. Imported profiles need credentials and verification before use.`, confirmLabel: "Import" })) return;
         const result = await api.importProfiles(backup);
         onMessage(`${result.imported} imported, ${result.skipped} duplicates skipped.`, false);
       } else if (await api.saveProfileExport()) {

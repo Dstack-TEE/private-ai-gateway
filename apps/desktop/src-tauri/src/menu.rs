@@ -11,7 +11,7 @@ use tauri::AppHandle;
 #[cfg(target_os = "macos")]
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     use desktop_core::{
-        brand::{ORGANIZATION_NAME, PRODUCT_NAME},
+        brand::{AboutLink, ORGANIZATION_NAME, PRODUCT_NAME},
         ui_api::NAVIGATE_EVENT,
     };
     use tauri::{
@@ -21,6 +21,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         },
         Emitter,
     };
+    use tauri_plugin_opener::OpenerExt;
 
     let about = AboutMetadata {
         name: Some(PRODUCT_NAME.to_string()),
@@ -101,9 +102,18 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             let _ = app.emit(NAVIGATE_EVENT, "settings");
         }
         "documentation" | "github" => {
-            // A failure shows in the window, which may be minimized.
-            crate::tray::show_window(app);
-            let _ = app.emit(NAVIGATE_EVENT, event.id().as_ref());
+            let link = if event.id().as_ref() == "github" {
+                AboutLink::Github
+            } else {
+                AboutLink::Documentation
+            };
+            if app.opener().open_url(link.url(), None::<&str>).is_err() {
+                crate::notifications::show_failure(
+                    app,
+                    "Could not open the link",
+                    "Your default browser did not open it.",
+                );
+            }
         }
         _ => {}
     });

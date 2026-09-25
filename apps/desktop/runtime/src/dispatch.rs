@@ -4,7 +4,10 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use desktop_core::protocol::{self, encode, rpc, Call, Command, ErrorCode, BUILD_VERSION};
+use desktop_core::{
+    contracts::{AppState, AppStateWire},
+    protocol::{self, encode, rpc, Call, Command, ErrorCode, BUILD_VERSION},
+};
 use serde_json::Value;
 
 use crate::controller::DesktopRuntime;
@@ -15,9 +18,9 @@ pub(crate) async fn dispatch(
     command: Command,
 ) -> Result<Value, protocol::Error> {
     match command {
-        Command::GetState {} => respond::<rpc::GetState, _>(runtime.state()),
-        Command::Start { config } => respond::<rpc::Start, _>(runtime.start(config)),
-        Command::Stop {} => respond::<rpc::Stop, _>(runtime.stop()),
+        Command::GetState {} => respond_state::<rpc::GetState, _>(runtime.state()),
+        Command::Start { config } => respond_state::<rpc::Start, _>(runtime.start(config)),
+        Command::Stop {} => respond_state::<rpc::Stop, _>(runtime.stop()),
         // Answered by `server::shutdown` under exclusive lifecycle admission.
         Command::Shutdown { .. } => {
             respond::<rpc::Shutdown, _>(Err("Shutdown requires lifecycle admission"))
@@ -26,7 +29,7 @@ pub(crate) async fn dispatch(
             profile,
             require_production_os,
             key,
-        } => respond::<rpc::Verify, _>(
+        } => respond_state::<rpc::Verify, _>(
             runtime
                 .verify_configuration(profile, require_production_os, key)
                 .await,
@@ -35,7 +38,7 @@ pub(crate) async fn dispatch(
             profile,
             require_production_os,
             key,
-        } => respond::<rpc::SaveConfiguration, _>(
+        } => respond_state::<rpc::SaveConfiguration, _>(
             runtime
                 .save_configuration(profile, require_production_os, key)
                 .await,
@@ -77,12 +80,14 @@ pub(crate) async fn dispatch(
             respond::<rpc::CancelAccountLogin, _>(runtime.cancel_account_login(id).await)
         }
         Command::ActivateProfile { profile_id } => {
-            respond::<rpc::ActivateProfile, _>(runtime.activate_profile(profile_id))
+            respond_state::<rpc::ActivateProfile, _>(runtime.activate_profile(profile_id))
         }
         Command::DeleteProfile { profile_id } => {
-            respond::<rpc::DeleteProfile, _>(runtime.delete_profile(profile_id).await)
+            respond_state::<rpc::DeleteProfile, _>(runtime.delete_profile(profile_id).await)
         }
-        Command::ClearApiKey {} => respond::<rpc::ClearApiKey, _>(runtime.clear_api_key().await),
+        Command::ClearApiKey {} => {
+            respond_state::<rpc::ClearApiKey, _>(runtime.clear_api_key().await)
+        }
         Command::ImportProfiles { backup } => {
             respond::<rpc::ImportProfiles, _>(runtime.import_profiles(backup))
         }
@@ -116,16 +121,16 @@ pub(crate) async fn dispatch(
             respond::<rpc::RotateClientKey, _>(runtime.rotate_client_key())
         }
         Command::SaveLocalApiConfig { config } => {
-            respond::<rpc::SaveLocalApiConfig, _>(runtime.save_local_api_config(config).await)
+            respond_state::<rpc::SaveLocalApiConfig, _>(runtime.save_local_api_config(config).await)
         }
         Command::SaveWebUi { config } => {
-            respond::<rpc::SaveWebUi, _>(runtime.save_web_ui(config).await)
+            respond_state::<rpc::SaveWebUi, _>(runtime.save_web_ui(config).await)
         }
         Command::SetWebUiPassword { password } => {
-            respond::<rpc::SetWebUiPassword, _>(runtime.set_web_ui_password(password))
+            respond_state::<rpc::SetWebUiPassword, _>(runtime.set_web_ui_password(password))
         }
         Command::RefreshCatalog {} => {
-            respond::<rpc::RefreshCatalog, _>(runtime.refresh_catalog().await)
+            respond_state::<rpc::RefreshCatalog, _>(runtime.refresh_catalog().await)
         }
         Command::ListAgents {} => respond::<rpc::ListAgents, _>(runtime.list_agents()),
         Command::PreviewAgent {
@@ -141,17 +146,32 @@ pub(crate) async fn dispatch(
         } => {
             respond::<rpc::ApplyAgent, _>(runtime.apply_agent(agent_id, connect, revision, options))
         }
+        Command::SetRequireProductionOs { required } => {
+            respond_state::<rpc::SetRequireProductionOs, _>(
+                runtime.set_require_production_os(required),
+            )
+        }
+        Command::SetAgentConnection { agent_id, connect } => {
+            respond::<rpc::SetAgentConnection, _>(runtime.set_agent_connection(agent_id, connect))
+        }
         Command::DisconnectAllAgents {} => {
             respond::<rpc::DisconnectAllAgents, _>(runtime.disconnect_all_agents())
         }
         Command::ResetSettings {} => {
-            respond::<rpc::ResetSettings, _>(runtime.reset_settings().await)
+            respond_state::<rpc::ResetSettings, _>(runtime.reset_settings().await)
         }
         Command::Settings {} => respond::<rpc::Settings, _>(runtime.settings()),
         Command::SetPreference { change } => {
             respond::<rpc::SetPreference, _>(runtime.set_preference(change))
         }
     }
+}
+
+/// A command that answers a state answers it with the protection it presents.
+fn respond_state<C: Call<Response = AppStateWire>, E: Into<crate::Error>>(
+    result: Result<AppState, E>,
+) -> Result<Value, protocol::Error> {
+    respond::<C, E>(result.map(AppStateWire::from))
 }
 
 fn respond<C: Call, E: Into<crate::Error>>(

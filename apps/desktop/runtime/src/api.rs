@@ -272,10 +272,7 @@ async fn events<B: Backend>(
     let mut projection = StateEventProjection::new(&initial);
     let mut receiver = api.host.events.subscribe();
     let mut snapshot = vec![
-        Event::new(
-            ui_api::STATE_EVENT,
-            serde_json::to_value(&initial).unwrap_or(Value::Null),
-        ),
+        ui_api::state_event(&initial),
         Event::new(
             ui_api::CLIENT_KEY_CHANGED_EVENT,
             json!(initial.client_key_available.unwrap_or(true)),
@@ -345,6 +342,7 @@ fn sse(event: &Event) -> SseEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use desktop_core::contracts::VerificationStatus;
     use futures_util::StreamExt;
     use std::sync::Mutex;
     use tower::ServiceExt;
@@ -433,7 +431,7 @@ mod tests {
         let (router, recorder, _) = local();
         let (status, body) = call(&router, "POST", "/api/rpc/get_state", "").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["result"]["status"], AppState::default().status);
+        assert_eq!(body["result"]["status"], "stopped");
         // The owner may run every command, including ones browsers cannot.
         let (status, body) = call(
             &router,
@@ -544,8 +542,8 @@ mod tests {
             .unwrap();
         let event: Value = serde_json::from_str(&first["data: ".len()..]).unwrap();
         assert_eq!(event["event"], ui_api::STATE_EVENT);
-        states.send_modify(|state| state.status = "running".into());
-        while !received.contains(r#""status":"running""#) {
+        states.send_modify(|state| state.status = VerificationStatus::Verifying);
+        while !received.contains(r#""status":"verifying""#) {
             let chunk = tokio::time::timeout(Duration::from_secs(5), body.next())
                 .await
                 .unwrap()

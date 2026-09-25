@@ -844,6 +844,12 @@ fn two_cli_clients_share_state_and_disconnect_does_not_stop_service() {
         .unwrap()
         .contains("revision_conflict"));
     assert_eq!(first["gateway"]["status"], "stopped");
+    // Every state output carries the protection it presents, as the API sends it.
+    assert_eq!(first["gateway"]["protection"]["phase"], "profileRequired");
+    assert_eq!(
+        backend.run(&["stop"])["protection"],
+        first["gateway"]["protection"]
+    );
     let second = backend.run(&["service", "start"]);
     assert_eq!(first["backend"]["instanceId"], second["instanceId"]);
     backend.run(&["settings", "set", "appearance", "dark", "--yes"]);

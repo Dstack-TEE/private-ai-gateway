@@ -5,6 +5,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::contracts::ServiceProvider;
 
+/// Where account avatars load from: the `img-src` sources the desktop CSP
+/// (`src-tauri/tauri.conf.json`) and the web UI's CSP allow besides `'self'`.
+pub const IMAGE_SOURCES: [&str; 3] = [
+    "https://img.clerk.com",
+    "https://images.clerk.dev",
+    "https://clerk.redpill.ai",
+];
+
 #[derive(Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct LoginPresentation {
@@ -55,4 +63,30 @@ fn validated_scope_slug(slug: Option<&str>) -> Result<&str, String> {
             })
     })
     .ok_or("Refresh account details or reconnect the account to open billing.".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_desktop_csp_allows_exactly_the_account_image_sources() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../../src-tauri/tauri.conf.json"))
+                .expect("tauri.conf.json is valid JSON");
+        let expected: Vec<&str> = std::iter::once("'self'").chain(IMAGE_SOURCES).collect();
+        for key in ["csp", "devCsp"] {
+            let policy = config["app"]["security"][key]
+                .as_str()
+                .expect("a CSP string");
+            let sources: Vec<&str> = policy
+                .split(';')
+                .map(str::trim)
+                .find_map(|directive| directive.strip_prefix("img-src "))
+                .expect("an img-src directive")
+                .split_whitespace()
+                .collect();
+            assert_eq!(sources, expected, "{key}");
+        }
+    }
 }

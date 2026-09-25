@@ -1,5 +1,9 @@
 mod permission;
-use desktop_core::{client::CallError, config::NotificationPreferences, contracts::AppState};
+use desktop_core::{
+    client::CallError,
+    config::NotificationPreferences,
+    contracts::{AppState, VerificationStatus},
+};
 use std::{
     sync::Mutex,
     time::{Duration, Instant},
@@ -68,6 +72,14 @@ fn system_notification_settings() -> Option<&'static str> {
     }
 }
 
+/// Reports an action the tray or the menu bar started, which has no window
+/// to show its failure in.
+pub fn show_failure(app: &AppHandle, title: &str, error: &str) {
+    if let Err(notification) = app.notification().builder().title(title).body(error).show() {
+        tracing::warn!("{title}: {error}; the notification failed too: {notification}");
+    }
+}
+
 pub struct Observer {
     faults: [bool; 2],
     session: Option<String>,
@@ -93,7 +105,10 @@ impl Observer {
     ) -> Vec<(&'static str, &'static str)> {
         let faults = [
             !state.reconnecting
-                && (matches!(state.status.as_str(), "blocked" | "error") || state.error.is_some()),
+                && (matches!(
+                    state.status,
+                    VerificationStatus::Blocked | VerificationStatus::Error
+                ) || state.error.is_some()),
             state.endpoint_error.is_some(),
         ];
         let proof = if self.session == state.session_id {
@@ -160,7 +175,7 @@ mod tests {
             gateway: false,
             ..Default::default()
         };
-        state.status = "error".into();
+        state.status = VerificationStatus::Error;
         assert!(observer.next(&state, true, config, now).is_empty());
         state.endpoint_error = Some("private detail".into());
         assert_eq!(observer.next(&state, true, config, now).len(), 1);

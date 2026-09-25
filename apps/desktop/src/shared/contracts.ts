@@ -7,10 +7,8 @@ import type {
   AccountBalanceTarget,
   AccountLoginDetails,
   AgentAccessStatus,
-  AgentPreview,
   AgentStatus,
   CliRegistration,
-  ConnectOptions,
   AppState,
   ImportResult,
   LaunchPreferences,
@@ -41,7 +39,7 @@ export interface NotificationConfiguration {
 }
 
 /** What a tray or menu item asks the main window to show or open. */
-export type NavigationTarget = "settings" | "agents" | "profiles" | "profile-setup" | "documentation" | "github";
+export type NavigationTarget = "settings" | "agents" | "profiles" | "profile-setup";
 
 export interface DesktopApi {
   startBackendService(): Promise<AppState>;
@@ -86,12 +84,13 @@ export interface DesktopApi {
   onNavigate(listener: (target: NavigationTarget) => void): () => void;
   onAgentsChange(listener: () => void): () => void;
   onClientKeyChange(listener: (available: boolean) => void): () => void;
-  mainWindowReady(): Promise<void>;
   /** Open a documented, allowlisted project resource in the system browser. */
   openAboutLink(target: AboutLink): Promise<void>;
   openAgentWebsite(agentId: string): Promise<void>;
   openApiKeyPage(provider: ServiceProvider): Promise<void>;
   start(config: StartConfig): Promise<AppState>;
+  /** Stops protection and saves the OS policy the next start uses. */
+  setRequireProductionOs(required: boolean): Promise<AppState>;
   saveConfiguration(profile: ConfidentialProfileInput, requireProductionOs: boolean, key?: string): Promise<AppState>;
   completeAccountLogin(id: string, callbackUrl: string): Promise<void>;
   beginAccountLogin(profile: ConfidentialProfileInput): Promise<LoginPresentation>;
@@ -110,11 +109,5 @@ export interface DesktopApi {
   listAgents(): Promise<AgentStatus[]>;
   getAgentAccess(): Promise<AgentAccessStatus>;
   requestAgentAccess(): Promise<AgentAccessStatus>;
-  previewAgent(agentId: string, connect: boolean, options: ConnectOptions): Promise<AgentPreview>;
-  applyAgent(
-    agentId: string,
-    connect: boolean,
-    revision: string,
-    options: ConnectOptions,
-  ): Promise<AgentStatus>;
+  setAgentConnection(agentId: string, connect: boolean): Promise<AgentStatus>;
 }

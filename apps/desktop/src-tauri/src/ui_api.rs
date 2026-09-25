@@ -5,7 +5,7 @@ use desktop_core::agent_access::AgentAccessStatus;
 use desktop_core::{
     client::{CallError, Client},
     config::{Appearance, NotificationPreferences},
-    contracts::{AgentStatus, AppState},
+    contracts::AppStateWire,
     protocol::rpc,
     ui_api::{self as shared, Backend, Event, Host, Method},
 };
@@ -75,10 +75,6 @@ impl Host for TauriHost {
         }
     }
 
-    fn sync_agents(&self, agents: &[AgentStatus]) {
-        tray::sync_agents(self.app(), agents);
-    }
-
     async fn notification_configuration(
         &self,
         preferences: NotificationPreferences,
@@ -93,7 +89,7 @@ impl Host for TauriHost {
         notifications::set_cached_preferences(self.app(), preferences)
     }
 
-    async fn reset_settings(&self, backend: &impl Backend) -> Result<AppState, CallError> {
+    async fn reset_settings(&self, backend: &impl Backend) -> Result<AppStateWire, CallError> {
         let prepared = self.app().state::<updates::PreparedUpdate>();
         let mut prepared = prepared
             .0

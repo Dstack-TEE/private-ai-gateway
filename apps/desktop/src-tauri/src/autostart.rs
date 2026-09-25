@@ -1,3 +1,9 @@
+//! Open at Login: `SMAppService` on macOS, the `auto-launch` crate elsewhere.
+//! tauri-plugin-autostart (2.5) wraps an older `auto-launch` that writes the
+//! Windows `Run` value and the Linux desktop entry `Exec` without quoting the
+//! executable path, so it would rewrite existing login items into ones that
+//! break for paths with spaces; this module writes the same entries quoted.
+
 #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
 const AUTOSTART_ARG: &str = "--autostart";
 

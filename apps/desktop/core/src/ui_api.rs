@@ -10,7 +10,7 @@ use crate::{
     client::{CallError, Client},
     config::{Appearance, Config, NotificationPreferences},
     contracts::{
-        AccountSaveResult, AgentStatus, AppState, ConfidentialProfileInput, ServiceProvider,
+        AccountSaveResult, AppState, AppStateWire, ConfidentialProfileInput, ServiceProvider,
     },
     protocol::{self, rpc, Call, Command, Preference},
 };
@@ -124,12 +124,17 @@ impl StateEventProjection {
                 json!(state.client_key_available.unwrap_or(true)),
             ));
         }
-        events.push(Event::new(
-            STATE_EVENT,
-            serde_json::to_value(state).unwrap_or(Value::Null),
-        ));
+        events.push(state_event(state));
         events
     }
+}
+
+/// The state event: the state with the protection it presents.
+pub fn state_event(state: &AppState) -> Event {
+    Event::new(
+        STATE_EVENT,
+        serde_json::to_value(AppStateWire::from(state.clone())).unwrap_or(Value::Null),
+    )
 }
 
 #[derive(Clone, Serialize, ts_rs::TS)]
@@ -207,8 +212,6 @@ pub trait Host: Clone + Send + Sync + 'static {
 
     fn present_account_login(&self, _url: &str) {}
 
-    fn sync_agents(&self, _agents: &[AgentStatus]) {}
-
     fn notification_configuration(
         &self,
         preferences: NotificationPreferences,
@@ -232,7 +235,7 @@ pub trait Host: Clone + Send + Sync + 'static {
     fn reset_settings(
         &self,
         backend: &impl Backend,
-    ) -> impl Future<Output = Result<AppState, CallError>> + Send {
+    ) -> impl Future<Output = Result<AppStateWire, CallError>> + Send {
         call(backend, rpc::ResetSettings)
     }
 
@@ -251,7 +254,7 @@ pub async fn invoke(
         Method::GetState => match backend.execute(Command::GetState {}).await {
             Ok(state) => Ok(state),
             Err(error) => match backend.disconnected_state() {
-                Some(cached) => Ok(value(cached)?),
+                Some(cached) => Ok(value(AppStateWire::from(cached))?),
                 None => Err(error),
             },
         },
@@ -260,11 +263,6 @@ pub async fn invoke(
             let login = call(backend, rpc::BeginAccountLogin { profile }).await?;
             host.present_account_login(&login.url);
             Ok(value(login)?)
-        }
-        Method::ListAgents => {
-            let agents = call(backend, rpc::ListAgents).await?;
-            host.sync_agents(&agents);
-            Ok(value(agents)?)
         }
         method if method.is_command() => {
             backend
@@ -352,7 +350,7 @@ pub async fn invoke(
 async fn save_account_login(
     backend: &impl Backend,
     input: SaveLoginParams,
-) -> Result<AppState, CallError> {
+) -> Result<AppStateWire, CallError> {
     let operation_id = uuid::Uuid::new_v4().to_string();
     let result = |operation_id: String| rpc::AccountSaveResult { operation_id };
     let initial = call(

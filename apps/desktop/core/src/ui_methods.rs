@@ -15,6 +15,7 @@ macro_rules! renderer_methods {
                 get_state => GetState,
                 start => Start,
                 stop => Stop,
+                set_require_production_os => SetRequireProductionOs,
                 activate_profile => ActivateProfile,
                 delete_profile => DeleteProfile,
                 save_configuration => SaveConfiguration,
@@ -35,8 +36,7 @@ macro_rules! renderer_methods {
                 query_usage => QueryUsage,
                 get_usage_record => GetUsageRecord,
                 list_agents => ListAgents,
-                preview_agent => PreviewAgent,
-                apply_agent => ApplyAgent,
+                set_agent_connection => SetAgentConnection,
             }
             host {
                 start_backend_service => StartBackendService,

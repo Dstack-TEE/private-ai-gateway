@@ -32,6 +32,10 @@ export default defineConfig(({ mode }) => {
   } },
   build: {
     assetsInlineLimit: 0,
+    // Both builds load from a local source (the app bundle, or the backend's
+    // web UI listener), so the entry chunk is not split by route; the limit
+    // leaves room for it and still flags an unexpected dependency.
+    chunkSizeWarningLimit: 1_000,
     emptyOutDir: true,
     outDir: web ? "../../runtime/web-dist" : "../../dist",
   },

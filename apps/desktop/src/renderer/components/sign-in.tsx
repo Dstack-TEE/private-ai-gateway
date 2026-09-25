@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useState, type FormEvent } from "react";
+import { useId, useState, type FormEvent } from "react";
 import { useLocation, useRouter, useSearch } from "@tanstack/react-router";
 import { brand } from "../brand/brand";
 import { errorMessage } from "../lib/error-message";
@@ -17,14 +17,6 @@ export function SignInPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const errorId = useId();
-  // Saved appearance needs a session, so the sign-in page follows the system theme.
-  useLayoutEffect(() => {
-    const media = window.matchMedia("(prefers-color-scheme: dark)");
-    const apply = () => document.documentElement.classList.toggle("dark", media.matches);
-    apply();
-    media.addEventListener("change", apply);
-    return () => media.removeEventListener("change", apply);
-  }, []);
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setBusy(true);
@@ -58,7 +50,7 @@ export function SignInPage() {
               {error && <FieldError id={errorId}>{error}</FieldError>}
             </Field>
             <Button type="submit" disabled={busy || !password}>{busy ? "Signing In…" : "Sign In"}</Button>
-            <FieldDescription>Set the password in the desktop app under Settings › Web UI, or with pap settings set web-ui.password.</FieldDescription>
+            <FieldDescription>Set the password in the desktop app under Settings › Web UI, or with <code>pap settings set web-ui.password</code>.</FieldDescription>
           </FieldGroup>
         </form>
       </CardContent>

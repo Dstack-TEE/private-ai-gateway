@@ -34,12 +34,21 @@ pub(crate) async fn run_blocking<T: Send + 'static>(
         .map_err(|_| "The background operation could not complete. Please try again.")?
 }
 
-fn apply_appearance(app: &AppHandle, appearance: Appearance) {
-    app.set_theme(match appearance {
+/// The native theme of an appearance; `None` follows the system. The webview's
+/// `prefers-color-scheme` follows it: macOS WKWebView inherits the window's
+/// appearance, WebView2 takes it as its preferred color scheme, and WebKitGTK
+/// follows GTK's dark-theme preference, which does not always track the
+/// desktop's dark style (see "Appearance" in docs/configuration.md).
+fn native_theme(appearance: Appearance) -> Option<tauri::Theme> {
+    match appearance {
         Appearance::System => None,
         Appearance::Light => Some(tauri::Theme::Light),
         Appearance::Dark => Some(tauri::Theme::Dark),
-    });
+    }
+}
+
+fn apply_appearance(app: &AppHandle, appearance: Appearance) {
+    app.set_theme(native_theme(appearance));
 }
 
 async fn open_account_url(app: AppHandle, url: String) -> Result<(), String> {
@@ -59,21 +68,19 @@ async fn run_cli_command(
     let output = app
         .shell()
         .sidecar("private-ai-proxy")
-        .map_err(|_| "The bundled private-ai-proxy command is unavailable in this installation")?
+        .map_err(|_| "The bundled pap command is unavailable in this installation")?
         .args(arguments)
         .output()
         .await
-        .map_err(|_| "The private-ai-proxy command could not complete")?;
+        .map_err(|_| "The pap command could not complete")?;
     if !output.status.success() {
-        return Err(
-            "The private-ai-proxy command could not update command-line access".to_string(),
-        );
+        return Err("The pap command could not update command-line access".to_string());
     }
     if output.stdout.len() > 64 * 1024 {
-        return Err("The private-ai-proxy command returned an invalid response".to_string());
+        return Err("The pap command returned an invalid response".to_string());
     }
     serde_json::from_slice(&output.stdout)
-        .map_err(|_| "The private-ai-proxy command returned an invalid response".to_string())
+        .map_err(|_| "The pap command returned an invalid response".to_string())
 }
 
 /// The backend instance the shell last saw. A backend that (re)connected needs
@@ -115,7 +122,7 @@ fn allow_automatic_cli_registration() -> Result<(), String> {
         .map_err(|_| "Cannot locate the installed application".to_string())?;
     if transient_macos_app_path(&executable) {
         return Err(
-            "Move Private AI Proxy to a stable location before registering private-ai-proxy"
+            "Move Private AI Proxy to a stable location before installing the pap command"
                 .to_string(),
         );
     }
@@ -192,6 +199,8 @@ macro_rules! generate_handler {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     desktop_core::logging::init();
+    // desktop_core's update check (the pacman notice) uses reqwest's rustls
+    // without a built-in crypto provider.
     let _ = rustls::crypto::ring::default_provider().install_default();
     let app =
         tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
@@ -262,15 +271,27 @@ pub fn run() {
                 .iter()
                 .find(|window| window.label == "main")
                 .ok_or("Main window configuration is missing")?;
+            // Created hidden (`visible: false`) in the saved appearance, so
+            // the page paints in it from the start, and shown once the page
+            // has loaded. The settings file is read directly: the backend may
+            // still be starting, and it reapplies the appearance on connecting.
+            let appearance = desktop_core::config::load()
+                .map(|saved| saved.appearance)
+                .unwrap_or_default();
             let window = WebviewWindowBuilder::from_config(app, config)?
                 .initialization_script(distribution::initialization_script())
                 .on_page_load(|window, payload| {
                     if matches!(payload.event(), PageLoadEvent::Finished) {
-                        tray::main_window_ready(&window).ok();
+                        tray::main_window_ready(window.app_handle());
                     }
                 })
                 .build()?;
-            window.set_title(desktop_core::brand::PRODUCT_NAME)?;
+            // A new window follows the system, so only a saved light or dark
+            // appearance is set, before the page loads. (On Linux the window
+            // builder's theme does not apply; `set_theme` does everywhere.)
+            if let Some(theme) = native_theme(appearance) {
+                window.set_theme(Some(theme))?;
+            }
             let window_for_events = window.clone();
             let app_for_events = app.handle().clone();
             let client_for_events = client.clone();

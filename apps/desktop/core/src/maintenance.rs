@@ -150,14 +150,10 @@ pub fn json_content(data: &impl Serialize) -> Result<String, String> {
 
 /// An allowlist of typed fields; never serialize state, raw errors or stderr.
 pub fn diagnostics(state: &AppState, version: &str) -> serde_json::Value {
-    let status = match state.status.as_str() {
-        "verified" | "verifying" | "blocked" | "stopped" | "error" => state.status.as_str(),
-        _ => "unknown",
-    };
     serde_json::json!({
         "formatVersion": 1, "appVersion": version, "os": std::env::consts::OS, "architecture": std::env::consts::ARCH,
         "wakeMonitorAvailable": state.wake_monitor_available,
-        "gateway": { "status": status, "hasError": state.error.is_some(), "configurationVerification": state.configuration_verification, "productionOsRequired": state.config.require_production_os },
+        "gateway": { "status": state.status, "hasError": state.error.is_some(), "configurationVerification": state.configuration_verification, "productionOsRequired": state.config.require_production_os },
         "localApi": { "bound": state.proxy_url.is_some(), "hasError": state.endpoint_error.is_some(), "networkAccessAllowed": state.local_api.allow_network_access },
         "webUi": { "enabled": state.web_ui.enabled, "bound": state.web_ui.url.is_some(), "hasError": state.web_ui.error.is_some(), "networkAccessAllowed": state.web_ui.allow_network_access },
         "profiles": { "count": state.profiles.len(), "activeCredentialAvailable": state.api_key_saved },

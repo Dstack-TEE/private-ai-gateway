@@ -8,7 +8,6 @@ import {
   SETTINGS_RESET_EVENT,
   STATE_EVENT,
   type AgentAccessStatus,
-  type AgentPreview,
   type AgentStatus,
   type Appearance,
   type CliRegistration,
@@ -51,7 +50,6 @@ export interface UiPlatform {
   saveDiagnosticsExport(): Promise<boolean>;
   requestNotificationPermission(): Promise<Pick<NotificationConfiguration, "permission" | "alertsEnabled">>;
   openNotificationSettings(): Promise<void>;
-  mainWindowReady(): Promise<void>;
   openAboutLink: DesktopApi["openAboutLink"];
   openWebUi(): Promise<void>;
   openAgentWebsite(agentId: string): Promise<void>;
@@ -123,11 +121,11 @@ export function createDesktopApi(transport: UiTransport, platform: UiPlatform): 
     onNavigate: (listener) => subscribe(NAVIGATE_EVENT, listener),
     onAgentsChange: (listener) => subscribe(AGENTS_CHANGED_EVENT, listener),
     onClientKeyChange: (listener) => subscribe(CLIENT_KEY_CHANGED_EVENT, listener),
-    mainWindowReady: platform.mainWindowReady,
     openAboutLink: platform.openAboutLink,
     openAgentWebsite: platform.openAgentWebsite,
     openApiKeyPage: platform.openApiKeyPage,
     start: (config: StartConfig) => call<AppState>("start", { config }),
+    setRequireProductionOs: (required) => call<AppState>("set_require_production_os", { required }),
     saveConfiguration: (profile, requireProductionOs, key) => call("save_configuration", { profile, requireProductionOs, key }),
     completeAccountLogin: (id, callbackUrl) => call("complete_account_login", { id, callbackUrl }),
     beginAccountLogin: async (profile) => {
@@ -150,7 +148,6 @@ export function createDesktopApi(transport: UiTransport, platform: UiPlatform): 
     listAgents: (): Promise<AgentStatus[]> => call("list_agents"),
     getAgentAccess: (): Promise<AgentAccessStatus> => call("get_agent_access"),
     requestAgentAccess: (): Promise<AgentAccessStatus> => call("request_agent_access"),
-    previewAgent: (agentId, connect, options): Promise<AgentPreview> => call("preview_agent", { agentId, connect, options }),
-    applyAgent: (agentId, connect, revision, options): Promise<AgentStatus> => call("apply_agent", { agentId, connect, revision, options }),
+    setAgentConnection: (agentId, connect): Promise<AgentStatus> => call("set_agent_connection", { agentId, connect }),
   };
 }

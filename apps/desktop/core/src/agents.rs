@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Deserialize, Serialize, ts_rs::TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(optional_fields)]
 pub struct AgentStatus {
@@ -27,7 +27,7 @@ pub struct AgentStatus {
     pub repair_action: Option<AgentRepairAction>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, ts_rs::TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum AgentRepairAction {
     Reconnect,

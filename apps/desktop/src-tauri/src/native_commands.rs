@@ -42,7 +42,6 @@ macro_rules! native_commands {
             commands::accounts::open_organization,
             commands::desktop::copy_text,
             commands::desktop::show_edit_menu,
-            commands::desktop::main_window_ready,
             commands::desktop::open_agent_website,
             commands::desktop::open_api_key_page,
             commands::desktop::open_about_link,

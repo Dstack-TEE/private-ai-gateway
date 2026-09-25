@@ -3,7 +3,8 @@ import { Network } from "lucide-react";
 import { brand } from "../brand/brand";
 import { useAppearance } from "./appearance";
 import { macOS } from "../lib/environment";
-import { servicePreset } from "../lib/services";
+import { SERVICE_ICONS } from "../lib/services";
+import type { ServiceProvider } from "../../shared/contracts";
 
 export function BrandMark({ className = "", busy = false }: { className?: string; busy?: boolean }): React.JSX.Element {
   const selectedAppearance = useAppearance();
@@ -17,10 +18,10 @@ export function BrandMark({ className = "", busy = false }: { className?: string
   );
 }
 
-export function ServiceLogo({ url, size = "regular" }: { url: string; size?: "regular" | "large" }): React.JSX.Element {
-  const service = servicePreset(url);
-  if (!service) {
+export function ServiceLogo({ provider, size = "regular" }: { provider: ServiceProvider; size?: "regular" | "large" }): React.JSX.Element {
+  const icon = SERVICE_ICONS[provider];
+  if (!icon) {
     return <span className={`service-custom-icon w-6 h-6 flex-none grid place-items-center overflow-hidden rounded-md [&.service-logo-large]:w-7.5 [&.service-logo-large]:h-7.5 text-muted-foreground service-logo-${size}`}><Network size={size === "large" ? 16 : 14} /></span>;
   }
-  return <span className={`service-logo w-6 h-6 flex-none grid place-items-center overflow-hidden rounded-md [&_img]:w-full [&_img]:h-full [&_img]:object-contain service-${service.id} service-logo-${size}`}><img src={service.icon} alt="" /></span>;
+  return <span className={`service-logo w-6 h-6 flex-none grid place-items-center overflow-hidden rounded-md [&_img]:w-full [&_img]:h-full [&_img]:object-contain service-${provider} service-logo-${size}`}><img src={icon} alt="" /></span>;
 }

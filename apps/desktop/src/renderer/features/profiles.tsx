@@ -18,17 +18,14 @@ import { useConfirm } from "../components/confirm";
 import { DialogFooter } from "../components/ui/dialog";
 import { FormField } from "../components/settings";
 import { ChoiceSelect } from "../components/choice-select";
-import type { ConfidentialProfile, ConfidentialProfileInput, AppState, ServiceProvider } from "../../shared/contracts";
+import { DEFAULT_SERVICE_PROVIDER, SERVICE_PROVIDERS, type ConfidentialProfile, type ConfidentialProfileInput, type AppState, type ServiceProvider } from "../../shared/contracts";
 import { desktopApi, distributionCapabilities } from "../lib/environment";
 import { profileIsAvailable } from "../lib/protection";
 import { ServiceLogo } from "../components/brand";
 import { serviceHost } from "../lib/format";
-import { DEFAULT_SERVICE_PRESET, SERVICE_PROVIDER_OPTIONS, servicePreset, serviceProviderOption, serviceProviderPreset } from "../lib/services";
 
 export function ProfilesDialog({
   state,
-  busy,
-  running,
   repair,
   onActivate,
   onSave,
@@ -36,8 +33,6 @@ export function ProfilesDialog({
   onClose,
 }: {
   state: AppState;
-  busy: boolean;
-  running: boolean;
   /** Opens the active profile's editor on top, for protection that needs its credential. */
   repair: boolean;
   onActivate(profileId: string): Promise<string | undefined>;
@@ -50,6 +45,7 @@ export function ProfilesDialog({
   const [transferBusy, setTransferBusy] = useState(false);
   const [transferMessage, setTransferMessage] = useState<string>();
   const [error, setError] = useState<string>();
+  const busy = state.status === "verifying";
   const frozen = busy || transferBusy;
   const [workingProfileId, setWorkingProfileId] = useState<string>();
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
@@ -95,7 +91,7 @@ export function ProfilesDialog({
                 disabled={frozen || Boolean(workingProfileId)}
                 onClick={() => void select(profile.id)}
               >
-                <ServiceLogo url={profile.remoteUrl} size="large" />
+                <ServiceLogo provider={profile.provider} size="large" />
                 <span><strong>{profile.name}</strong><small>{serviceHost(profile.remoteUrl)} · {status}</small></span>
                 {working ? <LoaderCircle className="is-spinning animate-control-spin motion-reduce:animate-none" size={16} aria-hidden="true" /> : active ? <Check size={16} aria-hidden="true" /> : null}
               </ActionItem>
@@ -114,7 +110,7 @@ export function ProfilesDialog({
         <Button type="button" variant="outline" disabled={Boolean(workingProfileId) || transferBusy} onClick={onClose}>Done</Button>
       </DialogFooter>
       {editor && (!editor.profileId || editingProfile) && <ProfileEditorDialog
-        state={state} busy={busy} running={running} profile={editingProfile}
+        state={state} profile={editingProfile}
         onSave={onSave} onDelete={onDelete} onComplete={closeEditor} onDeleted={closeEditor} onClose={closeEditor}
       />}
     </AppDialog>
@@ -122,8 +118,8 @@ export function ProfilesDialog({
 }
 
 function connectionRequirement(profile: Pick<ConfidentialProfile, "provider">): string {
-  if (profile.provider === "custom") return "Add an API key";
-  return `Connect ${serviceProviderOption(profile.provider)?.name ?? "account"} or add an API key`;
+  const provider = SERVICE_PROVIDERS[profile.provider];
+  return provider.accountLogin ? `Connect ${provider.label} or add an API key` : "Add an API key";
 }
 
 /** A v4 UUID; `crypto.randomUUID` is missing outside secure contexts, such as a web UI on a LAN address. */
@@ -137,8 +133,6 @@ function randomUuid(): string {
 
 export function ProfileEditorDialog({
   state,
-  busy,
-  running,
   profile,
   startAfterSave = false,
   onSave,
@@ -148,8 +142,6 @@ export function ProfileEditorDialog({
   onClose,
 }: {
   state: AppState;
-  busy: boolean;
-  running: boolean;
   profile?: ConfidentialProfile;
   startAfterSave?: boolean;
   onSave(profile: ConfidentialProfileInput, key?: string): Promise<string | undefined>;
@@ -158,14 +150,20 @@ export function ProfileEditorDialog({
   onDeleted(): void;
   onClose(): void;
 }): React.JSX.Element {
+  const busy = state.status === "verifying";
+  // Saving or connecting an account restarts protection that is on.
+  const running = state.protection.action.operation === "stop";
   const frozen = busy;
   const isNew = !profile;
-  const [draft, setDraft] = useState<ConfidentialProfileInput>(() => ({
-    id: profile?.id ?? `profile-${randomUuid()}`,
-    name: profile?.name ?? DEFAULT_SERVICE_PRESET.name,
-    provider: profile?.provider ?? DEFAULT_SERVICE_PRESET.id,
-    remoteUrl: profile?.remoteUrl ?? DEFAULT_SERVICE_PRESET.url,
-  }));
+  const [draft, setDraft] = useState<ConfidentialProfileInput>(() => {
+    const provider = SERVICE_PROVIDERS[profile?.provider ?? DEFAULT_SERVICE_PROVIDER];
+    return {
+      id: profile?.id ?? `profile-${randomUuid()}`,
+      name: profile?.name ?? provider.label,
+      provider: provider.id,
+      remoteUrl: profile?.remoteUrl ?? provider.presetUrl ?? "",
+    };
+  });
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [saving, setSaving] = useState(false);
   const saveInFlight = useRef(false);
@@ -194,9 +192,8 @@ export function ProfileEditorDialog({
       await account.start(draft);
     } catch (error) { reportError(error); }
   };
-  const selectedPreset = serviceProviderPreset(draft.provider);
-  const selectedProviderName = serviceProviderOption(draft.provider)?.name;
-  const keyLabel = selectedPreset?.keyLabel ?? "API key";
+  const provider = SERVICE_PROVIDERS[draft.provider];
+  const keyLabel = provider.keyLabel;
   const draftUrl = draft.remoteUrl.trim().replace(/\/$/, "");
   const profileChanged = !profile
     || profile.provider !== draft.provider
@@ -205,7 +202,7 @@ export function ProfileEditorDialog({
     && profile.credentialSaved
     && !profileChanged
     && profile.auth.kind === (authMethod === "account" ? "oauth" : "apiKey");
-  const detailsEnabled = savedCredentialApplies && draft.provider === "redpill" && authMethod === "account" && Boolean(profile?.id);
+  const detailsEnabled = savedCredentialApplies && provider.workspaces && authMethod === "account" && Boolean(profile?.id);
   const { data: currentDetails, error: detailsError } = useQuery({
     queryKey: detailsEnabled ? ["account-details", profile?.id, profile?.credentialRef] : ["account-details", null],
     queryFn: () => desktopApi.getAccountDetails(profile?.id ?? ""), enabled: detailsEnabled, staleTime: 30_000,
@@ -216,7 +213,7 @@ export function ProfileEditorDialog({
   const workspaceId = selectedWorkspaceId ?? (authorized
     ? workspaces?.length === 1 ? workspaces[0]?.id : undefined
     : savedScope?.workspaceId ?? undefined);
-  const needsWorkspace = Boolean(authorized && draft.provider === "redpill" && workspaces?.length && workspaceId === undefined);
+  const needsWorkspace = Boolean(authorized && provider.workspaces && workspaces?.length && workspaceId === undefined);
 
   const savedAccount = currentDetails?.auth.kind === "oauth" ? {
     ...currentDetails.auth,
@@ -226,7 +223,7 @@ export function ProfileEditorDialog({
   const selectedAccount = authorized?.kind === "oauth" ? authorized
     : !account.busy && savedCredentialApplies ? savedAccount : undefined;
   const accountScope = selectedAccount?.scope;
-  const needsAccountLogin = draft.provider !== "custom" && authMethod === "account"
+  const needsAccountLogin = provider.accountLogin && authMethod === "account"
     && !authorized && (!savedCredentialApplies || profile?.auth.kind !== "oauth");
 
 
@@ -234,19 +231,17 @@ export function ProfileEditorDialog({
     if (!await account.cancel()) return;
     pendingWorkspaceSave.current = undefined;
     setSelectedWorkspaceId(undefined);
-    const nextOption = serviceProviderOption(next);
-    if (!nextOption) return;
-    const nextPreset = serviceProviderPreset(next);
+    const nextProvider = SERVICE_PROVIDERS[next];
     setDraft((current) => {
-      const currentName = serviceProviderOption(current.provider)?.name;
+      const currentProvider = SERVICE_PROVIDERS[current.provider];
       return {
         ...current,
         provider: next,
-        name: current.name === currentName ? nextOption.name : current.name,
-        remoteUrl: nextPreset?.url ?? (servicePreset(current.remoteUrl) ? "" : current.remoteUrl),
+        name: current.name === currentProvider.label ? nextProvider.label : current.name,
+        remoteUrl: nextProvider.presetUrl ?? (currentProvider.presetUrl ? "" : current.remoteUrl),
       };
     });
-    setAuthMethod(next === "custom" ? "apiKey" : "account");
+    setAuthMethod(nextProvider.accountLogin ? "account" : "apiKey");
     setApiKeyDraft("");
   };
   const chooseAuthMethod = async (next: "account" | "apiKey") => {
@@ -281,7 +276,7 @@ export function ProfileEditorDialog({
     setError(undefined);
     try {
       if (!authorized && running && profile?.id === state.activeProfileId && !await confirm({ title: "Save and reconnect?", message: "Saving this active profile restarts protection. In-flight requests may be interrupted.", confirmLabel: "Save and Reconnect" })) return;
-      if (!authorized && authMethod === "account" && draft.provider === "redpill"
+      if (!authorized && authMethod === "account" && provider.workspaces
         && workspaceId !== undefined && workspaceId !== savedScope?.workspaceId) {
         pendingWorkspaceSave.current = workspaceId;
         if (!await account.start(draft)) pendingWorkspaceSave.current = undefined;
@@ -294,17 +289,18 @@ export function ProfileEditorDialog({
         onComplete();
         return;
       }
-      const message = await onSave(draft, authMethod === "apiKey" || draft.provider === "custom" ? apiKeyDraft.trim() || undefined : undefined);
+      const message = await onSave(draft, authMethod === "apiKey" || !provider.accountLogin ? apiKeyDraft.trim() || undefined : undefined);
       if (message) reportError(message);
       else onComplete();
     } catch (error) { reportError(error); }
     finally { saveInFlight.current = false; setSaving(false); }
-  }, [working, frozen, needsAccountLogin, needsWorkspace, authorized, running, profile?.id, state.activeProfileId, login, authMethod, draft, state.config.requireProductionOs, workspaceId, account.consume, startAfterSave, onComplete, onSave, apiKeyDraft, savedScope?.workspaceId, account.start, reportError, confirm]);
+  }, [working, frozen, needsAccountLogin, needsWorkspace, authorized, running, profile?.id, state.activeProfileId, login, authMethod, draft, provider, state.config.requireProductionOs, workspaceId, account.consume, startAfterSave, onComplete, onSave, apiKeyDraft, savedScope?.workspaceId, account.start, reportError, confirm]);
 
   useEffect(() => {
     if (!authorized || !login || working || frozen || autoSaveAttempt.current === login.id) return;
     const pendingWorkspace = pendingWorkspaceSave.current;
-    if (draft.provider !== "phala" && pendingWorkspace === undefined) return;
+    // Without a workspace to choose, a completed sign-in saves at once.
+    if (provider.workspaces && pendingWorkspace === undefined) return;
     pendingWorkspaceSave.current = undefined;
     autoSaveAttempt.current = login.id;
     if (pendingWorkspace !== undefined && !workspaces?.some((item) => item.id === pendingWorkspace)) {
@@ -313,7 +309,7 @@ export function ProfileEditorDialog({
       return;
     }
     void save();
-  }, [authorized, login, draft.provider, workspaces, working, frozen, save, reportError]);
+  }, [authorized, login, provider, workspaces, working, frozen, save, reportError]);
 
   return (
     <AppDialog title={isNew ? "New profile" : "Edit profile"} className="sm:max-w-lg" dismissible={!saving && !account.working} onClose={() => void closeEditor()}>
@@ -322,21 +318,21 @@ export function ProfileEditorDialog({
         <FieldGroup className="gap-4 [&_[data-slot=field]]:gap-2">
         <Field>
         <FieldLabel id="profile-provider-label">Provider</FieldLabel>
-        <ToggleGroup variant="outline" className="service-presets w-full grid grid-cols-3 gap-2 max-[440px]:grid-cols-1" value={[draft.provider]} disabled={frozen || working} aria-labelledby="profile-provider-label" onValueChange={([value]) => { const option = value && serviceProviderOption(value); if (option) void chooseService(option.id); }}>
-          {SERVICE_PROVIDER_OPTIONS.map((service) => (
-            <ToggleGroupItem key={service.id} value={service.id} className="service-preset min-w-0 text-left [&_.service-logo]:w-4.5 [&_.service-logo]:h-4.5 [&_.service-custom-icon]:w-4.5 [&_.service-custom-icon]:h-4.5 [&_strong]:min-w-0 [&_strong]:flex-auto [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_>_svg]:flex-none [&_>_svg]:text-foreground" aria-label={service.name}>
-              <ServiceLogo url={service.url} />
-              <strong>{service.name}</strong>
+        <ToggleGroup variant="outline" className="service-presets w-full grid grid-cols-3 gap-2 max-[440px]:grid-cols-1" value={[draft.provider]} disabled={frozen || working} aria-labelledby="profile-provider-label" onValueChange={([value]) => { const next = Object.values(SERVICE_PROVIDERS).find((service) => service.id === value); if (next) void chooseService(next.id); }}>
+          {Object.values(SERVICE_PROVIDERS).map((service) => (
+            <ToggleGroupItem key={service.id} value={service.id} className="service-preset min-w-0 text-left [&_.service-logo]:w-4.5 [&_.service-logo]:h-4.5 [&_.service-custom-icon]:w-4.5 [&_.service-custom-icon]:h-4.5 [&_strong]:min-w-0 [&_strong]:flex-auto [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_>_svg]:flex-none [&_>_svg]:text-foreground" aria-label={service.label}>
+              <ServiceLogo provider={service.id} />
+              <strong>{service.label}</strong>
               {draft.provider === service.id && <Check size={15} aria-hidden="true" />}
             </ToggleGroupItem>
           ))}
         </ToggleGroup>
         </Field>
           <FormField id="profile-name" label="Profile name"><Input id="profile-name" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} disabled={frozen || working} autoComplete="off" /></FormField>
-          {draft.provider === "custom" && <FormField id="profile-endpoint" label="Service endpoint" description={<>Requires ACI support. <Button type="button" variant="link" className="h-auto p-0 text-xs align-baseline" onClick={() => { void desktopApi.openAboutLink("aci").catch(reportError); }}>About ACI<ExternalLink size={12} aria-hidden="true" /></Button></>}><Input id="profile-endpoint" aria-describedby="profile-endpoint-note" value={draft.remoteUrl} onChange={(event) => setDraft((current) => ({ ...current, remoteUrl: event.target.value }))} disabled={frozen || working} spellCheck={false} /></FormField>}
-          <Tabs value={draft.provider === "custom" ? "apiKey" : authMethod} className="gap-4"
+          {!provider.presetUrl && <FormField id="profile-endpoint" label="Service endpoint" description={<>Requires ACI support. <Button type="button" variant="link" className="h-auto p-0 text-xs align-baseline" onClick={() => { void desktopApi.openAboutLink("aci").catch(reportError); }}>About ACI<ExternalLink size={12} aria-hidden="true" /></Button></>}><Input id="profile-endpoint" aria-describedby="profile-endpoint-note" value={draft.remoteUrl} onChange={(event) => setDraft((current) => ({ ...current, remoteUrl: event.target.value }))} disabled={frozen || working} spellCheck={false} /></FormField>}
+          <Tabs value={provider.accountLogin ? authMethod : "apiKey"} className="gap-4"
             onValueChange={(next) => { if (next === "account" || next === "apiKey") void chooseAuthMethod(next); }}>
-            {draft.provider !== "custom" && <TabsList aria-label="Connection method" className="w-full">
+            {provider.accountLogin && <TabsList aria-label="Connection method" className="w-full">
               <TabsTrigger value="account" disabled={working || frozen}>Account</TabsTrigger>
               <TabsTrigger value="apiKey" disabled={working || frozen}>API key</TabsTrigger>
             </TabsList>}
@@ -350,7 +346,7 @@ export function ProfileEditorDialog({
                     <Button type="button" variant="ghost" size="sm" disabled={account.working} onClick={() => void account.cancel()}>Cancel</Button>
                   </div>
                   </div>
-                  {draft.provider === "redpill" && <details>
+                  {provider.callbackUrl && <details>
                     <summary className="cursor-pointer text-sm text-muted-foreground">Paste callback link</summary>
                     <div className="mt-3 space-y-2">
                       <FormField id="account-callback" label="Callback URL">
@@ -365,7 +361,7 @@ export function ProfileEditorDialog({
                     target={authorized && login ? { kind: "login", id: login.id } : { kind: "profile", profileId: draft.id }}
                     scope={accountScope} images={selectedAccount.images} onSignIn={() => void signIn()}
                     credentialRef={profile?.credentialRef} onError={reportError} disabled={working || frozen} />
-                  {draft.provider === "redpill" && Boolean(workspaces?.length || accountScope?.workspace) && <FormField id="profile-workspace" label="Workspace">
+                  {provider.workspaces && Boolean(workspaces?.length || accountScope?.workspace) && <FormField id="profile-workspace" label="Workspace">
                     <ChoiceSelect id="profile-workspace" label="Workspace" className="w-full" value={workspaceId === undefined ? "" : String(workspaceId)} options={[
                       { value: "", label: "Select workspace", disabled: true },
                       ...(workspaces ?? []).map((workspace) => ({ value: String(workspace.id), label: workspace.name })),
@@ -374,13 +370,13 @@ export function ProfileEditorDialog({
                     ]} disabled={working || frozen || !workspaces?.length} onChange={(value) => setSelectedWorkspaceId(Number(value))} />
                     {!authorized && <FieldError>{workspaceError && `Could not load account workspaces. ${workspaceError}`}</FieldError>}
                   </FormField>}
-                </> : <Button type="button" variant="default" size="lg" className="w-full [&_.service-logo]:size-4" disabled={working || frozen || !draft.name.trim()} onClick={() => void signIn()}><ServiceLogo url={draft.remoteUrl} />Connect {selectedProviderName}</Button>}
+                </> : <Button type="button" variant="default" size="lg" className="w-full [&_.service-logo]:size-4" disabled={working || frozen || !draft.name.trim()} onClick={() => void signIn()}><ServiceLogo provider={draft.provider} />Connect {provider.label}</Button>}
               </FieldGroup>
             </TabsContent>
             <TabsContent value="apiKey">
               <FormField id="profile-key" label={keyLabel} description={savedCredentialApplies ? "Leave blank to keep the saved key." : "Stored securely on this device."}>
                 <Input id="profile-key" type="password" value={apiKeyDraft} onChange={(event) => setApiKeyDraft(event.target.value)} placeholder={savedCredentialApplies ? "Replace the saved key" : `Paste your ${keyLabel}`} disabled={frozen || working} autoComplete="off" spellCheck={false} aria-describedby="profile-key-note" />
-                {distributionCapabilities.accountPortalLinks && draft.provider !== "custom" && <Button type="button" variant="link" size="sm" className="h-auto justify-start self-start p-0" disabled={working || frozen} onClick={() => {
+                {distributionCapabilities.accountPortalLinks && provider.accountLogin && <Button type="button" variant="link" size="sm" className="h-auto justify-start self-start p-0" disabled={working || frozen} onClick={() => {
                   void desktopApi.openApiKeyPage(draft.provider).catch(reportError);
                 }}>Get API key<ExternalLink size={14} aria-hidden="true" /></Button>}
               </FormField>
@@ -392,7 +388,7 @@ export function ProfileEditorDialog({
         <DialogFooter>
           {!isNew && <Button type="button" variant="destructive" className="sm:mr-auto" disabled={working || frozen} onClick={() => void removeProfile()}><Trash2 size={14} />Delete Profile</Button>}
           <Button type="button" variant="outline" onClick={() => void closeEditor()} disabled={saving || account.working}>Cancel</Button>
-          {!needsAccountLogin && <Button type="submit" variant="default" disabled={working || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || needsWorkspace || (!authorized && !savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Saving…" : authorized && draft.provider === "phala" ? "Retry" : "Save"}</Button>}
+          {!needsAccountLogin && <Button type="submit" variant="default" disabled={working || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || needsWorkspace || (!authorized && !savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Saving…" : authorized && !provider.workspaces ? "Retry" : "Save"}</Button>}
         </DialogFooter>
       </form>
     </AppDialog>

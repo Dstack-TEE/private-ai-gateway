@@ -152,6 +152,7 @@ impl DesktopRuntime {
             }
         }
         if self.instance.is_none() {
+            self.report_agents(&statuses);
             return Ok(statuses);
         }
         if let Some(catalog) = catalog.as_ref() {
@@ -171,7 +172,22 @@ impl DesktopRuntime {
             }
         }
         self.publish_agent_tokens(tokens)?;
+        self.report_agents(&statuses);
         Ok(statuses)
+    }
+
+    /// Agents also change without an app action: one is installed or removed,
+    /// or a catalog change needs attention. The backend learns of that only
+    /// by scanning, so a scan that differs from the last one publishes a new
+    /// agents revision for every client.
+    fn report_agents(&self, statuses: &[AgentStatus]) {
+        let Ok(mut reported) = self.reported_agents.lock() else {
+            return;
+        };
+        if reported.as_slice() != statuses {
+            statuses.clone_into(&mut reported);
+            self.manager.agents_changed();
+        }
     }
 
     pub fn preview_agent(
@@ -214,9 +230,21 @@ impl DesktopRuntime {
             self.proxy
                 .set_tokens(self.proxy.tokens().without(agent.id()));
         }
-        let mut status = projector.apply(agent, connect, &revision, catalog.as_ref(), &options)?;
+        let applied = projector.apply(agent, connect, &revision, catalog.as_ref(), &options);
+        self.manager.agents_changed();
+        let mut status = applied?;
         status.authorized &= self.publish_agent_tokens(projector.scan(None)?.1)?;
         Ok(status)
+    }
+
+    pub fn set_agent_connection(
+        &self,
+        agent_id: String,
+        connect: bool,
+    ) -> Result<AgentStatus, crate::Error> {
+        let options = ConnectOptions::default();
+        let preview = self.preview_agent(agent_id.clone(), connect, options.clone())?;
+        self.apply_agent(agent_id, connect, preview.revision, options)
     }
 
     pub fn disconnect_all_agents(&self) -> Result<Vec<AgentStatus>, Error> {
@@ -236,7 +264,9 @@ impl DesktopRuntime {
         self.proxy
             .set_tokens(with_client_token(TokenSet::default(), &self.credentials)?);
         let projector = self.current_projector()?;
-        match projector.disconnect_all() {
+        let disconnected = projector.disconnect_all();
+        self.manager.agents_changed();
+        match disconnected {
             Err(error) => Err(format!(
                 "Restore all could not revoke the agents ({error}); access stays revoked until it is retried"
             ).into()),

@@ -26,10 +26,7 @@ pub fn channel_name(channel: UpdateChannel) -> &'static str {
 
 /// Whether a release version may be published in `feed`. Stable releases are
 /// also published to the beta feed, so beta users receive them too.
-pub fn belongs_to_feed(version: &str, feed: UpdateChannel) -> bool {
-    let Ok(version) = semver::Version::parse(version) else {
-        return false;
-    };
+pub fn belongs_to_feed(version: &semver::Version, feed: UpdateChannel) -> bool {
     version.pre.is_empty()
         || feed == UpdateChannel::Beta && version.pre.as_str().starts_with("beta.")
 }
@@ -157,7 +154,6 @@ pub struct UpdateNotice {
     pub commands: Vec<String>,
     /// Portable archive to extract into a fresh directory.
     pub download_url: Option<String>,
-    pub channel_published: bool,
 }
 
 /// The desktop app's update check result for the renderer.
@@ -169,7 +165,6 @@ pub struct UpdateInfo {
     pub current_version: String,
     pub channel: UpdateChannel,
     pub version: Option<String>,
-    pub channel_published: bool,
     /// Steps that install `version` when a package manager or the user owns
     /// the installation.
     pub upgrade_commands: Vec<String>,
@@ -198,8 +193,7 @@ pub async fn check(
         .build()
         .map_err(|_| "Could not check for updates")?;
     let published = published_version(&client, feed_url(configured, channel)?, channel).await?;
-    let channel_published = published.is_some();
-    let latest = published.filter(|version| *version > current);
+    let latest = (published > current).then_some(published);
     let (commands, download_url) = match &latest {
         Some(version) => upgrade_steps(
             installation,
@@ -215,24 +209,20 @@ pub async fn check(
         version: latest.map(|version| version.to_string()),
         commands,
         download_url,
-        channel_published,
     })
 }
 
-/// The version a feed announces, or `None` when the feed is not published.
+/// The version a feed announces.
 async fn published_version(
     client: &reqwest::Client,
     url: url::Url,
     feed: UpdateChannel,
-) -> Result<Option<semver::Version>, String> {
+) -> Result<semver::Version, String> {
     let response = client
         .get(url)
         .send()
         .await
         .map_err(|_| "Could not check for updates. Try again later.")?;
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(None);
-    }
     if !response.status().is_success() {
         return Err("Could not check for updates. Try again later.".into());
     }
@@ -240,12 +230,12 @@ async fn published_version(
         .json()
         .await
         .map_err(|_| "The update feed is invalid")?;
-    if !belongs_to_feed(&manifest.version, feed) {
+    let version =
+        semver::Version::parse(&manifest.version).map_err(|_| "The update feed is invalid")?;
+    if !belongs_to_feed(&version, feed) {
         return Err("The update does not match the selected channel".into());
     }
-    semver::Version::parse(&manifest.version)
-        .map(Some)
-        .map_err(|_| "The update feed is invalid".into())
+    Ok(version)
 }
 
 /// Checks the release feeds for the running executable's installation.
@@ -341,12 +331,13 @@ mod tests {
 
     #[test]
     fn beta_feed_carries_stable_releases_but_stable_never_carries_betas() {
-        assert!(belongs_to_feed("0.2.0", UpdateChannel::Stable));
-        assert!(belongs_to_feed("0.2.0", UpdateChannel::Beta));
-        assert!(belongs_to_feed("0.2.0-beta.10", UpdateChannel::Beta));
-        assert!(!belongs_to_feed("0.2.0-beta.1", UpdateChannel::Stable));
-        assert!(!belongs_to_feed("0.2.0-rc.1", UpdateChannel::Beta));
-        assert!(!belongs_to_feed("invalid", UpdateChannel::Stable));
+        let belongs =
+            |version: &str, feed| belongs_to_feed(&semver::Version::parse(version).unwrap(), feed);
+        assert!(belongs("0.2.0", UpdateChannel::Stable));
+        assert!(belongs("0.2.0", UpdateChannel::Beta));
+        assert!(belongs("0.2.0-beta.10", UpdateChannel::Beta));
+        assert!(!belongs("0.2.0-beta.1", UpdateChannel::Stable));
+        assert!(!belongs("0.2.0-rc.1", UpdateChannel::Beta));
     }
 
     #[test]

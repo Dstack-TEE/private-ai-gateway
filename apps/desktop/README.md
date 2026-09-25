@@ -188,14 +188,16 @@ Product identity is committed where each consumer reads it:
   product name, identifier and publisher for Rust, and its unit test fails when
   they differ from the config. The identifier names the data directory and
   credential namespace, so a mismatch would split user data.
-- `core/src/brand.rs` and `src/renderer/brand/brand.ts` also hold the byline and
-  the default service URL, and the same test checks that they match.
-  `brand.rs` has the support link.
+- `core/src/brand.rs` also holds the byline and the support link, and derives
+  the default service from `ServiceProvider::DEFAULT`; the renderer receives
+  the byline and the providers as generated contracts.
 - `package.json` `bugs.email`: the support contact, used as the Linux package
   maintainer address.
 - Images: `src-tauri/icons/` (from `tauri icon`, plus the Icon Composer project
-  `AppIcon.icon` that `npm run build` compiles on macOS), `assets/tray/trayTemplate@2x.png`,
-  `src/renderer/brand/app-icon-{light,dark}.png`, and the installer images
+  `AppIcon.icon` that `npm run build` compiles on macOS), the tray icons
+  `assets/tray/{protected,unprotected}{,-dark}.png` (the black ones are the
+  macOS menu bar template), `src/renderer/brand/app-icon-{light,dark}.png`,
+  and the installer images
   `src-tauri/installer/brand-header.bmp` (150×57), `brand-sidebar.bmp`
   (164×314, the NSIS sizes) and `brand-dmg-background.png` (660×440, matching
   `bundle.macOS.dmg`).

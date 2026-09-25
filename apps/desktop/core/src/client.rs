@@ -320,13 +320,7 @@ impl Client {
         if state.backend_connected == Some(false) && state.error.is_some() {
             return;
         }
-        state.status = "error".into();
-        state.backend_connected = Some(false);
-        state.identity = None;
-        state.proxy_url = None;
-        state.error = Some(error);
-        state.endpoint_error =
-            Some("Backend disconnected. Start it with private-ai-proxy service start.".into());
+        state.disconnect(error);
         self.states.send_replace(state);
     }
 
@@ -418,7 +412,7 @@ impl Client {
     }
 
     pub fn state(&self) -> Result<AppState, CallError> {
-        self.call(rpc::GetState)
+        self.call(rpc::GetState).map(|answer| answer.state)
     }
 
     pub fn state_or_cached(&self) -> Result<AppState, CallError> {
@@ -432,17 +426,6 @@ impl Client {
                     Err(error)
                 }
             }
-        }
-    }
-
-    pub fn toggle(&self) -> Result<AppState, CallError> {
-        let state = self.state()?;
-        if state.should_stop_protection() {
-            self.call(rpc::Stop)
-        } else {
-            self.call(rpc::Start {
-                config: state.config,
-            })
         }
     }
 
@@ -818,7 +801,10 @@ mod tests {
         state.backend_instance = Some("replacement-instance".into());
         client.states.send_replace(state);
         client.report_disconnect("unexpected disconnection".into());
-        assert_eq!(client.states.borrow().status, "error");
+        assert_eq!(
+            client.states.borrow().status,
+            crate::contracts::VerificationStatus::Error
+        );
         assert_eq!(client.states.borrow().backend_connected, Some(false));
         assert_eq!(
             client.states.borrow().error.as_deref(),

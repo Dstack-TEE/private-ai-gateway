@@ -27,7 +27,7 @@ impl SessionManager {
                 runtime.service = Some(service);
                 runtime.identity_ready = true;
                 runtime.epoch += 1;
-                runtime.state.status = "verifying".to_string();
+                runtime.state.status = VerificationStatus::Verifying;
                 runtime.state.progress = Some("Reading the verified model list".to_string());
                 runtime.state.catalog = None;
                 load_catalog = true;
@@ -36,7 +36,7 @@ impl SessionManager {
                 apply_identity_event(&mut runtime.state, &identity);
                 runtime.identity_ready = true;
                 runtime.epoch += 1;
-                runtime.state.status = "verifying".to_string();
+                runtime.state.status = VerificationStatus::Verifying;
                 runtime.state.progress = Some("Reading the verified model list".to_string());
                 runtime.state.catalog = None;
                 load_catalog = true;
@@ -45,12 +45,16 @@ impl SessionManager {
             // read still in flight can neither publish nor clear this error,
             // and the identity must be reported again before anything opens.
             VerifierEvent::Blocked { code, reason } => {
-                let rotating =
-                    code.as_deref() == Some("keyset_changed") && runtime.state.status != "blocked";
+                let rotating = code.as_deref() == Some("keyset_changed")
+                    && runtime.state.status != VerificationStatus::Blocked;
                 end_session = !rotating && !runtime.verification_only;
                 runtime.epoch += 1;
                 runtime.identity_ready = false;
-                runtime.state.status = if rotating { "error" } else { "blocked" }.to_string();
+                runtime.state.status = if rotating {
+                    VerificationStatus::Error
+                } else {
+                    VerificationStatus::Blocked
+                };
                 runtime.state.reconnecting = crate::recovery::connection_intended(&runtime.state);
                 if rotating {
                     retired_task = runtime.task.take();
@@ -62,8 +66,8 @@ impl SessionManager {
             VerifierEvent::Fatal { message } => {
                 runtime.epoch += 1;
                 runtime.identity_ready = false;
-                if runtime.state.status != "blocked" {
-                    runtime.state.status = "error".to_string();
+                if runtime.state.status != VerificationStatus::Blocked {
+                    runtime.state.status = VerificationStatus::Error;
                 }
                 runtime.state.reconnecting = crate::recovery::connection_intended(&runtime.state);
                 runtime.state.progress = None;
@@ -77,7 +81,7 @@ impl SessionManager {
         }
 
         let epoch = runtime.epoch;
-        if runtime.state.status != "verified" {
+        if runtime.state.status != VerificationStatus::Verified {
             // Any state other than verified revokes the session at once.
             self.proxy.publish(Session {
                 generation,

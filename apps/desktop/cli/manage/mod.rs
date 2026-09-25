@@ -60,7 +60,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), CallError> {
                         return true;
                     }
                 };
-                let text = match render_output(&state, cli) {
+                let text = match render_output(&AppStateWire::from(state), cli) {
                     Ok(text) => text,
                     Err(error) => {
                         output_error = Some(OutputError::Message(error));
@@ -89,7 +89,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), CallError> {
             command: Service::Status,
         } => {
             if client.is_running()? {
-                json!({"backend": client.version()?, "gateway": client.state()?})
+                json!({"backend": client.version()?, "gateway": AppStateWire::from(client.state()?)})
             } else {
                 json!({"backend": null, "status": "not_running"})
             }
@@ -128,15 +128,19 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), CallError> {
             {
                 return Err("Profile selection was changed by another client.".into());
             }
-            if state.status == "verified" && !state.configuration_verification {
-                value(state)?
+            if state.status == VerificationStatus::Verified && !state.configuration_verification {
+                value(AppStateWire::from(state))?
             } else {
-                let started = if state.status == "verifying" && !state.configuration_verification {
+                let started = if state.status == VerificationStatus::Verifying
+                    && !state.configuration_verification
+                {
                     state
                 } else {
-                    client.call(rpc::Start {
-                        config: state.config,
-                    })?
+                    client
+                        .call(rpc::Start {
+                            config: state.config,
+                        })?
+                        .state
                 };
                 let deadline = Instant::now() + Duration::from_secs(*timeout);
                 loop {
@@ -146,9 +150,11 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), CallError> {
                             "The protection operation was superseded by another client.".into()
                         );
                     }
-                    match state.status.as_str() {
-                        "verified" if !state.configuration_verification => break value(state)?,
-                        "verifying" => {}
+                    match state.status {
+                        VerificationStatus::Verified if !state.configuration_verification => {
+                            break value(AppStateWire::from(state))?
+                        }
+                        VerificationStatus::Verifying => {}
                         _ => return Err(
                             "Protection did not become verified. Inspect private-ai-proxy status."
                                 .into(),
@@ -345,7 +351,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), CallError> {
             command: Models::List { refresh },
         } => {
             let state: AppState = if *refresh {
-                client.call(rpc::RefreshCatalog)?
+                client.call(rpc::RefreshCatalog)?.state
             } else {
                 client.state()?
             };
@@ -625,7 +631,7 @@ fn open_web_ui(cli: &Cli, client: &Client) -> Result<Value, CallError> {
         // The same change `settings set web-ui.enabled true` makes.
         let mut config = client.call(rpc::Settings)?.web_ui;
         config.enabled = true;
-        status = client.call(rpc::SaveWebUi { config })?.web_ui;
+        status = client.call(rpc::SaveWebUi { config })?.state.web_ui;
     }
     let url = status.url.ok_or_else(|| {
         format!(

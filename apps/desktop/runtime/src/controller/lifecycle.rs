@@ -22,17 +22,19 @@ impl DesktopRuntime {
             self.recovery.reset_retry();
         }
         let retry = crate::recovery::should_retry(&state)
-            || (state.reconnecting && state.status == "stopped" && self.recovery.pending());
+            || (state.reconnecting
+                && state.status == VerificationStatus::Stopped
+                && self.recovery.pending());
         if !retry && !self.recovery.needs_check() {
             return Ok(());
         }
-        if state.status == "verifying" && self.recovery.online() {
+        if state.status == VerificationStatus::Verifying && self.recovery.online() {
             return Ok(());
         }
         self.recovery.clear_request();
         if !retry
             && !crate::recovery::should_recover(
-                &state.status,
+                state.status,
                 state.configuration_verification,
                 self.recovery.pending(),
             )
@@ -142,6 +144,18 @@ impl DesktopRuntime {
                 Err(error)
             }
         }
+    }
+
+    pub fn set_require_production_os(&self, required: bool) -> Result<AppState, Error> {
+        let _operation = self.configuration_change()?;
+        self.recovery.cancel();
+        self.stop_inner()?;
+        self.update_config(|saved| {
+            saved.require_production_os = required;
+            Ok(())
+        })?;
+        self.publish_profiles()?;
+        self.state()
     }
 
     pub fn stop(&self) -> Result<AppState, Error> {

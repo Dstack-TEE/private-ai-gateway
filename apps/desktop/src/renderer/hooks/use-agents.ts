@@ -1,95 +1,75 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import type { AgentStatus, DesktopApi } from "../../shared/contracts";
+import { useEffect, useMemo, useState } from "react";
+import { keepPreviousData, useIsMutating, useMutation, useMutationState, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import type { AgentStatus, AppState, DesktopApi } from "../../shared/contracts";
 import { errorMessage, toastError } from "../lib/error-message";
 import { agentIntegrationsLocked, completeAgentStatuses, createAgentAccessAction, readAgentIntegrations, type AgentIntegrations } from "../lib/agent-integrations";
 
-type Options = {
-  requiresAuthorization: boolean;
-  active: boolean;
-  revision?: string;
-  verified: boolean;
-  notify(message: string): void;
-};
+const connectionKey = (agentId: string) => ["agent-connection", agentId];
 
-/** Query ownership and serialized user intent for native agent connections. */
-export function useAgents(api: DesktopApi, { requiresAuthorization, active, revision, verified, notify }: Options) {
+/**
+ * The agents the backend detects. They change with the backend's
+ * `agentsRevision` and verified catalog; returning to the window rescans for
+ * agents installed meanwhile.
+ */
+export function useAgents(api: DesktopApi, state: AppState, requiresAuthorization: boolean) {
   const client = useQueryClient();
-  const readIntegrations = useCallback(() => readAgentIntegrations(api, requiresAuthorization), [api, requiresAuthorization]);
   const [authorizing, setAuthorizing] = useState(false);
   const accessAction = useMemo(() => createAgentAccessAction(api, requiresAuthorization, client, setAuthorizing), [api, requiresAuthorization, client]);
-  const { data, error: agentsError } = useQuery({
-    queryKey: ["agents"], queryFn: readIntegrations, staleTime: 0,
+  const { data, error } = useQuery({
+    queryKey: ["agents", state.backendInstance, state.agentsRevision, state.catalog?.revision, state.protection.phase === "protected"],
+    queryFn: () => readAgentIntegrations(api, requiresAuthorization),
     enabled: !authorizing,
-    refetchInterval: active ? 15_000 : false,
+    placeholderData: keepPreviousData,
   });
+  useEffect(() => api.onAgentsChange(() => { void client.invalidateQueries({ queryKey: ["agents"] }); }), [api, client]);
   const accessStatus = requiresAuthorization ? data?.accessStatus : "authorized";
-  const controlsLocked = agentIntegrationsLocked(accessStatus, authorizing);
-  const agents = completeAgentStatuses(data?.agents ?? []);
-  const [pendingAgentChanges, setPendingAgentChanges] = useState<Record<string, boolean>>({});
-  const agentOperations = useRef(new Set<string>());
-  const agentIntents = useRef(new Map<string, boolean>());
-
-  const loadAgents = useCallback(async () => {
-    if (accessAction.pending) return undefined;
-    try {
-      return (await client.fetchQuery({ queryKey: ["agents"], queryFn: readIntegrations, staleTime: 0 })).agents;
-    } catch {
-      return undefined;
-    }
-  }, [accessAction, client, readIntegrations]);
-  useEffect(() => { if (active) void loadAgents(); }, [active, loadAgents]);
-  useEffect(() => { void loadAgents(); }, [loadAgents, revision, verified]);
-  useEffect(() => api.onAgentsChange(() => { void loadAgents(); }), [api, loadAgents]);
-
-  const requestAccess = async () => {
-    try {
-      await accessAction.run();
-    } catch (error) {
-      toastError("Could not grant agent access", error);
-    }
-  };
-
-  const applyAgent = async (agent: AgentStatus, connect: boolean) => {
-    if (agentIntegrationsLocked(requiresAuthorization ? client.getQueryData<AgentIntegrations>(["agents"])?.accessStatus : "authorized", accessAction.pending)) return;
-    agentIntents.current.set(agent.id, connect);
-    setPendingAgentChanges((current) => ({ ...current, [agent.id]: connect }));
-    if (agentOperations.current.has(agent.id)) return;
-    agentOperations.current.add(agent.id);
-    let failure: string | undefined;
-    let attemptedConnection = connect;
-    try {
-      let changed = agent;
-      // Serialize writes per agent and retain the user's latest intent.
-      while (agentIntents.current.has(agent.id)) {
-        const target = agentIntents.current.get(agent.id);
-        if (target === undefined) break;
-        attemptedConnection = target;
-        if (changed.recorded !== target || (target && !changed.authorized && changed.attention)) {
-          const options = {};
-          const preview = await api.previewAgent(agent.id, target, options);
-          const status = await api.applyAgent(agent.id, target, preview.revision, options);
-          changed = status;
-          await client.cancelQueries({ queryKey: ["agents"] });
-          client.setQueryData<AgentIntegrations>(["agents"], (current) => current && ({ ...current, agents: current.agents.map((entry) => entry.id === status.id ? status : entry) }));
-        }
-        if (agentIntents.current.get(agent.id) === target) {
-          agentIntents.current.delete(agent.id);
-        }
+  const changing = useIsMutating({ mutationKey: ["agent-connection"] }) > 0;
+  return useMemo(() => ({
+    agents: completeAgentStatuses(data?.agents ?? []),
+    accessStatus,
+    authorizing,
+    /** An agent connection is changing. */
+    changing,
+    controlsLocked: agentIntegrationsLocked(accessStatus, authorizing),
+    problem: error ? errorMessage(error) : undefined,
+    requestAccess: async () => {
+      try {
+        await accessAction.run();
+      } catch (failure) {
+        toastError("Could not grant agent access", failure);
       }
-      notify(`${agent.name} ${changed.recorded ? "connected" : "disconnected"}`);
-    } catch (error) {
-      failure = errorMessage(error);
-    } finally {
-      agentIntents.current.delete(agent.id);
-      agentOperations.current.delete(agent.id);
-      setPendingAgentChanges((current) => { const next = { ...current }; delete next[agent.id]; return next; });
-      void loadAgents();
-    }
-    if (failure) {
-      toastError(`${agent.name} could not ${attemptedConnection ? "connect" : "disconnect"}`, failure);
-    }
+    },
+  }), [data, error, accessStatus, authorizing, changing, accessAction]);
+}
+
+/**
+ * Connects or disconnects one agent. Changes of the same agent run one after
+ * another (the mutation scope), each with the backend's own preview.
+ */
+export function useAgentConnection(api: DesktopApi, agent: AgentStatus) {
+  const client = useQueryClient();
+  const mutation = useMutation({
+    mutationKey: connectionKey(agent.id),
+    scope: { id: `agent-connection:${agent.id}` },
+    mutationFn: (connect: boolean) => api.setAgentConnection(agent.id, connect),
+    onSuccess: (status) => {
+      client.setQueriesData<AgentIntegrations>({ queryKey: ["agents"] }, (current) => current && ({
+        ...current,
+        agents: current.agents.map((entry) => entry.id === status.id ? status : entry),
+      }));
+      toast.success(`${agent.name} ${status.recorded ? "connected" : "disconnected"}`);
+    },
+    onError: (failure, connect) => toastError(`${agent.name} could not ${connect ? "connect" : "disconnect"}`, failure),
+    onSettled: () => client.invalidateQueries({ queryKey: ["agents"] }),
+  });
+  const pending = useMutationState({
+    filters: { mutationKey: connectionKey(agent.id), status: "pending" },
+    select: (entry) => entry.state.variables,
+  }).at(-1);
+  return {
+    /** The connection the latest pending change asks for. */
+    pending: typeof pending === "boolean" ? pending : undefined,
+    change: (connect: boolean) => mutation.mutate(connect),
   };
-  const problem = agentsError ? errorMessage(agentsError) : undefined;
-  return { agents, accessStatus, authorizing, controlsLocked, pendingAgentChanges, loadAgents, requestAccess, applyAgent, problem };
 }

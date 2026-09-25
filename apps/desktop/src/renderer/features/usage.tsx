@@ -19,7 +19,8 @@ import { IconButton } from "../components/controls";
 import { AppDialog, DoneFooter } from "../components/app-dialog";
 import { desktopApi } from "../lib/environment";
 import { ChoiceSelect } from "../components/choice-select";
-import type { AgentStatus, AppState, RequestActivity, UsagePage } from "../../shared/contracts";
+import type { RequestActivity, UsagePage } from "../../shared/contracts";
+import { useShell } from "../lib/shell";
 import { formatTimestamp } from "../lib/format";
 import { VerificationVerdict } from "../components/verification-verdict";
 
@@ -45,15 +46,10 @@ export function UsageRow({ activity, onOpen }: { activity: RequestActivity; onOp
   );
 }
 
-export function UsageView({
-  state,
-  agents,
-  onInspect,
-}: {
-  state: AppState;
-  agents: AgentStatus[];
-  onInspect(activity: RequestActivity): void;
-}): React.JSX.Element {
+export function UsagePage(): React.JSX.Element {
+  const shell = useShell();
+  const agents = shell.agents.agents;
+  const onInspect = (activity: RequestActivity) => shell.openDialog({ kind: "usage-proof", activity });
   const search = useSearch({ from: "/_app/usage" });
   const navigate = useNavigate({ from: "/usage" });
   const filter = (next: UsageSearch) => void navigate({ search: (current) => ({ ...current, ...next }) });
@@ -262,7 +258,7 @@ function MissingUsage({ activity }: { activity: Pick<RequestActivity, "leftDevic
   const explanation = !activity.leftDevice
     ? "This request was blocked locally before forwarding. There is no provider token usage to report."
     : activity.path === "/v1/messages/count_tokens"
-      ? "This endpoint counts a prompt's tokens; it does not return an inference usage report."
+      ? "This endpoint counts a prompt’s tokens; it does not return an inference usage report."
       : "No token count was recorded. The provider may omit usage, or the response may be incomplete or too large to capture. Missing counts are not estimated.";
   return <Hint content={explanation}><span tabIndex={0} className="text-muted-foreground underline decoration-dotted underline-offset-4">{notApplicable ? "Not applicable" : "Unavailable"}</span></Hint>;
 }

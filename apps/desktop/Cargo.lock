@@ -5061,7 +5061,6 @@ dependencies = [
  "objc2-service-management",
  "objc2-user-notifications",
  "private-ai-proxy-core",
- "reqwest",
  "rustls",
  "semver",
  "serde",

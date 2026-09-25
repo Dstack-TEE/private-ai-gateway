@@ -45,7 +45,6 @@ const platform: UiPlatform = {
   saveDiagnosticsExport: () => invoke("export_diagnostics"),
   requestNotificationPermission: () => invoke("request_notification_permission"),
   openNotificationSettings: () => invoke("open_notification_settings"),
-  mainWindowReady: () => invoke("main_window_ready"),
   openAboutLink: (target) => invoke("open_about_link", { target }),
   openWebUi: () => invoke("open_web_ui"),
   openAgentWebsite: (agentId) => invoke("open_agent_website", { agentId }),

@@ -131,6 +131,16 @@ watcher watches the settings directory only, so an edit made to the
 target itself applies when the service next starts. The app refuses to replace
 a symlinked `credentials.toml`; sync the directory rather than linking it.
 
+## Appearance
+
+`appearance` is `system`, `light` or `dark`. The desktop app opens its window
+in the saved appearance; the web UI applies it once you sign in (the sign-in
+page follows the browser).
+
+On Linux, `system` follows GTK's light or dark preference, which WebKitGTK
+uses and which does not always track the desktop's dark style (for example
+GNOME's Style setting). Choose `light` or `dark` for a fixed appearance.
+
 ## Syncing between devices
 
 The settings directory contains only settings, so it can be synced as a whole

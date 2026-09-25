@@ -1,6 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri::{
     menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder, Submenu},
@@ -9,15 +8,14 @@ use tauri::{
 };
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
-use desktop_core::agents::{Agent, AgentStatus, ConnectOptions};
+use desktop_core::agents::{Agent, AgentStatus};
 use desktop_core::brand::PRODUCT_NAME as APP_NAME;
 use desktop_core::{
     client::Client,
-    contracts::AppState,
+    contracts::{AppState, VerificationStatus},
+    protection::{ProtectionOperation, ProtectionPhase},
     protocol::rpc,
-    ui_api::{
-        AGENTS_CHANGED_EVENT, CONFIRM_STOP_ALL_EVENT, LAUNCH_PREFERENCES_EVENT, NAVIGATE_EVENT,
-    },
+    ui_api::{CONFIRM_STOP_ALL_EVENT, LAUNCH_PREFERENCES_EVENT, NAVIGATE_EVENT},
 };
 
 /// Native menu handles mirror backend state; actions use the same client as the window.
@@ -29,6 +27,8 @@ pub struct TrayMenu {
     agents: Vec<(Agent, CheckMenuItem<Wry>)>,
     profiles: Submenu<Wry>,
     profile_items: Mutex<Option<Vec<ProfileMenuItem>>>,
+    /// The backend instance and agents revision the agent items show.
+    agents_seen: Mutex<Option<(Option<String>, u64)>>,
     protected_icon: AtomicBool,
     dark_icon: AtomicBool,
 }
@@ -40,10 +40,9 @@ struct ProfileMenuItem {
 }
 
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
-    let state = AppState::default();
-    let status_line = protection_title(&state);
-    let toggle = MenuItemBuilder::with_id("toggle", protection_action(&state)).build(app)?;
-    let status = MenuItemBuilder::with_id("status", &status_line)
+    let protection = AppState::default().protection();
+    let toggle = MenuItemBuilder::with_id("toggle", &protection.action.label).build(app)?;
+    let status = MenuItemBuilder::with_id("status", &protection.title)
         .enabled(false)
         .build(app)?;
     let autostart = CheckMenuItemBuilder::with_id("autostart", "Open at Login")
@@ -90,6 +89,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         agents,
         profiles,
         profile_items: Mutex::new(None),
+        agents_seen: Mutex::new(None),
         protected_icon: AtomicBool::new(false),
         dark_icon: AtomicBool::new(false),
     });
@@ -98,7 +98,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     TrayIconBuilder::with_id("gateway")
         .icon(icon)
         .icon_as_template(cfg!(target_os = "macos"))
-        .tooltip(format!("{APP_NAME} - {status_line}"))
+        .tooltip(tooltip(&protection.title))
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -132,78 +132,81 @@ fn perform_action(app: &AppHandle, id: String) {
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let client = app.state::<Arc<Client>>().inner().clone();
-        let result = (|| -> Result<(), String> {
-            match id.as_str() {
-                "copy-endpoint" => {
-                    let endpoint = client
-                        .state()?
-                        .proxy_url
-                        .ok_or("Local API is unavailable")?;
+        let result = match id.as_str() {
+            "copy-endpoint" => client
+                .state()
+                .map_err(String::from)
+                .and_then(|state| state.proxy_url.ok_or("The Local API is unavailable".into()))
+                .and_then(|endpoint| {
                     app.clipboard()
                         .write_text(endpoint)
-                        .map_err(|_| "Cannot copy the endpoint")?;
-                }
-                "copy-key" => {
+                        .map_err(|_| "The clipboard is unavailable".into())
+                })
+                .map_err(|error| ("Could not copy the Local API endpoint", error)),
+            "copy-key" => client
+                .call(rpc::GetClientKey)
+                .map_err(String::from)
+                .and_then(|key| {
                     app.clipboard()
-                        .write_text(client.call(rpc::GetClientKey)?)
-                        .map_err(|_| "Cannot copy the client key")?;
-                }
-                _ if id.starts_with("profile:") => {
-                    client.call(rpc::ActivateProfile {
-                        profile_id: id[8..].to_string(),
-                    })?;
-                }
-                _ if id.starts_with("agent:") => {
-                    let agent_id = &id[6..];
-                    let agent = client
-                        .call(rpc::ListAgents)?
-                        .into_iter()
-                        .find(|agent| agent.id == agent_id)
-                        .ok_or("Agent is no longer available")?;
-                    if !agent.installed && !agent.recorded {
-                        return Err("Agent is not installed".into());
-                    }
-                    let connect = !agent.recorded;
-                    let options = ConnectOptions::default();
-                    let preview = client.call(rpc::PreviewAgent {
-                        agent_id: agent.id.clone(),
-                        connect,
-                        options: options.clone(),
-                    })?;
-                    client.call(rpc::ApplyAgent {
-                        agent_id: agent.id,
-                        connect,
-                        revision: preview.revision,
-                        options,
-                    })?;
-                }
-                _ => return Ok(()),
-            }
-            Ok(())
-        })();
-        // Like other tray apps, a failed menu action is logged; the menu and the
-        // window show the state that actually applies.
-        if let Err(error) = result {
-            tracing::warn!("Tray action {id} failed: {error}");
+                        .write_text(key)
+                        .map_err(|_| "The clipboard is unavailable".into())
+                })
+                .map_err(|error| ("Could not copy the Local API key", error)),
+            _ if id.starts_with("profile:") => client
+                .call(rpc::ActivateProfile {
+                    profile_id: id["profile:".len()..].to_string(),
+                })
+                .map(|_| ())
+                .map_err(|error| ("Could not switch profiles", error.into())),
+            _ if id.starts_with("agent:") => set_agent_connection(&client, &id["agent:".len()..])
+                .map_err(|error| ("Could not change the agent connection", error)),
+            _ => Ok(()),
+        };
+        if let Err((title, error)) = result {
+            crate::notifications::show_failure(&app, title, &error);
         }
-        let state = client.state().unwrap_or_else(|_| client.cached_state());
-        sync(&app, &state);
+        // A check item flips when clicked; show what actually applies.
         if id.starts_with("agent:") {
-            if let Ok(agents) = client.call(rpc::ListAgents) {
-                sync_agents(&app, &agents);
+            refresh_agents(&app);
+        }
+        sync(
+            &app,
+            &client.state().unwrap_or_else(|_| client.cached_state()),
+        );
+    });
+}
+
+/// Connects a disconnected agent, or disconnects a connected one.
+fn set_agent_connection(client: &Client, agent_id: &str) -> Result<(), String> {
+    let agent = client
+        .call(rpc::ListAgents)?
+        .into_iter()
+        .find(|agent| agent.id == agent_id)
+        .ok_or("The agent is no longer available")?;
+    client.call(rpc::SetAgentConnection {
+        agent_id: agent.id,
+        connect: !agent.recorded,
+    })?;
+    Ok(())
+}
+
+/// Follows the agents the backend reports; they change with its
+/// `agents_revision` and when another backend answers.
+fn refresh_agents(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let client = app.state::<Arc<Client>>().inner().clone();
+        match client.call(rpc::ListAgents) {
+            Ok(agents) => {
+                let handle = app.clone();
+                let _ = app.run_on_main_thread(move || sync_agents(&handle, &agents));
             }
-            let _ = app.emit(AGENTS_CHANGED_EVENT, ());
+            Err(error) => tracing::warn!("Cannot refresh tray agents: {error}"),
         }
     });
 }
 
-pub fn sync_agents(app: &AppHandle, agents: &[AgentStatus]) {
-    let handle = app.clone();
-    let agents = agents.to_vec();
-    let _ = app.run_on_main_thread(move || sync_agents_inner(&handle, &agents));
-}
-
-fn sync_agents_inner(app: &AppHandle, agents: &[AgentStatus]) {
+fn sync_agents(app: &AppHandle, agents: &[AgentStatus]) {
     let Some(menu) = app.try_state::<TrayMenu>() else {
         return;
     };
@@ -215,10 +218,10 @@ fn sync_agents_inner(app: &AppHandle, agents: &[AgentStatus]) {
         );
         let suffix = match agent {
             Some(agent) if agent.attention.is_some() || agent.error.is_some() => {
-                " - Needs attention"
+                " – Needs Attention"
             }
             Some(agent) if agent.installed => "",
-            _ => " - Not installed",
+            _ => " – Not Installed",
         };
         let _ = item.set_text(format!("{}{suffix}", kind.name()));
     }
@@ -272,7 +275,7 @@ fn sync_profiles(app: &AppHandle, state: &AppState, menu: &TrayMenu) -> tauri::R
             .set_checked(profile.id == state.active_profile_id);
         let _ = entry
             .item
-            .set_enabled(state.status != "verifying" && profile.credential_saved);
+            .set_enabled(state.status != VerificationStatus::Verifying && profile.credential_saved);
     }
     Ok(())
 }
@@ -280,27 +283,40 @@ fn sync_profiles(app: &AppHandle, state: &AppState, menu: &TrayMenu) -> tauri::R
 fn toggle_or_open_settings(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let client = app.state::<std::sync::Arc<Client>>();
+        let client = app.state::<Arc<Client>>();
         let Ok(state) = client.state() else {
             sync(&app, &client.cached_state());
             show_window(&app);
             return;
         };
-        if !protection_action_enabled(&state) {
+        let action = state.protection().action;
+        if !action.enabled {
             sync(&app, &state);
             return;
         }
-        if !should_stop(&state) && !active_profile_ready(&state) {
-            sync(&app, &state);
-            show_window(&app);
-            let _ = app.emit(NAVIGATE_EVENT, "profile-setup");
-            return;
+        let result = match action.operation {
+            ProtectionOperation::SetUpProfile => {
+                sync(&app, &state);
+                show_window(&app);
+                let _ = app.emit(NAVIGATE_EVENT, "profile-setup");
+                return;
+            }
+            ProtectionOperation::Stop => client
+                .call(rpc::Stop)
+                .map_err(|error| ("Could not stop protection", error)),
+            ProtectionOperation::Start => client
+                .call(rpc::Start {
+                    config: state.config,
+                })
+                .map_err(|error| ("Could not start protection", error)),
+        };
+        if let Err((title, error)) = result {
+            crate::notifications::show_failure(&app, title, &error.to_string());
         }
-        if let Err(error) = client.toggle() {
-            tracing::warn!("Tray protection toggle failed: {error}");
-        }
-        let state = client.state().unwrap_or_else(|_| client.cached_state());
-        sync(&app, &state);
+        sync(
+            &app,
+            &client.state().unwrap_or_else(|_| client.cached_state()),
+        );
     });
 }
 
@@ -321,7 +337,11 @@ fn sync_autostart(app: &AppHandle) {
         if let Err(error) = result {
             let menu = app.state::<TrayMenu>();
             let _ = menu.autostart.set_checked(!checked);
-            tracing::warn!("Open at Login could not be changed: {}", error);
+            crate::notifications::show_failure(
+                &app,
+                "Could not change Open at Login",
+                &error.to_string(),
+            );
             // Keep open windows in sync with the preference that actually applies.
             if let Ok(preferences) = desktop_core::ui_api::launch_preferences(&client, &host).await
             {
@@ -348,18 +368,27 @@ pub fn sync(app: &AppHandle, state: &AppState) {
 }
 
 fn sync_inner(app: &AppHandle, state: &AppState) {
-    let status_line = protection_title(state);
+    let protection = state.protection();
     if let Some(menu) = app.try_state::<TrayMenu>() {
-        let _ = menu.status.set_text(&status_line);
-        let _ = menu.toggle.set_text(protection_action(state));
-        let _ = menu.toggle.set_enabled(protection_action_enabled(state));
+        let _ = menu.status.set_text(&protection.title);
+        let _ = menu.toggle.set_text(&protection.action.label);
+        let _ = menu.toggle.set_enabled(protection.action.enabled);
         let _ = menu.endpoint.set_enabled(state.proxy_url.is_some());
         // Profiles are unknown until the backend answers.
-        let _ = menu.profiles.set_enabled(!backend_starting(state));
+        let _ = menu
+            .profiles
+            .set_enabled(protection.phase != ProtectionPhase::Starting);
         if let Err(error) = sync_profiles(app, state, &menu) {
             tracing::warn!("Cannot refresh tray profiles: {error}");
         }
-        let protected = state.is_protected();
+        let agents = (state.backend_instance.clone(), state.agents_revision);
+        if let Ok(mut seen) = menu.agents_seen.lock() {
+            if state.backend_instance.is_some() && seen.as_ref() != Some(&agents) {
+                *seen = Some(agents);
+                refresh_agents(app);
+            }
+        }
+        let protected = protection.phase == ProtectionPhase::Protected;
         if menu.protected_icon.load(Ordering::Relaxed) != protected {
             if let Err(error) = apply_icon(
                 app,
@@ -372,8 +401,12 @@ fn sync_inner(app: &AppHandle, state: &AppState) {
         }
     }
     if let Some(tray) = app.tray_by_id("gateway") {
-        let _ = tray.set_tooltip(Some(format!("{APP_NAME} - {status_line}")));
+        let _ = tray.set_tooltip(Some(tooltip(&protection.title)));
     }
+}
+
+fn tooltip(status: &str) -> String {
+    format!("{APP_NAME} – {status}")
 }
 
 /// System theme observers call this independently of the application's theme.
@@ -408,46 +441,15 @@ fn apply_icon(app: &AppHandle, menu: &TrayMenu, protected: bool, dark: bool) -> 
     Ok(())
 }
 
+/// Black icons are the macOS template and the light-theme icons elsewhere.
 fn tray_icon(protected: bool, dark: bool) -> tauri::Result<tauri::image::Image<'static>> {
-    let image =
-        tauri::image::Image::from_bytes(include_bytes!("../../assets/tray/trayTemplate@2x.png"))?;
-    let mut rgba = image.rgba().to_vec();
-    let foreground = if !cfg!(target_os = "macos") && dark {
-        255
-    } else {
-        0
+    let bytes: &'static [u8] = match (protected, dark) {
+        (true, false) => include_bytes!("../../assets/tray/protected.png"),
+        (false, false) => include_bytes!("../../assets/tray/unprotected.png"),
+        (true, true) => include_bytes!("../../assets/tray/protected-dark.png"),
+        (false, true) => include_bytes!("../../assets/tray/unprotected-dark.png"),
     };
-    for pixel in rgba.as_chunks_mut::<4>().0 {
-        pixel[..3].fill(foreground);
-        if !protected {
-            pixel[3] = (u16::from(pixel[3]) * 45 / 100) as u8;
-        }
-    }
-    Ok(tauri::image::Image::new_owned(
-        rgba,
-        image.width(),
-        image.height(),
-    ))
-}
-
-fn protection_title(state: &AppState) -> String {
-    if !state.is_protected() {
-        return menu_state(state).into();
-    }
-    let mode = if state.config.require_production_os {
-        "Protected"
-    } else {
-        "Protected (Dev mode)"
-    };
-    let Some(since) = state.protected_since else {
-        return mode.into();
-    };
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let minutes = now.saturating_sub(since) / 60;
-    format!("{mode} - {}h {:02}m", minutes / 60, minutes % 60)
+    tauri::image::Image::from_bytes(bytes)
 }
 
 #[derive(Default)]
@@ -456,18 +458,15 @@ pub struct MainWindowPresentation {
     requested: AtomicBool,
 }
 
-pub fn main_window_ready(window: &tauri::WebviewWindow) -> Result<(), String> {
-    if window.label() != "main" {
-        return Err("Only the main window can announce its content is ready".into());
-    }
-    let app = window.app_handle();
+/// The main window's page has loaded; a request to show it that came earlier
+/// shows it now.
+pub fn main_window_ready(app: &AppHandle) {
     let presentation = app.state::<MainWindowPresentation>();
     if !presentation.ready.swap(true, Ordering::SeqCst)
         && presentation.requested.load(Ordering::SeqCst)
     {
         show_window(app);
     }
-    Ok(())
 }
 
 pub fn show_window(app: &AppHandle) {
@@ -515,168 +514,3 @@ fn set_dock_visibility(app: &AppHandle, visible: bool) {
 
 #[cfg(not(target_os = "macos"))]
 fn set_dock_visibility(_app: &AppHandle, _visible: bool) {}
-
-fn should_stop(state: &AppState) -> bool {
-    state.should_stop_protection()
-}
-
-/// The shell is still starting the backend: disconnected, without an error.
-fn backend_starting(state: &AppState) -> bool {
-    state.backend_connected == Some(false) && state.error.is_none()
-}
-
-fn protection_action_enabled(state: &AppState) -> bool {
-    !backend_starting(state)
-        && !(state.status == "verifying" && state.configuration_verification)
-        && (should_stop(state) || state.endpoint_error.is_none())
-}
-
-fn protection_action(state: &AppState) -> &'static str {
-    if backend_starting(state) {
-        return "Starting…";
-    }
-    if state.reconnecting {
-        return "Cancel Reconnection";
-    }
-    if state.status == "verifying" && !state.configuration_verification {
-        "Cancel Verification"
-    } else if should_stop(state) {
-        "Stop Protection"
-    } else if !active_profile_ready(state) {
-        "Set Up Profile…"
-    } else {
-        "Start Protection"
-    }
-}
-
-fn menu_state(state: &AppState) -> &'static str {
-    if backend_starting(state) {
-        return "Starting the background service";
-    }
-    if state.reconnecting {
-        return "Reconnecting - requests paused";
-    }
-    if state.endpoint_error.is_some() {
-        return "Local API unavailable";
-    }
-    if state.status == "stopped" && !active_profile_ready(state) {
-        return "Not protected - profile required";
-    }
-    match state.status.as_str() {
-        "verifying" if state.configuration_verification => "Verifying configuration",
-        "verifying" => "Verifying service",
-        "verified" if state.configuration_verification => "Not protected - configuration verified",
-        "verified" if !state.api_key_saved => "Not protected - API key required",
-        "verified" => "Protected",
-        "blocked" => "Protection blocked - service identity changed",
-        "error" => "Not protected - verification failed",
-        _ => "Not protected",
-    }
-}
-
-fn active_profile_ready(state: &AppState) -> bool {
-    state.api_key_saved
-        && state
-            .profiles
-            .iter()
-            .any(|profile| profile.id == state.active_profile_id && profile.credential_saved)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{menu_state, protection_action, protection_action_enabled, should_stop};
-    use desktop_core::contracts::{AppState, ConfidentialProfile, ProfileAuth, ServiceProvider};
-
-    fn state(status: &str, api_key_saved: bool) -> AppState {
-        AppState {
-            status: status.to_string(),
-            api_key_saved,
-            ..AppState::default()
-        }
-    }
-
-    #[test]
-    fn protection_action_matches_the_runtime_operation() {
-        assert_eq!(
-            menu_state(&AppState::default()),
-            "Not protected - profile required"
-        );
-        assert_eq!(menu_state(&state("verified", true)), "Protected");
-        assert_eq!(
-            menu_state(&state("verified", false)),
-            "Not protected - API key required"
-        );
-        assert_eq!(
-            protection_action(&state("verified", true)),
-            "Stop Protection"
-        );
-        assert_eq!(
-            protection_action(&state("verifying", false)),
-            "Cancel Verification"
-        );
-        assert!(should_stop(&state("verifying", false)));
-        assert!(should_stop(&state("blocked", true)));
-        assert!(!should_stop(&state("error", true)));
-        for status in ["stopped", "error"] {
-            let mut reconnecting = state(status, true);
-            reconnecting.reconnecting = true;
-            assert!(should_stop(&reconnecting));
-            assert_eq!(protection_action(&reconnecting), "Cancel Reconnection");
-            reconnecting.configuration_verification = true;
-            assert!(!should_stop(&reconnecting));
-        }
-    }
-
-    #[test]
-    fn a_starting_backend_offers_no_protection_action() {
-        let starting = AppState {
-            backend_connected: Some(false),
-            ..AppState::default()
-        };
-        assert_eq!(menu_state(&starting), "Starting the background service");
-        assert_eq!(protection_action(&starting), "Starting…");
-        assert!(!protection_action_enabled(&starting));
-        let failed = AppState {
-            error: Some("Backend exited during startup".into()),
-            ..starting
-        };
-        assert_ne!(protection_action(&failed), "Starting…");
-    }
-
-    #[test]
-    fn stopped_state_requires_a_saved_active_credential() {
-        let mut ready = state("stopped", true);
-        ready.active_profile_id = "profile-1".to_string();
-        ready.profiles.push(ConfidentialProfile {
-            credential_ref: None,
-            id: "profile-1".to_string(),
-            name: "Private AI".to_string(),
-            provider: ServiceProvider::Custom,
-            remote_url: "https://private.example.com".to_string(),
-            auth: ProfileAuth::ApiKey,
-            credential_saved: true,
-            verified_at: None,
-        });
-        assert_eq!(menu_state(&ready), "Not protected");
-        assert_eq!(protection_action(&ready), "Start Protection");
-
-        ready.status = "verified".into();
-        ready.configuration_verification = true;
-        assert!(!should_stop(&ready));
-        assert_eq!(protection_action(&ready), "Start Protection");
-        assert_eq!(menu_state(&ready), "Not protected - configuration verified");
-        assert!(protection_action_enabled(&ready));
-
-        ready.status = "verifying".into();
-        assert!(!should_stop(&ready));
-        assert!(!protection_action_enabled(&ready));
-        assert_eq!(protection_action(&ready), "Start Protection");
-
-        ready.status = "stopped".into();
-        ready.configuration_verification = false;
-
-        ready.profiles[0].credential_saved = false;
-        assert_eq!(menu_state(&ready), "Not protected - profile required");
-        assert_eq!(protection_action(&ready), "Set Up Profile…");
-    }
-}

@@ -26,7 +26,7 @@ use desktop_core::{
     config::{self as settings_config, Config},
     contracts::{
         AgentPreview, AgentStatus, AppState, ConfidentialProfileInput, ConnectOptions,
-        ListenConfig, RequestActivity, ServiceProvider, StartConfig,
+        ListenConfig, RequestActivity, ServiceProvider, StartConfig, VerificationStatus,
     },
     listen::ResolvedListen,
     lock,
@@ -72,6 +72,8 @@ pub struct DesktopRuntime {
     credentials: ClientCredentials,
     endpoint: EndpointRuntime,
     agent_policy: Mutex<()>,
+    /// The agents the last scan reported; see `report_agents`.
+    reported_agents: Mutex<Vec<AgentStatus>>,
     lifecycle: tokio::sync::Mutex<()>,
     exiting: AtomicBool,
     recovery: crate::recovery::Recovery,
@@ -313,6 +315,7 @@ impl DesktopRuntime {
             balances: crate::balance_cache::BalanceCache::default(),
             endpoint: EndpointRuntime::new(task_runtime.clone()),
             agent_policy: Mutex::new(()),
+            reported_agents: Mutex::new(Vec::new()),
             lifecycle: tokio::sync::Mutex::new(()),
             exiting: AtomicBool::new(false),
             recovery: crate::recovery::Recovery::default(),
