@@ -1,6 +1,6 @@
 [package]
 name = "private-ai-proxy-core"
-version = "0.2.0-beta.0"
+version.workspace = true
 description = "Private AI Proxy client side: contracts, the management API and its client, the local endpoint, the settings file and paths"
 license = "Apache-2.0"
 edition = "2021"

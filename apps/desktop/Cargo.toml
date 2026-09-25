@@ -7,3 +7,6 @@ members = [
     "src-tauri",
 ]
 resolver = "2"
+
+[workspace.package]
+version = "0.1.7-beta.4"
