@@ -45,8 +45,8 @@ jobs:
         run: npm ci --ignore-scripts
       # The script is idempotent: it re-reads both feeds and uploads only what
       # is still behind. After a transient GitHub API or asset upload failure,
-      # use "Re-run failed jobs" on the release run or dispatch this workflow
-      # on the tag.
+      # use "Re-run failed jobs" on the release run, which also runs the npm
+      # publish that was skipped (see distribution.md).
       - name: Validate and advance the selected channel
         timeout-minutes: 10
         env:

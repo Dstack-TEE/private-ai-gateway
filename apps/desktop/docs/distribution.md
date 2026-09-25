@@ -84,8 +84,11 @@ Once every package and the App Store upload have succeeded, the run:
    (`gh attestation verify <file> --repo Dstack-TEE/private-ai-gateway`);
 2. publishes it (stable releases become Latest);
 3. advances the updater feeds. The publish is idempotent, so after a transient
-   GitHub failure use **Re-run failed jobs** (or dispatch `desktop-update-feed.yml`
-   on the tag);
+   GitHub failure use **Re-run failed jobs**, which also runs the npm publish
+   that the failure skipped. Dispatching `desktop-update-feed.yml` on the tag
+   instead leaves `publish-npm` skipped in the release run; then also dispatch
+   `private-ai-proxy-npm.yml` on the tag with `release_tag` set to the tag and
+   `publish` enabled;
 4. dispatches the dedicated npm publisher at the release tag and waits for it.
    npm checks the top-level workflow identity for OIDC trusted publishing.
 

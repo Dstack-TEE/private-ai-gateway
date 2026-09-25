@@ -192,11 +192,10 @@ jobs:
 
   # Trusted publishing (OIDC) only authorizes `npm publish`; `npm dist-tag` is
   # not available to this job, so the wrapper moves the channel tag as it
-  # publishes. Every version shares one packument, and npm resolves the wrapper
-  # and its aliased platform versions from the same packument response, so any
-  # response that already carries the new wrapper also carries the platform
-  # versions published before it. Publishing the wrapper last is therefore
-  # enough; there is nothing to wait for.
+  # publishes. Every version shares one packument, which the registry writes
+  # whole, and the platform versions are published first, so any packument
+  # that lists the new wrapper also lists its platform versions. Publishing the
+  # wrapper last is therefore enough; there is nothing to wait for.
   publish:
     if: inputs.publish
     needs: package

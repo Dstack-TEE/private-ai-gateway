@@ -59,7 +59,15 @@ until the next beta is published. Right after `0.2.0` ships,
 `npm install private-ai-proxy@beta` still installs `0.2.0-beta.N`, an older
 version than `latest`. Install `private-ai-proxy` to get the newest stable
 release. The desktop updater's beta feed differs: a stable release also
-advances it when it is newer.
+advances it when it is newer. A maintainer can move `beta` by hand with an
+interactive `npm dist-tag add private-ai-proxy@<version> beta`, which uses
+their own npm login rather than OIDC.
+
+For about five minutes after a publish, `npm install private-ai-proxy@latest`
+or `@beta` can fail with `ETARGET`. npm can read the dist-tag from the
+abbreviated packument and the version from the full packument, and the
+registry CDN caches the two representations separately (`Vary: Accept`,
+`Cache-Control: max-age=300`). Retrying after the cache expires succeeds.
 
 ### Linux libc
 
@@ -127,13 +135,16 @@ resolvable, or `npm install private-ai-proxy` fails for every user of that
 channel. Trusted publishing only authorizes `npm publish`, not `npm dist-tag`,
 so the channel tag moves when the wrapper is published, and the wrapper goes
 last. That order alone is enough: every version is part of the one
-`private-ai-proxy` packument, and npm resolves the wrapper and its aliased
-platform versions from the same packument response. A response that already
-lists the new wrapper also lists the platform versions published before it.
-Codex publishes in the same order without waiting in between. The job does not
-install from the registry after publishing: the CDN caches the packument for
-several minutes, and the local tarball install above already proves the
-packages.
+`private-ai-proxy` packument, which the registry writes whole on each publish,
+and the platform versions are published before the wrapper. Any copy of the
+packument that lists the new wrapper therefore also lists its platform
+versions. Codex publishes in the same order without waiting in between. The
+job does not install from the registry after publishing, because the registry
+CDN keeps serving cached packuments for several minutes (see
+[Dist-tags and version ranges](#dist-tags-and-version-ranges)). The local
+tarball install above proves the package contents and commands, and
+`scripts/package-npm.test.mjs` checks that the wrapper's aliases name exactly
+the published platform versions.
 
 Before each publish, `apps/desktop/scripts/npm-registry.mjs` looks the version
 up anonymously. An existing version is skipped only when its registry
@@ -146,8 +157,9 @@ interrupted publish; different contents fail the job.
 `Dstack-TEE/private-ai-gateway`, workflow `private-ai-proxy-npm.yml`, and the
 protected `npm` environment. Because every version shares the one package name,
 this single trusted publisher covers the whole release. The publish job uses
-Node 24, requests `id-token: write`, and publishes from a GitHub-hosted runner,
-which makes npm generate provenance attestations automatically
+Node 24 and requests `id-token: write`. Because it publishes a public package
+from a public repository through trusted publishing, npm generates provenance
+attestations automatically
 ([npm trusted publishing](https://docs.npmjs.com/trusted-publishers#automatic-provenance-generation)).
 It uses no npm publish token. OIDC authentication covers
 `npm publish` and `npm stage publish` only
