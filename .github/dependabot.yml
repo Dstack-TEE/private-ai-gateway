@@ -1,20 +1,8 @@
-# Dependabot version updates. `chore(deps)` commits do not bump the desktop
-# version or appear in its release-please changelog.
+# Dependabot version updates for the desktop app (apps/desktop) only; the
+# rest of the repository is out of scope. `chore(deps)` commits do not bump
+# the desktop version or appear in its release-please changelog.
 version: 2
 updates:
-  # Actions are pinned to a commit SHA with a `# vN` comment; Dependabot
-  # updates both.
-  - package-ecosystem: github-actions
-    directory: /
-    schedule:
-      interval: weekly
-    commit-message:
-      prefix: chore(deps)
-    groups:
-      github-actions:
-        patterns:
-          - "*"
-
   # Tauri's npm packages and crates must move together: @tauri-apps/api needs
   # the same minor version as the tauri crate. A Dependabot group cannot span
   # the npm and cargo entries, so Tauri is excluded from both and bumped by
