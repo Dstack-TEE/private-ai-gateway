@@ -179,6 +179,9 @@ pub struct ProxyState {
     /// Apply the production dstack OS-image policy on startup and re-verification.
     require_production_os: bool,
     audits: Arc<tokio::sync::Semaphore>,
+    /// Seconds since the Unix epoch, for keyset expiry (§3.4): the system
+    /// clock, which tests replace with the published fixtures' serving time.
+    now_secs: fn() -> u64,
     trusted: Mutex<TrustedIdentity>,
     /// Serializes the re-verify so a burst of blocked requests reverifies
     /// once, and holds the latest attempt's outcome for the requests that
@@ -232,6 +235,7 @@ impl ProxyState {
             policy,
             require_production_os,
             audits: Arc::new(tokio::sync::Semaphore::new(16)),
+            now_secs: desktop_core::now_secs,
             trusted: Mutex::new(TrustedIdentity::new(
                 report,
                 identity,
@@ -710,7 +714,7 @@ async fn proxy_observed(
     context: Option<ForwardContext>,
 ) -> Response {
     let path = uri.path().to_string();
-    if desktop_core::now_secs() >= observed.not_after {
+    if (state.now_secs)() >= observed.not_after {
         observed.delivery.cancel();
     }
     let identity_before = observed.keyset_digest;

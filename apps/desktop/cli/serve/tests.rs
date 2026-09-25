@@ -7,6 +7,7 @@ use crate::checks::{parse_receipt_document, run_response_checks, UpstreamContext
 use crate::client::host_of;
 use crate::spec_fixtures::{
     vector_receipt_envelope, vector_report, vector_session_bytes, REQUEST_BODY, RESPONSE_BODY,
+    SERVED_AT,
 };
 use crate::transcript::Transcript;
 use agent_bridge::proxy::ProxyEvent;
@@ -362,7 +363,7 @@ fn state_over(base_url: String, tx: mpsc::UnboundedSender<RequestOutcome>) -> Ar
     let host = host_of(&base_url).unwrap();
     // Byte-exact passthrough harness: enforcement off so fixture-pinned
     // request hashes hold; `apply_constraints` has its own unit test.
-    Arc::new(ProxyState::new(
+    let state = ProxyState::new(
         AciClient::new().unwrap(),
         base_url,
         host,
@@ -378,7 +379,15 @@ fn state_over(base_url: String, tx: mpsc::UnboundedSender<RequestOutcome>) -> Ar
         }),
         Arc::new(|_| {}),
         tokio_util::sync::CancellationToken::new(),
-    ))
+    );
+    Arc::new(at_fixture_time(state))
+}
+
+/// Run on the published fixtures' clock: their keyset's `not_after` is fixed
+/// by the spec test vectors, so the system clock would expire it.
+fn at_fixture_time(mut state: ProxyState) -> ProxyState {
+    state.now_secs = || SERVED_AT;
+    state
 }
 
 #[tokio::test]
@@ -677,7 +686,7 @@ async fn a_412_refusal_refreshes_policy_pins_and_retries() {
 
     let (tx, mut rx) = mpsc::unbounded_channel();
     let host = host_of(&base).unwrap();
-    let state = Arc::new(ProxyState::new(
+    let state = Arc::new(at_fixture_time(ProxyState::new(
         AciClient::new().unwrap(),
         base.clone(),
         host,
@@ -693,7 +702,7 @@ async fn a_412_refusal_refreshes_policy_pins_and_retries() {
         }),
         Arc::new(|_| {}),
         tokio_util::sync::CancellationToken::new(),
-    ));
+    )));
     // A stale pin, as if the pinned session was superseded after startup.
     *state.policy_pins.lock().unwrap() = vec!["f".repeat(64)];
     let proxy = spawn_server(build_proxy_router(state.clone())).await;
