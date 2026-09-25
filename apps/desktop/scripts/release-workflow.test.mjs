@@ -33,6 +33,11 @@ test("only release tags publish, after every package, in order", async () => {
   assert.ok(after("mac-app-store", "verify"));
   assert.ok(after("update-feed", "release"));
   assert.ok(after("publish-npm", "update-feed"));
+  // Beta releases skip the App Store job; a later job without a status check
+  // function would be skipped with it.
+  for (const [name, job] of Object.entries(direct.jobs)) {
+    if (after(name, "mac-app-store")) assert.match(job.if ?? "", /!cancelled\(\)/, name);
+  }
   // Pull requests and test builds have no release channel, so every job
   // that can write runs only behind the release job.
   assert.match(direct.jobs.release.if, /needs\.version\.outputs\.channel != ''/);
