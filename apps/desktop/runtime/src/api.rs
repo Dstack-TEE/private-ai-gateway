@@ -199,8 +199,11 @@ async fn rpc<B: Backend>(
     #[cfg_attr(not(feature = "web-ui"), allow(unused_variables))] headers: axum::http::HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    // A body that is too large or stalls answers in the API's error shape.
-    let Some(params) = body.ok().as_deref().and_then(parameters) else {
+    let body = match body {
+        Ok(body) => body,
+        Err(rejection) => return unreadable_body(rejection),
+    };
+    let Some(params) = parameters(&body) else {
         return error(protocol::Error::invalid_request());
     };
     let method = Method::from_name(&name);
@@ -222,6 +225,17 @@ async fn rpc<B: Backend>(
     match result {
         Ok(result) => Json(json!({ "result": result })).into_response(),
         Err(failure) => error(failure.into_api()),
+    }
+}
+
+/// The answer to a request body that could not be read: axum's own 413 for
+/// one over the body limit (`DefaultBodyLimit`), and `invalid_request` for
+/// one that stalled or broke off.
+pub(crate) fn unreadable_body(rejection: BytesRejection) -> Response {
+    if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        rejection.into_response()
+    } else {
+        error(protocol::Error::invalid_request())
     }
 }
 
@@ -446,6 +460,15 @@ mod tests {
                 json!({ "command": "set_web_ui_password", "params": { "password": null } }),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn a_body_over_the_limit_is_payload_too_large() {
+        let (router, _, _) = local();
+        // axum's default body limit is 2 MiB.
+        let body = format!(r#"{{"padding":"{}"}}"#, "x".repeat(2 * 1024 * 1024));
+        let (status, _) = call(&router, "POST", "/api/rpc/get_state", &body).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]

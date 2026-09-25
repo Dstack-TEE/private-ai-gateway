@@ -721,6 +721,10 @@ fn exchange(
     body: &str,
 ) -> (u16, String, Value) {
     let mut stream = TcpStream::connect(authority).unwrap();
+    // A backend that never answers fails the test instead of hanging it.
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
     let cookie = cookie
         .map(|cookie| format!("Cookie: {cookie}\r\n"))
         .unwrap_or_default();
