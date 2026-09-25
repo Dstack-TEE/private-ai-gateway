@@ -306,10 +306,10 @@ export function createOpenCodeAciV2Plugin({
       // Model transforms replay after the complete provider/model collection is
       // materialized, including model-level `providers.<id>.models.<id>` config
       // entries. Re-pin the endpoint here so those entries cannot move the
-      // model to another endpoint. The host ignores `package` edits from a
-      // model transform, and a model-level entry moves the model back to a
-      // native runtime package; the `http.request` guard below is what rejects
-      // that route, not this transform.
+      // model to another endpoint, and remove any model whose runtime package
+      // is not the verified AI SDK package: a model transform cannot edit the
+      // runtime package itself, so this removal is what closes the native-route
+      // path. The `http.request` guard below only enforces the verified origin.
       await ctx.model.transform((editor) => {
         const verifiedBaseURL = active?.config.baseURL ?? initial.baseURL;
         for (const model of editor.list(providerID)) {
