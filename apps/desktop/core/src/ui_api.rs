@@ -19,90 +19,42 @@ const TASK_FAILED: &str = "The background operation could not complete. Please t
 
 macro_rules! methods {
     (
-        commands { $($command:ident => $command_name:literal),+ $(,)? }
-        host { $($host:ident => $host_name:literal),+ $(,)? }
+        commands { $($command:ident => $command_variant:ident),+ $(,)? }
+        host { $($host:ident => $host_variant:ident),+ $(,)? }
     ) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-        pub enum Method { $($command,)+ $($host,)+ }
+        pub enum Method { $($command_variant,)+ $($host_variant,)+ }
 
         impl Method {
-            pub const ALL: &'static [Self] = &[$(Self::$command,)+ $(Self::$host,)+];
+            pub const ALL: &'static [Self] =
+                &[$(Self::$command_variant,)+ $(Self::$host_variant,)+];
 
             pub const fn name(self) -> &'static str {
                 match self {
-                    $(Self::$command => $command_name,)+
-                    $(Self::$host => $host_name,)+
+                    $(Self::$command_variant => stringify!($command),)+
+                    $(Self::$host_variant => stringify!($host),)+
                 }
             }
 
             pub fn from_name(name: &str) -> Option<Self> {
-                match name {
-                    $($command_name => Some(Self::$command),)+
-                    $($host_name => Some(Self::$host),)+
-                    _ => None,
-                }
+                Self::ALL.iter().copied().find(|method| method.name() == name)
             }
 
             /// Whether the method is the management command of the same name
             /// and parameters; the host may add effects around it.
             pub const fn is_command(self) -> bool {
-                matches!(self, $(Self::$command)|+)
+                matches!(self, $(Self::$command_variant)|+)
             }
         }
     };
 }
 
-// This is the only renderer management allowlist: Tauri command names, web
-// RPC paths and the methods a web UI session may call. A method either is the
-// command of the same name or is composed by the `Host` from commands and
-// local data; a host method that shares a command's name takes the same
-// parameters and answers the same result.
-methods! {
-    commands {
-        GetState => "get_state",
-        Start => "start",
-        Stop => "stop",
-        ActivateProfile => "activate_profile",
-        DeleteProfile => "delete_profile",
-        SaveConfiguration => "save_configuration",
-        CompleteAccountLogin => "complete_account_login",
-        BeginAccountLogin => "begin_account_login",
-        PollAccountLogin => "poll_account_login",
-        GetAccountDetails => "get_account_details",
-        GetAccountBalance => "get_account_balance",
-        CancelAccountLogin => "cancel_account_login",
-        GetClientKey => "get_client_key",
-        RotateClientKey => "rotate_client_key",
-        SaveLocalApiConfig => "save_local_api_config",
-        SaveWebUi => "save_web_ui",
-        SetWebUiPassword => "set_web_ui_password",
-        ImportProfiles => "import_profiles",
-        ExportProfilesContent => "export_profiles_content",
-        ExportDiagnosticsContent => "export_diagnostics_content",
-        QueryUsage => "query_usage",
-        GetUsageRecord => "get_usage_record",
-        ListAgents => "list_agents",
-        PreviewAgent => "preview_agent",
-        ApplyAgent => "apply_agent",
-    }
-    host {
-        StartBackendService => "start_backend_service",
-        SaveAccountLogin => "save_account_login",
-        GetOrganizationUrl => "get_organization_url",
-        GetTopUpUrl => "get_top_up_url",
-        ListListenAddresses => "list_listen_addresses",
-        GetAgentAccess => "get_agent_access",
-        RequestAgentAccess => "request_agent_access",
-        GetAppearance => "get_appearance",
-        SetAppearance => "set_appearance",
-        GetLaunchPreferences => "get_launch_preferences",
-        SetLaunchPreference => "set_launch_preference",
-        GetNotificationSettings => "get_notification_settings",
-        SaveNotificationSettings => "save_notification_settings",
-        ResetSettings => "reset_settings",
-        GetUpdateNotice => "get_update_notice",
-    }
-}
+// The only renderer management allowlist (`ui_methods.rs`): Tauri command
+// names, web RPC paths and the methods a web UI session may call. A method
+// either is the command of the same name or is composed by the `Host` from
+// commands and local data; a host method that shares a command's name takes
+// the same parameters and answers the same result.
+crate::renderer_methods!(methods);
 
 pub const APPEARANCE_EVENT: &str = "pap://appearance";
 pub const LAUNCH_PREFERENCES_EVENT: &str = "pap://launch-preferences";

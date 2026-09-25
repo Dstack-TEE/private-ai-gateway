@@ -22,6 +22,7 @@ pub mod protocol;
 pub mod sse;
 pub mod transport;
 pub mod ui_api;
+mod ui_methods;
 pub mod updates;
 pub mod usage;
 #[cfg(windows)]

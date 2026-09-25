@@ -1,6 +1,7 @@
-//! Tauri commands served by the shared UI API. Each command is its method's
-//! name in snake_case, so capabilities grant it individually; its arguments are
-//! passed through unchanged as the method parameters the web UI sends.
+//! Tauri commands served by the shared UI API, one per renderer method
+//! (`desktop_core::renderer_methods!`), so capabilities grant each one; its
+//! arguments are passed through unchanged as the method parameters the web UI
+//! sends.
 
 use std::sync::Arc;
 
@@ -12,7 +13,13 @@ use tauri::{
 };
 
 macro_rules! ui_commands {
-    ($($command:ident => $method:ident),+ $(,)?) => {$(
+    (
+        commands { $($command:ident => $command_variant:ident),+ $(,)? }
+        host { $($host:ident => $host_variant:ident),+ $(,)? }
+    ) => {
+        ui_commands!(@each $($command => $command_variant,)+ $($host => $host_variant,)+);
+    };
+    (@each $($command:ident => $method:ident,)+) => {$(
         #[tauri::command]
         pub(crate) async fn $command(
             window: WebviewWindow,
@@ -24,43 +31,7 @@ macro_rules! ui_commands {
     )+};
 }
 
-ui_commands! {
-    start_backend_service => StartBackendService,
-    get_state => GetState,
-    start => Start,
-    stop => Stop,
-    activate_profile => ActivateProfile,
-    delete_profile => DeleteProfile,
-    save_configuration => SaveConfiguration,
-    complete_account_login => CompleteAccountLogin,
-    begin_account_login => BeginAccountLogin,
-    poll_account_login => PollAccountLogin,
-    save_account_login => SaveAccountLogin,
-    get_account_details => GetAccountDetails,
-    get_account_balance => GetAccountBalance,
-    cancel_account_login => CancelAccountLogin,
-    get_client_key => GetClientKey,
-    rotate_client_key => RotateClientKey,
-    save_local_api_config => SaveLocalApiConfig,
-    save_web_ui => SaveWebUi,
-    set_web_ui_password => SetWebUiPassword,
-    list_listen_addresses => ListListenAddresses,
-    import_profiles => ImportProfiles,
-    query_usage => QueryUsage,
-    get_usage_record => GetUsageRecord,
-    list_agents => ListAgents,
-    get_agent_access => GetAgentAccess,
-    request_agent_access => RequestAgentAccess,
-    preview_agent => PreviewAgent,
-    apply_agent => ApplyAgent,
-    get_appearance => GetAppearance,
-    set_appearance => SetAppearance,
-    get_launch_preferences => GetLaunchPreferences,
-    set_launch_preference => SetLaunchPreference,
-    get_notification_settings => GetNotificationSettings,
-    save_notification_settings => SaveNotificationSettings,
-    reset_settings => ResetSettings,
-}
+desktop_core::renderer_methods!(ui_commands);
 
 fn params(request: &Request<'_>) -> Result<Value, String> {
     match request.body() {
