@@ -36,7 +36,7 @@ PASS  id-2         binding chain: keyset JCS -> digest -> statement for our nonc
 PASS  id-3         keyset not expired (now < not_after) [9.1(3)] — now 1783899770 < not_after 1786491770
 PASS  id-4         source provenance connects workload to public code [9.1(4)] — booted compose measured into RTMR3: compose-hash=7c1e…40db; repo=https://github.com/Dstack-TEE/private-ai-gateway.git commit=58b027d… (published, not independently rebuilt)
 SKIP  id-5         private-key custody and subject per policy [9.1(5)] — custody policy not implemented in this CLI yet; subject: null (no policy constraints applied)
-PASS  id-6         the channel actually used is bound to the attested keyset (TLS SPKI or E2EE key) [9.1(6)] — observed SPKI 6ff3…9d21 for api.redpill.ai is in the attested keyset
+PASS  id-6         the channel actually used is bound to the attested keyset (TLS SPKI or E2EE key) [9.1(6)] — observed SPKI 6ff3…9d21 for https://api.redpill.ai is an attested entry clients pin
 
 VERIFIED (5 pass, 1 skipped: custody policy not implemented)
 ```

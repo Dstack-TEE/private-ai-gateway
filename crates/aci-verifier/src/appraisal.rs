@@ -98,13 +98,25 @@ pub enum CustodyEvidence<'a> {
     },
 }
 
-/// `Unobservable` is an offline audit; `NotObserved` is a live run that could
-/// not see its channel, which §1.1 makes a failure rather than a skip.
+/// `Observed` is a live channel to `origin` that presented `spki_sha256`;
+/// `DeclaredFor` is a caller that will pin what the report declares for
+/// `origin`. `Unobservable` is an offline audit; `NotObserved` is a live run
+/// that could not see its channel, which §1.1 makes a failure rather than a
+/// skip.
 pub enum ChannelEvidence<'a> {
-    Observed { host: &'a str, spki_sha256: &'a str },
-    DeclaredFor { origin: &'a str },
-    Unobservable { reason: &'a str },
-    NotObserved { reason: &'a str },
+    Observed {
+        origin: &'a str,
+        spki_sha256: &'a str,
+    },
+    DeclaredFor {
+        origin: &'a str,
+    },
+    Unobservable {
+        reason: &'a str,
+    },
+    NotObserved {
+        reason: &'a str,
+    },
 }
 
 pub struct AppraisalInputs<'a> {
@@ -506,7 +518,7 @@ fn appraise_channel(
     keyset: Option<&WorkloadKeyset>,
 ) -> (CheckResult, Vec<ChannelBinding>) {
     let none = Vec::new();
-    let (host, spki) = match &inputs.channel {
+    let (origin, spki) = match &inputs.channel {
         ChannelEvidence::Unobservable { reason } => {
             let r = unevaluable(CheckId::Channel, *reason, "no live channel to bind");
             return (r, none);
@@ -519,7 +531,10 @@ fn appraise_channel(
             );
             return (r, none);
         }
-        ChannelEvidence::Observed { host, spki_sha256 } => (*host, Some(*spki_sha256)),
+        ChannelEvidence::Observed {
+            origin,
+            spki_sha256,
+        } => (*origin, Some(*spki_sha256)),
         ChannelEvidence::DeclaredFor { origin } => (*origin, None),
     };
     let Some(keyset) = keyset else {
@@ -529,68 +544,49 @@ fn appraise_channel(
         );
         return (r, none);
     };
+    // The report declares which attested entry clients of this deployment
+    // pin (§4.2), so the deployment's own narrowing decides which entry that
+    // is, and an observed channel must present it.
+    let bindings =
+        match declared_tls_channel_bindings(keyset, &inputs.report.attestation.evidence, origin) {
+            Ok(bindings) => bindings,
+            Err(e) => {
+                let r = failed(CheckId::Channel, FailureCause::Channel(e.to_string()));
+                return (r, none);
+            }
+        };
     let Some(spki) = spki else {
-        // The caller will enforce what the report declares clients pin, so the
-        // deployment's own narrowing decides which entry that is.
-        return match declared_tls_channel_bindings(
-            keyset,
-            &inputs.report.attestation.evidence,
-            host,
-        ) {
-            Ok(bindings) => (
-                pass(
-                    CheckId::Channel,
-                    format!("the entry {host} clients pin is attested in the keyset"),
-                ),
-                bindings,
-            ),
-            Err(e) => (
-                failed(CheckId::Channel, FailureCause::Channel(e.to_string())),
-                none,
-            ),
-        };
+        let r = pass(
+            CheckId::Channel,
+            format!("the entry {origin} clients pin is attested in the keyset"),
+        );
+        return (r, bindings);
     };
-    let host = host.to_ascii_lowercase();
     let observed = spki.to_ascii_lowercase();
-    let candidates: Vec<&str> = keyset
-        .tls_keys_for_host(&host)
+    let declared: Vec<&str> = bindings
         .iter()
-        .map(|k| k.spki_sha256_hex.as_str())
+        .filter_map(|binding| match binding {
+            ChannelBinding::TlsSpkiSha256 { spki_sha256, .. } => Some(spki_sha256.as_str()),
+            ChannelBinding::E2eePublicKeySha256 { .. } => None,
+        })
         .collect();
-    let result = if candidates.iter().any(|c| c.eq_ignore_ascii_case(&observed)) {
-        pass(
-            CheckId::Channel,
-            format!("observed SPKI {observed} for {host} is in the attested keyset"),
-        )
-    } else if candidates.is_empty() {
-        // §9.1(6) also accepts an attested E2EE key, but a caller sending
-        // plaintext over TLS has nothing else to pin.
-        let why = if keyset.tls_public_keys.is_empty() {
-            "the keyset publishes no TLS role".to_string()
-        } else {
-            format!("no attested TLS key is scoped to {host}")
-        };
-        failed_with(
-            CheckId::Channel,
-            FailureCause::Channel(why.clone()),
-            format!("{why}: the channel cannot be bound (spec 1.1, spec 9.1(6))"),
-        )
-    } else {
-        failed_with(
-            CheckId::Channel,
-            FailureCause::Channel(format!("observed SPKI {observed} is not attested")),
-            format!("observed SPKI {observed} for {host} is NOT in the attested keyset"),
-        )
-    };
     let explain = inputs.explain.then(|| {
         format!(
-            "observed leaf SPKI sha256 for {host}: {observed}\nattested candidates: {}",
-            if candidates.is_empty() {
-                "(none)".to_string()
-            } else {
-                candidates.join(", ")
-            }
+            "observed leaf SPKI sha256 for {origin}: {observed}\nattested entries clients pin: {}",
+            declared.join(", ")
         )
     });
-    (result.with_explain(explain), none)
+    if !declared.contains(&observed.as_str()) {
+        let r = failed_with(
+            CheckId::Channel,
+            FailureCause::Channel(format!("observed SPKI {observed} is not attested")),
+            format!("observed SPKI {observed} for {origin} is NOT an attested entry clients pin"),
+        );
+        return (r.with_explain(explain), none);
+    }
+    let r = pass(
+        CheckId::Channel,
+        format!("observed SPKI {observed} for {origin} is an attested entry clients pin"),
+    );
+    (r.with_explain(explain), bindings)
 }

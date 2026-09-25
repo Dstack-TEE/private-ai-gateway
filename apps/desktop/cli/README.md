@@ -62,8 +62,9 @@ boot measurements. See
 
 The spec 9.1 checks run in the shared `aci-verifier` crate, the same
 implementation Gateway uses to verify its upstreams: quote appraisal, the
-§9.1(2) binding chain, provenance, custody, and §3.1 TLS selection. Receipt
-signatures are checked in this package's
+§9.1(2) binding chain, provenance, dstack KMS custody, and the channel check
+against the TLS entry the report declares clients pin (§4.2
+`downstream_tls_binding`). Receipt signatures are checked in this package's
 `aci/` modules. The neutral `aci-protocol` crate supplies wire types, JCS,
 attestation-statement construction, and receipt canonicalization. The CLI maps
 verification outcomes to a pass, fail, or honest skip and does not import a

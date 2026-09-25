@@ -47,7 +47,15 @@ pub fn vector_report() -> AttestationReport {
             report_data_hex: "df2174d28130852b413646a3786927b93e94c11d770268b65def8bdba45cb49e"
                 .to_string(),
             source_provenance: SourceProvenance::default(),
-            evidence: json!({}),
+            // Evidence is outside the keyset digest. Under the dstack policy a
+            // keyset with domain-scoped TLS entries declares which one clients
+            // pin (spec 4.2).
+            evidence: json!({
+                "downstream_tls_binding": {
+                    "domain": "api.example.com",
+                    "spki_sha256": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+                },
+            }),
         },
         service_capabilities: ServiceCapabilities {
             supported_e2ee_versions: vec!["2".to_string()],
