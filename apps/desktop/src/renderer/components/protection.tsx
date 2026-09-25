@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { RefreshCw, ShieldCheck, ShieldX } from "lucide-react";
 import { SwitchControl } from "./controls";
 import type { AppState } from "../../shared/contracts";
-import { isProtected } from "../lib/protection";
+import { backendStarting, isProtected } from "../lib/protection";
 
 export function ProtectionStatus({ state, label }: { state: AppState; label: string }): React.JSX.Element {
   const active = isProtected(state);
@@ -67,7 +67,7 @@ export function ProtectedControl({
         size="default"
         checked={checked}
         label={label}
-        disabled={(busy && state.configurationVerification) || (endpointDown && !checked)}
+        disabled={backendStarting(state) || (busy && state.configurationVerification) || (endpointDown && !checked)}
         developmentMode={developmentMode}
         onToggle={onToggle}
       />

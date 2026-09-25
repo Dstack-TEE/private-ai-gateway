@@ -349,11 +349,12 @@ not a parsing contract.
 management API's `GET /api/version` answers it: `apiVersion`, `product`,
 `version`, `instanceId`, `processId` and `executable` (0.1 named the first
 field `protocolVersion`). A command that fails prints
-`{"error": {"code": "CODE", "message": "MESSAGE"}}`, where `CODE` is the
-backend's stable error code, such as `invalid_state`, `busy` or `not_found`,
-or `command_failed` for a failure the CLI reports itself (earlier builds always
-used `command_failed` and prefixed the message with the backend's code). The
-desktop app and the web UI receive the same `code` and `message`.
+`{"error": {"code": "CODE", "message": "MESSAGE"}}` on stderr. `error.code` is
+the backend's stable error code, such as `invalid_state`, `busy` or
+`revision_conflict`, or `command_failed` for a failure the CLI reports itself;
+`error.message` is text for people. 0.1 always reported `command_failed` and
+prefixed the message with the backend's code (`CODE: MESSAGE`). The desktop app
+and the web UI receive the same `code` and `message`.
 
 For reviewed agent changes, obtain a preview first:
 

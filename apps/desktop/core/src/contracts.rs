@@ -151,6 +151,8 @@ pub enum ServiceProvider {
 }
 
 impl ServiceProvider {
+    pub const ALL: [Self; 3] = [Self::Phala, Self::Redpill, Self::Custom];
+
     pub const fn label(self) -> &'static str {
         match self {
             Self::Phala => "Phala",
@@ -714,15 +716,7 @@ mod typescript {
             "Readonly<Record<string, string>>",
             websites.into(),
         ));
-        // Every provider, as the type's JSON Schema enumerates them.
-        let providers: Vec<ServiceProvider> = serde_json::from_value(
-            schemars::schema_for!(ServiceProvider)
-                .get("enum")
-                .cloned()
-                .unwrap(),
-        )
-        .unwrap();
-        let api_key_pages: serde_json::Map<_, _> = providers
+        let api_key_pages: serde_json::Map<_, _> = ServiceProvider::ALL
             .into_iter()
             .filter_map(|provider| Some((name(&provider), api_key_page(provider)?.into())))
             .collect();

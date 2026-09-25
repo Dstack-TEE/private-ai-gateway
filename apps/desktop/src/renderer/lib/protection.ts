@@ -43,6 +43,15 @@ export function unavailableState(error: unknown): AppState {
   };
 }
 
+/**
+ * The desktop shell is still starting the backend: disconnected, without an
+ * error (`backend_starting` in `src-tauri/src/tray.rs`). Profiles and
+ * protection are unknown until it answers.
+ */
+export function backendStarting(state: AppState): boolean {
+  return state.backendConnected === false && !state.error;
+}
+
 export function profileIsAvailable(profile: ConfidentialProfile | undefined, state: AppState): boolean {
   return Boolean(profile && profile.credentialSaved && (profile.id !== state.activeProfileId || state.apiKeySaved));
 }

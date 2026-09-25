@@ -12,7 +12,7 @@ import type { AgentStatus, ConfidentialProfile, AppState, LaunchPreferences, Nav
 import { PageHeader, Sidebar, useView } from "./components/navigation";
 import type { SettingsTarget } from "./components/navigation";
 import { desktopApi, distributionCapabilities, web } from "./lib/environment";
-import { INITIAL_STATE, protectionFlags, profileIsAvailable, unavailableState } from "./lib/protection";
+import { INITIAL_STATE, backendStarting as backendIsStarting, protectionFlags, profileIsAvailable, unavailableState } from "./lib/protection";
 import { AgentsView } from "./features/agents";
 import { Overview } from "./features/overview";
 import { UsageView } from "./features/usage";
@@ -63,9 +63,9 @@ function App(): React.JSX.Element {
   const [allowDevelopmentOs, setAllowDevelopmentOs] = useState(false);
   const client = useQueryClient();
   const backendReady = Boolean(appState.data) && state.backendConnected !== false;
-  // The desktop shell starts the backend in the background; until it answers,
-  // the state reports it disconnected without an error.
-  const backendStarting = state.backendConnected === false && !state.error;
+  // The desktop shell starts the backend in the background. Until it answers,
+  // profiles and protection are unknown, so neither can be changed.
+  const backendStarting = backendIsStarting(state);
   useEffect(() => {
     if (!backendReady) return;
     // Prefetch shares page caches; failures are presented when the page is opened.
@@ -143,10 +143,11 @@ function App(): React.JSX.Element {
 
   // Protection needs a usable profile first: create one, or fix the active one.
   const openProfileSetup = () => {
+    if (backendStarting) return;
     openDialog(state.profiles.length === 0 ? { kind: "setup-profile" } : { kind: "profiles", repair: state.profiles.some((profile) => profile.id === state.activeProfileId) });
   };
   const showRequested = useEffectEvent((target: NavigationTarget) => {
-    if (target === "profiles") openDialog({ kind: "profiles", repair: false });
+    if (target === "profiles") { if (!backendStarting) openDialog({ kind: "profiles", repair: false }); }
     else if (target === "profile-setup") openProfileSetup();
     else if (target === "documentation" || target === "github") openAboutLink(target);
     else if (!modalOpen) void navigate({ to: `/${target}` as const });
@@ -235,6 +236,7 @@ function App(): React.JSX.Element {
   };
 
   const toggleProtection = () => {
+    if (backendStarting) return;
     const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
     if (!running && !busy && !state.reconnecting && !profileIsAvailable(activeProfile, state)) {
       openProfileSetup();
@@ -316,7 +318,7 @@ function App(): React.JSX.Element {
   const locked = applying;
   const openSettings = (target: SettingsTarget) => {
     if (target !== "confidential") openDialog({ kind: target });
-    else openDialog(state.profiles.length === 0 ? { kind: "setup-profile" } : { kind: "profiles", repair: false });
+    else if (!backendStarting) openDialog(state.profiles.length === 0 ? { kind: "setup-profile" } : { kind: "profiles", repair: false });
   };
   const inspectUsage = useCallback((activity: RequestActivity) => openDialog({ kind: "usage-proof", activity }), [openDialog]);
 

@@ -17,7 +17,7 @@ import { desktopApi, session } from "../lib/environment";
 import { parentDirectory, serviceHost } from "../lib/format";
 import { localAddressKind } from "../lib/local-api-config";
 import type { SettingsTarget } from "../components/navigation";
-import { isProtected, profileIsAvailable } from "../lib/protection";
+import { backendStarting, isProtected, profileIsAvailable } from "../lib/protection";
 
 function CliRegistrationControl(): React.JSX.Element {
   const client = useQueryClient();
@@ -132,7 +132,7 @@ export function SettingsView({
           {distribution.notifications && <SettingsLink title="Notifications" aria-label="Notifications" aria-haspopup="dialog" onClick={() => onOpen("notifications")} />}
       </SettingsSection>
       <SettingsSection title="Connections">
-          <SettingsLink title="Profiles" aria-label="Profiles" aria-haspopup="dialog" onClick={() => onOpen("confidential")} description={activeProfile ? `${activeProfile.name} · ${serviceHost(activeProfile.remoteUrl)} · ${isProtected(state) ? "Protected" : profileIsAvailable(activeProfile, state) ? "Ready" : "Connect account or add an API key"}` : "No provider configured"} />
+          <SettingsLink title="Profiles" aria-label="Profiles" aria-haspopup="dialog" disabled={backendStarting(state)} onClick={() => onOpen("confidential")} description={activeProfile ? `${activeProfile.name} · ${serviceHost(activeProfile.remoteUrl)} · ${isProtected(state) ? "Protected" : profileIsAvailable(activeProfile, state) ? "Ready" : "Connect account or add an API key"}` : "No provider configured"} />
           <SettingsLink title="Local API" description="Listener and client access" aria-label="Local API settings" aria-haspopup="dialog" onClick={() => onOpen("local-api")} />
           {distribution.webUi && state.webUi && <SettingsLink title="Web UI" description={webUiSummary(state.webUi)} aria-label="Web UI settings" aria-haspopup="dialog" onClick={() => onOpen("web-ui")} />}
           {session && <SignOutControl onSignOut={session.signOut} />}

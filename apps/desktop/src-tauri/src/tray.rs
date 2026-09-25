@@ -354,6 +354,8 @@ fn sync_inner(app: &AppHandle, state: &AppState) {
         let _ = menu.toggle.set_text(protection_action(state));
         let _ = menu.toggle.set_enabled(protection_action_enabled(state));
         let _ = menu.endpoint.set_enabled(state.proxy_url.is_some());
+        // Profiles are unknown until the backend answers.
+        let _ = menu.profiles.set_enabled(!backend_starting(state));
         if let Err(error) = sync_profiles(app, state, &menu) {
             tracing::warn!("Cannot refresh tray profiles: {error}");
         }
