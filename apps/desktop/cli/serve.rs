@@ -27,7 +27,9 @@ use axum::Router;
 use desktop_runtime::verifier_session::{IdentityEvent, VerifierEvent, VerifierEventSink};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
+use tokio_util::sync::CancellationToken;
 
+use crate::aci::tls::is_pin_mismatch;
 use crate::args::ServeArgs;
 use crate::checks::{BodyDigest, EstablishedIdentity, RequiredClaim};
 use crate::client::AciClient;
@@ -105,6 +107,27 @@ struct TrustedIdentity {
     /// §3.4: forwarding on an expired keyset must stop, so expiry blocks
     /// like a rotation and a fresh verify re-establishes trust.
     not_after: u64,
+    /// Delivery gate for this identity, read in the same snapshot as the
+    /// identity itself: cancelled when the identity is blocked or replaced,
+    /// so a request that passed the entry checks is refused rather than sent
+    /// under a decision made for an identity no longer trusted.
+    delivery: CancellationToken,
+}
+
+impl TrustedIdentity {
+    fn new(
+        report: AttestationReport,
+        identity: EstablishedIdentity,
+        delivery: CancellationToken,
+    ) -> Self {
+        Self {
+            keyset_digest: report.workload_keyset_digest.clone(),
+            report: Arc::new(report),
+            not_after: identity.keyset.not_after,
+            identity: Arc::new(identity),
+            delivery,
+        }
+    }
 }
 
 /// One forwarded POST exchange, recorded as digests for its asynchronous
@@ -178,13 +201,8 @@ pub struct ProxyState {
     reporter: Reporter,
     /// Cancels every managed verifier operation when its owning task stops.
     /// Standalone `serve` owns a token that remains live for the listener's
-    /// lifetime.
-    shutdown: tokio_util::sync::CancellationToken,
-    /// Delivery gate (same pattern as the desktop proxy): every identity loss
-    /// or replacement cancels this token, so a request that passed the entry
-    /// checks but has not started sending upstream is refused, never sent
-    /// under a decision made for the old identity.
-    delivery: Mutex<tokio_util::sync::CancellationToken>,
+    /// lifetime. Every identity's delivery gate is a child of it.
+    shutdown: CancellationToken,
     #[cfg(test)]
     pause: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
     event_sink: VerifierEventSink,
@@ -205,9 +223,8 @@ impl ProxyState {
         identity: EstablishedIdentity,
         reporter: Reporter,
         event_sink: VerifierEventSink,
-        shutdown: tokio_util::sync::CancellationToken,
+        shutdown: CancellationToken,
     ) -> Self {
-        let keyset_digest = report.workload_keyset_digest.clone();
         Self {
             client,
             base_url,
@@ -216,12 +233,11 @@ impl ProxyState {
             accepted_composes,
             require_production_os,
             audits: Arc::new(tokio::sync::Semaphore::new(16)),
-            trusted: Mutex::new(TrustedIdentity {
-                report: Arc::new(report),
-                keyset_digest,
-                not_after: identity.keyset.not_after,
-                identity: Arc::new(identity),
-            }),
+            trusted: Mutex::new(TrustedIdentity::new(
+                report,
+                identity,
+                shutdown.child_token(),
+            )),
             blocked: AtomicBool::new(false),
             reverify: tokio::sync::Mutex::new(Ok(())),
             reverify_attempts: AtomicU64::new(0),
@@ -231,18 +247,10 @@ impl ProxyState {
             policy_pins: Mutex::new(Vec::new()),
             reporter,
             event_sink,
-            delivery: Mutex::new(shutdown.child_token()),
             shutdown,
             #[cfg(test)]
             pause: Mutex::new(None),
         }
-    }
-
-    fn delivery_token(&self) -> tokio_util::sync::CancellationToken {
-        self.delivery
-            .lock()
-            .expect("delivery gate poisoned")
-            .clone()
     }
 
     fn record(&self, exchange: RecordedExchange) {
@@ -253,13 +261,25 @@ impl ProxyState {
         recorded.push_back(exchange);
     }
 
-    /// Cancel every delivery admitted under the previous identity.
+    /// Cancel every delivery admitted under the current identity. The gate
+    /// stays closed until a fresh verify adopts an identity with its own.
     fn revoke_deliveries(&self) {
+        self.trusted
+            .lock()
+            .expect("trusted identity poisoned")
+            .delivery
+            .cancel();
+    }
+
+    /// Trust a freshly verified identity under a new delivery gate, closing
+    /// the previous identity's gate in the same critical section.
+    fn adopt(&self, report: AttestationReport, identity: EstablishedIdentity) {
+        let adopted = TrustedIdentity::new(report, identity, self.shutdown.child_token());
         let previous = std::mem::replace(
-            &mut *self.delivery.lock().expect("delivery gate poisoned"),
-            self.shutdown.child_token(),
+            &mut *self.trusted.lock().expect("trusted identity poisoned"),
+            adopted,
         );
-        previous.cancel();
+        previous.delivery.cancel();
     }
 
     /// The active accepted set: the user's fixed list, or the current
@@ -306,7 +326,10 @@ impl ProxyState {
 
     /// The single re-verify funnel. `attempts` is the count the caller read
     /// before it started waiting: an attempt that failed since is shared, not
-    /// repeated (single flight).
+    /// repeated (single flight). Only the caller that ran a failed attempt
+    /// reports it, and not once the verifier is stopping: a managed backend
+    /// stops this verifier on `keyset_changed` to rebuild the session, and
+    /// that expected stop is not a verification failure.
     ///
     /// `refused_pins` heals a stale TLS pin: a send whose handshake that pin
     /// set rejected blocks like a keyset rotation (the TLS key is part of the
@@ -340,7 +363,17 @@ impl ProxyState {
         }
         *last = self.reverify().await;
         self.reverify_attempts.fetch_add(1, Ordering::SeqCst);
-        last.clone()
+        let result = last.clone();
+        drop(last);
+        if let Err(reason) = &result {
+            if !self.shutdown.is_cancelled() {
+                (self.event_sink)(VerifierEvent::Blocked {
+                    code: None,
+                    reason: reason.clone(),
+                });
+            }
+        }
+        result
     }
 
     async fn reverify(self: &Arc<Self>) -> Result<(), String> {
@@ -361,11 +394,7 @@ impl ProxyState {
         }
         let stale_pins = self.client.pinned_spkis(&self.host);
         let pins = verification.attested_spkis();
-        if !pins.is_empty() {
-            self.client.pin(&self.host, &pins)?;
-        }
         let verification_summary = verification.transcript.to_json(false);
-        let keyset_digest = verification.report.workload_keyset_digest.clone();
         let identity = verification
             .identity
             .ok_or("verified run carried no established identity")?;
@@ -377,15 +406,10 @@ impl ProxyState {
                 verification_summary,
             ),
         };
-        // The identity is being replaced: nothing admitted under the old one
-        // may still be delivered.
-        self.revoke_deliveries();
-        *self.trusted.lock().expect("trusted identity poisoned") = TrustedIdentity {
-            report: Arc::new(verification.report),
-            keyset_digest,
-            not_after: identity.keyset.not_after,
-            identity: Arc::new(identity),
-        };
+        // Re-pin last among the fallible steps, so a failed re-verify never
+        // leaves the new key pinned under the old identity.
+        self.client.pin(&self.host, &pins)?;
+        self.adopt(verification.report, identity);
         self.blocked.store(false, Ordering::SeqCst);
         (self.event_sink)(identity_event);
         let current_pins = self.client.pinned_spkis(&self.host);
@@ -417,8 +441,8 @@ pub async fn run(args: ServeArgs, require_production_os: bool) -> Result<i32, St
     }
 }
 
-/// Clear of the account callback (4181) and the web UI (4182), which a
-/// desktop installation may bind at the same time.
+/// Clear of the web UI (4182), which a desktop installation may bind at the
+/// same time.
 const DEFAULT_CONTROL: &str = "127.0.0.1:4183";
 /// Connections each listener holds open at once; later ones wait to be accepted.
 const MAX_CONNECTIONS: usize = 128;
@@ -446,7 +470,7 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
         },
         reporter,
         event_sink,
-        tokio_util::sync::CancellationToken::new(),
+        CancellationToken::new(),
     )
     .await?;
 
@@ -549,7 +573,7 @@ async fn initialize(
     options: VerifierOptions,
     reporter: Reporter,
     event_sink: VerifierEventSink,
-    shutdown: tokio_util::sync::CancellationToken,
+    shutdown: CancellationToken,
 ) -> Result<(Arc<ProxyState>, IdentityEvent, String), String> {
     let verification = verify_service(
         &options.base_url,
@@ -588,9 +612,7 @@ async fn initialize(
         verification_summary,
     );
     // Pin the just-verified TLS keys on every future hop to this host.
-    if !pins.is_empty() {
-        client.pin(&host, &pins)?;
-    }
+    client.pin(&host, &pins)?;
     let state = ProxyState::new(
         client,
         base_url.clone(),
@@ -672,29 +694,29 @@ async fn proxy_request(
     }
     let identity_before = state.snapshot().keyset_digest;
     if let Err(reason) = state.ensure_unblocked().await {
-        (state.event_sink)(VerifierEvent::Blocked {
-            code: None,
-            reason: reason.clone(),
-        });
         tracing::warn!("!! {method} {path} -> 503 blocked: {reason}");
         return text_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "upstream keyset changed or expired and re-verification failed; refusing to forward\n",
         );
     }
-    if state.snapshot().keyset_digest != identity_before {
+    // The identity this request is admitted under, and its delivery gate,
+    // from one snapshot.
+    let admitted = state.snapshot();
+    if admitted.keyset_digest != identity_before {
         return identity_changed_response(&method, &path);
     }
     if method == Method::POST {
-        proxy_inference(state, uri, headers, body, context).await
+        proxy_inference(state, admitted, uri, headers, body, context).await
     } else {
-        proxy_passthrough(state, method, uri, headers, body, context).await
+        proxy_passthrough(state, admitted, method, uri, headers, body, context).await
     }
 }
 
 /// Non-POST passthrough: streamed byte-exact, no receipt to check.
 async fn proxy_passthrough(
     state: Arc<ProxyState>,
+    mut admitted: TrustedIdentity,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -702,7 +724,6 @@ async fn proxy_passthrough(
     context: Option<ForwardContext>,
 ) -> Response {
     let path = uri.path().to_string();
-    let mut delivery = state.delivery_token();
     let url = join_url(&state.base_url, &uri);
     let send = || {
         let req = forward_headers(state.client.request(method.clone(), &url), &headers);
@@ -713,13 +734,14 @@ async fn proxy_passthrough(
         }
     };
     let mut resp =
-        match send_upstream(&state, &mut delivery, (&method, &path, &context), send).await {
+        match send_upstream(&state, &mut admitted, (&method, &path, &context), send).await {
             Ok(resp) => resp,
             Err(response) => return *response,
         };
     let status = resp.status().as_u16();
     let resp_headers = resp.headers().clone();
-    rotation_gate(&state, &state.snapshot().keyset_digest, &resp_headers);
+    rotation_gate(&state, &admitted.keyset_digest, &resp_headers);
+    let delivery = admitted.delivery;
     (state.reporter)(RequestOutcome {
         method,
         path,
@@ -764,6 +786,7 @@ async fn proxy_passthrough(
 /// after-the-fact receipt check.
 async fn proxy_inference(
     state: Arc<ProxyState>,
+    mut trusted: TrustedIdentity,
     uri: Uri,
     headers: HeaderMap,
     body: Bytes,
@@ -779,8 +802,6 @@ async fn proxy_inference(
         );
     }
 
-    let trusted = state.snapshot();
-    let mut delivery = state.delivery_token();
     let url = join_url(&state.base_url, &uri);
     let active_pins = state.active_pins();
     // A policy-derived set is refreshed only when it actually constrained this
@@ -814,7 +835,7 @@ async fn proxy_inference(
     }
     let mut resp = match send_upstream(
         &state,
-        &mut delivery,
+        &mut trusted,
         (&Method::POST, &path, &context),
         || send(request_body.clone()),
     )
@@ -823,6 +844,7 @@ async fn proxy_inference(
         Ok(resp) => resp,
         Err(response) => return *response,
     };
+    let delivery = trusted.delivery.clone();
     // A 412 refusal against a policy-derived pin set means the sessions
     // rotated under us (§8 supersession): refresh the set from the service's
     // current sessions and retry once. §5.3 refuses before serving, so
@@ -994,17 +1016,18 @@ async fn proxy_inference(
         .unwrap_or_else(|_| internal_error())
 }
 
-/// One upstream send under the delivery gate. A handshake the TLS pin
-/// refused can never reach the §3.4 rotation gate (it aborts before any
-/// response), so that refusal is healed through the keyset-rotation path.
-/// Only a connect-phase failure qualifies: a request that may already have
-/// reached the service is never replayed. Afterwards the request is sent once
-/// more only if the identity it was admitted under still holds; a changed
-/// identity gets the same retryable 503 as `proxy_request`. Any other
+/// One upstream send under the admitted identity's delivery gate. A
+/// handshake the TLS pin refused can never reach the §3.4 rotation gate (it
+/// aborts before any response), so that refusal is healed through the
+/// keyset-rotation path. Only this request's own pin refusal qualifies; it
+/// happens before any request byte is written, so a request that may already
+/// have reached the service is never replayed. Afterwards the request is sent
+/// once more only if the identity it was admitted under still holds; a
+/// changed identity gets the same retryable 503 as `proxy_request`. Any other
 /// failure (DNS, refused port, timeout, a dropped response) stays a 502.
 async fn send_upstream<Fut>(
     state: &Arc<ProxyState>,
-    delivery: &mut tokio_util::sync::CancellationToken,
+    admitted: &mut TrustedIdentity,
     (method, path, context): (&Method, &str, &Option<ForwardContext>),
     send: impl Fn() -> Fut,
 ) -> Result<reqwest::Response, Box<Response>>
@@ -1020,18 +1043,14 @@ where
             context.clone(),
         ))
     };
-    let admitted = state.snapshot().keyset_digest;
     let pins = state.client.pinned_spkis(&state.host);
-    let rejections = state.client.pin_rejections(&state.host);
     let attempts = state.reverify_attempts.load(Ordering::SeqCst);
-    let error = match race_delivery(delivery, send()).await {
+    let error = match race_delivery(&admitted.delivery, send()).await {
         None => return Err(Box::new(delivery_revoked_response(path))),
         Some(Ok(resp)) => return Ok(resp),
         Some(Err(e)) => e,
     };
-    // The TLS handshake runs in the connect phase, so a pin refusal is a
-    // connect error; the count tells it apart from DNS, refusal or timeout.
-    if !error.is_connect() || state.client.pin_rejections(&state.host) == rejections {
+    if !is_pin_mismatch(&error) {
         return Err(failed(error));
     }
     if let Err(reason) = state.reverify_blocked(attempts, Some(&pins)).await {
@@ -1040,20 +1059,17 @@ where
         if state.shutdown.is_cancelled() {
             return Err(Box::new(delivery_revoked_response(path)));
         }
-        (state.event_sink)(VerifierEvent::Blocked {
-            code: None,
-            reason: reason.clone(),
-        });
         tracing::warn!("!! {method} {path} -> 502 stale TLS pin; re-verification failed: {reason}");
         return Err(failed(error));
     }
-    if state.snapshot().keyset_digest != admitted {
+    let current = state.snapshot();
+    if current.keyset_digest != admitted.keyset_digest {
         return Err(Box::new(identity_changed_response(method, path)));
     }
-    // Another request's heal may have revoked the gate this one was admitted
-    // under while keeping the identity; send under the current token.
-    *delivery = state.delivery_token();
-    match race_delivery(delivery, send()).await {
+    // A heal (this request's or another's) re-adopted the same identity under
+    // a new delivery gate; send under that one.
+    *admitted = current;
+    match race_delivery(&admitted.delivery, send()).await {
         None => Err(Box::new(delivery_revoked_response(path))),
         Some(Ok(resp)) => Ok(resp),
         Some(Err(e)) => Err(failed(e)),
@@ -1073,7 +1089,7 @@ fn identity_changed_response(method: &Method, path: &str) -> Response {
 /// Race an upstream send against the delivery gate; `None` means revoked
 /// before (or while) sending, and nothing may be treated as delivered.
 async fn race_delivery<T>(
-    token: &tokio_util::sync::CancellationToken,
+    token: &CancellationToken,
     send: impl std::future::Future<Output = T>,
 ) -> Option<T> {
     tokio::select! {

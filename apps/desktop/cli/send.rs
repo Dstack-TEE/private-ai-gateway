@@ -66,9 +66,7 @@ pub async fn run(args: SendArgs, require_production_os: bool) -> Result<i32, Str
     } = verification;
 
     // Enforce the just-verified TLS keys on every further connection to this host.
-    if !pins.is_empty() {
-        client.pin(&host, &pins)?;
-    }
+    client.pin(&host, &pins)?;
 
     let model = match &args.model {
         Some(model) => model.clone(),

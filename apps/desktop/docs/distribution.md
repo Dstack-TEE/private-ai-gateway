@@ -250,8 +250,9 @@ token issuance, or error alert. No intermediate webview dialog is created.
 
 After selection, MAS stores a persistent app-scoped security bookmark in the app
 container. Before every backend launch or restart, the app resolves that bookmark
-and creates a fresh process-shareable bookmark for its owned backend. The backend
-resolves the shared bookmark, retains that access for its lifetime, and immediately
+and creates a fresh process-shareable bookmark for its owned backend, holding
+scoped access only while it does so. The backend resolves the shared bookmark,
+starts scoped access and holds it for its lifetime, and immediately
 scans and shows the actual installed Agents. Detection derives each Agent's configuration path
 from that authorized Home and checks for the Agent's official executable in the
 user-owned install directories, including common package-manager and version-manager

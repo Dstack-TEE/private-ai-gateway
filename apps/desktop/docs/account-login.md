@@ -24,7 +24,8 @@ crate's form-encoded RFC 8628 client. Its returned token is an inference
 key. Account metadata must load successfully before the authorization is ready.
 
 RedPill uses public OAuth client `cGrHCOWG3S91oa0A` on `clerk.redpill.ai` with
-exact callback `http://127.0.0.1:4181/oauth/callback`. Discovery must support code
+a loopback callback `http://127.0.0.1:<port>/oauth/callback` on a port the OS
+assigns for each sign-in (RFC 8252 §7.3). Discovery must support code
 flow, S256 PKCE and public token exchange. The `oauth2` crate builds the
 authorization request (random state, S256 PKCE) and exchanges the code. The
 callback checks Host, state, unique code and the RFC 9207 issuer when present.

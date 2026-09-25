@@ -13,7 +13,7 @@ pub(crate) use redpill::transition_credential;
 use redpill::*;
 
 use std::{
-    net::{Ipv4Addr, SocketAddrV4},
+    net::{Ipv4Addr, SocketAddr},
     sync::Arc,
     time::Duration,
 };
@@ -51,17 +51,15 @@ use desktop_core::contracts::{
 
 const REDPILL_CLIENT_ID: &str = "cGrHCOWG3S91oa0A";
 const ISSUER: &str = "https://clerk.redpill.ai";
-/// Where RedPill redirects the OAuth callback; the web UI may not take its port.
-pub(crate) const CALLBACK_ADDRESS: SocketAddrV4 =
-    SocketAddrV4::new(Ipv4Addr::LOCALHOST, desktop_core::account::CALLBACK_PORT);
 const CALLBACK_PATH: &str = "/oauth/callback";
 const KEY_URL: &str = "https://service.redpill.ai/api/oauth/key";
 const ACCOUNT_URL: &str = "https://service.redpill.ai/api/oauth/account";
 const PHALA_API: &str = "https://cloud-api.phala.com";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(900);
 
-fn callback_url() -> String {
-    format!("http://{CALLBACK_ADDRESS}{CALLBACK_PATH}")
+/// The loopback redirect URI for a callback listener bound to `address`.
+fn callback_url(address: SocketAddr) -> String {
+    format!("http://{address}{CALLBACK_PATH}")
 }
 
 #[derive(Clone)]
@@ -293,8 +291,8 @@ impl PendingLogin {
         let url = Url::parse(value.trim())
             .map_err(|_| Error::account("Account: Paste the complete callback URL."))?;
         if url.scheme() != "http"
-            || url.host() != Some(url::Host::Ipv4(*CALLBACK_ADDRESS.ip()))
-            || url.port() != Some(CALLBACK_ADDRESS.port())
+            || url.host() != Some(url::Host::Ipv4(Ipv4Addr::LOCALHOST))
+            || url.port() != Some(state.address.port())
             || url.path() != CALLBACK_PATH
             || !url.username().is_empty()
             || url.password().is_some()
@@ -308,8 +306,12 @@ impl PendingLogin {
             .parse()
             .map_err(|_| Error::account("Account: Invalid callback URL."))?;
         let mut headers = HeaderMap::new();
-        let host = CALLBACK_ADDRESS.to_string();
-        headers.insert("host", host.parse().expect("constant host"));
+        let host = state
+            .address
+            .to_string()
+            .parse()
+            .map_err(|_| Error::account("Account: Invalid callback URL."))?;
+        headers.insert("host", host);
         state.accept(&uri, &headers).await.map_err(|_| {
             Error::account("Account: This callback is invalid or has already been used.")
         })
@@ -394,20 +396,24 @@ pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<Pendi
             let discovery =
                 response(client.get(format!("{ISSUER}/.well-known/openid-configuration"))).await?;
             validate_discovery(&discovery)?;
-            let listener = TcpListener::bind(CALLBACK_ADDRESS).await.map_err(|_| {
-                format!(
-                    "Connection callback port {} is in use; close the other connection and retry",
-                    CALLBACK_ADDRESS.port()
-                )
-            })?;
+            // RFC 8252 §7.3: a loopback redirect on an OS-assigned port, which
+            // the authorization server must accept for any port.
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .map_err(|_| "Cannot open the connection callback listener")?;
+            let address = listener
+                .local_addr()
+                .map_err(|_| "Cannot open the connection callback listener")?;
             let oauth = redpill_client(
                 trusted_url(&string(&discovery, "authorization_endpoint")?, ISSUER)?,
                 trusted_url(&string(&discovery, "token_endpoint")?, ISSUER)?,
+                address,
             )?;
             let (url, state, verifier) = authorization_request(&oauth);
             let (sender, receiver) = oneshot::channel();
             let callback = Arc::new(CallbackState {
                 expected: state.into_secret(),
+                address,
                 sender: Mutex::new(Some(sender)),
             });
             let worker_callback = callback.clone();

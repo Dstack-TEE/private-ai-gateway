@@ -304,17 +304,19 @@ async fn pasted_callback_is_bound_to_session_and_consumed_once() {
     let (sender, receiver) = oneshot::channel();
     pending.callback = Some(Arc::new(CallbackState {
         expected: "expected".into(),
+        address: "127.0.0.1:50123".parse().unwrap(),
         sender: Mutex::new(Some(sender)),
     }));
     for url in [
         "https://attacker.test/oauth/callback?state=expected&code=secret",
-        "http://127.0.0.1:4181/oauth/callback?state=wrong&code=secret",
-        "http://127.0.0.1:4181/other?state=expected&code=secret",
-        "http://127.0.0.1:4181/oauth/callback?state=expected&state=expected&code=secret",
+        "http://127.0.0.1:50124/oauth/callback?state=expected&code=secret",
+        "http://127.0.0.1:50123/oauth/callback?state=wrong&code=secret",
+        "http://127.0.0.1:50123/other?state=expected&code=secret",
+        "http://127.0.0.1:50123/oauth/callback?state=expected&state=expected&code=secret",
     ] {
         assert!(pending.complete_callback("login", url).await.is_err());
     }
-    let url = "http://127.0.0.1:4181/oauth/callback?state=expected&code=secret";
+    let url = "http://127.0.0.1:50123/oauth/callback?state=expected&code=secret";
     assert!(pending.complete_callback("other-login", url).await.is_err());
     pending.complete_callback("login", url).await.unwrap();
     assert_eq!(receiver.await.unwrap().unwrap(), "secret");
@@ -328,14 +330,15 @@ async fn pasted_callback_is_bound_to_session_and_consumed_once() {
 
 #[test]
 fn callback_binds_host_state_and_issuer_and_rejects_duplicates() {
+    let address = "127.0.0.1:50123".parse().unwrap();
     let mut headers = HeaderMap::new();
-    headers.insert("host", "127.0.0.1:4181".parse().unwrap());
+    headers.insert("host", "127.0.0.1:50123".parse().unwrap());
     let valid: Uri =
         "/oauth/callback?state=expected&code=one-use&iss=https%3A%2F%2Fclerk.redpill.ai"
             .parse()
             .unwrap();
     assert_eq!(
-        callback_code(&valid, &headers, "expected").unwrap(),
+        callback_code(&valid, &headers, "expected", address).unwrap(),
         "one-use"
     );
     for query in [
@@ -346,10 +349,10 @@ fn callback_binds_host_state_and_issuer_and_rejects_duplicates() {
         "state=expected&code=x&iss=https://clerk.redpill.ai&iss=https://attacker.invalid",
     ] {
         let uri = format!("/oauth/callback?{query}").parse().unwrap();
-        assert!(callback_code(&uri, &headers, "expected").is_err());
+        assert!(callback_code(&uri, &headers, "expected", address).is_err());
     }
-    headers.insert("host", "attacker.invalid:4181".parse().unwrap());
-    assert!(callback_code(&valid, &headers, "expected").is_err());
+    headers.insert("host", "attacker.invalid:50123".parse().unwrap());
+    assert!(callback_code(&valid, &headers, "expected", address).is_err());
 }
 
 #[test]
@@ -376,6 +379,9 @@ fn unsupported_pkce_discovery_fails_closed() {
 #[tokio::test]
 async fn redpill_code_flow_binds_state_issuer_and_pkce_to_one_exchange() {
     use axum::{routing::post, Form, Json};
+    // The loopback callback on an OS-assigned port (RFC 8252 §7.3).
+    let callback_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let callback_address = callback_listener.local_addr().unwrap();
     let challenge = Arc::new(std::sync::Mutex::new(String::new()));
     let expected_challenge = challenge.clone();
     let token = post(
@@ -384,7 +390,7 @@ async fn redpill_code_flow_binds_state_issuer_and_pkce_to_one_exchange() {
             async move {
                 assert_eq!(form["grant_type"], "authorization_code");
                 assert_eq!(form["client_id"], REDPILL_CLIENT_ID);
-                assert_eq!(form["redirect_uri"], callback_url());
+                assert_eq!(form["redirect_uri"], callback_url(callback_address));
                 assert_eq!(form["code"], "one-use");
                 let verifier = Sha256::digest(form["code_verifier"].as_bytes());
                 assert_eq!(
@@ -425,6 +431,7 @@ async fn redpill_code_flow_binds_state_issuer_and_pkce_to_one_exchange() {
     let oauth = redpill_client(
         Url::parse(&format!("{ISSUER}/oauth/authorize")).unwrap(),
         Url::parse(&format!("{base}/oauth/token")).unwrap(),
+        callback_address,
     )
     .unwrap();
     let (url, state, verifier) = authorization_request(&oauth);
@@ -433,18 +440,17 @@ async fn redpill_code_flow_binds_state_issuer_and_pkce_to_one_exchange() {
     assert_eq!(query["response_type"], "code");
     assert_eq!(query["response_mode"], "query");
     assert_eq!(query["client_id"], REDPILL_CLIENT_ID);
-    assert_eq!(query["redirect_uri"], callback_url());
+    assert_eq!(query["redirect_uri"], callback_url(callback_address));
     assert_eq!(query["scope"], "openid profile user:org:read");
     assert_eq!(query["code_challenge_method"], "S256");
     assert_eq!(query["state"], *state.secret());
     *challenge.lock().unwrap() = query["code_challenge"].clone();
 
-    // The browser redirect reaches the loopback callback (RFC 8252 §7.3).
-    let callback_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let callback_address = callback_listener.local_addr().unwrap();
+    // The browser redirect reaches the loopback callback.
     let (sender, receiver) = oneshot::channel();
     let callback = Arc::new(CallbackState {
         expected: state.secret().clone(),
+        address: callback_address,
         sender: Mutex::new(Some(sender)),
     });
     let code = tokio::spawn(receive_code(callback_listener, callback, receiver));
@@ -455,7 +461,6 @@ async fn redpill_code_flow_binds_state_issuer_and_pkce_to_one_exchange() {
             state.secret(),
             url::form_urlencoded::byte_serialize(ISSUER.as_bytes()).collect::<String>()
         ))
-        .header("host", CALLBACK_ADDRESS.to_string())
         .send()
         .await
         .unwrap();
@@ -502,6 +507,7 @@ async fn redpill_token_errors_never_echo_the_response() {
     let oauth = redpill_client(
         Url::parse(&format!("{ISSUER}/oauth/authorize")).unwrap(),
         Url::parse(&format!("{base}/oauth/token")).unwrap(),
+        "127.0.0.1:50123".parse().unwrap(),
     )
     .unwrap();
     let (_, _, verifier) = authorization_request(&oauth);

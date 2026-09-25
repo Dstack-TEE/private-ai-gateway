@@ -25,8 +25,7 @@ an unsuccessful exit. The `ready` event includes both `proxy_url` and
 `control_url`. Human diagnostics remain on stderr.
 
 Standalone `serve` also exposes a control listener (`--control`, default
-`127.0.0.1:4183`, clear of the account callback on 4181 and the web UI on
-4182) backed by the same bounded receipt store used for automatic
+`127.0.0.1:4183`, clear of the web UI on 4182) backed by the same bounded receipt store used for automatic
 post-delivery audits. `GET /receipts` lists recent exchanges and
 `POST /receipts/<id>/verify` retries one audit. Managed desktop mode does not
 bind this listener because the backend owns the receipt store directly.
