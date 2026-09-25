@@ -1757,7 +1757,7 @@ async fn stale_pin_heals_against_live_service() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
     let observed = state.client.observed_spki(&state.host).expect("observed");
+    // Only the entry the report declares for this host is pinned (spec 4.2).
     let pinned = state.client.pinned_spkis(&state.host);
-    assert!(pinned.contains(&observed), "{pinned:?}");
-    assert!(!pinned.contains(&stale));
+    assert_eq!(pinned, vec![observed]);
 }

@@ -3,6 +3,7 @@
 pub const DEFAULT_DCAP_PCCS_URL: &str = dcap_qvl::PHALA_PCCS_URL;
 
 mod appraisal;
+mod channel;
 mod dstack;
 mod quote;
 mod report;
