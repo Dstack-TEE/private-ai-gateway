@@ -52,10 +52,16 @@ GitHub release with that changelog section as its notes.
   going from `0.2.0-beta.N` to `0.2.0` needs a commit on `main` whose message
   has the footer `Release-As: 0.2.0`
   ([release-please: Release-As](https://github.com/googleapis/release-please#how-do-i-change-the-version-number)).
-  The commit must change a file under `apps/desktop/`, because
-  `Desktop release PR` runs only for pushes that do; an empty commit, as in the
-  release-please README example, does not start it. The next release PR then
-  proposes `0.2.0`. Afterwards, betas continue from the next version.
+  An empty commit, as in the release-please README example, pushes nothing
+  under `apps/desktop/`, so run `Desktop release PR` from the Actions tab
+  (`workflow_dispatch`) afterwards. The next release PR then proposes `0.2.0`.
+  Afterwards, betas continue from the next version.
+- **Correcting the changelog**: edit the merged PR's body with a
+  `BEGIN_COMMIT_OVERRIDE` … `END_COMMIT_OVERRIDE` block
+  ([release-please: overriding release PR messages](https://github.com/googleapis/release-please#how-can-i-fix-release-notes)),
+  for example when a squash commit lists its commits as `* type: …` bullets,
+  which release-please cannot parse. Then run `Desktop release PR` manually to
+  refresh the release PR.
 
 The tag starts `Desktop release` (`desktop-release.yml`), which runs only for
 release tags and calls `Desktop Tauri` (`desktop-native.yml`) at the tagged
