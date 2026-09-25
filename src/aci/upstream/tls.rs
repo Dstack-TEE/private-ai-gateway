@@ -23,24 +23,40 @@ pub(super) fn response_headers(resp: &reqwest::Response) -> HashMap<String, Stri
     headers
 }
 
+/// The rustls configuration both clients share: webpki roots under the ring
+/// provider, named explicitly because dependencies also compile in aws-lc-rs,
+/// which leaves rustls unable to pick a process default from crate features.
+fn tls_config(
+    verifier: impl FnOnce(Arc<dyn ServerCertVerifier>) -> Arc<dyn ServerCertVerifier>,
+) -> Result<rustls::ClientConfig, UpstreamError> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let inner = rustls::client::WebPkiServerVerifier::builder_with_provider(
+        Arc::new(roots),
+        provider.clone(),
+    )
+    .build()
+    .map_err(|e| UpstreamError::Transport(format!("failed to build TLS verifier: {e}")))?;
+    Ok(rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| UpstreamError::Transport(format!("failed to build TLS config: {e}")))?
+        .dangerous()
+        .with_custom_certificate_verifier(verifier(inner))
+        .with_no_client_auth())
+}
+
 pub(super) fn pinned_spki_client(
     accepted_spkis: Vec<String>,
     connect_timeout_seconds: u64,
     read_timeout_seconds: u64,
 ) -> Result<reqwest::Client, UpstreamError> {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let inner = rustls::client::WebPkiServerVerifier::builder(Arc::new(roots))
-        .build()
-        .map_err(|e| UpstreamError::Transport(format!("failed to build TLS verifier: {e}")))?;
-    let verifier = Arc::new(SpkiPinVerifier {
-        inner,
-        accepted: accepted_spkis.into_iter().collect(),
-    });
-    let tls = rustls::ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(verifier)
-        .with_no_client_auth();
+    let tls = tls_config(|inner| {
+        Arc::new(SpkiPinVerifier {
+            inner,
+            accepted: accepted_spkis.into_iter().collect(),
+        })
+    })?;
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(connect_timeout_seconds))
         .read_timeout(Duration::from_secs(read_timeout_seconds))
@@ -123,18 +139,12 @@ pub fn observing_spki_client(
     connect_timeout_seconds: u64,
     read_timeout_seconds: u64,
 ) -> Result<reqwest::Client, UpstreamError> {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let inner = rustls::client::WebPkiServerVerifier::builder(Arc::new(roots))
-        .build()
-        .map_err(|e| UpstreamError::Transport(format!("failed to build TLS verifier: {e}")))?;
-    let tls = rustls::ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(ObservingSpkiVerifier {
+    let tls = tls_config(|inner| {
+        Arc::new(ObservingSpkiVerifier {
             inner,
             observations,
-        }))
-        .with_no_client_auth();
+        })
+    })?;
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(connect_timeout_seconds))
         .read_timeout(Duration::from_secs(read_timeout_seconds))

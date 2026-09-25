@@ -85,7 +85,12 @@ pub(super) async fn verify_quote_to_root(
     now_secs: u64,
     claimed_tee_type: &str,
 ) -> Result<VerifiedQuote, QuoteStepError> {
-    let collateral = dcap_qvl::collateral::get_collateral(pccs_url, raw_quote)
+    let collateral = dcap_qvl::collateral::CollateralClient::with_default_http(pccs_url)
+        .map_err(|e| QuoteStepError::Collateral {
+            url: pccs_url.to_string(),
+            reason: e.to_string(),
+        })?
+        .fetch(raw_quote)
         .await
         .map_err(|e| QuoteStepError::Collateral {
             url: pccs_url.to_string(),
