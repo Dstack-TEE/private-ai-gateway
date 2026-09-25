@@ -97,6 +97,7 @@ function fakeContext({
       _id: string,
       _update: (model: Record<string, any>) => void,
     ): void => {},
+    remove: (_providerID: string, _id: string): void => {},
   };
   const modelTransforms: ((editor: typeof modelEditor) => void)[] = [];
   const sessionHooks: {
@@ -439,40 +440,52 @@ test("drops OpenCode's provider id from ACI request bodies", () => {
   expect(sanitizeAciRequestBody(new Uint8Array())).toBeInstanceOf(Uint8Array);
 });
 
-test("pins models after model-level overrides", async () => {
+test("pins verified models and removes ones moved to another runtime", async () => {
   const fake = fakeContext({ options: { baseURL } });
   const plugin = await loadOpenCodeAciV2Plugin({ id: "aci-test" });
   const cleanup = await plugin.setup(fake.context);
 
   try {
     expect(fake.modelTransforms).toHaveLength(1);
-    const updates: { providerID: string; id: string; draft: Record<string, any> }[] = [];
+    const updated: Record<string, any>[] = [];
+    const removed: string[] = [];
     const editor = {
-      list: () => [{ providerID: "aci", id: "model-1" }],
+      list: () => [
+        { providerID: "aci", id: "verified-model", package: OPENCODE_ACI_PACKAGE },
+        {
+          providerID: "aci",
+          id: "native-model",
+          package: "@opencode/ai/providers/openai-compatible",
+        },
+      ],
       update: (providerID: string, id: string, update: (model: Record<string, any>) => void) => {
         const draft: Record<string, any> = {
-          package: "@opencode/ai/providers/openai-compatible",
+          package: OPENCODE_ACI_PACKAGE,
           settings: { baseURL: "https://attacker.example/v1" },
         };
         update(draft);
-        updates.push({ providerID, id, draft });
+        updated.push({ providerID, id, draft });
+      },
+      remove: (providerID: string, id: string) => {
+        removed.push(`${providerID}/${id}`);
       },
     };
     fake.modelTransforms[0]!(editor);
 
-    expect(updates).toHaveLength(1);
-    expect(updates[0]!.draft.package).toBe(OPENCODE_ACI_PACKAGE);
-    expect(updates[0]!.draft.settings).toEqual({ baseURL });
-
-    expect(updates).toHaveLength(1);
-    expect(updates[0]!.draft.package).toBe(OPENCODE_ACI_PACKAGE);
-    expect(updates[0]!.draft.settings).toEqual({ baseURL });
+    expect(updated).toEqual([
+      {
+        providerID: "aci",
+        id: "verified-model",
+        draft: { package: OPENCODE_ACI_PACKAGE, settings: { baseURL } },
+      },
+    ]);
+    expect(removed).toEqual(["aci/native-model"]);
   } finally {
     await cleanup?.();
   }
 });
 
-test("blocks native-route requests that do not target the verified gateway", async () => {
+test("blocks requests that do not target the verified gateway", async () => {
   const fake = fakeContext({ options: { baseURL } });
   const plugin = await loadOpenCodeAciV2Plugin({ id: "aci-test" });
   const cleanup = await plugin.setup(fake.context);

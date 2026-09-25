@@ -305,13 +305,26 @@ export function createOpenCodeAciV2Plugin({
 
       // Model transforms replay after the complete provider/model collection is
       // materialized, including model-level `providers.<id>.models.<id>` config
-      // entries. Pin again here so those overrides cannot swap the runtime
-      // package or endpoint after the provider transform ran.
+      // entries. Re-pin the endpoint here so those entries cannot move the
+      // model to another endpoint. The host ignores `package` edits from a
+      // model transform, and a model-level entry moves the model back to a
+      // native runtime package; the `http.request` guard below is what rejects
+      // that route, not this transform.
       await ctx.model.transform((editor) => {
         const verifiedBaseURL = active?.config.baseURL ?? initial.baseURL;
         for (const model of editor.list(providerID)) {
+          // The host ignores runtime-package edits from a model transform, and
+          // a model-level `providers.<id>.models.<id>` config entry moves the
+          // model back to a native runtime package. Remove such models instead
+          // of letting them serve traffic without the verified transport.
+          if (model.package !== OPENCODE_ACI_PACKAGE) {
+            console.error(
+              `${profile.logPrefix} removing model ${String(model.id)}: runtime package ${String(model.package)} is not the verified ACI transport`,
+            );
+            editor.remove(String(model.providerID), String(model.id));
+            continue;
+          }
           editor.update(String(model.providerID), String(model.id), (draft) => {
-            draft.package = OPENCODE_ACI_PACKAGE;
             draft.settings = { ...draft.settings, baseURL: verifiedBaseURL };
           });
         }
