@@ -514,7 +514,10 @@ fn unmanaged_provider_objects_are_not_captured_as_plain_backups() {
                 .projector
                 .preview(agent, true, Some(&catalog()), &claude_options())
                 .unwrap_err();
-            assert_eq!(error.code(), "configuration_conflict");
+            assert_eq!(
+                error.code(),
+                desktop_core::protocol::ErrorCode::ConfigurationConflict
+            );
             assert!(!error.to_string().contains("sk-test-hidden"));
             assert_eq!(fs::read_to_string(&path).unwrap(), text);
             assert!(!sandbox.projector.store_path().exists());
@@ -628,9 +631,9 @@ fn native_auth_and_routing_conflicts_are_read_only_and_deauthorize() {
         assert_eq!(
             error.code(),
             if matches!(case, "aws" | "stored-key" | "explicit-key" | "pool") {
-                "authentication_conflict"
+                desktop_core::protocol::ErrorCode::AuthenticationConflict
             } else {
-                "configuration_conflict"
+                desktop_core::protocol::ErrorCode::ConfigurationConflict
             }
         );
         assert!(!error.to_string().contains("sk-test-hidden"));
@@ -740,7 +743,7 @@ fn projections_and_codex_defaults_use_the_same_endpoint_filter() {
             .preview(Agent::ClaudeCode, true, Some(&catalog), &options)
             .unwrap_err()
             .code(),
-        "no_compatible_models"
+        desktop_core::protocol::ErrorCode::NoCompatibleModels
     );
     assert!(sandbox
         .projector
@@ -826,7 +829,10 @@ fn apply_refuses_a_stale_revision() {
             &claude_options(),
         )
         .unwrap_err();
-    assert_eq!(error.code(), "revision_conflict");
+    assert_eq!(
+        error.code(),
+        desktop_core::protocol::ErrorCode::RevisionConflict
+    );
     assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"model": "opus"}"#);
     write(&path, r#"{"model": "sonnet"}"#);
     let error = sandbox
@@ -839,7 +845,10 @@ fn apply_refuses_a_stale_revision() {
             &claude_options(),
         )
         .unwrap_err();
-    assert_eq!(error.code(), "revision_conflict");
+    assert_eq!(
+        error.code(),
+        desktop_core::protocol::ErrorCode::RevisionConflict
+    );
     assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"model": "sonnet"}"#);
     assert!(sandbox
         .projector
@@ -875,7 +884,10 @@ fn connect_rolls_everything_back_when_the_record_cannot_be_saved() {
             &claude_options(),
         )
         .unwrap_err();
-    assert_eq!(error.code(), "configuration_lock_failed");
+    assert_eq!(
+        error.code(),
+        desktop_core::protocol::ErrorCode::ConfigurationLockFailed
+    );
     assert!(!error.to_string().contains("sk-user"));
     assert_eq!(
         fs::read_to_string(&path).unwrap(),
@@ -957,7 +969,10 @@ fn drifted_or_broken_configs_deauthorize_tokens_but_stay_recoverable() {
         .projector
         .preview(Agent::ClaudeCode, true, Some(&catalog()), &claude_options())
         .unwrap_err();
-    assert_eq!(error.code(), "invalid_configuration");
+    assert_eq!(
+        error.code(),
+        desktop_core::protocol::ErrorCode::InvalidConfiguration
+    );
     assert!(!error.to_string().contains("sk-old-secret"));
     assert!(sandbox.projector.scan(None).unwrap().1.is_empty());
     let statuses = sandbox.projector.scan(None).unwrap().0;

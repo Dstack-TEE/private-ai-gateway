@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn client() -> Result<Client, String> {
+pub(super) fn client() -> Result<Client, Error> {
     Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
@@ -11,7 +11,7 @@ pub(super) fn client() -> Result<Client, String> {
 
 pub(super) async fn request_json(
     request: reqwest::RequestBuilder,
-) -> Result<(StatusCode, Value), String> {
+) -> Result<(StatusCode, Value), Error> {
     let result = request
         .send()
         .await
@@ -22,17 +22,17 @@ pub(super) async fn request_json(
         if status.is_success() {
             "Invalid account response".into()
         } else {
-            format!(
+            Error::account(format!(
                 "Account: Service rejected the request (HTTP {}). Retry or contact support.",
                 status.as_u16()
-            )
+            ))
         }
     })?;
     Ok((status, data))
 }
 
 /// Bound untrusted account responses and never include bodies, tokens or URLs in errors.
-async fn body(mut response: reqwest::Response) -> Result<Vec<u8>, String> {
+async fn body(mut response: reqwest::Response) -> Result<Vec<u8>, Error> {
     let mut bytes = Vec::new();
     while let Some(chunk) = response
         .chunk()
@@ -76,7 +76,7 @@ pub(super) fn protocol_error(data: &Value) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
-pub(super) fn account_error(status: StatusCode, data: &Value) -> String {
+pub(super) fn account_error(status: StatusCode, data: &Value) -> Error {
     if let Some(message) = match protocol_error(data) {
         Some("org_required") => Some("Select an organization on the connection page and try again."),
         Some("keys_permission_required" | "organization_permission_required") => Some("Your organization must grant key-management permission before you can connect."),
@@ -92,19 +92,21 @@ pub(super) fn account_error(status: StatusCode, data: &Value) -> String {
         Some("account_unavailable") => Some("This account is unavailable. Contact your organization administrator."),
         Some("not_available") => Some("Account connection is not enabled on this service."),
         _ => None,
-    } { return format!("Account: {message}"); }
+    } { return Error::account(format!("Account: {message}")); }
 
     match protocol_error(data) {
-        Some("access_denied") => "Account: Authorization was declined.".into(),
-        Some("expired_token") => "Account: Authorization expired; reconnect the account.".into(),
-        _ => format!(
+        Some("access_denied") => Error::account("Account: Authorization was declined."),
+        Some("expired_token") => {
+            Error::account("Account: Authorization expired; reconnect the account.")
+        }
+        _ => Error::account(format!(
             "Account: Service rejected the request (HTTP {}). Retry or contact support.",
             status.as_u16()
-        ),
+        )),
     }
 }
 
-pub(super) async fn response(request: reqwest::RequestBuilder) -> Result<Value, String> {
+pub(super) async fn response(request: reqwest::RequestBuilder) -> Result<Value, Error> {
     let (status, data) = request_json(request).await?;
     if !status.is_success() {
         return Err(account_error(status, &data));
@@ -112,22 +114,22 @@ pub(super) async fn response(request: reqwest::RequestBuilder) -> Result<Value, 
     Ok(data)
 }
 
-pub(super) fn string(data: &Value, field: &str) -> Result<String, String> {
+pub(super) fn string(data: &Value, field: &str) -> Result<String, Error> {
     data.get(field)
         .and_then(Value::as_str)
         .filter(|v| !v.is_empty() && v.len() <= 16384)
         .map(str::to_owned)
-        .ok_or_else(|| format!("Invalid account response: {field}"))
+        .ok_or_else(|| format!("Invalid account response: {field}").into())
 }
 
-pub(super) fn seconds(data: &Value, field: &str, max: u64) -> Result<u64, String> {
+pub(super) fn seconds(data: &Value, field: &str, max: u64) -> Result<u64, Error> {
     data.get(field)
         .and_then(Value::as_u64)
         .filter(|v| *v > 0 && *v <= max)
-        .ok_or_else(|| format!("Invalid account response: {field}"))
+        .ok_or_else(|| format!("Invalid account response: {field}").into())
 }
 
-pub(super) fn trusted_url(value: &str, origin: &str) -> Result<Url, String> {
+pub(super) fn trusted_url(value: &str, origin: &str) -> Result<Url, Error> {
     let url = Url::parse(value).map_err(|_| "Invalid authorization URL")?;
     if url.origin().ascii_serialization() != origin
         || !url.username().is_empty()

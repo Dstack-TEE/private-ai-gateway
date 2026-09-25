@@ -39,6 +39,8 @@ use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use url::Url;
 use uuid::Uuid;
 
+use crate::Error;
+
 use desktop_core::account::{account_return_url, LoginPresentation};
 #[cfg(test)]
 use desktop_core::account::{organization_url, top_up_url};
@@ -91,7 +93,7 @@ impl Authorization {
         &self,
         profile: &ConfidentialProfileInput,
         workspace_id: Option<i64>,
-    ) -> Result<Credential, String> {
+    ) -> Result<Credential, Error> {
         match self {
             Self::Inference(key) => {
                 if profile.provider == ServiceProvider::Redpill {
@@ -166,9 +168,9 @@ impl Authorization {
 }
 
 enum LoginState {
-    Authorizing(JoinHandle<Result<Authorization, String>>),
+    Authorizing(JoinHandle<Result<Authorization, Error>>),
     Authorized(Box<Authorization>),
-    Failed(String),
+    Failed(Error),
 }
 
 impl Drop for LoginState {
@@ -192,7 +194,7 @@ impl PendingLogin {
     pub(crate) fn new(
         presentation: LoginPresentation,
         profile: ConfidentialProfileInput,
-        worker: JoinHandle<Result<Authorization, String>>,
+        worker: JoinHandle<Result<Authorization, Error>>,
     ) -> Self {
         Self {
             presentation,
@@ -208,7 +210,7 @@ impl PendingLogin {
         self.deadline > Instant::now() && !matches!(self.state, LoginState::Failed(_))
     }
 
-    fn validate(&self, id: &str) -> Result<(), String> {
+    fn validate(&self, id: &str) -> Result<(), Error> {
         if self.presentation.id != id {
             return Err("Account connection is no longer active".into());
         }
@@ -218,7 +220,7 @@ impl PendingLogin {
         Ok(())
     }
 
-    async fn resolve(&mut self) -> Result<Option<&mut Authorization>, String> {
+    async fn resolve(&mut self) -> Result<Option<&mut Authorization>, Error> {
         if let LoginState::Authorizing(task) = &mut self.state {
             if !task.is_finished() {
                 return Ok(None);
@@ -236,7 +238,7 @@ impl PendingLogin {
         }
     }
 
-    pub async fn poll(&mut self, id: &str) -> Result<Option<AccountLoginDetails>, String> {
+    pub async fn poll(&mut self, id: &str) -> Result<Option<AccountLoginDetails>, Error> {
         self.validate(id)?;
         Ok(self
             .resolve()
@@ -249,7 +251,7 @@ impl PendingLogin {
         id: &str,
         profile: &ConfidentialProfileInput,
         workspace_id: Option<i64>,
-    ) -> Result<Credential, String> {
+    ) -> Result<Credential, Error> {
         self.validate(id)?;
         let candidate = desktop_core::config::resolve_profile(profile.clone(), None)?;
         if candidate.id != self.profile.id
@@ -268,7 +270,7 @@ impl PendingLogin {
     pub async fn balance_credential(
         &mut self,
         id: &str,
-    ) -> Result<(ServiceProvider, String), String> {
+    ) -> Result<(ServiceProvider, String), Error> {
         self.validate(id)?;
         let provider = self.profile.provider;
         let secret = self
@@ -280,17 +282,16 @@ impl PendingLogin {
         Ok((provider, secret))
     }
 
-    pub async fn complete_callback(&self, id: &str, value: &str) -> Result<(), String> {
+    pub async fn complete_callback(&self, id: &str, value: &str) -> Result<(), Error> {
         self.validate(id)?;
-        let state = self
-            .callback
-            .as_ref()
-            .ok_or("Account: This provider uses a device code, not a callback link.")?;
+        let state = self.callback.as_ref().ok_or(Error::account(
+            "Account: This provider uses a device code, not a callback link.",
+        ))?;
         if value.len() > 16384 {
-            return Err("Account: Callback link is too long.".into());
+            return Err(Error::account("Account: Callback link is too long."));
         }
-        let url =
-            Url::parse(value.trim()).map_err(|_| "Account: Paste the complete callback URL.")?;
+        let url = Url::parse(value.trim())
+            .map_err(|_| Error::account("Account: Paste the complete callback URL."))?;
         if url.scheme() != "http"
             || url.host() != Some(url::Host::Ipv4(*CALLBACK_ADDRESS.ip()))
             || url.port() != Some(CALLBACK_ADDRESS.port())
@@ -299,18 +300,19 @@ impl PendingLogin {
             || url.password().is_some()
             || url.fragment().is_some()
         {
-            return Err("Account: This callback URL does not match the current sign-in.".into());
+            return Err(Error::account(
+                "Account: This callback URL does not match the current sign-in.",
+            ));
         }
         let uri: Uri = format!("{}?{}", url.path(), url.query().unwrap_or_default())
             .parse()
-            .map_err(|_| "Account: Invalid callback URL.")?;
+            .map_err(|_| Error::account("Account: Invalid callback URL."))?;
         let mut headers = HeaderMap::new();
         let host = CALLBACK_ADDRESS.to_string();
         headers.insert("host", host.parse().expect("constant host"));
-        state
-            .accept(&uri, &headers)
-            .await
-            .map_err(|_| "Account: This callback is invalid or has already been used.".into())
+        state.accept(&uri, &headers).await.map_err(|_| {
+            Error::account("Account: This callback is invalid or has already been used.")
+        })
     }
 
     pub fn profile_id(&self) -> &str {
@@ -329,7 +331,7 @@ impl PendingLogin {
         self.saved = true;
     }
 
-    pub async fn cancel(&mut self) -> Result<(), String> {
+    pub async fn cancel(&mut self) -> Result<(), Error> {
         let provider = self.profile.provider;
         if self.saved || provider != ServiceProvider::Redpill {
             return Ok(());
@@ -355,7 +357,7 @@ pub(crate) enum CredentialTransition {
     Unavailable,
 }
 
-pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<PendingLogin, String> {
+pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<PendingLogin, Error> {
     profile.remote_url = desktop_core::config::resolve_profile(profile.clone(), None)?.remote_url;
     let client = client()?;
     let id = Uuid::new_v4().to_string();

@@ -4,7 +4,7 @@ pub(super) async fn phala(
     client: Client,
     device: String,
     interval: u64,
-) -> Result<Credential, String> {
+) -> Result<Credential, Error> {
     phala_at(client, device, interval, PHALA_API).await
 }
 
@@ -17,7 +17,7 @@ pub(super) async fn phala_at(
     device: String,
     mut interval: u64,
     base: &str,
-) -> Result<Credential, String> {
+) -> Result<Credential, Error> {
     loop {
         tokio::time::sleep(Duration::from_secs(interval)).await;
         let (status, data) = request_json(client.post(format!("{base}/api/v1/auth/device/token"))
@@ -45,13 +45,13 @@ pub(super) async fn phala_at(
             let workspace = string(
                 metadata
                     .get("workspace")
-                    .ok_or("Account: Missing workspace identity")?,
+                    .ok_or(Error::account("Account: Missing workspace identity"))?,
                 "name",
             )?;
             let account = string(
                 metadata
                     .get("user")
-                    .ok_or("Account: Missing account identity")?,
+                    .ok_or(Error::account("Account: Missing account identity"))?,
                 "username",
             )?;
             Ok(ProfileAuth::OAuth {

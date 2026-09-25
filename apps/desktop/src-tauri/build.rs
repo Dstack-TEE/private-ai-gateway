@@ -1,61 +1,45 @@
+// The renderer methods, as `desktop_core::renderer_methods!` lists them.
+include!("../core/src/ui_methods.rs");
+
+macro_rules! names {
+    (
+        commands { $($command:ident => $command_variant:ident),+ $(,)? }
+        host { $($host:ident => $host_variant:ident),+ $(,)? }
+    ) => {
+        [$(stringify!($command),)+ $(stringify!($host),)+]
+    };
+}
+
+/// The shell's own commands; see `invoke_handler!` in `src/lib.rs`.
+const NATIVE_COMMANDS: &[&str] = &[
+    "read_profile_backup",
+    "export_profiles",
+    "export_diagnostics",
+    "request_notification_permission",
+    "open_notification_settings",
+    "prepare_update",
+    "set_update_channel",
+    "restart_to_update",
+    "open_top_up",
+    "open_organization",
+    "copy_text",
+    "show_edit_menu",
+    "main_window_ready",
+    "open_agent_website",
+    "open_api_key_page",
+    "open_about_link",
+    "open_web_ui",
+    "get_cli_registration",
+    "set_cli_registration",
+    "stop_all_and_quit",
+];
+
 fn main() {
-    let manifest = tauri_build::AppManifest::new().commands(&[
-        "start_backend_service",
-        "get_state",
-        "reset_settings",
-        "read_profile_backup",
-        "import_profiles",
-        "export_profiles",
-        "export_diagnostics",
-        "get_notification_settings",
-        "save_notification_settings",
-        "request_notification_permission",
-        "open_notification_settings",
-        "get_appearance",
-        "set_appearance",
-        "prepare_update",
-        "set_update_channel",
-        "restart_to_update",
-        "get_launch_preferences",
-        "set_launch_preference",
-        "start",
-        "complete_account_login",
-        "begin_account_login",
-        "poll_account_login",
-        "save_account_login",
-        "get_account_details",
-        "get_account_balance",
-        "open_top_up",
-        "open_organization",
-        "cancel_account_login",
-        "activate_profile",
-        "delete_profile",
-        "save_configuration",
-        "stop",
-        "copy_text",
-        "show_edit_menu",
-        "main_window_ready",
-        "open_agent_website",
-        "open_api_key_page",
-        "query_usage",
-        "get_usage_record",
-        "open_about_link",
-        "get_client_key",
-        "rotate_client_key",
-        "save_local_api_config",
-        "save_web_ui",
-        "set_web_ui_password",
-        "open_web_ui",
-        "list_listen_addresses",
-        "list_agents",
-        "preview_agent",
-        "apply_agent",
-        "get_agent_access",
-        "request_agent_access",
-        "get_cli_registration",
-        "set_cli_registration",
-        "stop_all_and_quit",
-    ]);
+    let commands: Vec<&'static str> = renderer_methods!(names)
+        .into_iter()
+        .chain(NATIVE_COMMANDS.iter().copied())
+        .collect();
+    let manifest = tauri_build::AppManifest::new().commands(commands.leak());
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("failed to build the Tauri application");
 }

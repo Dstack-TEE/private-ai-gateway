@@ -1,7 +1,7 @@
 [package]
 name = "private-ai-proxy-runtime"
 version = "0.2.0-beta.0"
-description = "Private AI Proxy per-user backend: controller, settings files, management server, verifier sessions, usage, account login and web UI"
+description = "Private AI Proxy per-user backend: controller, settings files, the management API, verifier sessions, usage, account login and web UI"
 license = "Apache-2.0"
 edition = "2021"
 rust-version = "1.98"
@@ -9,7 +9,7 @@ rust-version = "1.98"
 [features]
 default = []
 mac-app-store = ["desktop-core/mac-app-store"]
-web-ui = ["dep:async-stream", "dep:axum-extra", "dep:futures-core", "dep:governor", "dep:rust-embed", "dep:time"]
+web-ui = ["dep:axum-extra", "dep:governor", "dep:rust-embed", "dep:time"]
 
 [lib]
 name = "desktop_runtime"
@@ -22,10 +22,10 @@ desktop-core = { package = "private-ai-proxy-core", path = "../core" }
 axum = "0.8"
 axum-extra = { version = "0.12", default-features = false, features = ["cookie"], optional = true }
 backon = { version = "1", default-features = false, features = ["std"] }
-async-stream = { version = "0.3", optional = true }
+async-stream = "0.3"
 base64 = "0.23"
 csv = "1"
-futures-core = { version = "0.3", optional = true }
+futures-core = "0.3"
 governor = { version = "0.10", default-features = false, features = ["std", "dashmap"], optional = true }
 hex = "0.4"
 indexmap = { version = "2", features = ["serde"] }
@@ -39,6 +39,7 @@ sha2 = "0.10"
 subtle = "2.6"
 reqwest = { version = "0.13", default-features = false, features = ["form", "json", "rustls-no-provider"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+tower = { version = "0.5", features = ["limit"] }
 rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
 rusqlite_migration = { version = "2", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
@@ -65,6 +66,7 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Power", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
+futures-util = "0.3"
 tempfile = "3"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 tokio = { version = "1", features = ["io-util", "test-util"] }

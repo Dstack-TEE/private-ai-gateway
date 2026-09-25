@@ -28,7 +28,7 @@ pub(super) struct Cli {
 pub(super) enum Action {
     /// Show backend and protection state. This does not start the backend.
     Status {
-        /// Stream state changes. Human output suppresses unchanged heartbeats; JSON remains NDJSON.
+        /// Stream state changes: the current state, then each change. JSON is one snapshot per line.
         #[arg(long)]
         watch: bool,
     },

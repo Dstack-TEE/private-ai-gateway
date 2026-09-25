@@ -138,7 +138,7 @@ fn perform_action(app: &AppHandle, id: String) {
                 }
                 "copy-key" => {
                     app.clipboard()
-                        .write_text(client.call(rpc::ClientKey)?)
+                        .write_text(client.call(rpc::GetClientKey)?)
                         .map_err(|_| "Cannot copy the client key")?;
                 }
                 _ if id.starts_with("profile:") => {
@@ -149,7 +149,7 @@ fn perform_action(app: &AppHandle, id: String) {
                 _ if id.starts_with("agent:") => {
                     let agent_id = &id[6..];
                     let agent = client
-                        .call(rpc::Agents)?
+                        .call(rpc::ListAgents)?
                         .into_iter()
                         .find(|agent| agent.id == agent_id)
                         .ok_or("Agent is no longer available")?;
@@ -182,7 +182,7 @@ fn perform_action(app: &AppHandle, id: String) {
         let state = client.state().unwrap_or_else(|_| client.cached_state());
         sync(&app, &state);
         if id.starts_with("agent:") {
-            if let Ok(agents) = client.call(rpc::Agents) {
+            if let Ok(agents) = client.call(rpc::ListAgents) {
                 sync_agents(&app, &agents);
             }
             let _ = app.emit("pap://agents-changed", ());
@@ -314,7 +314,7 @@ fn sync_autostart(app: &AppHandle) {
         if let Err(error) = result {
             let menu = app.state::<TrayMenu>();
             let _ = menu.autostart.set_checked(!checked);
-            tracing::warn!("Open at Login could not be changed: {}", error.message());
+            tracing::warn!("Open at Login could not be changed: {}", error);
             // Keep open windows in sync with the preference that actually applies.
             if let Ok(preferences) = desktop_core::ui_api::launch_preferences(&client, &host).await
             {

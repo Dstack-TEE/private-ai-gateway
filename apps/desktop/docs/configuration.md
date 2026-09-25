@@ -236,9 +236,8 @@ documents link here instead of keeping their own lists.
     `runtime/src/controller/settings_files.rs`), and its call at the start of
     the server's startup task (`runtime/src/server.rs`);
   - `Settings::import_error`, `import_ready`, `add_import_notices`,
-    `Applied::import_notices` and `IMPORT_PENDING` (`runtime/src/settings.rs`);
-  - the `"Settings from 0.1"` prefix in `RpcError::operation`
-    (`core/src/protocol.rs`).
+    `Applied::import_notices` and `IMPORT_PENDING` with its check in
+    `Settings::writable` (`runtime/src/settings.rs`).
 - The Keychain access group entitlement of the Mac App Store build (see
   [Mac App Store](mac-app-store.md)), kept only so the backend can import and
   delete what 0.1 saved in the Keychain.
@@ -261,6 +260,13 @@ documents link here instead of keeping their own lists.
   the legacy branch of `updateFeeds` in `scripts/update-feeds.mjs`. Delete the
   files from the `desktop-updates-beta` and `desktop-updates-stable` releases
   afterwards; later clients read only `latest.json`.
+- The client that stops a 0.1.4 to 0.2 beta backend over its NDJSON
+  protocol, so an update can replace a backend still running the old build:
+  `core/src/client/legacy.rs`, its calls in `core/src/client.rs`
+  (`is_running`, `version`, `ensure_service`, `shutdown_owned`),
+  `transport::legacy_endpoint_path` with `LEGACY_SOCKET_FILE`, and the test
+  `a_legacy_backend_is_stopped_over_its_own_protocol`
+  (`cli/tests/management.rs`).
 
 Not on this list: the `aci` command stays a documented legacy alias with its
 one-line hint. It predates the 0.1 settings format (it is the command name of

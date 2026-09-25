@@ -2,18 +2,15 @@ use super::*;
 use desktop_core::protocol::ShutdownMode;
 
 impl DesktopRuntime {
-    pub(super) fn configuration_change(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
-        let operation = self
-            .lifecycle
-            .try_lock()
-            .map_err(|_| "A configuration change is in progress")?;
+    pub(super) fn configuration_change(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, Error> {
+        let operation = self.lifecycle.try_lock().map_err(|_| Error::busy())?;
         if self.exiting.load(Ordering::Acquire) {
-            return Err("The app is closing".to_string());
+            return Err("The app is closing".into());
         }
         Ok(operation)
     }
 
-    pub(super) fn recover_network(self: &Arc<Self>) -> Result<(), String> {
+    pub(super) fn recover_network(self: &Arc<Self>) -> Result<(), Error> {
         let Ok(_operation) = self.lifecycle.try_lock() else {
             return Ok(());
         };
@@ -64,13 +61,14 @@ impl DesktopRuntime {
                 .map_err(|_| "Agent state unavailable")?;
             let result = self.manager.stop_with_reconnect(true);
             self.proxy.set_api_key(None);
-            self.publish_agent_tokens(TokenSet::default())?;
+            self.publish_agent_tokens(TokenSet::default())
+                .map_err(|error| error.to_string())?;
             result
         })();
         if let Err(error) = paused {
             self.manager.cancel_reconnection();
             self.recovery.cancel();
-            return Err(error);
+            return Err(error.into());
         }
         if !local_service && !self.recovery.online() {
             self.recovery.wait();
@@ -88,15 +86,13 @@ impl DesktopRuntime {
         })();
         if let Err(error) = resumed {
             self.recovery.wait();
-            return Err(format!(
-                "Could not reconnect; retrying automatically: {error}"
-            ));
+            return Err(format!("Could not reconnect; retrying automatically: {error}").into());
         }
         Ok(())
     }
 
     /// Called only by the server's blocking startup worker, after IPC is bound.
-    pub fn start_on_launch(self: &Arc<Self>) -> Result<(), String> {
+    pub fn start_on_launch(self: &Arc<Self>) -> Result<(), Error> {
         let _operation = self.lifecycle.blocking_lock();
         if self.exiting.load(Ordering::Acquire) {
             return Ok(());
@@ -109,13 +105,13 @@ impl DesktopRuntime {
         self.start_inner(state.config).map(|_| ())
     }
 
-    pub fn start(self: &Arc<Self>, config: StartConfig) -> Result<AppState, String> {
+    pub fn start(self: &Arc<Self>, config: StartConfig) -> Result<AppState, Error> {
         let _operation = self.configuration_change()?;
         self.recovery.cancel();
         self.start_inner(config)
     }
 
-    pub(super) fn start_inner(self: &Arc<Self>, config: StartConfig) -> Result<AppState, String> {
+    pub(super) fn start_inner(self: &Arc<Self>, config: StartConfig) -> Result<AppState, Error> {
         let _guard = self
             .agent_policy
             .lock()
@@ -123,16 +119,20 @@ impl DesktopRuntime {
         let config = settings_config::resolve_runtime_config(config)?;
         let state = self.manager.snapshot()?;
         if config.remote_url != state.config.remote_url {
-            return Err("Select or verify the Confidential AI profile before starting".to_string());
+            return Err(Error::invalid_state(
+                "Select or verify the Confidential AI profile before starting",
+            ));
         }
         let profile = state
             .profiles
             .iter()
             .find(|profile| profile.id == state.active_profile_id)
-            .ok_or_else(|| "Create a Confidential AI profile before starting".to_string())?;
-        let key = self
-            .load_profile_key(&profile.id)?
-            .ok_or_else(|| "Add a credential to the active Confidential AI profile".to_string())?;
+            .ok_or_else(|| {
+                Error::invalid_state("Create a Confidential AI profile before starting")
+            })?;
+        let key = self.load_profile_key(&profile.id)?.ok_or_else(|| {
+            Error::invalid_state("Add a credential to the active Confidential AI profile")
+        })?;
         self.proxy.set_api_key(Some(key));
         self.manager.set_api_key_saved(true);
         match self.manager.clone().start(config) {
@@ -144,17 +144,17 @@ impl DesktopRuntime {
         }
     }
 
-    pub fn stop(&self) -> Result<AppState, String> {
+    pub fn stop(&self) -> Result<AppState, Error> {
         let _operation = self.configuration_change()?;
         self.recovery.cancel();
         self.stop_inner()
     }
 
-    pub(super) fn stop_inner(&self) -> Result<AppState, String> {
+    pub(super) fn stop_inner(&self) -> Result<AppState, Error> {
         self.stop_with_reconnect(false)
     }
 
-    pub(super) fn stop_with_reconnect(&self, reconnecting: bool) -> Result<AppState, String> {
+    pub(super) fn stop_with_reconnect(&self, reconnecting: bool) -> Result<AppState, Error> {
         let _guard = self
             .agent_policy
             .lock()
@@ -162,20 +162,20 @@ impl DesktopRuntime {
         let result = self.manager.stop_with_reconnect(reconnecting);
         self.proxy.set_api_key(None);
         if self.instance.is_none() {
-            return result;
+            return Ok(result?);
         }
         self.proxy
             .set_tokens(with_client_token(TokenSet::default(), &self.credentials)?);
         if self.agent_configuration_enabled() {
             let failures = self.current_projector()?.reconcile(None)?;
             if !failures.is_empty() {
-                return Err(agent_failures(failures));
+                return Err(agent_failures(failures).into());
             }
         }
-        result
+        Ok(result?)
     }
 
-    pub async fn shutdown(&self, mode: ShutdownMode) -> Result<(), String> {
+    pub async fn shutdown(&self, mode: ShutdownMode) -> Result<(), Error> {
         // Shutdown waits for a configuration transaction to commit or roll back.
         // Cancelling that future midway could split credential and config state;
         // the server's shutdown watchdog bounds the wait.

@@ -340,7 +340,17 @@ OS requirement is a shared current policy, not a separate preference per profile
 Use `--json --non-interactive` for data and `--yes` only for changes you intend
 to approve. These flags are independent: JSON and non-interactive mode never
 imply consent. Results go to stdout; failures go to stderr. Watch mode emits
-one JSON snapshot per line. Human-readable output is not a parsing contract.
+one JSON snapshot per line: the current state, then one per change (0.1
+also repeated an unchanged snapshot every second). Human-readable output is
+not a parsing contract.
+
+`pap status --json` and `pap service start --json` report the backend as the
+management API's `GET /api/version` answers it: `apiVersion`, `product`,
+`version`, `instanceId`, `processId` and `executable` (0.1 named the first
+field `protocolVersion`). A command that fails prints
+`{"error": {"code": "command_failed", "message": "CODE: MESSAGE"}}`, where
+`CODE` is the backend's stable error code, such as `invalid_state`, `busy` or
+`not_found`.
 
 For reviewed agent changes, obtain a preview first:
 

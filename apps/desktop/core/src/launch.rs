@@ -115,6 +115,11 @@ fn sibling_executable(name: &str) -> Result<PathBuf, String> {
 /// inherit it; npm's cmd-shim avoids environment variables for the same reason.
 pub const ALIAS_ENV: &str = "PRIVATE_AI_PROXY_ALIAS";
 
+/// The service's exit status when another backend owns the instance lock:
+/// `EX_TEMPFAIL` of `sysexits.h`, a temporary condition. A client that
+/// started it waits for the backend that won instead of reporting a failure.
+pub const EXIT_ALREADY_RUNNING: i32 = 75;
+
 /// A command for any process the CLI starts, without [`ALIAS_ENV`].
 pub fn child_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     let mut command = Command::new(program);

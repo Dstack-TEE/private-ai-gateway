@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open, save } from "@tauri-apps/plugin-dialog";
 
-import type { DistributionCapabilities, ProfileBackup, UiMethod } from "../../shared/contracts";
+import type { DistributionCapabilities, ProfileBackup } from "../../shared/contracts";
 import { createDesktopApi, type UiPlatform, type UiTransport } from "./create-api";
 
 declare global {
@@ -14,7 +14,7 @@ declare global {
 }
 
 const transport: UiTransport = {
-  call: (method, params = {}) => invoke(commandName(method), params),
+  call: (method, params = {}) => invoke(method, params),
   subscribe,
 };
 
@@ -63,11 +63,6 @@ const platform: UiPlatform = {
   openOrganization: (organizationSlug) => invoke("open_organization", { organizationSlug }),
   openTopUp: (provider, scopeSlug) => invoke("open_top_up", { provider, scopeSlug }),
 };
-
-/** Tauri command names are the snake_case Rust function names of the shared UI methods. */
-function commandName(method: UiMethod): string {
-  return method.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
-}
 
 function subscribe<T>(event: string, listener: (payload: T) => void): () => void {
   let disposed = false;

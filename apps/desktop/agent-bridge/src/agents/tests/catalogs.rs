@@ -726,7 +726,7 @@ fn agents_require_a_verified_catalog_model() {
             )
             .unwrap_err()
             .code()
-            == "incompatible_model"
+            == desktop_core::protocol::ErrorCode::IncompatibleModel
     );
     #[cfg(unix)]
     {
@@ -744,7 +744,7 @@ fn agents_require_a_verified_catalog_model() {
                 .preview(Agent::Codex, true, Some(&catalog()), &claude_options())
                 .unwrap_err()
                 .code()
-                == "helper_unavailable"
+                == desktop_core::protocol::ErrorCode::HelperUnavailable
         );
     }
     // Without the bundled helper, agents cannot authenticate.
@@ -761,6 +761,6 @@ fn agents_require_a_verified_catalog_model() {
             .preview(Agent::ClaudeCode, true, Some(&catalog()), &claude_options())
             .unwrap_err()
             .code()
-            == "helper_unavailable"
+            == desktop_core::protocol::ErrorCode::HelperUnavailable
     );
 }

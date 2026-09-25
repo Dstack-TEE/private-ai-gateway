@@ -6,7 +6,7 @@ impl DesktopRuntime {
         profile: ConfidentialProfileInput,
         require_production_os: bool,
         key: Option<String>,
-    ) -> Result<AppState, String> {
+    ) -> Result<AppState, Error> {
         let saved = self
             .persist_configuration(profile, require_production_os, key, None, false)
             .await?;
@@ -18,7 +18,7 @@ impl DesktopRuntime {
         profile: ConfidentialProfileInput,
         require_production_os: bool,
         key: Option<String>,
-    ) -> Result<AppState, String> {
+    ) -> Result<AppState, Error> {
         let saved = self
             .persist_configuration(profile, require_production_os, key, None, true)
             .await?;
@@ -28,11 +28,11 @@ impl DesktopRuntime {
     pub(super) fn finish_configuration(
         self: &Arc<Self>,
         saved: SavedConfiguration<'_>,
-    ) -> Result<AppState, String> {
+    ) -> Result<AppState, Error> {
         if saved.reconnect {
             self.start_inner(saved.config)
         } else {
-            self.manager.snapshot()
+            Ok(self.manager.snapshot()?)
         }
     }
 
@@ -43,11 +43,11 @@ impl DesktopRuntime {
         key: Option<String>,
         auth: Option<desktop_core::contracts::ProfileAuth>,
         verify: bool,
-    ) -> Result<SavedConfiguration<'_>, String> {
+    ) -> Result<SavedConfiguration<'_>, Error> {
         let _operation = self.configuration_change()?;
         let initial = self.manager.snapshot()?;
         if initial.status == "verifying" {
-            return Err("Wait for the current verification to finish".to_string());
+            return Err("Wait for the current verification to finish".into());
         }
         let reconnect = initial.session_active
             || (self.manager.is_running()? && !initial.configuration_verification);
@@ -82,11 +82,11 @@ impl DesktopRuntime {
             .get(&id)
             .map(|credential| credential.api_key.clone());
         let candidate_key = match key {
-            Some(key) => settings_config::validate_api_key(&key)?,
+            Some(key) => settings_config::validate_api_key(&key).map_err(Error::invalid_state)?,
             None if !profile_changed => stored_key
                 .clone()
-                .ok_or_else(|| "Enter an API key".to_string())?,
-            None => return Err("Enter an API key for this profile".to_string()),
+                .ok_or_else(|| Error::invalid_state("Enter an API key"))?,
+            None => return Err(Error::invalid_state("Enter an API key for this profile")),
         };
         let config = StartConfig {
             remote_url: candidate.remote_url.clone(),
@@ -116,7 +116,7 @@ impl DesktopRuntime {
                 let _ = self.manager.stop();
                 self.proxy.set_api_key(None);
                 self.manager.restore_snapshot(previous);
-                return Err("Configuration verification did not start".to_string());
+                return Err("Configuration verification did not start".into());
             };
             let verified = self
                 .manager
@@ -127,16 +127,16 @@ impl DesktopRuntime {
                 self.proxy.set_api_key(None);
                 self.manager.restore_snapshot(previous);
                 return Err(match stop_result {
-                    Ok(_) => error,
+                    Ok(_) => error.into(),
                     Err(stop_error) => {
-                        format!("{error}. The verifier also could not stop: {stop_error}")
+                        format!("{error}. The verifier also could not stop: {stop_error}").into()
                     }
                 });
             }
             if let Err(error) = stop_result {
                 self.proxy.set_api_key(None);
                 self.manager.restore_snapshot(previous);
-                return Err(error);
+                return Err(error.into());
             }
         } else {
             self.manager.stop_with_reconnect(initial.session_active)?;
@@ -206,14 +206,15 @@ impl DesktopRuntime {
             return Err(match restore_error {
                 Some(restore_error) => format!(
                     "{error}. The previous credential could not be restored: {restore_error}"
-                ),
+                )
+                .into(),
                 None => error,
             });
         }
         self.recovery.cancel();
         self.publish_service_configuration(verify)?;
         if let Err(error) = self.cleanup_retired().await {
-            self.manager.report_error(error);
+            self.manager.report_error(error.to_string());
         }
         Ok(SavedConfiguration {
             config,
@@ -222,11 +223,11 @@ impl DesktopRuntime {
         })
     }
 
-    pub fn activate_profile(self: &Arc<Self>, profile_id: String) -> Result<AppState, String> {
+    pub fn activate_profile(self: &Arc<Self>, profile_id: String) -> Result<AppState, Error> {
         let _operation = self.configuration_change()?;
         let previous = self.manager.snapshot()?;
         if previous.status == "verifying" {
-            return Err("Wait for the current verification to finish".to_string());
+            return Err("Wait for the current verification to finish".into());
         }
         if previous.active_profile_id == profile_id {
             return Ok(previous);
@@ -234,7 +235,7 @@ impl DesktopRuntime {
         let reconnect = previous.session_active
             || (self.manager.is_running()? && !previous.configuration_verification);
         if !self.settings.config()?.profiles.contains_key(&profile_id) {
-            return Err("Confidential AI profile not found".to_string());
+            return Err(Error::invalid_state("Confidential AI profile not found"));
         }
         if reconnect {
             self.stop_with_reconnect(true)?;
@@ -250,14 +251,16 @@ impl DesktopRuntime {
         if reconnect {
             self.start_inner(config)
         } else {
-            self.manager.snapshot()
+            Ok(self.manager.snapshot()?)
         }
     }
 
-    pub async fn delete_profile(&self, profile_id: String) -> Result<AppState, String> {
+    pub async fn delete_profile(&self, profile_id: String) -> Result<AppState, Error> {
         let _operation = self.configuration_change()?;
         if self.manager.is_running()? {
-            return Err("Stop protection before deleting a profile".to_string());
+            return Err(Error::invalid_state(
+                "Stop protection before deleting a profile",
+            ));
         }
         let previous = self.manager.snapshot()?;
         let affects_active = previous.active_profile_id == profile_id;
@@ -266,7 +269,7 @@ impl DesktopRuntime {
             .config
             .profiles
             .get(&profile_id)
-            .ok_or_else(|| "Confidential AI profile not found".to_string())?;
+            .ok_or_else(|| Error::invalid_state("Confidential AI profile not found"))?;
         let removed_key = saved
             .credentials
             .profiles
@@ -302,7 +305,8 @@ impl DesktopRuntime {
                     Ok(()) => error,
                     Err(restore_error) => format!(
                         "{error}. The deleted credential could not be restored: {restore_error}"
-                    ),
+                    )
+                    .into(),
                 },
             );
         }
@@ -311,17 +315,19 @@ impl DesktopRuntime {
             self.recovery.cancel();
         }
         self.publish_service_configuration(false)?;
-        self.manager.snapshot()
+        Ok(self.manager.snapshot()?)
     }
 
-    pub async fn clear_api_key(&self) -> Result<AppState, String> {
+    pub async fn clear_api_key(&self) -> Result<AppState, Error> {
         let _operation = self.configuration_change()?;
         if self.manager.is_running()? {
-            return Err("Stop protection before deleting a profile credential".to_string());
+            return Err(Error::invalid_state(
+                "Stop protection before deleting a profile credential",
+            ));
         }
         let state = self.manager.snapshot()?;
         if state.active_profile_id.is_empty() {
-            return Err("There is no active Confidential AI profile".to_string());
+            return Err("There is no active Confidential AI profile".into());
         }
         let profile = state
             .profiles
@@ -349,13 +355,13 @@ impl DesktopRuntime {
         self.proxy.set_api_key(None);
         self.recovery.cancel();
         self.publish_profiles()?;
-        self.manager.snapshot()
+        Ok(self.manager.snapshot()?)
     }
 
     pub fn import_profiles(
         &self,
         backup: desktop_core::maintenance::ProfileBackup,
-    ) -> Result<desktop_core::maintenance::ImportResult, String> {
+    ) -> Result<desktop_core::maintenance::ImportResult, Error> {
         let _operation = self.configuration_change()?;
         let mut result = None;
         self.update_config(|settings| {

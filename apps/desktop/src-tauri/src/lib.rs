@@ -157,6 +157,40 @@ fn configure_account_return(app: &tauri::App) {
     });
 }
 
+/// The invoke handler: every renderer method (`desktop_core::renderer_methods!`)
+/// and the shell's own commands.
+macro_rules! invoke_handler {
+    (
+        commands { $($command:ident => $command_variant:ident),+ $(,)? }
+        host { $($host:ident => $host_variant:ident),+ $(,)? }
+    ) => {
+        tauri::generate_handler![
+            $(commands::ui::$command,)+
+            $(commands::ui::$host,)+
+            commands::settings::read_profile_backup,
+            commands::settings::export_profiles,
+            commands::settings::export_diagnostics,
+            notifications::request_notification_permission,
+            notifications::open_notification_settings,
+            updates::prepare_update,
+            updates::set_update_channel,
+            updates::restart_to_update,
+            commands::accounts::open_top_up,
+            commands::accounts::open_organization,
+            commands::desktop::copy_text,
+            commands::desktop::show_edit_menu,
+            commands::desktop::main_window_ready,
+            commands::desktop::open_agent_website,
+            commands::desktop::open_api_key_page,
+            commands::desktop::open_about_link,
+            commands::desktop::open_web_ui,
+            commands::settings::get_cli_registration,
+            commands::settings::set_cli_registration,
+            commands::desktop::stop_all_and_quit
+        ]
+    };
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     desktop_core::logging::init();
@@ -191,63 +225,7 @@ pub fn run() {
         .manage(tray::MainWindowPresentation::default())
         .plugin(tauri_plugin_notification::init())
         .manage(notifications::Settings::default())
-        .invoke_handler(tauri::generate_handler![
-            commands::ui::start_backend_service,
-            commands::ui::get_state,
-            commands::ui::reset_settings,
-            commands::settings::read_profile_backup,
-            commands::ui::import_profiles,
-            commands::settings::export_profiles,
-            commands::settings::export_diagnostics,
-            commands::ui::get_notification_settings,
-            commands::ui::save_notification_settings,
-            notifications::request_notification_permission,
-            notifications::open_notification_settings,
-            commands::ui::get_appearance,
-            commands::ui::set_appearance,
-            updates::prepare_update,
-            updates::set_update_channel,
-            updates::restart_to_update,
-            commands::ui::get_launch_preferences,
-            commands::ui::set_launch_preference,
-            commands::ui::start,
-            commands::ui::begin_account_login,
-            commands::ui::complete_account_login,
-            commands::ui::save_configuration,
-            commands::ui::poll_account_login,
-            commands::ui::save_account_login,
-            commands::ui::get_account_details,
-            commands::ui::get_account_balance,
-            commands::accounts::open_top_up,
-            commands::accounts::open_organization,
-            commands::ui::cancel_account_login,
-            commands::ui::activate_profile,
-            commands::ui::delete_profile,
-            commands::ui::stop,
-            commands::desktop::copy_text,
-            commands::desktop::show_edit_menu,
-            commands::desktop::main_window_ready,
-            commands::desktop::open_agent_website,
-            commands::desktop::open_api_key_page,
-            commands::ui::query_usage,
-            commands::ui::get_usage_record,
-            commands::desktop::open_about_link,
-            commands::ui::get_client_key,
-            commands::ui::rotate_client_key,
-            commands::ui::save_local_api_config,
-            commands::ui::save_web_ui,
-            commands::ui::set_web_ui_password,
-            commands::desktop::open_web_ui,
-            commands::ui::list_listen_addresses,
-            commands::ui::list_agents,
-            commands::ui::preview_agent,
-            commands::ui::apply_agent,
-            commands::ui::get_agent_access,
-            commands::ui::request_agent_access,
-            commands::settings::get_cli_registration,
-            commands::settings::set_cli_registration,
-            commands::desktop::stop_all_and_quit
-        ])
+        .invoke_handler(desktop_core::renderer_methods!(invoke_handler))
         .setup(move |app| {
             let show_on_launch = !autostart::launched_at_login();
             #[cfg(all(target_os = "macos", not(feature = "mac-app-store")))]
@@ -316,10 +294,7 @@ pub fn run() {
                         if let Err(error) =
                             desktop_core::ui_api::refresh_preferences(&client, &host).await
                         {
-                            tracing::warn!(
-                                "Cannot refresh desktop preferences: {}",
-                                error.message()
-                            );
+                            tracing::warn!("Cannot refresh desktop preferences: {}", error);
                         }
                     });
                 }
@@ -357,10 +332,7 @@ pub fn run() {
                             if let Err(error) =
                                 desktop_core::ui_api::refresh_preferences(&client, &host).await
                             {
-                                tracing::warn!(
-                                    "Cannot refresh desktop preferences: {}",
-                                    error.message()
-                                );
+                                tracing::warn!("Cannot refresh desktop preferences: {}", error);
                             }
                         });
                     }

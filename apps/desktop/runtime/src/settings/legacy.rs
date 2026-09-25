@@ -223,7 +223,8 @@ pub(crate) fn import_settings(config_dir: &Path, data_dir: &Path) -> Result<Vec<
                     &current,
                     &next,
                     parse_credentials,
-                )?;
+                )
+                .map_err(|error| error.to_string())?;
             }
         } else {
             notices.push("Settings: The web UI password from 0.1 could not be read; set it again with `pap settings set web-ui.password`.".to_string());
@@ -263,7 +264,8 @@ pub(crate) fn import_settings(config_dir: &Path, data_dir: &Path) -> Result<Vec<
             &current,
             &next,
             config::parse,
-        )?;
+        )
+        .map_err(|error| error.to_string())?;
     }
     backup(data_dir)?;
     Ok(notices)
@@ -438,17 +440,19 @@ fn import_pending_secrets(
 
     // 1. Secrets, durable and verified, before anything is deleted.
     if !keys.is_empty() {
-        settings.update_credentials(|credentials| {
-            for (id, key) in &keys {
-                credentials
-                    .profiles
-                    .entry(id.clone())
-                    .or_insert_with(|| ProfileCredential {
-                        api_key: key.clone(),
-                    });
-            }
-            Ok(())
-        })?;
+        settings
+            .update_credentials(|credentials| {
+                for (id, key) in &keys {
+                    credentials
+                        .profiles
+                        .entry(id.clone())
+                        .or_insert_with(|| ProfileCredential {
+                            api_key: key.clone(),
+                        });
+                }
+                Ok(())
+            })
+            .map_err(|error| error.to_string())?;
         let written = private_fs::read_private_text(&settings.dir.join(CREDENTIALS_FILE))
             .map_err(|error| format!("Cannot verify {CREDENTIALS_FILE}: {error}"))?
             .ok_or_else(|| format!("Cannot verify {CREDENTIALS_FILE}"))
@@ -472,7 +476,7 @@ fn import_pending_secrets(
                     .entry(id.clone())
                     .or_insert_with(|| record.clone());
             }
-            Ok(())
+            Ok::<_, String>(())
         })?;
         let written = local_state::load(&data_dir.join(LOCAL_STATE_FILE))?;
         if found

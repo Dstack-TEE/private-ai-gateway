@@ -1,14 +1,15 @@
 use super::*;
 
-pub async fn account_details(key: &str) -> Result<AccountLoginDetails, String> {
+pub async fn account_details(key: &str) -> Result<AccountLoginDetails, Error> {
     let account = response(client()?.get(ACCOUNT_URL).bearer_auth(key)).await?;
     redpill_details(&account).map_err(|_| {
-        "Account: Could not refresh account details. Try again or reconnect the account."
-            .to_string()
+        Error::account(
+            "Account: Could not refresh account details. Try again or reconnect the account.",
+        )
     })
 }
 
-pub(super) fn amount(value: &Value, field: &str) -> Result<String, String> {
+pub(super) fn amount(value: &Value, field: &str) -> Result<String, Error> {
     let text = string(value, field)?;
     if !text.parse::<f64>().is_ok_and(f64::is_finite) {
         return Err("Invalid balance response".into());
@@ -19,7 +20,7 @@ pub(super) fn amount(value: &Value, field: &str) -> Result<String, String> {
 pub(crate) async fn account_balance(
     provider: &ServiceProvider,
     secret: &str,
-) -> Result<Option<AccountBalance>, String> {
+) -> Result<Option<AccountBalance>, Error> {
     let url = match provider {
         ServiceProvider::Phala => "https://cloud-api.phala.com/api/v1/private_ai/self",
         ServiceProvider::Redpill => "https://service.redpill.ai/api/oauth/balance",
@@ -35,7 +36,7 @@ pub(super) fn parse_account_balance(
     provider: &ServiceProvider,
     status: StatusCode,
     data: &Value,
-) -> Result<Option<AccountBalance>, String> {
+) -> Result<Option<AccountBalance>, Error> {
     if status == StatusCode::UNAUTHORIZED {
         return Ok(None);
     }

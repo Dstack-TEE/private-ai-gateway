@@ -1,56 +1,20 @@
 use super::*;
-use desktop_core::protocol::RpcError;
-
-#[derive(Debug)]
-pub enum AgentOperationError {
-    Agent(agent_bridge::agents::AgentError),
-    Runtime(String),
-}
-
-impl From<agent_bridge::agents::AgentError> for AgentOperationError {
-    fn from(error: agent_bridge::agents::AgentError) -> Self {
-        Self::Agent(error)
-    }
-}
-
-impl From<AgentOperationError> for RpcError {
-    fn from(error: AgentOperationError) -> Self {
-        match error {
-            AgentOperationError::Agent(error) => error.into(),
-            AgentOperationError::Runtime(message) => Self::operation(&message),
-        }
-    }
-}
-
-impl From<String> for AgentOperationError {
-    fn from(error: String) -> Self {
-        Self::Runtime(error)
-    }
-}
-
-impl From<&str> for AgentOperationError {
-    fn from(error: &str) -> Self {
-        Self::Runtime(error.to_string())
-    }
-}
-
 impl DesktopRuntime {
-    fn require_agent_access(&self) -> Result<(), String> {
+    fn require_agent_access(&self) -> Result<(), Error> {
         if let Some(error) = &self.agent_access_error {
-            return Err(format!(
-                "Agent Home access is unavailable to the backend: {error}"
-            ));
+            return Err(format!("Agent Home access is unavailable to the backend: {error}").into());
         }
-        self.agent_configuration_enabled()
+        Ok(self
+            .agent_configuration_enabled()
             .then_some(())
-            .ok_or_else(|| "Agent Home access is required".to_string())
+            .ok_or_else(|| "Agent Home access is required".to_string())?)
     }
 
     pub(super) fn agent_configuration_enabled(&self) -> bool {
         self.agent_configuration
     }
 
-    pub(super) fn projector(&self, endpoint: &str) -> Result<Projector, String> {
+    pub(super) fn projector(&self, endpoint: &str) -> Result<Projector, Error> {
         let projector = {
             #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
             {
@@ -78,12 +42,12 @@ impl DesktopRuntime {
         )
     }
 
-    pub(super) fn current_projector(&self) -> Result<Projector, String> {
+    pub(super) fn current_projector(&self) -> Result<Projector, Error> {
         self.projector(&self.manager.local_api()?.endpoint)
     }
 
     // Call under agent_policy so scans cannot reauthorize during recovery.
-    pub(super) fn publish_agent_tokens(&self, tokens: TokenSet) -> Result<bool, String> {
+    pub(super) fn publish_agent_tokens(&self, tokens: TokenSet) -> Result<bool, Error> {
         let protected = self.manager.snapshot()?.is_protected() && self.proxy.session().verified;
         self.proxy.set_tokens(with_client_token(
             if protected {
@@ -96,7 +60,7 @@ impl DesktopRuntime {
         Ok(protected)
     }
 
-    pub(super) fn reload_agent_tokens(&self) -> Result<(), String> {
+    pub(super) fn reload_agent_tokens(&self) -> Result<(), Error> {
         if !self.agent_configuration_enabled() {
             self.proxy
                 .set_tokens(with_client_token(TokenSet::default(), &self.credentials)?);
@@ -107,7 +71,7 @@ impl DesktopRuntime {
         if !crate::recovery::connection_intended(&self.manager.snapshot()?) {
             let failures = projector.reconcile(None)?;
             if !failures.is_empty() {
-                return Err(agent_failures(failures));
+                return Err(agent_failures(failures).into());
             }
         }
         let (_, tokens) = projector.scan(None)?;
@@ -144,11 +108,11 @@ impl DesktopRuntime {
         self.manager.report_error(message);
     }
 
-    pub async fn refresh_catalog(self: &Arc<Self>) -> Result<AppState, String> {
+    pub async fn refresh_catalog(self: &Arc<Self>) -> Result<AppState, Error> {
         self.manager.clone().refresh_catalog().await
     }
 
-    pub fn list_agents(&self) -> Result<Vec<AgentStatus>, String> {
+    pub fn list_agents(&self) -> Result<Vec<AgentStatus>, Error> {
         if let Some(error) = &self.agent_access_error {
             let _guard = self
                 .agent_policy
@@ -157,7 +121,7 @@ impl DesktopRuntime {
             self.publish_agent_tokens(TokenSet::default())?;
             return Err(format!(
                 "Agent detection cannot access the authorized Home folder: {error}. Re-enable Agent integrations and try again."
-            ));
+            ).into());
         }
         if !self.agent_configuration_enabled() {
             let _guard = self
@@ -168,7 +132,7 @@ impl DesktopRuntime {
             return Ok(Vec::new());
         }
         if let Err(error) = self.reconcile_agents() {
-            if self.state()?.error.as_deref() != Some(&error) {
+            if self.state()?.error != Some(error.to_string()) {
                 self.report_error(error);
             }
         }
@@ -215,7 +179,7 @@ impl DesktopRuntime {
         agent_id: String,
         connect: bool,
         options: ConnectOptions,
-    ) -> Result<AgentPreview, AgentOperationError> {
+    ) -> Result<AgentPreview, crate::Error> {
         self.require_agent_access()?;
         let agent = Agent::from_id(&agent_id)?;
         let catalog = self.connection_catalog(agent, connect)?;
@@ -230,7 +194,7 @@ impl DesktopRuntime {
         connect: bool,
         revision: String,
         options: ConnectOptions,
-    ) -> Result<AgentStatus, AgentOperationError> {
+    ) -> Result<AgentStatus, crate::Error> {
         self.require_agent_access()?;
         let _operation = self.configuration_change()?;
         let _guard = self
@@ -255,19 +219,19 @@ impl DesktopRuntime {
         Ok(status)
     }
 
-    pub fn disconnect_all_agents(&self) -> Result<Vec<AgentStatus>, String> {
+    pub fn disconnect_all_agents(&self) -> Result<Vec<AgentStatus>, Error> {
         self.require_agent_access()?;
         let _operation = self.configuration_change()?;
         self.disconnect_all_agents_inner()
     }
 
-    pub(super) fn disconnect_all_agents_inner(&self) -> Result<Vec<AgentStatus>, String> {
+    pub(super) fn disconnect_all_agents_inner(&self) -> Result<Vec<AgentStatus>, Error> {
         let _guard = self
             .agent_policy
             .lock()
             .map_err(|_| "Agent state unavailable")?;
         if self.instance.is_none() {
-            return Err("Another app instance owns the agent configurations".to_string());
+            return Err("Another app instance owns the agent configurations".into());
         }
         self.proxy
             .set_tokens(with_client_token(TokenSet::default(), &self.credentials)?);
@@ -275,20 +239,20 @@ impl DesktopRuntime {
         match projector.disconnect_all() {
             Err(error) => Err(format!(
                 "Restore all could not revoke the agents ({error}); access stays revoked until it is retried"
-            )),
+            ).into()),
             Ok(failures) => {
                 let (statuses, tokens) = projector.scan(None)?;
                 self.publish_agent_tokens(tokens)?;
                 if failures.is_empty() {
                     Ok(statuses)
                 } else {
-                    Err(agent_failures(failures))
+                    Err(agent_failures(failures).into())
                 }
             }
         }
     }
 
-    pub(super) fn reconcile_agents(&self) -> Result<(), String> {
+    pub(super) fn reconcile_agents(&self) -> Result<(), Error> {
         if !self.agent_configuration_enabled() {
             let _guard = self
                 .agent_policy
@@ -328,7 +292,7 @@ impl DesktopRuntime {
         if failures.is_empty() {
             Ok(())
         } else {
-            Err(agent_failures(failures))
+            Err(agent_failures(failures).into())
         }
     }
 
@@ -336,7 +300,7 @@ impl DesktopRuntime {
         &self,
         agent: Agent,
         connect: bool,
-    ) -> Result<Option<Catalog>, String> {
+    ) -> Result<Option<Catalog>, Error> {
         if !connect {
             return Ok(None);
         }

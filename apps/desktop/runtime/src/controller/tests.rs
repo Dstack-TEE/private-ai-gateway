@@ -31,11 +31,10 @@ fn launch_requires_instance_ownership_before_initialization() {
             .err()
             .expect("Launch must refuse an unavailable lock");
         match case.as_str() {
-            "held" => assert_eq!(
-                error,
-                "Another Private AI Proxy instance is already running. Stop the existing private-ai-proxy-service process before retrying."
-            ),
-            "invalid" => assert!(error.starts_with("Cannot take the instance lock:")),
+            "held" => assert_eq!(error, LaunchError::AlreadyRunning),
+            "invalid" => assert!(error
+                .to_string()
+                .starts_with("Cannot take the instance lock:")),
             _ => panic!("Unknown instance ownership test case"),
         }
         return;
@@ -190,7 +189,8 @@ fn completed_authorization_is_staged_until_explicit_save_and_bound_to_its_provid
             runtime
                 .save_account_login("login-test".into(), different_provider, true, None)
                 .await
-                .unwrap_err(),
+                .unwrap_err()
+                .to_string(),
             "Reconnect the selected provider"
         );
         // A different editor must not replace the active authorization.
@@ -205,6 +205,7 @@ fn completed_authorization_is_staged_until_explicit_save_and_bound_to_its_provid
             .await
             .err()
             .unwrap()
+            .to_string()
             .contains("other window"));
         // Simulate a saved authorization left behind by a closed window.
         runtime
@@ -219,7 +220,12 @@ fn completed_authorization_is_staged_until_explicit_save_and_bound_to_its_provid
             ..other
         };
         assert_eq!(
-            runtime.begin_account_login(reopened).await.err().unwrap(),
+            runtime
+                .begin_account_login(reopened)
+                .await
+                .err()
+                .unwrap()
+                .to_string(),
             "Account connection is only available for Phala and RedPill"
         );
         assert!(runtime.state().unwrap().profiles.is_empty());
@@ -236,7 +242,7 @@ fn offline_removal_queues_cleanup_and_uncommitted_retirement_preserves_active_ke
     let runtime = test_runtime(&executor, directory.path());
     runtime
         .update_config(|settings| {
-            settings.upsert(
+            Ok(settings.upsert(
                 "profile-test".into(),
                 settings_config::Profile {
                     name: "Test".into(),
@@ -250,7 +256,7 @@ fn offline_removal_queues_cleanup_and_uncommitted_retirement_preserves_active_ke
                     },
                     verified_at: Some(1),
                 },
-            )
+            )?)
         })
         .unwrap();
     runtime
@@ -390,7 +396,7 @@ fn shutdown_blocks_later_configuration_changes() {
     let state = runtime.state().unwrap();
     assert_eq!(state.status, "stopped");
     assert_eq!(
-        runtime.start(state.config).unwrap_err(),
+        runtime.start(state.config).unwrap_err().to_string(),
         "The app is closing"
     );
     assert!(matches!(
@@ -402,7 +408,7 @@ fn shutdown_blocks_later_configuration_changes() {
                 ConnectOptions::default()
             )
             .unwrap_err(),
-        AgentOperationError::Runtime(message) if message == "The app is closing"
+        crate::Error::Internal(message) if message == "The app is closing"
     ));
 }
 
@@ -442,7 +448,10 @@ fn shutdown_stops_waiting_for_a_stuck_command_after_its_bound() {
         );
     });
     assert_eq!(
-        runtime.start(runtime.state().unwrap().config).unwrap_err(),
+        runtime
+            .start(runtime.state().unwrap().config)
+            .unwrap_err()
+            .to_string(),
         "The app is closing"
     );
 }
@@ -874,12 +883,14 @@ fn occupied_listener_preserves_previous_endpoint_and_serializes_mutations() {
             )
             .unwrap();
         let gate = runtime.lifecycle.lock().await;
-        assert!(runtime.stop().unwrap_err().contains("in progress"));
-        assert!(runtime
-            .save_local_api_config(config.clone())
-            .await
-            .unwrap_err()
-            .contains("in progress"));
+        assert_eq!(runtime.stop().unwrap_err(), crate::Error::busy());
+        assert_eq!(
+            runtime
+                .save_local_api_config(config.clone())
+                .await
+                .unwrap_err(),
+            crate::Error::busy()
+        );
         drop(gate);
         let candidate = ListenConfig {
             port: occupied.local_addr().unwrap().port(),
@@ -890,6 +901,7 @@ fn occupied_listener_preserves_previous_endpoint_and_serializes_mutations() {
             .save_local_api_config(candidate.clone())
             .await
             .unwrap_err()
+            .to_string()
             .contains("primary"));
         assert!(std::net::TcpStream::connect(original.bind).is_ok());
         // A failed reservation keeps the existing listener alive.
@@ -981,7 +993,7 @@ fn inactive_agent_integrations_reject_configuration_and_withdraw_tokens() {
     runtime.proxy.set_tokens(tokens);
     runtime.agent_access_error = Some("bookmark cannot be resolved".into());
 
-    let error = runtime.list_agents().unwrap_err();
+    let error = runtime.list_agents().unwrap_err().to_string();
     assert!(error.contains("bookmark cannot be resolved"));
     assert!(error.contains("Re-enable Agent integrations"));
     assert!(runtime

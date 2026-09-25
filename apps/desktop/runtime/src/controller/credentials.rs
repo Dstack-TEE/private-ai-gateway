@@ -4,8 +4,8 @@ impl DesktopRuntime {
     /// Changes `config.toml` and publishes the file status.
     pub(super) fn update_config(
         &self,
-        change: impl FnOnce(&mut Config) -> Result<(), String>,
-    ) -> Result<Config, String> {
+        change: impl FnOnce(&mut Config) -> Result<(), Error>,
+    ) -> Result<Config, Error> {
         let result = self.settings.update_config(change);
         self.manager.set_config_files(self.settings.files());
         result
@@ -14,19 +14,15 @@ impl DesktopRuntime {
     /// Changes `credentials.toml` and publishes the file status.
     pub(super) fn update_credentials(
         &self,
-        change: impl FnOnce(&mut Credentials) -> Result<(), String>,
-    ) -> Result<(), String> {
+        change: impl FnOnce(&mut Credentials) -> Result<(), Error>,
+    ) -> Result<(), Error> {
         let result = self.settings.update_credentials(change);
         self.manager.set_config_files(self.settings.files());
         result
     }
 
     /// Saves or removes a profile's API key.
-    pub(super) fn set_profile_key(
-        &self,
-        profile_id: &str,
-        key: Option<&str>,
-    ) -> Result<(), String> {
+    pub(super) fn set_profile_key(&self, profile_id: &str, key: Option<&str>) -> Result<(), Error> {
         self.update_credentials(|credentials| {
             match key {
                 Some(key) => {
@@ -46,7 +42,7 @@ impl DesktopRuntime {
     }
 
     /// Publishes the saved profiles without touching the session.
-    pub(super) fn publish_profiles(&self) -> Result<StartConfig, String> {
+    pub(super) fn publish_profiles(&self) -> Result<StartConfig, Error> {
         let snapshot = self.settings.snapshot()?;
         let config = snapshot.config.runtime_config();
         self.manager.update_profile_list(
@@ -61,7 +57,7 @@ impl DesktopRuntime {
     pub(super) fn publish_service_configuration(
         &self,
         retain_catalog: bool,
-    ) -> Result<StartConfig, String> {
+    ) -> Result<StartConfig, Error> {
         let snapshot = self.settings.snapshot()?;
         let config = snapshot.config.runtime_config();
         let profiles = self.settings.profile_views(&snapshot);
@@ -78,11 +74,11 @@ impl DesktopRuntime {
         Ok(config)
     }
 
-    pub(super) fn load_profile_key(&self, profile_id: &str) -> Result<Option<String>, String> {
-        self.settings.profile_key(profile_id)
+    pub(super) fn load_profile_key(&self, profile_id: &str) -> Result<Option<String>, Error> {
+        Ok(self.settings.profile_key(profile_id)?)
     }
 
-    pub(super) fn queue_retired(&self, retired: RetiredCredential) -> Result<(), String> {
+    pub(super) fn queue_retired(&self, retired: RetiredCredential) -> Result<(), Error> {
         self.local_state.update(|state| {
             if let Some(previous) = state
                 .account_cleanup
@@ -93,10 +89,9 @@ impl DesktopRuntime {
                 return Ok(());
             }
             if state.account_cleanup.len() >= 128 {
-                return Err(
-                    "Account: Credential cleanup queue is full. Reconnect and retry cleanup."
-                        .into(),
-                );
+                return Err(Error::account(
+                    "Account: Credential cleanup queue is full. Reconnect and retry cleanup.",
+                ));
             }
             state
                 .account_cleanup
@@ -105,7 +100,7 @@ impl DesktopRuntime {
         })
     }
 
-    pub(super) async fn cleanup_retired(&self) -> Result<(), String> {
+    pub(super) async fn cleanup_retired(&self) -> Result<(), Error> {
         let mut records: Vec<_> = self
             .local_state
             .read()?

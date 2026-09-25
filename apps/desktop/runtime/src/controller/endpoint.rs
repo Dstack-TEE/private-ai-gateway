@@ -1,11 +1,11 @@
 use super::*;
 
 impl DesktopRuntime {
-    pub fn client_key(&self) -> Result<String, String> {
+    pub fn client_key(&self) -> Result<String, Error> {
         self.credentials.token()
     }
 
-    pub fn rotate_client_key(&self) -> Result<String, String> {
+    pub fn rotate_client_key(&self) -> Result<String, Error> {
         let _operation = self.configuration_change()?;
         let _guard = self
             .agent_policy
@@ -30,13 +30,13 @@ impl DesktopRuntime {
     pub async fn save_local_api_config(
         self: &Arc<Self>,
         config: ListenConfig,
-    ) -> Result<AppState, String> {
+    ) -> Result<AppState, Error> {
         let _operation = self.configuration_change()?;
         if self.instance.is_none() {
-            return Err("Change Local API settings in the primary app instance".to_string());
+            return Err("Change Local API settings in the primary app instance".into());
         }
         if self.manager.snapshot()?.status == "verifying" {
-            return Err("Wait for the current verification to finish".to_string());
+            return Err("Wait for the current verification to finish".into());
         }
         self.apply_local_api(config).await
     }
@@ -45,7 +45,7 @@ impl DesktopRuntime {
     pub(super) async fn apply_local_api(
         self: &Arc<Self>,
         config: ListenConfig,
-    ) -> Result<AppState, String> {
+    ) -> Result<AppState, Error> {
         let previous = self.manager.snapshot()?;
         let current = self.manager.local_api()?;
         let resolved = settings_config::resolve_local_api(config.clone())?;
@@ -62,7 +62,7 @@ impl DesktopRuntime {
         } else if previous.reconnecting && !self.recovery.online() {
             self.recovery.wait();
             result?;
-            return self.manager.snapshot();
+            return Ok(self.manager.snapshot()?);
         }
         if (reconnect || previous.reconnecting) && self.manager.snapshot()?.endpoint_error.is_none()
         {
@@ -71,13 +71,16 @@ impl DesktopRuntime {
                 return Err(match result {
                     Ok(_) => format!(
                         "Local API settings saved, but protection could not restart: {error}"
-                    ),
-                    Err(original) => format!("{original}. Protection could not restart: {error}"),
+                    )
+                    .into(),
+                    Err(original) => {
+                        format!("{original}. Protection could not restart: {error}").into()
+                    }
                 });
             }
         }
         result?;
-        self.manager.snapshot()
+        Ok(self.manager.snapshot()?)
     }
 
     pub(super) async fn rebind_local_api(
@@ -85,14 +88,14 @@ impl DesktopRuntime {
         config: ListenConfig,
         current: ResolvedListen,
         resolved: ResolvedListen,
-    ) -> Result<AppState, String> {
+    ) -> Result<AppState, Error> {
         let needs_bind =
             current.bind != resolved.bind || self.manager.snapshot()?.proxy_url.is_none();
         if !needs_bind {
             let resolved = self.save_local_api(config)?;
             self.manager
                 .set_endpoint(resolved.config, Ok(resolved.endpoint));
-            return self.manager.snapshot();
+            return Ok(self.manager.snapshot()?);
         }
 
         // Different ports can be reserved without releasing the working listener.
@@ -108,8 +111,8 @@ impl DesktopRuntime {
             Err(error) => {
                 if let Err(restore_error) = self.restore_endpoint(current.clone()) {
                     self.manager
-                        .set_endpoint(current.config, Err(restore_error.clone()));
-                    return Err(format!("{error}; {restore_error}"));
+                        .set_endpoint(current.config, Err(restore_error.to_string()));
+                    return Err(format!("{error}; {restore_error}").into());
                 }
                 return Err(error);
             }
@@ -120,8 +123,8 @@ impl DesktopRuntime {
                 drop(listener);
                 if let Err(restore_error) = self.restore_endpoint(current.clone()) {
                     self.manager
-                        .set_endpoint(current.config, Err(restore_error.clone()));
-                    return Err(format!("{error}; {restore_error}"));
+                        .set_endpoint(current.config, Err(restore_error.to_string()));
+                    return Err(format!("{error}; {restore_error}").into());
                 }
                 return Err(error);
             }
@@ -135,14 +138,14 @@ impl DesktopRuntime {
             )
             .inspect_err(|error| {
                 self.manager
-                    .set_endpoint(resolved.config.clone(), Err(error.clone()));
+                    .set_endpoint(resolved.config.clone(), Err(error.to_string()));
             })?;
         self.manager
             .set_endpoint(resolved.config, Ok(resolved.endpoint));
-        self.manager.snapshot()
+        Ok(self.manager.snapshot()?)
     }
 
-    fn save_local_api(&self, config: ListenConfig) -> Result<ResolvedListen, String> {
+    fn save_local_api(&self, config: ListenConfig) -> Result<ResolvedListen, Error> {
         let resolved = settings_config::resolve_local_api(config)?;
         self.update_config(|settings| {
             settings.local_api = resolved.config.clone();
@@ -154,7 +157,7 @@ impl DesktopRuntime {
     pub(super) fn restore_endpoint(
         self: &Arc<Self>,
         previous: ResolvedListen,
-    ) -> Result<(), String> {
+    ) -> Result<(), Error> {
         let listener = rebind(previous.bind).map_err(|error| {
             format!(
                 "The new Local API settings failed and the previous listener could not be restored: {error}"
@@ -168,7 +171,7 @@ impl DesktopRuntime {
         )
     }
 
-    pub async fn reset_settings(self: &Arc<Self>) -> Result<AppState, String> {
+    pub async fn reset_settings(self: &Arc<Self>) -> Result<AppState, Error> {
         let _operation = self.configuration_change()?;
         if self.instance.is_none() {
             return Err("Reset settings in the primary backend instance".into());
@@ -198,12 +201,12 @@ impl DesktopRuntime {
         self.publish_service_configuration(false)?;
         self.web_ui.set_password(None);
         self.apply_web_ui(&desktop_core::config::WebUiConfig::default());
-        self.manager.snapshot()
+        Ok(self.manager.snapshot()?)
     }
 }
 
 /// Binds a port whose Local API listener was just stopped.
-fn rebind(address: std::net::SocketAddr) -> Result<std::net::TcpListener, String> {
-    desktop_core::listen::bind(address, true)
-        .map_err(|error| format!("Cannot listen on {address}: {error}"))
+fn rebind(address: std::net::SocketAddr) -> Result<std::net::TcpListener, Error> {
+    Ok(desktop_core::listen::bind(address, true)
+        .map_err(|error| format!("Cannot listen on {address}: {error}"))?)
 }

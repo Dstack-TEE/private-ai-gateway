@@ -78,7 +78,7 @@ fn profiles_are_added_and_removed_as_tables() {
     settings
         .update_config(|config| {
             config.upsert("work".into(), profile("Work"))?;
-            config.upsert("home".into(), profile("Home"))
+            Ok(config.upsert("home".into(), profile("Home"))?)
         })
         .unwrap();
     let text = config_text(dir.path());
@@ -122,7 +122,11 @@ fn an_invalid_edit_keeps_the_last_good_settings_and_blocks_writes() {
             Ok(())
         })
         .unwrap_err();
-    assert!(refused.contains("Fix config.toml"), "{refused}");
+    assert_eq!(
+        refused.code(),
+        desktop_core::protocol::ErrorCode::InvalidState
+    );
+    assert!(refused.to_string().contains("Fix config.toml"), "{refused}");
     assert_eq!(
         fs::read_to_string(&path).unwrap(),
         "[local-api]\nport = \"oops\"\n"

@@ -79,7 +79,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
             command: Service::Status,
         } => {
             if client.is_running()? {
-                json!({"backend": client.hello()?, "gateway": client.state()?})
+                json!({"backend": client.version()?, "gateway": client.state()?})
             } else {
                 json!({"backend": null, "status": "not_running"})
             }
@@ -88,7 +88,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
             command: Service::Start,
         } => {
             Client::ensure_service()?;
-            value(client.hello()?)?
+            value(client.version()?)?
         }
         Action::Service {
             command: Service::Stop,
@@ -303,7 +303,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
             }
         }
         Action::Agents { command } => match command {
-            Agents::List => value(client.call(rpc::Agents)?)?,
+            Agents::List => value(client.call(rpc::ListAgents)?)?,
             Agents::Connect {
                 id,
                 model,
@@ -344,16 +344,12 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
             )?)?
         }
         Action::Usage { command } => match command {
-            Usage::List { filter, page } => value(client.call(rpc::Usage {
+            Usage::List { filter, page } => value(client.call(rpc::QueryUsage {
                 query: query(filter, Some(page)),
             })?)?,
-            Usage::Show { id } => value(
-                client
-                    .call(rpc::UsageRecord {
-                        record_id: id.clone(),
-                    })?
-                    .ok_or("Usage record not found")?,
-            )?,
+            Usage::Show { id } => value(client.call(rpc::GetUsageRecord {
+                record_id: id.clone(),
+            })?)?,
             Usage::Export { filter, output, .. } => {
                 let path = std::path::absolute(output).map_err(|_| "Cannot resolve export path")?;
                 if path.exists() {
@@ -412,7 +408,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
             }
             Token::Show => {
                 confirm(cli, "Reveal the local API token on stdout?")?;
-                json!({"token": client.call(rpc::ClientKey)?})
+                json!({"token": client.call(rpc::GetClientKey)?})
             }
             Token::ClearCredential => {
                 confirm(cli, "Remove the active profile credential?")?;
@@ -451,7 +447,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
             // Like the desktop app, the web path fails fast during installer updates
             // instead of waiting out the startup gate.
             let data = desktop_core::paths::app_data_dir()?;
-            let startup = desktop_core::lock::startup(&data)
+            let startup = desktop_core::lock::startup_shared(&data)
                 .map_err(|_| "Cannot acquire app startup lock")?
                 .ok_or("Backend startup or an update is already in progress.")?;
             match desktop_app().filter(|_| !*web && graphical_session()) {
@@ -590,7 +586,7 @@ fn set_setting(
                 _ => config.client_host = (!input.is_empty()).then(|| input.to_string()),
             }
             desktop_core::config::resolve_local_api(config.clone())?;
-            value(client.call(rpc::SaveLocalApi { config })?)
+            value(client.call(rpc::SaveLocalApiConfig { config })?)
         }
         SettingsKey::WebUiPassword => unreachable!(),
     }
