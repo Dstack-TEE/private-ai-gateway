@@ -80,8 +80,7 @@ async fn blocked_after_entry_checks_delivers_nothing() {
             .unwrap()
     });
     reached.notified().await;
-    state.blocked.store(true, Ordering::SeqCst);
-    state.revoke_deliveries();
+    state.snapshot().delivery.cancel();
     resume.notify_one();
     let response = request.await.unwrap();
     assert_eq!(response.status().as_u16(), 503);
@@ -177,7 +176,7 @@ async fn non_post_requests_are_refused_while_blocked() {
     let base = spawn_server(upstream).await;
     let (tx, _rx) = mpsc::unbounded_channel();
     let state = state_over(base, tx);
-    state.blocked.store(true, Ordering::SeqCst);
+    state.snapshot().delivery.cancel();
     let proxy = spawn_server(build_proxy_router(state)).await;
     let resp = reqwest::Client::new()
         .get(format!("{proxy}/v1/models"))
@@ -237,7 +236,7 @@ async fn keyset_change_and_verification_failure_have_distinct_events() {
     let previous = state.snapshot().delivery;
     let mut headers = HeaderMap::new();
     headers.insert("x-aci-keyset-digest", "new-keyset".parse().unwrap());
-    rotation_gate(&state, "old-keyset", &headers);
+    rotation_gate(&state, &state.snapshot(), &headers);
     assert!(previous.is_cancelled());
     assert!(matches!(
         received.recv().await.unwrap(),
@@ -256,6 +255,39 @@ async fn keyset_change_and_verification_failure_have_distinct_events() {
     ));
 }
 
+/// A block observed under an identity that a concurrent re-verification has
+/// since replaced must not block the new identity: with the old identity
+/// admitted (or seen expired) by one request, another request's re-verify
+/// adopts a new identity, and only then does the first request's block land.
+/// Forwards keep flowing under the new identity with no re-verification.
+#[tokio::test]
+async fn a_block_observed_under_a_replaced_identity_does_not_block_its_successor() {
+    let upstream = spawn_server(Router::new().fallback(|| async { StatusCode::OK })).await;
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let state = state_over(upstream, tx);
+    let observed = state.snapshot();
+    let report = vector_report();
+    let identity = crate::checks::established_identity(&report).unwrap();
+    state.adopt(report, identity);
+    let mut headers = HeaderMap::new();
+    headers.insert("x-aci-keyset-digest", "rotated-keyset".parse().unwrap());
+    rotation_gate(&state, &observed, &headers);
+
+    assert!(observed.delivery.is_cancelled());
+    assert!(!state.is_blocked());
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    let client = reqwest::Client::new();
+    for _ in 0..3 {
+        let resp = client
+            .get(format!("{proxy}/v1/models"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+    }
+    assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 0);
+}
+
 #[test]
 fn identity_event_carries_the_verified_workload_summary() {
     let report = vector_report();
@@ -270,8 +302,8 @@ fn identity_event_carries_the_verified_workload_summary() {
         ),
         Some(json!({
             "remote_url": "https://tee.example",
-            "proxy_url": "http://127.0.0.1:4181",
-            "control_url": "http://127.0.0.1:4182",
+            "proxy_url": "http://127.0.0.1:4180",
+            "control_url": "http://127.0.0.1:4183",
             "policy": {},
         })),
     );
@@ -280,7 +312,7 @@ fn identity_event_carries_the_verified_workload_summary() {
     assert_eq!(event["tee_type"], "tdx");
     assert_eq!(event["keyset_digest"], report.workload_keyset_digest);
     assert_eq!(event["tls_spki"], "sha256:observed");
-    assert_eq!(event["control_url"], "http://127.0.0.1:4182");
+    assert_eq!(event["control_url"], "http://127.0.0.1:4183");
 }
 
 fn state_over(base_url: String, tx: mpsc::UnboundedSender<RequestOutcome>) -> Arc<ProxyState> {
@@ -1361,7 +1393,7 @@ async fn a_refused_port_on_a_pinned_host_does_not_reverify() {
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 502);
-    assert!(!state.blocked.load(Ordering::SeqCst));
+    assert!(!state.is_blocked());
     assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 0);
     assert!(blocked_codes(&mut events).is_empty());
     assert_eq!(state.client.pinned_spkis(&state.host), pin);
@@ -1461,7 +1493,7 @@ async fn a_refused_pin_on_an_unverifiable_host_fails_closed() {
     assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 1);
     assert_eq!(upstream.completed.load(Ordering::SeqCst), 1);
     assert_eq!(state.client.pinned_spkis(&state.host), stale);
-    assert!(state.blocked.load(Ordering::SeqCst));
+    assert!(state.is_blocked());
 }
 
 /// Single flight: requests that queue behind an in-flight heal share its
@@ -1624,7 +1656,7 @@ async fn a_managed_rotation_is_not_reported_as_a_failed_verification() {
     });
     let mut headers = HeaderMap::new();
     headers.insert("x-aci-keyset-digest", "rotated-keyset".parse().unwrap());
-    rotation_gate(&state, &state.snapshot().keyset_digest, &headers);
+    rotation_gate(&state, &state.snapshot(), &headers);
 
     let proxy = spawn_server(build_proxy_router(state)).await;
     let client = reqwest::Client::new();

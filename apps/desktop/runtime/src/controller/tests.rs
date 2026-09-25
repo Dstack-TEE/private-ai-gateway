@@ -521,9 +521,18 @@ fn finished_local_listener_can_restart_at_the_same_address() {
                 config,
             )
             .unwrap();
-        // Stopping releases the port at once.
+        // Stopping closes the listener before `stop` returns. The kernel may
+        // still refuse the exact address for a moment: xnu disposes of a
+        // closed socket's PCB from its GC timer (scheduled a second out) when
+        // the PCB was referenced at close (`in_pcb_checkstate`), and
+        // `in_pcbbind` reports EADDRINUSE while that PCB is still listed
+        // (https://github.com/apple-oss-distributions/xnu/blob/main/bsd/netinet/in_pcb.c).
         runtime.endpoint.stop().await.unwrap();
-        runtime.restore_endpoint(resolved.clone()).unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while let Err(error) = runtime.restore_endpoint(resolved.clone()) {
+            assert!(tokio::time::Instant::now() < deadline, "{error}");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
         assert!(std::net::TcpListener::bind(resolved.bind).is_err());
         assert!(runtime.restore_endpoint(resolved.clone()).is_err());
         runtime.endpoint.stop().await.unwrap();

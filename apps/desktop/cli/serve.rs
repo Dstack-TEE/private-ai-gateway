@@ -14,7 +14,7 @@
 //! refused is treated as the same rotation: block, re-verify, and re-pin.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::aci::types::{AttestationReport, PROVIDER_ACI_SESSION_IDS, PROVIDER_ACI_VERIFIED};
@@ -108,9 +108,11 @@ struct TrustedIdentity {
     /// like a rotation and a fresh verify re-establishes trust.
     not_after: u64,
     /// Delivery gate for this identity, read in the same snapshot as the
-    /// identity itself: cancelled when the identity is blocked or replaced,
-    /// so a request that passed the entry checks is refused rather than sent
-    /// under a decision made for an identity no longer trusted.
+    /// identity itself. Cancelled when the identity is blocked (a rotation,
+    /// expiry, or refused pin observed under it) or replaced, so a request
+    /// that passed the entry checks is refused rather than sent under a
+    /// decision made for an identity no longer trusted. The proxy is blocked
+    /// exactly while the current identity's gate is cancelled.
     delivery: CancellationToken,
 }
 
@@ -178,9 +180,6 @@ pub struct ProxyState {
     require_production_os: bool,
     audits: Arc<tokio::sync::Semaphore>,
     trusted: Mutex<TrustedIdentity>,
-    /// Set when an upstream response advertised a keyset digest other than the
-    /// trusted one; blocks inference forwards until a fresh verify passes.
-    blocked: AtomicBool,
     /// Serializes the re-verify so a burst of blocked requests reverifies
     /// once, and holds the latest attempt's outcome for the requests that
     /// waited on it.
@@ -238,7 +237,6 @@ impl ProxyState {
                 identity,
                 shutdown.child_token(),
             )),
-            blocked: AtomicBool::new(false),
             reverify: tokio::sync::Mutex::new(Ok(())),
             reverify_attempts: AtomicU64::new(0),
             recorded: Mutex::new(VecDeque::new()),
@@ -259,16 +257,6 @@ impl ProxyState {
             recorded.pop_front();
         }
         recorded.push_back(exchange);
-    }
-
-    /// Cancel every delivery admitted under the current identity. The gate
-    /// stays closed until a fresh verify adopts an identity with its own.
-    fn revoke_deliveries(&self) {
-        self.trusted
-            .lock()
-            .expect("trusted identity poisoned")
-            .delivery
-            .cancel();
     }
 
     /// Trust a freshly verified identity under a new delivery gate, closing
@@ -301,12 +289,19 @@ impl ProxyState {
             .clone()
     }
 
-    /// Block forwards until a fresh verify re-establishes trust: cancel every
-    /// delivery admitted under the current identity and report the rotation
-    /// (the managed backend rebuilds its session on `keyset_changed`).
-    fn block_for_keyset_change(&self, reason: String) {
-        self.blocked.store(true, Ordering::SeqCst);
-        self.revoke_deliveries();
+    /// Whether forwards wait for a fresh verify: the current identity's
+    /// gate was cancelled by a block observed under it (or by shutdown).
+    fn is_blocked(&self) -> bool {
+        self.snapshot().delivery.is_cancelled()
+    }
+
+    /// Block forwards until a fresh verify re-establishes trust: cancel the
+    /// gate of the identity the change was `observed` under and report the
+    /// rotation (the managed backend rebuilds its session on
+    /// `keyset_changed`). An observation made under an identity that has
+    /// since been replaced only cancels that already-closed gate.
+    fn block_for_keyset_change(&self, observed: &TrustedIdentity, reason: String) {
+        observed.delivery.cancel();
         (self.event_sink)(VerifierEvent::Blocked {
             code: Some("keyset_changed".to_string()),
             reason,
@@ -317,7 +312,7 @@ impl ProxyState {
     /// success, re-pin the TLS key and adopt the new identity. Returns `Ok`
     /// when forwarding may proceed.
     async fn ensure_unblocked(self: &Arc<Self>) -> Result<(), String> {
-        if !self.blocked.load(Ordering::SeqCst) {
+        if !self.is_blocked() {
             return Ok(());
         }
         let attempts = self.reverify_attempts.load(Ordering::SeqCst);
@@ -341,19 +336,20 @@ impl ProxyState {
         refused_pins: Option<&[String]>,
     ) -> Result<(), String> {
         let mut last = self.reverify.lock().await;
-        // Decided under the lock: when another request's heal already
-        // replaced the refused pin, this one only needs to send again.
+        // Decided under the lock, where no identity can be adopted: when
+        // another request's heal already replaced the refused pin, this one
+        // only needs to send again.
         if let Some(refused) = refused_pins {
-            if !self.blocked.load(Ordering::SeqCst)
-                && self.client.pinned_spkis(&self.host) == refused
-            {
+            let current = self.snapshot();
+            if !current.delivery.is_cancelled() && self.client.pinned_spkis(&self.host) == refused {
                 self.block_for_keyset_change(
+                    &current,
                     "upstream TLS key is not in the attested pin set; re-verification required"
                         .to_string(),
                 );
             }
         }
-        if !self.blocked.load(Ordering::SeqCst) {
+        if !self.is_blocked() {
             return Ok(());
         }
         if self.reverify_attempts.load(Ordering::SeqCst) != attempts {
@@ -378,6 +374,7 @@ impl ProxyState {
 
     async fn reverify(self: &Arc<Self>) -> Result<(), String> {
         let verification = tokio::select! {
+            biased;
             _ = self.shutdown.cancelled() => {
                 return Err("verifier stopped during re-verification".to_string());
             }
@@ -410,7 +407,6 @@ impl ProxyState {
         // leaves the new key pinned under the old identity.
         self.client.pin(&self.host, &pins)?;
         self.adopt(verification.report, identity);
-        self.blocked.store(false, Ordering::SeqCst);
         (self.event_sink)(identity_event);
         let current_pins = self.client.pinned_spkis(&self.host);
         if !stale_pins.is_empty() && stale_pins != current_pins {
@@ -688,11 +684,11 @@ async fn proxy_request(
     // changed the service identity must not carry this request either: it
     // was admitted upstream against the old identity, so it is refused with a
     // retryable status until the desktop publishes the new identity.
-    if desktop_core::now_secs() >= state.snapshot().not_after {
-        state.blocked.store(true, Ordering::SeqCst);
-        state.revoke_deliveries();
+    let observed = state.snapshot();
+    if desktop_core::now_secs() >= observed.not_after {
+        observed.delivery.cancel();
     }
-    let identity_before = state.snapshot().keyset_digest;
+    let identity_before = observed.keyset_digest;
     if let Err(reason) = state.ensure_unblocked().await {
         tracing::warn!("!! {method} {path} -> 503 blocked: {reason}");
         return text_response(
@@ -740,7 +736,7 @@ async fn proxy_passthrough(
         };
     let status = resp.status().as_u16();
     let resp_headers = resp.headers().clone();
-    rotation_gate(&state, &admitted.keyset_digest, &resp_headers);
+    rotation_gate(&state, &admitted, &resp_headers);
     let delivery = admitted.delivery;
     (state.reporter)(RequestOutcome {
         method,
@@ -886,7 +882,7 @@ async fn proxy_inference(
     }
     let status = resp.status().as_u16();
     let resp_headers = resp.headers().clone();
-    rotation_gate(&state, &trusted.keyset_digest, &resp_headers);
+    rotation_gate(&state, &trusted, &resp_headers);
 
     let receipt_id = header_str(&resp_headers, "x-receipt-id").map(str::to_string);
     let streamed = header_str(&resp_headers, "content-type")
@@ -1110,10 +1106,11 @@ fn delivery_revoked_response(path: &str) -> Response {
 /// Keyset-rotation gate (§3.4): a response advertising a digest other than
 /// the trusted one blocks further inference forwards until a fresh verify
 /// re-establishes trust.
-fn rotation_gate(state: &ProxyState, trusted_digest: &str, headers: &HeaderMap) {
+fn rotation_gate(state: &ProxyState, admitted: &TrustedIdentity, headers: &HeaderMap) {
+    let trusted_digest = &admitted.keyset_digest;
     if let Some(observed) = header_str(headers, "x-aci-keyset-digest") {
         if observed != trusted_digest {
-            state.block_for_keyset_change(format!(
+            state.block_for_keyset_change(admitted, format!(
                 "upstream keyset digest changed ({observed} != {trusted_digest}); re-verification required"
             ));
             tracing::warn!(
