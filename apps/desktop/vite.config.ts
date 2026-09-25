@@ -12,7 +12,6 @@ export default defineConfig(({ mode }) => {
     "@": fileURLToPath(new URL("./src/renderer", import.meta.url)),
     "#backend": fileURLToPath(new URL(web ? "./src/renderer/backends/http-api.ts" : "./src/renderer/backends/tauri-api.ts", import.meta.url)),
   } },
-  define: { "import.meta.env.VITE_TARGET": JSON.stringify(web ? "web" : "desktop") },
   build: {
     assetsInlineLimit: 0,
     emptyOutDir: true,

@@ -11,7 +11,14 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use desktop_core::agents::{Agent, AgentStatus, ConnectOptions};
 use desktop_core::brand::PRODUCT_NAME as APP_NAME;
-use desktop_core::{client::Client, contracts::AppState, protocol::rpc};
+use desktop_core::{
+    client::Client,
+    contracts::AppState,
+    protocol::rpc,
+    ui_api::{
+        AGENTS_CHANGED_EVENT, CONFIRM_STOP_ALL_EVENT, LAUNCH_PREFERENCES_EVENT, NAVIGATE_EVENT,
+    },
+};
 
 /// Native menu handles mirror backend state; actions use the same client as the window.
 pub struct TrayMenu {
@@ -99,7 +106,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             "open" => show_window(app),
             "settings" | "agents" | "profiles" => {
                 show_window(app);
-                let _ = app.emit(crate::menu::NAVIGATE_EVENT, event.id().as_ref());
+                let _ = app.emit(NAVIGATE_EVENT, event.id().as_ref());
             }
             "autostart" => sync_autostart(app),
             "quit" => {
@@ -107,7 +114,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             }
             "stop-all-quit" => {
                 show_window(app);
-                let _ = app.emit("pap://confirm-stop-all", ());
+                let _ = app.emit(CONFIRM_STOP_ALL_EVENT, ());
             }
             id if matches!(id, "copy-key" | "copy-endpoint")
                 || id.starts_with("profile:")
@@ -185,7 +192,7 @@ fn perform_action(app: &AppHandle, id: String) {
             if let Ok(agents) = client.call(rpc::ListAgents) {
                 sync_agents(&app, &agents);
             }
-            let _ = app.emit("pap://agents-changed", ());
+            let _ = app.emit(AGENTS_CHANGED_EVENT, ());
         }
     });
 }
@@ -286,7 +293,7 @@ fn toggle_or_open_settings(app: &AppHandle) {
         if !should_stop(&state) && !active_profile_ready(&state) {
             sync(&app, &state);
             show_window(&app);
-            let _ = app.emit(crate::menu::NAVIGATE_EVENT, "profile-setup");
+            let _ = app.emit(NAVIGATE_EVENT, "profile-setup");
             return;
         }
         if let Err(error) = client.toggle() {
@@ -318,7 +325,7 @@ fn sync_autostart(app: &AppHandle) {
             // Keep open windows in sync with the preference that actually applies.
             if let Ok(preferences) = desktop_core::ui_api::launch_preferences(&client, &host).await
             {
-                let _ = app.emit(desktop_core::ui_api::LAUNCH_PREFERENCES_EVENT, preferences);
+                let _ = app.emit(LAUNCH_PREFERENCES_EVENT, preferences);
             }
         }
     });
@@ -511,27 +518,39 @@ fn should_stop(state: &AppState) -> bool {
     state.should_stop_protection()
 }
 
+/// The shell is still starting the backend: disconnected, without an error.
+fn backend_starting(state: &AppState) -> bool {
+    state.backend_connected == Some(false) && state.error.is_none()
+}
+
 fn protection_action_enabled(state: &AppState) -> bool {
-    !(state.status == "verifying" && state.configuration_verification)
+    !backend_starting(state)
+        && !(state.status == "verifying" && state.configuration_verification)
         && (should_stop(state) || state.endpoint_error.is_none())
 }
 
 fn protection_action(state: &AppState) -> &'static str {
+    if backend_starting(state) {
+        return "Starting…";
+    }
     if state.reconnecting {
-        return "Cancel reconnection";
+        return "Cancel Reconnection";
     }
     if state.status == "verifying" && !state.configuration_verification {
-        "Cancel verification"
+        "Cancel Verification"
     } else if should_stop(state) {
-        "Stop protection"
+        "Stop Protection"
     } else if !active_profile_ready(state) {
         "Set Up Profile…"
     } else {
-        "Start protection"
+        "Start Protection"
     }
 }
 
 fn menu_state(state: &AppState) -> &'static str {
+    if backend_starting(state) {
+        return "Starting the background service";
+    }
     if state.reconnecting {
         return "Reconnecting - requests paused";
     }
@@ -587,11 +606,11 @@ mod tests {
         );
         assert_eq!(
             protection_action(&state("verified", true)),
-            "Stop protection"
+            "Stop Protection"
         );
         assert_eq!(
             protection_action(&state("verifying", false)),
-            "Cancel verification"
+            "Cancel Verification"
         );
         assert!(should_stop(&state("verifying", false)));
         assert!(should_stop(&state("blocked", true)));
@@ -600,10 +619,26 @@ mod tests {
             let mut reconnecting = state(status, true);
             reconnecting.reconnecting = true;
             assert!(should_stop(&reconnecting));
-            assert_eq!(protection_action(&reconnecting), "Cancel reconnection");
+            assert_eq!(protection_action(&reconnecting), "Cancel Reconnection");
             reconnecting.configuration_verification = true;
             assert!(!should_stop(&reconnecting));
         }
+    }
+
+    #[test]
+    fn a_starting_backend_offers_no_protection_action() {
+        let starting = AppState {
+            backend_connected: Some(false),
+            ..AppState::default()
+        };
+        assert_eq!(menu_state(&starting), "Starting the background service");
+        assert_eq!(protection_action(&starting), "Starting…");
+        assert!(!protection_action_enabled(&starting));
+        let failed = AppState {
+            error: Some("Backend exited during startup".into()),
+            ..starting
+        };
+        assert_ne!(protection_action(&failed), "Starting…");
     }
 
     #[test]
@@ -621,19 +656,19 @@ mod tests {
             verified_at: None,
         });
         assert_eq!(menu_state(&ready), "Not protected");
-        assert_eq!(protection_action(&ready), "Start protection");
+        assert_eq!(protection_action(&ready), "Start Protection");
 
         ready.status = "verified".into();
         ready.configuration_verification = true;
         assert!(!should_stop(&ready));
-        assert_eq!(protection_action(&ready), "Start protection");
+        assert_eq!(protection_action(&ready), "Start Protection");
         assert_eq!(menu_state(&ready), "Not protected - configuration verified");
         assert!(protection_action_enabled(&ready));
 
         ready.status = "verifying".into();
         assert!(!should_stop(&ready));
         assert!(!protection_action_enabled(&ready));
-        assert_eq!(protection_action(&ready), "Start protection");
+        assert_eq!(protection_action(&ready), "Start Protection");
 
         ready.status = "stopped".into();
         ready.configuration_verification = false;

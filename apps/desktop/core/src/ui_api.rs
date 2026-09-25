@@ -56,12 +56,19 @@ macro_rules! methods {
 // the same parameters and answers the same result.
 crate::renderer_methods!(methods);
 
+// Events the renderer subscribes to; `src/shared/contracts.generated.ts`
+// exports the same constants.
 pub const APPEARANCE_EVENT: &str = "pap://appearance";
 pub const LAUNCH_PREFERENCES_EVENT: &str = "pap://launch-preferences";
 pub const SETTINGS_RESET_EVENT: &str = "pap://settings-reset";
 pub const STATE_EVENT: &str = "pap://state";
 pub const CLIENT_KEY_CHANGED_EVENT: &str = "pap://client-key-changed";
 pub const AGENTS_CHANGED_EVENT: &str = "pap://agents-changed";
+/// A tray or menu item asks the window to show a page or dialog, or to open a
+/// documentation link the way Settings does.
+pub const NAVIGATE_EVENT: &str = "pap://navigate";
+/// The tray asks the window to confirm stopping everything and quitting.
+pub const CONFIRM_STOP_ALL_EVENT: &str = "pap://confirm-stop-all";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

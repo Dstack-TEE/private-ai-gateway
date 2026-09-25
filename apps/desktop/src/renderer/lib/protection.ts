@@ -1,7 +1,7 @@
 import { errorMessage } from "./error-message";
 import { brand } from "../brand/brand";
 import type { Tone } from "./tone";
-import type { ConfidentialProfile, AppState } from "../../shared/contracts";
+import { DEFAULT_LOCAL_API_CONFIG, DEFAULT_WEB_UI_CONFIG, type ConfidentialProfile, type AppState } from "../../shared/contracts";
 import { serviceKeyLabel } from "./services";
 
 export const INITIAL_STATE: AppState = {
@@ -27,9 +27,9 @@ export const INITIAL_STATE: AppState = {
   config: { remoteUrl: brand.service.defaultUrl, requireProductionOs: true },
   profiles: [],
   activeProfileId: "",
-  localApi: { listenAddress: "127.0.0.1", allowNetworkAccess: false, port: 4180 },
+  localApi: DEFAULT_LOCAL_API_CONFIG,
   apiKeySaved: false,
-  webUi: { enabled: false, listenAddress: "127.0.0.1", allowNetworkAccess: false, port: 4182, passwordSet: false },
+  webUi: { ...DEFAULT_WEB_UI_CONFIG, passwordSet: false },
   configFiles: { configPath: "", credentialsPath: "", warnings: [], revision: 0 },
 };
 

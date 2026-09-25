@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
+#[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+use desktop_core::agent_access::AgentAccessStatus;
 use desktop_core::{
-    agent_access::AgentAccessStatus,
     client::{CallError, Client},
     config::{Appearance, NotificationPreferences},
     contracts::{AgentStatus, AppState},
@@ -129,7 +130,7 @@ impl Host for TauriHost {
         *prepared = None;
         result.map_err(|error| {
             CallError::Local(format!(
-                "Reset did not finish. Review the error and retry Reset settings. {error}"
+                "Reset did not finish. Review the error and retry Reset Settings. {error}"
             ))
         })
     }
@@ -151,10 +152,8 @@ pub(crate) async fn invoke(
     client: State<'_, Arc<Client>>,
     method: Method,
     params: Value,
-) -> Result<Value, String> {
-    shared::invoke(client.inner(), &TauriHost::new(window), method, params)
-        .await
-        .map_err(String::from)
+) -> Result<Value, CallError> {
+    shared::invoke(client.inner(), &TauriHost::new(window), method, params).await
 }
 
 #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
@@ -199,6 +198,5 @@ async fn request_agent_access(window: WebviewWindow, client: Arc<Client>) -> Res
 
 #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
 async fn request_agent_access(_window: WebviewWindow, _client: Arc<Client>) -> Result<(), String> {
-    let _ = AgentAccessStatus::Authorized;
     Ok(())
 }

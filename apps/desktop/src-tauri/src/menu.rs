@@ -8,13 +8,12 @@
 
 use tauri::AppHandle;
 
-/// Emitted to the window when a menu item asks it to show a page or dialog, or
-/// to open a documentation link the way Settings does.
-pub const NAVIGATE_EVENT: &str = "pap://navigate";
-
 #[cfg(target_os = "macos")]
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
-    use desktop_core::brand::{ORGANIZATION_NAME, PRODUCT_NAME};
+    use desktop_core::{
+        brand::{ORGANIZATION_NAME, PRODUCT_NAME},
+        ui_api::NAVIGATE_EVENT,
+    };
     use tauri::{
         menu::{
             AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID,

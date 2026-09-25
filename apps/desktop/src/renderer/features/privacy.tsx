@@ -82,7 +82,7 @@ function PrivacyVerification({ state }: { state: AppState }): React.JSX.Element 
         title={verified ? "Service identity and connection verified" : state.status === "verifying" ? "Checking the service" : "No verified live connection"}
         detail={verified ? "This app checked the service's hardware evidence and bound the encrypted connection to its attested key." : "A saved profile is not evidence of a currently protected connection. Protection must establish a new verified session."}
       />
-      <div className="sheet-card privacy-facts mt-4">
+      <div className="privacy-facts mt-4">
         {facts.map((fact) => (
           <div className="fact flex min-h-12.5 items-start gap-3 border-b border-border p-3.5 last:border-b-0" key={fact.title}>
             <span className={cn(CHECK_ICON_CLASS, CHECK_PRESENTATION[fact.ok ? "pass" : "skip"].iconClass)} aria-hidden="true">
@@ -99,7 +99,7 @@ function PrivacyVerification({ state }: { state: AppState }): React.JSX.Element 
       {identity && (
         <section className="privacy-section mt-6" aria-labelledby="verified-identity-title">
           <SectionHeading id="verified-identity-title" title={verified ? "Current service identity" : "Last reported identity"} summary={`${checkCount(checks)} checks passed`} />
-          <div className="sheet-card identity-grid grid grid-cols-2 gap-x-5 gap-y-4 p-3.5 [&_.wide]:col-span-full [&_>_div]:min-w-0 [&_span]:mb-0.5 [&_span]:block [&_span]:text-xs [&_span]:text-muted-foreground [&_strong]:block [&_strong]:select-text [&_strong]:font-semibold [&_strong.mono]:whitespace-normal [&_strong.mono]:font-medium [&_strong.mono]:wrap-anywhere">
+          <div className="identity-grid grid grid-cols-2 gap-x-5 gap-y-4 p-3.5 [&_.wide]:col-span-full [&_>_div]:min-w-0 [&_span]:mb-0.5 [&_span]:block [&_span]:text-xs [&_span]:text-muted-foreground [&_strong]:block [&_strong]:select-text [&_strong]:font-semibold [&_strong.mono]:whitespace-normal [&_strong.mono]:font-medium [&_strong.mono]:wrap-anywhere">
             <Detail label="Hardware" value={hardwareName(identity.teeType)} />
             <Detail label="Trust" value={trustName(identity.trustLevel)} />
             <Detail label="Source commit" value={identity.source.repoCommit ?? "Unknown"} mono wide />
@@ -116,7 +116,7 @@ function PrivacyVerification({ state }: { state: AppState }): React.JSX.Element 
       {checks.length > 0 && (
         <section className="privacy-section mt-6" aria-labelledby="verification-checks-title">
           <SectionHeading id="verification-checks-title" title="Verification checks" summary={`${checks.length} total`} />
-          <div className="sheet-card check-list">{checks.map((check) => <CheckRow key={check.id} check={check} />)}</div>
+          <div className="check-list">{checks.map((check) => <CheckRow key={check.id} check={check} />)}</div>
         </section>
       )}
     </section>

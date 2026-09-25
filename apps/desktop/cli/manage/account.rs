@@ -1,6 +1,10 @@
 //! CLI account authorization uses the same runtime session as the desktop UI.
 use super::{args::AccountLoginOptions, open_browser, service_provider, value, Cli};
-use desktop_core::{client::Client, contracts::*, protocol::rpc};
+use desktop_core::{
+    client::{CallError, Client},
+    contracts::*,
+    protocol::rpc,
+};
 use serde_json::Value;
 use std::{
     io::{self, IsTerminal, Read, Write},
@@ -15,7 +19,11 @@ impl Drop for Pending<'_> {
     fn drop(&mut self) {
         if let Some(id) = self.id.take() {
             if self.client.call(rpc::CancelAccountLogin { id }).is_err() {
-                tracing::warn!("Account cleanup could not complete; unused authorization expires automatically.");
+                // `eprintln!` panics when stderr is gone; a destructor must not.
+                let _ = writeln!(
+                    io::stderr(),
+                    "Account cleanup could not complete; unused authorization expires automatically."
+                );
             }
         }
     }
@@ -25,7 +33,7 @@ pub(super) fn login(
     client: &Client,
     cli: &Cli,
     options: &AccountLoginOptions,
-) -> Result<Value, String> {
+) -> Result<Value, CallError> {
     Client::ensure_service()?;
     let state = client.state()?;
     let existing = state
@@ -67,12 +75,12 @@ pub(super) fn login(
         client,
         id: Some(login.id.clone()),
     };
-    tracing::info!("Open this URL to sign in:\n{}", login.url);
+    eprintln!("Open this URL to sign in:\n{}", login.url);
     if let Some(code) = &login.user_code {
-        tracing::info!("Confirm device code: {code}");
+        eprintln!("Confirm device code: {code}");
     }
     if !options.no_browser && open_browser(&login.url).is_err() {
-        tracing::info!("Browser did not open. Open the URL above manually.");
+        eprintln!("Browser did not open. Open the URL above manually.");
     }
     if options.callback_stdin {
         let callback = read_callback()?;
@@ -108,7 +116,7 @@ pub(super) fn login(
         Some(details.workspaces[0].id)
     } else {
         for workspace in &details.workspaces {
-            tracing::info!("{}: {}", workspace.id, workspace.name.escape_default());
+            eprintln!("{}: {}", workspace.id, workspace.name.escape_default());
         }
         if cli.non_interactive || cli.json || !io::stdin().is_terminal() {
             return Err("Choose a workspace with --workspace <id> and retry login.".into());
@@ -154,7 +162,7 @@ pub(super) fn login(
     loop {
         match result {
             AccountSaveResult::Complete { state } => return value(state),
-            AccountSaveResult::Failed { error } => return Err(error),
+            AccountSaveResult::Failed { error } => return Err(error.into()),
             AccountSaveResult::Running => {
                 std::thread::sleep(Duration::from_millis(500));
                 result = client.call(rpc::AccountSaveResult {

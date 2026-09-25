@@ -11,7 +11,7 @@ use argon2::{
     Argon2,
 };
 
-pub const MIN_LENGTH: usize = 12;
+pub const MIN_LENGTH: usize = desktop_core::config::WEB_UI_PASSWORD_MIN_LENGTH;
 pub const MAX_LENGTH: usize = 256;
 
 /// Hashes a new password after checking its length in characters.

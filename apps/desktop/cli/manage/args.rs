@@ -8,7 +8,7 @@ use clap_complete::Shell;
     name = "private-ai-proxy",
     version = desktop_core::protocol::BUILD_VERSION,
     about = "Control the Private AI Proxy",
-    long_about = "Control the Private AI Proxy backend, protected connection, profiles, and coding-agent integrations. `private-ai-proxy start` explicitly starts protection and waits for verification. `private-ai-proxy service start` starts the backend; saved connect-on-launch behavior may then start protection automatically."
+    long_about = "Control the Private AI Proxy backend, protected connection, profiles, and coding-agent integrations. `private-ai-proxy start` explicitly starts protection and waits for verification. `private-ai-proxy service start` starts the backend; Protect on launch (`connect-on-launch`) may then start protection automatically."
 )]
 pub(super) struct Cli {
     /// Emit compact JSON instead of human-readable output.
@@ -46,7 +46,7 @@ pub(super) enum Action {
     },
     /// Stop protection and restore managed agent configurations; keep the backend running.
     Stop,
-    /// Manage the local backend process. Starting it may honor saved connect-on-launch behavior.
+    /// Manage the local backend process. Starting it may start protection when Protect on launch (`connect-on-launch`) is on.
     Service {
         #[command(subcommand)]
         command: Service,
@@ -86,7 +86,7 @@ pub(super) enum Action {
         #[command(subcommand)]
         command: Registration,
     },
-    /// Open the installed desktop app. App startup may honor saved connect-on-launch behavior.
+    /// Open the installed desktop app. Its backend may start protection when Protect on launch (`connect-on-launch`) is on.
     App {
         #[command(subcommand)]
         command: App,
@@ -109,7 +109,7 @@ pub(super) enum Action {
 
 #[derive(Subcommand)]
 pub(super) enum Service {
-    /// Start the local backend. Saved connect-on-launch behavior may start protection afterward.
+    /// Start the local backend. Protect on launch (`connect-on-launch`) may start protection afterward.
     Start,
     /// Stop the backend and restore managed agent configurations.
     Stop,
@@ -119,7 +119,7 @@ pub(super) enum Service {
 
 #[derive(Subcommand)]
 pub(super) enum App {
-    /// Open the installed desktop UI; startup may honor saved connect-on-launch behavior.
+    /// Open the installed desktop UI; its backend may start protection when Protect on launch (`connect-on-launch`) is on.
     /// Without a desktop app or graphical session, or with --web, open or print the
     /// service-hosted web UI address (offering to enable it once a password is set).
     Open {

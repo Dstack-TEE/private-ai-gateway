@@ -1,5 +1,6 @@
-// Backend DTOs are generated from Rust; this file adds renderer-only shapes.
+// Backend DTOs and constants are generated from Rust; this file adds renderer-only shapes.
 import type {
+  AboutLink,
   Appearance,
   ConfidentialProfileInput,
   AccountBalance,
@@ -29,7 +30,7 @@ import type {
   WebUiConfig,
 } from "./contracts.generated";
 
-export type * from "./contracts.generated";
+export * from "./contracts.generated";
 
 export type CheckStatus = VerificationCheck["status"];
 
@@ -71,8 +72,9 @@ export interface DesktopApi {
   listListenAddresses(): Promise<ListenAddress[]>;
   getNotificationSettings(): Promise<NotificationConfiguration>;
   selectProfileBackup(): Promise<ProfileBackup | null>;
-  saveProfileExport(): Promise<void>;
-  saveDiagnosticsExport(): Promise<void>;
+  /** Saves where the user chooses; `false` when they cancel. */
+  saveProfileExport(): Promise<boolean>;
+  saveDiagnosticsExport(): Promise<boolean>;
   importProfiles(backup: ProfileBackup): Promise<ImportResult>;
   saveNotificationSettings(config: NotificationPreferences): Promise<void>;
   requestNotificationPermission(): Promise<Pick<NotificationConfiguration, "permission" | "alertsEnabled">>;
@@ -86,7 +88,7 @@ export interface DesktopApi {
   onClientKeyChange(listener: (available: boolean) => void): () => void;
   mainWindowReady(): Promise<void>;
   /** Open a documented, allowlisted project resource in the system browser. */
-  openAboutLink(target: "documentation" | "github" | "aci"): Promise<void>;
+  openAboutLink(target: AboutLink): Promise<void>;
   openAgentWebsite(agentId: string): Promise<void>;
   openApiKeyPage(provider: ServiceProvider): Promise<void>;
   start(config: StartConfig): Promise<AppState>;

@@ -4,7 +4,7 @@ import type { DesktopApi } from "../../shared/contracts";
 import { IconButton } from "./controls";
 import { SettingsLink } from "./settings";
 import { useConfirm } from "./confirm";
-import { toastError } from "../lib/error-message";
+import { errorMessage, toastError } from "../lib/error-message";
 
 export function ProfileTransfer({ api, disabled, onBusy, onMessage }: {
   api: DesktopApi; disabled: boolean; onBusy(busy: boolean): void; onMessage(message: string, failed: boolean): void;
@@ -22,11 +22,10 @@ export function ProfileTransfer({ api, disabled, onBusy, onMessage }: {
         if (!await confirm({ title: `Import ${backup.profiles.length} profile configurations?`, message: `${names}${backup.profiles.length > 5 ? ", ..." : ""}\nExisting profiles will not be overwritten. Imported profiles need credentials and verification before use.`, confirmLabel: "Import" })) return;
         const result = await api.importProfiles(backup);
         onMessage(`${result.imported} imported, ${result.skipped} duplicates skipped.`, false);
-      } else {
-        await api.saveProfileExport();
+      } else if (await api.saveProfileExport()) {
         onMessage("Profile configurations exported without credentials.", false);
       }
-    } catch { onMessage(importing ? "Could not import profile configurations. Check the file format and profile limit." : "Could not export profile configurations. Choose a new file name and check write permissions.", true); }
+    } catch (error) { onMessage(`${importing ? "Could not import profile configurations." : "Could not export profile configurations."} ${errorMessage(error)}`, true); }
     finally { setBusy(false); onBusy(false); }
   };
   return <div className="flex items-center gap-2">
@@ -41,9 +40,8 @@ export function ExportDiagnostics({ api, onMessage }: { api: DesktopApi; onMessa
     if (busy) return;
     setBusy(true);
     try {
-      await api.saveDiagnosticsExport();
-      onMessage("Diagnostics exported without keys, URLs, local paths or request content.");
-    } catch { toastError("Could not export diagnostics", "Choose a new file name and check write permissions."); }
+      if (await api.saveDiagnosticsExport()) onMessage("Diagnostics exported without keys, URLs, local paths or request content.");
+    } catch (error) { toastError("Could not export diagnostics", error); }
     finally { setBusy(false); }
   };
   return <SettingsLink title={busy ? "Exporting diagnostics" : "Export diagnostics"} aria-label="Export diagnostics" disabled={busy} onClick={() => void run()} />;

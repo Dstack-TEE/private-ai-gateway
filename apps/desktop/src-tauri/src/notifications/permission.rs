@@ -71,7 +71,7 @@ pub async fn request(app: &AppHandle) -> Result<(), String> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        super::open_notification_settings(app.clone())
+        super::open_notification_settings(app.clone()).map_err(String::from)
     }
 }
 

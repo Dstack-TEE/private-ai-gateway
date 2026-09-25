@@ -1,25 +1,34 @@
-import type {
-  AgentAccessStatus,
-  AgentPreview,
-  AgentStatus,
-  Appearance,
-  CliRegistration,
-  DesktopApi,
-  AppState,
-  ListenConfig,
-  LoginPresentation,
-  NotificationConfiguration,
-  NotificationPreferences,
-  ProfileBackup,
-  RequestActivity,
-  ServiceProvider,
-  StartConfig,
-  UiMethod,
-  UpdateChannel,
-  UpdateInfo,
-  UsagePage,
-  UsageQuery,
-  WebUiConfig,
+import {
+  AGENTS_CHANGED_EVENT,
+  APPEARANCE_EVENT,
+  CLIENT_KEY_CHANGED_EVENT,
+  CONFIRM_STOP_ALL_EVENT,
+  LAUNCH_PREFERENCES_EVENT,
+  NAVIGATE_EVENT,
+  SETTINGS_RESET_EVENT,
+  STATE_EVENT,
+  type AgentAccessStatus,
+  type AgentPreview,
+  type AgentStatus,
+  type Appearance,
+  type CliRegistration,
+  type DesktopApi,
+  type DistributionCapabilities,
+  type AppState,
+  type ListenConfig,
+  type LoginPresentation,
+  type NotificationConfiguration,
+  type NotificationPreferences,
+  type ProfileBackup,
+  type RequestActivity,
+  type ServiceProvider,
+  type StartConfig,
+  type UiMethod,
+  type UpdateChannel,
+  type UpdateInfo,
+  type UsagePage,
+  type UsageQuery,
+  type WebUiConfig,
 } from "../../shared/contracts";
 
 export interface UiTransport {
@@ -38,8 +47,8 @@ export interface UiPlatform {
   stopAllAndQuit(): Promise<void>;
   copyText(text: string): Promise<void>;
   selectProfileBackup(): Promise<ProfileBackup | null>;
-  saveProfileExport(): Promise<void>;
-  saveDiagnosticsExport(): Promise<void>;
+  saveProfileExport(): Promise<boolean>;
+  saveDiagnosticsExport(): Promise<boolean>;
   requestNotificationPermission(): Promise<Pick<NotificationConfiguration, "permission" | "alertsEnabled">>;
   openNotificationSettings(): Promise<void>;
   mainWindowReady(): Promise<void>;
@@ -52,6 +61,25 @@ export interface UiPlatform {
   openTopUp(provider: ServiceProvider, scopeSlug?: string): Promise<void>;
 }
 
+/** The browser's web UI session: the router signs in before any page loads. */
+export interface WebSession {
+  /** Whether this browser has a live session; starts the event stream when it does. */
+  check(): Promise<boolean>;
+  /** Exchanges the web UI password for an `HttpOnly` session cookie. */
+  signIn(password: string): Promise<void>;
+  signOut(): Promise<void>;
+  /** Called with a notice when the session ends, here or on the server. */
+  onEnded(listener: (notice: string) => void): () => void;
+}
+
+/** What `#backend` provides: the Tauri shell, or the web UI's HTTP API. */
+export interface Backend {
+  desktopApi: DesktopApi;
+  distributionCapabilities: DistributionCapabilities;
+  /** Only the web UI has one. */
+  session: WebSession | undefined;
+}
+
 export function createDesktopApi(transport: UiTransport, platform: UiPlatform): DesktopApi {
   const call = transport.call.bind(transport);
   const subscribe = transport.subscribe.bind(transport);
@@ -60,17 +88,17 @@ export function createDesktopApi(transport: UiTransport, platform: UiPlatform): 
     showEditMenu: platform.showEditMenu,
     getAppearance: () => call<Appearance>("get_appearance"),
     setAppearance: (appearance) => call("set_appearance", { appearance }),
-    onAppearanceChange: (listener) => subscribe("pap://appearance", listener),
+    onAppearanceChange: (listener) => subscribe(APPEARANCE_EVENT, listener),
     getAppVersion: platform.getAppVersion,
     setUpdateChannel: platform.setUpdateChannel,
     prepareUpdate: platform.prepareUpdate,
     restartToUpdate: platform.restartToUpdate,
     getLaunchPreferences: () => call("get_launch_preferences"),
     setLaunchPreference: (name, enabled) => call("set_launch_preference", { name, enabled }),
-    onLaunchPreferencesChange: (listener) => subscribe("pap://launch-preferences", listener),
+    onLaunchPreferencesChange: (listener) => subscribe(LAUNCH_PREFERENCES_EVENT, listener),
     getCliRegistration: platform.getCliRegistration,
     setCliRegistration: platform.setCliRegistration,
-    onStopAllRequest: (listener) => subscribe("pap://confirm-stop-all", listener),
+    onStopAllRequest: (listener) => subscribe(CONFIRM_STOP_ALL_EVENT, listener),
     stopAllAndQuit: platform.stopAllAndQuit,
     copyText: platform.copyText,
     getClientKey: () => call<string>("get_client_key"),
@@ -90,11 +118,11 @@ export function createDesktopApi(transport: UiTransport, platform: UiPlatform): 
     openNotificationSettings: platform.openNotificationSettings,
     getState: () => call<AppState>("get_state"),
     resetSettings: () => call<AppState>("reset_settings"),
-    onSettingsReset: (listener) => subscribe("pap://settings-reset", listener),
-    onStateChange: (listener) => subscribe("pap://state", listener),
-    onNavigate: (listener) => subscribe("pap://navigate", listener),
-    onAgentsChange: (listener) => subscribe("pap://agents-changed", listener),
-    onClientKeyChange: (listener) => subscribe("pap://client-key-changed", listener),
+    onSettingsReset: (listener) => subscribe(SETTINGS_RESET_EVENT, listener),
+    onStateChange: (listener) => subscribe(STATE_EVENT, listener),
+    onNavigate: (listener) => subscribe(NAVIGATE_EVENT, listener),
+    onAgentsChange: (listener) => subscribe(AGENTS_CHANGED_EVENT, listener),
+    onClientKeyChange: (listener) => subscribe(CLIENT_KEY_CHANGED_EVENT, listener),
     mainWindowReady: platform.mainWindowReady,
     openAboutLink: platform.openAboutLink,
     openAgentWebsite: platform.openAgentWebsite,

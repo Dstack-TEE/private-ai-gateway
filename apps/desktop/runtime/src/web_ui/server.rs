@@ -25,7 +25,7 @@ use crate::{
     controller::DesktopRuntime,
 };
 use desktop_core::{
-    contracts::{DistributionCapabilities, DistributionChannel, WebBootstrap},
+    contracts::WebBootstrap,
     listen::{self, url_host, ResolvedListen},
     protocol::{self, ErrorCode, BUILD_VERSION},
     ui_api::{self, Backend, Method},
@@ -422,16 +422,6 @@ async fn sign_out(Extension(gate): Extension<Arc<Gate>>, jar: CookieJar) -> Resp
 async fn bootstrap() -> Json<WebBootstrap> {
     Json(WebBootstrap {
         version: BUILD_VERSION.to_string(),
-        distribution: DistributionCapabilities {
-            channel: DistributionChannel::Web,
-            native_updates: false,
-            cli_registration: false,
-            account_portal_links: true,
-            sandbox_home_access: false,
-            launch_at_login: false,
-            notifications: false,
-            web_ui: true,
-        },
     })
 }
 

@@ -13,7 +13,7 @@ import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
 import { SettingsSection, SettingsList, SettingsLink, SettingsToggle } from "../components/settings";
 import type { DistributionCapabilities, AppState, LaunchPreferences, WebUiStatus } from "../../shared/contracts";
-import { desktopApi, signOut } from "../lib/environment";
+import { desktopApi, session } from "../lib/environment";
 import { parentDirectory, serviceHost } from "../lib/format";
 import { localAddressKind } from "../lib/local-api-config";
 import type { SettingsTarget } from "../components/navigation";
@@ -114,7 +114,7 @@ export function SettingsView({
   const [diagnosticMessage, setDiagnosticMessage] = useState<string>();
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   return (
-    <div className="page-body max-w-230 min-h-full mt-0 mr-auto mb-0 ml-auto settings-page">
+    <div className="max-w-230 min-h-full mt-0 mr-auto mb-0 ml-auto">
       {state.configFiles.error && <Alert variant="destructive" className="mb-5">
         <AlertTitle>Settings file not applied</AlertTitle>
         <AlertDescription className="whitespace-pre-wrap font-mono text-xs">{state.configFiles.error}</AlertDescription>
@@ -135,10 +135,10 @@ export function SettingsView({
           <SettingsLink title="Profiles" aria-label="Profiles" aria-haspopup="dialog" onClick={() => onOpen("confidential")} description={activeProfile ? `${activeProfile.name} · ${serviceHost(activeProfile.remoteUrl)} · ${isProtected(state) ? "Protected" : profileIsAvailable(activeProfile, state) ? "Ready" : "Connect account or add an API key"}` : "No provider configured"} />
           <SettingsLink title="Local API" description="Listener and client access" aria-label="Local API settings" aria-haspopup="dialog" onClick={() => onOpen("local-api")} />
           {distribution.webUi && state.webUi && <SettingsLink title="Web UI" description={webUiSummary(state.webUi)} aria-label="Web UI settings" aria-haspopup="dialog" onClick={() => onOpen("web-ui")} />}
-          {signOut && <SignOutControl onSignOut={signOut} />}
+          {session && <SignOutControl onSignOut={session.signOut} />}
       </SettingsSection>
 
-      <Collapsible className="group mt-5 [&:first-child]:mt-0 settings-advanced [&_[data-slot=collapsible-trigger]]:mb-2 [&_[aria-expanded=true]_>_svg]:rotate-90">
+      <Collapsible className="group mt-5 [&:first-child]:mt-0 [&_[data-slot=collapsible-trigger]]:mb-2 [&_[aria-expanded=true]_>_svg]:rotate-90">
         <CollapsibleTrigger render={<Button variant="ghost" />}><ChevronRight size={15} aria-hidden="true" /><span>Advanced</span></CollapsibleTrigger>
         <CollapsibleContent>
           <SettingsList>

@@ -10,6 +10,7 @@ export interface ConfirmationOptions {
 
 type Confirm = (options: ConfirmationOptions) => Promise<boolean>;
 const ConfirmContext = createContext<Confirm | null>(null);
+const ConfirmOpenContext = createContext(false);
 
 /** Asks for a decision in an AlertDialog and resolves with the answer. */
 export function ConfirmProvider({ children }: PropsWithChildren) {
@@ -28,7 +29,7 @@ export function ConfirmProvider({ children }: PropsWithChildren) {
     setRequest(options);
     setOpen(true);
   }), []);
-  return <ConfirmContext.Provider value={confirm}>
+  return <ConfirmContext.Provider value={confirm}><ConfirmOpenContext.Provider value={open}>
     {children}
     <AlertDialog open={open} onOpenChange={(next) => { if (!next) settle(false); }}>
       <AlertDialogContent>
@@ -42,11 +43,16 @@ export function ConfirmProvider({ children }: PropsWithChildren) {
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
-  </ConfirmContext.Provider>;
+  </ConfirmOpenContext.Provider></ConfirmContext.Provider>;
 }
 
 export function useConfirm(): Confirm {
   const confirm = useContext(ConfirmContext);
   if (!confirm) throw new Error("ConfirmProvider is required");
   return confirm;
+}
+
+/** Whether a confirmation is waiting for an answer. */
+export function useConfirmOpen(): boolean {
+  return useContext(ConfirmOpenContext);
 }

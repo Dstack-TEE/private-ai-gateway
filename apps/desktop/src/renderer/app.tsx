@@ -11,7 +11,7 @@ import { useUpdates } from "./updates";
 import type { AgentStatus, ConfidentialProfile, AppState, LaunchPreferences, NavigationTarget, RequestActivity } from "../shared/contracts";
 import { PageHeader, Sidebar, useView } from "./components/navigation";
 import type { SettingsTarget } from "./components/navigation";
-import { desktopApi, distributionCapabilities } from "./lib/environment";
+import { desktopApi, distributionCapabilities, web } from "./lib/environment";
 import { INITIAL_STATE, protectionFlags, profileIsAvailable, unavailableState } from "./lib/protection";
 import { AgentsView } from "./features/agents";
 import { Overview } from "./features/overview";
@@ -24,7 +24,11 @@ import { WebUiDialog } from "./features/web-ui";
 import { UsageProofDialog } from "./features/usage";
 import { LocalApiExamplesDialog } from "./components/local-api-examples";
 import { NotificationsDialog } from "./components/notifications";
-import { useConfirm } from "./components/confirm";
+import { useConfirm, useConfirmOpen } from "./components/confirm";
+import { AppearanceProvider } from "./components/appearance";
+import { NotificationsProvider } from "./components/notifications";
+import { Toaster } from "./components/ui/sonner";
+import { queryClient } from "./lib/query-client";
 import { localEndpoint } from "./lib/format";
 
 type AppDialog =
@@ -32,16 +36,22 @@ type AppDialog =
   | { kind: "setup-profile" | "privacy" | "local-api" | "local-api-example" | "notifications" | "web-ui" }
   | { kind: "usage-proof"; activity: RequestActivity };
 
-/**
- * Whether a modal dialog, confirmation or sheet is open. Requests to show a
- * page, from the Settings shortcut, the macOS menu accelerator or the tray,
- * wait until it closes; popovers such as the date picker do not block them.
- */
-function modalOpen(): boolean {
-  return Boolean(document.querySelector("[data-slot=dialog-content], [data-slot=alert-dialog-content], [data-slot=sheet-content]"));
+/** The signed-in app, with the preferences it reads from the backend. */
+export function AppLayout(): React.JSX.Element {
+  const [settingsRevision, setSettingsRevision] = useState(0);
+  const navigate = useNavigate();
+  useEffect(() => desktopApi.onSettingsReset(() => {
+    queryClient.clear();
+    setSettingsRevision((value) => value + 1);
+    void navigate({ to: "/settings", replace: true, state: { notice: "Settings reset" } });
+  }), [navigate]);
+  return <AppearanceProvider key={settingsRevision} api={desktopApi}>
+    <NotificationsProvider api={desktopApi}><App /></NotificationsProvider>
+    <Toaster />
+  </AppearanceProvider>;
 }
 
-export function App(): React.JSX.Element {
+function App(): React.JSX.Element {
   const updates = useUpdates(desktopApi, distributionCapabilities.nativeUpdates || distributionCapabilities.channel === "web");
   const view = useView();
   const navigate = useNavigate();
@@ -53,6 +63,9 @@ export function App(): React.JSX.Element {
   const [allowDevelopmentOs, setAllowDevelopmentOs] = useState(false);
   const client = useQueryClient();
   const backendReady = Boolean(appState.data) && state.backendConnected !== false;
+  // The desktop shell starts the backend in the background; until it answers,
+  // the state reports it disconnected without an error.
+  const backendStarting = state.backendConnected === false && !state.error;
   useEffect(() => {
     if (!backendReady) return;
     // Prefetch shares page caches; failures are presented when the page is opened.
@@ -62,10 +75,14 @@ export function App(): React.JSX.Element {
   const { data: launchPreferences } = useQuery({ queryKey: ["launch-preferences"], queryFn: () => desktopApi.getLaunchPreferences() });
   const [savingPreference, setSavingPreference] = useState(false);
   const [connectingBackend, setConnectingBackend] = useState(false);
-  const reportWindowError = useCallback((message: string) => toastError("Window unavailable", message), []);
+  const reportWindowError = useCallback((message: string) => toastError("Could not show the window", message), []);
   useWindowReady(stateLoaded, desktopApi.mainWindowReady, reportWindowError);
   const confirm = useConfirm();
+  const confirming = useConfirmOpen();
   const [dialog, setDialog] = useState<AppDialog>();
+  // Requests to show a page, from the Settings shortcut, the macOS menu
+  // accelerator or the tray, wait until a dialog or confirmation closes.
+  const modalOpen = dialog !== undefined || confirming;
   // A tray or menu request never replaces a dialog that is already open.
   const openDialog = useCallback((next: AppDialog) => setDialog((current) => current ?? next), []);
   const closeDialog = useCallback(() => setDialog(undefined), []);
@@ -132,7 +149,7 @@ export function App(): React.JSX.Element {
     if (target === "profiles") openDialog({ kind: "profiles", repair: false });
     else if (target === "profile-setup") openProfileSetup();
     else if (target === "documentation" || target === "github") openAboutLink(target);
-    else if (!modalOpen()) void navigate({ to: `/${target}` as const });
+    else if (!modalOpen) void navigate({ to: `/${target}` as const });
   });
   useEffect(() => desktopApi.onNavigate((target) => showRequested(target)), []);
 
@@ -191,13 +208,13 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
       if (event.key !== "," || !(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
-      if (modalOpen()) return;
+      if (modalOpen) return;
       event.preventDefault();
       void navigate({ to: "/settings" });
     };
     window.addEventListener("keydown", shortcut);
     return () => window.removeEventListener("keydown", shortcut);
-  }, [navigate]);
+  }, [navigate, modalOpen]);
 
 
   const applyStateAction = async (action: () => Promise<AppState | void>, notice?: string): Promise<string | undefined> => {
@@ -265,15 +282,18 @@ export function App(): React.JSX.Element {
   const copy = (label: string, value: string) => runAction(`Could not copy ${label.toLowerCase()}`, () => copyValue(label, value));
   const openAboutLink = (target: "documentation" | "github") => void runAction("Could not open the link", () => desktopApi.openAboutLink(target));
 
+  // A browser has no window of the app to resize.
+  const resetItems = new Intl.ListFormat("en").format([
+    "appearance", "notifications", "startup preferences", "development OS policy", "update channel",
+    "Local API settings", "web UI settings", ...web ? [] : ["window size"],
+  ]);
   const resetSettings = async () => {
     let confirmed: boolean;
     try {
       confirmed = await confirm({
         title: "Reset settings?",
-        message: agentAccessStatus === "authorized"
-          ? "Stop protection, disconnect all agents and restore their configurations, and reset appearance, notifications, startup preferences, development OS policy, update channel, Local API settings, web UI, and window size. Profiles, credentials, the local API key, and usage history are kept. This does not change system notification permission or uninstall the private-ai-proxy command."
-          : "Stop protection and reset appearance, notifications, startup preferences, development OS policy, Local API settings, web UI, and window size. Profiles, credentials, the local API key, and usage history are kept. This does not change system notification permission.",
-        confirmLabel: "Reset settings",
+        message: `${agentAccessStatus === "authorized" ? "Stop protection, disconnect all agents and restore their configurations," : "Stop protection"} and reset ${resetItems}. Profiles, credentials, the local API key, and usage history are kept. This does not change system notification permission${distributionCapabilities.cliRegistration ? " or uninstall the private-ai-proxy command" : ""}.`,
+        confirmLabel: "Reset Settings",
       });
     } catch (error) {
       toastError("Could not reset settings", error);
@@ -313,9 +333,9 @@ export function App(): React.JSX.Element {
   };
 
   const windowContent = (
-    <main className="app-shell w-full h-full grid grid-cols-[var(--sidebar-width)_minmax(0,_1fr)] overflow-hidden bg-background max-[780px]:grid-cols-[154px_minmax(0,_1fr)] max-[620px]:grid-cols-[68px_minmax(0,_1fr)] max-[440px]:grid-cols-[56px_minmax(0,_1fr)]">
+    <main className="w-full h-full grid grid-cols-[var(--sidebar-width)_minmax(0,_1fr)] overflow-hidden bg-background max-[780px]:grid-cols-[154px_minmax(0,_1fr)] max-[620px]:grid-cols-[68px_minmax(0,_1fr)] max-[440px]:grid-cols-[56px_minmax(0,_1fr)]">
       <Sidebar updateReady={updates.ready} updateBusy={Boolean(updates.busy)} onRestartUpdate={() => void updates.restart()} />
-      <section className="workspace min-w-0 min-h-0 flex flex-col">
+      <section className="min-w-0 min-h-0 flex flex-col">
         <PageHeader
           view={view}
           state={state}
@@ -325,7 +345,7 @@ export function App(): React.JSX.Element {
           developmentMode={allowDevelopmentOs}
           onToggle={toggleProtection}
         />
-        <div className="content flex-auto min-w-0 min-h-0 overflow-auto pt-4 pr-6 pb-6 pl-6 [&_>_[role=alert]]:mb-4 max-[780px]:p-4 max-[440px]:p-3" id={`page-${view}`} key={view}>
+        <div className="flex-auto min-w-0 min-h-0 overflow-auto pt-4 pr-6 pb-6 pl-6 [&_>_[role=alert]]:mb-4 max-[780px]:p-4 max-[440px]:p-3" id={`page-${view}`} key={view}>
         {view === "overview" && (
           <Overview
             pendingAgentChanges={pendingAgentChanges}
@@ -336,7 +356,7 @@ export function App(): React.JSX.Element {
             endpointDown={endpointDown}
             developmentMode={allowDevelopmentOs}
             backendDisconnected={state.backendConnected === false}
-            connectingBackend={connectingBackend}
+            connectingBackend={connectingBackend || backendStarting}
             agentProblem={agentProblem}
             accountApi={desktopApi}
             agentAccessStatus={agentAccessStatus}

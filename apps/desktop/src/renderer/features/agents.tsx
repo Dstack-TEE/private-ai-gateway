@@ -13,7 +13,7 @@ import { AgentAttention } from "../components/agent-attention";
 import ohMyPiIcon from "../assets/oh-my-pi.svg";
 import type { Tone } from "../lib/tone";
 import { Item, ItemActions, ItemContent, ItemTitle } from "../components/ui/item";
-import { Separator } from "../components/ui/separator";
+import { SettingsSection } from "../components/settings";
 import { SwitchControl } from "../components/controls";
 import type { AgentAccessStatus, AgentStatus } from "../../shared/contracts";
 import { EmptyState } from "../components/detail";
@@ -75,42 +75,38 @@ export function AgentsView({
         ? "Access required"
         : "Checking access";
   return (
-    <div className="page-body max-w-230 min-h-full mt-0 mr-auto mb-0 ml-auto">
+    <div className="max-w-230 min-h-full mt-0 mr-auto mb-0 ml-auto">
       <AgentAccessNotice status={accessStatus} busy={authorizing} onAuthorize={onAuthorize} />
       {accessStatus === "authorized" && problem && <AgentDetectionNotice busy={authorizing} onRetry={onRetry} />}
-      <section className="group mt-5 [&:first-child]:mt-0" aria-labelledby="agents-title">
-        <h2 className="group-title mx-0.5 mb-2 flex min-h-5 items-center gap-2 text-sm font-semibold" id="agents-title">{accessStatus === "authorized" && !problem ? "Installed" : "Agents"} <span className="ml-auto truncate text-xs font-normal text-muted-foreground">{accessStatus === "authorized" && !problem ? `${connected} connected` : ""}</span></h2>
-        <div className="inset min-w-0 bg-card border border-border rounded-2xl overflow-hidden">
-          {accessStatus !== "authorized" ? listedAgents.map((agent) => (
-            <AgentRow
-              key={agent.id}
-              agent={agent}
-              detectionLabel={detectionLabel}
-              disabled
-              onSelect={() => undefined}
-            />
+      <SettingsSection title={accessStatus === "authorized" && !problem ? "Installed" : "Agents"} detail={accessStatus === "authorized" && !problem ? `${connected} connected` : undefined}>
+        {accessStatus !== "authorized" ? listedAgents.map((agent) => (
+          <AgentRow
+            key={agent.id}
+            agent={agent}
+            detectionLabel={detectionLabel}
+            disabled
+            onSelect={() => undefined}
+          />
+        ))
+          : problem ? listedAgents.map((agent) => (
+            <AgentRow key={agent.id} agent={agent} detectionLabel="Detection unavailable" disabled onSelect={() => undefined} />
           ))
-            : problem ? listedAgents.map((agent) => (
-              <AgentRow key={agent.id} agent={agent} detectionLabel="Detection unavailable" disabled onSelect={() => undefined} />
-            ))
-            : !agents.some((agent) => agent.installed) ? <EmptyState text="No installed agents found" />
-            : agents.filter((agent) => agent.installed).map((agent) => (
-            <AgentRow
-              pendingConnection={pendingAgentChanges[agent.id]}
-              key={agent.id}
-              agent={agent}
-              disabled={locked}
-              onSelect={(connect) => onSelect(agent, connect)}
-            />
-          ))}
-        </div>
-      </section>
-      {accessStatus === "authorized" && !problem && agents.some((agent) => !agent.installed) && <section className="group mt-5 [&:first-child]:mt-0" aria-labelledby="not-installed-title">
-        <h2 className="group-title mx-0.5 mb-2 flex min-h-5 items-center gap-2 text-sm font-semibold" id="not-installed-title">Not installed</h2>
-        <div className="inset min-w-0 bg-card border border-border rounded-2xl overflow-hidden">{agents.filter((agent) => !agent.installed).map((agent) => (
+          : !agents.some((agent) => agent.installed) ? <EmptyState text="No installed agents found" />
+          : agents.filter((agent) => agent.installed).map((agent) => (
+          <AgentRow
+            pendingConnection={pendingAgentChanges[agent.id]}
+            key={agent.id}
+            agent={agent}
+            disabled={locked}
+            onSelect={(connect) => onSelect(agent, connect)}
+          />
+        ))}
+      </SettingsSection>
+      {accessStatus === "authorized" && !problem && agents.some((agent) => !agent.installed) && <SettingsSection title="Not installed">
+        {agents.filter((agent) => !agent.installed).map((agent) => (
           <AgentRow key={agent.id} agent={agent} disabled={locked} onSelect={() => undefined} />
-        ))}</div>
-      </section>}
+        ))}
+      </SettingsSection>}
     </div>
   );
 }
@@ -178,7 +174,7 @@ export function AgentRow({
   const actionable = disconnecting || !agent.error;
   const note = agent.attention ?? agent.error;
   return (
-    <><Item size={compact ? "xs" : "default"} variant={compact ? "muted" : "default"} className="agent-block">
+    <Item size={compact ? "xs" : "default"} variant={compact ? "muted" : "default"} className="agent-block">
       <AgentMark agent={agent} />
       <ItemContent className="min-w-0">
         <ItemTitle className="row-title-line max-w-full flex items-center flex-wrap gap-y-1 gap-x-2">
@@ -197,7 +193,7 @@ export function AgentRow({
         onToggle={() => { if (!disabled && !detectionLabel && actionable) onSelect(!disconnecting); }}
       /> : <AgentWebsite agent={agent} />}
       </ItemActions>
-    </Item>{!compact && <Separator className="last:hidden" />}</>
+    </Item>
   );
 }
 

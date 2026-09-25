@@ -97,7 +97,7 @@ mod tests {
             (AgentError::Internal, "operation_failed"),
         ] {
             let public = Error::from(error);
-            assert!(public.to_string().starts_with(&format!("{code}: ")));
+            assert_eq!(serde_json::to_value(public.code).unwrap(), code);
             assert!(!public.message.contains("PRIVATE_OS_DETAIL"));
             assert!(!public.message.contains("sk-hidden"));
         }

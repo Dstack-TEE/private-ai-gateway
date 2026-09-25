@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use desktop_core::{
-    client::Client,
+    client::{CallError, Client},
     config::UpdateChannel,
     protocol::{rpc, Preference},
     updates::{self, Installation, UpdateInfo},
@@ -36,7 +36,7 @@ pub async fn set_update_channel(
     channel: UpdateChannel,
     prepared: State<'_, PreparedUpdate>,
     client: State<'_, Arc<Client>>,
-) -> Result<UpdateChannel, String> {
+) -> Result<UpdateChannel, CallError> {
     crate::distribution::require(
         crate::distribution::CAPABILITIES.native_updates,
         "Updates are managed by the App Store",
@@ -63,7 +63,7 @@ pub async fn set_update_channel(
 pub async fn prepare_update(
     app: AppHandle,
     prepared: State<'_, PreparedUpdate>,
-) -> Result<UpdateInfo, String> {
+) -> Result<UpdateInfo, CallError> {
     let configured = crate::distribution::CAPABILITIES.native_updates
         && app.config().plugins.0.contains_key("updater");
     let mut prepared = prepared
@@ -132,7 +132,7 @@ pub async fn prepare_update(
         }
         Err(error) => {
             *prepared = None;
-            return Err(error);
+            return Err(error.into());
         }
     };
     let version = update.version.clone();
@@ -216,7 +216,7 @@ pub async fn restart_to_update(
     app: AppHandle,
     prepared: State<'_, PreparedUpdate>,
     client: State<'_, Arc<Client>>,
-) -> Result<(), String> {
+) -> Result<(), CallError> {
     crate::distribution::require(
         crate::distribution::CAPABILITIES.native_updates,
         "Updates are managed by the App Store",

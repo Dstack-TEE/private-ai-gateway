@@ -50,9 +50,10 @@ pap stop
 pap service stop --yes
 ```
 
-`service start` starts the management backend; saved `connect-on-launch` may also
-start protection. `start` waits for verified protection. `stop` stops protection
-and restores managed agent configuration but keeps management available.
+`service start` starts the management backend; Protect on launch
+(`connect-on-launch`) may also start protection. `start` waits for verified
+protection. `stop` stops protection and restores managed agent configuration
+but keeps management available.
 `service stop` shuts down the backend. Closing the desktop app does not stop it.
 Stopping (or SIGTERM) first restores the coding-agent configuration; if that
 fails, the backend refuses to stop so agents are not left pointing at a stopped
@@ -348,9 +349,11 @@ not a parsing contract.
 management API's `GET /api/version` answers it: `apiVersion`, `product`,
 `version`, `instanceId`, `processId` and `executable` (0.1 named the first
 field `protocolVersion`). A command that fails prints
-`{"error": {"code": "command_failed", "message": "CODE: MESSAGE"}}`, where
-`CODE` is the backend's stable error code, such as `invalid_state`, `busy` or
-`not_found`.
+`{"error": {"code": "CODE", "message": "MESSAGE"}}`, where `CODE` is the
+backend's stable error code, such as `invalid_state`, `busy` or `not_found`,
+or `command_failed` for a failure the CLI reports itself (earlier builds always
+used `command_failed` and prefixed the message with the backend's code). The
+desktop app and the web UI receive the same `code` and `message`.
 
 For reviewed agent changes, obtain a preview first:
 
@@ -367,8 +370,9 @@ may have completed. Query state before deciding what to do next.
 Exit status is `0` for successful execution, `2` for invalid command arguments,
 and `1` for operation failures. With `--json`, failures have an `error` object
 with `code` and `message`. Argument errors use `invalid_arguments`; operation
-errors currently use `command_failed`. Do not classify failures by parsing
-human message text or assume all failures are retryable.
+errors use the backend's code, or `command_failed`. Classify failures by
+`code`, never by parsing message text, and do not assume all failures are
+retryable.
 
 `doctor` reports every independent check, even when some fail. In that case it
 prints the partial report on stdout and exits nonzero; the `errors` object

@@ -39,6 +39,7 @@ desktop-runtime = { package = "private-ai-proxy-runtime", path = "../runtime" }
 ed25519-dalek = "2"
 futures-util = "0.3"
 hex = "0.4"
+open = "5"
 rand = "0.8"
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "stream"] }
 rpassword = "7"

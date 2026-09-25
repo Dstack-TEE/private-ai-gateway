@@ -19,7 +19,7 @@ export function AppearanceProvider({ api, children }: PropsWithChildren<{ api: D
     mutationFn: (next: Appearance) => api.setAppearance(next),
     onMutate: () => client.cancelQueries({ queryKey: ["appearance"] }),
     onSuccess: (_, next) => { client.setQueryData(["appearance"], next); },
-    onError: () => toastError("Appearance settings unavailable", "Could not save appearance settings."),
+    onError: (error) => toastError("Could not change the appearance", error),
   });
   const busy = mutation.isPending;
   useEffect(() => api.onAppearanceChange((next) => { void client.cancelQueries({ queryKey: ["appearance"] }).then(() => client.setQueryData(["appearance"], next)); }), [api, client]);
@@ -33,7 +33,13 @@ export function AppearanceProvider({ api, children }: PropsWithChildren<{ api: D
     };
     apply();
     media.addEventListener("change", apply);
-    return () => media.removeEventListener("change", apply);
+    // Leaving the signed-in app (web sign-out) returns to the system appearance.
+    return () => {
+      media.removeEventListener("change", apply);
+      delete document.documentElement.dataset.appearance;
+      delete document.documentElement.dataset.theme;
+      document.documentElement.classList.toggle("dark", media.matches);
+    };
   }, [value]);
   const change = (next: Appearance) => {
     if (busy) return;

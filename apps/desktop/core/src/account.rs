@@ -30,6 +30,15 @@ pub fn top_up_url(provider: &ServiceProvider, scope_slug: Option<&str>) -> Resul
     }
 }
 
+/// Where a provider's API keys are managed.
+pub const fn api_key_page(provider: ServiceProvider) -> Option<&'static str> {
+    match provider {
+        ServiceProvider::Phala => Some("https://cloud.phala.com/dashboard"),
+        ServiceProvider::Redpill => Some("https://www.redpill.ai/dashboard"),
+        ServiceProvider::Custom => None,
+    }
+}
+
 pub fn organization_url(organization_slug: Option<&str>) -> Result<String, String> {
     Ok(format!(
         "https://redpill.ai/{}",

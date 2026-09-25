@@ -14,16 +14,9 @@ mod platform {
     pub struct ManagerState(AutoLaunch);
 
     pub fn setup(app: &AppHandle) -> Result<(), auto_launch::Error> {
-        let executable = std::env::current_exe()?;
-        #[cfg(target_os = "linux")]
-        let executable = app
-            .env()
-            .appimage
-            .map(std::path::PathBuf::from)
-            .unwrap_or(executable);
         app.manage(ManagerState(build(
             app.package_info().name.as_str(),
-            &executable,
+            &std::env::current_exe()?,
         )?));
         Ok(())
     }
@@ -57,6 +50,9 @@ mod platform {
             .set_args(&[super::AUTOSTART_ARG]);
         #[cfg(target_os = "linux")]
         builder.set_linux_launch_mode(auto_launch::LinuxLaunchMode::XdgAutostart);
+        // HKCU `Run`: a per-user install needs no administrator rights.
+        #[cfg(target_os = "windows")]
+        builder.set_windows_enable_mode(auto_launch::WindowsEnableMode::CurrentUser);
         builder.build()
     }
 
@@ -283,18 +279,19 @@ mod platform {
     #[cfg(not(feature = "mac-app-store"))]
     impl LegacyBackend<'_> {
         fn registration(&self) -> Result<auto_launch::AutoLaunch, String> {
-            // Match tauri-plugin-autostart 2.5.1's LaunchAgent builder exactly:
-            // package_info.name is the label/plist basename; the path is the canonical executable.
-            // Reuse its auto-launch 0.5.0 implementation, never enable the legacy backend.
+            // Match tauri-plugin-autostart 2.5.1's LaunchAgent registration:
+            // package_info.name is the label/plist basename; the path is the
+            // canonical executable. The legacy backend is never enabled.
             let executable = std::env::current_exe()
                 .and_then(|path| path.canonicalize())
                 .map_err(|_| "Cannot locate the previous login registration".to_string())?;
-            Ok(auto_launch::AutoLaunch::new(
-                self.0.package_info().name.as_str(),
-                &executable.display().to_string(),
-                true,
-                &[super::AUTOSTART_ARG],
-            ))
+            auto_launch::AutoLaunchBuilder::new()
+                .set_app_name(self.0.package_info().name.as_str())
+                .set_app_path(&executable.display().to_string())
+                .set_macos_launch_mode(auto_launch::MacOSLaunchMode::LaunchAgent)
+                .set_args(&[super::AUTOSTART_ARG])
+                .build()
+                .map_err(|_| "Cannot locate the previous login registration".to_string())
         }
     }
 
