@@ -9,7 +9,7 @@ impl DesktopRuntime {
         self.admission.clone()
     }
 
-    pub fn save_web_ui(self: &Arc<Self>, config: WebUiConfig) -> Result<AppState, Error> {
+    pub async fn save_web_ui(self: &Arc<Self>, config: WebUiConfig) -> Result<AppState, Error> {
         let _operation = self.configuration_change()?;
         if self.instance.is_none() {
             return Err(Error::invalid_state(
@@ -32,15 +32,20 @@ impl DesktopRuntime {
             saved.web_ui = config.clone();
             Ok(())
         })?;
-        self.apply_web_ui(&config);
+        self.apply_web_ui(&config).await;
         Ok(self.manager.snapshot()?)
     }
 
     /// Closes any running listener, revoking its sessions, then opens the configured one.
-    /// Invalid saved settings and a missing password fail closed, and bind failures
-    /// are reported in state rather than failing the service.
-    pub(super) fn apply_web_ui(self: &Arc<Self>, config: &WebUiConfig) {
-        let previous = self.web_ui.stop();
+    pub(super) async fn apply_web_ui(self: &Arc<Self>, config: &WebUiConfig) {
+        self.web_ui.stop().await;
+        self.open_web_ui(config);
+    }
+
+    /// Opens the configured listener. Invalid saved settings and a missing
+    /// password fail closed, and bind failures are reported in state rather
+    /// than failing the service.
+    pub(super) fn open_web_ui(self: &Arc<Self>, config: &WebUiConfig) {
         let mut status = WebUiStatus::from(config);
         status.password_set = self.web_ui.has_password();
         if config.enabled && !status.password_set {
@@ -50,11 +55,7 @@ impl DesktopRuntime {
                 .manager
                 .snapshot()
                 .and_then(|state| settings_config::validate_web_ui(config, state.local_api.port))
-                .and_then(|listen| {
-                    // Wait for the closing listener when the new one reuses its port.
-                    let reopening = previous.is_some_and(|bind| bind.port() == listen.bind.port());
-                    self.web_ui.start(self.clone(), &listen, reopening)
-                });
+                .and_then(|listen| self.web_ui.start(self.clone(), &listen));
             match started {
                 Ok(url) => status.url = Some(url),
                 Err(error) => status.error = Some(error),

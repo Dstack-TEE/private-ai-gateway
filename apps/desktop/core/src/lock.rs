@@ -1,4 +1,4 @@
-//! Per-user OS file locks (flock / LockFileEx via `fd-lock`).
+//! Per-user OS file locks (`std::fs::File::lock`: flock / LockFileEx).
 //!
 //! `instance` decides which process is the primary app instance before the
 //! endpoint is claimed, so a process that lost the port can never become the
@@ -8,8 +8,6 @@
 //! rename and manifest update.
 
 use std::{fmt, fs, io, path::Path};
-
-use fd_lock::RwLock;
 
 use crate::private_fs::create_private_dir;
 
@@ -92,8 +90,9 @@ pub fn with_apply_lock<T, E: From<ApplyLockError>>(
     data_dir: &Path,
     f: impl FnOnce() -> Result<T, E>,
 ) -> Result<T, E> {
-    let mut lock = RwLock::new(open(data_dir, "apply.lock").map_err(ApplyLockError)?);
-    let _guard = lock.write().map_err(ApplyLockError)?;
+    // Closing the file releases the lock.
+    let file = open(data_dir, "apply.lock").map_err(ApplyLockError)?;
+    file.lock().map_err(ApplyLockError)?;
     f()
 }
 

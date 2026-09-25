@@ -18,7 +18,7 @@ path = "src/lib.rs"
 [dependencies]
 aci-protocol = { path = "../../../crates/aci-protocol" }
 agent-bridge = { package = "private-ai-proxy-agent-bridge", path = "../agent-bridge" }
-desktop-core = { package = "private-ai-proxy-core", path = "../core" }
+desktop-core = { package = "private-ai-proxy-core", path = "../core", features = ["server"] }
 axum = "0.8"
 axum-extra = { version = "0.12", default-features = false, features = ["cookie"], optional = true }
 backon = { version = "1", default-features = false, features = ["std"] }
@@ -40,6 +40,7 @@ subtle = "2.6"
 reqwest = { version = "0.13", default-features = false, features = ["form", "json", "rustls-no-provider"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tower = { version = "0.5", features = ["limit"] }
+tower-http = { version = "0.6", features = ["timeout"] }
 rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
 rusqlite_migration = { version = "2", default-features = false }
 serde = { version = "1.0", features = ["derive"] }

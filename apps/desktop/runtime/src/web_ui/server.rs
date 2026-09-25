@@ -16,7 +16,7 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::json;
-use tokio::{runtime::Handle, sync::Semaphore};
+use tokio::{runtime::Handle, sync::Semaphore, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
 use super::{auth::SESSION_LIFETIME, throttle::THROTTLE_REFILL, Auth, Throttle};
@@ -26,7 +26,7 @@ use crate::{
 };
 use desktop_core::{
     contracts::WebBootstrap,
-    listen::{self, url_host, ResolvedListen},
+    listen::{url_host, ResolvedListen},
     protocol::{self, ErrorCode, BUILD_VERSION},
     ui_api::{self, Backend, Method},
 };
@@ -58,20 +58,22 @@ pub(crate) struct Gate {
     cookie: String,
 }
 
+/// Web UI connections held open at once; later ones wait to be accepted.
+const MAX_CONNECTIONS: usize = 64;
+
 pub(super) fn start(
     runtime: Arc<DesktopRuntime>,
     listen: &ResolvedListen,
-    reopening: bool,
     auth: Arc<Auth>,
     throttle: Arc<Throttle>,
     shutdown: CancellationToken,
     handle: &Handle,
-) -> Result<(), String> {
+) -> Result<JoinHandle<()>, String> {
     if WebAssets::get("index.html").is_none() {
         return Err("Web UI assets are not built. Run `npm run build:web` in apps/desktop and rebuild the service.".into());
     }
     let address = listen.bind;
-    let listener = bind(address, reopening)?;
+    let listener = bind(address)?;
     let router = api::router(Api {
         backend: ServiceBackend(runtime.clone()),
         host: ServiceHost::default(),
@@ -84,22 +86,15 @@ pub(super) fn start(
             cookie: cookie_name(listen.bind.port()),
         })),
     });
-    handle.spawn(async move {
-        let result = match tokio::net::TcpListener::from_std(listener) {
-            Ok(listener) => axum::serve(
-                listener,
-                router.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .with_graceful_shutdown(shutdown.cancelled_owned())
-            .await
-            .map_err(|_| ()),
-            Err(_) => Err(()),
-        };
-        if result.is_err() {
-            tracing::warn!("The web UI listener on {address} stopped");
-        }
-    });
-    Ok(())
+    let _entered = handle.enter();
+    let listener = tokio::net::TcpListener::from_std(listener)
+        .map_err(|_| format!("Cannot listen on {address}"))?;
+    Ok(handle.spawn(desktop_core::serve::serve(
+        listener,
+        router,
+        MAX_CONNECTIONS,
+        shutdown.cancelled_owned(),
+    )))
 }
 
 /// `Host` values the listener answers to: the bound address, the client host,
@@ -137,9 +132,9 @@ fn cookie_name(port: u16) -> String {
     format!("pap_session_{port}")
 }
 
-fn bind(address: SocketAddr, reopening: bool) -> Result<std::net::TcpListener, String> {
+fn bind(address: SocketAddr) -> Result<std::net::TcpListener, String> {
     let (ip, port) = (address.ip(), address.port());
-    let listener = listen::bind(address, reopening).map_err(|error| match error.kind() {
+    let listener = std::net::TcpListener::bind(address).map_err(|error| match error.kind() {
         std::io::ErrorKind::AddrInUse => format!("Port {port} is already in use on {ip}"),
         std::io::ErrorKind::PermissionDenied => {
             format!("Port {port} requires elevated privileges; choose another port")

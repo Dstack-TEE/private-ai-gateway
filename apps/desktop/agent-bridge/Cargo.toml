@@ -15,7 +15,7 @@ name = "private-ai-proxy-helper"
 path = "src/bin/private-ai-proxy-helper.rs"
 
 [dependencies]
-desktop-core = { package = "private-ai-proxy-core", path = "../core" }
+desktop-core = { package = "private-ai-proxy-core", path = "../core", features = ["server"] }
 axum = "0.8"
 async-stream = "0.3"
 bytes = "1"

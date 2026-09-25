@@ -391,7 +391,7 @@ fn shutdown_blocks_later_configuration_changes() {
     let directory = tempfile::tempdir().unwrap();
     let runtime = test_runtime(&executor, directory.path());
     executor
-        .block_on(runtime.shutdown(desktop_core::protocol::ShutdownMode::Quit))
+        .block_on(runtime.shutdown(desktop_core::protocol::ShutdownMode::Quit, true))
         .unwrap();
     let state = runtime.state().unwrap();
     assert_eq!(state.status, "stopped");
@@ -438,6 +438,7 @@ fn shutdown_stops_waiting_for_a_stuck_command_after_its_bound() {
             &runtime,
             &admission,
             desktop_core::protocol::ShutdownMode::Quit,
+            true,
         )
         .await
         .unwrap();
@@ -488,7 +489,7 @@ fn update_restart_preserves_only_an_active_protection_session() {
             });
         }
 
-        executor.block_on(runtime.shutdown(mode)).unwrap();
+        executor.block_on(runtime.shutdown(mode, true)).unwrap();
 
         let state = runtime.state().unwrap();
         assert_eq!(state.status, "stopped");
