@@ -34,6 +34,11 @@ brew install --cask private-ai-proxy
 The Formula exposes `pap`, `private-ai-proxy`, and `aci`. Homebrew owns upgrades
 and removal for both the Formula and Cask installations.
 
+The tap carries stable releases only. It is updated by pull requests that the
+tap's own workflow opens after a stable release and a maintainer merges, so it
+can trail the latest GitHub release. Use npm or the install script for beta
+versions or when you need a release the tap does not have yet.
+
 ## macOS and Linux install script
 
 Run the official installer from the stable RedPill URL:
