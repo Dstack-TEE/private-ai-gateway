@@ -214,9 +214,21 @@ impl DesktopRuntime {
             self.proxy
                 .set_tokens(self.proxy.tokens().without(agent.id()));
         }
-        let mut status = projector.apply(agent, connect, &revision, catalog.as_ref(), &options)?;
+        let applied = projector.apply(agent, connect, &revision, catalog.as_ref(), &options);
+        self.manager.agents_changed();
+        let mut status = applied?;
         status.authorized &= self.publish_agent_tokens(projector.scan(None)?.1)?;
         Ok(status)
+    }
+
+    pub fn set_agent_connection(
+        &self,
+        agent_id: String,
+        connect: bool,
+    ) -> Result<AgentStatus, crate::Error> {
+        let options = ConnectOptions::default();
+        let preview = self.preview_agent(agent_id.clone(), connect, options.clone())?;
+        self.apply_agent(agent_id, connect, preview.revision, options)
     }
 
     pub fn disconnect_all_agents(&self) -> Result<Vec<AgentStatus>, Error> {
@@ -236,7 +248,9 @@ impl DesktopRuntime {
         self.proxy
             .set_tokens(with_client_token(TokenSet::default(), &self.credentials)?);
         let projector = self.current_projector()?;
-        match projector.disconnect_all() {
+        let disconnected = projector.disconnect_all();
+        self.manager.agents_changed();
+        match disconnected {
             Err(error) => Err(format!(
                 "Restore all could not revoke the agents ({error}); access stays revoked until it is retried"
             ).into()),

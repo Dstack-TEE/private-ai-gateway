@@ -139,7 +139,7 @@ export function WebUiDialog({
                 <FieldTitle>Sign in</FieldTitle>
                 <FieldDescription>
                   {status.url ? `Browsers open ${status.url} and enter the password.` : "Turn on the web UI to get its address."}
-                  {!web && " From a terminal: pap app open --web."}
+                  {!web && <> From a terminal: <code>pap app open --web</code>.</>}
                 </FieldDescription>
               </FieldContent>
               {!web && <Button type="button" variant="outline" disabled={saving || !status.url} onClick={openInBrowser}>Open in Browser</Button>}

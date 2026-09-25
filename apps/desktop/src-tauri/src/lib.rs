@@ -19,10 +19,7 @@ use desktop_core::{
     config::Appearance,
     contracts::{AppState, CommandRegistration},
 };
-use tauri::{
-    webview::{PageLoadEvent, WebviewWindowBuilder},
-    AppHandle, Emitter, Manager, WindowEvent,
-};
+use tauri::{webview::WebviewWindowBuilder, AppHandle, Emitter, Manager, WindowEvent};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_shell::ShellExt;
 
@@ -59,21 +56,19 @@ async fn run_cli_command(
     let output = app
         .shell()
         .sidecar("private-ai-proxy")
-        .map_err(|_| "The bundled private-ai-proxy command is unavailable in this installation")?
+        .map_err(|_| "The bundled pap command is unavailable in this installation")?
         .args(arguments)
         .output()
         .await
-        .map_err(|_| "The private-ai-proxy command could not complete")?;
+        .map_err(|_| "The pap command could not complete")?;
     if !output.status.success() {
-        return Err(
-            "The private-ai-proxy command could not update command-line access".to_string(),
-        );
+        return Err("The pap command could not update command-line access".to_string());
     }
     if output.stdout.len() > 64 * 1024 {
-        return Err("The private-ai-proxy command returned an invalid response".to_string());
+        return Err("The pap command returned an invalid response".to_string());
     }
     serde_json::from_slice(&output.stdout)
-        .map_err(|_| "The private-ai-proxy command returned an invalid response".to_string())
+        .map_err(|_| "The pap command returned an invalid response".to_string())
 }
 
 /// The backend instance the shell last saw. A backend that (re)connected needs
@@ -115,7 +110,7 @@ fn allow_automatic_cli_registration() -> Result<(), String> {
         .map_err(|_| "Cannot locate the installed application".to_string())?;
     if transient_macos_app_path(&executable) {
         return Err(
-            "Move Private AI Proxy to a stable location before registering private-ai-proxy"
+            "Move Private AI Proxy to a stable location before installing the pap command"
                 .to_string(),
         );
     }
@@ -192,6 +187,8 @@ macro_rules! generate_handler {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     desktop_core::logging::init();
+    // desktop_core's update check (the pacman notice) uses reqwest's rustls
+    // without a built-in crypto provider.
     let _ = rustls::crypto::ring::default_provider().install_default();
     let app =
         tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
@@ -262,15 +259,11 @@ pub fn run() {
                 .iter()
                 .find(|window| window.label == "main")
                 .ok_or("Main window configuration is missing")?;
+            // Created hidden (`visible: false`); the renderer reports when
+            // it has applied the saved appearance (`main_window_ready`).
             let window = WebviewWindowBuilder::from_config(app, config)?
                 .initialization_script(distribution::initialization_script())
-                .on_page_load(|window, payload| {
-                    if matches!(payload.event(), PageLoadEvent::Finished) {
-                        tray::main_window_ready(&window).ok();
-                    }
-                })
                 .build()?;
-            window.set_title(desktop_core::brand::PRODUCT_NAME)?;
             let window_for_events = window.clone();
             let app_for_events = app.handle().clone();
             let client_for_events = client.clone();

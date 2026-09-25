@@ -256,9 +256,10 @@ impl Client {
     /// error: starting.
     pub fn attach(handle: tokio::runtime::Handle) -> Arc<Self> {
         let client = Arc::new(Self::new());
-        client
-            .states
-            .send_modify(|state| state.backend_connected = Some(false));
+        client.states.send_modify(|state| {
+            state.backend_connected = Some(false);
+            state.update_protection();
+        });
         let weak = Arc::downgrade(&client);
         handle.spawn_blocking(move || {
             let Some(client) = weak.upgrade() else {
@@ -320,13 +321,7 @@ impl Client {
         if state.backend_connected == Some(false) && state.error.is_some() {
             return;
         }
-        state.status = "error".into();
-        state.backend_connected = Some(false);
-        state.identity = None;
-        state.proxy_url = None;
-        state.error = Some(error);
-        state.endpoint_error =
-            Some("Backend disconnected. Start it with private-ai-proxy service start.".into());
+        state.disconnect(error);
         self.states.send_replace(state);
     }
 
@@ -818,7 +813,10 @@ mod tests {
         state.backend_instance = Some("replacement-instance".into());
         client.states.send_replace(state);
         client.report_disconnect("unexpected disconnection".into());
-        assert_eq!(client.states.borrow().status, "error");
+        assert_eq!(
+            client.states.borrow().status,
+            crate::contracts::VerificationStatus::Error
+        );
         assert_eq!(client.states.borrow().backend_connected, Some(false));
         assert_eq!(
             client.states.borrow().error.as_deref(),

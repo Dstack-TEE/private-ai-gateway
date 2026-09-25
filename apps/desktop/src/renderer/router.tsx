@@ -1,6 +1,11 @@
 import { createBrowserHistory, createMemoryHistory, createRootRoute, createRoute, createRouter, redirect, stripSearchParams } from "@tanstack/react-router";
+import { Bot, ChartNoAxesColumn, LayoutGrid, Settings, type LucideIcon } from "lucide-react";
 import { AppLayout } from "./app";
 import { SignInPage } from "./components/sign-in";
+import { AgentsPage } from "./features/agents";
+import { OverviewPage } from "./features/overview";
+import { SettingsPage } from "./features/settings";
+import { UsagePage } from "./features/usage";
 import { session, web } from "./lib/environment";
 import { queryClient } from "./lib/query-client";
 import { USAGE_SEARCH_DEFAULTS, validateUsageSearch } from "./lib/usage-dates";
@@ -21,7 +26,7 @@ const signInRoute = createRoute({
 });
 
 // Every page needs a session in the web UI (TanStack Router authenticated
-// routes). AppLayout renders the page matching the location.
+// routes). AppLayout renders the window around the page.
 const appRoute = createRoute({
   getParentRoute: () => rootRoute,
   id: "_app",
@@ -38,15 +43,18 @@ const appRoute = createRoute({
   },
   component: AppLayout,
 });
-const overviewRoute = createRoute({ getParentRoute: () => appRoute, path: "/" });
-const agentsRoute = createRoute({ getParentRoute: () => appRoute, path: "/agents" });
+// The sidebar lists the pages with a title, in this order.
+const overviewRoute = createRoute({ getParentRoute: () => appRoute, path: "/", component: OverviewPage, staticData: { title: "Overview", icon: LayoutGrid } });
+const agentsRoute = createRoute({ getParentRoute: () => appRoute, path: "/agents", component: AgentsPage, staticData: { title: "Agents", icon: Bot } });
 const usageRoute = createRoute({
   getParentRoute: () => appRoute,
   path: "/usage",
   validateSearch: validateUsageSearch,
   search: { middlewares: [stripSearchParams(USAGE_SEARCH_DEFAULTS)] },
+  component: UsagePage,
+  staticData: { title: "Usage", icon: ChartNoAxesColumn },
 });
-const settingsRoute = createRoute({ getParentRoute: () => appRoute, path: "/settings" });
+const settingsRoute = createRoute({ getParentRoute: () => appRoute, path: "/settings", component: SettingsPage, staticData: { title: "Settings", icon: Settings } });
 const unknownRoute = createRoute({
   getParentRoute: () => appRoute,
   path: "$",
@@ -83,7 +91,12 @@ declare module "@tanstack/react-router" {
     router: typeof router;
   }
   interface HistoryState {
-    /** Announced once the page it navigates to is shown. */
+    /** Shown by the sign-in page. */
     notice?: string;
+  }
+  interface StaticDataRouteOption {
+    /** A page of the window: its heading and sidebar entry. */
+    title?: string;
+    icon?: LucideIcon;
   }
 }

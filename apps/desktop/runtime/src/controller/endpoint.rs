@@ -35,7 +35,7 @@ impl DesktopRuntime {
         if self.instance.is_none() {
             return Err("Change Local API settings in the primary app instance".into());
         }
-        if self.manager.snapshot()?.status == "verifying" {
+        if self.manager.snapshot()?.status == VerificationStatus::Verifying {
             return Err("Wait for the current verification to finish".into());
         }
         self.apply_local_api(config).await

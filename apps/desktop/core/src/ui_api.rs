@@ -9,9 +9,7 @@ use crate::{
     agent_access,
     client::{CallError, Client},
     config::{Appearance, Config, NotificationPreferences},
-    contracts::{
-        AccountSaveResult, AgentStatus, AppState, ConfidentialProfileInput, ServiceProvider,
-    },
+    contracts::{AccountSaveResult, AppState, ConfidentialProfileInput, ServiceProvider},
     protocol::{self, rpc, Call, Command, Preference},
 };
 
@@ -207,8 +205,6 @@ pub trait Host: Clone + Send + Sync + 'static {
 
     fn present_account_login(&self, _url: &str) {}
 
-    fn sync_agents(&self, _agents: &[AgentStatus]) {}
-
     fn notification_configuration(
         &self,
         preferences: NotificationPreferences,
@@ -260,11 +256,6 @@ pub async fn invoke(
             let login = call(backend, rpc::BeginAccountLogin { profile }).await?;
             host.present_account_login(&login.url);
             Ok(value(login)?)
-        }
-        Method::ListAgents => {
-            let agents = call(backend, rpc::ListAgents).await?;
-            host.sync_agents(&agents);
-            Ok(value(agents)?)
         }
         method if method.is_command() => {
             backend

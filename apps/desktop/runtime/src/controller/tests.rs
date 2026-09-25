@@ -348,7 +348,7 @@ fn saving_an_offline_profile_does_not_launch_verification() {
         .block_on(runtime.save_configuration(profile, true, Some("test-key".into())))
         .unwrap();
     assert_eq!(saved.active_profile_id, "offline");
-    assert_eq!(saved.status, "stopped");
+    assert_eq!(saved.status, VerificationStatus::Stopped);
     assert!(saved.profiles[0].verified_at.is_none());
     assert!(saved.profiles[0].credential_saved);
     assert!(
@@ -386,6 +386,30 @@ fn busy_save_is_a_definite_rejection_not_an_unknown_operation() {
 }
 
 #[test]
+fn the_production_os_policy_is_saved_for_the_next_start() {
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = test_runtime(&executor, directory.path());
+    let state = runtime.set_require_production_os(false).unwrap();
+    assert!(!state.config.require_production_os);
+    assert!(
+        !runtime
+            .settings
+            .snapshot()
+            .unwrap()
+            .config
+            .require_production_os
+    );
+    assert!(
+        runtime
+            .set_require_production_os(true)
+            .unwrap()
+            .config
+            .require_production_os
+    );
+}
+
+#[test]
 fn shutdown_blocks_later_configuration_changes() {
     let executor = tokio::runtime::Runtime::new().unwrap();
     let directory = tempfile::tempdir().unwrap();
@@ -394,7 +418,7 @@ fn shutdown_blocks_later_configuration_changes() {
         .block_on(runtime.shutdown(desktop_core::protocol::ShutdownMode::Quit, true))
         .unwrap();
     let state = runtime.state().unwrap();
-    assert_eq!(state.status, "stopped");
+    assert_eq!(state.status, VerificationStatus::Stopped);
     assert_eq!(
         runtime.start(state.config).unwrap_err().to_string(),
         "The app is closing"
@@ -481,7 +505,7 @@ fn update_restart_preserves_only_an_active_protection_session() {
                 .save_active_session("update-session", 123)
                 .unwrap();
             runtime.manager.restore_snapshot(AppState {
-                status: "verified".into(),
+                status: VerificationStatus::Verified,
                 session_id: Some("update-session".into()),
                 session_active: true,
                 protected_since: Some(123),
@@ -492,7 +516,7 @@ fn update_restart_preserves_only_an_active_protection_session() {
         executor.block_on(runtime.shutdown(mode, true)).unwrap();
 
         let state = runtime.state().unwrap();
-        assert_eq!(state.status, "stopped");
+        assert_eq!(state.status, VerificationStatus::Stopped);
         assert_eq!(state.reconnecting, preserved);
         assert_eq!(state.session_active, preserved);
         assert_eq!(state.protected_since, preserved.then_some(123));
@@ -631,7 +655,7 @@ fn recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them() {
     let files = TokenFiles::new(&credential_directory);
     let token = files.read(agent.id()).unwrap().unwrap();
     let verified = AppState {
-        status: "verified".into(),
+        status: VerificationStatus::Verified,
         api_key_saved: true,
         session_active: true,
         config: StartConfig {
@@ -684,9 +708,9 @@ fn recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them() {
     assert!(statuses.iter().all(|status| !status.authorized));
     assert!(runtime.proxy.tokens().agent_for(&token).is_none());
     assert_eq!(std::fs::read(&path).unwrap(), projected);
-    for status in ["error", "stopped"] {
+    for status in [VerificationStatus::Error, VerificationStatus::Stopped] {
         runtime.manager.restore_snapshot(AppState {
-            status: status.into(),
+            status,
             ..verified.clone()
         });
         runtime.reload_agent_tokens().unwrap();
@@ -728,7 +752,7 @@ fn network_loss_revokes_session_and_manual_stop_cancels_recovery() {
     let directory = tempfile::tempdir().unwrap();
     let runtime = test_runtime(&executor, directory.path());
     runtime.manager.restore_snapshot(AppState {
-        status: "verified".into(),
+        status: VerificationStatus::Verified,
         session_id: Some("network-session".into()),
         session_active: true,
         protected_since: Some(123),
@@ -753,7 +777,7 @@ fn network_loss_revokes_session_and_manual_stop_cancels_recovery() {
     assert!(runtime.recovery.needs_check());
     drop(operation);
     let mut verifying = runtime.state().unwrap();
-    verifying.status = "verifying".into();
+    verifying.status = VerificationStatus::Verifying;
     runtime.manager.restore_snapshot(verifying.clone());
     runtime.recovery.available.store(true, Ordering::Release);
     runtime.recover_network().unwrap();
@@ -763,7 +787,7 @@ fn network_loss_revokes_session_and_manual_stop_cancels_recovery() {
     runtime.recover_network().unwrap();
     assert!(!runtime.recovery.needs_check());
     assert!(!runtime.proxy.session().verified);
-    assert_eq!(runtime.state().unwrap().status, "stopped");
+    assert_eq!(runtime.state().unwrap().status, VerificationStatus::Stopped);
     assert!(runtime.state().unwrap().reconnecting);
     assert_eq!(
         runtime.state().unwrap().session_id.as_deref(),
@@ -778,7 +802,7 @@ fn network_loss_revokes_session_and_manual_stop_cancels_recovery() {
     assert!(!runtime.recovery.pending());
     runtime.recovery.available.store(true, Ordering::Release);
     runtime.recover_network().unwrap();
-    assert_eq!(runtime.state().unwrap().status, "stopped");
+    assert_eq!(runtime.state().unwrap().status, VerificationStatus::Stopped);
 }
 
 #[test]
@@ -947,11 +971,16 @@ fn only_live_protection_allows_agent_projection() {
         api_key_saved: true,
         ..AppState::default()
     };
-    for status in ["stopped", "verifying", "blocked", "error"] {
-        state.status = status.to_string();
+    for status in [
+        VerificationStatus::Stopped,
+        VerificationStatus::Verifying,
+        VerificationStatus::Blocked,
+        VerificationStatus::Error,
+    ] {
+        state.status = status;
         assert!(!state.is_protected());
     }
-    state.status = "verified".to_string();
+    state.status = VerificationStatus::Verified;
     assert!(state.is_protected());
     state.configuration_verification = true;
     assert!(!state.is_protected());

@@ -128,10 +128,12 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), CallError> {
             {
                 return Err("Profile selection was changed by another client.".into());
             }
-            if state.status == "verified" && !state.configuration_verification {
+            if state.status == VerificationStatus::Verified && !state.configuration_verification {
                 value(state)?
             } else {
-                let started = if state.status == "verifying" && !state.configuration_verification {
+                let started = if state.status == VerificationStatus::Verifying
+                    && !state.configuration_verification
+                {
                     state
                 } else {
                     client.call(rpc::Start {
@@ -146,9 +148,11 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), CallError> {
                             "The protection operation was superseded by another client.".into()
                         );
                     }
-                    match state.status.as_str() {
-                        "verified" if !state.configuration_verification => break value(state)?,
-                        "verifying" => {}
+                    match state.status {
+                        VerificationStatus::Verified if !state.configuration_verification => {
+                            break value(state)?
+                        }
+                        VerificationStatus::Verifying => {}
                         _ => return Err(
                             "Protection did not become verified. Inspect private-ai-proxy status."
                                 .into(),

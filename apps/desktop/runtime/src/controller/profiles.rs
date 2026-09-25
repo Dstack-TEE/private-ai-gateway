@@ -46,7 +46,7 @@ impl DesktopRuntime {
     ) -> Result<SavedConfiguration<'_>, Error> {
         let _operation = self.configuration_change()?;
         let initial = self.manager.snapshot()?;
-        if initial.status == "verifying" {
+        if initial.status == VerificationStatus::Verifying {
             return Err("Wait for the current verification to finish".into());
         }
         let reconnect = initial.session_active
@@ -226,7 +226,7 @@ impl DesktopRuntime {
     pub fn activate_profile(self: &Arc<Self>, profile_id: String) -> Result<AppState, Error> {
         let _operation = self.configuration_change()?;
         let previous = self.manager.snapshot()?;
-        if previous.status == "verifying" {
+        if previous.status == VerificationStatus::Verifying {
             return Err("Wait for the current verification to finish".into());
         }
         if previous.active_profile_id == profile_id {

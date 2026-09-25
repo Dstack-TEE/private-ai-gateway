@@ -141,6 +141,12 @@ pub(crate) async fn dispatch(
         } => {
             respond::<rpc::ApplyAgent, _>(runtime.apply_agent(agent_id, connect, revision, options))
         }
+        Command::SetRequireProductionOs { required } => {
+            respond::<rpc::SetRequireProductionOs, _>(runtime.set_require_production_os(required))
+        }
+        Command::SetAgentConnection { agent_id, connect } => {
+            respond::<rpc::SetAgentConnection, _>(runtime.set_agent_connection(agent_id, connect))
+        }
         Command::DisconnectAllAgents {} => {
             respond::<rpc::DisconnectAllAgents, _>(runtime.disconnect_all_agents())
         }

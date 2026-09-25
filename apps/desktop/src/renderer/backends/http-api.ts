@@ -2,6 +2,7 @@ import {
   ABOUT_LINKS,
   AGENT_WEBSITES,
   API_KEY_PAGES,
+  SERVICE_PROVIDERS,
   WEB_DISTRIBUTION,
   type ProfileBackup,
   type UiMethod,
@@ -56,7 +57,6 @@ const platform: UiPlatform = {
       currentVersion: notice.currentVersion,
       channel: notice.channel,
       version: notice.version,
-      channelPublished: notice.channelPublished,
       upgradeCommands: notice.commands,
       downloadUrl: notice.downloadUrl,
     };
@@ -81,6 +81,7 @@ const platform: UiPlatform = {
   ),
   requestNotificationPermission: async () => ({ permission: "unsupported", alertsEnabled: false }),
   openNotificationSettings: async () => undefined,
+  // The page is its own window.
   mainWindowReady: async () => undefined,
   openWebUi: async () => {
     throw new Error("The web UI is already open in this browser");
@@ -269,8 +270,7 @@ function isProfileBackup(value: unknown): value is ProfileBackup {
   return value.profiles.every((profile: unknown) => Boolean(
     profile && typeof profile === "object"
       && "name" in profile && typeof profile.name === "string"
-      && "provider" in profile
-      && (profile.provider === "phala" || profile.provider === "redpill" || profile.provider === "custom")
+      && "provider" in profile && typeof profile.provider === "string" && Object.hasOwn(SERVICE_PROVIDERS, profile.provider)
       && "remoteUrl" in profile && typeof profile.remoteUrl === "string",
   ));
 }

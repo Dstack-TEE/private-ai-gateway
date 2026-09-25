@@ -26,7 +26,7 @@ use desktop_core::{
     config::{self as settings_config, Config},
     contracts::{
         AgentPreview, AgentStatus, AppState, ConfidentialProfileInput, ConnectOptions,
-        ListenConfig, RequestActivity, ServiceProvider, StartConfig,
+        ListenConfig, RequestActivity, ServiceProvider, StartConfig, VerificationStatus,
     },
     listen::ResolvedListen,
     lock,

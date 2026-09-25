@@ -19,6 +19,7 @@ pub mod logging;
 pub mod maintenance;
 pub mod paths;
 pub mod private_fs;
+pub mod protection;
 pub mod protocol;
 #[cfg(feature = "server")]
 pub mod serve;

@@ -11,7 +11,7 @@ import { Button } from "../components/ui/button";
 import { StateLabel } from "../components/state-label";
 import { AgentAttention } from "../components/agent-attention";
 import ohMyPiIcon from "../assets/oh-my-pi.svg";
-import type { Tone } from "../lib/tone";
+import type { Tone } from "../../shared/contracts";
 import { Item, ItemActions, ItemContent, ItemTitle } from "../components/ui/item";
 import { SettingsSection } from "../components/settings";
 import { SwitchControl } from "../components/controls";
@@ -19,7 +19,8 @@ import type { AgentAccessStatus, AgentStatus } from "../../shared/contracts";
 import { EmptyState } from "../components/detail";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { desktopApi } from "../lib/environment";
-import { supportedAgentStatuses } from "../lib/agent-integrations";
+import { useShell } from "../lib/shell";
+import { useAgentConnection } from "../hooks/use-agents";
 import { cn } from "../lib/utils";
 
 const AGENT_ICONS: Record<string, string> = {
@@ -44,29 +45,10 @@ function AgentMark({ agent }: { agent: Pick<AgentStatus, "id" | "name"> }): Reac
   );
 }
 
-export function AgentsView({
-  accessStatus,
-  authorizing,
-  pendingAgentChanges,
-  agents,
-  locked,
-  problem,
-  onSelect,
-  onAuthorize,
-  onRetry,
-}: {
-  accessStatus?: AgentAccessStatus;
-  authorizing: boolean;
-  pendingAgentChanges: Record<string, boolean>;
-  agents: AgentStatus[];
-  locked: boolean;
-  problem?: string;
-  onSelect(agent: AgentStatus, connect: boolean): void;
-  onAuthorize(): void;
-  onRetry(): void;
-}): React.JSX.Element {
+export function AgentsPage(): React.JSX.Element {
+  const { agents: integrations, applying } = useShell();
+  const { agents, accessStatus, authorizing, problem } = integrations;
   const connected = agents.filter((agent) => agent.installed && agent.connected).length;
-  const listedAgents = agents.length > 0 ? agents : supportedAgentStatuses();
   const detectionLabel = accessStatus === "authorized"
     ? undefined
     : authorizing
@@ -74,37 +56,26 @@ export function AgentsView({
       : accessStatus
         ? "Access required"
         : "Checking access";
+  const locked = applying || integrations.controlsLocked;
   return (
     <div className="max-w-230 min-h-full mt-0 mr-auto mb-0 ml-auto">
-      <AgentAccessNotice status={accessStatus} busy={authorizing} onAuthorize={onAuthorize} />
-      {accessStatus === "authorized" && problem && <AgentDetectionNotice busy={authorizing} onRetry={onRetry} />}
+      <AgentAccessNotice status={accessStatus} busy={authorizing} onAuthorize={() => void integrations.requestAccess()} />
+      {accessStatus === "authorized" && problem && <AgentDetectionNotice busy={authorizing} onRetry={() => void integrations.requestAccess()} />}
       <SettingsSection title={accessStatus === "authorized" && !problem ? "Installed" : "Agents"} detail={accessStatus === "authorized" && !problem ? `${connected} connected` : undefined}>
-        {accessStatus !== "authorized" ? listedAgents.map((agent) => (
-          <AgentRow
-            key={agent.id}
-            agent={agent}
-            detectionLabel={detectionLabel}
-            disabled
-            onSelect={() => undefined}
-          />
+        {accessStatus !== "authorized" ? agents.map((agent) => (
+          <AgentRow key={agent.id} agent={agent} detectionLabel={detectionLabel} disabled />
         ))
-          : problem ? listedAgents.map((agent) => (
-            <AgentRow key={agent.id} agent={agent} detectionLabel="Detection unavailable" disabled onSelect={() => undefined} />
+          : problem ? agents.map((agent) => (
+            <AgentRow key={agent.id} agent={agent} detectionLabel="Detection unavailable" disabled />
           ))
           : !agents.some((agent) => agent.installed) ? <EmptyState text="No installed agents found" />
           : agents.filter((agent) => agent.installed).map((agent) => (
-          <AgentRow
-            pendingConnection={pendingAgentChanges[agent.id]}
-            key={agent.id}
-            agent={agent}
-            disabled={locked}
-            onSelect={(connect) => onSelect(agent, connect)}
-          />
-        ))}
+            <AgentRow key={agent.id} agent={agent} disabled={locked} />
+          ))}
       </SettingsSection>
       {accessStatus === "authorized" && !problem && agents.some((agent) => !agent.installed) && <SettingsSection title="Not installed">
         {agents.filter((agent) => !agent.installed).map((agent) => (
-          <AgentRow key={agent.id} agent={agent} disabled={locked} onSelect={() => undefined} />
+          <AgentRow key={agent.id} agent={agent} disabled={locked} />
         ))}
       </SettingsSection>}
     </div>
@@ -115,7 +86,7 @@ function AgentDetectionNotice({ busy, onRetry }: { busy: boolean; onRetry(): voi
   return <Alert role="status" className="mb-5 rounded-xl border-border bg-muted/35 px-3.5 py-2.5">
     <TriangleAlert size={16} aria-hidden="true" />
     <AlertDescription className="col-start-2 flex flex-wrap items-center justify-between gap-3 text-xs leading-5">
-      <span className="min-w-0 flex-1"><strong className="font-medium text-foreground">Agent detection unavailable.</strong> Home access could not be used by the backend.</span>
+      <span className="min-w-0 flex-1"><strong className="font-medium text-foreground">Agent detection unavailable.</strong> The background service could not use Home access.</span>
       <Button type="button" variant="outline" size="sm" className="shrink-0" disabled={busy} aria-busy={busy} onClick={onRetry}>
         {busy ? <><LoaderCircle size={14} className="animate-spin" aria-hidden="true" />Retrying…</> : "Retry"}
       </Button>
@@ -142,20 +113,17 @@ function AgentAccessNotice({ status, busy, onAuthorize }: {
 }
 
 export function AgentRow({
-  pendingConnection,
   agent,
   disabled,
   detectionLabel,
   compact = false,
-  onSelect,
 }: {
-  pendingConnection?: boolean;
   agent: AgentStatus;
   disabled: boolean;
   detectionLabel?: string;
   compact?: boolean;
-  onSelect(connect: boolean): void;
 }): React.JSX.Element {
+  const { pending: pendingConnection, change: onSelect } = useAgentConnection(desktopApi, agent);
   const name = agent.name;
   const presence: { label: string; tone: Tone } = detectionLabel
     ? { label: detectionLabel, tone: "neutral" }

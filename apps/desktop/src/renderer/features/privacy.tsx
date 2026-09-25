@@ -7,7 +7,8 @@ import { formatTimestamp, hardwareName, shorten, trustName } from "../lib/format
 import { Detail } from "../components/detail";
 import { VerificationVerdict } from "../components/verification-verdict";
 import { cn } from "../lib/utils";
-import { toneTextClass, type Tone } from "../lib/tone";
+import { toneTextClass } from "../lib/tone";
+import type { Tone } from "../../shared/contracts";
 
 const CHECK_ICON_CLASS = "grid size-4.5 flex-none place-items-center rounded-full";
 const CHECK_PRESENTATION: Record<VerificationCheck["status"], { iconClass: string; tone: Tone }> = {
@@ -80,7 +81,7 @@ function PrivacyVerification({ state }: { state: AppState }): React.JSX.Element 
         tone={verdictTone}
         icon={VerdictIcon}
         title={verified ? "Service identity and connection verified" : state.status === "verifying" ? "Checking the service" : "No verified live connection"}
-        detail={verified ? "This app checked the service's hardware evidence and bound the encrypted connection to its attested key." : "A saved profile is not evidence of a currently protected connection. Protection must establish a new verified session."}
+        detail={verified ? "This app checked the service’s hardware evidence and bound the encrypted connection to its attested key." : "A saved profile is not evidence of a currently protected connection. Protection must establish a new verified session."}
       />
       <div className="privacy-facts mt-4">
         {facts.map((fact) => (

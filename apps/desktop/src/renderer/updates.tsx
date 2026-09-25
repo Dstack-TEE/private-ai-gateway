@@ -102,8 +102,7 @@ export function UpdateControl({ updates, productName, desktop }: { updates: Retu
     : error || !info ? "Update status unavailable"
     : !info.enabled && !info.systemManaged ? "Automatic updates unavailable in this build"
     : info.version ? `Version ${info.version} is available`
-    : info.channelPublished === false ? "No releases published in this channel yet"
-    : "You're up to date";
+    : "You’re up to date";
   const manual = !busy && !ready && info?.version ? info : undefined;
   const commands = manual?.upgradeCommands ?? [];
   return <Item>

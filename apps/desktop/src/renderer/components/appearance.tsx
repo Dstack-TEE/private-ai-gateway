@@ -8,13 +8,29 @@ import { toastError } from "../lib/error-message";
 import { Monitor, Sun, Moon } from "lucide-react";
 import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group";
 
-const AppearanceContext = createContext({ value: "system" as Appearance, ready: false, busy: false, change: (_value: Appearance) => {} });
+const AppearanceContext = createContext({ value: "system" as Appearance, busy: false, change: (_value: Appearance) => {} });
 
+/** Applies an appearance to the document: `system` follows the OS setting. */
+export function useAppearanceTheme(value: Appearance) {
+  useLayoutEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const apply = () => document.documentElement.classList.toggle("dark", value === "dark" || (value === "system" && media.matches));
+    apply();
+    media.addEventListener("change", apply);
+    return () => media.removeEventListener("change", apply);
+  }, [value]);
+}
+
+/**
+ * The saved appearance. The desktop window is created hidden and shown once
+ * the saved appearance is applied, so it never opens in the wrong theme.
+ */
 export function AppearanceProvider({ api, children }: PropsWithChildren<{ api: DesktopApi }>) {
   const client = useQueryClient();
-  const { data, isPending } = useQuery({ queryKey: ["appearance"], queryFn: () => api.getAppearance() });
+  // A backend that is still starting answers later with an appearance event;
+  // the window shows in the system appearance meanwhile.
+  const { data, isPending } = useQuery({ queryKey: ["appearance"], queryFn: () => api.getAppearance(), retry: false });
   const value = data ?? "system";
-  const ready = !isPending;
   const mutation = useMutation({
     mutationFn: (next: Appearance) => api.setAppearance(next),
     onMutate: () => client.cancelQueries({ queryKey: ["appearance"] }),
@@ -23,33 +39,18 @@ export function AppearanceProvider({ api, children }: PropsWithChildren<{ api: D
   });
   const busy = mutation.isPending;
   useEffect(() => api.onAppearanceChange((next) => { void client.cancelQueries({ queryKey: ["appearance"] }).then(() => client.setQueryData(["appearance"], next)); }), [api, client]);
-  useLayoutEffect(() => {
-    document.documentElement.dataset.appearance = value;
-    const media = window.matchMedia("(prefers-color-scheme: dark)");
-    const apply = () => {
-      const theme = value === "system" ? media.matches ? "dark" : "light" : value;
-      document.documentElement.classList.toggle("dark", theme === "dark");
-      document.documentElement.dataset.theme = theme;
-    };
-    apply();
-    media.addEventListener("change", apply);
-    // Leaving the signed-in app (web sign-out) returns to the system appearance.
-    return () => {
-      media.removeEventListener("change", apply);
-      delete document.documentElement.dataset.appearance;
-      delete document.documentElement.dataset.theme;
-      document.documentElement.classList.toggle("dark", media.matches);
-    };
-  }, [value]);
+  useAppearanceTheme(value);
+  useEffect(() => {
+    if (!isPending) void api.mainWindowReady().catch((error: unknown) => toastError("Could not show the window", error));
+  }, [api, isPending]);
   const change = (next: Appearance) => {
     if (busy) return;
     mutation.mutate(next);
   };
-  return <AppearanceContext.Provider value={{ value, ready, busy, change }}>{children}</AppearanceContext.Provider>;
+  return <AppearanceContext.Provider value={{ value, busy, change }}>{children}</AppearanceContext.Provider>;
 }
 
 export function useAppearance() { return useContext(AppearanceContext).value; }
-export function useAppearanceReady() { return useContext(AppearanceContext).ready; }
 
 export function AppearanceControl() {
   const appearance = useContext(AppearanceContext);

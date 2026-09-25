@@ -27,6 +27,7 @@ use desktop_core::config as settings_config;
 use desktop_core::contracts::{
     AppState, CatalogSummary, ConfidentialProfile, ListenConfig, ModelSummary, RequestActivity,
     ServiceIdentity, SourceProvenance, StartConfig, UsageSummary, VerificationCheck,
+    VerificationStatus,
 };
 use desktop_core::listen::ResolvedListen;
 use desktop_core::now_secs;
@@ -97,7 +98,7 @@ pub type VerifierEventSink = Arc<dyn Fn(VerifierEvent) + Send + Sync>;
 /// The status and error a state change introduced, for the service log.
 #[must_use]
 struct StateLog {
-    status: Option<String>,
+    status: Option<VerificationStatus>,
     error: Option<String>,
 }
 
@@ -205,7 +206,9 @@ impl SessionManager {
     }
 
     pub fn snapshot(&self) -> Result<AppState, String> {
-        Ok(self.lock()?.state.clone())
+        let mut state = self.lock()?.state.clone();
+        state.update_protection();
+        Ok(state)
     }
 
     pub fn subscribe(&self) -> watch::Receiver<AppState> {
@@ -261,7 +264,7 @@ impl SessionManager {
             runtime.last_catalog = None;
         }
         runtime.state = AppState {
-            status: "verifying".to_string(),
+            status: VerificationStatus::Verifying,
             configuration_verification: verification_only,
             progress: Some("Starting the verifier".to_string()),
             remote_url: Some(remote_url.clone()),
@@ -335,7 +338,10 @@ impl SessionManager {
                 let _ = task.stop();
                 return Err("Protection start was superseded".into());
             }
-            if matches!(runtime.state.status.as_str(), "error" | "blocked") {
+            if matches!(
+                runtime.state.status,
+                VerificationStatus::Error | VerificationStatus::Blocked
+            ) {
                 let _ = task.stop();
             } else {
                 runtime.task = Some(task);
@@ -345,7 +351,7 @@ impl SessionManager {
         self.task_runtime.spawn(async move {
             let budget = Duration::from_secs(if verification_only { 45 } else { 120 });
             if let Err(error) = manager.wait_for_verification(&session_id, budget).await {
-                let _ = manager.fail_if(generation, Some("verifying"), error);
+                let _ = manager.fail_if(generation, Some(VerificationStatus::Verifying), error);
             }
         });
         Ok(state)
@@ -363,15 +369,17 @@ impl SessionManager {
                 if state.session_id.as_deref() != Some(session_id) {
                     return Err("Configuration verification was superseded".to_string());
                 }
-                match state.status.as_str() {
-                    "verified" => return Ok(state),
-                    "blocked" | "error" => {
+                match state.status {
+                    VerificationStatus::Verified => return Ok(state),
+                    VerificationStatus::Blocked | VerificationStatus::Error => {
                         return Err(state
                             .error
                             .unwrap_or_else(|| "Configuration verification failed".to_string()));
                     }
-                    "stopped" => return Err("Configuration verification was cancelled".to_string()),
-                    _ => {}
+                    VerificationStatus::Stopped => {
+                        return Err("Configuration verification was cancelled".to_string())
+                    }
+                    VerificationStatus::Verifying => {}
                 }
                 states
                     .changed()
@@ -467,12 +475,18 @@ impl SessionManager {
             catalog: previous.catalog.clone(),
             web_ui: previous.web_ui.clone(),
             config_files: previous.config_files.clone(),
+            agents_revision: previous.agents_revision,
             ..AppState::default()
         }
     }
 
     pub fn set_api_key_saved(&self, saved: bool) {
         self.update(|state| state.api_key_saved = saved);
+    }
+
+    /// An agent configuration was connected or disconnected.
+    pub fn agents_changed(&self) {
+        self.update(|state| state.agents_revision = state.agents_revision.wrapping_add(1));
     }
 
     pub fn client_key_changed(&self, available: bool) {
@@ -712,7 +726,7 @@ impl SessionManager {
         });
         let outcome = match result {
             Ok(catalog) => {
-                runtime.state.status = "verified".to_string();
+                runtime.state.status = VerificationStatus::Verified;
                 runtime.state.reconnecting = false;
                 runtime.state.progress = None;
                 runtime.state.error = None;
@@ -721,7 +735,7 @@ impl SessionManager {
             }
             Err(error) => {
                 let message = format!("Cannot read the verified model list: {error}");
-                if runtime.state.status == "verified" {
+                if runtime.state.status == VerificationStatus::Verified {
                     // A failed manual refresh keeps the session it had.
                     runtime.state.error = Some(message.clone());
                     Err(message)
@@ -792,7 +806,7 @@ impl SessionManager {
         if runtime.generation != generation
             || runtime.epoch != epoch
             || !runtime.identity_ready
-            || runtime.state.status != "verified"
+            || runtime.state.status != VerificationStatus::Verified
         {
             return Ok(());
         }
@@ -836,8 +850,9 @@ impl SessionManager {
     /// Every state change goes through here. A new status or error is also
     /// logged, so the service log keeps what clients were shown; the caller
     /// writes it once it holds no lock.
-    fn send(&self, state: AppState) -> StateLog {
-        let (status, error) = (state.status.clone(), state.error.clone());
+    fn send(&self, mut state: AppState) -> StateLog {
+        state.update_protection();
+        let (status, error) = (state.status, state.error.clone());
         let previous = self.state_tx.send_replace(state);
         StateLog {
             status: (status != previous.status).then_some(status),
@@ -857,8 +872,11 @@ impl SessionManager {
         runtime.verification_only = false;
         runtime.state.catalog = None;
         runtime.state.progress = None;
-        if !matches!(runtime.state.status.as_str(), "error" | "blocked") {
-            runtime.state.status = "error".to_string();
+        if !matches!(
+            runtime.state.status,
+            VerificationStatus::Error | VerificationStatus::Blocked
+        ) {
+            runtime.state.status = VerificationStatus::Error;
             runtime.state.error = Some(if let Some(error) = error {
                 format!("Verifier task stopped unexpectedly: {error}")
             } else {
@@ -886,7 +904,7 @@ impl SessionManager {
     fn fail_if(
         &self,
         generation: u64,
-        status: Option<&str>,
+        status: Option<VerificationStatus>,
         message: String,
     ) -> Result<(), String> {
         let mut runtime = self.lock()?;
@@ -900,8 +918,8 @@ impl SessionManager {
         runtime.epoch += 1;
         runtime.identity_ready = false;
         runtime.verification_only = false;
-        if runtime.state.status != "blocked" {
-            runtime.state.status = "error".to_string();
+        if runtime.state.status != VerificationStatus::Blocked {
+            runtime.state.status = VerificationStatus::Error;
         }
         runtime.state.reconnecting = crate::recovery::connection_intended(&runtime.state);
         runtime.state.progress = None;

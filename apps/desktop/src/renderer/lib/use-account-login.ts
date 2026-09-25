@@ -1,17 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { LoginPresentation, ConfidentialProfileInput, DesktopApi, AccountLoginDetails } from "../../shared/contracts";
+import { useQuery } from "@tanstack/react-query";
+import type { LoginPresentation, ConfidentialProfileInput, DesktopApi } from "../../shared/contracts";
 
 type LoginApi = Pick<DesktopApi, "beginAccountLogin" | "pollAccountLogin" | "cancelAccountLogin" | "completeAccountLogin">;
-type LoginState =
-  | { phase: "idle" }
-  | { phase: "authorizing"; session: LoginPresentation }
-  | { phase: "authorized"; session: LoginPresentation; details: AccountLoginDetails };
 
 /** Owns a draft authorization, independently of the form's save operation. */
 export function useAccountLogin(api: LoginApi, onError: (error: unknown) => void) {
-  const [state, setState] = useState<LoginState>({ phase: "idle" });
+  const [session, setSession] = useState<LoginPresentation>();
   const [working, setWorking] = useState(false);
-  const session = useRef<LoginPresentation | undefined>(undefined);
+  const current = useRef<LoginPresentation | undefined>(undefined);
   const mounted = useRef(false);
   const operation = useRef(false);
 
@@ -19,19 +16,19 @@ export function useAccountLogin(api: LoginApi, onError: (error: unknown) => void
     mounted.current = true;
     return () => {
       mounted.current = false;
-      const current = session.current;
-      session.current = undefined;
-      if (current) void api.cancelAccountLogin(current.id).catch(() => console.error("Could not discard account authorization"));
+      const pending = current.current;
+      current.current = undefined;
+      if (pending) void api.cancelAccountLogin(pending.id).catch(() => console.error("Could not discard account authorization"));
     };
   }, [api]);
 
   const consume = useCallback(() => {
-    session.current = undefined;
-    if (mounted.current) setState({ phase: "idle" });
+    current.current = undefined;
+    if (mounted.current) setSession(undefined);
   }, []);
 
   const discard = useCallback(async () => {
-    if (session.current) await api.cancelAccountLogin(session.current.id);
+    if (current.current) await api.cancelAccountLogin(current.current.id);
     consume();
   }, [api, consume]);
 
@@ -61,53 +58,39 @@ export function useAccountLogin(api: LoginApi, onError: (error: unknown) => void
       await api.cancelAccountLogin(created.id);
       return;
     }
-    session.current = created;
-    setState({ phase: "authorizing", session: created });
+    current.current = created;
+    setSession(created);
   }), [api, discard, perform]);
 
   const complete = useCallback((callbackUrl: string) => perform(async () => {
-    const current = session.current;
-    if (!current) throw new Error("Account connection is no longer active");
-    await api.completeAccountLogin(current.id, callbackUrl);
+    if (!current.current) throw new Error("Account connection is no longer active");
+    await api.completeAccountLogin(current.current.id, callbackUrl);
   }), [api, perform]);
 
-  const pending = state.phase === "authorizing" ? state.session : undefined;
+  // Polls until the browser sign-in completes; pauses while another
+  // operation on the authorization runs.
+  const poll = useQuery({
+    queryKey: ["account-login", session?.id],
+    queryFn: () => api.pollAccountLogin(session?.id ?? ""),
+    enabled: Boolean(session) && !working,
+    refetchInterval: (query) => query.state.data ? false : 1_000,
+    retry: false,
+    gcTime: 0,
+  });
+  const details = session ? poll.data ?? undefined : undefined;
+  const pollError = poll.error;
   useEffect(() => {
-    if (!pending) return;
-    let disposed = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const current = () => !disposed && session.current?.id === pending.id;
-    const poll = async () => {
-      if (!current()) return;
-      if (!operation.current) {
-        try {
-          const details = await api.pollAccountLogin(pending.id);
-          if (!current()) return;
-          if (details && !operation.current) {
-            setState({ phase: "authorized", session: pending, details });
-            return;
-          }
-        } catch (error) {
-          if (!current()) return;
-          if (!operation.current) {
-            onError(error);
-            // Keep the handle until cancellation succeeds, so cleanup is retryable.
-            await cancel();
-            return;
-          }
-        }
-      }
-      if (current()) timer = setTimeout(() => void poll(), 1000);
-    };
-    void poll();
-    return () => { disposed = true; clearTimeout(timer); };
-  }, [api, cancel, onError, pending]);
+    if (!pollError) return;
+    onError(pollError);
+    // Keep the handle until cancellation succeeds, so cleanup is retryable.
+    void cancel();
+  }, [pollError, onError, cancel]);
 
   return {
-    session: state.phase === "idle" ? undefined : state.session,
-    auth: state.phase === "authorized" ? state.details.auth : undefined,
-    details: state.phase === "authorized" ? state.details : undefined,
-    busy: working || state.phase === "authorizing",
+    session,
+    auth: details?.auth,
+    details,
+    busy: working || Boolean(session && !details),
     working,
     start,
     cancel,

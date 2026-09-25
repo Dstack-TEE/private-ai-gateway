@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Check, Copy } from "lucide-react";
-import type { ModelSummary, DesktopApi } from "../../shared/contracts";
+import type { ModelSummary } from "../../shared/contracts";
 import { localApiExample, type ExampleLanguage } from "../lib/local-api-example";
 import { AppDialog, DoneFooter } from "./app-dialog";
 import { IconButton } from "./controls";
@@ -8,8 +8,9 @@ import { Field, FieldError, FieldLabel } from "./ui/field";
 import { ChoiceSelect } from "./choice-select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 
-export function LocalApiExamplesDialog({ endpoint, models: catalogModels, api, onCopy, onClose }: {
-  api: Pick<DesktopApi, "getClientKey" | "onClientKeyChange">;
+export function LocalApiExamplesDialog({ endpoint, models: catalogModels, apiKey, onCopy, onClose }: {
+  /** The Local API key; empty while it is unavailable. */
+  apiKey: string;
   endpoint?: string; models: ModelSummary[];
   onCopy(value: string): Promise<void>; onClose(): void;
 }) {
@@ -19,21 +20,6 @@ export function LocalApiExamplesDialog({ endpoint, models: catalogModels, api, o
   const [copied, setCopied] = useState<string>();
   const [copying, setCopying] = useState(false);
   const [error, setError] = useState<string>();
-  const [apiKey, setApiKey] = useState<string>();
-  useEffect(() => {
-    let active = true;
-    let generation = 0;
-    const load = () => {
-      const current = ++generation;
-      setApiKey(undefined);
-      setError(undefined);
-      setCopied(undefined);
-      void api.getClientKey().then((key) => { if (active && current === generation) setApiKey(key); }).catch(() => { if (active && current === generation) setError("Local API key is unavailable."); });
-    };
-    const unsubscribe = api.onClientKeyChange(load);
-    load();
-    return () => { active = false; unsubscribe(); };
-  }, [api]);
   const model = models.some((entry) => entry.id === selection) ? selection : models[0]?.id ?? "";
   const code = useMemo(() => {
     if (!endpoint || !apiKey) return undefined;
@@ -67,7 +53,7 @@ export function LocalApiExamplesDialog({ endpoint, models: catalogModels, api, o
         <pre className="p-4 text-xs leading-relaxed"><code>{code ?? "Local API example unavailable."}</code></pre>
       </TabsContent>
     </Tabs>
-    <FieldError>{error}</FieldError>
+    <FieldError>{apiKey ? error : "The Local API key is unavailable."}</FieldError>
     <span className="sr-only" role="status">{copied === code && code ? "Example copied" : ""}</span>
     <DoneFooter />
   </AppDialog>;

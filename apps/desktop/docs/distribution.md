@@ -223,7 +223,7 @@ other 0.3 removal in [Removal in 0.3](configuration.md#removal-in-03).
 A feed advances only after its release is public and every manifest URL
 responds, so a feed never names an unpublished asset. Assets are replaced one
 file at a time; a client that reads during the replacement sees the previous
-release or a transient "not published" state and retries.
+release or a transient "temporarily unavailable" error and retries.
 
 ## Agent access and credentials
 

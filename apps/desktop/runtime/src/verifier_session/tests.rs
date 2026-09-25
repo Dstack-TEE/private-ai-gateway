@@ -221,7 +221,14 @@ async fn late_catalog_failure_cannot_override_a_newer_success_or_security_stop()
         let state = manager.snapshot().unwrap();
         assert!(state.error.is_none());
         assert_eq!(proxy.session().verified, !stop);
-        assert_eq!(state.status, if stop { "stopped" } else { "verified" });
+        assert_eq!(
+            state.status,
+            if stop {
+                VerificationStatus::Stopped
+            } else {
+                VerificationStatus::Verified
+            }
+        );
         if !stop {
             assert_eq!(state.catalog.unwrap().models[0].id, "current-model");
         }
@@ -331,7 +338,7 @@ async fn ready_event_loads_catalog_before_opening_the_session() {
         )
         .await
         .unwrap();
-    assert_eq!(state.status, "verified");
+    assert_eq!(state.status, VerificationStatus::Verified);
     assert_eq!(state.catalog.unwrap().models[0].id, "test-model");
     assert!(proxy.session().verified);
     manager.stop().unwrap();
@@ -367,7 +374,7 @@ fn unexpected_termination_revokes_forwarding_and_requests_reconnect() {
         )
         .unwrap();
     let state = manager.snapshot().unwrap();
-    assert_eq!(state.status, "error");
+    assert_eq!(state.status, VerificationStatus::Error);
     assert_eq!(
         state.error.as_deref(),
         Some("Verifier task stopped unexpectedly: panic")
@@ -398,7 +405,7 @@ fn explicit_stop_stops_the_task_and_ends_the_session() {
         })
         .unwrap();
     let state = manager.stop().unwrap();
-    assert_eq!(state.status, "stopped");
+    assert_eq!(state.status, VerificationStatus::Stopped);
     assert!(stopped.load(std::sync::atomic::Ordering::SeqCst));
     assert!(!manager.is_running().unwrap());
     assert!(proxy.session().session_id.is_none());
@@ -424,23 +431,36 @@ async fn silent_verifier_times_out_without_stopping_a_completed_verification() {
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(46)).await;
     tokio::task::yield_now().await;
-    assert_eq!(manager.snapshot().unwrap().status, "verifying");
+    assert_eq!(
+        manager.snapshot().unwrap().status,
+        VerificationStatus::Verifying
+    );
     tokio::time::advance(Duration::from_secs(75)).await;
     tokio::task::yield_now().await;
-    assert_eq!(manager.snapshot().unwrap().status, "error");
+    assert_eq!(
+        manager.snapshot().unwrap().status,
+        VerificationStatus::Error
+    );
     assert!(crate::recovery::should_retry(&manager.snapshot().unwrap()));
     assert!(!proxy.session().verified);
     manager.start(config).unwrap();
     let generation = proxy.session().generation;
     let mut complete = manager.snapshot().unwrap();
-    complete.status = "verified".into();
+    complete.status = VerificationStatus::Verified;
     manager.restore_snapshot(complete);
     manager
-        .fail_if(generation, Some("verifying"), "late timeout".into())
+        .fail_if(
+            generation,
+            Some(VerificationStatus::Verifying),
+            "late timeout".into(),
+        )
         .unwrap();
     tokio::time::advance(Duration::from_secs(121)).await;
     tokio::task::yield_now().await;
-    assert_eq!(manager.snapshot().unwrap().status, "verified");
+    assert_eq!(
+        manager.snapshot().unwrap().status,
+        VerificationStatus::Verified
+    );
     manager.stop().unwrap();
 }
 
@@ -473,7 +493,7 @@ fn keyset_change_requests_fresh_verification_without_ending_the_session() {
         )
         .unwrap();
     let state = manager.snapshot().unwrap();
-    assert_eq!(state.status, "error");
+    assert_eq!(state.status, VerificationStatus::Error);
     assert!(state.reconnecting && crate::recovery::should_retry(&state));
     assert!(!manager.is_running().unwrap());
     assert!(!proxy.session().verified);
@@ -524,7 +544,10 @@ fn security_blocks_survive_process_failure_without_cancelling_candidate_sessions
                 },
             )
             .unwrap();
-        assert_eq!(manager.snapshot().unwrap().status, "blocked");
+        assert_eq!(
+            manager.snapshot().unwrap().status,
+            VerificationStatus::Blocked
+        );
         assert_eq!(usage.active_session().unwrap().is_some(), verification_only);
         assert_eq!(manager.is_running().unwrap(), running);
         manager
@@ -540,7 +563,7 @@ fn security_blocks_survive_process_failure_without_cancelling_candidate_sessions
             .fail(generation, "event sink failed".into())
             .unwrap();
         let state = manager.snapshot().unwrap();
-        assert_eq!(state.status, "blocked");
+        assert_eq!(state.status, VerificationStatus::Blocked);
         assert_eq!(state.configuration_verification, verification_only);
         assert!(!crate::recovery::should_retry(&state));
         assert!(!proxy.session().verified);
@@ -564,7 +587,7 @@ fn reconnection_preserves_session_history_but_requires_fresh_verification() {
         require_production_os: true,
     };
     manager.restore_snapshot(AppState {
-        status: "verified".into(),
+        status: VerificationStatus::Verified,
         config: config.clone(),
         session_id: Some("same-session".into()),
         session_active: true,
@@ -586,7 +609,10 @@ fn reconnection_preserves_session_history_but_requires_fresh_verification() {
     assert!(!proxy.session().verified);
     assert!(proxy.session().generation > retired_generation);
     manager.terminated(retired_generation, None).unwrap();
-    assert_eq!(manager.snapshot().unwrap().status, "verifying");
+    assert_eq!(
+        manager.snapshot().unwrap().status,
+        VerificationStatus::Verifying
+    );
     manager
         .fail(proxy.session().generation, "Transport interrupted".into())
         .unwrap();
@@ -602,7 +628,7 @@ fn reconnection_preserves_session_history_but_requires_fresh_verification() {
     assert_eq!(recovered.session_id, resumed.session_id);
     assert_eq!(recovered.protected_since, Some(123));
     assert!(recovered.session_active && recovered.identity.is_none());
-    assert_eq!(recovered.status, "stopped");
+    assert_eq!(recovered.status, VerificationStatus::Stopped);
     let retried = manager.start(config.clone()).unwrap();
     assert_eq!(retried.session_id, resumed.session_id);
     assert_eq!(retried.session_usage.requests, 7);
@@ -741,7 +767,8 @@ fn identity_alone_does_not_verify() {
     let mut state = AppState::default();
     apply_identity_event(&mut state, &identity_event(identity));
     assert_eq!(
-        state.status, "stopped",
+        state.status,
+        VerificationStatus::Stopped,
         "status is decided once the catalog is in"
     );
     assert!(state.identity.is_some());

@@ -97,7 +97,6 @@ pub async fn prepare_update(
         current_version,
         channel,
         version: None,
-        channel_published: true,
         upgrade_commands: Vec::new(),
         download_url: None,
     };
@@ -119,15 +118,13 @@ pub async fn prepare_update(
         .await?;
         info.version = notice.version;
         info.upgrade_commands = notice.commands;
-        info.channel_published = notice.channel_published;
         return Ok(info);
     }
     let endpoint = updates::feed_url(&feed, channel)?;
     let update = match feed_update(&app, endpoint, channel).await {
-        Ok(Checked::Update(update)) => *update,
-        Ok(checked) => {
+        Ok(Some(update)) => update,
+        Ok(None) => {
             *prepared = None;
-            info.channel_published = !matches!(checked, Checked::Unpublished);
             return Ok(info);
         }
         Err(error) => {
@@ -160,55 +157,30 @@ pub async fn prepare_update(
     Ok(info)
 }
 
-enum Checked {
-    Update(Box<Update>),
-    Current,
-    Unpublished,
-}
-
+/// The newer release `feed` announces. A release outside the feed's channel
+/// is not an update for it.
 async fn feed_update(
     app: &AppHandle,
     endpoint: tauri::Url,
     feed: UpdateChannel,
-) -> Result<Checked, String> {
+) -> Result<Option<Update>, String> {
     let updater = app
         .updater_builder()
-        .endpoints(vec![endpoint.clone()])
+        .endpoints(vec![endpoint])
         .map_err(|_| "Invalid update endpoint")?
+        .version_comparator(move |current, release| {
+            release.version > current && updates::belongs_to_feed(&release.version, feed)
+        })
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|_| "Updates are not configured correctly for this build")?;
-    match updater.check().await {
-        Ok(Some(update)) => {
-            if !updates::belongs_to_feed(&update.version, feed) {
-                return Err("The update does not match the selected channel".into());
-            }
-            Ok(Checked::Update(Box::new(update)))
+    updater.check().await.map_err(|error| match error {
+        // The plugin reports every unsuccessful feed response this way.
+        tauri_plugin_updater::Error::ReleaseNotFound => {
+            "The update channel is temporarily unavailable".to_string()
         }
-        Ok(None) => Ok(Checked::Current),
-        // The plugin groups HTTP failures as ReleaseNotFound. Only a confirmed
-        // 404 means the channel has not published a feed yet.
-        Err(tauri_plugin_updater::Error::ReleaseNotFound) => {
-            if feed_missing(endpoint).await? {
-                Ok(Checked::Unpublished)
-            } else {
-                Err("The update channel is temporarily unavailable".into())
-            }
-        }
-        Err(_) => Err("Could not check for updates. Try again later.".into()),
-    }
-}
-
-async fn feed_missing(endpoint: tauri::Url) -> Result<bool, String> {
-    let response = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|_| "Could not check the update channel")?
-        .head(endpoint)
-        .send()
-        .await
-        .map_err(|_| "Could not reach the update channel")?;
-    Ok(response.status() == reqwest::StatusCode::NOT_FOUND)
+        _ => "Could not check for updates. Try again later.".to_string(),
+    })
 }
 
 #[tauri::command]

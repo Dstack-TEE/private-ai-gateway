@@ -2,6 +2,7 @@
 //! generated from them; run `npm run generate:contracts` after changing one.
 
 pub use crate::agents::{AgentPreview, AgentStatus, ConnectOptions};
+pub use crate::protection::{Protection, VerificationStatus};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -152,6 +153,8 @@ pub enum ServiceProvider {
 
 impl ServiceProvider {
     pub const ALL: [Self; 3] = [Self::Phala, Self::Redpill, Self::Custom];
+    /// The provider a new profile and a fresh installation start with.
+    pub const DEFAULT: Self = Self::Redpill;
 
     pub const fn label(self) -> &'static str {
         match self {
@@ -166,6 +169,57 @@ impl ServiceProvider {
             Self::Phala => Some("https://inference.phala.com"),
             Self::Redpill => Some("https://tee.redpill.ai"),
             Self::Custom => None,
+        }
+    }
+
+    pub const fn key_label(self) -> &'static str {
+        match self {
+            Self::Phala => "Phala API key",
+            Self::Redpill => "RedPill API key",
+            Self::Custom => "API key",
+        }
+    }
+
+    /// Whether a profile can sign in with an account instead of an API key.
+    pub const fn account_login(self) -> bool {
+        !matches!(self, Self::Custom)
+    }
+
+    /// Whether an account signs in to one of its workspaces.
+    pub const fn workspaces(self) -> bool {
+        matches!(self, Self::Redpill)
+    }
+
+    /// Whether a sign-in returns to a loopback callback URL the user can also
+    /// paste; Phala signs in with a device code instead.
+    pub const fn callback_url(self) -> bool {
+        matches!(self, Self::Redpill)
+    }
+}
+
+/// A provider as the profile editor presents it.
+#[derive(Clone, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceProviderInfo {
+    pub id: ServiceProvider,
+    pub label: &'static str,
+    pub preset_url: Option<&'static str>,
+    pub key_label: &'static str,
+    pub account_login: bool,
+    pub workspaces: bool,
+    pub callback_url: bool,
+}
+
+impl From<ServiceProvider> for ServiceProviderInfo {
+    fn from(provider: ServiceProvider) -> Self {
+        Self {
+            id: provider,
+            label: provider.label(),
+            preset_url: provider.preset_url(),
+            key_label: provider.key_label(),
+            account_login: provider.account_login(),
+            workspaces: provider.workspaces(),
+            callback_url: provider.callback_url(),
         }
     }
 }
@@ -309,10 +363,7 @@ pub struct AppState {
     pub backend_connected: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_monitor_available: Option<bool>,
-    /// `stopped`, `verifying` (identity and catalog not both in), `verified`,
-    /// `blocked`, or `error`.
-    #[ts(type = r#""stopped" | "verifying" | "verified" | "blocked" | "error""#)]
-    pub status: String,
+    pub status: VerificationStatus,
     /// True while Settings is verifying a candidate configuration without
     /// opening the forwarding session or turning protection on.
     pub configuration_verification: bool,
@@ -363,6 +414,12 @@ pub struct AppState {
     pub web_ui: WebUiStatus,
     #[serde(default)]
     pub config_files: ConfigFiles,
+    /// Changes whenever the backend connects or disconnects an agent.
+    #[serde(default)]
+    pub agents_revision: u64,
+    /// Derived from the other fields; whatever publishes a state recomputes
+    /// it first (`update_protection`).
+    pub protection: Protection,
 }
 
 /// The settings files the backend reads. Never carries their contents.
@@ -423,8 +480,24 @@ impl From<&crate::config::WebUiConfig> for WebUiStatus {
 }
 
 impl AppState {
+    pub fn update_protection(&mut self) {
+        self.protection = Protection::of(self);
+    }
+
+    /// The state a client shows once the backend stopped answering.
+    pub fn disconnect(&mut self, error: String) {
+        self.status = VerificationStatus::Error;
+        self.backend_connected = Some(false);
+        self.identity = None;
+        self.proxy_url = None;
+        self.error = Some(error);
+        self.endpoint_error =
+            Some("The background service stopped. Start it with pap service start.".into());
+        self.update_protection();
+    }
+
     pub fn is_protected(&self) -> bool {
-        self.status == "verified"
+        self.status == VerificationStatus::Verified
             && !self.configuration_verification
             && self.api_key_saved
             && self.endpoint_error.is_none()
@@ -434,14 +507,19 @@ impl AppState {
     pub fn should_stop_protection(&self) -> bool {
         !self.configuration_verification
             && (self.reconnecting
-                || matches!(self.status.as_str(), "verifying" | "verified" | "blocked"))
+                || matches!(
+                    self.status,
+                    VerificationStatus::Verifying
+                        | VerificationStatus::Verified
+                        | VerificationStatus::Blocked
+                ))
     }
 }
 
 impl Default for AppState {
     fn default() -> Self {
-        Self {
-            status: "stopped".to_string(),
+        let mut state = Self {
+            status: VerificationStatus::Stopped,
             backend_connected: None,
             backend_instance: None,
             client_key_revision: 0,
@@ -470,7 +548,11 @@ impl Default for AppState {
             catalog: None,
             web_ui: WebUiStatus::from(&crate::config::WebUiConfig::default()),
             config_files: ConfigFiles::default(),
-        }
+            agents_revision: 0,
+            protection: Protection::default(),
+        };
+        state.update_protection();
+        state
     }
 }
 
@@ -600,6 +682,7 @@ mod typescript {
             WEB_UI_PASSWORD_MIN_LENGTH,
         },
         maintenance::{ImportResult, ProfileBackup, ProfileConfiguration},
+        protection::{ProtectionAction, ProtectionPhase, Tone},
         ui_api::{self, LaunchPreferences, ListenAddress, Method},
         updates::{Installation, UpdateInfo, UpdateNotice},
         usage::{UsageModelPoint, UsagePage, UsagePoint, UsageQuery},
@@ -629,6 +712,11 @@ mod typescript {
         for declaration in declarations!(
             &config,
             AppState,
+            VerificationStatus,
+            Protection,
+            ProtectionPhase,
+            ProtectionAction,
+            Tone,
             VerificationCheck,
             ServiceIdentity,
             SourceProvenance,
@@ -637,6 +725,7 @@ mod typescript {
             CatalogSummary,
             ModelSummary,
             ServiceProvider,
+            ServiceProviderInfo,
             ProfileAuth,
             AccountImages,
             AccountScope,
@@ -724,6 +813,36 @@ mod typescript {
             "API_KEY_PAGES",
             "Partial<Record<ServiceProvider, string>>",
             api_key_pages.into(),
+        ));
+        let providers: serde_json::Map<_, _> = ServiceProvider::ALL
+            .into_iter()
+            .map(|provider| {
+                let info = ServiceProviderInfo::from(provider);
+                (name(&provider), serde_json::to_value(info).unwrap())
+            })
+            .collect();
+        output.push_str(&constant(
+            "SERVICE_PROVIDERS",
+            "Readonly<Record<ServiceProvider, ServiceProviderInfo>>",
+            providers.into(),
+        ));
+        output.push_str(&constant(
+            "DEFAULT_SERVICE_PROVIDER",
+            "ServiceProvider",
+            serde_json::to_value(ServiceProvider::DEFAULT).unwrap(),
+        ));
+        output.push_str(&constant("BYLINE", "string", crate::brand::BYLINE.into()));
+        output.push_str(&constant(
+            "INITIAL_STATE",
+            "AppState",
+            serde_json::to_value(AppState::default()).unwrap(),
+        ));
+        let mut unavailable = AppState::default();
+        unavailable.disconnect("The background service is unavailable.".into());
+        output.push_str(&constant(
+            "UNAVAILABLE_STATE",
+            "AppState",
+            serde_json::to_value(unavailable).unwrap(),
         ));
         output.push_str(&constant(
             "WEB_UI_PASSWORD_MIN_LENGTH",

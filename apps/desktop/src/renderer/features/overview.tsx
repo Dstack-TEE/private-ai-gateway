@@ -9,8 +9,9 @@ import { Badge } from "../components/ui/badge";
 import { Card, CardHeader, CardTitle, CardDescription, CardAction, CardContent } from "../components/ui/card";
 import { Separator } from "../components/ui/separator";
 import { IconButton } from "../components/controls";
-import type { AgentAccessStatus, AgentStatus, DesktopApi, AppState, RequestActivity, UsageSummary } from "../../shared/contracts";
-import { isProtected, presentation } from "../lib/protection";
+import type { UsageSummary } from "../../shared/contracts";
+import { desktopApi } from "../lib/environment";
+import { useShell } from "../lib/shell";
 import { LocalApiPanel } from "./local-api";
 import { EmptyState } from "../components/detail";
 import { AgentRow } from "./agents";
@@ -35,125 +36,54 @@ const TLS_TRACKS = [
   "17 03 03 00 3c   7a0d 2c95 f6e3 41b8 d9c0 3f5e 8a2b 6e17 c4d8 0b93 5a6f e1d2 7c04 93ab 5e8f 21c6 d0a3 7b19",
 ];
 
-export function Overview({
-  pendingAgentChanges,
-  state,
-  agents,
-  busy,
-  running,
-  endpointDown,
-  developmentMode,
-  backendDisconnected,
-  connectingBackend,
-  agentProblem,
-  accountApi,
-  agentAccessStatus,
-  authorizingAgents,
-  onAuthorizeAgents,
-  locked,
-  clientKey,
-  clientKeyVisible,
-  copied,
-  onToggle,
-  onStartBackend,
-  onSettings,
-  onPrivacy,
-  onLocalSettings,
-  onLocalExamples,
-  onCopy,
-  onToggleClientKey,
-  onSelect,
-  onInspect,
-}: {
-  pendingAgentChanges: Record<string, boolean>;
-  state: AppState;
-  agents: AgentStatus[];
-  busy: boolean;
-  running: boolean;
-  endpointDown: boolean;
-  developmentMode: boolean;
-  backendDisconnected: boolean;
-  connectingBackend: boolean;
-  agentProblem?: string;
-  accountApi: Pick<DesktopApi, "getAccountBalance" | "openTopUp">;
-  agentAccessStatus?: AgentAccessStatus;
-  authorizingAgents: boolean;
-  onAuthorizeAgents(): void;
-  locked: boolean;
-  clientKey: string;
-  clientKeyVisible: boolean;
-  copied?: string;
-  onToggle(): void;
-  onStartBackend(): void;
-  onSettings(): void;
-  onPrivacy(): void;
-  onLocalSettings(): void;
-  onLocalExamples(): void;
-  onCopy(label: string, value: string): Promise<void>;
-  onToggleClientKey(): void;
-  onSelect(agent: AgentStatus, connect: boolean): void;
-  onInspect(activity: RequestActivity): void;
-}): React.JSX.Element {
-  const protectedNow = isProtected(state);
-  const localAvailable = isProtected(state) && Boolean(state.proxyUrl) && !state.endpointError;
+export function OverviewPage(): React.JSX.Element {
+  const shell = useShell();
+  const { state, agents } = shell;
+  const protectedNow = state.protection.phase === "protected";
+  const localAvailable = protectedNow && Boolean(state.proxyUrl);
   const recent = protectedNow || state.sessionActive || state.reconnecting ? state.activity.slice(0, 10) : [];
-  const agentDetectionLabel = agentAccessStatus === "authorized"
+  const agentDetectionLabel = agents.accessStatus === "authorized"
     ? undefined
-    : authorizingAgents
+    : agents.authorizing
       ? "Waiting for access"
-      : agentAccessStatus
+      : agents.accessStatus
         ? "Access required"
         : "Checking access";
-  const previewAgents = agentAccessStatus === "authorized"
-    ? agents.filter((agent) => agent.installed).slice(0, 3)
-    : agents.slice(0, 3);
+  const previewAgents = agents.accessStatus === "authorized"
+    ? agents.agents.filter((agent) => agent.installed).slice(0, 3)
+    : agents.agents.slice(0, 3);
   return (
     <div className="overview-page max-w-240 min-h-full mx-auto flex flex-col @container/overview @max-[600px]/overview:[&_.overview-grid_>_.overview-module:nth-child(n)]:col-auto @max-[600px]/overview:[&_.overview-grid_>_.overview-module:nth-child(n)]:row-auto">
       <div className="overview-top grid *:min-h-36 grid-cols-2 gap-4 items-stretch [&_.status-surface.status-compact]:min-w-0 @max-[600px]/overview:grid-cols-1">
-      <StatusSurface
-        state={state}
-        busy={busy}
-        running={running}
-        endpointDown={endpointDown}
-        developmentMode={developmentMode}
-        backendDisconnected={backendDisconnected}
-        connectingBackend={connectingBackend}
-        accountApi={accountApi}
-        onToggle={onToggle}
-        onStartBackend={onStartBackend}
-        onSettings={onSettings}
-        onPrivacy={onPrivacy}
-      />
+      <StatusSurface />
       <SessionSummary summary={state.sessionUsage} active={protectedNow || Boolean(state.sessionActive || state.reconnecting)} />
       </div>
       <div className="overview-grid mt-4 grid grid-cols-2 grid-rows-[auto_auto] gap-4 @max-[600px]/overview:grid-cols-1 [&_>_.overview-module:first-child]:col-start-1 [&_>_.overview-module:first-child]:row-start-1 [&_>_.overview-module:nth-child(2)]:col-start-1 [&_>_.overview-module:nth-child(2)]:row-start-2 [&_>_.overview-module:nth-child(3)]:col-start-2 [&_>_.overview-module:nth-child(3)]:row-[1_/_span_2]">
-        <OverviewModule title="Local API" description="Use private AI in your tools." titleAdornment={<Hint content="Local API examples"><Badge variant="ghost" className="size-6 p-0 [&>svg]:size-4!" render={<button type="button" />} aria-label="Local API examples" aria-haspopup="dialog" onClick={onLocalExamples}><CircleHelp aria-hidden="true" /></Badge></Hint>} status={<StateLabel tone={localAvailable ? "success" : "neutral"} text={localAvailable ? "Available" : "Unavailable"} />} action={<IconButton label="Local API settings" aria-haspopup="dialog" onClick={onLocalSettings}><Settings size={16} /></IconButton>}>
+        <OverviewModule title="Local API" description="Use private AI in your tools." titleAdornment={<Hint content="Local API examples"><Badge variant="ghost" className="size-6 p-0 [&>svg]:size-4!" render={<button type="button" />} aria-label="Local API examples" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "local-api-example" })}><CircleHelp aria-hidden="true" /></Badge></Hint>} status={<StateLabel tone={localAvailable ? "success" : "neutral"} text={localAvailable ? "Available" : "Unavailable"} />} action={<IconButton label="Local API settings" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "local-api" })}><Settings size={16} /></IconButton>}>
           <LocalApiPanel
             proxyUrl={state.proxyUrl}
-            clientKey={clientKey}
-            clientKeyVisible={clientKeyVisible}
-            copied={copied}
-            onCopy={onCopy}
-            onToggleKey={onToggleClientKey}
+            clientKey={shell.clientKey}
+            clientKeyVisible={shell.clientKeyVisible}
+            copied={shell.copied}
+            onCopy={shell.copy}
+            onToggleKey={shell.toggleClientKey}
           />
         </OverviewModule>
-        <OverviewModule stretch={false} title="Agents" description="Use private AI in your agents." action={agentAccessStatus !== "authorized" || authorizingAgents
-          ? <Button type="button" variant="outline" size="sm" className="relative min-w-20" disabled={!agentAccessStatus || authorizingAgents} aria-busy={authorizingAgents} aria-label="Enable" onClick={onAuthorizeAgents}>
-              <span className={authorizingAgents ? "invisible" : undefined}>Enable</span>
-              {authorizingAgents && <LoaderCircle aria-hidden="true" className="absolute animate-spin" />}
+        <OverviewModule stretch={false} title="Agents" description="Use private AI in your agents." action={agents.accessStatus !== "authorized" || agents.authorizing
+          ? <Button type="button" variant="outline" size="sm" className="relative min-w-20" disabled={!agents.accessStatus || agents.authorizing} aria-busy={agents.authorizing} aria-label="Enable" onClick={() => void agents.requestAccess()}>
+              <span className={agents.authorizing ? "invisible" : undefined}>Enable</span>
+              {agents.authorizing && <LoaderCircle aria-hidden="true" className="absolute animate-spin" />}
             </Button>
           : <Link to="/agents" className={cn(buttonVariants({ variant: "outline", size: "sm" }), "min-w-20")}>View All</Link>}>
           <div className="preview-list [&_>_:last-child]:border-b-0 overview-agent-list [--agent-row-height:calc(2rem_+_1.25rem_+_2px)] grid grid-rows-[repeat(3,_minmax(var(--agent-row-height),_auto))] gap-3 [&_>_.empty-state]:row-span-full">
-            {agentAccessStatus === "authorized" && !agents.some((agent) => agent.installed) ? <EmptyState text={agentProblem ? "Agent detection unavailable" : "No installed agents found"} />
+            {agents.accessStatus === "authorized" && !agents.agents.some((agent) => agent.installed) ? <EmptyState text={agents.problem ? "Agent detection unavailable" : "No installed agents found"} />
               : previewAgents.map((agent) => (
               <AgentRow
-                pendingConnection={pendingAgentChanges[agent.id]}
                 key={agent.id}
                 agent={agent}
                 compact
                 detectionLabel={agentDetectionLabel}
-                disabled={locked || authorizingAgents || Boolean(agentDetectionLabel)}
-                onSelect={(connect) => onSelect(agent, connect)}
+                disabled={shell.applying || agents.controlsLocked || Boolean(agentDetectionLabel)}
               />
             ))}
           </div>
@@ -166,10 +96,10 @@ export function Overview({
         >
           <div className="preview-list flex-1 min-h-0 overflow-y-auto overscroll-contain [&_>_:last-child]:border-b-0" role="region" tabIndex={0} aria-label="Recent requests">
             {recent.length === 0 && (
-              <EmptyState text={running || state.sessionActive || state.reconnecting ? "No requests in this session yet." : "Start protection to begin a new session."} />
+              <EmptyState text={state.protection.action.stops || state.sessionActive ? "No requests in this session yet." : "Start protection to begin a new session."} />
             )}
             {recent.map((item) => (
-              <React.Fragment key={item.id}><UsageRow activity={item} onOpen={() => onInspect(item)} /><Separator className="last:hidden" /></React.Fragment>
+              <React.Fragment key={item.id}><UsageRow activity={item} onOpen={() => shell.openDialog({ kind: "usage-proof", activity: item })} /><Separator className="last:hidden" /></React.Fragment>
             ))}
           </div>
         </OverviewModule>
@@ -178,35 +108,12 @@ export function Overview({
   );
 }
 
-function StatusSurface({
-  state,
-  busy,
-  running,
-  endpointDown,
-  developmentMode,
-  backendDisconnected,
-  connectingBackend,
-  accountApi,
-  onToggle,
-  onStartBackend,
-  onSettings,
-  onPrivacy,
-}: {
-  state: AppState;
-  busy: boolean;
-  running: boolean;
-  endpointDown: boolean;
-  developmentMode: boolean;
-  backendDisconnected: boolean;
-  connectingBackend: boolean;
-  accountApi: Pick<DesktopApi, "getAccountBalance" | "openTopUp">;
-  onToggle(): void;
-  onStartBackend(): void;
-  onSettings(): void;
-  onPrivacy(): void;
-}): React.JSX.Element {
-  const verdict = presentation(state);
-  const protectedNow = isProtected(state);
+function StatusSurface(): React.JSX.Element {
+  const shell = useShell();
+  const { state } = shell;
+  const protection = state.protection;
+  const protectedNow = protection.phase === "protected";
+  const developmentMode = !state.config.requireProductionOs;
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   return (
     <Card size="sm" role="region" className={cn(
@@ -215,21 +122,21 @@ function StatusSurface({
     )} aria-label="Protection status">
       <TrackLayer active={protectedNow} />
       <CardContent className="status-compact-content relative z-2 grid grid-cols-[minmax(0,_1fr)_44px] grid-rows-[auto_1fr] gap-y-2 gap-x-3 flex-1 w-full">
-        <div className={cn("status-heading col-start-1 row-start-1 min-w-0 [&_.protection-status]:grid [&_.protection-status]:grid-cols-[24px_minmax(0,_1fr)] [&_.protection-status]:gap-y-1 [&_.protection-status]:gap-x-1.5 [&_.protection-status]:items-center [&_.protection-status]:text-2xl [&_.protection-status]:font-semibold [&_.protection-status_>_svg]:w-6 [&_.protection-status_>_svg]:h-6 [&_.protection-duration]:col-start-2 [&_.protection-duration]:text-xs [&_.protection-duration]:font-normal", toneTextClass[verdict.tone])}>
-          <ProtectionStatus state={state} label={verdict.title} />
+        <div className={cn("status-heading col-start-1 row-start-1 min-w-0 [&_.protection-status]:grid [&_.protection-status]:grid-cols-[24px_minmax(0,_1fr)] [&_.protection-status]:gap-y-1 [&_.protection-status]:gap-x-1.5 [&_.protection-status]:items-center [&_.protection-status]:text-2xl [&_.protection-status]:font-semibold [&_.protection-status_>_svg]:w-6 [&_.protection-status_>_svg]:h-6 [&_.protection-duration]:col-start-2 [&_.protection-duration]:text-xs [&_.protection-duration]:font-normal", toneTextClass[protection.tone])}>
+          <ProtectionStatus state={state} />
         </div>
         <div className="status-profile-actions col-span-full row-start-2 self-end flex items-center gap-2 min-w-0">
-        {backendDisconnected ? <Button variant="outline" size="sm" disabled={connectingBackend} onClick={onStartBackend}><RefreshCw className={connectingBackend ? "animate-control-spin" : undefined} aria-hidden="true" />{connectingBackend ? "Starting…" : "Start Backend"}</Button> : <>
-        <Button id="overview-profile" variant="outline" size="sm" className="status-profile w-[min(128px,_100%)] min-w-0 [&_>_span:not(.service-logo):not(.service-custom-icon)]:min-w-0 [&_>_span:not(.service-logo):not(.service-custom-icon)]:flex-1 [&_>_span:not(.service-logo):not(.service-custom-icon)]:overflow-hidden [&_>_span:not(.service-logo):not(.service-custom-icon)]:text-left [&_>_span:not(.service-logo):not(.service-custom-icon)]:text-ellipsis [&_>_span:not(.service-logo):not(.service-custom-icon)]:whitespace-nowrap [&_>_svg]:flex-none [&_.service-logo]:w-5 [&_.service-logo]:h-5 [&_.service-custom-icon]:w-5 [&_.service-custom-icon]:h-5" aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Set Up Profile"} aria-haspopup="dialog" onClick={onSettings}>
-          {activeProfile ? <ServiceLogo url={activeProfile.remoteUrl} /> : <Plus aria-hidden="true" />}
+        {state.backendConnected === false ? <Button variant="outline" size="sm" disabled={shell.startingBackend} onClick={shell.startBackend}><RefreshCw className={shell.startingBackend ? "animate-control-spin" : undefined} aria-hidden="true" />{shell.startingBackend ? "Starting…" : "Start Background Service"}</Button> : <>
+        <Button id="overview-profile" variant="outline" size="sm" className="status-profile w-[min(128px,_100%)] min-w-0 [&_>_span:not(.service-logo):not(.service-custom-icon)]:min-w-0 [&_>_span:not(.service-logo):not(.service-custom-icon)]:flex-1 [&_>_span:not(.service-logo):not(.service-custom-icon)]:overflow-hidden [&_>_span:not(.service-logo):not(.service-custom-icon)]:text-left [&_>_span:not(.service-logo):not(.service-custom-icon)]:text-ellipsis [&_>_span:not(.service-logo):not(.service-custom-icon)]:whitespace-nowrap [&_>_svg]:flex-none [&_.service-logo]:w-5 [&_.service-logo]:h-5 [&_.service-custom-icon]:w-5 [&_.service-custom-icon]:h-5" aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Set Up Profile"} aria-haspopup="dialog" onClick={shell.openProfiles}>
+          {activeProfile ? <ServiceLogo provider={activeProfile.provider} /> : <Plus aria-hidden="true" />}
           <span>{activeProfile?.name ?? "Set Up"}</span>
           {activeProfile && <ChevronDown aria-hidden="true" />}
         </Button>
-        {activeProfile?.auth.kind === "oauth" && <AccountBalanceValue api={accountApi} provider={activeProfile.provider} target={{ kind: "profile", profileId: activeProfile.id }} credentialRef={activeProfile.credentialRef} enabled={protectedNow} />}
-        <IconButton size="icon-sm" label="Privacy verification" aria-haspopup="dialog" onClick={onPrivacy}><Info aria-hidden="true" /></IconButton>
+        {activeProfile?.auth.kind === "oauth" && <AccountBalanceValue api={desktopApi} provider={activeProfile.provider} target={{ kind: "profile", profileId: activeProfile.id }} credentialRef={activeProfile.credentialRef} enabled={protectedNow} />}
+        <IconButton size="icon-sm" label="Privacy verification" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "privacy" })}><Info aria-hidden="true" /></IconButton>
         </>}
         </div>
-        <ProtectedControl state={state} busy={busy} running={running} endpointDown={endpointDown} developmentMode={developmentMode} onToggle={onToggle} iconOnly />
+        <ProtectedControl state={state} onToggle={shell.toggleProtection} iconOnly />
       </CardContent>
     </Card>
   );

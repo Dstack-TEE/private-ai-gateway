@@ -5,7 +5,7 @@ use desktop_core::agent_access::AgentAccessStatus;
 use desktop_core::{
     client::{CallError, Client},
     config::{Appearance, NotificationPreferences},
-    contracts::{AgentStatus, AppState},
+    contracts::AppState,
     protocol::rpc,
     ui_api::{self as shared, Backend, Event, Host, Method},
 };
@@ -73,10 +73,6 @@ impl Host for TauriHost {
                 "Cannot open the account connection page; use the manual connection link"
             );
         }
-    }
-
-    fn sync_agents(&self, agents: &[AgentStatus]) {
-        tray::sync_agents(self.app(), agents);
     }
 
     async fn notification_configuration(

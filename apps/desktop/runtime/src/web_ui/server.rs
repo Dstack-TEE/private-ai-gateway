@@ -1,6 +1,6 @@
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 use axum::{
@@ -246,17 +246,28 @@ fn json_content_type(headers: &HeaderMap) -> bool {
         })
 }
 
+fn content_security_policy() -> HeaderValue {
+    static POLICY: OnceLock<HeaderValue> = OnceLock::new();
+    POLICY
+        .get_or_init(|| {
+            let images = desktop_core::account::IMAGE_SOURCES.join(" ");
+            HeaderValue::try_from(format!("default-src 'self'; img-src 'self' {images}; style-src 'self' 'unsafe-inline'; connect-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"))
+                .expect("the CSP is a valid header value")
+        })
+        .clone()
+}
+
+/// API answers are never stored; [`asset`] sets its own caching.
 fn secure_response(mut response: Response) -> Response {
     let headers = response.headers_mut();
-    headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"),
-    );
+    headers.insert(header::CONTENT_SECURITY_POLICY, content_security_policy());
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
     );
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers
+        .entry(header::CACHE_CONTROL)
+        .or_insert(HeaderValue::from_static("no-store"));
     headers.insert(
         header::REFERRER_POLICY,
         HeaderValue::from_static("no-referrer"),
@@ -461,8 +472,19 @@ async fn asset(request: Request<Body>) -> Response {
     let Some(asset) = WebAssets::get(path) else {
         return status(ErrorCode::NotFound, "Web UI not found");
     };
+    // Vite fingerprints everything it emits under `assets/`, so those files
+    // never change; the page and other files are revalidated. See "Cache
+    // busting" in MDN's HTTP caching guide.
+    let cache = if path.starts_with("assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
     (
-        [(header::CONTENT_TYPE, asset.metadata.mimetype())],
+        [
+            (header::CONTENT_TYPE, asset.metadata.mimetype()),
+            (header::CACHE_CONTROL, cache),
+        ],
         asset.data,
     )
         .into_response()
@@ -990,6 +1012,18 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(body, document, "{uri}");
+        }
+        // Built assets: the page is revalidated, Vite's fingerprinted files never change.
+        if status == StatusCode::OK {
+            let cache = |response: Response| response.headers()[header::CACHE_CONTROL].clone();
+            assert_eq!(cache(get("/settings").await), "no-cache");
+            let fingerprinted = WebAssets::iter()
+                .find(|path| path.starts_with("assets/"))
+                .unwrap();
+            assert_eq!(
+                cache(get(&format!("/{fingerprinted}")).await),
+                "public, max-age=31536000, immutable"
+            );
         }
         for uri in ["/api", "/api/unknown"] {
             let token = fixture.auth.open_session().unwrap();

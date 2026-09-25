@@ -193,6 +193,12 @@ commands! {
         revision: String,
         options: ConnectOptions,
     } -> AgentStatus;
+    /// Stops protection and saves whether it requires a production OS image;
+    /// the next start uses the saved policy.
+    SetRequireProductionOs { required: bool } -> AppState;
+    /// Connects or disconnects an agent with the configuration a preview
+    /// would show, in one step.
+    SetAgentConnection { agent_id: String, connect: bool } -> AgentStatus;
     DisconnectAllAgents -> Vec<AgentStatus>;
     ResetSettings -> AppState;
     /// The settings in effect (`config.toml`); never includes a secret.
