@@ -32,47 +32,39 @@ impl From<Permission> for PermissionStatus {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub use macos::{query, request};
+
+#[cfg(target_os = "windows")]
 pub async fn query(app: &AppHandle) -> PermissionStatus {
-    #[cfg(target_os = "macos")]
-    {
-        return macos::query(app).await;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let id = app.config().identifier.clone();
-        return crate::run_blocking(move || {
-            use windows::{
-                core::HSTRING,
-                UI::Notifications::{NotificationSetting, ToastNotificationManager},
-            };
-            let setting = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(id))
-                .and_then(|notifier| notifier.Setting());
-            Ok(match setting {
-                Ok(NotificationSetting::Enabled) => Permission::Granted,
-                Ok(_) => Permission::Denied,
-                Err(_) => Permission::Unknown,
-            })
+    let id = app.config().identifier.clone();
+    crate::run_blocking(move || {
+        use windows::{
+            core::HSTRING,
+            UI::Notifications::{NotificationSetting, ToastNotificationManager},
+        };
+        let setting = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(id))
+            .and_then(|notifier| notifier.Setting());
+        Ok(match setting {
+            Ok(NotificationSetting::Enabled) => Permission::Granted,
+            Ok(_) => Permission::Denied,
+            Err(_) => Permission::Unknown,
         })
-        .await
-        .map(PermissionStatus::from)
-        .unwrap_or_else(|_| Permission::Unknown.into());
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let _ = app;
-        Permission::Unsupported.into()
-    }
+    })
+    .await
+    .map(PermissionStatus::from)
+    .unwrap_or_else(|_| Permission::Unknown.into())
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub async fn query(_app: &AppHandle) -> PermissionStatus {
+    Permission::Unsupported.into()
+}
+
+/// Without a system prompt, asking for permission opens the system settings.
+#[cfg(not(target_os = "macos"))]
 pub async fn request(app: &AppHandle) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        return macos::request(app).await;
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        super::open_notification_settings(app.clone()).map_err(String::from)
-    }
+    super::open_notification_settings(app.clone()).map_err(String::from)
 }
 
 #[cfg(target_os = "macos")]
