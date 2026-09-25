@@ -99,6 +99,30 @@ pauses the user-owned backend before invoking the native installer and preserves
 active session so protection can resume after fresh verification when the app
 restarts.
 
+The CLI-only packages also install an optional systemd user unit,
+`/usr/lib/systemd/user/private-ai-proxy.service`, as Syncthing's packages do.
+Nothing enables it. Without it, the first command starts the backend. To start
+the backend at login instead, stop any backend a command started, then enable
+the unit:
+
+```sh
+pap --yes service stop
+systemctl --user enable --now private-ai-proxy
+```
+
+`Restart=on-failure` restarts a crashed backend but not one stopped with `pap
+service stop`. After a package upgrade, the next command stops the old backend
+(a clean exit, so systemd does not restart it) and starts the new one itself,
+outside systemd. Hand the backend back to the unit with:
+
+```sh
+pap --yes service stop && systemctl --user restart private-ai-proxy
+```
+
+A plain `systemctl --user restart` would find that backend holding the instance
+lock and fail until the unit's start limit stops retrying. The desktop package
+ships no unit, because the app manages its own backend.
+
 The web UI renderer comes from `npm run build:web` in `apps/desktop`, which
 writes `runtime/web-dist` for the CLI package's default `web-ui` feature. Plain
 Cargo builds work without it and print a warning; enabling the web UI in such a
@@ -132,7 +156,10 @@ release; `package_only` skips the full verification.
 - Tags are `desktop-v<semver>` and titles are `Private AI Proxy v<semver>`.
 - Beta versions use `x.y.z-beta.n`; stable versions use `x.y.z`.
 - Release notes are the release's `CHANGELOG.md` section. GitHub lists the
-  assets, including `SHA256SUMS`.
+  assets, including `SHA256SUMS`. In a directory of downloaded assets,
+  `sha256sum --ignore-missing -c SHA256SUMS` checks them, and
+  `gh attestation verify <file> --repo Dstack-TEE/private-ai-gateway` checks
+  their build provenance.
 - Public assets use `private-ai-proxy-<version>-<platform>-<arch>.<format>` or
   `private-ai-proxy-cli-<version>-<platform>-<arch>.<format>`.
 - Stable desktop releases become the repository's Latest release. Beta releases

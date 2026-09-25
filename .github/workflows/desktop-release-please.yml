@@ -2,7 +2,7 @@ name: Desktop release PR
 
 # release-please keeps a release PR open with the next version and changelog.
 # Merging it tags the commit and creates a draft release; the tag builds and
-# publishes the release (desktop-native.yml).
+# publishes the release (desktop-release.yml).
 on:
   push:
     branches:

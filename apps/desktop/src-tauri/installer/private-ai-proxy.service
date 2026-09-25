@@ -1,0 +1,17 @@
+# Optional user service for CLI-only Linux packages, like Syncthing's
+# syncthing.service. Nothing enables it; run
+#   systemctl --user enable --now private-ai-proxy
+# to start the backend at login instead of on the first command.
+[Unit]
+Description=Private AI Proxy backend
+Documentation=https://github.com/Dstack-TEE/private-ai-gateway/blob/main/apps/desktop/docs/cli-distribution.md
+StartLimitIntervalSec=60
+StartLimitBurst=4
+
+[Service]
+ExecStart=/usr/libexec/private-ai-proxy/private-ai-proxy-service
+Restart=on-failure
+RestartSec=1
+
+[Install]
+WantedBy=default.target

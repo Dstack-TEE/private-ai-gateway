@@ -62,14 +62,17 @@ The App Store build's CFBundleVersion is `100 + <Desktop release run number>`.
 A Mac app's build number must increase with every upload, across versions, and
 is at most three integers and 18 characters
 ([TN2420](https://developer.apple.com/library/archive/technotes/tn2420/_index.html)).
-The run number counts release tags only, and a re-run keeps it. The offset
+The run number increases only on release tags (the first tag gets 104, after
+three earlier manual runs of the workflow file), and a re-run keeps it. The offset
 starts above the hand-numbered builds 1–17, as Xcode Cloud's
 [next build number](https://developer.apple.com/documentation/xcode/setting-the-next-build-number-for-xcode-cloud-builds)
 does for existing Mac apps.
 
 Once every package and the App Store upload have succeeded, the run:
 
-1. attaches the signed assets, `latest.json` and `SHA256SUMS` to the draft;
+1. attaches the signed assets, `latest.json` and `SHA256SUMS` to the draft.
+   Every file in `SHA256SUMS` gets a signed SLSA build provenance attestation
+   (`gh attestation verify <file> --repo Dstack-TEE/private-ai-gateway`);
 2. publishes it (stable releases become Latest);
 3. advances the updater feeds;
 4. dispatches the dedicated npm publisher at the release tag and waits for it.
