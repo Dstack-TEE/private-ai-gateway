@@ -958,39 +958,19 @@ jobs:
       actions: write
       contents: read
     steps:
+      # The workflow dispatch API returns the run it created
+      # (return_run_details), so the job watches exactly that run.
       - name: Dispatch trusted npm publisher
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          workflow=private-ai-proxy-npm.yml
-          request_id="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"
-          gh workflow run "$workflow" \
-            --repo "$GITHUB_REPOSITORY" \
-            --ref "$RELEASE_TAG" \
-            -f release_tag="$RELEASE_TAG" \
-            -f publish=true \
-            -f request_id="$request_id"
-
-          run_id=
-          for _ in {1..30}; do
-            runs="$(gh run list \
-              --repo "$GITHUB_REPOSITORY" \
-              --workflow "$workflow" \
-              --event workflow_dispatch \
-              --limit 20 \
-              --json databaseId,displayTitle,headSha)"
-            run_id="$(jq -r \
-              --arg title "[$request_id]" \
-              --arg sha "$GITHUB_SHA" \
-              '[.[] | select(.headSha == $sha and (.displayTitle | endswith($title)))][0].databaseId // empty' \
-              <<<"$runs")"
-            [[ -n "$run_id" ]] && break
-            sleep 2
-          done
-          if [[ -z "$run_id" ]]; then
-            echo "Timed out locating the dispatched npm workflow" >&2
-            exit 1
-          fi
+          run_id="$(gh api --method POST \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/private-ai-proxy-npm.yml/dispatches" \
+            -f ref="$RELEASE_TAG" \
+            -f 'inputs[release_tag]'="$RELEASE_TAG" \
+            -f 'inputs[publish]'=true \
+            -F return_run_details=true \
+            --jq .workflow_run_id)"
           gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status
