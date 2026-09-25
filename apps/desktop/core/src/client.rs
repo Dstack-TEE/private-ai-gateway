@@ -39,6 +39,8 @@ mod legacy;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// The service sends an SSE comment every 15 s; silence past this means it hung.
 const EVENTS_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+/// How long a client waits to retry an event stream the backend has no room for.
+const EVENTS_BUSY_RETRY: Duration = Duration::from_secs(1);
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 /// Bounds a live but slow backend start, such as the first launch after an
 /// update while the OS scans the new binaries on a busy machine.
@@ -326,16 +328,26 @@ impl Client {
             payload: Value,
         }
         block_on(async {
-            let mut connection = open_current().await?;
+            // The connection stays open while its event stream is read.
+            let (connection, response) = loop {
+                let mut connection = open_current().await?;
+                let response = send(
+                    &mut connection.sender,
+                    Method::GET,
+                    protocol::EVENTS_PATH,
+                    None,
+                )
+                .await
+                .map_err(connection_error)?;
+                // Busy: every event stream of the backend is taken; one frees
+                // when another client closes its stream.
+                if response.status() == StatusCode::SERVICE_UNAVAILABLE {
+                    tokio::time::sleep(EVENTS_BUSY_RETRY).await;
+                    continue;
+                }
+                break (connection, response);
+            };
             let instance = connection.version.instance_id.clone();
-            let response = send(
-                &mut connection.sender,
-                Method::GET,
-                protocol::EVENTS_PATH,
-                None,
-            )
-            .await
-            .map_err(connection_error)?;
             if response.status() != StatusCode::OK {
                 return Err(connection_error(io::ErrorKind::InvalidData.into()));
             }

@@ -204,30 +204,20 @@ fn spawn_detached(command: &mut Command) -> io::Result<Child> {
     command.spawn()
 }
 
-/// Starts the service without a console and outside the caller's job, so it
-/// outlives the terminal or app that started it.
+/// Starts the service without a console and in its own process group, so it
+/// outlives the terminal that started it, as libuv (Node's `detached`) starts
+/// processes. Like libuv it does not ask to break away from the caller's job
+/// (`CREATE_BREAKAWAY_FROM_JOB`): process creation fails in a job that does
+/// not allow breakaway, and a job that ends its processes when it closes ends
+/// the service with them.
 #[cfg(windows)]
 fn spawn_detached(command: &mut Command) -> io::Result<Child> {
     use std::os::windows::process::CommandExt;
-    use windows_sys::Win32::{
-        Foundation::ERROR_ACCESS_DENIED,
-        System::Threading::{
-            CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS,
-        },
-    };
+    use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
 
-    let detached = CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS;
-    match command
-        .creation_flags(detached | CREATE_BREAKAWAY_FROM_JOB)
+    command
+        .creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
         .spawn()
-    {
-        // A job without `JOB_OBJECT_LIMIT_BREAKAWAY_OK` refuses the breakaway
-        // with ERROR_ACCESS_DENIED; the service then starts inside it.
-        Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
-            command.creation_flags(detached).spawn()
-        }
-        result => result,
-    }
 }
 
 #[cfg(any(

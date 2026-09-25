@@ -429,19 +429,26 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
     }
 
     // Both serve until the process is interrupted.
+    let (control, proxy) = (
+        build_control_router(state.clone()),
+        build_proxy_router(state),
+    );
     tokio::join!(
-        desktop_core::serve::serve(
-            control_listener,
-            build_control_router(state.clone()),
-            MAX_CONNECTIONS,
-            std::future::pending(),
-        ),
-        desktop_core::serve::serve(
-            listener,
-            build_proxy_router(state),
-            MAX_CONNECTIONS,
-            std::future::pending(),
-        ),
+        async {
+            desktop_core::serve::serve(
+                control_listener,
+                control,
+                MAX_CONNECTIONS,
+                std::future::pending(),
+            )
+            .await
+            .await
+        },
+        async {
+            desktop_core::serve::serve(listener, proxy, MAX_CONNECTIONS, std::future::pending())
+                .await
+                .await
+        },
     );
     Ok(0)
 }

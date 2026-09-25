@@ -22,6 +22,11 @@ impl DesktopRuntime {
     /// app, the way the matching management commands would. An invalid file
     /// changes nothing; its error is published with the file status.
     pub(crate) async fn apply_settings_files(self: &Arc<Self>) {
+        // The watcher also sees this store's own writes; those leave nothing
+        // to apply and must not make concurrent changes busy.
+        if self.settings.up_to_date() {
+            return;
+        }
         // Under the lifecycle lock, so switching the settings in effect and
         // applying them is one step for every other operation.
         let _operation = self.lifecycle.lock().await;

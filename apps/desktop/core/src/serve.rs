@@ -21,14 +21,18 @@ const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// Serves `router` on `listener` until `signal` completes, holding at most
 /// `max_connections` connections open; the next connection is accepted once
 /// one closes. Every request carries [`ConnectInfo`] with the peer address.
-/// Once `signal` completes the listener closes, idle connections close, and
-/// this returns when the open requests have been answered.
+///
+/// Once `signal` completes this closes the listener, so its address can be
+/// bound again, and returns the drain: idle connections close at once, and
+/// the drain completes when the open requests have been answered. A request
+/// that stopped its own listener must not wait for the drain.
 pub async fn serve<L>(
     mut listener: L,
     router: Router,
     max_connections: usize,
     signal: impl Future<Output = ()>,
-) where
+) -> impl Future<Output = ()> + Send + 'static
+where
     L: Listener,
     L::Addr: Clone + Sync,
 {
@@ -64,7 +68,7 @@ pub async fn serve<L>(
         });
     }
     drop(listener);
-    graceful.shutdown().await;
+    graceful.shutdown()
 }
 
 #[cfg(test)]

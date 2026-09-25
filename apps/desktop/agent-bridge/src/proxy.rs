@@ -447,6 +447,7 @@ pub async fn serve(state: Arc<ProxyState>, listener: std::net::TcpListener) -> R
         MAX_CONNECTIONS,
         std::future::pending(),
     )
+    .await
     .await;
     Ok(())
 }

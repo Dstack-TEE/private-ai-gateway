@@ -61,11 +61,23 @@ reports that the backend keeps running, and the service log has the reason. Mac
 App Store builds stop anyway. A signal (SIGTERM or SIGINT, as systemd, launchd
 and `kill` send) always stops the backend, since a service manager would kill it
 next; a restore that failed is logged and retried when the backend next starts.
-On Windows, signing out or shutting down ends the windowless backend without
+A signal during a `service stop` waits for it, and stops the backend itself only
+if that stop was refused. On Windows, signing out or shutting down ends the windowless backend without
 this sequence; the next start restores what it left. Shutdown is bounded:
 running commands get 10 seconds, then open connections and leftover background
 tasks 5 seconds each, and the process exits at the latest 30 seconds after the
 shutdown began.
+
+Clients reach the backend through a socket in a per-user directory that does not
+depend on how the session was started: `XDG_RUNTIME_DIR`, else `/run/user/$UID`,
+on Linux, and the user's `/var/folders/…/T/` on macOS. A 0.2 beta backend
+started with a custom `TMPDIR`, or on Linux without `XDG_RUNTIME_DIR`, listens
+elsewhere: newer clients do not find it, and a new backend cannot start while it
+runs. Stop it with the old build's `pap service stop`, or sign out or restart.
+
+On Windows the backend starts detached from the console, like Node's `detached`
+processes, but inside the caller's job object: a job that ends its processes
+when it closes, as some remote shells and CI runners use, ends the backend too.
 
 ## Settings
 

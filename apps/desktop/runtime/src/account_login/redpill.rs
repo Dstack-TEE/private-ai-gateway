@@ -281,12 +281,11 @@ pub(super) async fn receive_code(
     let app = Router::new()
         .route("/oauth/callback", get(callback))
         .with_state(state);
-    let server = AbortOnDropHandle::new(tokio::spawn(desktop_core::serve::serve(
-        listener,
-        app,
-        CALLBACK_CONNECTIONS,
-        stop.cancelled_owned(),
-    )));
+    let server = AbortOnDropHandle::new(tokio::spawn(async move {
+        desktop_core::serve::serve(listener, app, CALLBACK_CONNECTIONS, stop.cancelled_owned())
+            .await
+            .await
+    }));
     let code = receiver.await.map_err(|_| "Login callback stopped")?;
     shutdown.cancel();
     let _ = timeout(Duration::from_secs(2), server).await;

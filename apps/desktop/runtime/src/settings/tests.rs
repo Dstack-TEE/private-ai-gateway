@@ -169,8 +169,10 @@ fn a_concurrent_edit_is_never_overwritten() {
 fn a_linked_config_file_is_saved_to_its_target() {
     let dir = tempfile::tempdir().unwrap();
     let settings = open(dir.path());
+    use std::os::unix::fs::PermissionsExt;
     let target = dir.path().join("dotfiles-config.toml");
     fs::write(&target, "appearance = \"dark\"\n").unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
     let link = dir.path().join("config").join(CONFIG_FILE);
     fs::remove_file(&link).unwrap();
     std::os::unix::fs::symlink(&target, &link).unwrap();
@@ -187,6 +189,26 @@ fn a_linked_config_file_is_saved_to_its_target() {
         fs::read_to_string(&target).unwrap(),
         "appearance = \"dark\"\nconnect-on-launch = true\n"
     );
+    assert_eq!(
+        fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+
+    // A read-only target is reported, not replaced.
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o444)).unwrap();
+    let error = settings
+        .update_config(|config| {
+            config.connect_on_launch = false;
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("links to a read-only file"),
+        "{error}"
+    );
+    assert!(fs::read_to_string(&target)
+        .unwrap()
+        .contains("connect-on-launch = true"));
 }
 
 #[test]

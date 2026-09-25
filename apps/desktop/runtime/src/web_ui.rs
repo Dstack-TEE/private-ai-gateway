@@ -12,10 +12,7 @@ mod server;
 #[cfg(feature = "web-ui")]
 mod throttle;
 
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::sync::{Arc, Mutex};
 
 use tokio::{runtime::Handle, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -27,10 +24,6 @@ pub(crate) use server::{change_password, routes, Gate};
 pub use throttle::Throttle;
 
 use desktop_core::listen::ResolvedListen;
-
-/// How long stopping the listener waits for its open requests to be answered.
-/// The listener itself closes at once.
-const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct WebUi {
     auth: Arc<Auth>,
@@ -63,12 +56,9 @@ impl WebUi {
         self.auth.revoke_all();
         if let Some((shutdown, server)) = previous {
             shutdown.cancel();
-            if tokio::time::timeout(STOP_TIMEOUT, server).await.is_err() {
-                tracing::warn!(
-                    "Web UI requests still open after {} s; continuing without them",
-                    STOP_TIMEOUT.as_secs()
-                );
-            }
+            // Only until the listener is closed: the request that stopped
+            // it is still open.
+            let _ = server.await;
         }
     }
 

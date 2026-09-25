@@ -14,7 +14,7 @@ use std::{
 
 use axum::{
     body::{Body, Bytes},
-    extract::{Path, Request, State},
+    extract::{rejection::BytesRejection, Path, Request, State},
     http::{HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{sse::Event as SseEvent, IntoResponse, Response, Sse},
@@ -43,7 +43,8 @@ pub(crate) const SESSION_CHECK: Duration = Duration::from_secs(15);
 
 /// Event streams one listener serves at once; more are refused as busy.
 const MAX_EVENT_STREAMS: usize = 32;
-/// A client must finish sending a request body within this time.
+/// A request body that sends nothing for this long fails: tower-http's
+/// `TimeoutBody` restarts the timeout at every frame.
 const BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// This process as `GET /api/version` reports it.
@@ -196,9 +197,10 @@ async fn rpc<B: Backend>(
     Extension(caller): Extension<Caller>,
     Path(name): Path<String>,
     #[cfg_attr(not(feature = "web-ui"), allow(unused_variables))] headers: axum::http::HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let Some(params) = parameters(&body) else {
+    // A body that is too large or stalls answers in the API's error shape.
+    let Some(params) = body.ok().as_deref().and_then(parameters) else {
         return error(protocol::Error::invalid_request());
     };
     let method = Method::from_name(&name);

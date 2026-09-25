@@ -11,10 +11,7 @@ use std::{
 };
 
 use governor::{
-    clock::{Clock, DefaultClock},
-    middleware::NoOpMiddleware,
-    state::keyed::DashMapStateStore,
-    Quota, RateLimiter,
+    clock::Clock, middleware::NoOpMiddleware, state::keyed::DashMapStateStore, Quota, RateLimiter,
 };
 
 /// Unauthenticated requests allowed in a burst, then one per `THROTTLE_REFILL`.
@@ -23,13 +20,20 @@ pub const THROTTLE_REFILL: Duration = Duration::from_secs(3);
 /// Client budgets kept before idle ones (back at a full burst) are dropped.
 const TRACKED_CLIENTS: usize = 1024;
 
-pub struct Throttle<C: Clock = DefaultClock>(
+/// Budgets refill by the system clock; in unit tests time stands still unless
+/// a test advances it, so slow test machines cannot refill a budget early.
+#[cfg(not(test))]
+type ThrottleClock = governor::clock::DefaultClock;
+#[cfg(test)]
+type ThrottleClock = governor::clock::FakeRelativeClock;
+
+pub struct Throttle<C: Clock = ThrottleClock>(
     RateLimiter<IpAddr, DashMapStateStore<IpAddr>, C, NoOpMiddleware<C::Instant>>,
 );
 
 impl Default for Throttle {
     fn default() -> Self {
-        Self::with_clock(DefaultClock::default())
+        Self::with_clock(ThrottleClock::default())
     }
 }
 

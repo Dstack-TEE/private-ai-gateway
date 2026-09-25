@@ -125,8 +125,9 @@ instant, the app's change fails with a retryable error instead of discarding
 your edit, and your edit is applied by the watcher.
 
 The app writes files atomically. A `config.toml` that links elsewhere (as GNU
-Stow or chezmoi link dotfiles) is saved to the link's target, so the link
-stays. The watcher watches the settings directory only, so an edit made to the
+Stow or chezmoi link dotfiles) is saved to the link's target with the target's
+permissions, so the link stays; a read-only target is reported instead. The
+watcher watches the settings directory only, so an edit made to the
 target itself applies when the service next starts. The app refuses to replace
 a symlinked `credentials.toml`; sync the directory rather than linking it.
 

@@ -5,7 +5,7 @@ use std::{
 
 use axum::{
     body::{Body, Bytes},
-    extract::{ConnectInfo, Request},
+    extract::{rejection::BytesRejection, ConnectInfo, Request},
     http::{header, HeaderMap, HeaderValue, Method as HttpMethod, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -89,12 +89,18 @@ pub(super) fn start(
     let _entered = handle.enter();
     let listener = tokio::net::TcpListener::from_std(listener)
         .map_err(|_| format!("Cannot listen on {address}"))?;
-    Ok(handle.spawn(desktop_core::serve::serve(
-        listener,
-        router,
-        MAX_CONNECTIONS,
-        shutdown.cancelled_owned(),
-    )))
+    // Finishes once the listener is closed; its open requests, such as the
+    // one that stopped it, are answered in the background.
+    Ok(handle.spawn(async move {
+        let drain = desktop_core::serve::serve(
+            listener,
+            router,
+            MAX_CONNECTIONS,
+            shutdown.cancelled_owned(),
+        )
+        .await;
+        tokio::spawn(drain);
+    }))
 }
 
 /// `Host` values the listener answers to: the bound address, the client host,
@@ -349,8 +355,15 @@ struct SessionRequest {
 }
 
 /// Signs in with the password and sets the session cookie.
-async fn session(Extension(gate): Extension<Arc<Gate>>, jar: CookieJar, body: Bytes) -> Response {
-    let Ok(request) = serde_json::from_slice::<SessionRequest>(&body) else {
+async fn session(
+    Extension(gate): Extension<Arc<Gate>>,
+    jar: CookieJar,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let Some(request) = body
+        .ok()
+        .and_then(|body| serde_json::from_slice::<SessionRequest>(&body).ok())
+    else {
         return api::error(protocol::Error::invalid_request());
     };
     let auth = gate.auth.clone();
