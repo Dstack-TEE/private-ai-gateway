@@ -12,15 +12,25 @@ async function readWorkflow(name) {
 }
 
 test("only release tags publish, after every package, in order", async () => {
-  const [release, direct] = await Promise.all([readWorkflow("desktop-release.yml"), readWorkflow("desktop-native.yml")]);
+  const [release, direct, npm] = await Promise.all([
+    readWorkflow("desktop-release.yml"),
+    readWorkflow("desktop-native.yml"),
+    readWorkflow("private-ai-proxy-npm.yml"),
+  ]);
   // Only release tags start Desktop release, so its run number counts releases.
   assert.deepEqual(release.on, { push: { tags: ["desktop-v*"] } });
   assert.equal(release.jobs.release.uses, "./.github/workflows/desktop-native.yml");
   assert.equal(direct.on.push.tags, undefined);
+  assert.equal(direct.jobs["mac-app-store"].with.build_number, "${{ needs.version.outputs.app_store_build_number }}");
+  // npm trusted publishing checks the top-level workflow, so the npm
+  // publisher is dispatched, never called.
+  assert.equal(npm.on.workflow_call, undefined);
 
   const needs = (job) => [direct.jobs[job].needs ?? []].flat();
   const after = (job, dependency) => needs(job).some((need) => need === dependency || after(need, dependency));
   assert.ok(after("release", "package") && after("release", "mac-app-store"));
+  // The App Store upload cannot be undone.
+  assert.ok(after("mac-app-store", "verify"));
   assert.ok(after("update-feed", "release"));
   assert.ok(after("publish-npm", "update-feed"));
   // Pull requests and test builds have no release channel, so every job

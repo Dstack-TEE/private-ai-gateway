@@ -228,9 +228,10 @@ jobs:
           fi
 
   # Stable releases also upload the App Store build, in parallel with the
-  # Direct packages; the release job publishes only after both succeed.
+  # Direct packages; the release job publishes only after both succeed. The
+  # upload cannot be undone, so it waits for the full verification.
   mac-app-store:
-    needs: version
+    needs: [version, verify]
     if: needs.version.outputs.channel == 'stable'
     permissions:
       contents: read
@@ -348,7 +349,7 @@ jobs:
           scratch="$(mktemp -d "$RUNNER_TEMP/updater-key.XXXXXX")"
           trap 'rm -rf "$scratch"' EXIT
           printf 'updater key check\n' > "$scratch/probe"
-          npm exec -- tauri signer sign "$scratch/probe" > /dev/null
+          npm exec -- tauri signer sign -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$scratch/probe" > /dev/null
       - name: Prepare Apple notarization key
         if: runner.os == 'macOS' && env.RELEASE_CHANNEL != ''
         shell: bash
@@ -978,4 +979,8 @@ jobs:
             -f 'inputs[publish]'=true \
             -F return_run_details=true \
             --jq .workflow_run_id)"
-          gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status
+          if [[ -z "$run_id" ]]; then
+            echo "The dispatch API returned no workflow_run_id for private-ai-proxy-npm.yml" >&2
+            exit 1
+          fi
+          gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status --interval 30
