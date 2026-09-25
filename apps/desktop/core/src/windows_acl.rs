@@ -1,6 +1,8 @@
 //! Reading and setting a file's owner and DACL, for the checks and the
 //! owner-only files that need them (private files in [`crate::private_fs`],
-//! the OpenClaw helper inspection in agent-bridge). Policy stays with callers.
+//! the OpenClaw helper inspection in agent-bridge), and the user SIDs and SDDL
+//! security descriptors the local endpoint's named pipe uses. Policy stays
+//! with callers.
 //!
 //! GetSecurityInfo owns one LocalFree allocation; owner/DACL/ACE pointers borrow it:
 //! https://learn.microsoft.com/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo
@@ -24,21 +26,26 @@ use std::{
 };
 
 use windows_sys::Win32::{
-    Foundation::{LocalFree, ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE},
+    Foundation::{
+        GetLastError, LocalFree, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, FALSE, GENERIC_READ,
+        GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    },
     Security::{
         Authorization::{
             ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
             GetSecurityInfo, SetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
         },
-        GetAce, GetLengthSid, GetSecurityDescriptorDacl, GetSecurityDescriptorLength, IsValidAcl,
-        IsValidSecurityDescriptor, IsValidSid, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
-        DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
-        PSID,
+        CopySid, EqualSid, GetAce, GetLengthSid, GetSecurityDescriptorDacl,
+        GetSecurityDescriptorLength, GetTokenInformation, IsValidAcl, IsValidSecurityDescriptor,
+        IsValidSid, TokenUser, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION,
+        OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+        PSID, TOKEN_QUERY, TOKEN_USER,
     },
     Storage::FileSystem::{
         CreateFileW, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
         FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
     },
+    System::Threading::{GetCurrentProcess, OpenProcessToken},
 };
 
 /// LocalSystem and the built-in Administrators group, which Windows trusts
@@ -88,6 +95,140 @@ impl Drop for LocalAllocation {
         // Only successful APIs documented to return LocalAlloc storage construct this owner.
         unsafe { LocalFree(self.0) };
     }
+}
+
+/// A self-relative security descriptor converted from SDDL.
+pub(crate) struct SecurityDescriptor(LocalAllocation);
+
+impl SecurityDescriptor {
+    pub(crate) fn from_sddl(sddl: &str) -> io::Result<Self> {
+        let sddl: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
+        let mut descriptor = null_mut();
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self(LocalAllocation(descriptor)))
+    }
+
+    pub(crate) fn as_ptr(&self) -> PSECURITY_DESCRIPTOR {
+        self.0 .0
+    }
+}
+
+/// The user SID of an access token, copied out of it.
+pub(crate) struct Sid {
+    storage: Vec<usize>,
+}
+
+impl Sid {
+    /// The user of `token`, opened with `TOKEN_QUERY` access.
+    pub(crate) fn from_token(token: HANDLE) -> io::Result<Self> {
+        let mut required = 0;
+        unsafe {
+            GetTokenInformation(token, TokenUser, null_mut(), 0, &mut required);
+        }
+        if unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER || required == 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let words = (required as usize).div_ceil(size_of::<usize>());
+        let mut token_info = vec![0usize; words];
+        if unsafe {
+            GetTokenInformation(
+                token,
+                TokenUser,
+                token_info.as_mut_ptr().cast(),
+                required,
+                &mut required,
+            )
+        } == FALSE
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let source = unsafe { (*(token_info.as_ptr().cast::<TOKEN_USER>())).User.Sid };
+        if source.is_null() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Windows returned an invalid user SID",
+            ));
+        }
+        let sid_length = unsafe { GetLengthSid(source) };
+        if sid_length == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Windows returned an invalid user SID",
+            ));
+        }
+        let sid_words = (sid_length as usize).div_ceil(size_of::<usize>());
+        let mut storage = vec![0usize; sid_words];
+        if unsafe { CopySid(sid_length, storage.as_mut_ptr().cast(), source) } == FALSE {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self { storage })
+    }
+
+    /// The user this process runs as.
+    pub(crate) fn current_user() -> io::Result<Self> {
+        let token = open_process_token(unsafe { GetCurrentProcess() })?;
+        Self::from_token(token.as_raw_handle())
+    }
+
+    fn as_ptr(&self) -> PSID {
+        self.storage.as_ptr().cast_mut().cast()
+    }
+
+    pub(crate) fn same_as(&self, other: &Self) -> bool {
+        let equal = unsafe { EqualSid(self.as_ptr(), other.as_ptr()) };
+        equal != FALSE
+    }
+
+    pub(crate) fn string(&self) -> io::Result<String> {
+        sid_string(self.as_ptr())
+    }
+}
+
+/// Opens the access token of `process` for [`Sid::from_token`].
+pub(crate) fn open_process_token(process: HANDLE) -> io::Result<OwnedHandle> {
+    let mut token = null_mut();
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == FALSE {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: OpenProcessToken returned a unique owned kernel handle.
+    Ok(unsafe { OwnedHandle::from_raw_handle(token) })
+}
+
+/// The current Windows user's SID in string form (`S-1-5-…`).
+pub fn current_user_sid() -> io::Result<String> {
+    Sid::current_user()?.string()
+}
+
+/// A valid SID in string form (`S-1-5-…`).
+fn sid_string(sid: PSID) -> io::Result<String> {
+    let invalid = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Windows returned an invalid SID",
+        )
+    };
+    let mut text = null_mut();
+    if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 || text.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let _text = LocalAllocation(text.cast());
+    // ConvertSidToStringSidW guarantees allocated, NUL-terminated UTF-16 output.
+    // A valid SID string fits within 184 characters (15 subauthorities).
+    let length = (0..=184)
+        .find(|&length| unsafe { *text.add(length) } == 0)
+        .ok_or_else(invalid)?;
+    String::from_utf16(unsafe { std::slice::from_raw_parts(text, length) }).map_err(|_| invalid())
 }
 
 fn wide(path: &Path) -> io::Result<Vec<u16>> {
@@ -143,7 +284,7 @@ pub fn open_for_dacl_change(path: &Path) -> io::Result<fs::File> {
 /// full access to the current user and [`TRUSTED_SIDS`] only: the owner-only
 /// DACL of the IPC endpoint, plus the trusted system principals.
 pub fn restrict_to_current_user(file: &fs::File) -> io::Result<()> {
-    let user = crate::transport::current_user_sid()?;
+    let user = current_user_sid()?;
     set_dacl(
         file,
         &format!("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{user})"),
@@ -154,23 +295,11 @@ pub fn restrict_to_current_user(file: &fs::File) -> io::Result<()> {
 /// an SDDL string describes; `D:P` protects it from inheritance. Working on
 /// the handle, not the path, means the file checked is the file changed.
 pub fn set_dacl(file: &fs::File, sddl: &str) -> io::Result<()> {
-    let sddl: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
-    let mut descriptor = null_mut();
-    if unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl.as_ptr(),
-            SDDL_REVISION_1,
-            &mut descriptor,
-            null_mut(),
-        )
-    } == 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    let descriptor = LocalAllocation(descriptor);
+    let descriptor = SecurityDescriptor::from_sddl(sddl)?;
     let (mut present, mut defaulted, mut dacl) = (0, 0, null_mut());
-    if unsafe { GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut dacl, &mut defaulted) }
-        == 0
+    if unsafe {
+        GetSecurityDescriptorDacl(descriptor.as_ptr(), &mut present, &mut dacl, &mut defaulted)
+    } == 0
     {
         return Err(io::Error::last_os_error());
     }
@@ -225,20 +354,7 @@ unsafe fn sid_text(sid: PSID, available: usize) -> Result<String, String> {
     {
         return Err("The file has an invalid SID".into());
     }
-    let mut text = null_mut();
-    if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 || text.is_null() {
-        return Err("Cannot identify a SID of the file".into());
-    }
-    let _text = LocalAllocation(text.cast());
-    // ConvertSidToStringSidW guarantees allocated, NUL-terminated UTF-16 output.
-    // A valid SID string fits within 184 characters (15 subauthorities).
-    for length in 0..=184 {
-        if unsafe { *text.add(length) } == 0 {
-            return String::from_utf16(unsafe { std::slice::from_raw_parts(text, length) })
-                .map_err(|_| "Cannot decode a SID of the file".into());
-        }
-    }
-    Err("A SID of the file exceeds its bounds".into())
+    sid_string(sid).map_err(|_| "Cannot identify a SID of the file".into())
 }
 
 /// Reads the owner and the basic DACL entries of an open file. A missing or
@@ -320,7 +436,7 @@ pub fn read(handle: &OwnedHandle) -> Result<Acl, String> {
     }
     Ok(Acl {
         owner_sid,
-        current_user_sid: crate::transport::current_user_sid()
+        current_user_sid: current_user_sid()
             .map_err(|_| "Cannot inspect the current Windows user".to_string())?,
         aces,
     })

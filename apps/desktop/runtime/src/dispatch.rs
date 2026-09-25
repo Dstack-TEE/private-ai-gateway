@@ -118,7 +118,9 @@ pub(crate) async fn dispatch(
         Command::SaveLocalApiConfig { config } => {
             respond::<rpc::SaveLocalApiConfig, _>(runtime.save_local_api_config(config).await)
         }
-        Command::SaveWebUi { config } => respond::<rpc::SaveWebUi, _>(runtime.save_web_ui(config)),
+        Command::SaveWebUi { config } => {
+            respond::<rpc::SaveWebUi, _>(runtime.save_web_ui(config).await)
+        }
         Command::SetWebUiPassword { password } => {
             respond::<rpc::SetWebUiPassword, _>(runtime.set_web_ui_password(password))
         }

@@ -12,6 +12,8 @@ StartLimitBurst=4
 ExecStart=/usr/libexec/private-ai-proxy/private-ai-proxy-service
 Restart=on-failure
 RestartSec=1
+# 75 (EX_TEMPFAIL): another backend of this user already runs; retrying cannot help.
+RestartPreventExitStatus=75
 
 [Install]
 WantedBy=default.target

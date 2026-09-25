@@ -1,8 +1,9 @@
 //! The client side of Private AI Proxy, shared by the desktop shell, the CLI
 //! and the backend: renderer contracts, the management API and its client,
 //! the local endpoint, backend launch, the settings file, app paths and
-//! owner-only file primitives. It links no server or database; its HTTP
-//! clients are the management API client and the release-channel update check.
+//! owner-only file primitives. It links no database; its HTTP clients are the
+//! management API client and the release-channel update check, and the
+//! `server` feature adds the serving loop the backend's listeners share.
 
 pub mod account;
 pub mod agent_access;
@@ -19,6 +20,8 @@ pub mod maintenance;
 pub mod paths;
 pub mod private_fs;
 pub mod protocol;
+#[cfg(feature = "server")]
+pub mod serve;
 pub mod sse;
 pub mod transport;
 pub mod ui_api;

@@ -5,7 +5,7 @@ use std::{
 
 use axum::{
     body::{Body, Bytes},
-    extract::{ConnectInfo, Request},
+    extract::{rejection::BytesRejection, ConnectInfo, Request},
     http::{header, HeaderMap, HeaderValue, Method as HttpMethod, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -16,7 +16,7 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::json;
-use tokio::{runtime::Handle, sync::Semaphore};
+use tokio::{runtime::Handle, sync::Semaphore, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
 use super::{auth::SESSION_LIFETIME, throttle::THROTTLE_REFILL, Auth, Throttle};
@@ -26,7 +26,7 @@ use crate::{
 };
 use desktop_core::{
     contracts::WebBootstrap,
-    listen::{self, url_host, ResolvedListen},
+    listen::{url_host, ResolvedListen},
     protocol::{self, ErrorCode, BUILD_VERSION},
     ui_api::{self, Backend, Method},
 };
@@ -58,20 +58,22 @@ pub(crate) struct Gate {
     cookie: String,
 }
 
+/// Web UI connections held open at once; later ones wait to be accepted.
+const MAX_CONNECTIONS: usize = 64;
+
 pub(super) fn start(
     runtime: Arc<DesktopRuntime>,
     listen: &ResolvedListen,
-    reopening: bool,
     auth: Arc<Auth>,
     throttle: Arc<Throttle>,
     shutdown: CancellationToken,
     handle: &Handle,
-) -> Result<(), String> {
+) -> Result<JoinHandle<()>, String> {
     if WebAssets::get("index.html").is_none() {
         return Err("Web UI assets are not built. Run `npm run build:web` in apps/desktop and rebuild the service.".into());
     }
     let address = listen.bind;
-    let listener = bind(address, reopening)?;
+    let listener = bind(address)?;
     let router = api::router(Api {
         backend: ServiceBackend(runtime.clone()),
         host: ServiceHost::default(),
@@ -84,22 +86,21 @@ pub(super) fn start(
             cookie: cookie_name(listen.bind.port()),
         })),
     });
-    handle.spawn(async move {
-        let result = match tokio::net::TcpListener::from_std(listener) {
-            Ok(listener) => axum::serve(
-                listener,
-                router.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .with_graceful_shutdown(shutdown.cancelled_owned())
-            .await
-            .map_err(|_| ()),
-            Err(_) => Err(()),
-        };
-        if result.is_err() {
-            tracing::warn!("The web UI listener on {address} stopped");
-        }
-    });
-    Ok(())
+    let _entered = handle.enter();
+    let listener = tokio::net::TcpListener::from_std(listener)
+        .map_err(|_| format!("Cannot listen on {address}"))?;
+    // Finishes once the listener is closed; its open requests, such as the
+    // one that stopped it, are answered in the background.
+    Ok(handle.spawn(async move {
+        let drain = desktop_core::serve::serve(
+            listener,
+            router,
+            MAX_CONNECTIONS,
+            shutdown.cancelled_owned(),
+        )
+        .await;
+        tokio::spawn(drain);
+    }))
 }
 
 /// `Host` values the listener answers to: the bound address, the client host,
@@ -137,9 +138,9 @@ fn cookie_name(port: u16) -> String {
     format!("pap_session_{port}")
 }
 
-fn bind(address: SocketAddr, reopening: bool) -> Result<std::net::TcpListener, String> {
+fn bind(address: SocketAddr) -> Result<std::net::TcpListener, String> {
     let (ip, port) = (address.ip(), address.port());
-    let listener = listen::bind(address, reopening).map_err(|error| match error.kind() {
+    let listener = std::net::TcpListener::bind(address).map_err(|error| match error.kind() {
         std::io::ErrorKind::AddrInUse => format!("Port {port} is already in use on {ip}"),
         std::io::ErrorKind::PermissionDenied => {
             format!("Port {port} requires elevated privileges; choose another port")
@@ -210,12 +211,7 @@ impl Gate {
                     }
                 }
             }
-            if request.method() == HttpMethod::POST
-                && headers
-                    .get(header::CONTENT_TYPE)
-                    .and_then(|value| value.to_str().ok())
-                    .is_none_or(|value| !value.eq_ignore_ascii_case("application/json"))
-            {
+            if request.method() == HttpMethod::POST && !json_content_type(headers) {
                 return secure_response(status(
                     ErrorCode::UnsupportedMediaType,
                     "JSON body required",
@@ -233,6 +229,21 @@ impl Gate {
     pub(crate) fn session_live(&self, session: &str) -> bool {
         self.auth.authorize(session)
     }
+}
+
+/// Whether the request declares a JSON body, by axum's `Json` rule
+/// (`application/json`, parameters such as `charset` allowed, or a `+json`
+/// type). No such type is CORS-safelisted, so a cross-site page cannot send
+/// one without a preflight.
+fn json_content_type(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<mime::Mime>().ok())
+        .is_some_and(|mime| {
+            mime.type_() == mime::APPLICATION
+                && (mime.subtype() == mime::JSON || mime.suffix() == Some(mime::JSON))
+        })
 }
 
 fn secure_response(mut response: Response) -> Response {
@@ -344,8 +355,15 @@ struct SessionRequest {
 }
 
 /// Signs in with the password and sets the session cookie.
-async fn session(Extension(gate): Extension<Arc<Gate>>, jar: CookieJar, body: Bytes) -> Response {
-    let Ok(request) = serde_json::from_slice::<SessionRequest>(&body) else {
+async fn session(
+    Extension(gate): Extension<Arc<Gate>>,
+    jar: CookieJar,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let Some(request) = body
+        .ok()
+        .and_then(|body| serde_json::from_slice::<SessionRequest>(&body).ok())
+    else {
         return api::error(protocol::Error::invalid_request());
     };
     let auth = gate.auth.clone();
@@ -442,16 +460,8 @@ async fn asset(request: Request<Body>) -> Response {
     let Some(asset) = WebAssets::get(path) else {
         return status(ErrorCode::NotFound, "Web UI not found");
     };
-    let content_type = match path.rsplit('.').next() {
-        Some("js") => "text/javascript; charset=utf-8",
-        Some("css") => "text/css; charset=utf-8",
-        Some("svg") => "image/svg+xml",
-        Some("png") => "image/png",
-        Some("json") => "application/json",
-        _ => "text/html; charset=utf-8",
-    };
     (
-        [(header::CONTENT_TYPE, HeaderValue::from_static(content_type))],
+        [(header::CONTENT_TYPE, asset.metadata.mimetype())],
         asset.data,
     )
         .into_response()
@@ -915,6 +925,16 @@ mod tests {
         )
         .await;
         assert_eq!(form.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        // Parameters are part of a JSON type, as for axum's `Json`.
+        let charset = send(
+            &fixture.router,
+            request(HttpMethod::POST, "/api/session")
+                .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await;
+        assert_ne!(charset.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
         let unknown = send(
             &fixture.router,
             request(HttpMethod::GET, "/api/unknown")

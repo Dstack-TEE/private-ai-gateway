@@ -41,8 +41,16 @@ fn main() {
     }
 }
 
-/// One file per day in the logs directory, the last week kept.
+/// One file per day in the logs directory, the last week kept. Panics are
+/// also logged, as tracing-panic's hook does, so a panicking task's message
+/// reaches the file and not only a stderr that went away with the starting
+/// client; the default hook still prints it with any `RUST_BACKTRACE`.
 fn init_logging() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic| {
+        tracing::error!("Private AI Proxy backend {panic}");
+        default_hook(panic);
+    }));
     let file = desktop_core::paths::logs_dir().and_then(|directory| {
         desktop_core::private_fs::create_private_dir(&directory)
             .map_err(|error| error.to_string())?;

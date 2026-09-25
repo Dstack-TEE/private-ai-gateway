@@ -136,8 +136,10 @@ protection problems, is stored under that key.
   replaces files, and clients report it after 5 s instead of waiting.
 - Shutdown enters draining before taking the exclusive operation gate, waits
   for existing mutations, restores managed agent configuration, stops listeners,
-  and awaits process exit. Failure to restore leaves management available for
-  recovery instead of closing the inference listener halfway through shutdown.
+  and awaits process exit. When a client requested it, failure to restore
+  leaves management available for recovery instead of closing the inference
+  listener halfway through shutdown; a signal or the owning app's exit stops
+  regardless.
 - An owned verifier task performs attestation, TLS pinning and receipt audits in
   the backend process. Task failure publishes the error/reconnect state;
   explicit stop cancels the task after first revoking the published forwarding

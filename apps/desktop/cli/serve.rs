@@ -345,6 +345,8 @@ pub async fn run(args: ServeArgs, require_production_os: bool) -> Result<i32, St
 /// Clear of the account callback (4181) and the web UI (4182), which a
 /// desktop installation may bind at the same time.
 const DEFAULT_CONTROL: &str = "127.0.0.1:4183";
+/// Connections each listener holds open at once; later ones wait to be accepted.
+const MAX_CONNECTIONS: usize = 128;
 
 async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, String> {
     let reporter: Reporter = if args.json_events {
@@ -426,16 +428,28 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
         println!();
     }
 
-    let control_server = axum::serve(control_listener, build_control_router(state.clone()));
-    let proxy_server = axum::serve(listener, build_proxy_router(state));
-    tokio::select! {
-        result = control_server => {
-            result.map_err(|e| format!("control server error: {e}"))?;
-        }
-        result = proxy_server => {
-            result.map_err(|e| format!("proxy server error: {e}"))?;
-        }
-    }
+    // Both serve until the process is interrupted.
+    let (control, proxy) = (
+        build_control_router(state.clone()),
+        build_proxy_router(state),
+    );
+    tokio::join!(
+        async {
+            desktop_core::serve::serve(
+                control_listener,
+                control,
+                MAX_CONNECTIONS,
+                std::future::pending(),
+            )
+            .await
+            .await
+        },
+        async {
+            desktop_core::serve::serve(listener, proxy, MAX_CONNECTIONS, std::future::pending())
+                .await
+                .await
+        },
+    );
     Ok(0)
 }
 

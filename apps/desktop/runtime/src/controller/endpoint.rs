@@ -200,13 +200,13 @@ impl DesktopRuntime {
         })?;
         self.publish_service_configuration(false)?;
         self.web_ui.set_password(None);
-        self.apply_web_ui(&desktop_core::config::WebUiConfig::default());
+        self.apply_web_ui(&desktop_core::config::WebUiConfig::default())
+            .await;
         Ok(self.manager.snapshot()?)
     }
 }
 
 /// Binds a port whose Local API listener was just stopped.
 fn rebind(address: std::net::SocketAddr) -> Result<std::net::TcpListener, Error> {
-    Ok(desktop_core::listen::bind(address, true)
-        .map_err(|error| format!("Cannot listen on {address}: {error}"))?)
+    Ok(proxy::bind_std(address)?)
 }

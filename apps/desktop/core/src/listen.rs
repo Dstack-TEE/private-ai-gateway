@@ -1,14 +1,10 @@
-//! Listener validation and binding shared by the Local API and the web UI.
+//! Listener validation shared by the Local API and the web UI.
 //!
 //! Loopback is the default. Any other address fails closed unless the user
 //! explicitly allowed network access, and an all-interfaces listener needs a
 //! client host so the advertised URL is reachable.
 
-use std::{
-    io,
-    net::{IpAddr, SocketAddr, TcpListener},
-    time::{Duration, Instant},
-};
+use std::net::{IpAddr, SocketAddr};
 
 use crate::contracts::ListenConfig;
 
@@ -44,31 +40,6 @@ pub fn resolve(mut config: ListenConfig) -> Result<ResolvedListen, String> {
         endpoint: format!("http://{}:{}", url_host(host), config.port),
         config,
     })
-}
-
-/// How long a port this process just released may stay busy.
-const RELEASE_WAIT: Duration = Duration::from_secs(2);
-
-/// Binds `address`; `released` means this process just closed a listener on its port.
-///
-/// Dropping a listener does not always free its port at once: a child that another
-/// thread is spawning holds a copy of the socket until it execs, and a gracefully
-/// stopping server drops its listener on its own task. Rebinding briefly waits that
-/// out instead of reporting the port as taken.
-pub fn bind(address: SocketAddr, released: bool) -> io::Result<TcpListener> {
-    let deadline = Instant::now() + RELEASE_WAIT;
-    loop {
-        match TcpListener::bind(address) {
-            Err(error)
-                if released
-                    && error.kind() == io::ErrorKind::AddrInUse
-                    && Instant::now() < deadline =>
-            {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            result => return result,
-        }
-    }
 }
 
 /// Brackets IPv6 literals for use in URLs and `Host` headers.

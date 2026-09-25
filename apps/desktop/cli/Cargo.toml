@@ -29,12 +29,13 @@ aci-protocol = { path = "../../../crates/aci-protocol" }
 agent-bridge = { package = "private-ai-proxy-agent-bridge", path = "../agent-bridge" }
 async-stream = "0.3"
 axum = "0.8"
+backon = { version = "1", default-features = false, features = ["std", "tokio-sleep"] }
 base64 = "0.23"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 dcap-qvl = { version = "0.6.3", default-features = false, features = ["std", "report", "rustcrypto"] }
-desktop-core = { package = "private-ai-proxy-core", path = "../core" }
+desktop-core = { package = "private-ai-proxy-core", path = "../core", features = ["server"] }
 desktop-runtime = { package = "private-ai-proxy-runtime", path = "../runtime" }
 ed25519-dalek = "2"
 futures-util = "0.3"
@@ -60,7 +61,9 @@ x509-parser = "0.18"
 rustix = { version = "1", features = ["process"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Environment", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+windows-registry = "0.6.1"
+windows-result = "0.4"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Environment", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 tempfile = "3"

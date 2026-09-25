@@ -14,7 +14,7 @@ use std::{
 
 use axum::{
     body::{Body, Bytes},
-    extract::{Path, Request, State},
+    extract::{rejection::BytesRejection, Path, Request, State},
     http::{HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{sse::Event as SseEvent, IntoResponse, Response, Sse},
@@ -24,9 +24,10 @@ use axum::{
 use serde_json::{json, Value};
 use tokio::{
     runtime::Handle,
-    sync::{broadcast, watch},
+    sync::{broadcast, watch, Semaphore},
 };
 use tokio_util::sync::CancellationToken;
+use tower_http::timeout::RequestBodyTimeoutLayer;
 
 use crate::controller::DesktopRuntime;
 use desktop_core::{
@@ -39,6 +40,12 @@ use desktop_core::{
 /// How often an event stream of a browser checks that its session lives.
 #[cfg_attr(not(feature = "web-ui"), allow(dead_code))]
 pub(crate) const SESSION_CHECK: Duration = Duration::from_secs(15);
+
+/// Event streams one listener serves at once; more are refused as busy.
+const MAX_EVENT_STREAMS: usize = 32;
+/// A request body that sends nothing for this long fails: tower-http's
+/// `TimeoutBody` restarts the timeout at every frame.
+const BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// This process as `GET /api/version` reports it.
 pub(crate) fn version() -> &'static Version {
@@ -148,8 +155,16 @@ pub(crate) fn router<B: Backend>(api: Api<B>) -> Router {
     };
     routes
         .layer(middleware::from_fn_with_state(api.clone(), authorize::<B>))
+        .layer(Extension(EventStreams(Arc::new(Semaphore::new(
+            MAX_EVENT_STREAMS,
+        )))))
+        .layer(RequestBodyTimeoutLayer::new(BODY_READ_TIMEOUT))
         .with_state(api)
 }
+
+/// The event stream slots of one listener.
+#[derive(Clone)]
+struct EventStreams(Arc<Semaphore>);
 
 /// The one authorization middleware: the listener decides who is calling.
 async fn authorize<B: Backend>(
@@ -182,9 +197,10 @@ async fn rpc<B: Backend>(
     Extension(caller): Extension<Caller>,
     Path(name): Path<String>,
     #[cfg_attr(not(feature = "web-ui"), allow(unused_variables))] headers: axum::http::HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let Some(params) = parameters(&body) else {
+    // A body that is too large or stalls answers in the API's error shape.
+    let Some(params) = body.ok().as_deref().and_then(parameters) else {
         return error(protocol::Error::invalid_request());
     };
     let method = Method::from_name(&name);
@@ -231,7 +247,12 @@ pub(crate) fn error(error: protocol::Error) -> Response {
 async fn events<B: Backend>(
     State(api): State<Api<B>>,
     Extension(caller): Extension<Caller>,
-) -> Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>> {
+    Extension(EventStreams(streams)): Extension<EventStreams>,
+) -> Response {
+    // The slot is held until the stream ends.
+    let Ok(slot) = streams.try_acquire_owned() else {
+        return error(protocol::Error::busy());
+    };
     let mut states = api.states.clone();
     let initial = states.borrow_and_update().clone();
     let mut projection = StateEventProjection::new(&initial);
@@ -256,8 +277,9 @@ async fn events<B: Backend>(
     };
     let (backend, host, shutdown) = (api.backend.clone(), api.host.clone(), api.shutdown.clone());
     let stream = async_stream::stream! {
+        let _slot = slot;
         for event in snapshot {
-            yield Ok(sse(&event));
+            yield Ok::<_, Infallible>(sse(&event));
         }
         let mut session = tokio::time::interval(SESSION_CHECK);
         loop {
@@ -291,11 +313,13 @@ async fn events<B: Backend>(
             }
         }
     };
-    Sse::new(stream).keep_alive(
-        axum::response::sse::KeepAlive::new()
-            .interval(Duration::from_secs(15))
-            .text("keep-alive"),
-    )
+    Sse::new(stream)
+        .keep_alive(
+            axum::response::sse::KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("keep-alive"),
+        )
+        .into_response()
 }
 
 fn sse(event: &Event) -> SseEvent {
@@ -506,5 +530,31 @@ mod tests {
                 .unwrap();
             received.push_str(std::str::from_utf8(&chunk).unwrap());
         }
+    }
+
+    #[tokio::test]
+    async fn event_streams_beyond_the_cap_are_refused_as_busy() {
+        let (router, _, _states) = local();
+        let open = || {
+            router.clone().oneshot(
+                Request::builder()
+                    .uri(protocol::EVENTS_PATH)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+        };
+        let mut streams = Vec::new();
+        for _ in 0..MAX_EVENT_STREAMS {
+            let response = open().await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            streams.push(response);
+        }
+        assert_eq!(
+            open().await.unwrap().status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        // A closed stream frees its slot.
+        streams.pop();
+        assert_eq!(open().await.unwrap().status(), StatusCode::OK);
     }
 }

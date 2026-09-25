@@ -61,6 +61,8 @@ use crate::{
 /// limit. Responses stream.
 pub const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_IN_FLIGHT: usize = 64;
+/// Connections the Local API holds open at once; later ones wait to be accepted.
+const MAX_CONNECTIONS: usize = 128;
 const BODY_READ_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(not(test))]
 const VERIFIER_CALL_TIMEOUT: Duration = Duration::from_secs(660);
@@ -439,9 +441,15 @@ pub async fn serve(state: Arc<ProxyState>, listener: std::net::TcpListener) -> R
         .map_err(|error| format!("Cannot configure the local listener: {error}"))?;
     let listener = TcpListener::from_std(listener)
         .map_err(|error| format!("Cannot use the local listener: {error}"))?;
-    axum::serve(listener, router(state))
-        .await
-        .map_err(|error| format!("The Local API stopped: {error}"))
+    desktop_core::serve::serve(
+        listener,
+        router(state),
+        MAX_CONNECTIONS,
+        std::future::pending(),
+    )
+    .await
+    .await;
+    Ok(())
 }
 
 async fn relay(

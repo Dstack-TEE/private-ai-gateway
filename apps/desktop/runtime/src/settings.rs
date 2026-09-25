@@ -94,7 +94,7 @@ pub struct Snapshot {
     pub credentials: Credentials,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Applied {
     current: Snapshot,
     config_error: Option<String>,
@@ -325,6 +325,23 @@ impl Settings {
     pub fn reload(&self) -> Option<(Snapshot, Snapshot)> {
         // Read under the lock so a concurrent write is either fully seen or not at all.
         let mut applied = self.lock().ok()?;
+        let previous = applied.current.clone();
+        if !self.refresh(&mut applied) {
+            return None;
+        }
+        applied.revision += 1;
+        Some((previous, applied.current.clone()))
+    }
+
+    /// Whether [`Settings::reload`] would change nothing, as after this
+    /// store's own writes.
+    pub fn up_to_date(&self) -> bool {
+        self.lock()
+            .is_ok_and(|applied| !self.refresh(&mut applied.clone()))
+    }
+
+    /// Reads both files into `applied`; returns whether that changed it.
+    fn refresh(&self, applied: &mut Applied) -> bool {
         let config = read(&self.dir.join(CONFIG_FILE), false)
             .map_err(|error| format!("Cannot read {CONFIG_FILE}: {error}"))
             .and_then(|text| {
@@ -344,7 +361,7 @@ impl Settings {
                 applied.credentials_unknown.clone(),
             )
         };
-        let before = status(&applied);
+        let before = status(applied);
         match config {
             Ok(config) => {
                 applied.current.config = config.value;
@@ -361,11 +378,7 @@ impl Settings {
             }
             Err(error) => applied.credentials_error = Some(error),
         }
-        if applied.current == previous && status(&applied) == before {
-            return None;
-        }
-        applied.revision += 1;
-        Some((previous, applied.current.clone()))
+        applied.current != previous || status(applied) != before
     }
 
     /// Calls `changed` after either file changes on disk, debounced.
@@ -426,13 +439,40 @@ pub(crate) fn write<T: Serialize>(
     private_fs::create_private_dir(dir)
         .map_err(|error| format!("Cannot create the settings directory: {error}"))?;
     let private = name == CREDENTIALS_FILE;
+    // A `config.toml` that a dotfile manager (GNU Stow, chezmoi) links in is
+    // saved to the link's target with the target's permissions, as editors
+    // save it; credentials never follow a link.
+    let linked =
+        !private && fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_symlink());
+    let read_only = || {
+        Error::invalid_state(format!(
+            "{name} links to a read-only file. Change the setting there, or replace the link with a copy."
+        ))
+    };
+    let path = if linked {
+        let target = fs::canonicalize(&path)
+            .map_err(|error| format!("Cannot resolve the {name} link: {error}"))?;
+        if fs::metadata(&target).is_ok_and(|metadata| metadata.permissions().readonly()) {
+            return Err(read_only());
+        }
+        target
+    } else {
+        path
+    };
     let replace = if private {
         private_fs::write_private_atomic
     } else {
         private_fs::write_atomic
     };
     replace(&path, &text, Some(current.as_deref())).map_err(|error| {
-        if private_fs::ChangedOnDisk::is(&error) {
+        if linked
+            && matches!(
+                error.kind(),
+                io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem
+            )
+        {
+            read_only()
+        } else if private_fs::ChangedOnDisk::is(&error) {
             Error::invalid_state(format!(
                 "{name} changed on disk while saving; review it and retry"
             ))

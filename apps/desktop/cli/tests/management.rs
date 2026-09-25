@@ -611,6 +611,49 @@ fn web_ui_listener_fails_closed_and_rebinds_with_fresh_sessions() {
     );
 }
 
+/// Saving the web UI settings restarts its listener, which must not wait for
+/// the browser request that asked for it.
+#[test]
+fn a_browser_saves_the_web_ui_settings_without_waiting_on_itself() {
+    let backend = Backend::start();
+    let port = {
+        let free = TcpListener::bind("127.0.0.1:0").unwrap();
+        free.local_addr().unwrap().port()
+    };
+    backend.run(&["settings", "set", "web-ui.port", &port.to_string(), "--yes"]);
+    assert_success(&backend.set_web_ui_password(WEB_PASSWORD));
+    let state = backend.run(&["settings", "set", "web-ui.enabled", "true", "--yes"]);
+    if state["webUi"]["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("assets are not built"))
+    {
+        return;
+    }
+    let authority = format!("127.0.0.1:{port}");
+    let token = web_session(&authority, WEB_PASSWORD);
+    let config = json!({
+        "config": { "enabled": true, "listenAddress": "127.0.0.1", "port": port }
+    });
+    let started = Instant::now();
+    let (status, body) = http(
+        &authority,
+        "POST",
+        "/api/rpc/save_web_ui",
+        Some(&token),
+        &config.to_string(),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "saving took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        body["result"]["webUi"]["url"],
+        format!("http://{authority}")
+    );
+}
+
 /// Signs in to the web UI at `authority` and returns its session cookie.
 fn web_session(authority: &str, password: &str) -> String {
     let body = json!({ "password": password }).to_string();

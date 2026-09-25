@@ -12,12 +12,9 @@ mod server;
 #[cfg(feature = "web-ui")]
 mod throttle;
 
-use std::{
-    net::SocketAddr,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
-use tokio::runtime::Handle;
+use tokio::{runtime::Handle, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
 pub use auth::Auth;
@@ -32,7 +29,7 @@ pub struct WebUi {
     auth: Arc<Auth>,
     #[cfg(feature = "web-ui")]
     throttle: Arc<Throttle>,
-    running: Mutex<Option<(SocketAddr, CancellationToken)>>,
+    running: Mutex<Option<(CancellationToken, JoinHandle<()>)>>,
     #[cfg_attr(not(feature = "web-ui"), allow(dead_code))]
     handle: Handle,
 }
@@ -48,18 +45,21 @@ impl WebUi {
         }
     }
 
-    /// Closes the listener and every browser session. Returns the address that was open.
-    pub(crate) fn stop(&self) -> Option<SocketAddr> {
+    /// Closes the listener and every browser session, so its port can be
+    /// bound again once this returns.
+    pub(crate) async fn stop(&self) {
         let previous = self
             .running
             .lock()
             .ok()
             .and_then(|mut running| running.take());
         self.auth.revoke_all();
-        previous.map(|(bind, shutdown)| {
+        if let Some((shutdown, server)) = previous {
             shutdown.cancel();
-            bind
-        })
+            // Only until the listener is closed: the request that stopped
+            // it is still open.
+            let _ = server.await;
+        }
     }
 
     #[cfg(feature = "web-ui")]
@@ -67,20 +67,18 @@ impl WebUi {
         &self,
         runtime: Arc<crate::controller::DesktopRuntime>,
         listen: &ResolvedListen,
-        reopening: bool,
     ) -> Result<String, String> {
         let shutdown = CancellationToken::new();
-        server::start(
+        let server = server::start(
             runtime,
             listen,
-            reopening,
             self.auth.clone(),
             self.throttle.clone(),
             shutdown.clone(),
             &self.handle,
         )?;
         if let Ok(mut running) = self.running.lock() {
-            *running = Some((listen.bind, shutdown));
+            *running = Some((shutdown, server));
         }
         Ok(listen.endpoint.clone())
     }
@@ -90,7 +88,6 @@ impl WebUi {
         &self,
         _runtime: Arc<crate::controller::DesktopRuntime>,
         _listen: &ResolvedListen,
-        _reopening: bool,
     ) -> Result<String, String> {
         Err("The web UI is not included in this build".into())
     }

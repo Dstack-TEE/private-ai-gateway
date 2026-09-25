@@ -175,7 +175,10 @@ impl DesktopRuntime {
         Ok(result?)
     }
 
-    pub async fn shutdown(&self, mode: ShutdownMode) -> Result<(), Error> {
+    /// Stops protection, the Local API and the web UI. A `refusable` shutdown
+    /// (a client's request) fails before stopping anything when the agent
+    /// configurations cannot be restored; any other one continues.
+    pub async fn shutdown(&self, mode: ShutdownMode, refusable: bool) -> Result<(), Error> {
         // Shutdown waits for a configuration transaction to commit or roll back.
         // Cancelling that future midway could split credential and config state;
         // the server's shutdown watchdog bounds the wait.
@@ -189,14 +192,15 @@ impl DesktopRuntime {
             mode == ShutdownMode::UpdateRestart && self.manager.snapshot()?.session_active;
         tracing::info!("Shutdown: stopping protection and restoring agent configuration");
         let restored = self.stop_with_reconnect(preserve_session);
-        // Outside the Mac App Store, agents are never left pointing at a
-        // stopped Local API: a failed restore keeps the backend running.
-        if !cfg!(all(target_os = "macos", feature = "mac-app-store")) {
+        // Outside the Mac App Store, a client's shutdown never leaves agents
+        // pointing at a stopped Local API: a failed restore keeps the backend
+        // running. A signal or the owning app's exit stops it regardless.
+        if refusable && !cfg!(all(target_os = "macos", feature = "mac-app-store")) {
             restored.as_ref().map_err(Clone::clone)?;
         }
         tracing::info!("Shutdown: stopping the Local API and the web UI");
         self.endpoint.stop().await?;
-        self.web_ui.stop();
+        self.web_ui.stop().await;
         self.exiting.store(true, Ordering::Release);
         restored.map(|_| ())
     }

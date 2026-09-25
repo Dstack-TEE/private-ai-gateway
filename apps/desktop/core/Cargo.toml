@@ -9,13 +9,15 @@ rust-version = "1.98"
 [features]
 default = []
 mac-app-store = ["dep:objc2", "dep:objc2-foundation"]
+# The HTTP serving loop the backend's listeners share.
+server = ["dep:axum", "dep:tower-service", "hyper/server", "hyper-util/server-graceful"]
 
 [lib]
 name = "desktop_core"
 path = "src/lib.rs"
 
 [dependencies]
-fd-lock = "4"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"], optional = true }
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
@@ -31,6 +33,7 @@ tempfile = "3"
 tokio = { version = "1", features = ["io-util", "net", "rt", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 toml_edit = { version = "0.25", features = ["serde"] }
+tower-service = { version = "0.3", optional = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 ts-rs = "12"
@@ -46,6 +49,7 @@ objc2 = { version = "0.6", optional = true }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSError", "NSString", "NSURL"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
+backon = { version = "1", default-features = false, features = ["std", "std-blocking-sleep"] }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_Threading"] }
 
 [dev-dependencies]

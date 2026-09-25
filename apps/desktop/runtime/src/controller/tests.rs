@@ -391,7 +391,7 @@ fn shutdown_blocks_later_configuration_changes() {
     let directory = tempfile::tempdir().unwrap();
     let runtime = test_runtime(&executor, directory.path());
     executor
-        .block_on(runtime.shutdown(desktop_core::protocol::ShutdownMode::Quit))
+        .block_on(runtime.shutdown(desktop_core::protocol::ShutdownMode::Quit, true))
         .unwrap();
     let state = runtime.state().unwrap();
     assert_eq!(state.status, "stopped");
@@ -438,6 +438,7 @@ fn shutdown_stops_waiting_for_a_stuck_command_after_its_bound() {
             &runtime,
             &admission,
             desktop_core::protocol::ShutdownMode::Quit,
+            true,
         )
         .await
         .unwrap();
@@ -488,7 +489,7 @@ fn update_restart_preserves_only_an_active_protection_session() {
             });
         }
 
-        executor.block_on(runtime.shutdown(mode)).unwrap();
+        executor.block_on(runtime.shutdown(mode, true)).unwrap();
 
         let state = runtime.state().unwrap();
         assert_eq!(state.status, "stopped");
@@ -511,9 +512,6 @@ fn finished_local_listener_can_restart_at_the_same_address() {
             ..Default::default()
         };
         let resolved = settings_config::resolve_local_api(config.clone()).unwrap();
-        // Stands in for a child forked by another thread: it keeps the socket
-        // listening after the endpoint drops its own handle, until it execs.
-        let inherited = listener.try_clone().unwrap();
         runtime
             .endpoint
             .start(
@@ -523,13 +521,9 @@ fn finished_local_listener_can_restart_at_the_same_address() {
                 config,
             )
             .unwrap();
+        // Stopping releases the port at once.
         runtime.endpoint.stop().await.unwrap();
-        let exec = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            drop(inherited);
-        });
         runtime.restore_endpoint(resolved.clone()).unwrap();
-        exec.join().unwrap();
         assert!(std::net::TcpListener::bind(resolved.bind).is_err());
         assert!(runtime.restore_endpoint(resolved.clone()).is_err());
         runtime.endpoint.stop().await.unwrap();

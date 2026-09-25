@@ -3,7 +3,6 @@
 //! exit shuts it down, and admits each command.
 
 use std::{
-    future::IntoFuture,
     io,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -15,7 +14,7 @@ use std::{
 use serde_json::Value;
 use tokio::{
     runtime::Handle,
-    sync::{RwLock, Semaphore},
+    sync::{Notify, RwLock, Semaphore},
 };
 use tokio_util::sync::CancellationToken;
 use tower::limit::GlobalConcurrencyLimitLayer;
@@ -43,6 +42,9 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_IN_PROGRESS: &str = "Shutdown is already in progress";
 /// Requests the local endpoint runs at once; later ones wait for a slot.
 const MAX_REQUESTS: usize = 64;
+/// Connections the local endpoint holds open at once, event streams included;
+/// later ones wait to be accepted.
+const MAX_CONNECTIONS: usize = 64;
 
 /// Lifecycle admission shared by every listener of one service.
 pub(crate) struct Admission {
@@ -51,6 +53,8 @@ pub(crate) struct Admission {
     exports: Semaphore,
     /// Cancelled once a shutdown succeeded; the service then exits.
     stopped: CancellationToken,
+    /// Notified when a client's shutdown was refused and the backend keeps running.
+    refused: Notify,
 }
 
 impl Default for Admission {
@@ -60,6 +64,7 @@ impl Default for Admission {
             mutations: RwLock::new(()),
             exports: Semaphore::new(1),
             stopped: CancellationToken::new(),
+            refused: Notify::new(),
         }
     }
 }
@@ -100,47 +105,48 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
         listener: api::Listener::Local,
     })
     .layer(GlobalConcurrencyLimitLayer::new(MAX_REQUESTS));
-    let server = tokio::spawn(
-        axum::serve(LocalListener(listener), api)
-            .with_graceful_shutdown(stopped.clone().cancelled_owned())
-            .into_future(),
-    );
+    let signal = stopped.clone().cancelled_owned();
+    let server = tokio::spawn(async move {
+        desktop_core::serve::serve(LocalListener(listener), api, MAX_CONNECTIONS, signal)
+            .await
+            .await
+    });
     let owner = owner_exited();
-    tokio::pin!(owner);
     let signal = shutdown_signal();
-    tokio::pin!(signal);
-    loop {
-        tokio::select! {
-            () = stopped.cancelled() => break,
-            _ = &mut owner => {
-                // A sandboxed service belongs to its GUI parent. Restoration
-                // errors remain retryable on next launch, never keep it alive.
-                tracing::info!("The owning app exited");
-                let worker = runtime.clone();
-                let executor = handle.clone();
-                let gate = admission.clone();
-                match tokio::task::spawn_blocking(move || shutdown(&worker, &gate, &executor, ShutdownMode::Quit, false)).await {
-                    Ok(Ok(())) => {},
-                    Ok(Err(error)) => runtime.report_error(error),
-                    Err(error) => tracing::warn!(
-                        "Cannot finish backend shutdown: {error}"
-                    ),
-                }
-                break;
+    // A signal (systemd, launchd, `docker stop`) or the owning app's exit
+    // always ends the service; only a client's `shutdown` can be refused. A
+    // step that fails, such as restoring an agent configuration, is logged
+    // and retried on the next launch.
+    let reason = tokio::select! {
+        () = stopped.cancelled() => None,
+        () = owner => Some("The owning app exited"),
+        result = signal => {
+            result?;
+            Some("Received a shutdown signal")
+        }
+    };
+    if let Some(reason) = reason {
+        tracing::info!("{reason}");
+        loop {
+            // Registered before trying, so a refusal in between is not missed.
+            let refused = admission.refused.notified();
+            let (worker, gate, executor) = (runtime.clone(), admission.clone(), handle.clone());
+            match tokio::task::spawn_blocking(move || {
+                shutdown(&worker, &gate, &executor, ShutdownMode::Quit, false)
+            })
+            .await
+            {
+                // A client's shutdown is running, bounded by its watchdog: it
+                // stops the backend unless it is refused, and then this one runs.
+                Ok(Err(error)) if error == SHUTDOWN_IN_PROGRESS => tokio::select! {
+                    () = stopped.cancelled() => {}
+                    () = refused => continue,
+                },
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => runtime.report_error(error),
+                Err(error) => tracing::warn!("Cannot finish backend shutdown: {error}"),
             }
-            result = &mut signal => {
-                result?;
-                tracing::info!("Received a shutdown signal");
-                let worker = runtime.clone();
-                let executor = handle.clone();
-                let gate = admission.clone();
-                let result = tokio::task::spawn_blocking(move || shutdown(&worker, &gate, &executor, ShutdownMode::Quit, true)).await.map_err(|_| "Shutdown task failed")?;
-                match result {
-                    Ok(()) => break,
-                    Err(error) => runtime.report_error(error),
-                }
-                signal.set(shutdown_signal());
-            }
+            break;
         }
     }
     stopped.cancel();
@@ -297,8 +303,8 @@ pub(crate) fn execute(
     handle.block_on(crate::dispatch::dispatch(runtime, command))
 }
 
-/// Stops the backend. A failure keeps it running when `refusable`; the owning
-/// app's exit (not refusable) ends it regardless.
+/// Stops the backend. A failure keeps it running when `refusable`; a signal or
+/// the owning app's exit (not refusable) ends it regardless.
 fn shutdown(
     runtime: &Arc<DesktopRuntime>,
     admission: &Admission,
@@ -311,10 +317,11 @@ fn shutdown(
     }
     tracing::info!("Shutting down ({mode:?})");
     let watchdog = Watchdog::arm();
-    let result = handle.block_on(drain_and_stop(runtime, admission, mode));
+    let result = handle.block_on(drain_and_stop(runtime, admission, mode, refusable));
     match &result {
         Err(error) if refusable => {
             admission.draining.store(false, Ordering::Release);
+            admission.refused.notify_waiters();
             tracing::error!("Shutdown refused; the backend keeps running: {error}");
         }
         Err(error) => {
@@ -336,6 +343,7 @@ pub(crate) async fn drain_and_stop(
     runtime: &DesktopRuntime,
     admission: &Admission,
     mode: ShutdownMode,
+    refusable: bool,
 ) -> Result<(), String> {
     tracing::info!("Shutdown: waiting for running commands");
     let _exclusive = tokio::time::timeout(DRAIN_TIMEOUT, admission.mutations.write())
@@ -347,7 +355,7 @@ pub(crate) async fn drain_and_stop(
             )
         });
     runtime
-        .shutdown(mode)
+        .shutdown(mode, refusable)
         .await
         .map_err(|error| error.to_string())
 }
