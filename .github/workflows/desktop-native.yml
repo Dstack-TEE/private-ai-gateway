@@ -955,9 +955,12 @@ jobs:
           if [[ "$CHANNEL" == stable ]]; then prerelease=false latest=true; fi
           gh release edit "$TAG" --draft=false --prerelease="$prerelease" --latest="$latest" --title "Private AI Proxy v$VERSION"
 
+  # Beta releases skip the App Store job, and a job whose `if` has no status
+  # check function inherits success(), which is false after any skipped
+  # dependency, direct or not; so each job after it checks its own result.
   update-feed:
     needs: release
-    if: needs.release.result == 'success'
+    if: ${{ !cancelled() && needs.release.result == 'success' }}
     permissions:
       contents: write
     uses: ./.github/workflows/desktop-update-feed.yml
@@ -966,7 +969,7 @@ jobs:
 
   publish-npm:
     needs: update-feed
-    if: needs.update-feed.result == 'success'
+    if: ${{ !cancelled() && needs.update-feed.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     permissions:
