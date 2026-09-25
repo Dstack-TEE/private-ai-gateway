@@ -207,19 +207,17 @@ mod platform {
         let Some(context) = (unsafe { context.cast::<CallbackContext>().as_ref() }) else {
             return;
         };
-        match message_type {
-            kIOMessageSystemHasPoweredOn => {
-                if let Some(runtime) = context.runtime.upgrade() {
-                    runtime.system_resumed();
-                }
+        if message_type == kIOMessageSystemHasPoweredOn {
+            if let Some(runtime) = context.runtime.upgrade() {
+                runtime.system_resumed();
             }
-            kIOMessageCanSystemSleep | kIOMessageSystemWillSleep => {
-                let connection = context.connection.load(Ordering::Acquire);
-                if connection != 0 {
-                    IOAllowPowerChange(connection, message_argument as isize);
-                }
+        } else if message_type == kIOMessageCanSystemSleep
+            || message_type == kIOMessageSystemWillSleep
+        {
+            let connection = context.connection.load(Ordering::Acquire);
+            if connection != 0 {
+                IOAllowPowerChange(connection, message_argument as isize);
             }
-            _ => {}
         }
     }
 
