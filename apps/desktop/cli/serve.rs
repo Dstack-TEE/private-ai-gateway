@@ -260,14 +260,12 @@ impl ProxyState {
     }
 
     /// Trust a freshly verified identity under a new delivery gate, closing
-    /// the previous identity's gate in the same critical section.
+    /// the previous identity's gate in the same critical section: under the
+    /// trusted lock, a gate still open is the current identity's.
     fn adopt(&self, report: AttestationReport, identity: EstablishedIdentity) {
         let adopted = TrustedIdentity::new(report, identity, self.shutdown.child_token());
-        let previous = std::mem::replace(
-            &mut *self.trusted.lock().expect("trusted identity poisoned"),
-            adopted,
-        );
-        previous.delivery.cancel();
+        let mut trusted = self.trusted.lock().expect("trusted identity poisoned");
+        std::mem::replace(&mut *trusted, adopted).delivery.cancel();
     }
 
     /// The active accepted set: the user's fixed list, or the current
@@ -298,14 +296,24 @@ impl ProxyState {
     /// Block forwards until a fresh verify re-establishes trust: cancel the
     /// gate of the identity the change was `observed` under and report the
     /// rotation (the managed backend rebuilds its session on
-    /// `keyset_changed`). An observation made under an identity that has
-    /// since been replaced only cancels that already-closed gate.
+    /// `keyset_changed`). Only the block that closes the current identity's
+    /// gate reports it: an observation made under an identity since
+    /// replaced, or one already blocked, only cancels a closed gate.
     fn block_for_keyset_change(&self, observed: &TrustedIdentity, reason: String) {
-        observed.delivery.cancel();
-        (self.event_sink)(VerifierEvent::Blocked {
-            code: Some("keyset_changed".to_string()),
-            reason,
-        });
+        let blocks_current = {
+            // Serialized with `adopt`, which closes a replaced identity's
+            // gate under this lock: an open gate here is the current one's.
+            let _trusted = self.trusted.lock().expect("trusted identity poisoned");
+            let open = !observed.delivery.is_cancelled();
+            observed.delivery.cancel();
+            open
+        };
+        if blocks_current {
+            (self.event_sink)(VerifierEvent::Blocked {
+                code: Some("keyset_changed".to_string()),
+                reason,
+            });
+        }
     }
 
     /// When blocked by a keyset change, re-verify the service once and, on
@@ -678,18 +686,36 @@ async fn proxy_request(
     body: Bytes,
     context: Option<ForwardContext>,
 ) -> Response {
-    let path = uri.path().to_string();
-    // Every method re-checks verification (§3.4): an expired or rotated keyset
-    // blocks GET passthrough exactly like inference. A re-verification that
-    // changed the service identity must not carry this request either: it
-    // was admitted upstream against the old identity, so it is refused with a
-    // retryable status until the desktop publishes the new identity.
     let observed = state.snapshot();
+    proxy_observed(state, observed, method, uri, headers, body, context).await
+}
+
+/// One request arriving while `observed` was the trusted identity. Every
+/// method re-checks verification (§3.4): an expired or rotated keyset blocks
+/// GET passthrough exactly like inference, and an expiry seen in `observed`
+/// closes only that identity's gate. A re-verification that changed the
+/// service identity must not carry this request either: it was admitted
+/// upstream against the old identity, so it is refused with a retryable
+/// status until the desktop publishes the new identity.
+async fn proxy_observed(
+    state: Arc<ProxyState>,
+    observed: TrustedIdentity,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+    context: Option<ForwardContext>,
+) -> Response {
+    let path = uri.path().to_string();
     if desktop_core::now_secs() >= observed.not_after {
         observed.delivery.cancel();
     }
     let identity_before = observed.keyset_digest;
     if let Err(reason) = state.ensure_unblocked().await {
+        // A managed verifier stopping is retryable, not a failed verification.
+        if state.shutdown.is_cancelled() {
+            return delivery_revoked_response(&path);
+        }
         tracing::warn!("!! {method} {path} -> 503 blocked: {reason}");
         return text_response(
             StatusCode::SERVICE_UNAVAILABLE,

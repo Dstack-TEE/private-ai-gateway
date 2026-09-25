@@ -237,6 +237,8 @@ async fn keyset_change_and_verification_failure_have_distinct_events() {
     let mut headers = HeaderMap::new();
     headers.insert("x-aci-keyset-digest", "new-keyset".parse().unwrap());
     rotation_gate(&state, &state.snapshot(), &headers);
+    // A second response under the already-blocked identity reports nothing.
+    rotation_gate(&state, &state.snapshot(), &headers);
     assert!(previous.is_cancelled());
     assert!(matches!(
         received.recv().await.unwrap(),
@@ -255,25 +257,16 @@ async fn keyset_change_and_verification_failure_have_distinct_events() {
     ));
 }
 
-/// A block observed under an identity that a concurrent re-verification has
-/// since replaced must not block the new identity: with the old identity
-/// admitted (or seen expired) by one request, another request's re-verify
-/// adopts a new identity, and only then does the first request's block land.
-/// Forwards keep flowing under the new identity with no re-verification.
-#[tokio::test]
-async fn a_block_observed_under_a_replaced_identity_does_not_block_its_successor() {
-    let upstream = spawn_server(Router::new().fallback(|| async { StatusCode::OK })).await;
-    let (tx, _rx) = mpsc::unbounded_channel();
-    let state = state_over(upstream, tx);
-    let observed = state.snapshot();
+/// A replacement for the fixture identity, adopted as a concurrent
+/// re-verification would.
+fn adopt_fixture_identity(state: &ProxyState) {
     let report = vector_report();
     let identity = crate::checks::established_identity(&report).unwrap();
     state.adopt(report, identity);
-    let mut headers = HeaderMap::new();
-    headers.insert("x-aci-keyset-digest", "rotated-keyset".parse().unwrap());
-    rotation_gate(&state, &observed, &headers);
+}
 
-    assert!(observed.delivery.is_cancelled());
+/// Forwards under the current identity succeed without re-verification.
+async fn assert_forwards_without_reverification(state: &Arc<ProxyState>) {
     assert!(!state.is_blocked());
     let proxy = spawn_server(build_proxy_router(state.clone())).await;
     let client = reqwest::Client::new();
@@ -286,6 +279,56 @@ async fn a_block_observed_under_a_replaced_identity_does_not_block_its_successor
         assert_eq!(resp.status().as_u16(), 200);
     }
     assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 0);
+}
+
+/// A rotation observed under an identity that a concurrent re-verification
+/// has since replaced neither blocks the new identity nor reports
+/// `keyset_changed`, which would make the managed backend rebuild a session
+/// that is already current.
+#[tokio::test]
+async fn a_rotation_observed_under_a_replaced_identity_is_ignored() {
+    let upstream = spawn_server(Router::new().fallback(|| async { StatusCode::OK })).await;
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut state = state_over(upstream, tx);
+    let mut events = capture_events(&mut state);
+    let observed = state.snapshot();
+    adopt_fixture_identity(&state);
+    let mut headers = HeaderMap::new();
+    headers.insert("x-aci-keyset-digest", "rotated-keyset".parse().unwrap());
+    rotation_gate(&state, &observed, &headers);
+
+    assert!(observed.delivery.is_cancelled());
+    assert!(blocked_codes(&mut events).is_empty());
+    assert_forwards_without_reverification(&state).await;
+}
+
+/// The expiry path: a request observes the old identity expired, another
+/// request's re-verification adopts a new identity, and only then does the
+/// first request act on its expired observation. That closes only the old
+/// identity's gate; the request itself and later ones are served under the
+/// new identity.
+#[tokio::test]
+async fn an_expiry_observed_under_a_replaced_identity_does_not_block_its_successor() {
+    let upstream = spawn_server(Router::new().fallback(|| async { StatusCode::OK })).await;
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let state = state_over(upstream, tx);
+    state.trusted.lock().unwrap().not_after = 0;
+    let expired = state.snapshot();
+    adopt_fixture_identity(&state);
+
+    let response = proxy_observed(
+        state.clone(),
+        expired.clone(),
+        Method::GET,
+        "/v1/models".parse().unwrap(),
+        HeaderMap::new(),
+        Bytes::new(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(expired.delivery.is_cancelled());
+    assert_forwards_without_reverification(&state).await;
 }
 
 #[test]
@@ -1662,9 +1705,20 @@ async fn a_managed_rotation_is_not_reported_as_a_failed_verification() {
     let client = reqwest::Client::new();
     let requests = (0..4).map(|_| {
         let request = client.get(format!("{proxy}/v1/models"));
-        async move { request.send().await.unwrap().status().as_u16() }
+        async move {
+            let resp = request.send().await.unwrap();
+            (resp.status().as_u16(), resp.text().await.unwrap())
+        }
     });
-    assert_eq!(futures_util::future::join_all(requests).await, vec![503; 4]);
+    let responses = futures_util::future::join_all(requests).await;
+    for (status, body) in responses {
+        assert_eq!(status, 503);
+        assert!(
+            body.contains("retry once the gateway is verified again"),
+            "{body}"
+        );
+        assert!(!body.contains("re-verification failed"), "{body}");
+    }
     assert_eq!(blocked_codes(&mut received), vec![keyset_changed()]);
 }
 

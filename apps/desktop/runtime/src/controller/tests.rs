@@ -502,6 +502,31 @@ fn update_restart_preserves_only_an_active_protection_session() {
 
 #[test]
 fn finished_local_listener_can_restart_at_the_same_address() {
+    // Other tests in this binary spawn child processes. On macOS std marks a
+    // new socket close-on-exec in a second call after creating it
+    // (rust-lang/rust#24237), so a child spawned in between inherits the
+    // listener and keeps its port bound after `stop` closed ours. The rebind
+    // assertions therefore run in a process of their own.
+    const CHILD: &str = "PAP_TEST_LISTENER_RESTART";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "controller::tests::finished_local_listener_can_restart_at_the_same_address",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     let executor = tokio::runtime::Runtime::new().unwrap();
     let directory = tempfile::tempdir().unwrap();
     let runtime = test_runtime(&executor, directory.path());
@@ -521,18 +546,9 @@ fn finished_local_listener_can_restart_at_the_same_address() {
                 config,
             )
             .unwrap();
-        // Stopping closes the listener before `stop` returns. The kernel may
-        // still refuse the exact address for a moment: xnu disposes of a
-        // closed socket's PCB from its GC timer (scheduled a second out) when
-        // the PCB was referenced at close (`in_pcb_checkstate`), and
-        // `in_pcbbind` reports EADDRINUSE while that PCB is still listed
-        // (https://github.com/apple-oss-distributions/xnu/blob/main/bsd/netinet/in_pcb.c).
+        // Stopping releases the port at once.
         runtime.endpoint.stop().await.unwrap();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-        while let Err(error) = runtime.restore_endpoint(resolved.clone()) {
-            assert!(tokio::time::Instant::now() < deadline, "{error}");
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
+        runtime.restore_endpoint(resolved.clone()).unwrap();
         assert!(std::net::TcpListener::bind(resolved.bind).is_err());
         assert!(runtime.restore_endpoint(resolved.clone()).is_err());
         runtime.endpoint.stop().await.unwrap();
