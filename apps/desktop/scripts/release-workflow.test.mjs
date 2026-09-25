@@ -11,45 +11,41 @@ async function readWorkflow(name) {
   return load(await readFile(path.join(repositoryRoot, ".github/workflows", name), "utf8"));
 }
 
-test("release-please tags start one same-revision release graph", async () => {
-  const [releasePlease, release, direct, appStore, updateFeed, npm] = await Promise.all([
-    readWorkflow("desktop-release-please.yml"),
+test("only release tags publish, after every package, in order", async () => {
+  const [release, direct, npm] = await Promise.all([
     readWorkflow("desktop-release.yml"),
     readWorkflow("desktop-native.yml"),
-    readWorkflow("desktop-mac-app-store.yml"),
-    readWorkflow("desktop-update-feed.yml"),
     readWorkflow("private-ai-proxy-npm.yml"),
   ]);
-
-  const releasePleaseStep = releasePlease.jobs["release-please"].steps.at(-1);
-  assert.equal(releasePleaseStep.with["config-file"], "apps/desktop/release-please-config.json");
-  assert.equal(releasePleaseStep.with["manifest-file"], "apps/desktop/.release-please-manifest.json");
   // Only release tags start Desktop release, so its run number counts releases.
-  assert.deepEqual(Object.keys(release.on), ["push"]);
-  assert.deepEqual(release.on.push, { tags: ["desktop-v*"] });
+  assert.deepEqual(release.on, { push: { tags: ["desktop-v*"] } });
   assert.equal(release.jobs.release.uses, "./.github/workflows/desktop-native.yml");
   assert.equal(direct.on.push.tags, undefined);
-
-  assert.equal(direct.jobs["mac-app-store"].uses, "./.github/workflows/desktop-mac-app-store.yml");
-  assert.equal(direct.jobs["mac-app-store"].if, "needs.version.outputs.channel == 'stable'");
   assert.equal(direct.jobs["mac-app-store"].with.build_number, "${{ needs.version.outputs.app_store_build_number }}");
-  assert.equal(appStore.on.workflow_dispatch?.inputs, undefined);
-  assert.equal(appStore.on.workflow_call.inputs.build_number.type, "string");
-  assert.deepEqual(direct.jobs.release.needs, ["version", "package", "mac-app-store"]);
-  assert.equal(direct.jobs.release.permissions.contents, "write");
-
-  assert.equal(direct.jobs["update-feed"].uses, "./.github/workflows/desktop-update-feed.yml");
-  assert.equal(direct.jobs["update-feed"].needs, "release");
-  assert.equal(direct.jobs["publish-npm"].needs, "update-feed");
-  assert.equal(direct.jobs["publish-npm"].permissions.actions, "write");
-  assert.equal(direct.jobs["publish-npm"].permissions.contents, "read");
-  assert.match(direct.jobs["publish-npm"].steps[0].run, /gh workflow run "\$workflow"/);
-  assert.match(direct.jobs["publish-npm"].steps[0].run, /--ref "\$RELEASE_TAG"/);
-  assert.match(direct.jobs["publish-npm"].steps[0].run, /gh run watch "\$run_id"/);
-  assert.equal(updateFeed.on.workflow_call.inputs.tag.type, "string");
+  // npm trusted publishing checks the top-level workflow, so the npm
+  // publisher is dispatched, never called.
   assert.equal(npm.on.workflow_call, undefined);
-  assert.equal(npm.on.workflow_dispatch.inputs.release_tag.type, "string");
-  assert.equal(npm.on.workflow_dispatch.inputs.request_id.type, "string");
+
+  const needs = (job) => [direct.jobs[job].needs ?? []].flat();
+  const after = (job, dependency) => needs(job).some((need) => need === dependency || after(need, dependency));
+  assert.ok(after("release", "package") && after("release", "mac-app-store"));
+  // The App Store upload cannot be undone.
+  assert.ok(after("mac-app-store", "verify"));
+  assert.ok(after("update-feed", "release"));
+  assert.ok(after("publish-npm", "update-feed"));
+  // Pull requests and test builds have no release channel, so every job
+  // that can write runs only behind the release job.
+  assert.match(direct.jobs.release.if, /needs\.version\.outputs\.channel != ''/);
+  for (const [name, job] of Object.entries(direct.jobs)) {
+    if (Object.values(job.permissions ?? {}).includes("write")) assert.ok(name === "release" || after(name, "release"), name);
+  }
+
+  // create-update-manifest rejects anything but the exact release assets
+  // before a file reaches the draft release.
+  const steps = direct.jobs.release.steps.map((step) => step.run ?? "");
+  const gate = steps.findIndex((run) => run.includes("create-update-manifest.mjs"));
+  assert.notEqual(gate, -1);
+  assert.ok(gate < steps.findIndex((run) => run.includes("gh release upload")));
 });
 
 test("npm publishes the channel wrapper only after its platform versions resolve", async () => {

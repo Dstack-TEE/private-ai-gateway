@@ -36,8 +36,9 @@ Versions, changelog and tags come from
 (`release-please-config.json`, `.release-please-manifest.json`). On every push
 to `main` that touches `apps/desktop`, `Desktop release PR` keeps a release PR
 open. The PR carries the next version in `package.json`,
-`src-tauri/tauri.conf.json`, every workspace `Cargo.toml` and `Cargo.lock`,
-plus the new `CHANGELOG.md` section built from Conventional Commit titles.
+`src-tauri/tauri.conf.json`, the workspace `Cargo.toml` (every crate inherits
+its `version`) and `Cargo.lock`, plus the new `CHANGELOG.md` section built from
+Conventional Commit titles.
 Merging the PR tags the merge commit `desktop-v<version>` and creates a draft
 GitHub release with that changelog section as its notes.
 
@@ -62,8 +63,10 @@ The App Store build's CFBundleVersion is `100 + <Desktop release run number>`.
 A Mac app's build number must increase with every upload, across versions, and
 is at most three integers and 18 characters
 ([TN2420](https://developer.apple.com/library/archive/technotes/tn2420/_index.html)).
-The run number increases only on release tags (the first tag gets 104, after
-three earlier manual runs of the workflow file), and a re-run keeps it. The offset
+The run number increases only on release tags, from 4 after three earlier
+manual runs of the workflow file, and a re-run keeps it. Beta tags use a run
+number but upload nothing, so the first App Store upload is `100 +` the run
+number of the first stable tag, at least 104. The offset
 starts above the hand-numbered builds 1–17, as Xcode Cloud's
 [next build number](https://developer.apple.com/documentation/xcode/setting-the-next-build-number-for-xcode-cloud-builds)
 does for existing Mac apps.
@@ -74,14 +77,17 @@ Once every package and the App Store upload have succeeded, the run:
    Every file in `SHA256SUMS` gets a signed SLSA build provenance attestation
    (`gh attestation verify <file> --repo Dstack-TEE/private-ai-gateway`);
 2. publishes it (stable releases become Latest);
-3. advances the updater feeds;
+3. advances the updater feeds, retrying the idempotent publish up to three times
+   on a transient GitHub failure;
 4. dispatches the dedicated npm publisher at the release tag and waits for it.
    npm checks the top-level workflow identity for OIDC trusted publishing.
 
 A MAS failure therefore cannot leave a newly public Direct release. A later
 Direct failure can leave only an uploaded, unsubmitted App Store build. To
-recover, re-run the failed jobs of the tag's `Desktop release` run. Windows Authenticode remains
-optional and does not block the release.
+recover, use **Re-run failed jobs** on the tag's `Desktop release` run, never
+**Re-run all jobs**, which would upload the same App Store build number again
+([Mac App Store](mac-app-store.md#build-and-signing-prerequisites)). Windows
+Authenticode remains optional and does not block the release.
 
 ### Release GitHub App
 

@@ -2,8 +2,9 @@ name: Desktop release
 
 # release-please pushes desktop-v<version> when its release PR merges. This
 # workflow runs only for those tags, so its run number increases only on
-# release tags (starting at 104 after three earlier manual runs) and numbers
-# App Store builds (desktop-native.yml).
+# release tags (from 4, after three earlier manual runs). Stable tags number
+# their App Store build 100 + that run number (desktop-native.yml); beta tags
+# use a run number but upload nothing.
 on:
   push:
     tags:

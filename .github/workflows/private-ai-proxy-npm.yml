@@ -1,7 +1,5 @@
 name: Private AI Proxy npm packages
 
-run-name: Private AI Proxy npm ${{ inputs.release_tag }}${{ inputs.request_id != '' && format(' [{0}]', inputs.request_id) || '' }}
-
 on:
   workflow_dispatch:
     inputs:
@@ -14,11 +12,6 @@ on:
         required: true
         default: false
         type: boolean
-      request_id:
-        description: Optional orchestration identifier
-        required: false
-        default: ''
-        type: string
 
 permissions:
   contents: read
@@ -148,7 +141,7 @@ jobs:
           VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
-          while read -r platform npm_platform arch extension binary_extension; do
+          while read -r platform npm_platform arch _ binary_extension; do
             if [[ "$binary_extension" == none ]]; then binary_extension=""; fi
             target="${npm_platform}-${arch}"
             package_version="${VERSION}-${target}"

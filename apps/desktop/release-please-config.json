@@ -1,6 +1,5 @@
 {
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
-  "bootstrap-sha": "8345ce50da7c98dcb1f2eea7caafc163cbd09642",
   "packages": {
     "apps/desktop": {
       "release-type": "node",
@@ -20,28 +19,8 @@
         },
         {
           "type": "toml",
-          "path": "agent-bridge/Cargo.toml",
-          "jsonpath": "$.package.version"
-        },
-        {
-          "type": "toml",
-          "path": "cli/Cargo.toml",
-          "jsonpath": "$.package.version"
-        },
-        {
-          "type": "toml",
-          "path": "core/Cargo.toml",
-          "jsonpath": "$.package.version"
-        },
-        {
-          "type": "toml",
-          "path": "runtime/Cargo.toml",
-          "jsonpath": "$.package.version"
-        },
-        {
-          "type": "toml",
-          "path": "src-tauri/Cargo.toml",
-          "jsonpath": "$.package.version"
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.package.version"
         },
         {
           "type": "toml",

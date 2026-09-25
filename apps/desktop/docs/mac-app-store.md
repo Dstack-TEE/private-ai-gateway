@@ -75,9 +75,14 @@ period-separated integers of at most 18 characters, and for a Mac app it must
 increase with every upload, across versions
 ([TN2420](https://developer.apple.com/library/archive/technotes/tn2420/_index.html)).
 Releases number it `100 + <Desktop release run number>` (see
-[Release orchestration](distribution.md#release-orchestration)). ASC confirms
-uniqueness and ordering; the repository validates syntax only. For a local unsigned build of a
-stable version on macOS:
+[Release orchestration](distribution.md#release-orchestration)).
+`Desktop release` runs only for `desktop-v*` tags, so its run number counts
+beta and stable release tags alike, from 4. Only stable tags upload, so the
+first upload is `100 +` the run number of the first stable tag, at least 104,
+and builds skip the numbers of beta tags. There is no manual upload path; a new
+build number needs a new release tag. ASC confirms uniqueness and ordering; the
+repository validates syntax only. For a local unsigned build of a stable
+version on macOS:
 
 ```sh
 APPLE_APP_STORE_BUILD_NUMBER=1 npm run dist:app-store -- --bundles app
@@ -110,6 +115,14 @@ Pull requests, pushes to `main` and manual runs only verify. Packaging and
 upload happen only when a stable release tag calls the workflow; the upload
 must run from that tag and passes App Store validation before delivery. The
 signed pkg is also kept as a workflow artifact for review.
+
+A re-run keeps the run number and therefore the build number, and ASC rejects a
+second upload of the same build. If a later job of the tag's `Desktop release`
+run fails after the upload succeeded, use **Re-run failed jobs**, never **Re-run
+all jobs**. It re-runs only the failed jobs and their dependents
+([REST: Re-run failed jobs](https://docs.github.com/en/rest/actions/workflow-runs#re-run-failed-jobs-from-a-workflow-run)),
+so the successful upload is not repeated, and `GITHUB_RUN_NUMBER` does not change
+on a re-run ([Variables](https://docs.github.com/en/actions/reference/workflows-and-actions/variables)).
 
 ## Privacy and export compliance
 
@@ -195,19 +208,21 @@ the Direct updater or install replacement code as a MAS rollback mechanism.
 ## Repository verification
 
 Run from `apps/desktop`: focused Agent contract tests; `cargo test --locked
---workspace`; workspace fmt/clippy; runtime and desktop tests with the
-`mac-app-store` feature; `npm run check` (brand generation, TypeScript and Agent
+--workspace`; workspace fmt/clippy; core, runtime and desktop clippy and tests
+with the `mac-app-store` feature; `npm run check` (TypeScript and Agent
 Integrations tests); `npm run test:release` (includes MAS package tests); and
-`git diff --check`. Both Direct PR verification and the MAS workflow call
-`npm run check`; their `apps/desktop/**` path filters cover renderer, TypeScript
-and script changes. Use `npm run test:agents` for a focused rerun.
+`git diff --check`. In CI, `Desktop Tauri` (`desktop-native.yml`) runs fmt, the
+workspace clippy and tests, `npm run check` and `npm run test:release` on
+Linux; `Desktop Mac App Store` runs the `mac-app-store` feature clippy and
+tests on macos-26, where its macOS-only code compiles. Both run for every
+`apps/desktop/**` change. Use `npm run test:agents` for a focused rerun.
 
 Agent contract tests cover both credential modes, missing helper, quoted Home
 paths, restoration, revocation and rotation. Package tests validate manifest/profile
 and updater/executable policy, including real plist Date/Data decoding; they do
-not validate signatures. Workflow contract tests execute the actual preflight
-scripts with synthetic settings, including missing/invalid signing and upload
-credentials. macOS CI checks Direct migration code as well as the MAS feature.
+not validate signatures. The signing and upload preflights run only in the
+release package job. macOS CI checks Direct migration code as well as the MAS
+feature.
 Agent Integrations tests exercise inactive refresh, explicit Enable, cancellation,
 silent restoration, access loss, shared query publication, request serialization,
 connection gates and non-MAS behavior. Runtime access tests check that inactive
@@ -217,6 +232,6 @@ Agent authority is withdrawn.
 Record verification results against the exact source revision in CI or the
 release audit. Ignored live, OS Keychain, root and subprocess fixtures do not
 count as passed coverage. The macOS-only SMAppService and bookmark branches are
-not executed by Linux all-features tests. The MAS workflow checks those
-branches on macos-26. Signing, native APIs, browser presentation and ASC review
-remain separate gates above.
+not executed on Linux. The MAS workflow checks those branches on macos-26.
+Signing, native APIs, browser presentation and ASC review remain separate gates
+above.

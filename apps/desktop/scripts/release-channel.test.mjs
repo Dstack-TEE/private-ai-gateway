@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
-import path from "node:path";
 import {
   appVersion,
   publishedRelease,
@@ -41,10 +40,11 @@ test("release-please bumps every manifest that carries the app version", async (
   const metadata = JSON.parse(execFileSync("cargo", ["metadata", "--no-deps", "--format-version", "1"], { cwd: appRoot, encoding: "utf8" }));
   assert.equal(appVersion(), version);
   assert.equal((await read("package.json")).version, version);
+  // Every crate inherits the one workspace version.
+  assert.ok(files.includes("Cargo.toml $.workspace.package.version"));
   for (const crate of metadata.packages) {
-    const manifest = path.relative(metadata.workspace_root, crate.manifest_path).split(path.sep).join("/");
     assert.equal(crate.version, version, crate.name);
-    assert.ok(files.includes(`${manifest} $.package.version`), manifest);
+    assert.match(await readFile(crate.manifest_path, "utf8"), /^version\.workspace = true$/m, crate.name);
     assert.ok(files.includes(`Cargo.lock $.package[?(@.name.value == '${crate.name}')].version`), crate.name);
   }
 });
