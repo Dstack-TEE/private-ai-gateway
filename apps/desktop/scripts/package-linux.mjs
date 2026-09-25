@@ -40,8 +40,10 @@ const debPrerm = path.join(appRoot, "src-tauri/installer/deb-prerm.sh");
 const tauri = JSON.parse(await readFile(path.join(appRoot, "src-tauri/tauri.conf.json"), "utf8"));
 const desktopName = tauri.productName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 const cliName = `${desktopName}-cli`;
-// Debian Policy 5.6.2: the maintainer is a name and an email address.
-export const maintainer = `${tauri.bundle.publisher} <support@phala.com>`;
+// Debian Policy 5.6.2: the maintainer is a name and an email address. The
+// support contact is package.json's `bugs.email`.
+const { bugs } = JSON.parse(await readFile(path.join(appRoot, "package.json"), "utf8"));
+export const maintainer = `${tauri.bundle.publisher} <${bugs.email}>`;
 
 const linuxPackages = {
   desktop: {

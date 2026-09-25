@@ -180,11 +180,18 @@ inconclusive. Review the complete report before updating the inventory.
 
 Product identity is committed where each consumer reads it:
 
-- `src-tauri/tauri.conf.json`: product name, identifier, deep-link scheme,
-  bundle metadata, installer images and the DMG layout. The Linux packages
-  (`scripts/package-linux.mjs`) take their names and descriptions from it too.
-- `core/src/brand.rs` for Rust and `src/renderer/brand/brand.ts` for the
-  renderer: names, links, service defaults and theme colors.
+- `src-tauri/tauri.conf.json` is the source of the product name (also the main
+  window title), identifier, deep-link scheme, publisher, bundle metadata,
+  installer images and the DMG layout. The Linux packages
+  (`scripts/package-linux.mjs`) and the renderer (`src/renderer/brand/brand.ts`
+  imports `productName`) read it directly. `core/src/brand.rs` repeats the
+  product name, identifier and publisher for Rust, and its unit test fails when
+  they differ from the config. The identifier names the data directory and
+  credential namespace, so a mismatch would split user data.
+- `core/src/brand.rs` and `src/renderer/brand/brand.ts` also hold the byline and
+  service defaults; `brand.rs` has the support link.
+- `package.json` `bugs.email`: the support contact, used as the Linux package
+  maintainer address.
 - Images: `src-tauri/icons/` (from `tauri icon`, plus the Icon Composer project
   `AppIcon.icon` that `npm run build` compiles on macOS), `assets/tray/trayTemplate@2x.png`,
   `src/renderer/brand/app-icon-{light,dark}.png`, and the installer images
@@ -201,8 +208,8 @@ npm exec tauri icon brand/dstack/icon/app-icon.png -- -o /tmp/icons
 ```
 
 A second brand replaces exactly these values and images. It can do this in a
-`tauri build --config` overlay for the Tauri values, plus its own `brand.rs`
-and `brand.ts`. Its identifier gives it a separate data and credential
+`tauri build --config` overlay for the Tauri values, its own `brand.rs` and
+`brand.ts`, and its support contact. Its identifier gives it a separate data and credential
 namespace. The default identifier `org.dstack.private-ai-proxy` also differs
 from earlier beta builds.
 

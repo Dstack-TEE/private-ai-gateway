@@ -4,6 +4,9 @@
   "private": true,
   "description": "Private AI Proxy desktop app, web UI and release tooling",
   "license": "Apache-2.0",
+  "bugs": {
+    "email": "support@phala.com"
+  },
   "type": "module",
   "scripts": {
     "refresh:codex-catalog": "node scripts/refresh-codex-catalog.mjs",
@@ -22,7 +25,7 @@
     "generate:contracts": "node scripts/generate-contracts.mjs",
     "test:agents": "node --test scripts/agent-integrations.test.mjs",
     "test:probe": "node --test scripts/probe-model-endpoints.test.mjs",
-    "test:release": "node --test scripts/create-update-manifest.test.mjs scripts/package-app-store.test.mjs scripts/package-cli.test.mjs scripts/package-linux.test.mjs scripts/npm-install.test.mjs scripts/npm-registry.test.mjs scripts/package-npm.test.mjs scripts/release-channel.test.mjs scripts/release-workflow.test.mjs",
+    "test:release": "node --test scripts/create-update-manifest.test.mjs scripts/package-app-store.test.mjs scripts/package-cli.test.mjs scripts/package-linux.test.mjs scripts/npm-install.test.mjs scripts/npm-registry.test.mjs scripts/package-npm.test.mjs scripts/release-channel.test.mjs scripts/release-config.test.mjs scripts/release-workflow.test.mjs",
     "package:npm": "node scripts/package-npm.mjs"
   },
   "engines": {

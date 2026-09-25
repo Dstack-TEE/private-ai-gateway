@@ -3,7 +3,7 @@ import { MAC_APP_STORE_DISTRIBUTION, validateAppStoreBuildNumber } from "./distr
 
 // Release-only Tauri settings from the CI environment, merged by
 // `tauri build --config <JSON>` over the committed tauri.conf.json.
-export function releaseConfig(buildDistribution, env = process.env) {
+export function releaseConfig(buildDistribution, env = process.env, version = appVersion()) {
   const appStoreBuildNumber = env.APPLE_APP_STORE_BUILD_NUMBER?.trim();
   const updaterKey = env.TAURI_UPDATER_PUBLIC_KEY?.trim();
   const updaterEndpoint = env.TAURI_UPDATER_ENDPOINT?.trim();
@@ -15,14 +15,14 @@ export function releaseConfig(buildDistribution, env = process.env) {
   if (appStoreBuildNumber) {
     if (!appStore) throw new Error("APPLE_APP_STORE_BUILD_NUMBER is only valid for Mac App Store builds");
     validateAppStoreBuildNumber(appStoreBuildNumber);
-    if (versionRelease(appVersion()).channel !== "stable") throw new Error("Mac App Store releases must use a stable version");
+    if (versionRelease(version).channel !== "stable") throw new Error("Mac App Store releases must use a stable version");
   }
   if (Boolean(updaterKey) !== Boolean(updaterEndpoint)) {
     throw new Error("Set both TAURI_UPDATER_PUBLIC_KEY and TAURI_UPDATER_ENDPOINT, or neither");
   }
   if (updaterEndpoint) {
     const endpoint = new URL(updaterEndpoint);
-    if (!endpoint.pathname.endsWith(`/${versionRelease(appVersion()).feedTag}/latest.json`)) {
+    if (!endpoint.pathname.endsWith(`/${versionRelease(version).feedTag}/latest.json`)) {
       throw new Error("Updater endpoint does not match the release channel");
     }
     if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password) {

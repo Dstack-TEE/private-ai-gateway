@@ -1,28 +1,11 @@
 // Product identity shown by the renderer; see "Branding" in apps/desktop/README.md.
+import { productName } from "../../../src-tauri/tauri.conf.json";
 import appIconLight from "./app-icon-light.png";
 import appIconDark from "./app-icon-dark.png";
 
 export const brand = {
-  ...{
-    "id": "dstack",
-    "productName": "Private AI Proxy",
-    "shortName": "Proxy",
-    "organizationName": "Dstack TEE",
-    "byline": "by dstack TEE",
-    "tagline": "The open framework for confidential AI",
-    "homepageUrl": "https://dstack.org",
-    "supportUrl": "https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/quickstart.md",
-    "service": {
-      "name": "RedPill",
-      "defaultUrl": "https://tee.redpill.ai",
-      "keyLabel": "RedPill API key"
-    },
-    "theme": {
-      "accentLight": "#8BC34A",
-      "accentDark": "#A5D66D",
-      "brandColor": "#83B83F",
-      "iconBackground": "#579532"
-    }
-  },
+  productName,
+  byline: "by dstack TEE",
+  service: { defaultUrl: "https://tee.redpill.ai" },
   appIcon: { light: appIconLight, dark: appIconDark },
 } as const;
