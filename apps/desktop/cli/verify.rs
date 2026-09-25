@@ -10,6 +10,7 @@ use crate::aci::verifier::DEFAULT_DCAP_PCCS_URL;
 use crate::args::VerifyArgs;
 use crate::checks::{
     run_report_checks, ChannelEvidence, EstablishedIdentity, QuoteSource, ReportCheckContext,
+    ReportOutcome, VerifierPolicy,
 };
 use crate::client::{host_of, normalize_base_url, random_nonce_hex, AciClient};
 use crate::transcript::Transcript;
@@ -26,25 +27,22 @@ pub struct ServiceVerification {
     pub base_url: String,
     pub host: String,
     pub observed_spki: Option<String>,
+    tls_pins: Vec<String>,
 }
 
 impl ServiceVerification {
-    /// The pin set for every later connection to this host: each TLS key the
-    /// verified keyset attests for it (§9.1(6) accepts any of them, so a
-    /// VERIFIED run's observed key is among them). Empty without an identity.
+    /// The pin set for every later connection to this host: the attested TLS
+    /// keys the report declares its clients pin (§4.2), which id-6 required
+    /// the observed key to be among. Empty unless id-6 passed.
     pub fn attested_spkis(&self) -> Vec<String> {
-        self.identity
-            .iter()
-            .flat_map(|identity| identity.keyset.tls_keys_for_host(&self.host))
-            .map(|key| key.spki_sha256_hex.clone())
-            .collect()
+        self.tls_pins.clone()
     }
 }
 
 pub async fn verify_service(
     base_url: &str,
     nonce_arg: Option<&str>,
-    accepted_composes: &[String],
+    policy: &VerifierPolicy,
     require_production_os: bool,
     explain: bool,
 ) -> Result<ServiceVerification, String> {
@@ -67,14 +65,14 @@ pub async fn verify_service(
     let mut transcript = Transcript::default();
     let channel = match &observed_spki {
         Some(spki) => ChannelEvidence::Observed {
-            host: &host,
+            origin: &base_url,
             spki_sha256: spki,
         },
         None => ChannelEvidence::NotObserved {
             reason: "no TLS handshake observed (plain-HTTP base URL)",
         },
     };
-    let identity = run_report_checks(
+    let ReportOutcome { identity, tls_pins } = run_report_checks(
         &mut transcript,
         &report,
         ReportCheckContext {
@@ -85,7 +83,7 @@ pub async fn verify_service(
                 pccs_url: DEFAULT_DCAP_PCCS_URL,
             },
             channel,
-            accepted_composes,
+            policy,
             require_production_os,
             explain,
         },
@@ -100,6 +98,7 @@ pub async fn verify_service(
         base_url,
         host,
         observed_spki,
+        tls_pins,
     })
 }
 
@@ -107,7 +106,7 @@ pub async fn run(args: VerifyArgs, require_production_os: bool) -> Result<i32, S
     let verification = verify_service(
         &args.base_url,
         args.nonce.as_deref(),
-        &args.accepted_composes,
+        &args.policy.verifier_policy()?,
         require_production_os,
         args.explain,
     )

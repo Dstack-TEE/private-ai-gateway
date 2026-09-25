@@ -337,8 +337,8 @@ mod tests {
         t.skip(ID_1, "quote collateral offline", "quote collateral offline");
         t.skip(
             ID_5,
-            "custody policy not implemented in this CLI yet",
-            "custody policy not implemented",
+            "no custody policy configured",
+            "no custody policy configured",
         );
         // id-1 skipped: no failure, but not fully verified — PARTIAL, and the
         // exit code / JSON `verified` agree by gating on the same predicate.
@@ -346,7 +346,7 @@ mod tests {
         assert_eq!(t.count(Status::Pass), 1);
         assert_eq!(
             t.verdict_line(),
-            "PARTIAL — hardware root not verified (1 pass, 2 skipped: quote collateral offline, custody policy not implemented)"
+            "PARTIAL — hardware root not verified (1 pass, 2 skipped: quote collateral offline, no custody policy configured)"
         );
     }
 

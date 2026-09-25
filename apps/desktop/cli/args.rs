@@ -2,7 +2,8 @@
 
 use clap::{Args, Subcommand};
 
-use crate::checks::RequiredClaim;
+use crate::aci::verifier::{CustodyPolicy, CustodyPolicyError};
+use crate::checks::{RequiredClaim, VerifierPolicy};
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -38,10 +39,10 @@ pub enum Command {
     Serve(ServeArgs),
 }
 
-#[derive(Debug, Args)]
-pub struct VerifyArgs {
-    #[arg(help = "Base URL of the ACI service to verify.")]
-    pub base_url: String,
+/// The verifier policy (spec 1.3) every command that appraises a report runs
+/// under. Names follow the gateway's upstream policy configuration.
+#[derive(Debug, Default, Args)]
+pub struct PolicyArgs {
     #[arg(
         long = "accept-compose",
         value_name = "HEX",
@@ -50,6 +51,64 @@ pub struct VerifyArgs {
                 the provenance yourself."
     )]
     pub accepted_composes: Vec<String>,
+    #[arg(
+        long = "accept-subject",
+        value_name = "app-id:0xHEX",
+        help = "Measured dstack app-id to accept for key custody (spec 9.1(5)); \
+                repeatable. Custody is checked when this and \
+                --accept-dstack-kms-root-public-key are given; with neither, id-5 is \
+                skipped."
+    )]
+    pub accepted_subjects: Vec<String>,
+    #[arg(
+        long = "accept-dstack-kms-root-public-key",
+        value_name = "HEX",
+        help = "dstack KMS root public key the receipt-key custody chain must end at \
+                (spec 3.3, 9.1(5)); repeatable."
+    )]
+    pub accepted_dstack_kms_root_public_keys: Vec<String>,
+}
+
+impl PolicyArgs {
+    /// Validate the flags once, before any report is fetched.
+    pub fn verifier_policy(&self) -> Result<VerifierPolicy, String> {
+        let custody_configured = !(self.accepted_subjects.is_empty()
+            && self.accepted_dstack_kms_root_public_keys.is_empty());
+        let custody = custody_configured
+            .then(|| {
+                CustodyPolicy::new(
+                    self.accepted_subjects.clone(),
+                    self.accepted_dstack_kms_root_public_keys.clone(),
+                )
+            })
+            .transpose()
+            .map_err(|e| match e {
+                CustodyPolicyError::EmptySubjects => {
+                    "--accept-dstack-kms-root-public-key needs --accept-subject".to_string()
+                }
+                CustodyPolicyError::EmptyKmsRoots => {
+                    "--accept-subject needs --accept-dstack-kms-root-public-key".to_string()
+                }
+                CustodyPolicyError::InvalidSubject(subject) => {
+                    format!("invalid --accept-subject {subject:?}: expected app-id:0x<hex>")
+                }
+                CustodyPolicyError::InvalidKmsRootPublicKey(e) => {
+                    format!("invalid --accept-dstack-kms-root-public-key: {e}")
+                }
+            })?;
+        Ok(VerifierPolicy {
+            accepted_composes: self.accepted_composes.clone(),
+            custody,
+        })
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct VerifyArgs {
+    #[arg(help = "Base URL of the ACI service to verify.")]
+    pub base_url: String,
+    #[command(flatten)]
+    pub policy: PolicyArgs,
     #[arg(
         long,
         help = "Nonce to send with the attestation request; a fresh random one is \
@@ -76,14 +135,8 @@ pub struct AuditArgs {
         help = "Path to the saved spec 9.1 attestation report JSON."
     )]
     pub report: String,
-    #[arg(
-        long = "accept-compose",
-        value_name = "HEX",
-        help = "Compose hash to accept (spec 1.3 verifier policy); repeatable. Without \
-                it the compose measurement is verified and reported, and you appraise \
-                the provenance yourself."
-    )]
-    pub accepted_composes: Vec<String>,
+    #[command(flatten)]
+    pub policy: PolicyArgs,
     #[arg(
         long,
         value_name = "FILE",
@@ -146,14 +199,8 @@ pub struct AuditArgs {
 pub struct SendArgs {
     #[arg(help = "Base URL of the ACI service to send the request to.")]
     pub base_url: String,
-    #[arg(
-        long = "accept-compose",
-        value_name = "HEX",
-        help = "Compose hash to accept (spec 1.3 verifier policy); repeatable. Without \
-                it the compose measurement is verified and reported, and you appraise \
-                the provenance yourself."
-    )]
-    pub accepted_composes: Vec<String>,
+    #[command(flatten)]
+    pub policy: PolicyArgs,
     #[arg(
         long,
         value_name = "MODEL",
@@ -214,14 +261,8 @@ pub struct SendArgs {
 pub struct SessionsArgs {
     #[arg(help = "Base URL of the ACI service whose attested sessions to audit.")]
     pub base_url: String,
-    #[arg(
-        long = "accept-compose",
-        value_name = "HEX",
-        help = "Compose hash to accept (spec 1.3 verifier policy); repeatable. Without \
-                it the compose measurement is verified and reported, and you appraise \
-                the provenance yourself."
-    )]
-    pub accepted_composes: Vec<String>,
+    #[command(flatten)]
+    pub policy: PolicyArgs,
     #[arg(
         long,
         value_name = "MODEL",
@@ -244,14 +285,8 @@ pub struct SessionsArgs {
 pub struct ServeArgs {
     #[arg(help = "Base URL of the ACI service to proxy to.")]
     pub base_url: String,
-    #[arg(
-        long = "accept-compose",
-        value_name = "HEX",
-        help = "Compose hash to accept (spec 1.3 verifier policy); repeatable. Without \
-                it the compose measurement is verified and reported, and you appraise \
-                the provenance yourself."
-    )]
-    pub accepted_composes: Vec<String>,
+    #[command(flatten)]
+    pub policy: PolicyArgs,
     #[arg(
         long,
         value_name = "ADDR:PORT",
@@ -329,5 +364,44 @@ mod tests {
         );
         let err = session_id("not-hex").unwrap_err();
         assert!(err.contains("spec 5.3"), "{err}");
+    }
+
+    // The generator point, a valid compressed secp256k1 key.
+    const ROOT: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    fn policy(subjects: &[&str], roots: &[&str]) -> Result<VerifierPolicy, String> {
+        PolicyArgs {
+            accepted_composes: Vec::new(),
+            accepted_subjects: subjects.iter().map(|s| s.to_string()).collect(),
+            accepted_dstack_kms_root_public_keys: roots.iter().map(|s| s.to_string()).collect(),
+        }
+        .verifier_policy()
+    }
+
+    #[test]
+    fn custody_flags_build_a_policy_or_name_the_missing_flag() {
+        assert!(policy(&[], &[]).unwrap().custody.is_none());
+        assert!(policy(&["app-id:0xAB"], &[ROOT]).unwrap().custody.is_some());
+
+        let err = policy(&[], &[ROOT]).unwrap_err();
+        assert_eq!(
+            err,
+            "--accept-dstack-kms-root-public-key needs --accept-subject"
+        );
+        let err = policy(&["app-id:0xab"], &[]).unwrap_err();
+        assert_eq!(
+            err,
+            "--accept-subject needs --accept-dstack-kms-root-public-key"
+        );
+        let err = policy(&["0xab"], &[ROOT]).unwrap_err();
+        assert_eq!(
+            err,
+            r#"invalid --accept-subject "0xab": expected app-id:0x<hex>"#
+        );
+        let err = policy(&["app-id:0xab"], &["02zz"]).unwrap_err();
+        assert!(
+            err.starts_with("invalid --accept-dstack-kms-root-public-key: "),
+            "{err}"
+        );
     }
 }

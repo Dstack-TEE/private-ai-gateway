@@ -35,14 +35,26 @@ fixed accepted set, composed with request pins by intersection, and
 `--require-claim <name[=source]>` derives the pin set from the audited
 current sessions, refreshing it when the service refuses a superseded pin.
 
-The TLS channel is pinned to every key the verified keyset attests for the
-host. A keyset rotation blocks forwarding until a fresh verification passes:
-a changed `X-ACI-Keyset-Digest` on a response triggers it, and so does a
-handshake the pin refuses, since a rotated TLS key aborts the connection
-before any response exists. A failed re-verification keeps the old pin.
-After a successful one, the refused request is sent once more if the
-identity it was admitted under still holds, and otherwise gets a retryable
-503.
+The TLS channel is pinned to the keys the verified report declares for the
+host: every attested TLS key when none is domain-scoped, otherwise only the
+entry its `downstream_tls_binding` names (spec 4.2). A keyset rotation blocks
+forwarding until a fresh verification passes: a changed `X-ACI-Keyset-Digest`
+on a response triggers it, and so does a handshake the pin refuses, since a
+rotated TLS key aborts the connection before any response exists. A failed
+re-verification keeps the old pin. After a successful one, the refused
+request is sent once more if the identity it was admitted under still holds,
+and otherwise gets a retryable 503.
+
+Custody (id-5) is checked when a custody policy is given: repeatable
+`--accept-dstack-kms-root-public-key` together with repeatable
+`--accept-subject app-id:0x<hex>`, the measured dstack app-id. The receipt
+key's dstack KMS signature chain must then end at an accepted root, anchored
+on the app-id the verified event log measures. The report's self-asserted
+`image_digest` is never an anchor: nothing measured corroborates it (spec
+4.1), so any app under the same KMS root could claim it. Without a policy
+id-5 is an honest skip; no trust anchors are built in. The flags sit beside
+`--accept-compose` on `verify`, `audit`, `sessions`, `send` and `serve`, and
+`serve`'s `ready` event reports them under `policy`.
 
 All five commands accept `--require-production-os`. Under that strict policy,
 the client reads the RTMR3-bound `os-image-hash` and requires it to be in the
@@ -61,10 +73,13 @@ boot measurements. See
 
 Every relying-party verification step lives in this package's `aci/` modules:
 quote appraisal, the §9.1(2) binding chain, §3.1 TLS selection, and receipt
-signatures. The neutral `aci-protocol` crate supplies only wire types, JCS,
-attestation-statement construction, and receipt canonicalization. The CLI maps
-verification outcomes to a pass, fail, or honest skip and does not import a
-gateway implementation.
+signatures. When the keyset has domain-scoped TLS keys, the channel check and
+the pin use only the entry the report's `downstream_tls_binding` declares
+(§4.2), the same selection Gateway makes for its upstreams. The neutral
+`aci-protocol` crate supplies only wire types, JCS, attestation-statement
+construction, and receipt canonicalization. The CLI maps verification
+outcomes to a pass, fail, or honest skip and does not import a gateway
+implementation.
 
 Differences that are deliberate — the CLI's honest skips, and checks only a
 relying party can run — are recorded in

@@ -23,7 +23,7 @@ use crate::aci::receipt::receipt_signing_input;
 use crate::aci::types::{AttestationReport, WorkloadKeyset};
 use crate::aci::verifier::{
     appraise_report, dstack_rtmr3_event, AppraisalInputs, CheckId, CheckResult, CustodyEvidence,
-    DstackEventLog, Outcome,
+    CustodyPolicy, DstackEventLog, Outcome,
 };
 pub use crate::aci::verifier::{ChannelEvidence, QuoteSource};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -59,15 +59,23 @@ pub struct ReportCheckContext<'a> {
     pub expiry_skipped: bool,
     pub quote: QuoteSource<'a>,
     pub channel: ChannelEvidence<'a>,
-    /// Verifier policy (§1.3): compose hashes this caller accepts. Empty
-    /// means the measurement is verified and reported, not pinned — the
-    /// operator appraises the provenance themselves.
-    pub accepted_composes: &'a [String],
+    pub policy: &'a VerifierPolicy,
     /// Verifier policy (§1.3): appraise the RTMR3 `os-image-hash` against the
     /// reviewed production allowlist. A separate dstack verifier must first
     /// bind that hash to MRTD/RTMR0-2 for the same evidence.
     pub require_production_os: bool,
     pub explain: bool,
+}
+
+/// The verifier policy (§1.3) a report is appraised under.
+#[derive(Clone, Debug, Default)]
+pub struct VerifierPolicy {
+    /// Compose hashes this caller accepts. Empty means the measurement is
+    /// verified and reported, not pinned — the operator appraises the
+    /// provenance themselves.
+    pub accepted_composes: Vec<String>,
+    /// The §9.1(5) custody policy. Without one, id-5 is an honest skip.
+    pub custody: Option<CustodyPolicy>,
 }
 
 /// The workload identity a verified report establishes (§9.1): the keyset
@@ -114,6 +122,15 @@ pub fn established_identity(report: &AttestationReport) -> Result<EstablishedIde
     })
 }
 
+/// What the id-1–id-6 checks establish for the caller to act on.
+pub struct ReportOutcome {
+    /// The identity id-2 established, when it did.
+    pub identity: Option<EstablishedIdentity>,
+    /// The attested TLS SPKIs id-6 bound for this deployment's clients to pin
+    /// (§4.2 `downstream_tls_binding`); empty unless id-6 passed.
+    pub tls_pins: Vec<String>,
+}
+
 /// Run the id-1–id-6 checks over a parsed report, appending to `transcript`.
 ///
 /// Returns `Err` only for protocol-gate problems (the report is not an
@@ -122,7 +139,7 @@ pub async fn run_report_checks(
     transcript: &mut Transcript,
     report: &AttestationReport,
     cx: ReportCheckContext<'_>,
-) -> Result<Option<EstablishedIdentity>, String> {
+) -> Result<ReportOutcome, String> {
     transcript.workload_keyset_digest = Some(report.workload_keyset_digest.clone());
     // The checks, their order, and what each outcome means are the shared
     // appraisal's (`aci::verifier`); this renders the outcomes.
@@ -132,12 +149,13 @@ pub async fn run_report_checks(
         now_secs: cx.now_secs,
         expiry_waived: cx.expiry_skipped,
         quote: cx.quote,
-        accepted_composes: cx.accepted_composes,
-        // §9.1(5) needs a custody policy this CLI does not implement yet
-        // (docs/reviews/aci-spec-conformance-gaps.md item 1).
-        custody: CustodyEvidence {
-            reason: "custody policy not implemented in this CLI yet \
-                     (no client policy is configured)",
+        accepted_composes: &cx.policy.accepted_composes,
+        custody: match &cx.policy.custody {
+            Some(policy) => CustodyEvidence::DstackKms { policy },
+            None => CustodyEvidence::NotConfigured {
+                reason: "no custody policy configured (--accept-dstack-kms-root-public-key \
+                         with --accept-subject)",
+            },
         },
         channel: cx.channel,
         explain: cx.explain,
@@ -162,10 +180,13 @@ pub async fn run_report_checks(
             );
         }
     }
-    Ok(appraisal.identity.map(|binding| EstablishedIdentity {
-        keyset: binding.keyset,
-        keyset_digest: binding.keyset_digest,
-    }))
+    Ok(ReportOutcome {
+        identity: appraisal.identity.map(|binding| EstablishedIdentity {
+            keyset: binding.keyset,
+            keyset_digest: binding.keyset_digest,
+        }),
+        tls_pins: appraisal.tls_pins,
+    })
 }
 
 fn run_production_os_policy(transcript: &mut Transcript, report: &AttestationReport) {
@@ -873,6 +894,11 @@ mod tests {
     };
     use crate::transcript::Status;
 
+    static NO_POLICY: VerifierPolicy = VerifierPolicy {
+        accepted_composes: Vec::new(),
+        custody: None,
+    };
+
     fn offline_cx<'a>(nonce: Option<&'a str>, now_secs: u64) -> ReportCheckContext<'a> {
         ReportCheckContext {
             nonce,
@@ -881,7 +907,7 @@ mod tests {
             quote: QuoteSource::Offline {
                 reason: "quote collateral offline",
             },
-            accepted_composes: &[],
+            policy: &NO_POLICY,
             require_production_os: false,
             channel: ChannelEvidence::Unobservable {
                 reason: "offline audit: no live TLS channel observed",
@@ -975,31 +1001,89 @@ mod tests {
         assert_eq!(status_of(&t, "id-3"), Status::Skip);
     }
 
+    /// A fixture-shaped report over `tls_public_keys`, bound to `TEST_NONCE`.
+    fn report_with_tls(tls_public_keys: Value, evidence: Value) -> AttestationReport {
+        let mut report = vector_report();
+        report.attestation.workload_keyset["tls_public_keys"] = tls_public_keys;
+        let digest = identity::workload_keyset_digest(&report.attestation.workload_keyset).unwrap();
+        let statement = identity::attestation_statement(&digest, Some(TEST_NONCE)).unwrap();
+        report.attestation.report_data_hex = hex::encode(identity::report_data(&statement));
+        report.workload_keyset_digest = digest;
+        report.attestation.evidence = evidence;
+        report
+    }
+
+    /// Evidence declaring the entry clients of this deployment pin (§4.2).
+    fn declaring(domain: &str, spki_sha256: &str) -> Value {
+        serde_json::json!({
+            "downstream_tls_binding": { "domain": domain, "spki_sha256": spki_sha256 },
+        })
+    }
+
+    async fn observe(
+        report: &AttestationReport,
+        origin: &str,
+        spki: &str,
+    ) -> (Status, Vec<String>) {
+        let mut t = Transcript::default();
+        let mut cx = offline_cx(Some(TEST_NONCE), SERVED_AT);
+        cx.channel = ChannelEvidence::Observed {
+            origin,
+            spki_sha256: spki,
+        };
+        let outcome = run_report_checks(&mut t, report, cx).await.unwrap();
+        (status_of(&t, "id-6"), outcome.tls_pins)
+    }
+
     #[tokio::test]
-    async fn channel_binding_matches_domain_scoped_entry() {
+    async fn channel_binding_matches_the_declared_domain_scoped_entry() {
         let report = vector_report();
-        let identity = established_identity(&report).unwrap();
-        let spki = identity.keyset.tls_public_keys[0].spki_sha256_hex.clone();
-        let domain = identity.keyset.tls_public_keys[0].domain.clone().unwrap();
+        let declared = "c0".repeat(32);
 
-        let mut t = Transcript::default();
-        let mut cx = offline_cx(Some(TEST_NONCE), SERVED_AT);
-        cx.channel = ChannelEvidence::Observed {
-            host: &domain,
-            spki_sha256: &spki,
-        };
-        run_report_checks(&mut t, &report, cx).await.unwrap();
-        assert_eq!(status_of(&t, "id-6"), Status::Pass);
+        let (status, pins) = observe(&report, "https://api.example.com", &declared).await;
+        assert_eq!(status, Status::Pass);
+        assert_eq!(pins, vec![declared.clone()]);
 
-        // Same SPKI presented for a hostname the keyset does not scope it to.
-        let mut t = Transcript::default();
-        let mut cx = offline_cx(Some(TEST_NONCE), SERVED_AT);
-        cx.channel = ChannelEvidence::Observed {
-            host: "other.example.com",
-            spki_sha256: &spki,
-        };
-        run_report_checks(&mut t, &report, cx).await.unwrap();
-        assert_eq!(status_of(&t, "id-6"), Status::Fail);
+        // Same SPKI presented for a hostname the report does not declare it for.
+        let (status, pins) = observe(&report, "https://other.example.com", &declared).await;
+        assert_eq!(status, Status::Fail);
+        assert!(pins.is_empty());
+    }
+
+    #[tokio::test]
+    async fn channel_binding_pins_only_the_declared_entry_among_host_keys() {
+        // Both entries apply to the host (§3.1), but the report declares that
+        // clients of this deployment pin the first (§4.2).
+        let declared = "c0".repeat(32);
+        let other = "d1".repeat(32);
+        let report = report_with_tls(
+            serde_json::json!([
+                { "domain": "api.example.com", "spki_sha256": declared },
+                { "domain": null, "spki_sha256": other },
+            ]),
+            declaring("api.example.com", &declared),
+        );
+
+        let (status, pins) = observe(&report, "https://api.example.com", &declared).await;
+        assert_eq!(status, Status::Pass);
+        assert_eq!(pins, vec![declared]);
+
+        let (status, pins) = observe(&report, "https://api.example.com", &other).await;
+        assert_eq!(status, Status::Fail);
+        assert!(pins.is_empty());
+    }
+
+    #[tokio::test]
+    async fn channel_binding_fails_without_a_declared_entry() {
+        let declared = "c0".repeat(32);
+        let report = report_with_tls(
+            serde_json::json!([{ "domain": "api.example.com", "spki_sha256": declared }]),
+            serde_json::json!({}),
+        );
+
+        let (status, pins) = observe(&report, "https://api.example.com", &declared).await;
+        assert_eq!(status, Status::Fail);
+        assert!(pins.is_empty());
     }
 
     static REQUEST_DIGEST: std::sync::LazyLock<BodyDigest> =

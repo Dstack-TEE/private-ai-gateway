@@ -6,7 +6,11 @@
 
 use serde_json::Value;
 
-use super::dstack::verify_dstack_compose_measurement;
+use super::channel::declared_tls_pins;
+use super::dstack::{
+    dstack_app_id, verify_dstack_compose_measurement, verify_dstack_kms_receipt_custody,
+};
+use super::policy::CustodyPolicy;
 use super::quote::{
     parse_quote_evidence, quote_binds_report_data, verify_quote_to_root, QuoteStepError,
 };
@@ -80,16 +84,27 @@ pub enum QuoteSource<'a> {
     Offline { reason: &'a str },
 }
 
-pub struct CustodyEvidence<'a> {
-    pub reason: &'a str,
+/// `NotConfigured` is a caller with no custody policy: §9.1(5) is recorded as
+/// unevaluable, never passed.
+pub enum CustodyEvidence<'a> {
+    DstackKms { policy: &'a CustodyPolicy },
+    NotConfigured { reason: &'a str },
 }
 
+/// `Observed` is a live channel to `origin` that presented `spki_sha256`.
 /// `Unobservable` is an offline audit; `NotObserved` is a live run that could
 /// not see its channel, which §1.1 makes a failure rather than a skip.
 pub enum ChannelEvidence<'a> {
-    Observed { host: &'a str, spki_sha256: &'a str },
-    Unobservable { reason: &'a str },
-    NotObserved { reason: &'a str },
+    Observed {
+        origin: &'a str,
+        spki_sha256: &'a str,
+    },
+    Unobservable {
+        reason: &'a str,
+    },
+    NotObserved {
+        reason: &'a str,
+    },
 }
 
 pub struct AppraisalInputs<'a> {
@@ -110,6 +125,9 @@ pub struct AppraisalInputs<'a> {
 pub struct Appraisal {
     pub results: Vec<CheckResult>,
     pub identity: Option<ReportBinding>,
+    /// The attested TLS SPKIs the channel check bound for this deployment's
+    /// clients to pin (§4.2); empty unless it passed.
+    pub tls_pins: Vec<String>,
 }
 
 /// Checks run in dependency order and are returned in §9.1 step order. A step
@@ -154,14 +172,20 @@ pub async fn appraise_report(inputs: AppraisalInputs<'_>) -> Result<Appraisal, S
     let keyset = identity.as_ref().map(|b| &b.keyset);
     results.push(appraise_expiry(&inputs, keyset));
 
-    results.push(appraise_provenance(&inputs, verified_quote.as_ref()).await);
+    let (provenance_result, app_id) = appraise_provenance(&inputs, verified_quote.as_ref()).await;
+    results.push(provenance_result);
 
-    results.push(appraise_custody(&inputs, keyset));
+    results.push(appraise_custody(&inputs, keyset, app_id.as_deref()));
 
-    results.push(appraise_channel(&inputs, keyset));
+    let (channel_result, tls_pins) = appraise_channel(&inputs, keyset);
+    results.push(channel_result);
 
     results.sort_by_key(|r| r.id);
-    Ok(Appraisal { results, identity })
+    Ok(Appraisal {
+        results,
+        identity,
+        tls_pins,
+    })
 }
 
 fn pass(id: CheckId, detail: impl Into<String>) -> CheckResult {
@@ -325,11 +349,12 @@ fn appraise_expiry(inputs: &AppraisalInputs<'_>, keyset: Option<&WorkloadKeyset>
     }
 }
 
-/// §9.1(4). Verify that published provenance is bound into RTMR3.
-pub(super) async fn appraise_provenance(
+/// §9.1(4). Verify that published provenance is bound into RTMR3. Returns the
+/// RTMR3-measured app-id, which §9.1(5) anchors on.
+async fn appraise_provenance(
     inputs: &AppraisalInputs<'_>,
     quote_report: Option<&dcap_qvl::quote::Report>,
-) -> CheckResult {
+) -> (CheckResult, Option<Vec<u8>>) {
     let evidence = &inputs.report.attestation.evidence;
     let provenance: &SourceProvenance = &inputs.report.attestation.source_provenance;
     let declared = match (
@@ -342,12 +367,15 @@ pub(super) async fn appraise_provenance(
         // §4.1: a verifier MUST reject a report without acceptable
         // provenance, measured compose or not.
         _ => {
-            return failed_with(
-                CheckId::Provenance,
-                FailureCause::Provenance(
-                    "the report declares no source provenance (spec 4.1)".to_string(),
+            return (
+                failed_with(
+                    CheckId::Provenance,
+                    FailureCause::Provenance(
+                        "the report declares no source provenance (spec 4.1)".to_string(),
+                    ),
+                    "the report declares no source provenance (spec 4.1)",
                 ),
-                "the report declares no source provenance (spec 4.1)",
+                None,
             )
         }
     };
@@ -373,16 +401,17 @@ pub(super) async fn appraise_provenance(
                 "no app_compose",
             ),
         };
-        return result;
+        return (result, None);
     };
     let events = match verify_dstack_event_log(evidence, quote_report) {
         Ok(events) => events,
-        Err(e) => return failed(CheckId::Provenance, FailureCause::Evidence(e)),
+        Err(e) => return (failed(CheckId::Provenance, FailureCause::Evidence(e)), None),
     };
     let measured = match verify_dstack_compose_measurement(evidence, &events) {
         Ok(measured) => measured,
-        Err(e) => return failed(CheckId::Provenance, FailureCause::Evidence(e)),
+        Err(e) => return (failed(CheckId::Provenance, FailureCause::Evidence(e)), None),
     };
+    let app_id = dstack_app_id(&events).ok();
     let explain = inputs
         .explain
         .then(|| format!("sha256(app_compose) = measured compose-hash = {measured}; RTMR3 replay matched the quote"));
@@ -408,82 +437,252 @@ pub(super) async fn appraise_provenance(
             ),
         )
     };
-    result.with_explain(explain)
+    (result.with_explain(explain), app_id)
 }
 
-fn appraise_custody(inputs: &AppraisalInputs<'_>, keyset: Option<&WorkloadKeyset>) -> CheckResult {
-    let subject = keyset.and_then(|k| k.subject.as_deref()).unwrap_or("null");
-    unevaluable(
+fn appraise_custody(
+    inputs: &AppraisalInputs<'_>,
+    keyset: Option<&WorkloadKeyset>,
+    app_id: Option<&[u8]>,
+) -> CheckResult {
+    let policy = match &inputs.custody {
+        CustodyEvidence::NotConfigured { reason } => {
+            let subject = keyset.and_then(|k| k.subject.as_deref()).unwrap_or("null");
+            return unevaluable(
+                CheckId::Custody,
+                format!("{reason}; subject: {subject} (no policy constraints applied)"),
+                "no custody policy configured",
+            );
+        }
+        CustodyEvidence::DstackKms { policy } => policy,
+    };
+    let Some(keyset) = keyset else {
+        return unreached(
+            CheckId::Custody,
+            "no established keyset to check custody for",
+        );
+    };
+    let Some(app_id) = app_id else {
+        return unreached(
+            CheckId::Custody,
+            "the measured app-id the custody chain anchors on was never established",
+        );
+    };
+    if let Err(e) = verify_dstack_kms_receipt_custody(
+        &inputs.report.attestation.evidence,
+        keyset,
+        app_id,
+        policy,
+    ) {
+        let detail = format!("key custody did not verify: {e}");
+        return failed_with(
+            CheckId::Custody,
+            FailureCause::Evidence(e.to_string()),
+            detail,
+        );
+    }
+    // The policy anchor compares against the measured app-id, not the
+    // report's own claims.
+    if let Err(detail) = policy.check_measured(keyset, app_id) {
+        return failed_with(
+            CheckId::Custody,
+            FailureCause::Policy(detail.clone()),
+            detail,
+        );
+    }
+    pass(
         CheckId::Custody,
         format!(
-            "{}; subject: {subject} (no policy constraints applied)",
-            inputs.custody.reason
+            "receipt key held under the dstack KMS chain; measured app-id 0x{} accepted",
+            hex::encode(app_id)
         ),
-        "custody policy not implemented",
     )
 }
 
-fn appraise_channel(inputs: &AppraisalInputs<'_>, keyset: Option<&WorkloadKeyset>) -> CheckResult {
-    let (host, spki) = match &inputs.channel {
+fn appraise_channel(
+    inputs: &AppraisalInputs<'_>,
+    keyset: Option<&WorkloadKeyset>,
+) -> (CheckResult, Vec<String>) {
+    let none = Vec::new();
+    let (origin, spki) = match &inputs.channel {
         ChannelEvidence::Unobservable { reason } => {
-            return unevaluable(CheckId::Channel, *reason, "no live channel to bind");
+            let r = unevaluable(CheckId::Channel, *reason, "no live channel to bind");
+            return (r, none);
         }
         ChannelEvidence::NotObserved { reason } => {
-            return failed_with(
+            let r = failed_with(
                 CheckId::Channel,
                 FailureCause::Channel((*reason).to_string()),
                 format!("the channel is not bound to the attested keyset ({reason}); spec 1.1"),
             );
+            return (r, none);
         }
-        ChannelEvidence::Observed { host, spki_sha256 } => (*host, *spki_sha256),
+        ChannelEvidence::Observed {
+            origin,
+            spki_sha256,
+        } => (*origin, *spki_sha256),
     };
     let Some(keyset) = keyset else {
-        return unreached(
+        let r = unreached(
             CheckId::Channel,
             "no decoded keyset to match the channel against (see the binding check)",
         );
+        return (r, none);
     };
-    let host = host.to_ascii_lowercase();
+    // §9.1(6) also accepts an attested E2EE key, but a caller sending
+    // plaintext over TLS has only the TLS entry the report declares (§4.2).
+    let pins = match declared_tls_pins(keyset, &inputs.report.attestation.evidence, origin) {
+        Ok(pins) => pins,
+        Err(e) => {
+            let r = failed_with(
+                CheckId::Channel,
+                FailureCause::Channel(e.to_string()),
+                format!("{e}: the channel cannot be bound (spec 1.1, spec 9.1(6))"),
+            );
+            return (r, none);
+        }
+    };
     let observed = spki.to_ascii_lowercase();
-    let candidates: Vec<&str> = keyset
-        .tls_keys_for_host(&host)
-        .iter()
-        .map(|k| k.spki_sha256_hex.as_str())
-        .collect();
-    let result = if candidates.iter().any(|c| c.eq_ignore_ascii_case(&observed)) {
-        pass(
-            CheckId::Channel,
-            format!("observed SPKI {observed} for {host} is in the attested keyset"),
-        )
-    } else if candidates.is_empty() {
-        // §9.1(6) also accepts an attested E2EE key, but a caller sending
-        // plaintext over TLS has nothing else to pin.
-        let why = if keyset.tls_public_keys.is_empty() {
-            "the keyset publishes no TLS role".to_string()
-        } else {
-            format!("no attested TLS key is scoped to {host}")
-        };
-        failed_with(
-            CheckId::Channel,
-            FailureCause::Channel(why.clone()),
-            format!("{why}: the channel cannot be bound (spec 1.1, spec 9.1(6))"),
-        )
-    } else {
-        failed_with(
-            CheckId::Channel,
-            FailureCause::Channel(format!("observed SPKI {observed} is not attested")),
-            format!("observed SPKI {observed} for {host} is NOT in the attested keyset"),
-        )
-    };
     let explain = inputs.explain.then(|| {
         format!(
-            "observed leaf SPKI sha256 for {host}: {observed}\nattested candidates: {}",
-            if candidates.is_empty() {
-                "(none)".to_string()
-            } else {
-                candidates.join(", ")
-            }
+            "observed leaf SPKI sha256 for {origin}: {observed}\nattested entries clients pin: {}",
+            pins.join(", ")
         )
     });
-    result.with_explain(explain)
+    if !pins.contains(&observed) {
+        let r = failed_with(
+            CheckId::Channel,
+            FailureCause::Channel(format!("observed SPKI {observed} is not attested")),
+            format!("observed SPKI {observed} for {origin} is NOT an attested entry clients pin"),
+        );
+        return (r.with_explain(explain), none);
+    }
+    let r = pass(
+        CheckId::Channel,
+        format!("observed SPKI {observed} for {origin} is an attested entry clients pin"),
+    );
+    (r.with_explain(explain), pins)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::dstack::tests::{custody_fixture, policy_with_root, signing_key, APP_ID};
+    use super::*;
+    use crate::spec_fixtures::vector_report;
+
+    fn inputs<'a>(
+        report: &'a AttestationReport,
+        custody: CustodyEvidence<'a>,
+    ) -> AppraisalInputs<'a> {
+        AppraisalInputs {
+            report,
+            nonce: None,
+            now_secs: 0,
+            expiry_waived: false,
+            quote: QuoteSource::Offline {
+                reason: "not under test",
+            },
+            accepted_composes: &[],
+            custody,
+            channel: ChannelEvidence::Unobservable {
+                reason: "not under test",
+            },
+            explain: false,
+        }
+    }
+
+    /// A report whose evidence carries the custody chain `root` issued, and
+    /// the keyset that chain covers.
+    fn custody_report(root: u8) -> (AttestationReport, WorkloadKeyset) {
+        let (keyset, evidence) = custody_fixture(&signing_key(root));
+        let mut report = vector_report();
+        report.attestation.evidence = evidence;
+        (report, keyset)
+    }
+
+    #[test]
+    fn custody_without_a_policy_is_skipped() {
+        let (report, keyset) = custody_report(1);
+        let custody = CustodyEvidence::NotConfigured {
+            reason: "no custody policy configured",
+        };
+
+        let result = appraise_custody(&inputs(&report, custody), Some(&keyset), Some(&APP_ID));
+
+        assert!(
+            matches!(&result.outcome, Outcome::Unevaluable(why) if why == "no custody policy configured")
+        );
+    }
+
+    #[test]
+    fn custody_under_an_accepted_root_and_app_id_passes() {
+        let (report, keyset) = custody_report(1);
+        let policy = policy_with_root(&signing_key(1));
+
+        let result = appraise_custody(
+            &inputs(&report, CustodyEvidence::DstackKms { policy: &policy }),
+            Some(&keyset),
+            Some(&APP_ID),
+        );
+
+        assert!(result.passed(), "{}", result.detail);
+        assert!(
+            result.detail.contains(&hex::encode(APP_ID)),
+            "{}",
+            result.detail
+        );
+    }
+
+    #[test]
+    fn custody_under_another_root_fails() {
+        let (report, keyset) = custody_report(1);
+        let policy = policy_with_root(&signing_key(4));
+
+        let result = appraise_custody(
+            &inputs(&report, CustodyEvidence::DstackKms { policy: &policy }),
+            Some(&keyset),
+            Some(&APP_ID),
+        );
+
+        assert!(matches!(
+            result.outcome,
+            Outcome::Failed(FailureCause::Evidence(_))
+        ));
+    }
+
+    #[test]
+    fn custody_for_an_app_id_the_policy_does_not_accept_fails() {
+        let (report, keyset) = custody_report(1);
+        let root = signing_key(1);
+        let root = hex::encode(root.verifying_key().to_sec1_bytes());
+        let policy = CustodyPolicy::new(["app-id:0xcd".to_string()], [root]).unwrap();
+
+        let result = appraise_custody(
+            &inputs(&report, CustodyEvidence::DstackKms { policy: &policy }),
+            Some(&keyset),
+            Some(&APP_ID),
+        );
+
+        assert!(matches!(
+            result.outcome,
+            Outcome::Failed(FailureCause::Policy(_))
+        ));
+    }
+
+    #[test]
+    fn custody_without_a_measured_app_id_fails() {
+        let (report, keyset) = custody_report(1);
+        let policy = policy_with_root(&signing_key(1));
+
+        let result = appraise_custody(
+            &inputs(&report, CustodyEvidence::DstackKms { policy: &policy }),
+            Some(&keyset),
+            None,
+        );
+
+        assert!(matches!(
+            result.outcome,
+            Outcome::Failed(FailureCause::NotReached(_))
+        ));
+    }
 }

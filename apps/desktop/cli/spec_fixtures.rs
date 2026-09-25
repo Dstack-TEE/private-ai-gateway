@@ -12,6 +12,10 @@ use serde_json::{json, Value};
 const WIRE_FIXTURES: &str = include_str!("tests/fixtures/aci_wire_fixtures.json");
 
 pub const TEST_NONCE: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+/// The published keyset's `not_after` (2027-01-15 UTC). It is part of the
+/// keyset whose digest, `report_data` and signed receipts the spec test
+/// vectors pin, so it cannot move: tests compare it against `SERVED_AT`, the
+/// fixtures' own clock, never the system clock.
 pub const KEYSET_NOT_AFTER: u64 = 1_800_000_000;
 pub const SERVED_AT: u64 = 1_750_000_000;
 
@@ -47,7 +51,15 @@ pub fn vector_report() -> AttestationReport {
             report_data_hex: "df2174d28130852b413646a3786927b93e94c11d770268b65def8bdba45cb49e"
                 .to_string(),
             source_provenance: SourceProvenance::default(),
-            evidence: json!({}),
+            // Evidence is outside the keyset digest. Under the dstack policy a
+            // keyset with domain-scoped TLS entries declares which one clients
+            // pin (spec 4.2).
+            evidence: json!({
+                "downstream_tls_binding": {
+                    "domain": "api.example.com",
+                    "spki_sha256": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+                },
+            }),
         },
         service_capabilities: ServiceCapabilities {
             supported_e2ee_versions: vec!["2".to_string()],

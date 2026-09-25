@@ -34,7 +34,7 @@ pub async fn run(args: AuditArgs, require_production_os: bool) -> Result<i32, St
             channel: ChannelEvidence::Unobservable {
                 reason: "offline audit: no live TLS channel observed",
             },
-            accepted_composes: &args.accepted_composes,
+            policy: &args.policy.verifier_policy()?,
             require_production_os,
             explain: false,
         },
