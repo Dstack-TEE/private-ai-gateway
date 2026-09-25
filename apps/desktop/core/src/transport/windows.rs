@@ -4,38 +4,30 @@
 //! ends check that the peer process runs as the current user.
 
 use std::{
-    ffi::{c_void, OsStr},
+    ffi::c_void,
     io,
     os::windows::{
         ffi::OsStrExt,
         io::{AsRawHandle, FromRawHandle, OwnedHandle},
     },
     path::{Path, PathBuf},
-    ptr,
     time::{Duration, Instant},
 };
 
-use crate::{brand::APP_IDENTIFIER, lock::InstanceLock};
+use crate::{
+    brand::APP_IDENTIFIER,
+    lock::InstanceLock,
+    windows_acl::{open_process_token, SecurityDescriptor, Sid},
+};
 use tokio::net::windows::named_pipe::{
     ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
 };
 use windows_sys::Win32::{
-    Foundation::{
-        GetLastError, LocalFree, ERROR_INSUFFICIENT_BUFFER, ERROR_PIPE_BUSY, FALSE, HANDLE,
-    },
-    Security::{
-        Authorization::{
-            ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-            SDDL_REVISION_1,
-        },
-        CopySid, EqualSid, GetLengthSid, GetTokenInformation, TokenUser, PSECURITY_DESCRIPTOR,
-        PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
-    },
+    Foundation::{ERROR_PIPE_BUSY, FALSE},
+    Security::SECURITY_ATTRIBUTES,
     System::{
         Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId},
-        Threading::{
-            GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
-        },
+        Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
     },
 };
 
@@ -96,7 +88,8 @@ impl Listener {
 }
 
 fn instance(endpoint: &Path, first: bool) -> io::Result<NamedPipeServer> {
-    let security = SecurityDescriptor::current_user()?;
+    let user = Sid::current_user()?.string()?;
+    let security = SecurityDescriptor::from_sddl(&format!("D:P(A;;GA;;;{user})"))?;
     let mut attributes = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: security.as_ptr(),
@@ -162,167 +155,15 @@ fn authenticate_process(process_id: u32) -> io::Result<()> {
     }
     // SAFETY: OpenProcess returned a unique owned kernel handle.
     let process = unsafe { OwnedHandle::from_raw_handle(process.cast()) };
-    let token = open_process_token(process.as_raw_handle().cast())?;
-    let server = Sid::from_token(token.as_raw_handle().cast())?;
-    let current = current_user()?;
-    require_same_user(&server, &current)
-}
-
-fn require_same_user(peer: &Sid, current: &Sid) -> io::Result<()> {
-    if unsafe { EqualSid(peer.as_ptr(), current.as_ptr()) } == FALSE {
+    let token = open_process_token(process.as_raw_handle())?;
+    let peer = Sid::from_token(token.as_raw_handle())?;
+    if !peer.same_as(&Sid::current_user()?) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "local IPC peer is not owned by the current Windows user",
         ));
     }
     Ok(())
-}
-
-fn open_process_token(process: HANDLE) -> io::Result<OwnedHandle> {
-    let mut token = ptr::null_mut();
-    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == FALSE {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: OpenProcessToken returned a unique owned kernel handle.
-    Ok(unsafe { OwnedHandle::from_raw_handle(token.cast()) })
-}
-
-/// The current Windows user's SID in string form (`S-1-5-…`).
-pub fn current_user_sid() -> io::Result<String> {
-    current_user()?.string()
-}
-
-fn current_user() -> io::Result<Sid> {
-    let token = open_process_token(unsafe { GetCurrentProcess() })?;
-    Sid::from_token(token.as_raw_handle().cast())
-}
-
-struct Sid {
-    storage: Vec<usize>,
-}
-
-impl Sid {
-    fn from_token(token: HANDLE) -> io::Result<Self> {
-        let mut required = 0;
-        unsafe {
-            GetTokenInformation(token, TokenUser, ptr::null_mut(), 0, &mut required);
-        }
-        if unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER || required == 0 {
-            return Err(io::Error::last_os_error());
-        }
-
-        let words = (required as usize).div_ceil(std::mem::size_of::<usize>());
-        let mut token_info = vec![0usize; words];
-        if unsafe {
-            GetTokenInformation(
-                token,
-                TokenUser,
-                token_info.as_mut_ptr().cast(),
-                required,
-                &mut required,
-            )
-        } == FALSE
-        {
-            return Err(io::Error::last_os_error());
-        }
-        let source = unsafe { (*(token_info.as_ptr().cast::<TOKEN_USER>())).User.Sid };
-        if source.is_null() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Windows returned an invalid user SID",
-            ));
-        }
-        let sid_length = unsafe { GetLengthSid(source) };
-        if sid_length == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Windows returned an invalid user SID",
-            ));
-        }
-        let sid_words = (sid_length as usize).div_ceil(std::mem::size_of::<usize>());
-        let mut storage = vec![0usize; sid_words];
-        if unsafe { CopySid(sid_length, storage.as_mut_ptr().cast(), source) } == FALSE {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(Self { storage })
-    }
-
-    fn as_ptr(&self) -> PSID {
-        self.storage.as_ptr().cast_mut().cast()
-    }
-
-    fn sddl(&self) -> io::Result<String> {
-        Ok(format!("D:P(A;;GA;;;{})", self.string()?))
-    }
-
-    fn string(&self) -> io::Result<String> {
-        let mut string_sid = ptr::null_mut();
-        if unsafe { ConvertSidToStringSidW(self.as_ptr(), &mut string_sid) } == FALSE {
-            return Err(io::Error::last_os_error());
-        }
-        let allocation = LocalAllocation(string_sid.cast());
-        let mut length = 0;
-        while unsafe { *string_sid.add(length) } != 0 {
-            length += 1;
-        }
-        let sid = String::from_utf16(unsafe { std::slice::from_raw_parts(string_sid, length) })
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Windows returned an invalid SID",
-                )
-            })?;
-        drop(allocation);
-        Ok(sid)
-    }
-}
-
-struct SecurityDescriptor(PSECURITY_DESCRIPTOR);
-
-impl SecurityDescriptor {
-    fn current_user() -> io::Result<Self> {
-        let sddl = current_user()?.sddl()?;
-        let wide = wide_string(OsStr::new(&sddl));
-        let mut descriptor = ptr::null_mut();
-        if unsafe {
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                wide.as_ptr(),
-                SDDL_REVISION_1,
-                &mut descriptor,
-                ptr::null_mut(),
-            )
-        } == FALSE
-        {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(Self(descriptor))
-    }
-
-    fn as_ptr(&self) -> PSECURITY_DESCRIPTOR {
-        self.0
-    }
-}
-
-impl Drop for SecurityDescriptor {
-    fn drop(&mut self) {
-        unsafe {
-            LocalFree(self.0.cast());
-        }
-    }
-}
-
-struct LocalAllocation(*mut c_void);
-
-impl Drop for LocalAllocation {
-    fn drop(&mut self) {
-        unsafe {
-            LocalFree(self.0);
-        }
-    }
-}
-
-fn wide_string(value: &OsStr) -> Vec<u16> {
-    value.encode_wide().chain(Some(0)).collect()
 }
 
 #[cfg(test)]

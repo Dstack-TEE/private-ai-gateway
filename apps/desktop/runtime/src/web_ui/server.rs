@@ -205,12 +205,7 @@ impl Gate {
                     }
                 }
             }
-            if request.method() == HttpMethod::POST
-                && headers
-                    .get(header::CONTENT_TYPE)
-                    .and_then(|value| value.to_str().ok())
-                    .is_none_or(|value| !value.eq_ignore_ascii_case("application/json"))
-            {
+            if request.method() == HttpMethod::POST && !json_content_type(headers) {
                 return secure_response(status(
                     ErrorCode::UnsupportedMediaType,
                     "JSON body required",
@@ -228,6 +223,21 @@ impl Gate {
     pub(crate) fn session_live(&self, session: &str) -> bool {
         self.auth.authorize(session)
     }
+}
+
+/// Whether the request declares a JSON body, by axum's `Json` rule
+/// (`application/json`, parameters such as `charset` allowed, or a `+json`
+/// type). No such type is CORS-safelisted, so a cross-site page cannot send
+/// one without a preflight.
+fn json_content_type(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<mime::Mime>().ok())
+        .is_some_and(|mime| {
+            mime.type_() == mime::APPLICATION
+                && (mime.subtype() == mime::JSON || mime.suffix() == Some(mime::JSON))
+        })
 }
 
 fn secure_response(mut response: Response) -> Response {
@@ -437,16 +447,8 @@ async fn asset(request: Request<Body>) -> Response {
     let Some(asset) = WebAssets::get(path) else {
         return status(ErrorCode::NotFound, "Web UI not found");
     };
-    let content_type = match path.rsplit('.').next() {
-        Some("js") => "text/javascript; charset=utf-8",
-        Some("css") => "text/css; charset=utf-8",
-        Some("svg") => "image/svg+xml",
-        Some("png") => "image/png",
-        Some("json") => "application/json",
-        _ => "text/html; charset=utf-8",
-    };
     (
-        [(header::CONTENT_TYPE, HeaderValue::from_static(content_type))],
+        [(header::CONTENT_TYPE, asset.metadata.mimetype())],
         asset.data,
     )
         .into_response()
@@ -910,6 +912,16 @@ mod tests {
         )
         .await;
         assert_eq!(form.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        // Parameters are part of a JSON type, as for axum's `Json`.
+        let charset = send(
+            &fixture.router,
+            request(HttpMethod::POST, "/api/session")
+                .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await;
+        assert_ne!(charset.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
         let unknown = send(
             &fixture.router,
             request(HttpMethod::GET, "/api/unknown")

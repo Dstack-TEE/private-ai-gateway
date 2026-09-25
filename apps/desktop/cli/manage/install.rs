@@ -580,16 +580,11 @@ mod platform {
     use std::path::{Path, PathBuf};
     use std::ptr;
 
+    use windows_registry::{Type, CURRENT_USER};
+    use windows_result::HRESULT;
     use windows_sys::Win32::{
-        Foundation::{ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_SUCCESS},
-        System::{
-            Environment::ExpandEnvironmentStringsW,
-            Registry::{
-                RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW,
-                RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE,
-                REG_EXPAND_SZ, REG_SZ,
-            },
-        },
+        Foundation::ERROR_FILE_NOT_FOUND,
+        System::Environment::ExpandEnvironmentStringsW,
         UI::WindowsAndMessaging::{
             SendMessageTimeoutW, HWND_BROADCAST, SMTO_ABORTIFHUNG, WM_SETTINGCHANGE,
         },
@@ -784,81 +779,53 @@ mod platform {
             .find(|candidate| fs::metadata(candidate).is_ok_and(|metadata| metadata.is_file()))
     }
 
-    fn read_user_path() -> Result<(String, u32), String> {
+    fn read_user_path() -> Result<(String, Type), String> {
         Ok(read_registry_string(ENVIRONMENT_KEY, PATH_VALUE, false)?
-            .unwrap_or_else(|| (String::new(), REG_EXPAND_SZ)))
+            .unwrap_or_else(|| (String::new(), Type::ExpandString)))
     }
 
     fn read_ownership() -> Result<Option<String>, String> {
         Ok(read_registry_string(OWNERSHIP_KEY, OWNERSHIP_VALUE, true)?.map(|(value, _)| value))
     }
 
+    fn not_found(error: &windows_result::Error) -> bool {
+        error.code() == HRESULT::from_win32(ERROR_FILE_NOT_FOUND)
+    }
+
     fn read_registry_string(
         sub_key: &str,
         value_name: &str,
         missing_key_allowed: bool,
-    ) -> Result<Option<(String, u32)>, String> {
-        let Some(key) = open_registry_key(sub_key, KEY_QUERY_VALUE, missing_key_allowed)? else {
-            return Ok(None);
+    ) -> Result<Option<(String, Type)>, String> {
+        let key = match CURRENT_USER.open(sub_key) {
+            Ok(key) => key,
+            Err(error) if missing_key_allowed && not_found(&error) => return Ok(None),
+            Err(_) => return Err("Cannot open private-ai-proxy registration settings".to_string()),
         };
-        let value_name = wide(value_name);
-        let mut value_type = REG_EXPAND_SZ;
-        let mut bytes = 0_u32;
-        // SAFETY: the key and output pointers are valid; a null data pointer queries size.
-        let queried = unsafe {
-            RegQueryValueExW(
-                key.0,
-                value_name.as_ptr(),
-                ptr::null_mut(),
-                &mut value_type,
-                ptr::null_mut(),
-                &mut bytes,
-            )
+        let value = match key.get_value(value_name) {
+            Ok(value) => value,
+            Err(error) if not_found(&error) => return Ok(None),
+            Err(_) => return Err("Cannot read private-ai-proxy registration settings".to_string()),
         };
-        if queried == ERROR_FILE_NOT_FOUND {
-            return Ok(None);
-        }
-        if queried != ERROR_SUCCESS && queried != ERROR_MORE_DATA {
-            return Err("Cannot read private-ai-proxy registration settings".to_string());
-        }
-        if value_type != REG_SZ && value_type != REG_EXPAND_SZ {
+        let value_type = value.ty();
+        if !matches!(value_type, Type::String | Type::ExpandString) {
             return Err(
                 "A private-ai-proxy registration setting has an unsupported registry type"
                     .to_string(),
             );
         }
-        let mut buffer = vec![0_u16; (bytes as usize).div_ceil(2).max(1)];
-        // SAFETY: the buffer has the byte capacity reported by the first query.
-        let queried = unsafe {
-            RegQueryValueExW(
-                key.0,
-                value_name.as_ptr(),
-                ptr::null_mut(),
-                &mut value_type,
-                buffer.as_mut_ptr().cast(),
-                &mut bytes,
-            )
-        };
-        if queried != ERROR_SUCCESS {
-            return Err("Cannot read private-ai-proxy registration settings".to_string());
-        }
-        let length = buffer
-            .iter()
-            .position(|value| *value == 0)
-            .unwrap_or(buffer.len());
-        Ok(Some((
-            String::from_utf16_lossy(&buffer[..length]),
-            value_type,
-        )))
+        let text = String::try_from(value)
+            .map_err(|_| "Cannot read private-ai-proxy registration settings".to_string())?;
+        Ok(Some((text, value_type)))
     }
 
-    fn write_user_path(value: &str, value_type: u32) -> Result<(), String> {
+    fn write_user_path(value: &str, value_type: Type) -> Result<(), String> {
         write_registry_string(ENVIRONMENT_KEY, PATH_VALUE, value, value_type, false)
             .map_err(|_| "Cannot update the current user's PATH".to_string())
     }
 
     fn write_ownership(value: &str) -> Result<(), String> {
-        write_registry_string(OWNERSHIP_KEY, OWNERSHIP_VALUE, value, REG_SZ, true)
+        write_registry_string(OWNERSHIP_KEY, OWNERSHIP_VALUE, value, Type::String, true)
             .map_err(|_| "Cannot record private-ai-proxy PATH registration ownership".to_string())
     }
 
@@ -866,92 +833,33 @@ mod platform {
         sub_key: &str,
         value_name: &str,
         value: &str,
-        value_type: u32,
+        value_type: Type,
         create: bool,
-    ) -> Result<(), String> {
+    ) -> windows_result::Result<()> {
         let key = if create {
-            create_registry_key(sub_key)?
+            CURRENT_USER.create(sub_key)?
         } else {
-            open_registry_key(sub_key, KEY_QUERY_VALUE | KEY_SET_VALUE, false)?
-                .ok_or_else(|| "Registry key is missing".to_string())?
+            CURRENT_USER.options().read().write().open(sub_key)?
         };
-        let value_name = wide(value_name);
-        let data = wide(value);
-        let byte_length = data
-            .len()
-            .checked_mul(2)
-            .and_then(|length| u32::try_from(length).ok())
-            .ok_or_else(|| "The current user's PATH is too large".to_string())?;
-        // SAFETY: the UTF-16 buffer includes its terminator and remains valid for the call.
-        let written = unsafe {
-            RegSetValueExW(
-                key.0,
-                value_name.as_ptr(),
-                0,
-                value_type,
-                data.as_ptr().cast(),
-                byte_length,
-            )
-        };
-        if written != ERROR_SUCCESS {
-            return Err("Cannot update private-ai-proxy registration settings".to_string());
+        if value_type == Type::ExpandString {
+            key.set_expand_string(value_name, value)
+        } else {
+            key.set_string(value_name, value)
         }
-        Ok(())
     }
 
     fn delete_ownership() -> Result<(), String> {
-        let Some(key) = open_registry_key(OWNERSHIP_KEY, KEY_SET_VALUE, true)? else {
-            return Ok(());
-        };
-        let value_name = wide(OWNERSHIP_VALUE);
-        // SAFETY: the key and null-terminated value name remain valid for the call.
-        let deleted = unsafe { RegDeleteValueW(key.0, value_name.as_ptr()) };
-        if deleted != ERROR_SUCCESS && deleted != ERROR_FILE_NOT_FOUND {
-            return Err("Cannot remove private-ai-proxy PATH registration ownership".to_string());
+        let removed = CURRENT_USER
+            .options()
+            .write()
+            .open(OWNERSHIP_KEY)
+            .and_then(|key| key.remove_value(OWNERSHIP_VALUE));
+        match removed {
+            Err(error) if !not_found(&error) => {
+                Err("Cannot remove private-ai-proxy PATH registration ownership".to_string())
+            }
+            _ => Ok(()),
         }
-        Ok(())
-    }
-
-    fn open_registry_key(
-        sub_key: &str,
-        access: u32,
-        missing_allowed: bool,
-    ) -> Result<Option<RegistryKey>, String> {
-        let sub_key = wide(sub_key);
-        let mut key: HKEY = ptr::null_mut();
-        // SAFETY: pointers are valid for the duration of the Windows registry call.
-        let opened =
-            unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, sub_key.as_ptr(), 0, access, &mut key) };
-        if opened == ERROR_FILE_NOT_FOUND && missing_allowed {
-            return Ok(None);
-        }
-        if opened != ERROR_SUCCESS {
-            return Err("Cannot open private-ai-proxy registration settings".to_string());
-        }
-        Ok(Some(RegistryKey(key)))
-    }
-
-    fn create_registry_key(sub_key: &str) -> Result<RegistryKey, String> {
-        let sub_key = wide(sub_key);
-        let mut key: HKEY = ptr::null_mut();
-        // SAFETY: pointers are valid and optional class/security/disposition parameters are null.
-        let created = unsafe {
-            RegCreateKeyExW(
-                HKEY_CURRENT_USER,
-                sub_key.as_ptr(),
-                0,
-                ptr::null(),
-                0,
-                KEY_QUERY_VALUE | KEY_SET_VALUE,
-                ptr::null(),
-                &mut key,
-                ptr::null_mut(),
-            )
-        };
-        if created != ERROR_SUCCESS {
-            return Err("Cannot create private-ai-proxy registration settings".to_string());
-        }
-        Ok(RegistryKey(key))
     }
 
     fn path_entries(value: &str) -> Vec<String> {
@@ -1033,17 +941,6 @@ mod platform {
                 5_000,
                 &mut result,
             );
-        }
-    }
-
-    struct RegistryKey(HKEY);
-
-    impl Drop for RegistryKey {
-        fn drop(&mut self) {
-            // SAFETY: the handle was returned by RegOpenKeyExW and is closed once here.
-            unsafe {
-                RegCloseKey(self.0);
-            }
         }
     }
 

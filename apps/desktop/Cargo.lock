@@ -551,6 +551,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cffb0e931875b666fc4fcb20fee52e9bbd1ef836fd9e9e04ec21555f9f85f7ef"
 dependencies = [
  "fastrand",
+ "tokio",
 ]
 
 [[package]]
@@ -4291,6 +4292,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-io-kit"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33fafba39597d6dc1fb709123dfa8289d39406734be322956a69f0931c73bb15"
+dependencies = [
+ "libc",
+ "objc2-core-foundation",
+]
+
+[[package]]
 name = "objc2-io-surface"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4927,6 +4938,7 @@ dependencies = [
  "aci-protocol",
  "async-stream",
  "axum",
+ "backon",
  "base64 0.23.1",
  "bytes",
  "clap",
@@ -4955,6 +4967,8 @@ dependencies = [
  "tracing-appender",
  "uuid",
  "webpki-roots",
+ "windows-registry 0.6.1",
+ "windows-result 0.4.1",
  "windows-sys 0.61.2",
  "x509-parser",
 ]
@@ -5078,9 +5092,12 @@ dependencies = [
  "indexmap 2.14.2",
  "keyring",
  "libc",
+ "mime",
  "netwatcher",
  "notify-debouncer-mini",
  "oauth2",
+ "objc2-core-foundation",
+ "objc2-io-kit",
  "private-ai-proxy-agent-bridge",
  "private-ai-proxy-core",
  "rand 0.8.8",
@@ -5669,6 +5686,7 @@ version = "8.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42ffa149f6aa81b58a5b3011d01a857c4ed12c7a732d2c51947a4c7c692185f0"
 dependencies = [
+ "mime_guess",
  "sha2 0.11.0",
  "walkdir",
 ]

@@ -95,7 +95,7 @@ fn read_acl(handle: &OwnedHandle) -> Result<WindowsAcl, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use desktop_core::{transport::current_user_sid, windows_acl};
+    use desktop_core::windows_acl::{self, current_user_sid};
 
     /// A new file in this test's own temporary directory with the given DACL.
     fn fixture(path: &Path, sddl: &str) {

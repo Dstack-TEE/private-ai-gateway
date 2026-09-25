@@ -3,8 +3,10 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::http::Method;
+use backon::{ExponentialBuilder, Retryable};
 use serde_json::Value;
 
 use super::report::{rewrite_noted, summarize};
@@ -168,8 +170,6 @@ pub(super) async fn verify_exchange(
     Ok((transcript, detail))
 }
 
-const AUDIT_RETRY_DELAYS_MS: [u64; 4] = [100, 250, 500, 1_000];
-
 fn transient_audit_status(status: u16) -> bool {
     status == 404 || status == 429 || (500..600).contains(&status)
 }
@@ -179,30 +179,36 @@ enum AuditFetchError {
     Transport(String),
 }
 
+/// Fetches a receipt or session, retrying transport failures and statuses
+/// that may clear (not yet published, rate limited, server errors) four
+/// times, 100 ms apart and doubling up to 1 s.
 async fn fetch_audit_artifact<F, Fut>(mut fetch: F) -> Result<HttpResult, AuditFetchError>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<HttpResult, String>>,
 {
-    let mut delays = AUDIT_RETRY_DELAYS_MS.into_iter();
-    loop {
-        match fetch().await {
-            Ok(response) if (200..300).contains(&response.status) => return Ok(response),
-            Ok(response) if transient_audit_status(response.status) => {
-                let Some(delay_ms) = delays.next() else {
-                    return Err(AuditFetchError::Status(response.status));
-                };
-                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-            }
-            Ok(response) => return Err(AuditFetchError::Status(response.status)),
-            Err(error) => {
-                let Some(delay_ms) = delays.next() else {
-                    return Err(AuditFetchError::Transport(error));
-                };
-                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+    let attempt = || {
+        let response = fetch();
+        async {
+            match response.await {
+                Ok(response) if (200..300).contains(&response.status) => Ok(response),
+                Ok(response) => Err(AuditFetchError::Status(response.status)),
+                Err(error) => Err(AuditFetchError::Transport(error)),
             }
         }
-    }
+    };
+    attempt
+        .retry(
+            ExponentialBuilder::default()
+                .with_min_delay(Duration::from_millis(100))
+                .with_max_delay(Duration::from_secs(1))
+                .with_max_times(4),
+        )
+        .when(|error| match error {
+            AuditFetchError::Status(status) => transient_audit_status(*status),
+            AuditFetchError::Transport(_) => true,
+        })
+        .await
 }
 
 async fn fetch_receipt_for_audit(

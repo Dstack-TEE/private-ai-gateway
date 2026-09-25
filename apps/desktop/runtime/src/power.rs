@@ -183,90 +183,24 @@ mod platform {
         thread::{self, JoinHandle},
     };
 
-    type CfRunLoopRef = *mut c_void;
-    type CfRunLoopSourceRef = *mut c_void;
-    type CfStringRef = *const c_void;
-    type IoConnect = u32;
-    type IoObject = u32;
-    type IoNotificationPortRef = *mut c_void;
-    type IoService = u32;
-    type KernReturn = i32;
-
-    const IO_MESSAGE_CAN_SYSTEM_SLEEP: u32 = 0xe000_0270;
-    const IO_MESSAGE_SYSTEM_WILL_SLEEP: u32 = 0xe000_0280;
-    const IO_MESSAGE_SYSTEM_HAS_POWERED_ON: u32 = 0xe000_0300;
-
-    #[repr(C)]
-    struct CfRunLoopSourceContext {
-        version: isize,
-        info: *mut c_void,
-        retain: Option<extern "C" fn(*const c_void) -> *const c_void>,
-        release: Option<extern "C" fn(*const c_void)>,
-        copy_description: Option<extern "C" fn(*const c_void) -> CfStringRef>,
-        equal: Option<extern "C" fn(*const c_void, *const c_void) -> u8>,
-        hash: Option<extern "C" fn(*const c_void) -> usize>,
-        schedule: Option<extern "C" fn(*mut c_void, CfRunLoopRef, CfStringRef)>,
-        cancel: Option<extern "C" fn(*mut c_void, CfRunLoopRef, CfStringRef)>,
-        perform: extern "C" fn(*mut c_void),
-    }
-
-    #[link(name = "CoreFoundation", kind = "framework")]
-    unsafe extern "C" {
-        #[link_name = "kCFRunLoopCommonModes"]
-        static CF_RUN_LOOP_COMMON_MODES: CfStringRef;
-
-        fn CFRelease(value: *const c_void);
-        fn CFRetain(value: *const c_void) -> *const c_void;
-        fn CFRunLoopAddSource(
-            run_loop: CfRunLoopRef,
-            source: CfRunLoopSourceRef,
-            mode: CfStringRef,
-        );
-        fn CFRunLoopGetCurrent() -> CfRunLoopRef;
-        fn CFRunLoopRemoveSource(
-            run_loop: CfRunLoopRef,
-            source: CfRunLoopSourceRef,
-            mode: CfStringRef,
-        );
-        fn CFRunLoopRun();
-        fn CFRunLoopSourceCreate(
-            allocator: *const c_void,
-            order: isize,
-            context: *mut CfRunLoopSourceContext,
-        ) -> CfRunLoopSourceRef;
-        fn CFRunLoopSourceSignal(source: CfRunLoopSourceRef);
-        fn CFRunLoopStop(run_loop: CfRunLoopRef);
-        fn CFRunLoopWakeUp(run_loop: CfRunLoopRef);
-    }
-
-    #[link(name = "IOKit", kind = "framework")]
-    unsafe extern "C" {
-        fn IOAllowPowerChange(connection: IoConnect, notification_id: isize) -> KernReturn;
-        fn IODeregisterForSystemPower(notifier: *mut IoObject) -> KernReturn;
-        fn IONotificationPortDestroy(port: IoNotificationPortRef);
-        fn IONotificationPortGetRunLoopSource(port: IoNotificationPortRef) -> CfRunLoopSourceRef;
-        fn IORegisterForSystemPower(
-            context: *mut c_void,
-            port: *mut IoNotificationPortRef,
-            callback: unsafe extern "C" fn(
-                context: *mut c_void,
-                service: IoService,
-                message_type: u32,
-                message_argument: *mut c_void,
-            ),
-            notifier: *mut IoObject,
-        ) -> IoConnect;
-        fn IOServiceClose(connection: IoConnect) -> KernReturn;
-    }
+    use objc2_core_foundation::{
+        kCFRunLoopCommonModes, CFRetained, CFRunLoop, CFRunLoopSource, CFRunLoopSourceContext,
+    };
+    use objc2_io_kit::{
+        io_connect_t, io_object_t, io_service_t, kIOMessageCanSystemSleep,
+        kIOMessageSystemHasPoweredOn, kIOMessageSystemWillSleep, IOAllowPowerChange,
+        IODeregisterForSystemPower, IONotificationPort, IONotificationPortRef,
+        IORegisterForSystemPower, IOServiceClose,
+    };
 
     struct CallbackContext {
         runtime: Weak<DesktopRuntime>,
         connection: AtomicU32,
     }
 
-    unsafe extern "C" fn power_changed(
+    unsafe extern "C-unwind" fn power_changed(
         context: *mut c_void,
-        _service: IoService,
+        _service: io_service_t,
         message_type: u32,
         message_argument: *mut c_void,
     ) {
@@ -274,32 +208,39 @@ mod platform {
             return;
         };
         match message_type {
-            IO_MESSAGE_SYSTEM_HAS_POWERED_ON => {
+            kIOMessageSystemHasPoweredOn => {
                 if let Some(runtime) = context.runtime.upgrade() {
                     runtime.system_resumed();
                 }
             }
-            IO_MESSAGE_CAN_SYSTEM_SLEEP | IO_MESSAGE_SYSTEM_WILL_SLEEP => {
+            kIOMessageCanSystemSleep | kIOMessageSystemWillSleep => {
                 let connection = context.connection.load(Ordering::Acquire);
                 if connection != 0 {
-                    unsafe {
-                        IOAllowPowerChange(connection, message_argument as isize);
-                    }
+                    IOAllowPowerChange(connection, message_argument as isize);
                 }
             }
             _ => {}
         }
     }
 
-    extern "C" fn stop_run_loop(_info: *mut c_void) {
-        unsafe {
-            CFRunLoopStop(CFRunLoopGetCurrent());
+    unsafe extern "C-unwind" fn stop_run_loop(_info: *mut c_void) {
+        if let Some(run_loop) = CFRunLoop::current() {
+            run_loop.stop();
         }
     }
 
+    /// The worker's run loop and the source that stops it.
+    struct Stopper {
+        run_loop: CFRetained<CFRunLoop>,
+        source: CFRetained<CFRunLoopSource>,
+    }
+
+    // SAFETY: another thread only signals the source and wakes the run loop,
+    // which Core Foundation allows from any thread; the worker owns the rest.
+    unsafe impl Send for Stopper {}
+
     pub struct Monitor {
-        run_loop: usize,
-        stop_source: usize,
+        stopper: Stopper,
         thread: Option<JoinHandle<()>>,
     }
 
@@ -312,9 +253,8 @@ mod platform {
                 .map_err(|error| format!("Cannot start system wake monitor: {error}"))?;
 
             match started_rx.recv() {
-                Ok(Ok((run_loop, stop_source))) => Ok(Self {
-                    run_loop,
-                    stop_source,
+                Ok(Ok(stopper)) => Ok(Self {
+                    stopper,
                     thread: Some(thread),
                 }),
                 Ok(Err(error)) => {
@@ -331,38 +271,31 @@ mod platform {
 
     impl Drop for Monitor {
         fn drop(&mut self) {
-            let run_loop = self.run_loop as CfRunLoopRef;
-            let stop_source = self.stop_source as CfRunLoopSourceRef;
-            unsafe {
-                // A signaled source stays pending, so cancellation cannot be lost before CFRunLoopRun.
-                CFRunLoopSourceSignal(stop_source);
-                CFRunLoopWakeUp(run_loop);
-            }
+            // A signaled source stays pending, so cancellation cannot be lost before CFRunLoopRun.
+            self.stopper.source.signal();
+            self.stopper.run_loop.wake_up();
             if let Some(thread) = self.thread.take() {
                 if thread.join().is_err() {
                     tracing::warn!("System wake monitor thread did not shut down cleanly");
                 }
             }
-            unsafe {
-                CFRelease(stop_source.cast());
-                CFRelease(run_loop.cast());
-            }
         }
     }
 
-    fn run(
-        runtime: Weak<DesktopRuntime>,
-        started: mpsc::SyncSender<Result<(usize, usize), String>>,
-    ) {
-        let context = Box::new(CallbackContext {
+    fn run(runtime: Weak<DesktopRuntime>, started: mpsc::SyncSender<Result<Stopper, String>>) {
+        let context = Box::into_raw(Box::new(CallbackContext {
             runtime,
             connection: AtomicU32::new(0),
-        });
-        let context_ptr = Box::into_raw(context);
-        let mut port = ptr::null_mut();
-        let mut notifier = 0;
+        }));
+        let mut port: IONotificationPortRef = ptr::null_mut();
+        let mut notifier: io_object_t = 0;
         let connection = unsafe {
-            IORegisterForSystemPower(context_ptr.cast(), &mut port, power_changed, &mut notifier)
+            IORegisterForSystemPower(
+                context.cast(),
+                &mut port,
+                Some(power_changed),
+                &mut notifier,
+            )
         };
         if connection == 0 || port.is_null() || notifier == 0 {
             unsafe {
@@ -373,100 +306,73 @@ mod platform {
                     IOServiceClose(connection);
                 }
                 if !port.is_null() {
-                    IONotificationPortDestroy(port);
+                    IONotificationPort::destroy(port);
                 }
-                drop(Box::from_raw(context_ptr));
+                drop(Box::from_raw(context));
             }
             let _ = started.send(Err(
                 "IOKit could not register system wake notifications".to_string()
             ));
             return;
         }
+        unsafe { (*context).connection.store(connection, Ordering::Release) };
 
-        unsafe {
-            (*context_ptr)
-                .connection
-                .store(connection, Ordering::Release);
-        }
-        let source = unsafe { IONotificationPortGetRunLoopSource(port) };
-        let run_loop = unsafe { CFRunLoopGetCurrent() };
-        if source.is_null() || run_loop.is_null() {
-            cleanup(connection, port, &mut notifier, context_ptr);
-            let _ = started.send(Err(
-                "IOKit could not create a wake notification run loop".to_string()
-            ));
-            return;
-        }
-
-        let mut stop_context = CfRunLoopSourceContext {
+        let source = unsafe { IONotificationPort::run_loop_source(port) };
+        let mut stop_context = CFRunLoopSourceContext {
             version: 0,
             info: ptr::null_mut(),
             retain: None,
             release: None,
-            copy_description: None,
+            copyDescription: None,
             equal: None,
             hash: None,
             schedule: None,
             cancel: None,
-            perform: stop_run_loop,
+            perform: Some(stop_run_loop),
         };
-        let stop_source = unsafe { CFRunLoopSourceCreate(ptr::null(), 0, &mut stop_context) };
-        if stop_source.is_null() {
-            cleanup(connection, port, &mut notifier, context_ptr);
+        let stop_source = unsafe { CFRunLoopSource::new(None, 0, &mut stop_context) };
+        let (Some(source), Some(stop_source), Some(run_loop)) =
+            (source, stop_source, CFRunLoop::current())
+        else {
+            cleanup(connection, port, &mut notifier, context);
             let _ = started.send(Err(
-                "CoreFoundation could not create a wake monitor stop source".to_string(),
+                "Core Foundation could not create the wake monitor run loop".to_string(),
             ));
             return;
-        }
+        };
 
-        unsafe {
-            CFRunLoopAddSource(run_loop, source, CF_RUN_LOOP_COMMON_MODES);
-            CFRunLoopAddSource(run_loop, stop_source, CF_RUN_LOOP_COMMON_MODES);
-            // Monitor owns these retains until after the worker has been joined.
-            CFRetain(run_loop.cast());
-            CFRetain(stop_source.cast());
+        let modes = unsafe { kCFRunLoopCommonModes };
+        run_loop.add_source(Some(&source), modes);
+        run_loop.add_source(Some(&stop_source), modes);
+        let stopper = Stopper {
+            run_loop: run_loop.clone(),
+            source: stop_source.clone(),
+        };
+        if started.send(Ok(stopper)).is_ok() {
+            CFRunLoop::run();
         }
-        if started
-            .send(Ok((run_loop as usize, stop_source as usize)))
-            .is_err()
-        {
-            unsafe {
-                CFRelease(run_loop.cast());
-                CFRelease(stop_source.cast());
-                CFRunLoopRemoveSource(run_loop, stop_source, CF_RUN_LOOP_COMMON_MODES);
-                CFRunLoopRemoveSource(run_loop, source, CF_RUN_LOOP_COMMON_MODES);
-                CFRelease(stop_source.cast());
-            }
-            cleanup(connection, port, &mut notifier, context_ptr);
-            return;
-        }
-
-        unsafe {
-            CFRunLoopRun();
-            CFRunLoopRemoveSource(run_loop, stop_source, CF_RUN_LOOP_COMMON_MODES);
-            CFRunLoopRemoveSource(run_loop, source, CF_RUN_LOOP_COMMON_MODES);
-            CFRelease(stop_source.cast());
-        }
-        cleanup(connection, port, &mut notifier, context_ptr);
+        run_loop.remove_source(Some(&stop_source), modes);
+        run_loop.remove_source(Some(&source), modes);
+        cleanup(connection, port, &mut notifier, context);
     }
 
     fn cleanup(
-        connection: IoConnect,
-        port: IoNotificationPortRef,
-        notifier: &mut IoObject,
+        connection: io_connect_t,
+        port: IONotificationPortRef,
+        notifier: &mut io_object_t,
         context: *mut CallbackContext,
     ) {
+        let deregistered = unsafe { IODeregisterForSystemPower(notifier) };
+        let closed = IOServiceClose(connection);
         unsafe {
-            let deregistered = IODeregisterForSystemPower(notifier);
-            let closed = IOServiceClose(connection);
-            IONotificationPortDestroy(port);
+            IONotificationPort::destroy(port);
             drop(Box::from_raw(context));
-            if deregistered != 0 {
-                tracing::warn!("Could not unregister macOS power notifications ({deregistered})");
-            }
-            if closed != 0 {
-                tracing::warn!("Could not close the macOS power connection ({closed})");
-            }
+        }
+        if deregistered != 0 {
+            tracing::warn!("Could not unregister macOS power notifications ({deregistered})");
+        }
+        if closed != 0 {
+            tracing::warn!("Could not close the macOS power connection ({closed})");
         }
     }
 }
