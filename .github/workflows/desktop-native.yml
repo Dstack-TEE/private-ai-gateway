@@ -252,7 +252,7 @@ jobs:
   package:
     name: Package (${{ matrix.platform }})
     needs: [verify, verify-linux-arm64, verify-windows-x64, version]
-    if: ${{ always() && needs.version.result == 'success' && ((needs.verify.result == 'success' && needs.verify-linux-arm64.result == 'success' && needs.verify-windows-x64.result == 'success') || inputs.package_only == true) }}
+    if: ${{ !cancelled() && needs.version.result == 'success' && ((needs.verify.result == 'success' && needs.verify-linux-arm64.result == 'success' && needs.verify-windows-x64.result == 'success') || inputs.package_only == true) }}
     environment:
       name: ${{ needs.version.outputs.channel != '' && 'desktop-release' || 'desktop-build' }}
     env:
@@ -897,7 +897,7 @@ jobs:
 
   release:
     needs: [version, package, mac-app-store]
-    if: ${{ always() && needs.version.outputs.channel != '' && needs.package.result == 'success' && (needs.mac-app-store.result == 'success' || needs.mac-app-store.result == 'skipped') }}
+    if: ${{ !cancelled() && needs.version.outputs.channel != '' && needs.package.result == 'success' && (needs.mac-app-store.result == 'success' || needs.mac-app-store.result == 'skipped') }}
     environment: desktop-release
     runs-on: ubuntu-24.04
     permissions:
