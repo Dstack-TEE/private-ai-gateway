@@ -165,6 +165,10 @@ fn perform_action(app: &AppHandle, id: String) {
         if let Err((title, error)) = result {
             crate::notifications::show_failure(&app, title, &error);
         }
+        // A check item flips when clicked; show what actually applies.
+        if id.starts_with("agent:") {
+            refresh_agents(&app);
+        }
         sync(
             &app,
             &client.state().unwrap_or_else(|_| client.cached_state()),
