@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import secrets
 import subprocess
 import sys
@@ -14,7 +13,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from live_e2e.common import ROOT, request_json, write_bytes  # noqa: E402
+from live_e2e.common import ROOT, pap_bin, request_json, write_bytes  # noqa: E402
 
 
 def main() -> None:
@@ -32,9 +31,8 @@ def main() -> None:
     parser.add_argument("--response-body", type=Path)
     parser.add_argument("--skip-expiry", action="store_true")
     parser.add_argument(
-        "--aci-bin",
-        default=os.environ.get("ACI_BIN", "aci"),
-        help="installed ACI client command (default: %(default)s)",
+        "--pap-bin",
+        help="Private AI Proxy CLI command (default: $PAP_BIN, else pap on PATH)",
     )
     args = parser.parse_args()
 
@@ -104,7 +102,7 @@ def run_audit(
     nonce: str | None,
 ) -> int:
     cmd = [
-        args.aci_bin,
+        args.pap_bin or pap_bin(),
         "audit",
         "--report",
         str(report_path),
@@ -122,7 +120,7 @@ def run_audit(
         cmd.extend(["--response-body", str(args.response_body)])
     if args.skip_expiry:
         cmd.append("--skip-expiry")
-    # `aci audit --json` prints the transcript on stdout and exits non-zero
+    # `pap audit --json` prints the transcript on stdout and exits non-zero
     # when the verdict is NOT VERIFIED; pass both through.
     result = subprocess.run(cmd, cwd=ROOT, check=False)
     return result.returncode
