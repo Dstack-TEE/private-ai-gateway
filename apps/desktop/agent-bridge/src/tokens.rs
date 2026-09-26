@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use rand::RngCore;
+use rand::{rngs::SysRng, TryRng};
 
 #[cfg(windows)]
 use desktop_core::private_fs::symlink_refused;
@@ -193,7 +193,9 @@ impl TokenSet {
 
 fn generate() -> String {
     let mut bytes = [0u8; TOKEN_BYTES];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    SysRng
+        .try_fill_bytes(&mut bytes)
+        .expect("the system random source failed");
     hex::encode(bytes)
 }
 

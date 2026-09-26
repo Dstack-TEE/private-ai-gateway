@@ -38,7 +38,7 @@ use axum::{
     Json, Router,
 };
 use futures_util::{FutureExt, StreamExt};
-use rand::RngCore;
+use rand::{rngs::SysRng, TryRng};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::{net::TcpListener, sync::mpsc, sync::Semaphore};
@@ -1005,7 +1005,9 @@ fn model_of(bytes: &[u8]) -> Option<String> {
 
 fn new_id() -> String {
     let mut bytes = [0u8; 16];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    SysRng
+        .try_fill_bytes(&mut bytes)
+        .expect("the system random source failed");
     hex::encode(bytes)
 }
 

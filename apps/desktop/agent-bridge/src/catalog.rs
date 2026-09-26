@@ -388,7 +388,7 @@ impl Catalog {
             );
         }
         let bytes = serde_json::to_vec(&self.models).map_err(|error| error.to_string())?;
-        self.revision = format!("{:x}", Sha256::digest(bytes));
+        self.revision = hex::encode(Sha256::digest(bytes));
         Ok(())
     }
 
