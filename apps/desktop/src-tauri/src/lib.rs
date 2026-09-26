@@ -347,9 +347,11 @@ pub fn run() {
             // A backend that was already running may have answered before
             // this subscription: handle the current state as a change too.
             let mut backend = BackendInstance::default();
-            // The notification permission is asked for once per launch, after
-            // the first backend's preferences apply.
-            let mut ask_permission = distribution::CAPABILITIES.notifications;
+            // The notification permission is asked for once per launch, once a
+            // backend answers with its preferences.
+            let permission_asked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                !distribution::CAPABILITIES.notifications,
+            ));
             states.mark_changed();
             tauri::async_runtime::spawn(async move {
                 while states.changed().await.is_ok() {
@@ -375,17 +377,17 @@ pub fn run() {
                         // A backend that (re)connected, or an edit of
                         // config.toml, for example: reapply preferences.
                         let (client, host) = (client.clone(), host.clone());
-                        let (app, ask) = (handle.clone(), connected && ask_permission);
-                        ask_permission &= !ask;
+                        let (app, asked) = (handle.clone(), permission_asked.clone());
                         tauri::async_runtime::spawn(async move {
-                            match desktop_core::ui_api::refresh_preferences(&client, &host).await {
-                                Ok(()) if ask => {
-                                    notifications::request_startup_permission(&app).await
-                                }
-                                Ok(()) => {}
-                                Err(error) => {
-                                    tracing::warn!("Cannot refresh desktop preferences: {}", error);
-                                }
+                            if let Err(error) =
+                                desktop_core::ui_api::refresh_preferences(&client, &host).await
+                            {
+                                tracing::warn!("Cannot refresh desktop preferences: {}", error);
+                            } else if !asked.swap(true, std::sync::atomic::Ordering::SeqCst)
+                                && !notifications::request_startup_permission(&app, &client).await
+                            {
+                                // The preferences were unavailable: ask after a later refresh.
+                                asked.store(false, std::sync::atomic::Ordering::SeqCst);
                             }
                         });
                     }

@@ -1,7 +1,8 @@
 import React, { useCallback, useRef, useState } from "react";
-import { skipToken, useIsMutating, useMutation, useQuery } from "@tanstack/react-query";
+import { skipToken, useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { useAccountLogin } from "../lib/use-account-login";
+import { afterVerification } from "../lib/use-app-state";
 import { AccountTools } from "../components/account-tools";
 import { ToggleGroup, ToggleGroupItem } from "../components/ui/toggle-group";
 import { errorMessage } from "../lib/error-message";
@@ -15,11 +16,11 @@ import { Alert, AlertDescription } from "../components/ui/alert";
 import { Input } from "../components/ui/input";
 import { IconButton } from "../components/controls";
 import { AppDialog, useDialog, type DialogControl } from "../components/app-dialog";
-import { useConfirm, type ConfirmationOptions } from "../components/confirm";
+import { useConfirm } from "../components/confirm";
 import { DialogFooter } from "../components/ui/dialog";
 import { FormField } from "../components/settings";
 import { ChoiceSelect } from "../components/choice-select";
-import { DEFAULT_SERVICE_PROVIDER, SERVICE_PROVIDERS, type ConfidentialProfile, type ConfidentialProfileInput, type AppState, type LoginPresentation, type ServiceProvider } from "../../shared/contracts";
+import { DEFAULT_SERVICE_PROVIDER, SERVICE_PROVIDERS, type ConfidentialProfile, type ConfidentialProfileInput, type Confirmation, type AppState, type LoginPresentation, type ServiceProvider } from "../../shared/contracts";
 import { desktopApi, distributionCapabilities } from "../lib/environment";
 import { profileIsAvailable } from "../lib/protection";
 import { ServiceLogo } from "../components/brand";
@@ -164,6 +165,7 @@ export function ProfileEditorDialog({
   const [error, setError] = useState<string>();
   const reportError = useCallback((failure: unknown) => setError(errorMessage(failure)), []);
   const confirm = useConfirm();
+  const client = useQueryClient();
   const account = useAccountLogin(desktopApi, reportError);
   const { session: login, auth: authorized } = account;
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<number>();
@@ -256,7 +258,7 @@ export function ProfileEditorDialog({
   // Phala, whose authorization selects the workspace, or another RedPill
   // workspace chosen before signing in again. Otherwise Save completes it.
   const connect = useMutation({
-    mutationFn: async ({ workspace, question }: { workspace: number | undefined; question?: ConfirmationOptions }) => {
+    mutationFn: async ({ workspace, question }: { workspace: number | undefined; question?: Confirmation }) => {
       if (question && !await confirm(question)) return;
       const signedIn = await account.authorize(draft);
       if (!signedIn || (provider.workspaces && workspace === undefined)) return;
@@ -265,6 +267,8 @@ export function ProfileEditorDialog({
         setSelectedWorkspaceId(undefined);
         throw new Error("The selected workspace is no longer available. Choose a workspace and save again.");
       }
+      // As the form does, saving waits while protection verifies.
+      await afterVerification(client);
       await saveLogin.mutateAsync({ login: signedIn.login, workspace: workspace ?? (offered.length === 1 ? offered[0]?.id : undefined) });
     },
     onMutate: () => setError(undefined),

@@ -28,3 +28,11 @@ test("the first state is taken as it is", () => {
   const first = state("a", 3);
   assert.equal(newerState(undefined, first), first);
 });
+
+test("a disconnected state applies whatever its sequence, and a reconnected one replaces it", () => {
+  const connected = state("a", 7, "verified");
+  const disconnected = { ...state("a", 7, "error"), backendConnected: false };
+  assert.equal(newerState(connected, disconnected), disconnected);
+  const reconnected = state("a", 7, "verified");
+  assert.equal(newerState(disconnected, reconnected), reconnected);
+});

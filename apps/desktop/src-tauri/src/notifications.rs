@@ -1,14 +1,15 @@
 mod permission;
 use desktop_core::{
-    client::CallError,
+    client::{CallError, Client},
     config::NotificationPreferences,
     contracts::{
         AppState, NotificationConfiguration, NotificationPermission, NotificationPermissionStatus,
         VerificationStatus,
     },
+    protocol::rpc,
 };
 use std::{
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, Manager};
@@ -38,22 +39,22 @@ pub fn set_cached_preferences(
     Ok(())
 }
 
-/// Asks for the system permission at startup while notifications are on and
-/// the user has not decided yet, so alerts can show without opening
-/// Settings. Where the system has no prompt, it never opens anything.
-pub async fn request_startup_permission(app: &AppHandle) {
-    let enabled = app
-        .state::<Settings>()
-        .0
-        .lock()
-        .is_ok_and(|preferences| preferences.enabled);
-    if !enabled || permission::query(app).await.permission != NotificationPermission::NotDetermined
+/// Asks for the system permission at startup while the backend's preferences
+/// have notifications on and the user has not decided yet, so alerts can show
+/// without opening Settings. Where the system has no prompt, it never opens
+/// anything. Returns whether the preferences could be read, which decides.
+pub async fn request_startup_permission(app: &AppHandle, client: &Arc<Client>) -> bool {
+    let Ok(settings) = desktop_core::ui_api::call(client, rpc::Settings).await else {
+        return false;
+    };
+    if settings.notifications.enabled
+        && permission::query(app).await.permission == NotificationPermission::NotDetermined
     {
-        return;
+        if let Err(error) = permission::request(app).await {
+            tracing::warn!("Cannot request notification permission: {error}");
+        }
     }
-    if let Err(error) = permission::request(app).await {
-        tracing::warn!("Cannot request notification permission: {error}");
-    }
+    true
 }
 
 #[tauri::command]

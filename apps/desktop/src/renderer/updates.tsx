@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo } from "react";
+import React, { useCallback, useMemo, useRef } from "react";
 import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { RotateCw } from "lucide-react";
 import type { DesktopApi, UpdateInfo, UpdateChannel } from "../shared/contracts";
@@ -9,6 +9,8 @@ import { Item, ItemContent, ItemTitle, ItemDescription, ItemActions } from "./co
 import { useConfirm } from "./components/confirm";
 import { toastError } from "./lib/error-message";
 
+const CHECK_INTERVAL = 6 * 60 * 60_000;
+
 /** Channel changes and installs, which run one at a time and pause checks. */
 const UPDATE_OPERATION = ["app-update-operation"];
 
@@ -17,21 +19,25 @@ export function useUpdates(api: DesktopApi, checks: boolean) {
   const client = useQueryClient();
   const confirm = useConfirm();
   const operating = useIsMutating({ mutationKey: UPDATE_OPERATION }) > 0;
-  const { data: snapshot, error, failureReason, failureCount, isFetching, refetch } = useQuery<UpdateInfo>({
+  // The query counts every failed check; these came before the last success.
+  const earlierFailures = useRef(0);
+  const { data: snapshot, error: checkError, isFetching: checking, refetch } = useQuery<UpdateInfo>({
     queryKey: ["app-update"], queryFn: () => api.prepareUpdate(), enabled: checks && !operating,
-    refetchInterval: 6 * 60 * 60_000,
-    // A tray app prepares updates while its window is hidden or inactive.
+    // A failed check runs again after 1 minute, then backs off up to the
+    // interval. Unlike retries, which wait for the window to be focused, the
+    // interval keeps running while it is hidden: a tray app prepares updates
+    // while its window is hidden or inactive.
+    refetchInterval: ({ state }) => {
+      if (state.status === "success") earlierFailures.current = state.errorUpdateCount;
+      const failures = state.errorUpdateCount - earlierFailures.current;
+      return failures ? Math.min(60_000 * 2 ** (failures - 1), CHECK_INTERVAL) : CHECK_INTERVAL;
+    },
     refetchIntervalInBackground: true,
     staleTime: 15 * 60_000,
-    // A failed check retries after 1 minute, then backs off up to the interval.
-    retry: true,
-    retryDelay: (failures) => Math.min(60_000 * 2 ** failures, 6 * 60 * 60_000),
+    retry: false,
   });
-  // A check that failed and waits to retry is not checking.
-  const checkError = error ?? failureReason;
-  const checking = isFetching && failureCount === 0;
   const { data: installedVersion } = useQuery({ queryKey: ["app-version"], queryFn: () => api.getAppVersion(), staleTime: Infinity });
-  /** Checks again now, in place of a check or retry in progress. */
+  /** Checks again now, in place of a check in progress. */
   const recheck = useCallback(async () => {
     await client.cancelQueries({ queryKey: ["app-update"] });
     void refetch();
