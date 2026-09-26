@@ -25,7 +25,7 @@ pub(super) fn audit_exchange(
 ) {
     let report_state = state.clone();
     let report_exchange = exchange.clone();
-    let report = move |verified, detail, rewritten| {
+    let report = move |verified, detail, rewritten, receipt| {
         let state = &report_state;
         let exchange = &report_exchange;
         if let Some(entry) = state
@@ -44,6 +44,7 @@ pub(super) fn audit_exchange(
             status: exchange.status,
             streamed: exchange.streamed,
             receipt_id: Some(exchange.receipt_id.clone()),
+            receipt,
             verified,
             detail,
             context: exchange.context.clone(),
@@ -59,6 +60,7 @@ pub(super) fn audit_exchange(
                 "Response delivery failed before the complete response was received; the receipt does not match the partial response."
                     .into(),
                 None,
+                None,
             );
             return;
         }
@@ -68,6 +70,7 @@ pub(super) fn audit_exchange(
                 "Response stream was canceled or protection stopped; no complete response proof was recorded."
                     .into(),
                 None,
+                None,
             );
             return;
         }
@@ -76,6 +79,7 @@ pub(super) fn audit_exchange(
         report(
             None,
             "Response delivered; receipt audit deferred because the audit limit was reached".into(),
+            None,
             None,
         );
         return;
@@ -90,10 +94,11 @@ pub(super) fn audit_exchange(
             ) => result,
         };
         match result {
-            Ok(Ok((transcript, detail))) => report(
+            Ok(Ok((transcript, detail, receipt))) => report(
                 Some(transcript.verified()),
                 format!("Post-delivery receipt audit: {detail}"),
                 Some(rewrite_noted(&transcript)),
+                receipt,
             ),
             Ok(Err(_)) => report(
                 None,
@@ -102,6 +107,7 @@ pub(super) fn audit_exchange(
                     exchange.receipt_id
                 ),
                 None,
+                None,
             ),
             Err(_) => report(
                 None,
@@ -109,6 +115,7 @@ pub(super) fn audit_exchange(
                     "Response delivered; receipt audit timed out. Standalone serve can retry with POST /receipts/{}/verify.",
                     exchange.receipt_id
                 ),
+                None,
                 None,
             ),
         }
@@ -120,7 +127,7 @@ pub(super) async fn verify_exchange(
     trusted: &TrustedIdentity,
     exchange: &RecordedExchange,
     bearer: Option<&str>,
-) -> Result<(Transcript, String), String> {
+) -> Result<(Transcript, String, Option<String>), String> {
     if matches!(&exchange.delivery, ResponseDelivery::Cancelled) {
         return Err(
             "the client canceled the response stream before its complete bytes were observed"
@@ -129,6 +136,8 @@ pub(super) async fn verify_exchange(
     }
     let receipt_resp = fetch_receipt_for_audit(state, &exchange.receipt_id, bearer).await?;
     let receipt = receipt_resp.json().and_then(parse_receipt_document)?;
+    // JSON is UTF-8 (RFC 8259 §8.1), so the checked document keeps its bytes.
+    let document = String::from_utf8(receipt_resp.body).ok();
 
     let mut transcript = Transcript::default();
     let (session_resp, no_session_reason) = fetch_session_for_audit(state, &receipt).await;
@@ -167,7 +176,7 @@ pub(super) async fn verify_exchange(
             exchange.response.len
         ));
     }
-    Ok((transcript, detail))
+    Ok((transcript, detail, document))
 }
 
 fn transient_audit_status(status: u16) -> bool {

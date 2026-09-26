@@ -508,6 +508,10 @@ impl DesktopRuntime {
         Ok(self.usage.get(record_id)?)
     }
 
+    pub fn usage_receipt(&self, record_id: &str) -> Result<Option<String>, Error> {
+        Ok(self.usage.receipt(record_id)?)
+    }
+
     pub fn export_usage_csv(&self, query: UsageQuery, path: PathBuf) -> Result<usize, Error> {
         Ok(self.usage.export_csv(&query, &path)?)
     }

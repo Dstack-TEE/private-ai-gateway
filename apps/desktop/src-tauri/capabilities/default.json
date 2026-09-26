@@ -48,6 +48,7 @@
     "allow-open-api-key-page",
     "allow-query-usage",
     "allow-get-usage-record",
+    "allow-get-usage-receipt",
     "allow-open-about-link",
     "allow-get-client-key",
     "allow-rotate-client-key",

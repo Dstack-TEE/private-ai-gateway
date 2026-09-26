@@ -35,6 +35,7 @@ macro_rules! renderer_methods {
                 export_diagnostics_content => ExportDiagnosticsContent,
                 query_usage => QueryUsage,
                 get_usage_record => GetUsageRecord,
+                get_usage_receipt => GetUsageReceipt,
                 list_agents => ListAgents,
                 set_agent_connection => SetAgentConnection,
             }

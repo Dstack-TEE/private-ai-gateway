@@ -920,6 +920,12 @@ fn two_cli_clients_share_state_and_disconnect_does_not_stop_service() {
         backend.run(&["usage", "list"])["items"],
         serde_json::json!([])
     );
+    let receipt = backend
+        .command(&["usage", "show", "missing", "--receipt"])
+        .output()
+        .unwrap();
+    assert!(!receipt.status.success());
+    assert!(String::from_utf8_lossy(&receipt.stderr).contains("No receipt is saved"));
     assert_eq!(
         backend.run(&["status"])["backend"]["instanceId"],
         first["backend"]["instanceId"]

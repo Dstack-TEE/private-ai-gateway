@@ -347,7 +347,12 @@ pub(super) enum Usage {
         page: Pagination,
     },
     /// Show one usage record by ID.
-    Show { id: String },
+    Show {
+        id: String,
+        /// Print the signed receipt document its audit checked, exactly as the service returned it.
+        #[arg(long)]
+        receipt: bool,
+    },
     /// Export every matching record to a new CSV file; pagination does not apply.
     Export {
         #[command(flatten)]

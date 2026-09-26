@@ -112,6 +112,9 @@ pub(crate) async fn dispatch(
             )),
             Err(error) => Err(error.into()),
         },
+        Command::GetUsageReceipt { record_id } => {
+            respond::<rpc::GetUsageReceipt, _>(runtime.usage_receipt(&record_id))
+        }
         Command::ExportUsage { query, path } => {
             respond::<rpc::ExportUsage, _>(runtime.export_usage_csv(query, absolute(path)?))
         }

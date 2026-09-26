@@ -173,6 +173,7 @@ pub(super) fn managed_reporter(events: tokio::sync::mpsc::Sender<ProxyEvent>) ->
             status: outcome.status,
             streamed: outcome.streamed,
             receipt_id: outcome.receipt_id,
+            receipt: outcome.receipt,
             verified: outcome.verified,
             detail: outcome.detail,
             at: context.at,

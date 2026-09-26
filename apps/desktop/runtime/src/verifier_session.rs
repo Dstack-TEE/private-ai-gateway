@@ -655,6 +655,10 @@ impl SessionManager {
         let summary = self
             .usage
             .upsert(&activity)
+            .and_then(|()| match event.receipt.as_deref() {
+                Some(receipt) => self.usage.save_receipt(&activity.id, receipt),
+                None => Ok(()),
+            })
             .and_then(|()| self.usage.session_summary(&activity.session_id));
         {
             let state = &mut runtime.state;

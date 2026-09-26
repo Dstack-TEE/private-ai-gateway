@@ -76,6 +76,9 @@ pub struct RequestOutcome {
     pub streamed: bool,
     /// Receipt associated with this inference response, when one was returned.
     pub receipt_id: Option<String>,
+    /// The receipt document the audit checked, exactly as the service
+    /// returned it (spec §7.2); `None` until an audit fetched it.
+    pub receipt: Option<String>,
     /// `Some` when receipt checks reached a verdict; `None` when no receipt
     /// applies or its verification could not be completed.
     pub verified: Option<bool>,
@@ -777,6 +780,7 @@ async fn proxy_passthrough(
         status,
         streamed: false,
         receipt_id: None,
+        receipt: None,
         verified: None,
         detail: String::new(),
         context,
@@ -958,6 +962,7 @@ async fn proxy_inference(
                 status,
                 streamed,
                 receipt_id,
+                receipt: None,
                 verified,
                 detail: detail.to_string(),
                 context: context.clone(),
@@ -1302,6 +1307,7 @@ fn send_error(
         status: 502,
         streamed: false,
         receipt_id: None,
+        receipt: None,
         verified: Some(false),
         detail: format!("upstream connection failed (possible TLS pin mismatch): {err}"),
         context,

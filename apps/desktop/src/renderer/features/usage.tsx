@@ -1,9 +1,9 @@
-import React, { lazy, Suspense, useEffect, useRef, useState } from "react";
+import React, { lazy, Suspense, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { usagePageQuery } from "../lib/page-queries";
 import { errorMessage } from "../lib/error-message";
-import { Ban, ChevronLeft, ChevronRight, ShieldCheck, ShieldX } from "lucide-react";
+import { Ban, Check, ChevronLeft, ChevronRight, Copy, ShieldCheck, ShieldX } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { ActionItem } from "../components/action-item";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
@@ -233,7 +233,6 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
     {activity.leftDevice && <section className="proof-explanation pt-3.5 border-t border-t-border [&_h3]:text-xs [&_h3]:font-semibold [&_p]:mt-1.5 [&_p]:text-muted-foreground [&_p]:text-xs" aria-label="Proof scope">
       <h3>What the proof checks</h3>
       <p>The verifier checks the request digest, the service signature against its attested keyset, and the response digest. This verifies the exchanged data, not answer accuracy.</p>
-      <p>Only the verification result and receipt ID are saved here, not the full signed receipt.</p>
     </section>}
     </>
   );
@@ -247,10 +246,38 @@ export function UsageProofDialog({ activity: listed, onClose }: { activity: Requ
   return (
     <AppDialog title="Usage proof" description={formatTimestamp(activity.at * 1_000, true)} className="sm:max-w-xl" onClose={onClose}>
       {error && <Alert variant="destructive"><AlertTitle>Could not refresh this record</AlertTitle><AlertDescription>{errorMessage(error)}</AlertDescription></Alert>}
-      <div className="-mx-6 flex min-h-0 flex-col gap-5 overflow-y-auto px-6 [&_.evidence]:text-sm [&_.evidence]:gap-y-4.5 [&_[data-slot=verification-verdict]]:shrink-0"><Evidence activity={activity} /></div>
+      <div className="-mx-6 flex min-h-0 flex-col gap-5 overflow-y-auto px-6 [&_.evidence]:text-sm [&_.evidence]:gap-y-4.5 [&_[data-slot=verification-verdict]]:shrink-0"><Evidence activity={activity} />{activity.receiptId && <SignedReceipt recordId={activity.id} />}</div>
       <DoneFooter />
     </AppDialog>
   );
+}
+
+/**
+ * The receipt document the audit checked. The signature covers the document's
+ * JCS form, whose numbers and strings serialize as ECMAScript's do (RFC 8785),
+ * so indenting it with `JSON.stringify` shows exactly the signed values. Copy
+ * takes the document as the service returned it, ready for `pap audit --receipt`.
+ */
+function SignedReceipt({ recordId }: { recordId: string }): React.JSX.Element | null {
+  const shell = useShell();
+  const titleId = useId();
+  const { data: receipt, error } = useQuery({
+    queryKey: ["usage-receipt", recordId], queryFn: () => desktopApi.getUsageReceipt(recordId),
+  });
+  const formatted = useMemo(() => {
+    if (!receipt) return undefined;
+    try { return JSON.stringify(JSON.parse(receipt), null, 2); }
+    catch { return receipt; }
+  }, [receipt]);
+  if (error) return <Alert variant="destructive"><AlertTitle>Could not load the signed receipt</AlertTitle><AlertDescription>{errorMessage(error)}</AlertDescription></Alert>;
+  if (!receipt) return null;
+  return <section className="grid gap-2 border-t border-t-border pt-3.5" aria-labelledby={titleId}>
+    <div className="flex items-center justify-between gap-3">
+      <div className="grid gap-0.5"><h3 id={titleId} className="text-xs font-semibold">Signed receipt</h3><p className="text-xs text-muted-foreground">As returned by the service. It holds hashes and verification metadata, not request or response content.</p></div>
+      <IconButton size="icon-sm" label="Copy signed receipt" onClick={() => shell.copy("Signed receipt", receipt)}>{shell.copied === "Signed receipt" ? <Check /> : <Copy />}</IconButton>
+    </div>
+    <pre className="overflow-x-auto rounded-2xl border bg-muted/50 p-4 text-xs leading-relaxed select-text"><code>{formatted}</code></pre>
+  </section>;
 }
 
 function MissingUsage({ activity }: { activity: Pick<RequestActivity, "leftDevice" | "path"> }) {

@@ -363,9 +363,17 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), CallError> {
             Usage::List { filter, page } => value(client.call(rpc::QueryUsage {
                 query: query(filter, Some(page)),
             })?)?,
-            Usage::Show { id } => value(client.call(rpc::GetUsageRecord {
+            Usage::Show { id, receipt: false } => value(client.call(rpc::GetUsageRecord {
                 record_id: id.clone(),
             })?)?,
+            Usage::Show { id, receipt: true } => {
+                let receipt = client
+                    .call(rpc::GetUsageReceipt {
+                        record_id: id.clone(),
+                    })?
+                    .ok_or("No receipt is saved for this usage record.")?;
+                return finish_output(write_bytes(receipt.as_bytes()));
+            }
             Usage::Export { filter, output, .. } => {
                 let path = std::path::absolute(output).map_err(|_| "Cannot resolve export path")?;
                 if path.exists() {

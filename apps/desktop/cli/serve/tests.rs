@@ -209,6 +209,7 @@ fn request_outcome_event_is_stable_json() {
         status: 200,
         streamed: true,
         receipt_id: Some("rcpt-1".to_string()),
+        receipt: None,
         verified: Some(true),
         detail: "receipt verified".to_string(),
         context: None,
@@ -512,11 +513,13 @@ async fn transient_receipt_and_session_fetches_are_retried() {
         local_policy_applied: false,
     };
 
-    let (transcript, _) = verify_exchange(&state, &state.snapshot(), &exchange, None)
+    let (transcript, _, receipt) = verify_exchange(&state, &state.snapshot(), &exchange, None)
         .await
         .unwrap();
 
     assert!(transcript.verified());
+    // The checked document is kept exactly as the service served it.
+    assert_eq!(receipt, Some(vector_receipt_envelope().to_string()));
     assert_eq!(receipt_calls.load(Ordering::SeqCst), 3);
     assert_eq!(session_calls.load(Ordering::SeqCst), 2);
 }
@@ -1106,6 +1109,7 @@ fn proxy_event(generation: u64, request_id: &str) -> ProxyEvent {
         status: 200,
         streamed: false,
         receipt_id: None,
+        receipt: None,
         verified: None,
         detail: String::new(),
         at: 1,
@@ -1131,6 +1135,7 @@ async fn managed_verdict_waits_for_a_full_queue_and_keeps_attribution() {
         status: 200,
         streamed: true,
         receipt_id: Some("rcpt-1".to_string()),
+        receipt: None,
         verified: Some(false),
         detail: "receipt failed".to_string(),
         context: Some(ForwardContext {

@@ -145,6 +145,7 @@ export function createDesktopApi(transport: UiTransport, platform: UiPlatform): 
     stop: () => call<AppState>("stop"),
     queryUsage: (query: UsageQuery): Promise<UsagePage> => call("query_usage", { query }),
     getUsageRecord: (recordId: string): Promise<RequestActivity> => call("get_usage_record", { recordId }),
+    getUsageReceipt: (recordId: string): Promise<string | null> => call("get_usage_receipt", { recordId }),
     listAgents: (): Promise<AgentStatus[]> => call("list_agents"),
     getAgentAccess: (): Promise<AgentAccessStatus> => call("get_agent_access"),
     requestAgentAccess: (): Promise<AgentAccessStatus> => call("request_agent_access"),

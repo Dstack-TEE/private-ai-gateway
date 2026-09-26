@@ -69,13 +69,17 @@ async fn control_verify(
     };
     let bearer = bearer_token(&headers);
     let trusted = state.snapshot();
-    let report = |verified: Option<bool>, rewritten: Option<bool>, detail: String| {
+    let report = |verified: Option<bool>,
+                  rewritten: Option<bool>,
+                  detail: String,
+                  receipt: Option<String>| {
         (state.reporter)(RequestOutcome {
             method: Method::POST,
             path: exchange.path.clone(),
             status: exchange.status,
             streamed: exchange.streamed,
             receipt_id: Some(exchange.receipt_id.clone()),
+            receipt,
             verified,
             detail,
             context: exchange.context.clone(),
@@ -84,7 +88,7 @@ async fn control_verify(
         });
     };
     match verify_exchange(&state, &trusted, &exchange, bearer.as_deref()).await {
-        Ok((transcript, detail)) => {
+        Ok((transcript, detail, receipt)) => {
             let verified = transcript.verified();
             let rewritten = Some(rewrite_noted(&transcript));
             if let Some(entry) = state
@@ -97,7 +101,7 @@ async fn control_verify(
             {
                 entry.verified = Some(verified);
             }
-            report(Some(verified), rewritten, detail);
+            report(Some(verified), rewritten, detail, receipt);
             let mut body = transcript.to_json(false);
             body["receipt_id"] = json!(id);
             json_response(StatusCode::OK, body)
@@ -114,7 +118,7 @@ async fn control_verify(
             {
                 entry.verified = None;
             }
-            report(None, None, detail.clone());
+            report(None, None, detail.clone(), None);
             json_response(StatusCode::BAD_GATEWAY, json!({ "error": detail }))
         }
     }
