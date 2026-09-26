@@ -6,6 +6,7 @@ from typing import Any
 
 from ..common import Provider, json_bytes, request_json, run_pap_audit, write_bytes, write_json
 from .attested_sessions import assert_upstream_attested_sessions
+from .lifecycle import assert_receipt_log
 
 
 REQUESTER_TOKEN = "live-e2e-requester"
@@ -140,32 +141,4 @@ def assert_embeddings_receipt_log(provider: Provider, receipt: dict[str, Any]) -
         raise RuntimeError(
             f"{provider.name} receipt endpoint must be /v1/embeddings, got {receipt.get('endpoint')!r}"
         )
-    events = receipt.get("event_log")
-    if not isinstance(events, list):
-        raise RuntimeError(f"{provider.name} receipt missing event_log")
-    upstream = [
-        event
-        for event in events
-        if isinstance(event, dict) and event.get("type") == "upstream.verified"
-    ]
-    if not upstream:
-        raise RuntimeError(f"{provider.name} receipt missing upstream.verified event")
-    verified = [event for event in upstream if event.get("result") == "verified"]
-    if not verified:
-        raise RuntimeError(f"{provider.name} receipt has no verified upstream event")
-    for event in verified:
-        bindings = event.get("channel_bindings")
-        if not isinstance(bindings, list) or not bindings:
-            raise RuntimeError(f"{provider.name} upstream event missing channel binding")
-        if provider.binding not in {binding.get("type") for binding in bindings}:
-            raise RuntimeError(f"{provider.name} upstream event missing {provider.binding}")
-    if provider.public_model != provider.upstream_model:
-        request_modified = any(
-            isinstance(event, dict)
-            and event.get("type") == "transparency.request_modified"
-            for event in events
-        )
-        if not request_modified:
-            raise RuntimeError(
-                f"{provider.name} receipt missing transparency.request_modified"
-            )
+    assert_receipt_log(provider, receipt)

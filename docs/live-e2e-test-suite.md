@@ -300,9 +300,9 @@ Capability-gated on `embeddings`. For each provider that lists it, the runner:
 - Runs the same `pap audit` offline verification against the receipt +
   request + response bodies to confirm canonical request/forwarded/response
   hashes and the receipt signature.
-- Asserts `receipt.endpoint == "/v1/embeddings"` and that `upstream.verified`
-  carries the provider's declared binding (e.g. `e2ee_public_key_sha256` for
-  Chutes embeddings).
+- Asserts `receipt.endpoint == "/v1/embeddings"` and that the session cited by
+  `upstream.verified` carries the provider's declared binding (e.g.
+  `e2ee_public_key_sha256` for Chutes embeddings).
 
 The first wired model is `Qwen/Qwen3-Embedding-8B-TEE` on Chutes (chute_id
 `21822836-bfa6-5426-b27e-dd5fdda1249e`), routed via the same

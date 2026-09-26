@@ -135,22 +135,23 @@ def assert_receipt_log(provider: Provider, receipt: dict[str, Any]) -> None:
     ]
     if not upstream:
         raise RuntimeError(f"{provider.name} receipt missing upstream.verified event")
-    verified = [event for event in upstream if event.get("result") == "verified"]
-    if not verified:
+    if not any(event.get("result") == "verified" for event in upstream):
         raise RuntimeError(f"{provider.name} receipt has no verified upstream event")
-    for event in verified:
-        bindings = event.get("channel_bindings")
-        if not isinstance(bindings, list) or not bindings:
-            raise RuntimeError(f"{provider.name} upstream event missing channel binding")
-        if provider.binding not in {binding.get("type") for binding in bindings}:
-            raise RuntimeError(f"{provider.name} upstream event missing {provider.binding}")
-    if provider.public_model != provider.upstream_model:
-        request_modified = any(
-            isinstance(event, dict)
-            and event.get("type") == "transparency.request_modified"
-            for event in events
+    # The channel binding lives in the cited session, checked by
+    # assert_upstream_attested_sessions. A rewrite shows as differing hashes.
+    received = event_body_hash(provider, events, "request.received")
+    forwarded = event_body_hash(provider, events, "request.forwarded")
+    if provider.public_model != provider.upstream_model and received == forwarded:
+        raise RuntimeError(
+            f"{provider.name} receipt records no model rewrite: "
+            "request.forwarded body_hash equals request.received"
         )
-        if not request_modified:
-            raise RuntimeError(
-                f"{provider.name} receipt missing transparency.request_modified"
-            )
+
+
+def event_body_hash(provider: Provider, events: list[Any], event_type: str) -> str:
+    matches = [
+        event for event in events if isinstance(event, dict) and event.get("type") == event_type
+    ]
+    if len(matches) != 1 or not isinstance(matches[0].get("body_hash"), str):
+        raise RuntimeError(f"{provider.name} receipt needs one {event_type} event with body_hash")
+    return matches[0]["body_hash"]
