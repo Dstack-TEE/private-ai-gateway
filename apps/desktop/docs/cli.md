@@ -27,6 +27,7 @@ The same binary includes the ACI protocol commands:
 | `pap audit` | Audit saved ACI evidence offline; see `audit --help` for inputs. |
 | `pap sessions <url>` | Inspect and verify attested inference sessions. |
 | `pap send <url>` | Send an inference request using the ACI client. |
+| `pap curl <https-url> -- [options]` | Verify the service, then run system curl with its attested TLS key pinned. |
 | `pap serve <url>` | Run the local streaming proxy with post-delivery receipt audits. |
 
 `send` reads the API key from the `ACI_API_KEY` environment variable or, with
@@ -38,6 +39,50 @@ option is hidden, still works with a warning, and will be removed in 0.3
 `private-ai-proxy` (and the legacy `aci` alias) accept these same commands. They are compiled from
 this package's ACI modules, not forwarded to another executable. `serve` is standalone;
 `start` below manages the persistent background service and saved profiles.
+
+### One pinned curl request
+
+```sh
+pap curl https://tee.redpill.ai/v1/chat/completions -- \
+  --fail-with-body --no-buffer \
+  --header "Authorization: Bearer $ACI_API_KEY" \
+  --header 'content-type: application/json' \
+  --data-binary '{"model":"MODEL_ID","messages":[{"role":"user","content":"Hi"}],"provider":{"aci_verified":true}}'
+```
+
+`pap curl` verifies a fresh service report before starting system curl, under
+the same policy flags as `verify` (`--accept-compose`, `--accept-subject`,
+`--accept-dstack-kms-root-public-key`). curl then connects with the TLS key the
+verification established pinned: the entry the report's
+`downstream_tls_binding` declares, or every attested TLS key when none is
+domain-scoped. A failed verification or pin mismatch stops the request. The
+response stays on stdout and verification output goes to stderr; with `--json`
+the transcript is one JSON line on stderr. This command does not audit the
+response receipt; use `pap send` or `pap serve` when that is required.
+
+curl also validates the certificate chain against the system CA store, so the
+service needs a CA-issued certificate. Production deployments normally have one.
+
+The wrapper supports a single URL and these curl request options:
+
+| Options | Purpose |
+| --- | --- |
+| `--header`, `-H`, `--data`, `-d`, `--data-raw`, `--data-binary`, `--json`, `--form`, `-F`, `--upload-file`, `-T`, `--request`, `-X` | Build the request. |
+| `--fail`, `-f`, `--fail-with-body`, `--no-buffer`, `--silent`, `-s`, `--show-error`, `-S`, `--include`, `-i`, `--verbose`, `-v`, `--compressed`, `--head`, `-I` | Control output and transfer behavior. |
+| `--output`, `-o`, `--max-time`, `--connect-timeout` | Write the result or set timeouts. |
+
+Put options after `--` and give each value-taking option a separate argument.
+Additional URLs, redirects, proxy or TLS overrides, config files, and other
+curl options are rejected; this is deliberately not a general curl parser. The
+URL is never globbed, so `[1-3]` or `{a,b}` in it is sent as written.
+
+| Exit code | Meaning |
+| --- | --- |
+| 125 | pap refused the request or could not start curl: invalid options, failed verification, or curl missing. curl did not run. |
+| 128 + N | curl was killed by signal N (Unix). |
+| Any other | curl's own exit code; 0 is success. |
+
+Command-line usage errors, such as a missing URL, exit 2 before verification.
 
 ## Lifecycle
 

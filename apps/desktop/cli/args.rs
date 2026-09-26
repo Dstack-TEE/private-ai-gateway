@@ -1,5 +1,7 @@
 //! ACI command arguments for Private AI Proxy, built on clap's derive API.
 
+use std::ffi::OsString;
+
 use clap::{Args, Subcommand};
 
 use crate::aci::verifier::{CustodyPolicy, CustodyPolicyError};
@@ -30,6 +32,12 @@ pub enum Command {
                  environment variable."
     )]
     Send(SendArgs),
+    #[command(
+        about = "Verify the target's ACI service (fail closed), then run the system curl \
+                 with the attested TLS key pinned. Exits 125 when pap refuses the request, \
+                 otherwise with curl's exit code."
+    )]
+    Curl(CurlArgs),
     #[command(
         about = "Local verifying proxy (default 127.0.0.1:4180, plain HTTP on localhost). \
                  Verifies the service on startup and refuses to start unless VERIFIED, \
@@ -258,6 +266,27 @@ pub struct SendArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct CurlArgs {
+    #[arg(help = "HTTPS URL to request after its ACI service has been verified.")]
+    pub url: String,
+    #[command(flatten)]
+    pub policy: PolicyArgs,
+    #[arg(
+        long,
+        help = "Print the verification transcript as JSON on stderr; stdout stays curl's."
+    )]
+    pub json: bool,
+    #[arg(
+        last = true,
+        allow_hyphen_values = true,
+        value_name = "CURL_ARG",
+        help = "Supported request options passed to system curl. Put them after `--`; \
+                pap owns the URL and transport-security options."
+    )]
+    pub curl_args: Vec<OsString>,
+}
+
+#[derive(Debug, Args)]
 pub struct SessionsArgs {
     #[arg(help = "Base URL of the ACI service whose attested sessions to audit.")]
     pub base_url: String,
@@ -350,6 +379,7 @@ fn session_id(value: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::FromArgMatches;
 
     // Only `session_id` is ours; clap's own parsing needs no test, and
     // `RequiredClaim::parse` is covered in checks.rs.
@@ -402,6 +432,34 @@ mod tests {
         assert!(
             err.starts_with("invalid --accept-dstack-kms-root-public-key: "),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn curl_args_after_separator_are_passed_through() {
+        let matches = Command::augment_subcommands(clap::Command::new("pap"))
+            .try_get_matches_from([
+                "pap",
+                "curl",
+                "https://example.com/v1/chat/completions",
+                "--accept-compose",
+                "abcd",
+                "--json",
+                "--",
+                "--json",
+                "{}",
+                "--data-binary",
+                "@request.json",
+            ])
+            .unwrap();
+        let Command::Curl(args) = Command::from_arg_matches(&matches).unwrap() else {
+            panic!("expected curl command");
+        };
+        assert_eq!(args.policy.accepted_composes, ["abcd"]);
+        assert!(args.json);
+        assert_eq!(
+            args.curl_args,
+            ["--json", "{}", "--data-binary", "@request.json"].map(OsString::from)
         );
     }
 }
