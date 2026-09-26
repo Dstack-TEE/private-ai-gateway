@@ -481,11 +481,11 @@ an upstream timeout, a response body that fails partway (`stream_abort`, the one
 line that carries a request id). Such a line can name the requested model or the
 request host; it never carries request or response content.
 
-`prefix_hash` is derived from content: a digest of the conversation's first
-4 KB, truncated to 32 hex characters, used for cache-affinity routing. Set
-`middleware.prefix_hash_secret` so it is an HMAC the control plane cannot test
-guesses against; without the secret it is a plain SHA-256, which lets the
-control plane link equal prefixes and confirm a prefix it already knows.
+`prefix_hash` is derived from content: an HMAC-SHA256 of the conversation's
+first 4 KB, truncated to 32 hex characters, used for cache-affinity routing.
+The gateway derives the HMAC key from dstack KMS, so the key never leaves the
+TEE. The control plane can see when two requests share a prefix, but it cannot
+test a guessed prefix against the hash.
 
 ## API Surface
 

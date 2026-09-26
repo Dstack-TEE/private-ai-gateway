@@ -22,12 +22,18 @@ use private_ai_gateway::aggregator::upstream_config::{
     UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
 use private_ai_gateway::http::{build_router_with_admin, build_router_with_admin_and_middleware};
-use private_ai_gateway::middleware::{Middleware, MiddlewareConfig};
+use private_ai_gateway::middleware::{Middleware, MiddlewareConfig, PrefixHashKey};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tower::ServiceExt;
 
 use common::{StaticKeyProvider, StubQuoter};
+
+/// A middleware with a fixed prefix-hash key; the gateway derives the real
+/// key from dstack KMS.
+fn new_middleware(config: &MiddlewareConfig) -> Result<Middleware, String> {
+    Middleware::new(PrefixHashKey::new([7; 32]), config)
+}
 
 fn temp_config_path() -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
@@ -119,14 +125,13 @@ async fn get_json(app: Router, uri: &str) -> (StatusCode, Value) {
 async fn relays_catalogs_from_control() {
     let control_url = spawn_stub_control().await;
     let middleware = Arc::new(
-        Middleware::new(&MiddlewareConfig {
+        new_middleware(&MiddlewareConfig {
             control_url,
             control_token: None,
             control_timeout_ms: Some(2_000),
             control_post_timeout_ms: Some(2_000),
             sse_keepalive_ms: None,
             send_request_features: None,
-            prefix_hash_secret: None,
             tee_only_domains: Vec::new(),
         })
         .unwrap(),
@@ -155,14 +160,13 @@ async fn relays_catalogs_from_control() {
 async fn relays_catalog_query_string_to_control() {
     let control_url = spawn_stub_control().await;
     let middleware = Arc::new(
-        Middleware::new(&MiddlewareConfig {
+        new_middleware(&MiddlewareConfig {
             control_url,
             control_token: None,
             control_timeout_ms: Some(2_000),
             control_post_timeout_ms: Some(2_000),
             sse_keepalive_ms: None,
             send_request_features: None,
-            prefix_hash_secret: None,
             tee_only_domains: Vec::new(),
         })
         .unwrap(),
