@@ -9,9 +9,9 @@ const ConfirmOpenContext = createContext(false);
 
 /**
  * Asks for a decision and resolves with the answer: in an alert sheet when
- * `ask` shows one (the macOS app), otherwise in an AlertDialog. The dialog
- * focuses the confirm button, or Cancel when the action can't be undone, so
- * Return never runs an irreversible action; Windows orders the buttons
+ * `ask` shows one (the macOS app, where the confirm button is the default),
+ * otherwise in an AlertDialog. The dialog focuses Cancel, the safe choice, so
+ * Return never starts the action; Windows orders the buttons
  * confirm-then-Cancel, other platforms Cancel-then-confirm.
  */
 export function ConfirmProvider({ ask, children }: PropsWithChildren<{ ask?: DesktopApi["showConfirmation"] }>) {
@@ -23,7 +23,6 @@ export function ConfirmProvider({ ask, children }: PropsWithChildren<{ ask?: Des
   // gone by then (a deleted item's controls) or nothing had focus (a button that
   // disabled itself before asking), the action that follows decides where focus goes.
   const opener = useRef<Element | null>(null);
-  const action = useRef<HTMLButtonElement>(null);
   const cancel = useRef<HTMLButtonElement>(null);
   const settle = useCallback((confirmed: boolean) => {
     resolve.current?.(confirmed);
@@ -48,14 +47,14 @@ export function ConfirmProvider({ ask, children }: PropsWithChildren<{ ask?: Des
   return <ConfirmContext.Provider value={confirm}><ConfirmOpenContext.Provider value={open || asking > 0}>
     {children}
     <AlertDialog open={open} onOpenChange={(next) => { if (!next) settle(false); }}>
-      <AlertDialogContent initialFocus={request?.destructive ? cancel : action} finalFocus={() => opener.current !== document.body && Boolean(opener.current?.isConnected)}>
+      <AlertDialogContent initialFocus={cancel} finalFocus={() => opener.current !== document.body && Boolean(opener.current?.isConnected)}>
         <AlertDialogHeader>
           <AlertDialogTitle>{request?.title}</AlertDialogTitle>
           <AlertDialogDescription className="whitespace-pre-line">{request?.message}</AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           {platform !== "windows" && cancelButton}
-          <AlertDialogAction ref={action} variant={request?.destructive ? "destructive" : "default"} onClick={() => settle(true)}>{request?.confirmLabel}</AlertDialogAction>
+          <AlertDialogAction variant={request?.destructive ? "destructive" : "default"} onClick={() => settle(true)}>{request?.confirmLabel}</AlertDialogAction>
           {platform === "windows" && cancelButton}
         </AlertDialogFooter>
       </AlertDialogContent>

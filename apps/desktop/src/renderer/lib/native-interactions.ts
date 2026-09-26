@@ -23,9 +23,10 @@ export function installNativeInteractions(api: Pick<DesktopApi, "showEditMenu" |
       return;
     }
     // Linux has no menu bar to hold them, so Ctrl+W closes the window and
-    // Ctrl+Q quits (GNOME HIG, Keyboard). Like GTK, a layout without Latin
-    // letters uses the key's position.
-    if (platform !== "linux" || !modified) return;
+    // Ctrl+Q quits (GNOME HIG, Keyboard), once per press and never while an
+    // input method composes. Like GTK, a layout without Latin letters uses the
+    // key's position.
+    if (platform !== "linux" || !modified || event.isComposing || event.repeat) return;
     const key = /^[a-z]$/i.test(event.key) ? event.key.toLowerCase() : event.code;
     const action = key === "w" || key === "KeyW" ? api.closeWindow : key === "q" || key === "KeyQ" ? api.quit : undefined;
     if (!action) return;
