@@ -3,16 +3,12 @@
 // setting without one. A classic script before the styles, so a page never
 // paints in the wrong theme (the CSP allows only 'self' scripts, so it is a
 // file); the React app only writes the attribute. In the desktop app it also
-// puts the platform and window material the shell injects (see
-// distribution.rs) on <html data-platform data-backdrop>, for the platform
-// metrics in semantic.css.
+// puts the platform the shell injects (see distribution.rs) on
+// <html data-platform>, for the renderer's platform behaviour.
 {
   const root = document.documentElement;
   const shell = window.__PAP_WINDOW__;
-  if (shell) {
-    root.dataset.platform = shell.platform;
-    if (shell.backdrop) root.dataset.backdrop = shell.backdrop;
-  }
+  if (shell) root.dataset.platform = shell.platform;
   const media = matchMedia("(prefers-color-scheme: dark)");
   const apply = () => {
     const appearance = root.dataset.appearance;

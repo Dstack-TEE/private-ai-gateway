@@ -3,9 +3,7 @@ import { ChevronDown, CircleHelp, Info, LoaderCircle, Plus, RefreshCw, Settings 
 import { Link } from "@tanstack/react-router";
 import { Button, buttonVariants } from "../components/ui/button";
 import { StateLabel } from "../components/state-label";
-import { Hint } from "../components/hint";
 import { currency, formatTokens } from "../lib/usage-presentation";
-import { Badge } from "../components/ui/badge";
 import { Card, CardHeader, CardTitle, CardDescription, CardAction, CardContent } from "../components/ui/card";
 import { Separator } from "../components/ui/separator";
 import { IconButton } from "../components/controls";
@@ -59,7 +57,7 @@ export function OverviewPage(): React.JSX.Element {
       <SessionSummary summary={state.sessionUsage} active={protectedNow || Boolean(state.sessionActive || state.reconnecting)} />
       </div>
       <div className="overview-grid mt-4 grid grid-cols-2 grid-rows-[auto_auto] gap-4 @max-[600px]/overview:grid-cols-1 [&_>_.overview-module:first-child]:col-start-1 [&_>_.overview-module:first-child]:row-start-1 [&_>_.overview-module:nth-child(2)]:col-start-1 [&_>_.overview-module:nth-child(2)]:row-start-2 [&_>_.overview-module:nth-child(3)]:col-start-2 [&_>_.overview-module:nth-child(3)]:row-[1_/_span_2]">
-        <OverviewModule title="Local API" description="Use private AI in your tools." titleAdornment={<Hint content="Local API examples"><Badge variant="ghost" className="size-6 p-0 [&>svg]:size-4!" render={<button type="button" />} aria-label="Local API examples" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "local-api-example" })}><CircleHelp aria-hidden="true" /></Badge></Hint>} status={<StateLabel tone={localAvailable ? "success" : "neutral"} text={localAvailable ? "Available" : "Unavailable"} />} action={<IconButton label="Local API settings" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "local-api" })}><Settings size={16} /></IconButton>}>
+        <OverviewModule title="Local API" description="Use private AI in your tools." titleAdornment={<IconButton variant="ghost" size="icon-xs" label="Local API examples" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "local-api-example" })}><CircleHelp aria-hidden="true" /></IconButton>} status={<StateLabel tone={localAvailable ? "success" : "neutral"} text={localAvailable ? "Available" : "Unavailable"} />} action={<IconButton label="Local API settings" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "local-api" })}><Settings size={16} /></IconButton>}>
           <LocalApiPanel
             proxyUrl={state.proxyUrl}
             clientKey={shell.clientKey}

@@ -252,9 +252,9 @@ function Window(): React.JSX.Element {
 
   return (
     <ShellContext.Provider value={shell}>
-    <main className="w-full h-full grid grid-cols-[var(--sidebar-width)_minmax(0,_1fr)] overflow-hidden max-[780px]:grid-cols-[154px_minmax(0,_1fr)] max-[620px]:grid-cols-[68px_minmax(0,_1fr)] max-[440px]:grid-cols-[56px_minmax(0,_1fr)]">
+    <main className="w-full h-full grid grid-cols-[var(--sidebar-width)_minmax(0,_1fr)] overflow-hidden bg-background max-[780px]:grid-cols-[154px_minmax(0,_1fr)] max-[620px]:grid-cols-[68px_minmax(0,_1fr)] max-[440px]:grid-cols-[56px_minmax(0,_1fr)]">
       <Sidebar navigationRef={navigation} />
-      <section className="min-w-0 min-h-0 flex flex-col bg-background">
+      <section className="min-w-0 min-h-0 flex flex-col">
         <PageHeader titleRef={pageTitle} />
         <div id="page-content" className="flex-auto min-w-0 min-h-0 overflow-auto pt-4 pr-6 pb-6 pl-6 [&_>_[role=alert]]:mb-4 max-[780px]:p-4 max-[440px]:p-3">
           <Outlet />

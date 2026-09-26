@@ -24,7 +24,7 @@ pub(crate) const CAPABILITIES: DistributionCapabilities = DistributionCapabiliti
     web_ui: true,
 };
 
-/// The operating system, for the renderer's platform metrics.
+/// The operating system, for the renderer's platform behaviour.
 const PLATFORM: &str = if cfg!(target_os = "macos") {
     "macos"
 } else if cfg!(target_os = "windows") {
@@ -33,12 +33,12 @@ const PLATFORM: &str = if cfg!(target_os = "macos") {
     "linux"
 };
 
-/// The distribution's capabilities, and the platform and window material
-/// (`mica` on Windows 11) that `appearance-init.js` puts on the root element.
-pub(crate) fn initialization_script(backdrop: Option<&str>) -> String {
+/// The distribution's capabilities, and the platform that `appearance-init.js`
+/// puts on the root element.
+pub(crate) fn initialization_script() -> String {
     let capabilities = serde_json::to_string(&CAPABILITIES)
         .expect("distribution capabilities must be serializable");
-    let window = serde_json::json!({ "platform": PLATFORM, "backdrop": backdrop });
+    let window = serde_json::json!({ "platform": PLATFORM });
     format!("window.__PAP_DISTRIBUTION__ = {capabilities};\nwindow.__PAP_WINDOW__ = {window};")
 }
 
@@ -52,7 +52,7 @@ mod tests {
 
     #[test]
     fn injected_capabilities_enforce_the_channel_contract() {
-        let script = initialization_script(None);
+        let script = initialization_script();
         let (distribution, _) = script.split_once('\n').unwrap();
         let json = distribution
             .strip_prefix("window.__PAP_DISTRIBUTION__ = ")
