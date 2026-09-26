@@ -474,7 +474,8 @@ fn yaml_value(node: yaml_edit::YamlNode) -> Option<ConfigValue> {
 /// are read by other parsers, which can decode a long literal such as
 /// `0.049999999999999996` to a different f64 than serde_json does. Reading
 /// those values back through serde_json gives both sides of a comparison the
-/// same decoder.
+/// same decoder. Older records only match because that decoder is serde_json's
+/// default one, not `float_roundtrip`; a unit test pins this.
 fn recorded(value: Value) -> Value {
     serde_json::from_str(&value.to_string()).unwrap_or(value)
 }

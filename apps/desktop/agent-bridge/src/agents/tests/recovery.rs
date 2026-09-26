@@ -996,3 +996,22 @@ fn older_connections_without_tee_names_update_on_the_next_reconcile() {
         assert!(apply_connect(&sandbox, agent, &catalog, &options).authorized);
     }
 }
+
+/// A price with more significant digits than `f64::DIGITS` is stored rounded,
+/// so the config written on connect reads back as the value just recorded.
+#[test]
+fn long_prices_connect_authorized() {
+    let catalog = Catalog::from_remote(
+        &json!({"data": [{
+            "id": "openai/gpt-5-nano",
+            "pricing": {"prompt": "0.000000049999999999999996", "completion": "0.0000004"}
+        }]}),
+        1,
+    )
+    .unwrap();
+    for agent in [Agent::Pi, Agent::OhMyPi, Agent::OpenClaw] {
+        let sandbox = sandbox(&format!("long-prices-{}", agent.id()));
+        let status = apply_connect(&sandbox, agent, &catalog, &ConnectOptions::default());
+        assert!(status.authorized, "{}: {:?}", agent.id(), status.attention);
+    }
+}

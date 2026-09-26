@@ -26,6 +26,8 @@ jsonc-parser = { version = "0.33.1", features = ["serde", "cst"] }
 rand = "0.8"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
 serde = { version = "1", features = ["derive"] }
+# Keep serde_json's default float parsing: config_doc's `recorded` depends on
+# it, and a test fails if `float_roundtrip` is enabled by feature unification.
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
 shlex = "2"
