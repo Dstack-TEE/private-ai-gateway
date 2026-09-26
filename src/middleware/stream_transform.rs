@@ -8,7 +8,7 @@
 //! when the client opts out. Cost injection, TTFT, and outcome are a separate
 //! metering pass downstream (`sse`).
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
@@ -25,9 +25,10 @@ use super::response_transform::{
     self, anthropic_usage, chat_cache_tokens, custom_tool_call_item, custom_tool_input,
     function_call_item, i64_field, invalid_finish_reason_error, invalid_tool_call_arguments_error,
     invalid_tool_call_identity_error, item_id, map_finish_reason, message_item,
-    normalize_function_call_arguments, normalize_reasoning_usage_value, now_millis, now_secs,
-    output_text_part, reasoning_item, reasoning_text, refusal_part, responses_object,
-    responses_terminal, responses_usage, transform_finish_reason, ResponseIdentity, ResponsesHead,
+    normalize_reasoning_usage_value, now_millis, now_secs, output_text_part,
+    parse_function_call_arguments, reasoning_item, reasoning_text, refusal_part, responses_object,
+    responses_terminal, responses_usage, transform_finish_reason,
+    validated_function_call_arguments, ResponseIdentity, ResponsesHead,
 };
 use super::sse::MAX_SSE_LINE_BYTES;
 use super::types::ProviderFormat;
@@ -153,14 +154,33 @@ struct StreamState {
     cache_read_tokens: Option<i64>,
     cache_creation_tokens: Option<i64>,
     has_started: bool,
-    content_block_started: bool,
-    current_content_index: i64,
-    tool_calls_started: BTreeSet<i64>,
+    text_content_index: Option<i64>,
+    next_content_index: i64,
+    message_calls: BTreeMap<i64, MessageToolCall>,
+    next_message_call_index: i64,
     finish_reason: Option<String>,
     /// Set once the closing events have been emitted, so they cannot be sent twice.
     terminated: bool,
     // OpenAI chat -> Responses.
     responses: ResponsesStream,
+}
+
+#[derive(Default)]
+struct MessageToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+    content_index: Option<i64>,
+}
+
+impl MessageToolCall {
+    fn has_payload(&self) -> bool {
+        !self.id.trim().is_empty() || !self.name.trim().is_empty() || !self.arguments.is_empty()
+    }
+
+    fn has_identity(&self) -> bool {
+        !self.id.trim().is_empty() && !self.name.trim().is_empty()
+    }
 }
 
 #[derive(Default)]
@@ -267,6 +287,40 @@ fn set_tool_identity(current: &mut String, value: &str) -> Result<(), ()> {
     }
     current.push_str(value);
     Ok(())
+}
+
+fn optional_stream_string(value: Option<&Value>) -> Result<&str, ()> {
+    match value {
+        None | Some(Value::Null) => Ok(""),
+        Some(Value::String(value)) => Ok(value),
+        Some(_) => Err(()),
+    }
+}
+
+struct ChatToolDelta<'a> {
+    index: i64,
+    id: &'a str,
+    name: &'a str,
+    arguments: &'a str,
+}
+
+fn parse_chat_tool_delta(value: &Value) -> Result<ChatToolDelta<'_>, ()> {
+    let tool_call = value.as_object().ok_or(())?;
+    let index = tool_call.get("index").and_then(Value::as_i64).ok_or(())?;
+    if index < 0 {
+        return Err(());
+    }
+    let function = match tool_call.get("function") {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(function)) => Some(function),
+        Some(_) => return Err(()),
+    };
+    Ok(ChatToolDelta {
+        index,
+        id: optional_stream_string(tool_call.get("id"))?,
+        name: optional_stream_string(function.and_then(|value| value.get("name")))?,
+        arguments: optional_stream_string(function.and_then(|value| value.get("arguments")))?,
+    })
 }
 
 /// One SSE event reduced to the fields the transforms consume: the last
@@ -548,65 +602,79 @@ fn sse_event(event: &str, data: &Value) -> String {
 
 /// Emit the events that close an Anthropic message: stops for every open
 /// content block, then either an error event or message_delta + message_stop.
-///
-/// Called from two places, because `[DONE]` is not guaranteed. It is an OpenAI
-/// convention, not an SSE requirement, and an upstream may simply stop sending
-/// bytes — GMI's OpenAI-compatible endpoint ends after its final usage chunk
-/// with no terminator. Emitting this only on `[DONE]` would leave such a stream
-/// as an Anthropic message that never stops, which no client can distinguish
-/// from a response still in progress.
-///
-/// Idempotent via `state.terminated`, so a real `[DONE]` and an end-of-stream
-/// call cannot both emit.
-///
-/// Deliberately NOT conditioned on `has_started`: an explicit `[DONE]` has
-/// always produced the terminal events even with nothing before it, and that
-/// is what the framing tests pin. The end-of-stream caller applies that check
-/// itself, where synthesizing a terminal for a stream that produced nothing
-/// would be new behaviour rather than preserved behaviour.
-fn anthropic_stream_tail(state: &mut StreamState) -> String {
+/// A clean terminal is emitted only after the upstream supplied a recognized
+/// finish reason and every completed tool call has a stable identity and valid
+/// JSON-object arguments.
+fn anthropic_stream_tail(state: &mut StreamState) -> Result<String, ()> {
     if state.terminated {
-        return String::new();
+        return Ok(String::new());
     }
-    state.terminated = true;
 
-    let mut output = String::new();
-    if state.content_block_started {
-        output.push_str(&sse_event(
-            "content_block_stop",
-            &json!({ "type": "content_block_stop", "index": state.current_content_index }),
-        ));
-        state.content_block_started = false;
-    }
-    for index in &state.tool_calls_started {
-        output.push_str(&sse_event(
-            "content_block_stop",
-            &json!({ "type": "content_block_stop", "index": index }),
-        ));
-    }
-    state.tool_calls_started.clear();
-
-    let fr = state.finish_reason.as_deref();
-    let is_error_finish = fr == Some("error") || fr.is_some_and(|f| f.ends_with("_error"));
+    let fr = state.finish_reason.as_deref().ok_or(())?;
+    let is_error_finish = fr == "error" || fr.ends_with("_error");
     if is_error_finish {
-        let error_type = match fr {
-            Some(f) if f.ends_with("_error") => f,
-            _ => "api_error",
+        state.terminated = true;
+        let error_type = if fr.ends_with("_error") {
+            fr
+        } else {
+            "api_error"
         };
-        output.push_str(&sse_event(
+        return Ok(sse_event(
             "error",
             &json!({
                 "type": "error",
                 "error": { "type": error_type, "message": "The upstream provider returned an error" },
             }),
         ));
-        return output;
+    }
+
+    let mut stop_reason = map_finish_reason(Some(fr)).ok_or(())?;
+    let truncated = matches!(fr, "length" | "content_filter");
+    let mut output = flush_ready_message_calls(state);
+    let invalid_identity = state
+        .message_calls
+        .values()
+        .any(|call| call.has_payload() && !call.has_identity());
+    if invalid_identity && !truncated {
+        return Err(());
+    }
+    if !truncated {
+        output.push_str(&open_pending_message_calls(state));
+    }
+    if !truncated
+        && state
+            .message_calls
+            .values()
+            .filter(|call| call.content_index.is_some())
+            .any(|call| parse_function_call_arguments(&call.arguments).is_none())
+    {
+        return Err(());
+    }
+    let has_tool_calls = state
+        .message_calls
+        .values()
+        .any(|call| call.content_index.is_some());
+    if stop_reason == "end_turn" && has_tool_calls {
+        stop_reason = "tool_use";
+    } else if stop_reason == "tool_use" && !has_tool_calls {
+        return Err(());
+    }
+
+    state.terminated = true;
+    output.push_str(&close_message_text(state));
+    for call in state.message_calls.values_mut() {
+        if let Some(index) = call.content_index.take() {
+            output.push_str(&sse_event(
+                "content_block_stop",
+                &json!({ "type": "content_block_stop", "index": index }),
+            ));
+        }
     }
     output.push_str(&sse_event(
         "message_delta",
         &json!({
             "type": "message_delta",
-            "delta": { "stop_reason": map_finish_reason(fr), "stop_sequence": Value::Null },
+            "delta": { "stop_reason": stop_reason, "stop_sequence": Value::Null },
             "usage": anthropic_usage(
                 state.input_tokens,
                 state.output_tokens,
@@ -616,7 +684,107 @@ fn anthropic_stream_tail(state: &mut StreamState) -> String {
         }),
     ));
     output.push_str("event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n");
+    Ok(output)
+}
+
+fn close_message_text(state: &mut StreamState) -> String {
+    let Some(index) = state.text_content_index.take() else {
+        return String::new();
+    };
+    sse_event(
+        "content_block_stop",
+        &json!({ "type": "content_block_stop", "index": index }),
+    )
+}
+
+fn flush_ready_message_calls(state: &mut StreamState) -> String {
+    let mut output = String::new();
+    loop {
+        let index = state.next_message_call_index;
+        let ready = state
+            .message_calls
+            .get(&index)
+            .is_some_and(|call| call.content_index.is_none() && call.has_identity());
+        if !ready {
+            break;
+        }
+        state.next_message_call_index += 1;
+        output.push_str(&open_message_call(index, state));
+    }
     output
+}
+
+fn open_pending_message_calls(state: &mut StreamState) -> String {
+    let pending = state
+        .message_calls
+        .iter()
+        .filter(|(_, call)| call.content_index.is_none() && call.has_identity())
+        .map(|(index, _)| *index)
+        .collect::<Vec<_>>();
+    let mut output = String::new();
+    for index in pending {
+        output.push_str(&open_message_call(index, state));
+    }
+    output
+}
+
+fn open_message_call(index: i64, state: &mut StreamState) -> String {
+    let mut output = close_message_text(state);
+    let content_index = state.next_content_index;
+    state.next_content_index += 1;
+    let call = state
+        .message_calls
+        .get_mut(&index)
+        .expect("message tool call exists");
+    call.content_index = Some(content_index);
+    output.push_str(&sse_event(
+        "content_block_start",
+        &json!({
+            "type": "content_block_start",
+            "index": content_index,
+            "content_block": { "type": "tool_use", "id": call.id, "name": call.name, "input": {} },
+        }),
+    ));
+    if !call.arguments.is_empty() {
+        output.push_str(&sse_event(
+            "content_block_delta",
+            &json!({
+                "type": "content_block_delta",
+                "index": content_index,
+                "delta": { "type": "input_json_delta", "partial_json": call.arguments },
+            }),
+        ));
+    }
+    output
+}
+
+fn message_tool_deltas(tool_calls: &[Value], state: &mut StreamState) -> Result<String, ()> {
+    let mut output = String::new();
+    for tool_call in tool_calls {
+        let delta = parse_chat_tool_delta(tool_call)?;
+
+        let was_started = {
+            let call = state.message_calls.entry(delta.index).or_default();
+            set_tool_identity(&mut call.id, delta.id)?;
+            set_tool_identity(&mut call.name, delta.name)?;
+            if !delta.arguments.is_empty() {
+                call.arguments.push_str(delta.arguments);
+            }
+            call.content_index
+        };
+        if let Some(content_index) = was_started.filter(|_| !delta.arguments.is_empty()) {
+            output.push_str(&sse_event(
+                "content_block_delta",
+                &json!({
+                    "type": "content_block_delta",
+                    "index": content_index,
+                    "delta": { "type": "input_json_delta", "partial_json": delta.arguments },
+                }),
+            ));
+        }
+        output.push_str(&flush_ready_message_calls(state));
+    }
+    Ok(output)
 }
 
 fn openai_to_anthropic_messages_stream(
@@ -627,8 +795,8 @@ fn openai_to_anthropic_messages_stream(
     let payload = event.data.as_deref().unwrap_or("").trim();
 
     if payload == "[DONE]" {
-        let tail = anthropic_stream_tail(state);
-        return Ok(if tail.is_empty() { None } else { Some(tail) });
+        let tail = anthropic_stream_tail(state)?;
+        return Ok((!tail.is_empty()).then_some(tail));
     }
 
     if payload.is_empty() {
@@ -680,8 +848,8 @@ fn openai_to_anthropic_messages_stream(
             .unwrap_or_else(|| "unknown".to_string());
         let input_tokens = parsed
             .get("usage")
-            .map(|u| i64_field(u, "prompt_tokens"))
-            .filter(|t| *t != 0)
+            .map(|usage| i64_field(usage, "prompt_tokens"))
+            .filter(|tokens| *tokens != 0)
             .unwrap_or(state.input_tokens);
         output.push_str(&sse_event(
             "message_start",
@@ -705,100 +873,65 @@ fn openai_to_anthropic_messages_stream(
     let choice = parsed
         .get("choices")
         .and_then(Value::as_array)
-        .and_then(|c| c.first());
+        .and_then(|choices| choices.first());
     let Some(choice) = choice else {
-        return Ok(if output.is_empty() {
-            None
-        } else {
-            Some(output)
-        });
+        return Ok((!output.is_empty()).then_some(output));
     };
-    let delta = choice.get("delta");
+    let delta = match choice.get("delta") {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(delta)) => Some(delta),
+        Some(_) => return Err(()),
+    };
 
-    if let Some(content) = delta
-        .and_then(|d| d.get("content"))
-        .and_then(Value::as_str)
-        .filter(|c| !c.is_empty())
-    {
-        if !state.content_block_started {
-            output.push_str(&sse_event(
-                "content_block_start",
-                &json!({
-                    "type": "content_block_start",
-                    "index": state.current_content_index,
-                    "content_block": { "type": "text", "text": "" },
-                }),
-            ));
-            state.content_block_started = true;
-        }
+    let content = match delta.and_then(|delta| delta.get("content")) {
+        None | Some(Value::Null) => None,
+        Some(Value::String(content)) if content.is_empty() => None,
+        Some(Value::String(content)) => Some(content.as_str()),
+        Some(_) => return Err(()),
+    };
+    if let Some(content) = content {
+        let content_index = match state.text_content_index {
+            Some(index) => index,
+            None => {
+                let index = state.next_content_index;
+                state.next_content_index += 1;
+                state.text_content_index = Some(index);
+                output.push_str(&sse_event(
+                    "content_block_start",
+                    &json!({
+                        "type": "content_block_start",
+                        "index": index,
+                        "content_block": { "type": "text", "text": "" },
+                    }),
+                ));
+                index
+            }
+        };
         output.push_str(&sse_event(
             "content_block_delta",
             &json!({
                 "type": "content_block_delta",
-                "index": state.current_content_index,
+                "index": content_index,
                 "delta": { "type": "text_delta", "text": content },
             }),
         ));
     }
 
-    if let Some(tool_calls) = delta
-        .and_then(|d| d.get("tool_calls"))
-        .and_then(Value::as_array)
-    {
-        for tool_call in tool_calls {
-            let tool_index = state.current_content_index
-                + 1
-                + tool_call.get("index").and_then(Value::as_i64).unwrap_or(0);
-            let id = tool_call.get("id").and_then(Value::as_str);
-            let name = tool_call
-                .get("function")
-                .and_then(|f| f.get("name"))
-                .and_then(Value::as_str);
-            if let (Some(id), Some(name)) = (id.filter(|s| !s.is_empty()), name) {
-                if state.content_block_started && !state.tool_calls_started.contains(&tool_index) {
-                    output.push_str(&sse_event(
-                        "content_block_stop",
-                        &json!({ "type": "content_block_stop", "index": state.current_content_index }),
-                    ));
-                    state.content_block_started = false;
-                }
-                output.push_str(&sse_event(
-                    "content_block_start",
-                    &json!({
-                        "type": "content_block_start",
-                        "index": tool_index,
-                        "content_block": { "type": "tool_use", "id": id, "name": name, "input": {} },
-                    }),
-                ));
-                state.tool_calls_started.insert(tool_index);
-            }
-            if let Some(arguments) = tool_call
-                .get("function")
-                .and_then(|f| f.get("arguments"))
-                .and_then(Value::as_str)
-                .filter(|a| !a.is_empty())
-            {
-                output.push_str(&sse_event(
-                    "content_block_delta",
-                    &json!({
-                        "type": "content_block_delta",
-                        "index": tool_index,
-                        "delta": { "type": "input_json_delta", "partial_json": arguments },
-                    }),
-                ));
-            }
+    match delta.and_then(|delta| delta.get("tool_calls")) {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(tool_calls)) => {
+            output.push_str(&message_tool_deltas(tool_calls, state)?);
         }
+        Some(_) => return Err(()),
     }
 
-    if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
-        state.finish_reason = Some(reason.to_string());
+    match choice.get("finish_reason") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(reason)) => state.finish_reason = Some(reason.clone()),
+        Some(_) => return Err(()),
     }
 
-    Ok(if output.is_empty() {
-        None
-    } else {
-        Some(output)
-    })
+    Ok((!output.is_empty()).then_some(output))
 }
 
 // ── OpenAI chat.completion SSE → Responses SSE ──────────────────────────────
@@ -1028,30 +1161,20 @@ fn responses_text_delta(kind: TextKind, delta: &str, state: &mut ResponsesStream
 fn responses_tool_deltas(tool_calls: &[Value], state: &mut ResponsesStream) -> Result<String, ()> {
     let mut output = String::new();
     for tool_call in tool_calls {
-        let index = tool_call.get("index").and_then(Value::as_i64).unwrap_or(0);
-        let call_id = tool_call.get("id").and_then(Value::as_str).unwrap_or("");
-        let function = tool_call.get("function");
-        let name = function
-            .and_then(|function| function.get("name"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let arguments = function
-            .and_then(|function| function.get("arguments"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
+        let delta = parse_chat_tool_delta(tool_call)?;
 
         let was_started = {
-            let call = state.calls.entry(index).or_default();
-            set_tool_identity(&mut call.call_id, call_id)?;
-            set_tool_identity(&mut call.chat_name, name)?;
-            if !arguments.is_empty() {
-                call.arguments.push_str(arguments);
+            let call = state.calls.entry(delta.index).or_default();
+            set_tool_identity(&mut call.call_id, delta.id)?;
+            set_tool_identity(&mut call.chat_name, delta.name)?;
+            if !delta.arguments.is_empty() {
+                call.arguments.push_str(delta.arguments);
             }
             call.output_index.is_some()
         };
 
-        if was_started && !arguments.is_empty() {
-            let call = state.calls.get(&index).expect("tool call exists");
+        if was_started && !delta.arguments.is_empty() {
+            let call = state.calls.get(&delta.index).expect("tool call exists");
             if call.kind == CallKind::Function {
                 if let Some(output_index) = call.output_index {
                     let item_id = call.item_id();
@@ -1061,7 +1184,7 @@ fn responses_tool_deltas(tool_calls: &[Value], state: &mut ResponsesStream) -> R
                         json!({
                             "item_id": item_id,
                             "output_index": output_index,
-                            "delta": arguments,
+                            "delta": delta.arguments,
                         }),
                     ));
                 }
@@ -1182,7 +1305,7 @@ fn close_responses_calls(state: &mut ResponsesStream) -> String {
             ));
             continue;
         }
-        let Some(arguments) = normalize_function_call_arguments(&call.arguments) else {
+        let Some(arguments) = validated_function_call_arguments(&call.arguments) else {
             state.invalid_tool_arguments = true;
             continue;
         };
@@ -1652,9 +1775,16 @@ impl Stream for SseTransformStream {
                         && !this.state.terminated
                     {
                         if this.state.finish_reason.is_some() {
-                            let tail = anthropic_stream_tail(&mut this.state);
-                            if !tail.is_empty() {
-                                this.queue.push_back(Bytes::from(tail));
+                            match anthropic_stream_tail(&mut this.state) {
+                                Ok(tail) if !tail.is_empty() => {
+                                    this.queue.push_back(Bytes::from(tail));
+                                }
+                                Ok(_) => {}
+                                Err(()) => {
+                                    this.fail(
+                                        "provider sent an invalid tool call or finish reason",
+                                    );
+                                }
                             }
                         } else {
                             this.fail("provider ended before sending a finish reason");
@@ -1695,6 +1825,7 @@ impl Stream for SseTransformStream {
 mod tests {
     use super::*;
     use futures_util::StreamExt;
+    use std::collections::BTreeSet;
 
     #[tokio::test]
     async fn malformed_anthropic_event_ends_stream_without_terminal() {
@@ -1852,7 +1983,10 @@ mod tests {
             .expect("bare payload after an event line still transforms");
         assert!(out.contains("\"text\":\"hi\""), "{out}");
 
-        let mut state = StreamState::default();
+        let mut state = StreamState {
+            finish_reason: Some("stop".to_string()),
+            ..Default::default()
+        };
         let out = StreamTransform::OpenaiToAnthropicMessages
             .apply(": keepalive\n[DONE]", "fb", &mut state)
             .unwrap()
@@ -1896,7 +2030,10 @@ mod tests {
     // OpenAI→Anthropic stream, not be skipped as an unparseable event.
     #[test]
     fn spaceless_done_terminates_openai_to_anthropic() {
-        let mut state = StreamState::default();
+        let mut state = StreamState {
+            finish_reason: Some("stop".to_string()),
+            ..Default::default()
+        };
         let out = StreamTransform::OpenaiToAnthropicMessages
             .apply("data:[DONE]", "fb", &mut state)
             .unwrap()
@@ -1930,6 +2067,9 @@ mod tests {
         let upstream = "data: {\"id\":\"chatcmpl-7bdaaade5030\",\"model\":\"vendor-model-int\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"}}]}\n\n";
         let events: Vec<Result<Bytes, ServiceError>> = vec![
             Ok(Bytes::from(upstream)),
+            Ok(Bytes::from(
+                "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            )),
             Ok(Bytes::from("data: [DONE]\n\n")),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
@@ -2256,6 +2396,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn responses_stream_requires_tool_call_index() {
+        let event = json!({ "choices": [{ "delta": { "tool_calls": [{
+            "id": "call_1",
+            "function": { "name": "lookup", "arguments": "{}" }
+        }] } }] });
+        let (_, error, _) = replay_responses_fixture(&json!({
+            "events": [format!("data: {event}")]
+        }))
+        .await;
+        assert!(error.is_some());
+    }
+
+    #[tokio::test]
     async fn openai_chat_to_responses_stream_matches_fixtures() {
         let cases: Vec<Value> =
             serde_json::from_str(include_str!("../../tests/fixtures/stream_golden.json"))
@@ -2336,6 +2489,154 @@ mod tests {
         let error = out.iter().find(|e| e["type"] == json!("error")).unwrap();
         assert_eq!(error["error"]["type"], json!("overloaded_error"));
         assert!(!out.iter().any(|e| e["type"] == json!("message_stop")));
+    }
+
+    #[test]
+    fn openai_to_anthropic_tool_stream_is_ordered_and_strict() {
+        let transform = StreamTransform::OpenaiToAnthropicMessages;
+        let tool_event = |call: Value| {
+            format!(
+                "data: {}",
+                json!({ "choices": [{ "delta": { "tool_calls": [call] } }] })
+            )
+        };
+        let mut state = StreamState::default();
+        let first_event = format!(
+            "data: {}",
+            json!({
+                "id": "c1",
+                "model": "m",
+                "choices": [{ "delta": { "tool_calls": [{
+                    "index": 0,
+                    "function": { "arguments": "{\"q\":" }
+                }] } }]
+            })
+        );
+        let first = transform
+            .apply(&first_event, "fallback", &mut state)
+            .unwrap()
+            .unwrap();
+        assert!(first.contains("message_start"));
+        assert!(!first.contains("content_block_start"));
+
+        let id_event = tool_event(json!({ "index": 0, "id": "call_1" }));
+        let id_only = transform.apply(&id_event, "fallback", &mut state).unwrap();
+        assert!(id_only.is_none());
+
+        let name_event = tool_event(json!({
+            "index": 0,
+            "function": { "name": "lookup", "arguments": "\"x\"}" }
+        }));
+        let started = transform
+            .apply(&name_event, "fallback", &mut state)
+            .unwrap()
+            .unwrap();
+        assert_eq!(started.matches("content_block_start").count(), 2);
+        assert!(started.contains(r#""index":0"#));
+        assert!(started.contains(r#""partial_json":"{\"q\":\"x\"}""#));
+
+        let duplicate_event = tool_event(json!({
+            "index": 0,
+            "id": "call_1",
+            "function": { "name": "lookup" }
+        }));
+        let duplicate = transform
+            .apply(&duplicate_event, "fallback", &mut state)
+            .unwrap();
+        assert!(duplicate.is_none());
+
+        transform
+            .apply(
+                r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+                "fallback",
+                &mut state,
+            )
+            .unwrap();
+        let tail = transform
+            .apply("data: [DONE]", "fallback", &mut state)
+            .unwrap()
+            .unwrap();
+        assert!(tail.contains(r#""stop_reason":"tool_use""#));
+
+        let call_1 = tool_event(json!({
+            "index": 1, "id": "call_2",
+            "function": { "name": "second", "arguments": "{\"b\":2}" }
+        }));
+        let call_0 = tool_event(json!({
+            "index": 0, "id": "call_1",
+            "function": { "name": "first", "arguments": "{\"a\":1}" }
+        }));
+        let content = r#"data: {"choices":[{"delta":{"content":"after"}}]}"#;
+        let finish = r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#;
+        let ordered = run(
+            transform.clone(),
+            &[&call_1, &call_0, content, finish, "data: [DONE]"],
+        );
+        let blocks = ordered
+            .iter()
+            .filter(|event| event["type"] == "content_block_start")
+            .map(|event| event["content_block"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(blocks[0]["name"], "first");
+        assert_eq!(blocks[1]["name"], "second");
+        assert_eq!(blocks[2]["type"], "text");
+        assert_eq!(
+            ordered
+                .iter()
+                .find(|event| event["type"] == "message_delta")
+                .unwrap()["delta"]["stop_reason"],
+            "tool_use"
+        );
+
+        let sparse = tool_event(json!({
+            "index": 2, "id": "call_3",
+            "function": { "name": "sparse", "arguments": "{}" }
+        }));
+        let sparse_out = run(
+            transform.clone(),
+            &[
+                &sparse,
+                r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+                "data: [DONE]",
+            ],
+        );
+        assert!(sparse_out.iter().any(|event| {
+            event["type"] == "content_block_start" && event["content_block"]["name"] == "sparse"
+        }));
+
+        for events in [
+            vec![tool_event(json!({
+                "id": "call_1",
+                "function": { "name": "f", "arguments": "{}" }
+            }))],
+            vec![
+                tool_event(json!({
+                    "index": 0,
+                    "id": "call_1",
+                    "function": { "name": "f", "arguments": "{" }
+                })),
+                r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#.to_string(),
+                "data: [DONE]".to_string(),
+            ],
+            vec![
+                tool_event(json!({
+                    "index": 0,
+                    "id": "call_1",
+                    "function": { "name": "f", "arguments": "{}" }
+                })),
+                tool_event(json!({ "index": 0, "id": "call_2" })),
+            ],
+        ] {
+            let mut state = StreamState::default();
+            let mut failed = false;
+            for event in events {
+                if transform.apply(&event, "fallback", &mut state).is_err() {
+                    failed = true;
+                    break;
+                }
+            }
+            assert!(failed, "malformed tool stream was accepted");
+        }
     }
 
     /// An Anthropic upstream's error on the chat surface must reach the client

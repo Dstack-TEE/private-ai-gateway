@@ -1868,6 +1868,45 @@ async fn malformed_2xx_body_returns_502_upstream() {
 }
 
 #[tokio::test]
+async fn malformed_chat_success_on_messages_returns_502_upstream() {
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({ "allow": true, "candidates": [{ "routeId": "openai:gpt", "format": "openai" }] }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    let upstream = json!({
+        "id": "chatcmpl-upstream",
+        "model": "internal-model",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "tool_calls": [{
+                    "type": "function",
+                    "id": "call_1",
+                    "function": { "name": "lookup", "arguments": "{" }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    });
+    let service = build_service_with_upstream(200, serde_json::to_vec(&upstream).unwrap());
+
+    let (status, _, body) =
+        response_parts(mw.handle_completion(&service, messages_input(false)).await).await;
+    assert_eq!(status, 502);
+    assert_eq!(body["type"], "error");
+    assert_eq!(body["error"]["type"], "api_error");
+    assert!(!body.to_string().contains("chatcmpl-upstream"));
+    assert!(!body.to_string().contains("internal-model"));
+
+    let report = wait_for_post(&posts, |report| report["status"] == json!(502)).await;
+    assert_eq!(report["status"], 502);
+    assert_eq!(report["errorSource"], "upstream");
+    assert_eq!(report["errorMessage"], "upstream_malformed_response");
+}
+
+#[tokio::test]
 async fn total_forward_failure_reports_upstream_failure() {
     let (control_url, posts) = spawn_control_capturing(
         200,

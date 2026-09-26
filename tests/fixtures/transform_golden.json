@@ -317,6 +317,7 @@
     "format": "openai",
     "fn": "messages",
     "engine": null,
+    "error": true,
     "input": {
       "model": "gpt-4",
       "max_tokens": 8,
@@ -334,42 +335,6 @@
         {
           "type": "bash_20250124",
           "input_schema": null
-        }
-      ]
-    },
-    "output": {
-      "model": "gpt-4",
-      "messages": [
-        {
-          "role": "user",
-          "content": "hi"
-        }
-      ],
-      "max_tokens": 8,
-      "tools": [
-        {
-          "type": "function",
-          "function": {
-            "name": "y",
-            "description": "",
-            "parameters": {
-              "type": "object",
-              "properties": {},
-              "required": []
-            }
-          }
-        },
-        {
-          "type": "function",
-          "function": {
-            "name": "bash_20250124",
-            "description": "bash_20250124 tool",
-            "parameters": {
-              "type": "object",
-              "properties": {},
-              "required": []
-            }
-          }
         }
       ]
     }

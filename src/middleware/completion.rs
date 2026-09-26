@@ -506,11 +506,34 @@ pub async fn run(
                         return finalize_generated(502, body, &[], e2ee, outcome_ctx);
                     }
                 };
-                let mut transformed = response_transform::transform_response(
+                let mut transformed = match response_transform::transform_response(
                     selected_format,
                     upstream_endpoint,
                     upstream_json,
-                );
+                ) {
+                    Ok(transformed) => transformed,
+                    Err(err) => {
+                        tracing::warn!(
+                            route_id = %forward.selected_route,
+                            error = %err,
+                            "upstream success body cannot be represented on the client surface"
+                        );
+                        let message = "upstream returned a malformed success body";
+                        meter.gateway_failure(
+                            502,
+                            ErrorSource::Upstream,
+                            ErrorClass::UpstreamMalformedResponse,
+                            false,
+                        );
+                        let body = errors::envelope_bytes(
+                            surface,
+                            errors::error_type(surface, 502),
+                            message,
+                            Some(&request_id),
+                        );
+                        return finalize_generated(502, body, &[], e2ee, outcome_ctx);
+                    }
+                };
                 if exclude_reasoning {
                     response_transform::exclude_reasoning(&mut transformed);
                 }
