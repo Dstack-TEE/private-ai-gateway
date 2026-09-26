@@ -4,24 +4,23 @@ import { brand } from "../brand/brand";
 import { useAppearance } from "./appearance";
 import { macOS } from "../lib/environment";
 import { SERVICE_ICONS } from "../lib/services";
+import { cn } from "../lib/utils";
 import type { ServiceProvider } from "../../shared/contracts";
 
-export function BrandMark({ className = "", busy = false }: { className?: string; busy?: boolean }): React.JSX.Element {
+export function BrandMark({ className }: { className?: string }): React.JSX.Element {
   const selectedAppearance = useAppearance();
   const appearance = macOS ? selectedAppearance : "light";
-  const classes = ["brand-logo inline-grid place-items-center flex-none [&>img]:block [&>img]:size-full [&>img]:object-contain motion-reduce:animate-none", className, busy ? "is-busy animate-brand-icon-pulse" : ""].filter(Boolean).join(" ");
   return (
-    <picture className={classes} aria-hidden="true">
+    <picture className={cn("flex-none", className)} aria-hidden="true">
       {appearance === "system" && <source media="(prefers-color-scheme: dark)" srcSet={brand.appIcon.dark} />}
-      <img src={appearance === "dark" ? brand.appIcon.dark : brand.appIcon.light} alt="" />
+      <img className="size-full object-contain" src={appearance === "dark" ? brand.appIcon.dark : brand.appIcon.light} alt="" />
     </picture>
   );
 }
 
 export function ServiceLogo({ provider, size = "regular" }: { provider: ServiceProvider; size?: "regular" | "large" }): React.JSX.Element {
   const icon = SERVICE_ICONS[provider];
-  if (!icon) {
-    return <span className={`service-custom-icon w-6 h-6 flex-none grid place-items-center overflow-hidden rounded-md [&.service-logo-large]:w-7.5 [&.service-logo-large]:h-7.5 text-muted-foreground service-logo-${size}`}><Network size={size === "large" ? 16 : 14} /></span>;
-  }
-  return <span className={`service-logo w-6 h-6 flex-none grid place-items-center overflow-hidden rounded-md [&_img]:w-full [&_img]:h-full [&_img]:object-contain service-${provider} service-logo-${size}`}><img src={icon} alt="" /></span>;
+  return <span className={cn("grid flex-none place-items-center overflow-hidden rounded-md text-muted-foreground", size === "large" ? "size-7.5" : "size-6")}>
+    {icon ? <img className="size-full object-contain" src={icon} alt="" /> : <Network size={size === "large" ? 16 : 14} aria-hidden="true" />}
+  </span>;
 }

@@ -5,6 +5,7 @@ import { titleBarDragRegion } from "../lib/environment";
 import { errorMessage } from "../lib/error-message";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "./ui/alert";
 import { Button, buttonVariants } from "./ui/button";
+import { cn } from "../lib/utils";
 
 /**
  * A page that failed to render, in place of the page (the router's
@@ -26,7 +27,7 @@ export function PageNotFound() {
       <TriangleAlert aria-hidden="true" />
       <AlertTitle>This page doesn’t exist</AlertTitle>
       <AlertDescription>Check the address, or go to Overview.</AlertDescription>
-      <AlertAction><Link to="/" className={buttonVariants({ variant: "outline", size: "sm" })}>Go to Overview</Link></AlertAction>
+      <AlertAction><Link to="/" className={cn(buttonVariants({ variant: "outline", size: "sm" }))}>Go to Overview</Link></AlertAction>
     </Alert></div>
   </main>;
 }

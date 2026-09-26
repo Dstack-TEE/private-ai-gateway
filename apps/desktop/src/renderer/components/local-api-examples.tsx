@@ -35,8 +35,8 @@ export function LocalApiExamplesDialog({ endpoint, models: catalogModels, apiKey
         <TabsList aria-label="Code language"><TabsTrigger value="javascript">JavaScript</TabsTrigger><TabsTrigger value="python">Python</TabsTrigger><TabsTrigger value="curl">cURL</TabsTrigger></TabsList>
         <IconButton label="Copy example" disabled={!code || copying} onClick={() => { if (code) copy("Example", code); }}>{isCopied(code) ? <Check /> : <Copy />}</IconButton>
       </div>
-      <TabsContent value={language} className="min-h-0 overflow-auto rounded-2xl border bg-muted/50">
-        <pre className="p-4 text-xs leading-relaxed"><code>{code ?? "Local API example unavailable."}</code></pre>
+      <TabsContent value={language} className="flex min-h-0 flex-col">
+        <pre className="min-h-0 overflow-auto rounded-2xl border bg-muted/50 p-4 text-xs leading-relaxed"><code>{code ?? "Local API example unavailable."}</code></pre>
       </TabsContent>
     </Tabs>
     <FieldError>{apiKey ? (error ? "Could not copy the example." : undefined) : "The Local API key is unavailable."}</FieldError>
