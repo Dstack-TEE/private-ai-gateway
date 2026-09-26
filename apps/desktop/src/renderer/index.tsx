@@ -11,15 +11,15 @@ import { router } from "./router";
 /**
  * How long the pointer rests before a tooltip shows: about a second for macOS
  * help tags (AppKit's NSInitialToolTipDelay), and Windows' and GTK's 500 ms.
- * A browser keeps Base UI's default.
+ * The web UI keeps showing them at once.
  */
-const tooltipDelay = platform === "macos" ? 1_000 : platform ? 500 : undefined;
+const tooltipDelay = platform === "macos" ? 1_000 : platform ? 500 : 0;
 
 export function Renderer(): React.JSX.Element {
   // Browsers keep their own context menu, shortcuts and drop behavior.
   useEffect(() => web ? undefined : installNativeInteractions(desktopApi, platform), []);
-  // The desktop app asks in the system alert; the web UI in a dialog.
-  return <QueryClientProvider client={queryClient}><TooltipProvider delay={tooltipDelay}><ConfirmProvider ask={web ? undefined : desktopApi.showConfirmation}>
+  // The macOS app asks in an alert sheet; Windows, Linux and the web UI in the window's dialog.
+  return <QueryClientProvider client={queryClient}><TooltipProvider delay={tooltipDelay}><ConfirmProvider ask={platform === "macos" ? desktopApi.showConfirmation : undefined}>
     <RouterProvider router={router} />
   </ConfirmProvider></TooltipProvider></QueryClientProvider>;
 }

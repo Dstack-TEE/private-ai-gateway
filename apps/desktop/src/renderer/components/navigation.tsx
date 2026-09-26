@@ -4,7 +4,7 @@ import { RotateCw } from "lucide-react";
 import { brand } from "../brand/brand";
 import { Badge } from "./ui/badge";
 import { SidebarMenu, SidebarMenuItem, SidebarMenuButton } from "./ui/sidebar";
-import { macOS, titleBarDragRegion } from "../lib/environment";
+import { overlaidTitleBar, titleBarDragRegion } from "../lib/environment";
 import { useShell } from "../lib/shell";
 import { BrandMark } from "./brand";
 import { ProtectedControl, ProtectionStatus } from "./protection";
@@ -26,7 +26,7 @@ export function Sidebar(): React.JSX.Element {
   const { updates } = useShell();
   return (
     <aside className="sidebar min-w-0 pt-3 pr-2 pb-3 pl-2 flex flex-col gap-0.5 bg-sidebar border-r border-r-sidebar-border [&_nav]:grid [&_nav]:gap-0.5 max-[620px]:pl-2 max-[620px]:pr-2 max-[440px]:pl-1.5 max-[440px]:pr-1.5">
-      {macOS && <div className="sidebar-drag relative flex-[0_0_28px]" data-tauri-drag-region />}
+      {overlaidTitleBar && <div className="sidebar-drag relative flex-[0_0_28px]" data-tauri-drag-region />}
       <div className="sidebar-brand min-h-9.5 mt-0 mr-1.5 mb-5 ml-1.5 flex items-center gap-2.25 font-semibold whitespace-nowrap overflow-hidden [&_>_*]:pointer-events-none [&_span]:overflow-hidden [&_span]:text-ellipsis max-[780px]:[&_>_span:last-child]:text-xs max-[620px]:justify-center max-[620px]:p-0 max-[620px]:[&_>_span:last-child]:hidden" {...titleBarDragRegion}>
         <BrandMark className="brand-mark size-9" />
         <span className="sidebar-brand-copy min-w-0 flex flex-col gap-0.5 text-sm leading-4.5 [&_small]:text-xs [&_small]:leading-4 [&_small]:font-normal [&_small]:text-muted-foreground"><span>{brand.productName}</span><small>{brand.byline}</small></span>

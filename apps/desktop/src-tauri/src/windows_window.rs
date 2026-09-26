@@ -2,7 +2,7 @@
 //! without browser shortcuts, and the one-time notice that closing the window
 //! leaves the app in the notification area.
 
-use tauri::{AppHandle, Manager, WebviewWindow};
+use tauri::{AppHandle, WebviewWindow};
 use tauri_plugin_notification::NotificationExt;
 
 /// Windows 11 (build 22000) is the first with Mica; elsewhere the window stays
@@ -13,7 +13,14 @@ pub fn mica_supported() -> bool {
 
 /// Turns off WebView2's browser accelerator keys (Find, Print, Reload, zoom,
 /// caret browsing and the like); text editing and navigation keys keep working.
+/// WebView2 applies a setting changed after navigation started from the next
+/// navigation, and Tauri exposes the webview only once the first one began, so
+/// the renderer also stops Reload itself (`native-interactions.ts`). Debug
+/// builds keep the keys, and with them the DevTools shortcuts.
 pub fn disable_browser_accelerator_keys(window: &WebviewWindow) {
+    if cfg!(debug_assertions) {
+        return;
+    }
     let result = window.with_webview(|webview| {
         use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
         use windows::core::Interface;
@@ -39,12 +46,13 @@ pub fn disable_browser_accelerator_keys(window: &WebviewWindow) {
 const TRAY_NOTICE_FILE: &str = "tray-notice-shown";
 
 /// The first time closing the window leaves the app running, says where it
-/// went. The notice is recorded in the app's local data, not its settings.
+/// went. The notice is recorded with the app's other local state, not in its
+/// settings.
 pub fn explain_close_to_tray(app: &AppHandle) {
     if app.tray_by_id("gateway").is_none() {
         return;
     }
-    let Ok(directory) = app.path().app_local_data_dir() else {
+    let Ok(directory) = desktop_core::paths::app_data_dir() else {
         return;
     };
     let marker = directory.join(TRAY_NOTICE_FILE);

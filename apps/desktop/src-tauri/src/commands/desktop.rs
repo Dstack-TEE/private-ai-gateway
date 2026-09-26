@@ -4,11 +4,10 @@ use desktop_core::{
     agents::Agent,
     brand::AboutLink,
     client::{CallError, Client},
-    contracts::ServiceProvider,
+    contracts::{Confirmation, ServiceProvider},
 };
 use tauri::{AppHandle, Manager, State, WebviewWindow};
 use tauri_plugin_clipboard_manager::ClipboardExt;
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 
 use crate::{distribution, open_account_url, run_blocking};
@@ -110,25 +109,33 @@ pub(crate) fn show_edit_menu(window: WebviewWindow, editable: bool) -> Result<()
         .map_err(|_| "Cannot open editing menu".into())
 }
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct Confirmation {
-    title: String,
-    message: String,
-    confirm_label: String,
-    cancel_label: Option<String>,
-    destructive: bool,
-}
-
-/// Asks for a decision in the system alert, attached to the window: a sheet on
-/// macOS, a task dialog on Windows and a message dialog on Linux. The confirm
+/// Asks for a decision in an alert sheet on the window (NSAlert): the confirm
 /// button is the default (Return) button and Cancel takes Escape; `true` when
-/// the user confirms.
+/// the user confirms. Only macOS uses it: on Windows and Linux the system
+/// message dialogs (through rfd) can't make Cancel the default button or, on
+/// Linux, attach to the window, so the window's own dialog asks there.
 #[tauri::command]
 pub(crate) async fn show_confirmation(
     window: WebviewWindow,
     confirmation: Confirmation,
 ) -> Result<bool, CallError> {
+    #[cfg(target_os = "macos")]
+    {
+        ask_in_sheet(window, confirmation).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, confirmation);
+        Err("The system alert is only used on macOS".into())
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn ask_in_sheet(
+    window: WebviewWindow,
+    confirmation: Confirmation,
+) -> Result<bool, CallError> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
     let Confirmation {
         title,
         message,
@@ -148,7 +155,7 @@ pub(crate) async fn show_confirmation(
         .dialog()
         .message(message)
         .title(title)
-        .kind(if destructive {
+        .kind(if destructive.unwrap_or(false) {
             MessageDialogKind::Warning
         } else {
             MessageDialogKind::Info

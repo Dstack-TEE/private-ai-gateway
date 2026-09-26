@@ -74,8 +74,17 @@
    other platforms keep Tailwind's hover styles. */
 @custom-variant hover {
   @media (hover: hover) {
-    &:hover:not(:where([data-platform="macos"] *)) { @slot; }
+    &:hover:not(:where([data-platform="macos"] :not(.default-look))) { @slot; }
   }
+}
+/* A control whose look must not change keeps the metrics and hover a browser
+   gets on every platform: the billing balance button App Review approved. */
+.default-look {
+  --radius: 0.625rem;
+  --text-sm: 0.875rem;
+  --text-xs: 0.75rem;
+  --control-height: 2.25rem;
+  --control-height-sm: 2rem;
 }
 :root.dark {
   color-scheme: dark;
