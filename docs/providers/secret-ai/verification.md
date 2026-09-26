@@ -137,10 +137,8 @@ behind the same attested workload and SPKI.
 - A registry or verifier upgrade changes the verification trust root. Upgrade
   `secretvm-verify` and `uv.lock` deliberately, then rerun the live and hermetic
   tests.
-- Workloads that extend TDX RTMR3 with a docker-files archive are not currently
-  accepted because SecretAI does not expose that archive digest as evidence.
-  Such workloads fail closed until the evidence contract and workload identity
-  include the additional measured input.
+- Workloads that extend TDX RTMR3 with a docker-files archive fail closed,
+  because SecretAI does not expose that archive digest as evidence.
 
 ## Test the adapter
 

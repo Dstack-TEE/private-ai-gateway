@@ -1,13 +1,17 @@
 # One-file dstack compose for Private AI Gateway under git-launcher.
 #
-# Deploy from this directory after setting the variables below, for example:
+# Replace COMMIT_SHA below with the reviewed gateway commit, then deploy from
+# this directory:
 #
 #   phala deploy -n private-ai-gateway -c compose.yaml \
-#     -e PRIVATE_AI_GATEWAY_REPO_COMMIT=<full-40-hex-sha> \
 #     -e PRIVATE_AI_GATEWAY_ADMIN_TOKEN=<long-random-token>
 #
 # The compose inlines the launcher pin, static gateway config, and initial
 # upstream config so dstack's compose_hash covers the complete launch policy.
+# The commit must stay a literal: dstack measures this file before variable
+# substitution, so a commit supplied through a variable is not measured.
+# Compose does not recreate a container when only `configs:` content changes;
+# see "Redeploy after changing configs: content" in README.md.
 # The gateway copies the read-only upstream seed into its mutable state path only
 # when no mutable config exists yet; later admin updates replace the mutable file
 # without changing this attested compose.
@@ -38,7 +42,7 @@ configs:
   gateway-pin:
     content: |
       REPO_URL=https://github.com/Dstack-TEE/private-ai-gateway.git
-      COMMIT_SHA=${PRIVATE_AI_GATEWAY_REPO_COMMIT:?set PRIVATE_AI_GATEWAY_REPO_COMMIT to the audited full commit SHA}
+      COMMIT_SHA=REPLACE_WITH_REVIEWED_FULL_COMMIT_SHA
       WORK_DIR=/var/lib/git-launcher/private-ai-gateway
 
   gateway-config:

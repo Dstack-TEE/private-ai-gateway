@@ -1,17 +1,21 @@
 # Reference Implementation vs. ACI Spec: Known Gaps
 
-Where this implementation currently falls short of, or diverges from,
+Where this implementation falls short of, or diverges from,
 [the ACI Spec](../../spec/aci.md). The spec is authoritative; these are
 implementation compromises, not spec changes. Each item is a candidate work
 item.
 
 ## Verifier coverage
 
-1. **The `pap` CLI has no custody policy.** §9.1(5) requires the verifier
-   policy to check private-key custody (for this deployment, the dstack KMS
-   signature chain in `attestation.evidence.key_custody`). The independent
-   Private AI Proxy client does not implement that policy, so `pap verify`
-   reports id-5 as an honest `skip`, never a pass.
+1. **Client custody checks are partial and opt-in.** §9.1(5) requires the
+   verifier policy to check private-key custody (for this deployment, the
+   dstack KMS signature chain in `attestation.evidence.key_custody`). `pap`
+   checks the receipt key when run with `--accept-subject app-id:0x<hex>` and
+   `--accept-dstack-kms-root-public-key`: the chain must run from the measured
+   app ID to an accepted KMS root, and the custody entry must name a receipt
+   key in the attested keyset. Without that policy, and always in
+   verifier-ts, id-5 is a `skip`. Neither client covers E2EE or TLS keys (see
+   items 13 and 14).
    The top-line verdict and exit code do not distinguish a skip from a pass:
    a run can end `VERIFIED` (exit 0) with custody unevaluated. The skip and
    its reason are always printed in the transcript and counted in the
@@ -195,18 +199,15 @@ item.
 
 18. **The live E2E scripts predate the simplified protocol.** Parts of
    `scripts/live_e2e/` (e.g. `cases/embeddings.py`, `cases/lifecycle.py`)
-   still assert removed mechanism (transparency events), and
-   `scripts/phala_multi_upstream_smoke.sh` /
-   `scripts/local_multi_upstream_smoke.sh` still use `workload_id` and
-   `accepted_workload_ids`. The in-process integration suites (`tests/`)
-   and `docs/live-e2e-test-suite.md` cover the new protocol; the live
-   scripts need the same pass, and the public deployment serves the
-   previous build until redeployed.
+   still assert removed transparency events, so the full live matrix fails.
+   The multi-upstream smoke scripts, the attested-session case, and the
+   in-process integration suites (`tests/`) use the simplified protocol.
 
 19. **Client CI triggers are path-scoped.** `verifier-ts` tests pin the spec
-   test vectors byte-for-byte, but the workflow triggers only on
-   `clients/verifier-ts/**`, so an edit to `spec/test-vectors.md` alone does
-   not rerun them (Rust CI catches drift via `tests/spec_vectors.rs`).
+   test vectors byte-for-byte, and the unified TypeScript workflow runs for
+   changes anywhere under `clients/**`. It does not trigger for an edit
+   to `spec/test-vectors.md` alone; Rust CI catches that drift through
+   `tests/spec_vectors.rs`.
 
 ## Beyond-spec surfaces (intentional, keep honest)
 

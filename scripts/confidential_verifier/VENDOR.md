@@ -3,13 +3,12 @@
 This is a vendored copy of the `confidential_verifier` Python package from
 [`Phala-Network/private-ai-verifier`](https://github.com/Phala-Network/private-ai-verifier).
 
-The gateway's provider-verifier bridge (`scripts/private_ai_provider_verifier.py`) used to import
-this package from a sibling checkout resolved via `PRIVATE_AI_VERIFIER_DIR`. That coupled the gateway
-to a separately-versioned repo — and, worse, to whatever happened to be *uncommitted* in that sibling
-checkout. A real example: the bridge calls `NearAICloudVerifier.verify_gateway_component`, which only
-ever existed as an uncommitted local edit, so a clean checkout failed with
-`'NearAICloudVerifier' object has no attribute 'verify_gateway_component'`. Vendoring removes that
-whole class of drift: the verification code now ships with the gateway and is ours to edit.
+The gateway's provider-verifier bridge (`scripts/private_ai_provider_verifier.py`) imports this copy
+rather than a sibling checkout of the upstream repo. The verification code ships with the gateway and
+is ours to edit, so a clean checkout always has the methods the bridge calls. A sibling checkout ties
+the gateway to whatever is uncommitted there: `NearAICloudVerifier.verify_gateway_component` once
+existed only as an uncommitted edit, and a clean checkout failed with
+`'NearAICloudVerifier' object has no attribute 'verify_gateway_component'`.
 
 ## Provenance
 
@@ -21,8 +20,15 @@ whole class of drift: the verification code now ships with the gateway and is ou
 
 Keep this list current so we can diff against upstream and re-sync deliberately.
 
-- `verifiers/nearai.py`: added `NearAICloudVerifier.verify_gateway_component(...)` — the gateway-only
+- `verifiers/nearai.py`: added `NearAICloudVerifier.verify_gateway_component(...)`, the gateway-only
   verification entry point the bridge depends on. (Upstream had this only as an uncommitted edit.)
+- `verifiers/nearai.py`: `_verify_component` parses `report_data` from the quote bytes with
+  `_tdx_report_data_hex` and fails when the nonce, signing address, or `report_data` is missing.
+  Upstream read `report_data` from the dstack verifier result, which never contains it, so the
+  binding check never ran.
+- `providers/nearai.py`: `NearaiProvider` takes an optional `api_key` and sends it as a bearer token
+  when fetching the attestation report.
+- `RedpillProvider` is renamed `RedPillProvider`.
 - `verifiers/dstack.py`: `DstackVerifier.verify` sends `"attestation": None` in the `/verify` body.
   dstack-verifier >= 0.5.6 serializes the request with `serde_human_bytes` and no field default, so the
   optional `attestation` field must be present even when unused. Older verifiers ignore the extra key,
@@ -32,7 +38,8 @@ Keep this list current so we can diff against upstream and re-sync deliberately.
 
 To pull upstream fixes, diff this tree against a fresh checkout at a newer commit, re-apply the local
 changes above, update the baseline commit here, and run the bridge contract test
-(`tests/contract_verifier_bridge.py`) plus `run.py --profile quick`.
+(`cargo test --locked --test contract_verifier_bridge`) plus
+`uv run python scripts/live_e2e/run.py --profile quick`.
 
 ## Runtime dependencies
 

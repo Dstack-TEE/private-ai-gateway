@@ -1,166 +1,160 @@
-# PhalaDirect — attested session verification & binding
+# Phala Direct Verification
 
-- **TEE:** Intel TDX (CPU) + NVIDIA Confidential Compute (GPU), Phala dstack.
-- **Topology:** the gateway connects **directly** to each model's own
-  dstack-vllm-proxy endpoint (one HTTPS endpoint per model, configured as its own
-  upstream entry). No hosted `api.redpill.ai` / `cloud-api.phala.network` hop.
-- **Session binding:** `tls_spki_sha256` (custom-domain leaf SPKI).
-- **Verifier:** bridge (`verify_phala_direct`) → vendored `confidential_verifier`
-  (`DstackVerifier`, `verify_report_data`, `NvidiaGpuVerifier`) + an external
-  dstack-verifier service (`DSTACK_VERIFIER_URL`).
-- **Requires:** the proxy serving attestation **version 2** (see
-  [Producer requirement](#producer-requirement)).
-- **Status:** sound for the TLS-SPKI binding; known-good software/OS provenance is a
-  TODO (see [review.md](review.md)).
+The `phala-direct` adapter connects to one dstack-vllm-proxy origin and verifies that origin's legacy version 2 attestation report. It is a per-model compatibility path for services that do not expose canonical ACI reports.
+
+| Property | Value |
+| --- | --- |
+| Attestation scope | Per model |
+| Verifier | `scripts/provider_verifier/phala_direct.py` through the provider-verifier bridge |
+| External dependency | dstack verifier at `DSTACK_VERIFIER_URL` (default `http://localhost:8080`) |
+| Enforced binding | `tls_spki_sha256` |
+| Evidence endpoint | `<base_url>/v1/attestation/report?version=2&signing_algo=ecdsa&nonce=<random>` |
 
 ## Producer requirement
 
-The binding only works if the proxy binds its custom-domain TLS SPKI into the quote.
-The proxy reads its dstack-ingress certificate (`TLS_CERT_PATH`), computes
-`SHA256(SubjectPublicKeyInfo DER)` of the leaf, and serves attestation **version 2**:
+The upstream proxy must serve attestation version 2 with a custom-domain TLS SPKI bound into TDX report data:
 
-```
-GET /v1/attestation/report?version=2&signing_algo=ecdsa&nonce=<hex>
-report_data[0:32]  = SHA256(signing_address ‖ tls_cert_fingerprint)
-report_data[32:64] = nonce
-response.tls_cert_fingerprint = <SHA256(SPKI DER) hex>
+```text
+report_data[0:32] = SHA256(signing_address || tls_cert_fingerprint)
+report_data[32:64] = request nonce
 ```
 
-Soundness depends on TLS terminating **inside** the CVM (the dstack-ingress sidecar's
-certbot key is TEE-resident). A gateway-managed / off-TEE TLS terminator would make the
-SPKI binding vacuous.
+`tls_cert_fingerprint` is the SHA-256 of the leaf certificate's SubjectPublicKeyInfo DER, and the report must return it. A proxy that ignores `version=2` cannot produce an enforceable custom-domain binding and is rejected.
 
-## What is verified
+This property is meaningful only when TLS private-key custody belongs to the attested workload, such as a dstack-ingress sidecar inside the CVM. An off-TEE TLS terminator breaks the intended custody claim even if the digest appears in the report.
 
-`verify_phala_direct` GETs `{base_url}/v1/attestation/report?version=2&signing_algo=ecdsa`
-with a fresh nonce (and the configured `bearer_token`), then:
+## Verification algorithm
 
-1. **Require a TLS fingerprint.** `tls_cert_fingerprint` must be present — an older proxy
-   that ignored `version=2` cannot be TLS-pinned, so it is rejected.
-2. **Reject debug-mode TDs.** The TDX quote's `TD_ATTRIBUTES` TUD byte (offset 168) must
-   be zero — a debug-mode TD exposes its CPU state and private memory to the host, so the
-   TEE guarantee does not hold. (Shared `tdx_debug_enabled`, applied to every TDX provider.)
-3. **Verify the TDX quote.** The dstack-verifier service verifies the quote, event log,
-   and VM config (RTMR replay). `is_valid` must be true.
-4. **Verify the compose hash.** `SHA256(app_compose)` must equal the `compose-hash`
-   event that the dstack verifier replayed into RTMR3 (`details.app_info.compose_hash`).
-   The report's own `info.compose_hash` field is not used.
-5. **Verify the report_data binding.** Parse `report_data` from the *verified* quote
-   bytes (`_tdx_report_data_hex`, TDX v4 offset `quote[48+520 : 48+584]`) and run
-   `verify_report_data(report_data, signing_address, nonce, tls_cert_fingerprint)`:
-   `report_data[0:32] == SHA256(signing_address ‖ tls_cert_fingerprint)` and
-   `report_data[32:64] == nonce`. **Fail closed** if `report_data`, the nonce, or the
-   signing address is unavailable.
-6. **Record the GPU evidence — supplemental, not a gate.** Check the GPU evidence nonce
-   against the request nonce and run `NvidiaGpuVerifier` (NRAS), but **do not fail** on a
-   GPU error. A standalone gateway-side NRAS check only proves a CC-capable GPU *exists*
-   for a nonce; it does not prove that GPU is bound to this CPU TEE or serving this request.
-   That binding is the measured serving software's job, attested *inside* the CPU-TEE quote
-   — so GPU trust is subsumed by the CPU-TEE quote + serving-software provenance (steps
-   2–4), and the NRAS result is recorded as `gpu_verified` / `gpu_evidence_*` metadata.
+For each verification, the adapter:
 
-## What binds the session
+1. Generates a 32-byte nonce and fetches the version 2 report, using the configured provider credential when present.
+2. Requires a TDX quote, signing address, TLS fingerprint, and a matching echoed nonce when the report includes one.
+3. Rejects a debug TD: the TUD byte of `TD_ATTRIBUTES` (quote offset 168) must be zero.
+4. Sends the quote, event log, and VM configuration to the dstack verifier and requires `is_valid: true`. The dstack verifier replays the event log against the quote's RTMRs.
+5. Requires `app_compose` and checks that `SHA256(UTF8(app_compose))` equals the `compose-hash` event in the verified event log.
+6. Parses `report_data` from the verified quote and checks the signing-address, TLS-fingerprint, and nonce layout above.
+7. Sends available NVIDIA evidence to NRAS and records the nonce-matched result as supplemental metadata.
+8. Resolves the attested dstack OS-image hash as described in [How the OS image is classified](#how-the-os-image-is-classified).
+9. Emits the report's TLS fingerprint as the channel binding.
 
-The TLS SPKI fingerprint, the signing address (secp256k1 response-signing key), and the
-request nonce are all folded into `report_data`, which lives inside the dstack-verified
-quote. So the `tls_spki_sha256` the gateway enforces is proven to belong to the attested
-TDX workload — not merely copied from the report JSON. The signing address is surfaced in
-`provider_claims` so it can be pinned alongside the SPKI.
+Steps 1 through 6 and 9 gate the result. GPU verification and OS classification are recorded but never reject.
 
-## What a tamper rejects
+## Channel binding and forwarding
 
-Pinned hermetically by `tests/phala_direct_bridge.rs` (→ `scripts/soundness_phala_direct.py`):
+The verified TDX quote binds the signing address, fresh nonce, and custom-domain TLS SPKI. The backend's `SpkiPinVerifier` compares that digest with the live HTTPS certificate's SPKI before forwarding. A missing fingerprint, wrong nonce, changed fingerprint, invalid quote, missing `app_compose`, or a compose that does not match the measured `compose-hash` event fails before prompt forwarding on a constrained request.
 
-- Missing `tls_cert_fingerprint` (version-2 not served) → rejected.
-- Swapped `tls_cert_fingerprint` (MITM attempt) → `report_data binding failed`.
-- Wrong nonce → `report_data binding failed`.
-- dstack quote invalid → rejected (the CPU-TEE gate).
-- `app_compose` that is not the RTMR3-measured compose (even with a matching
-  `info.compose_hash`), or no measured compose hash → rejected.
-
-GPU is **supplemental**, so a GPU evidence nonce mismatch or a failed NRAS result does
-**not** reject — the upstream still verifies, and the outcome is recorded as
-`gpu_verified: false` / `gpu_evidence_nonce_matched: false`. The shared report_data binding
-logic is also pinned by `tests/soundness_report_data.rs`.
-
-## Transport enforcement
-
-The backend enforces the verified `tls_spki_sha256` against the upstream HTTPS connection
-(`OpenAICompatibleBackend` → `SpkiPinVerifier`, which pins `SHA256(SPKI DER)`) before
-forwarding any request.
+Use one upstream entry per distinct origin. Several public aliases can share an entry only when they use the same `base_url`.
 
 ## Provider claims recorded
 
-`trust_boundary` (`phala-dstack-cvm`), `evidence_scope` (`model_instance`),
-`canonical_model_id`, `attestation_version` (2), `tls_spki_from_report_data`,
-`signing_address`, `report_data_nonce_matched`, `compose_hash_verified`, `tdx_debug_mode`
-(always `false` — debug TDs are rejected), `tcb_status` (the granular dstack TCB status,
-e.g. `UpToDate`), the OS-image provenance trio `os_image_hash` / `os_image_version` /
-`os_image_is_dev` and the resolved `production_os_image` decision, and the supplemental GPU
-metadata `gpu_verified`, `gpu_evidence_present`, `gpu_evidence_nonce_matched`, `gpu_arch`.
+The attested-session layer reads these `provider_claims` keys, so their names and meanings are a stable contract.
 
-> **`production_os_image` is decided, not a TODO.** It is `false` for a dev image, `true`
-> for a production image, and `null` only when the hash cannot be resolved (unknown image
-> while offline). It is recorded metadata, **not a gate** — the deployed fleet currently
-> runs dev images (`dstack-nvidia-dev-*`, `is_dev: true`), so gating here would reject them;
-> the session layer decides policy. See [How the OS image is classified](#how-the-os-image-is-classified).
+| Key | Value |
+| --- | --- |
+| `trust_boundary` | `phala-dstack-cvm` |
+| `evidence_scope` | `model_instance` |
+| `canonical_model_id` | The configured model ID. |
+| `attestation_version` | `2` |
+| `tls_spki_from_report_data` | `true` |
+| `signing_address` | The response-signing address bound into `report_data`. |
+| `report_data_nonce_matched` | `true` |
+| `compose_hash_verified` | `true` |
+| `tdx_debug_mode` | `false`, because debug TDs are rejected. |
+| `tcb_status` | The dstack verifier's TCB status, such as `UpToDate`. |
+| `os_image_hash` | The attested dstack OS-image hash. |
+| `os_image_version` | The resolved image version, or `null`. |
+| `os_image_is_dev` | The resolved `is_dev` flag, or `null`. |
+| `production_os_image` | `true` for a production image, `false` for a development image, `null` when the hash cannot be resolved. |
+| `gpu_verified` | `true` only when NRAS accepts the evidence and the GPU nonce matches. |
+| `gpu_evidence_present` | Whether the report carried NVIDIA evidence. |
+| `gpu_evidence_nonce_matched` | Whether the GPU evidence nonce equals the request nonce, or `null` without evidence. |
+| `gpu_arch` | The GPU architecture from the evidence. |
+
+## Session claims
+
+| Claim | Mapping |
+| --- | --- |
+| `tee_attested` | Asserted from the verified TDX quote and bound TLS channel. |
+| `tcb_up_to_date` | Asserted only for `UpToDate`; another status is refuted; absence is unknown. |
+| `os_known_good` | Asserted for a resolved production dstack image, refuted for a resolved development image, unknown when resolution fails. |
+| `gpu_attested` | Asserted as verifier-derived only when NRAS succeeds and the GPU nonce matches. This does not prove that GPU served this request or is bound to the CPU TEE. |
+| `serving_software_known_good` | Unknown. Compose integrity is checked, but no reviewed digest allowlist is applied. |
+| `model_weights_provenance` | Unknown. |
 
 ## How the OS image is classified
 
-The decision is bound to the attestation, so the image download server cannot lie about it:
+The classification is bound to the attestation, so the image download server cannot change it:
 
-1. The dstack verifier returns `app_info.os_image_hash` and only reports `is_valid` when
-   `os_image_hash_verified` (it reproduced MRTD/RTMRs from that exact image).
-2. dstack derives `os_image_hash = SHA256(sha256sum.txt)`, and that manifest pins
-   `SHA256(metadata.json)`. So `metadata.json`'s `is_dev` flag is **cryptographically bound**
-   to the attested hash — flipping it changes `metadata.json` → `sha256sum.txt` →
-   `os_image_hash`, which would no longer match the quote.
-3. `resolve_os_image` (`scripts/dstack_os_image.py`) re-downloads
-   `https://download.dstack.org/os-images/mr_{os_image_hash}.tar.gz`, **re-verifies both
-   equalities**, then reads `is_dev`. `production_os_image = not is_dev`.
+1. The dstack verifier returns `app_info.os_image_hash` and reports `is_valid` only after it reproduces MRTD and the RTMRs from that exact image.
+2. dstack defines `os_image_hash` as `SHA256(sha256sum.txt)`, and that manifest pins `SHA256(metadata.json)`. Flipping the `is_dev` flag in `metadata.json` would change the manifest and therefore the attested hash.
+3. `resolve_os_image` in `scripts/dstack_os_image.py` looks the hash up in the reviewed `KNOWN_OS_IMAGES` map, then in an on-disk cache, and otherwise downloads `https://download.dstack.org/os-images/mr_<os_image_hash>.tar.gz`. It checks both digest equalities before it reads `is_dev`.
+4. `production_os_image` is `not is_dev`. A hash that cannot be resolved stays `null`; it is never treated as production.
 
-Known fleet images are seeded in `KNOWN_OS_IMAGES`, so the common path is offline; an
-unseeded hash is resolved once and cached on disk. Re-verify or add an image with
-`uv run python scripts/dstack_os_image.py <os_image_hash>`.
+Check an image, or produce a new `KNOWN_OS_IMAGES` entry, with:
 
-## Notes
-
-- Requires a reachable dstack-verifier at `DSTACK_VERIFIER_URL` (default
-  `http://localhost:8080`).
-- The guest OS image is now **classified** (dev-vs-prod, bound to the attested
-  `os_image_hash`) and surfaced as `production_os_image` — but it is recorded, **not gated**.
-  Known-good pinning of the vllm-proxy image/compose digest is still **not** enforced
-  (compose-hash *integrity* is proven, but the compose is not checked against an allowlist).
-  See [review.md](review.md).
-- GPU attestation is **supplemental metadata, not a security boundary** on this path. A
-  gateway-side NRAS check is an online existence oracle (a CC-capable GPU exists for a
-  nonce); it does not prove the GPU is bound to this CPU TEE. The sound model is that the
-  CPU TEE's *measured serving software* (inside the quote) attests the GPU and sets up the
-  encrypted CPU↔GPU CC channel, refusing to serve otherwise — so GPU trust is subsumed by
-  the CPU-TEE quote + serving-software provenance. Verifying the NRAS JWT against NRAS' JWKS
-  would not change this, so it is not treated as a gating requirement.
-
-## Configuration
-
-Each model is its own dstack-vllm-proxy endpoint, so today it is configured as **one
-upstream entry per model** (its own `base_url`); see `deploy/upstreams.example.json`. The
-verifier routes by `base_url` origin and derives the binding + every claim dynamically — no
-TLS pin or claim is set in config. This collapses into a single `phala-direct` provider
-entry whose `models` map carries a per-model `endpoint` once the rich multi-model-per-
-provider config loader lands (that refactor is owned by the attested-session work and keeps
-this verifier's per-`{model, endpoint}` wiring unchanged).
-
-## Reproduce
-
-```bash
-cd <private-ai-gateway checkout>
-set -a; . .env; set +a
-export DSTACK_VERIFIER_URL="http://localhost:8080"
-echo '{"api_version":"aci.provider-verifier.request.v1","provider":"phala-direct",
-  "upstream_name":"phala-direct-live","url_origin":"https://<model-endpoint>",
-  "model_id":"<canonical-model>",
-  "provider_options":{"phala_direct_bearer_token":"<api-key>"},
-  "forwarded_body_hash":"sha256:'"$(printf '0%.0s' {1..64})"'","required":true,
-  "timeout_seconds":300}' \
-  | uv run python scripts/private_ai_provider_verifier.py
+```sh
+uv run python scripts/dstack_os_image.py <os_image_hash>
 ```
+
+The adapter records the classification and does not enforce it. A relying party that requires a production image must apply a claims policy.
+
+## Limitations
+
+- A non-current TCB state is recorded rather than rejected by the bridge.
+- Production-versus-development OS classification is recorded rather than enforced, so a verified channel can carry a session that refutes `os_known_good`.
+- The compose check proves the compose was measured. The adapter does not compare the compose or image digests with an operator allowlist.
+- GPU evidence is an online existence and nonce check. It is not hardware-bound to the serving CPU TEE and does not prove which GPU served a request.
+- Model weights are not measured into the accepted identity.
+- The legacy producer and external dstack verifier are additional trust and availability dependencies.
+
+## Tests and reproduction
+
+Run the hermetic bridge test:
+
+```sh
+cargo test --test phala_direct_bridge
+```
+
+It runs `scripts/soundness_phala_direct.py`, which stubs the HTTP fetch, dstack verifier, and NRAS but uses the real `report_data` logic. The script checks these outcomes:
+
+| Input | Outcome |
+| --- | --- |
+| Genuine version 2 report | Verified with the `tls_spki_sha256` binding and the claims above. |
+| Missing `tls_cert_fingerprint` | Rejected. |
+| Fingerprint that differs from the one bound in `report_data` | Rejected as a `report_data` binding failure. |
+| Debug TD | Rejected. |
+| dstack verifier returns `is_valid: false` | Rejected. |
+| `app_compose` that differs from the measured `compose-hash` event, even with a matching `info.compose_hash` | Rejected. |
+| dstack verifier result without a measured compose hash | Rejected. |
+| GPU nonce mismatch | Verified with `gpu_evidence_nonce_matched: false` and `gpu_verified: false`. |
+| NRAS failure | Verified with `gpu_verified: false`. |
+| Unresolvable OS image | Verified with `production_os_image: null`. |
+| OS-image archive with a flipped `is_dev` or a wrong hash | Rejected by `resolve_os_image`. |
+
+`tests/soundness_report_data.rs` covers the shared `report_data` binding logic.
+
+For a live endpoint, start a trusted dstack verifier and set the optional provider credential:
+
+```sh
+export DSTACK_VERIFIER_URL='http://localhost:8080'
+export PHALA_DIRECT_API_KEY='...'
+request_hash="sha256:$(printf '0%.0s' {1..64})"
+jq -n \
+  --arg origin 'https://model.example' \
+  --arg model 'provider/model-id' \
+  --arg key "$PHALA_DIRECT_API_KEY" \
+  --arg hash "$request_hash" \
+  '{
+    api_version: "aci.provider-verifier.request.v1",
+    provider: "phala-direct",
+    upstream_name: "phala-direct-live",
+    url_origin: $origin,
+    model_id: $model,
+    forwarded_body_hash: $hash,
+    required: true,
+    timeout_seconds: 300,
+    provider_options: {phala_direct_bearer_token: $key}
+  }' | uv run python scripts/private_ai_provider_verifier.py
+```
+
+The dated [admissions review](review.md) lists the conditions for strict-release inclusion.

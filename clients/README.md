@@ -1,85 +1,110 @@
 # ACI clients
 
-Start with the [client product architecture](architecture.md) for the product
-goal, shared trust contract, component ownership, and remaining release work.
-Framework-specific coding-agent configuration is in
-[`coding-agents.md`](coding-agents.md).
+Use these clients when an application must verify the remote workload and its
+channel before sending model request bytes. Choose the smallest layer that
+matches your host.
 
-Four client layers cover verification, framework-neutral provider behavior,
-and native coding-agent integrations:
+## Choose a client
 
-- [`verifier-ts`](verifier-ts) — `@phala/aci-verifier`, a TypeScript verifier
-  for the browser, Node, and Bun. One call, `verifyService(url)`, fetches the
-  report with a fresh nonce and returns a full §9.1 transcript. It also
-  covers receipts and body hashes (§9.3) and sessions (§8, §9.2). The
-  hardware quote is verified with `@phala/dcap-qvl`; every other check is
-  Web Crypto. Its runtime subpath also exposes `connectAci()`, an
-  instance-scoped verified transport with tested Node and Bun adapters that
-  applications can inject into OpenAI Node, OpenAI Agents JS, Vercel AI SDK,
-  LangChain JS, OpenCode and other fetch-aware clients. Ships an ESM bundle
-  for `<script type="module">`.
-  Both runtime transports and the CLI can pin reviewed RTMR3-bound compose hashes;
-  self-declared repository and commit fields are informational labels.
-  Key custody (§9.1 check 5) is an honest skip in both verifiers; the channel
-  check (6) needs an observed SPKI (or the `pap` CLI / `pap serve` proxy for a
-  pinned channel) — this client ships no E2EE (§6) this round.
-- `pap` — the preferred command for the unified Private AI Proxy CLI at
-  [`../apps/desktop/cli`](../apps/desktop/cli). `private-ai-proxy` is its
-  full-name alias and `aci` is its protocol-focused alias. Gateway and Proxy
-  independently implement their respective sides of the public ACI wire
-  protocol:
-  `pap verify` (live attestation), `pap audit` (saved artifacts),
-  `pap sessions` (the §9.2 audit of the service's current attested sessions,
-  with a `--require-claim` claims policy), `pap send` (one inference with
-  receipt verification), and `pap serve` (a local verifying
-  proxy: forwards any endpoint over the pinned channel, records each
-  exchange's digests for on-demand receipt verification, and pins sessions
-  per §5.3 — a fixed `--session` list, or a `--require-claim` policy that
-  derives the accepted set and refreshes it when the service refuses a
-  superseded pin).
-- [`provider`](provider) — `@phala/aci-provider`, the framework-neutral ACI
-  provider. It owns verified connection lifecycle, live model discovery,
-  TEE-only and allowlist filtering, model capability mapping, bounded receipt
-  history, response-completion receipt verification, and content-addressed
-  session inspection. Pi and OpenCode use this package rather than implementing
-  those behaviors separately.
-- [`pi-provider`](pi-provider) — a [pi](https://pi.dev/) provider
-  extension that turns the gateway (or any ACI service) into a first-class
-  chat provider in pi's model picker, with **attested TLS (SPKI) pinning** as
-  the security control (always fail closed). The npm workspaces monorepo
-  ships the vendor-neutral
-  [`@phala/pi-provider-aci`](pi-provider/packages/pi-provider-aci) adapter plus
-  thin branded distributions,
-  [`pi-provider-redpill`](pi-provider/packages/pi-provider-redpill) and
-  [`pi-provider-phala-cloud`](pi-provider/packages/pi-provider-phala-cloud).
-  It adds Pi configuration, model types, settings, commands, credentials, and
-  footer state around the shared provider.
-  Pi uses its native Provider/Auth API and verifies the signed receipt plus
-  cited session before every response stream completes. The transport retains
-  bounded wire digests, provider-scoped receipt commands display or re-run a
-  recorded audit, and provider-scoped session commands remain available for
-  direct session inspection.
-  See [`pi-provider/README.md`](pi-provider/README.md)
-  for install and use. The coordinated npm release process is documented in
-  [`releasing.md`](releasing.md).
-- [`opencode-provider`](opencode-provider) — the native OpenCode v1 server
-  plugin. `@phala/opencode-provider-aci` maps the shared provider into
-  OpenCode's config, auth, model, and lifecycle hooks;
-  `opencode-provider-redpill` supplies API-key authentication, while
-  `opencode-provider-phala-cloud` also adds Phala Cloud device login. Both use
-  shared branded profiles. It verifies every receipt before the response stream
-  completes, so a failed audit stops the generation/tool loop, and adds a
-  provider-scoped read-only inspection tool for connection, attestation,
-  receipt, and session status. Provider-scoped OpenCode commands expose those
-  inspections without adding a second verifier or credential store.
+| Need | Use | What it owns |
+| --- | --- | --- |
+| Run a familiar curl request over an attested channel | [`pap curl`](../apps/desktop/docs/cli.md#one-pinned-curl-request) | Service verification and TLS SPKI pinning, then delegates the request to system curl. |
+| Verify one chat request, receipt, and cited session | [`pap send`](../docs/quickstart.md#5-verify-one-inference-end-to-end) | One complete command-line exchange and audit. |
+| Verify artifacts in a browser, or add pinned fetch to Node or Bun | [`@phala/aci-verifier`](verifier-ts/README.md) | Reports, quotes, measurements, pinned runtime transport, wire digests, receipts, and sessions. |
+| Build a provider adapter for another host | [`@phala/aci-provider`](provider/README.md) | Verified connection lifecycle, model catalog, filtering, receipt history, response verification, and inspection. |
+| Use ACI in Pi | [`@phala/pi-provider-aci`](pi-provider/README.md) or a branded package | Native Pi auth, model picker, persistence, commands, and fail-closed receipt verification. |
+| Use ACI in OpenCode | [`@phala/opencode-provider-aci`](opencode-provider/README.md) or a branded package | Native OpenCode provider, auth, catalog, tools, lifecycle, and fail-closed receipt verification. |
 
-SDKs that accept a function can use `connectAci().fetch` directly. Native Pi
-and OpenCode integrations use their official provider and plugin APIs through
-the packages above. A base URL alone cannot inject ACI's attested TLS transport;
-hosts without a custom-fetch or provider-plugin extension point are not claimed
-as native integrations in this release.
+If your SDK accepts a custom `fetch`, start with `connectAci()` from
+`@phala/aci-verifier/runtime`. If you are integrating a coding agent or another
+host with its own provider lifecycle, use `@phala/aci-provider` and map its
+host-neutral contracts into the host's official APIs.
 
-[docs/quickstart.md](../docs/quickstart.md) exercises both verifier
-surfaces against a live deployment. The `pi-provider` extension is loaded
-with pi's `-e` flag pointing at one of the package directories (e.g.
-`pi -e clients/pi-provider/packages/pi-provider-aci`), or installed from npm; see its README for the invocation.
+A base URL alone cannot install an attested TLS transport. A host needs a
+custom-fetch hook, a provider-plugin boundary, or a local proxy such as
+`pap serve`.
+
+## Shared checks and client-specific policy
+
+Pinned Rust and TypeScript inference transports share these checks:
+
+1. Fetch an attestation report with a fresh nonce.
+2. Verify the TDX quote and the nonce-bound workload keyset. The TypeScript
+   verifier reports the TCB status without enforcing it.
+3. Verify that the published compose is measured into RTMR3.
+4. Reject an expired identity and any configured release-policy mismatch.
+5. Send inference bytes only over TLS whose observed SPKI is an attested TLS
+   key for the host. The Rust CLI accepts only the entry the report declares in
+   `downstream_tls_binding` when the keyset scopes keys to domains. The
+   TypeScript runtime accepts any attested key for the host.
+6. Fail closed when a required check fails.
+
+Serving and response policy then depends on the client. `pap send`, `pap serve`,
+and the TypeScript runtime require verified serving by default. The TypeScript
+runtime applies this to JSON POST requests. `pap curl` passes the caller's
+request body unchanged, so include `provider.aci_verified` or session IDs when
+the request must fail closed at the provider hop. Clients
+that promise response verification capture exact wire digests and verify signed
+receipts and cited sessions; `pap curl` does not verify a response receipt.
+
+The browser verifier can check artifacts and quote evidence, but browser APIs
+do not expose the peer certificate needed for SPKI pinning. Use the Node or Bun
+runtime transport, the Rust CLI, or `pap serve` for a pinned channel.
+
+## Verification versus release acceptance
+
+Hardware verification and release acceptance are separate decisions:
+
+- **Hardware-bound mode** proves that a genuine TDX workload booted the
+  measured compose and serves the attested keys.
+- **Reviewed-release mode** also requires the measured compose hash to appear
+  in an accepted list: `--accept-compose` in Rust, `acceptedComposeHashes` in
+  TypeScript.
+
+The compose hash is the value to pin. The report's `source_provenance` is the
+gateway's own statement. Read the repository and commit from the measured
+compose instead.
+
+The Pi and OpenCode packages, including the RedPill and Phala Cloud
+distributions, run in hardware-bound mode: they ship no accepted compose
+hashes. Users can supply them through the `trust.acceptedComposeHashes` option
+or the `REDPILL_ACCEPTED_COMPOSE_HASHES` or `PHALA_ACCEPTED_COMPOSE_HASHES`
+environment variable. Shipping
+reviewed hashes through an authenticated release channel is planned.
+
+Key custody is also established by review. The Rust CLI checks custody of the
+receipt-signing key when given `--accept-subject` and
+`--accept-dstack-kms-root-public-key`. The TypeScript verifier does not check
+custody. No client can check where the TLS private key lives: that follows
+from reviewing the compose that runs the TLS terminator.
+
+## Coding-agent packages
+
+Besides `@phala/aci-verifier`, the client workspace publishes these packages:
+
+| Host | Neutral package | RedPill | Phala Cloud |
+| --- | --- | --- | --- |
+| Shared kernel | [`@phala/aci-provider`](provider/README.md) | Shared profile | Shared profile and account flow |
+| Pi | [`@phala/pi-provider-aci`](pi-provider/packages/pi-provider-aci/README.md) | [`pi-provider-redpill`](pi-provider/packages/pi-provider-redpill/README.md) | [`pi-provider-phala-cloud`](pi-provider/packages/pi-provider-phala-cloud/README.md) |
+| OpenCode | [`@phala/opencode-provider-aci`](opencode-provider/packages/opencode-provider-aci/README.md) | [`opencode-provider-redpill`](opencode-provider/packages/opencode-provider-redpill/README.md) | [`opencode-provider-phala-cloud`](opencode-provider/packages/opencode-provider-phala-cloud/README.md) |
+
+The branded packages are thin distributions over the same verifier and
+provider kernel. They add product identity, default endpoints, environment
+names, and authentication options. They do not implement separate verification
+logic.
+
+See [Coding-agent integrations](coding-agents.md) for installation and host
+behavior, [Client architecture](architecture.md) for component ownership, and
+[Releasing](releasing.md) for the coordinated npm release process.
+
+## Trust boundary
+
+The local application or coding agent sees plaintext prompts and responses.
+These clients protect the remote model HTTP path. MCP servers, tools, browser
+automation, shell commands, WebSockets, extensions, and host telemetry have
+separate trust boundaries.
+
+Provider authentication is also outside ACI. RedPill packages accept API keys.
+Phala Cloud packages additionally expose the shared device authorization flow.
+Pi and OpenCode persist credentials through their own native stores; the ACI
+packages do not create a parallel credential database.

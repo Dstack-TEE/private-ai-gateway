@@ -47,7 +47,11 @@ UPSTREAM_MODEL = "zai-org/GLM-5.1-TEE"
 
 
 def list_sessions() -> list[dict]:
-    r = requests.get(f"{BASE}/v1/aci/sessions", params={"provider": NAME}, timeout=10)
+    r = requests.get(
+        f"{BASE}/v1/aci/sessions",
+        params={"upstream_name": NAME},
+        timeout=10,
+    )
     if r.status_code != 200:
         return []
     return (r.json() or {}).get("sessions", [])
