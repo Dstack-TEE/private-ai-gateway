@@ -444,7 +444,10 @@ currently displayed page. Exports refuse existing destination files.
 the record's audit checked, byte for byte as the service returned it, to archive
 or re-verify offline with `pap audit --receipt`. Receipts hold hashes and
 verification metadata, never request or response content. They stay in the
-local usage database, and `usage clear` deletes them with the records.
+local usage database, and `usage clear` deletes them with the records. An audit
+reads at most 64 KiB of a receipt (the spec's test vector is under 1 KiB); a
+larger document fails the audit without being checked or saved, so `--receipt`
+reports that no receipt is saved, as it does before the audit finishes.
 
 OS login startup, notification permissions and installer-based app updates stay
 in the desktop UI or OS installer. `doctor` also reports whether the saved update

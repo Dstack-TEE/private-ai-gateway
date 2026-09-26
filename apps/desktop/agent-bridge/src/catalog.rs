@@ -243,8 +243,12 @@ impl CatalogModel {
     /// Remote pricing is per token. The UI presents the same validated value
     /// per one million tokens and omits malformed or negative fields. The
     /// decimal point is shifted in the price text instead of multiplying
-    /// floats, so `0.00000005` becomes exactly the f64 nearest `0.05`, whose
-    /// shortest form every JSON and YAML parser reads back identically.
+    /// floats, so `0.00000005` becomes exactly the f64 nearest `0.05`. The
+    /// result keeps `f64::DIGITS` significant digits, which serde_json's
+    /// default parser reads back exactly for per-million prices from 1e-8 up
+    /// to 1e15 (a significand below 2^53 and a decimal exponent within ±22).
+    /// A longer form can read back as a neighbouring f64, and a fresh
+    /// connection would then differ from its own record.
     pub fn price_per_million(&self, name: &str) -> Option<f64> {
         let text = match self.remote.extra.get("pricing")?.get(name)? {
             Value::Number(value) => value.to_string(),
@@ -256,6 +260,9 @@ impl CatalogModel {
             None => (text.as_str(), 0),
         };
         let price: f64 = format!("{mantissa}e{}", exponent.checked_add(6)?)
+            .parse()
+            .ok()?;
+        let price: f64 = format!("{price:.*e}", f64::DIGITS as usize - 1)
             .parse()
             .ok()?;
         (price.is_finite() && price >= 0.0).then_some(price)

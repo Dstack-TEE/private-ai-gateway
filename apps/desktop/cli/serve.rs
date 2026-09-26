@@ -315,6 +315,11 @@ impl ProxyState {
             observed.delivery.cancel();
             open
         };
+        // Reported after the lock is released: the managed sink takes the
+        // session lock, persists state and stops this verifier, none of which
+        // may run under the trusted lock. A re-verify that adopts a new
+        // identity in between costs the backend one extra session rebuild;
+        // the block itself is never lost.
         if blocks_current {
             (self.event_sink)(VerifierEvent::Blocked {
                 code: Some("keyset_changed".to_string()),
@@ -717,6 +722,10 @@ async fn proxy_observed(
     context: Option<ForwardContext>,
 ) -> Response {
     let path = uri.path().to_string();
+    // Without the trusted lock on purpose: the lock only decides which block
+    // reports `Blocked`, and expiry reports nothing itself (a failed
+    // re-verify below does). Cancelling a gate `adopt` already closed is a
+    // no-op, so a newer identity is never blocked by this.
     if (state.now_secs)() >= observed.not_after {
         observed.delivery.cancel();
     }

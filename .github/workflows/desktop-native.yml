@@ -124,6 +124,31 @@ jobs:
           cargo fmt --all -- --check
           cargo clippy --locked --workspace --all-targets -- -D warnings
           cargo test --locked --workspace
+      # CycloneDX SBOMs that the release job attests. They are generated on
+      # every run so that a tool change fails here rather than on a release
+      # tag. `--target all` covers every platform's dependencies.
+      - name: Generate SBOMs
+        working-directory: apps/desktop
+        env:
+          CARGO_CYCLONEDX_VERSION: 0.5.9
+        run: |
+          set -euo pipefail
+          asset=cargo-cyclonedx-x86_64-unknown-linux-gnu.tar.xz
+          directory="$RUNNER_TEMP/cargo-cyclonedx"
+          mkdir -p "$directory" "$RUNNER_TEMP/sbom"
+          curl -fsSL -o "$directory/$asset" "https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-${CARGO_CYCLONEDX_VERSION}/$asset"
+          printf '%s  %s\n' fb8dbee9f182173e062a64a387b21a0badc6fab8b2abf9294973f012972bf6d8 "$directory/$asset" | sha256sum -c -
+          tar -xJf "$directory/$asset" -C "$directory" --strip-components=1 cargo-cyclonedx-x86_64-unknown-linux-gnu/cargo-cyclonedx
+          PATH="$directory:$PATH" cargo cyclonedx --format json --spec-version 1.5 --target all
+          mv cli/private-ai-proxy.cdx.json src-tauri/private-ai-proxy-desktop.cdx.json "$RUNNER_TEMP/sbom/"
+          npm sbom --omit dev --sbom-format cyclonedx --sbom-type application > "$RUNNER_TEMP/sbom/private-ai-proxy-renderer.cdx.json"
+      - name: Upload SBOMs
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: desktop-sbom
+          if-no-files-found: error
+          retention-days: 14
+          path: ${{ runner.temp }}/sbom/
       - &save-rust-cache
         name: Save Rust dependencies
         if: always() && !cancelled() && steps.rust-cache.outputs.cache-primary-key != '' && steps.rust-cache.outputs.cache-hit != 'true'
@@ -896,7 +921,7 @@ jobs:
       - *save-rust-cache
 
   release:
-    needs: [version, package, mac-app-store]
+    needs: [version, verify, package, mac-app-store]
     if: ${{ !cancelled() && needs.version.outputs.channel != '' && needs.package.result == 'success' && (needs.mac-app-store.result == 'success' || needs.mac-app-store.result == 'skipped') }}
     environment: desktop-release
     runs-on: ubuntu-24.04
@@ -939,6 +964,26 @@ jobs:
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-checksums: release/SHA256SUMS
+      # The verify job's SBOMs, attested to the packages they describe rather
+      # than published as assets. Every package ships the CLI binaries (the
+      # desktop packages as sidecars) and its service embeds the web UI
+      # renderer; the desktop packages also ship the desktop shell crate.
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: desktop-sbom
+          path: sbom
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: release/private-ai-proxy-*
+          sbom-path: sbom/private-ai-proxy.cdx.json
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: release/private-ai-proxy-*
+          sbom-path: sbom/private-ai-proxy-renderer.cdx.json
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: release/private-ai-proxy-[0-9]*
+          sbom-path: sbom/private-ai-proxy-desktop.cdx.json
       # release-please created the draft with the changelog as its notes.
       - name: Attach the assets to the draft release
         env:

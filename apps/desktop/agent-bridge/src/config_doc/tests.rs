@@ -115,3 +115,15 @@ fn yaml_edits_preserve_comments_and_prune_owned_tables() {
     assert!(text.contains("theme: dark"));
     assert!(!text.contains("private-ai-proxy"));
 }
+
+/// `recorded` relies on serde_json's default float parsing, which reads the
+/// 17-digit literal older builds wrote as the f64 nearest `0.05`. Enabling
+/// serde_json's `float_roundtrip` anywhere in the build (features are unified)
+/// would read it exactly and break recovery of those connections.
+#[test]
+fn serde_json_float_parsing_is_not_roundtrip() {
+    let exact: f64 = "0.049999999999999996".parse().unwrap();
+    let parsed: f64 = serde_json::from_str("0.049999999999999996").unwrap();
+    assert_ne!(exact, 0.05);
+    assert_eq!(parsed, 0.05);
+}
