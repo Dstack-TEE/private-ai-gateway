@@ -92,9 +92,10 @@ protection problems, is stored under that key.
   The shell injects the platform (`<html data-platform>`) for platform
   behaviour such as tooltip delays and drag regions; every platform and the
   web UI use the same shadcn styles. Tray and menu items show the window and
-  leave the page or dialog for it to take (`take_navigation`), announced by
-  `pap://navigate`; the window takes one left before it listened once it
-  does, so a request made while the app starts is kept. One requested while a dialog is
+  leave the page or dialog they ask for in the shell, which announces it with
+  `pap://navigate`. The window takes it (`take_navigation`) once its state has
+  loaded and on each event, so a request made while the app starts is handled
+  once, with the real profiles. One requested while a dialog is
   open shows once it closes, and one requested while a confirmation asks for an
   answer is dropped, as with an alert. One app-level handler runs every native
   menu item, the tray's and the menu bar's. Failures show

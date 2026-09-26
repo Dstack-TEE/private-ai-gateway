@@ -32,7 +32,7 @@ export function LocalApiPanel({
 }): React.JSX.Element {
   const endpointLabel = "Local API endpoint";
   const keyLabel = "Local API key";
-  const { copy, isCopied, status } = useCopy((error) => toastError("Could not copy", error));
+  const { copy, isCopied, status } = useCopy((error, label) => toastError(`Could not copy the ${label}`, error));
   return (
     <div className="copy-rows relative grid auto-rows-auto gap-3">
       <CopyRow title="Endpoint" copyLabel={endpointLabel} value={proxyUrl} copied={isCopied(proxyUrl)} onCopy={copy} />

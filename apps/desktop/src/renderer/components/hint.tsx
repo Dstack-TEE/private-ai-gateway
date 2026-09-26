@@ -2,7 +2,10 @@ import type { ReactElement, ReactNode } from "react";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
-/** A tooltip on an existing control, without adding layout wrappers. */
+/**
+ * A tooltip whose trigger is `children` itself; it adds no wrapper element.
+ * A disabled button gets no pointer events, so wrap it for a hint.
+ */
 export function Hint({ content, children }: { content: ReactNode; children: ReactElement }) {
   return <Tooltip>
     <TooltipTrigger render={children} />

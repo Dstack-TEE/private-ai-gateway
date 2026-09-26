@@ -8,9 +8,10 @@ type Copied = { label: string; value: string };
  * Copies values to the clipboard. The value copied last shows as copied for a
  * moment, and `status`, a live region, announces it; render it in the same
  * view as the copy buttons, since an open dialog hides the page behind it from
- * screen readers.
+ * screen readers. Each copy clears the region first, so copying the same value
+ * again is announced again.
  */
-export function useCopy(onError?: (error: unknown) => void) {
+export function useCopy(onError?: (error: unknown, label: string) => void) {
   const [copied, setCopied] = useState<Copied>();
   useEffect(() => {
     if (!copied) return;
@@ -19,8 +20,9 @@ export function useCopy(onError?: (error: unknown) => void) {
   }, [copied]);
   const { mutate, isPending, error } = useMutation({
     mutationFn: ({ value }: Copied) => desktopApi.copyText(value),
+    onMutate: () => setCopied(undefined),
     onSuccess: (_, copy) => setCopied(copy),
-    onError,
+    onError: (failure, { label }) => onError?.(failure, label),
   });
   return {
     copy: (label: string, value: string) => mutate({ label, value }),

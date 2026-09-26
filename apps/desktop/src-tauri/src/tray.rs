@@ -147,15 +147,27 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
 #[derive(Default)]
 pub struct PendingNavigation(Mutex<Option<NavigationTarget>>);
 
+impl PendingNavigation {
+    /// Replaces a request the window has not taken yet.
+    fn set(&self, target: NavigationTarget) {
+        if let Ok(mut pending) = self.0.lock() {
+            *pending = Some(target);
+        }
+    }
+
+    /// Takes the request, so it is handled once.
+    fn take(&self) -> Option<NavigationTarget> {
+        self.0.lock().ok()?.take()
+    }
+}
+
 /// Shows the window at a page or dialog. The request waits here until the
 /// renderer takes it, since one made before the renderer listens (while the
 /// app is starting) would otherwise be lost; the event tells a listening
 /// renderer to take it now.
 fn navigate(app: &AppHandle, target: NavigationTarget) {
     show_window(app);
-    if let Ok(mut pending) = app.state::<PendingNavigation>().0.lock() {
-        *pending = Some(target);
-    }
+    app.state::<PendingNavigation>().set(target);
     let _ = app.emit(NAVIGATE_EVENT, ());
 }
 
@@ -163,7 +175,7 @@ fn navigate(app: &AppHandle, target: NavigationTarget) {
 /// `NAVIGATE_EVENT` and again on each event.
 #[tauri::command]
 pub(crate) fn take_navigation(pending: State<'_, PendingNavigation>) -> Option<NavigationTarget> {
-    pending.0.lock().ok()?.take()
+    pending.take()
 }
 
 fn perform_action(app: &AppHandle, id: String) {
@@ -551,3 +563,18 @@ fn set_dock_visibility(app: &AppHandle, visible: bool) {
 
 #[cfg(not(target_os = "macos"))]
 fn set_dock_visibility(_app: &AppHandle, _visible: bool) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_window_takes_the_latest_request_once() {
+        let pending = PendingNavigation::default();
+        assert_eq!(pending.take(), None);
+        pending.set(NavigationTarget::Profiles);
+        pending.set(NavigationTarget::ConfirmStopAll);
+        assert_eq!(pending.take(), Some(NavigationTarget::ConfirmStopAll));
+        assert_eq!(pending.take(), None);
+    }
+}

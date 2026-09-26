@@ -117,10 +117,16 @@ function Window(): React.JSX.Element {
     }
   };
   const resetSettings = async () => {
+    // What a reset leaves alone; the web UI has no notifications or pap command.
+    const kept = new Intl.ListFormat("en").format([
+      "Profiles", "credentials", "the Local API key", "usage history",
+      ...distributionCapabilities.notifications ? ["system notification permission"] : [],
+      ...distributionCapabilities.cliRegistration ? ["the pap command"] : [],
+    ]);
     try {
       if (await confirm({
         title: "Reset settings?",
-        message: `${agents.accessStatus === "authorized" ? "Protection stops, agents disconnect," : "Protection stops"} and settings return to their defaults. Profiles, credentials, the Local API key, and usage history are kept.`,
+        message: `${agents.accessStatus === "authorized" ? "Protection stops, agents disconnect and their configurations are restored," : "Protection stops"} and settings return to their defaults. ${kept} are unchanged.`,
         confirmLabel: "Reset Settings",
         destructive: true,
       })) resetMutate();
@@ -194,7 +200,11 @@ function Window(): React.JSX.Element {
     else if (dialog.control.open) deferredRequest.current = target;
     else if (!confirming) show(target);
   });
-  useEffect(() => desktopApi.onNavigate((target) => showRequested(target)), []);
+  // A request waits in the shell until the window's state and agents have
+  // loaded, so one made while the app starts sees the real profiles and
+  // agent access.
+  const ready = Boolean(appState.data || appState.error) && (agents.accessStatus !== undefined || agents.problem !== undefined);
+  useEffect(() => ready ? desktopApi.onNavigate((target) => showRequested(target)) : undefined, [ready]);
   const dialogControl = {
     ...dialog.control,
     onOpenChangeComplete: (open: boolean) => {
