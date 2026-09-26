@@ -22,6 +22,23 @@ use sha2::{Digest, Sha256};
 use super::request_transform::Endpoint;
 use super::types::{ReasoningConfig, ReasoningEffort};
 
+/// HMAC-SHA256 key for the cache-affinity prefix hash. The gateway derives it
+/// from dstack KMS, so it never leaves the TEE.
+#[derive(Clone)]
+pub struct PrefixHashKey([u8; 32]);
+
+impl PrefixHashKey {
+    pub fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl std::fmt::Debug for PrefixHashKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PrefixHashKey(..)")
+    }
+}
+
 /// First-bytes cap for the prefix hash. 4096 bytes is ≈1k tokens — aligned
 /// with the smallest prefix the major providers cache at all (1024 tokens),
 /// so a shorter shared prefix that this cap would have distinguished is one
@@ -71,9 +88,9 @@ pub struct RequestFeatures {
     pub input_modalities: Vec<&'static str>,
     pub reasoning: ReasoningIntent,
     pub response_format: ResponseFormatKind,
-    /// The cache-affinity key: hex SHA-256 — or HMAC-SHA256 when
-    /// `middleware.prefix_hash_secret` is set — of the canonical first bytes
-    /// of the conversation, truncated to 32 chars (`hash_api_key` style).
+    /// The cache-affinity key: hex HMAC-SHA256, under the KMS-derived
+    /// `PrefixHashKey`, of the canonical first bytes of the conversation,
+    /// truncated to 32 chars (`hash_api_key` style).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefix_hash: Option<String>,
 }
@@ -164,18 +181,15 @@ impl Acc {
     /// like `user\0hi` is trivially enumerable; a full 4KB one is only
     /// guessable when the guesser already holds every byte of it.
     ///
-    /// With a secret the digest is HMAC-SHA256 keyed inside the gateway, so
-    /// the control plane cannot even test guesses of fully-known templates;
-    /// without one it is plain SHA-256, which keeps prefix equality linkable
-    /// and known 4KB templates confirmable (stated in the config docs).
-    fn prefix_hash(&self, secret: Option<&[u8]>) -> Option<String> {
+    /// The digest is HMAC-SHA256 under a key that never leaves the TEE, so
+    /// the control plane cannot test guesses, even of fully known templates.
+    /// It still sees when two requests share a prefix: that equality is what
+    /// cache affinity routes on.
+    fn prefix_hash(&self, key: &PrefixHashKey) -> Option<String> {
         if self.prefix.len() < PREFIX_CAP {
             return None;
         }
-        let digest: [u8; 32] = match secret {
-            Some(key) => hmac_sha256(key, &self.prefix),
-            None => Sha256::digest(&self.prefix).into(),
-        };
+        let digest = hmac_sha256(&key.0, &self.prefix);
         Some(hex::encode(digest)[..32].to_string())
     }
 }
@@ -223,7 +237,7 @@ pub fn extract(
     endpoint: Endpoint,
     params: &Value,
     requirements: Option<&ReasoningConfig>,
-    prefix_secret: Option<&[u8]>,
+    prefix_hash_key: &PrefixHashKey,
 ) -> Option<RequestFeatures> {
     let mut acc = Acc::default();
     match endpoint {
@@ -312,7 +326,7 @@ pub fn extract(
         input_modalities: acc.modalities.iter().copied().collect(),
         reasoning: reasoning_intent(endpoint, params, requirements),
         response_format,
-        prefix_hash: acc.prefix_hash(prefix_secret),
+        prefix_hash: acc.prefix_hash(prefix_hash_key),
     })
 }
 
@@ -546,8 +560,12 @@ mod tests {
         json!({ "model": "m", "messages": messages })
     }
 
+    fn test_key() -> PrefixHashKey {
+        PrefixHashKey::new([7; 32])
+    }
+
     fn features(params: &Value) -> RequestFeatures {
-        extract(Endpoint::ChatComplete, params, None, None).unwrap()
+        extract(Endpoint::ChatComplete, params, None, &test_key()).unwrap()
     }
 
     #[test]
@@ -661,20 +679,23 @@ mod tests {
     #[test]
     fn secret_keys_the_hash() {
         let params = chat(json!([{ "role": "user", "content": "s".repeat(5000) }]));
-        let hash = |secret: Option<&[u8]>| {
-            extract(Endpoint::ChatComplete, &params, None, secret)
-                .unwrap()
-                .prefix_hash
+        let hash = |key: [u8; 32]| {
+            extract(
+                Endpoint::ChatComplete,
+                &params,
+                None,
+                &PrefixHashKey::new(key),
+            )
+            .unwrap()
+            .prefix_hash
         };
-        let (plain, k1, k2) = (hash(None), hash(Some(b"k1")), hash(Some(b"k2")));
-        // Same prefix, three different keys under three different secrets:
-        // without the secret the control plane could recompute `plain`; with
-        // one it cannot test guesses at all.
-        assert!(plain.is_some() && k1.is_some() && k2.is_some());
-        assert_ne!(plain, k1);
+        let (k1, k2) = (hash([1; 32]), hash([2; 32]));
+        // Same prefix, different keys under different secrets: without the
+        // key the control plane cannot recompute or test the hash.
+        assert!(k1.is_some() && k2.is_some());
         assert_ne!(k1, k2);
-        // Deterministic under one secret — replicas sharing it share keys.
-        assert_eq!(k1, hash(Some(b"k1")));
+        // Deterministic under one key — replicas deriving it share hashes.
+        assert_eq!(k1, hash([1; 32]));
     }
 
     #[test]
@@ -697,7 +718,7 @@ mod tests {
                 { "type": "text", "text": "the chart" },
             ]},
         ]}]});
-        let f = extract(Endpoint::Messages, &params, None, None).unwrap();
+        let f = extract(Endpoint::Messages, &params, None, &test_key()).unwrap();
         assert_eq!(f.input_modalities, vec!["image", "text"]);
         assert!(f.estimated_prompt_tokens >= 85);
     }
@@ -709,7 +730,7 @@ mod tests {
                 Endpoint::Complete,
                 &json!({ "model": "m", "prompt": prompt }),
                 None,
-                None,
+                &test_key(),
             )
             .unwrap()
         };
@@ -744,7 +765,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            extract(Endpoint::ChatComplete, &plain, Some(&disabled), None)
+            extract(Endpoint::ChatComplete, &plain, Some(&disabled), &test_key())
                 .unwrap()
                 .reasoning,
             ReasoningIntent::Disabled
@@ -765,7 +786,7 @@ mod tests {
             ]}],
             "thinking": { "type": "disabled" },
         });
-        let f = extract(Endpoint::Messages, &params, None, None).unwrap();
+        let f = extract(Endpoint::Messages, &params, None, &test_key()).unwrap();
         assert_eq!(f.reasoning, ReasoningIntent::Disabled);
         assert_eq!(f.input_modalities, vec!["image", "text"]);
         assert!(f.estimated_prompt_tokens >= 85);
@@ -793,6 +814,6 @@ mod tests {
 
     #[test]
     fn unknown_shapes_send_nothing() {
-        assert!(extract(Endpoint::Embed, &json!({ "input": "x" }), None, None).is_none());
+        assert!(extract(Endpoint::Embed, &json!({ "input": "x" }), None, &test_key()).is_none());
     }
 }

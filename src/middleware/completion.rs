@@ -33,7 +33,7 @@ use crate::aggregator::service::{
 use super::control::ControlClient;
 use super::errors::{self, Surface};
 use super::reasoning;
-use super::request_features;
+use super::request_features::{self, PrefixHashKey};
 use super::request_transform::{
     build_candidates, responses_to_chat_params, validate_responses_request, Endpoint,
     ResponsesCandidateInput, TransformError,
@@ -94,7 +94,7 @@ pub async fn run(
     service: &Arc<AciService>,
     sse_keepalive_ms: Option<u64>,
     send_request_features: bool,
-    prefix_hash_secret: Option<&str>,
+    prefix_hash_key: &PrefixHashKey,
     input: CompletionInput,
 ) -> Response {
     let CompletionInput {
@@ -208,7 +208,7 @@ pub async fn run(
             endpoint,
             &params,
             reasoning_requirements.as_ref(),
-            prefix_hash_secret.map(str::as_bytes),
+            prefix_hash_key,
         )
     } else {
         None

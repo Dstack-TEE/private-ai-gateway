@@ -31,11 +31,19 @@ use private_ai_gateway::middleware::errors::{SseProtocol, Surface};
 use private_ai_gateway::middleware::request_transform::Endpoint;
 use private_ai_gateway::middleware::sse::{MeterStream, StreamReport};
 use private_ai_gateway::middleware::types::{OrganizationScope, TenantIdentity};
-use private_ai_gateway::middleware::{CompletionInput, Middleware, MiddlewareConfig};
+use private_ai_gateway::middleware::{
+    CompletionInput, Middleware, MiddlewareConfig, PrefixHashKey,
+};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 
 use common::{event_from_request, StaticKeyProvider, StubQuoter};
+
+/// A middleware with a fixed prefix-hash key; the gateway derives the real
+/// key from dstack KMS.
+fn new_middleware(config: &MiddlewareConfig) -> Result<Middleware, String> {
+    Middleware::new(PrefixHashKey::new([7; 32]), config)
+}
 
 // A mock upstream that returns a fixed response for any forward.
 struct MockUpstream {
@@ -581,14 +589,13 @@ fn assert_canary_absent(posts: &Arc<Mutex<Vec<Value>>>, probe: &str) {
 }
 
 fn middleware(control_url: String) -> Middleware {
-    Middleware::new(&MiddlewareConfig {
+    new_middleware(&MiddlewareConfig {
         control_url,
         control_token: None,
         control_timeout_ms: Some(2_000),
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
         send_request_features: None,
-        prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
     })
     .unwrap()
@@ -1780,7 +1787,6 @@ async fn meter_stream_injects_cost_classifies_completed_and_reports() {
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
         send_request_features: None,
-        prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
     })
     .unwrap();
@@ -2461,7 +2467,6 @@ async fn downstream_abort_before_settle_reports_gateway_failure_not_client_close
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
         send_request_features: None,
-        prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
     })
     .unwrap();
@@ -2527,7 +2532,6 @@ async fn downstream_abort_after_settle_does_not_double_report() {
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
         send_request_features: None,
-        prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
     })
     .unwrap();
@@ -3039,14 +3043,13 @@ async fn send_request_features_off_restores_the_featureless_pre_body() {
         "allow": false, "status": 403, "message": "denied"
     }))
     .await;
-    let mw = Middleware::new(&MiddlewareConfig {
+    let mw = new_middleware(&MiddlewareConfig {
         control_url,
         control_token: None,
         control_timeout_ms: Some(2_000),
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
         send_request_features: Some(false),
-        prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
     })
     .unwrap();
@@ -3274,7 +3277,6 @@ async fn mid_stream_read_timeout_settles_504_as_upstream_timeout() {
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
         send_request_features: None,
-        prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
     })
     .unwrap();
@@ -3360,14 +3362,13 @@ impl UpstreamBackend for SlowStreamUpstream {
 }
 
 fn middleware_with_keepalive(control_url: String, ms: u64) -> Middleware {
-    Middleware::new(&MiddlewareConfig {
+    new_middleware(&MiddlewareConfig {
         control_url,
         control_token: None,
         control_timeout_ms: Some(2_000),
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: Some(ms),
         send_request_features: None,
-        prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
     })
     .unwrap()
@@ -3469,7 +3470,6 @@ async fn unpolled_drop_is_a_client_disconnect_unless_the_pipeline_marked_itself(
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
         send_request_features: None,
-        prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
     };
     let report_for = |id: &str, abort: &Arc<std::sync::atomic::AtomicBool>| StreamReport {
@@ -3825,7 +3825,6 @@ async fn in_band_stream_error_settles_with_a_class_and_none_of_its_text() {
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
         send_request_features: None,
-        prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
     })
     .unwrap();
