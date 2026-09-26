@@ -2,18 +2,18 @@ import { useEffect, useMemo, useState } from "react";
 import { Check, Copy } from "lucide-react";
 import type { ModelSummary } from "../../shared/contracts";
 import { localApiExample, type ExampleLanguage } from "../lib/local-api-example";
-import { AppDialog, DoneFooter } from "./app-dialog";
+import { AppDialog, DoneFooter, type DialogControl } from "./app-dialog";
 import { IconButton } from "./controls";
 import { Field, FieldError, FieldLabel } from "./ui/field";
 import { ChoiceSelect } from "./choice-select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 
-export function LocalApiExamplesDialog({ endpoint, models: catalogModels, apiKey, onCopy, onClose }: {
+export function LocalApiExamplesDialog({ endpoint, models: catalogModels, apiKey, onCopy, ...control }: {
   /** The Local API key; empty while it is unavailable. */
   apiKey: string;
   endpoint?: string; models: ModelSummary[];
-  onCopy(value: string): Promise<void>; onClose(): void;
-}) {
+  onCopy(value: string): Promise<void>;
+} & DialogControl) {
   const models = catalogModels.filter((model) => model.supportedEndpoints?.includes("/v1/chat/completions") ?? true);
   const [language, setLanguage] = useState<ExampleLanguage>("javascript");
   const [selection, setSelection] = useState("");
@@ -38,7 +38,7 @@ export function LocalApiExamplesDialog({ endpoint, models: catalogModels, apiKey
     catch { setError("Could not copy the example."); }
     finally { setCopying(false); }
   };
-  return <AppDialog title="Local API examples" className="sm:max-w-3xl" onClose={onClose}>
+  return <AppDialog {...control} title="Local API examples" className="sm:max-w-3xl">
     <Field>
       <FieldLabel htmlFor="example-model">Model</FieldLabel>
       <ChoiceSelect id="example-model" label="Model" className="w-full" value={model} disabled={models.length === 0} onChange={setSelection}

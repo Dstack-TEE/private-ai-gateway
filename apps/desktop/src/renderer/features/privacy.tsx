@@ -1,6 +1,6 @@
 import React from "react";
 import { Check, LockOpen, RefreshCw, ShieldCheck, ShieldX } from "lucide-react";
-import { AppDialog, DoneFooter } from "../components/app-dialog";
+import { AppDialog, DoneFooter, type DialogControl } from "../components/app-dialog";
 import type { AppState, VerificationCheck } from "../../shared/contracts";
 import { hasLiveVerification } from "../lib/protection";
 import { formatTimestamp, hardwareName, shorten, trustName } from "../lib/format";
@@ -35,8 +35,8 @@ const CHECK_TITLES: Record<string, string> = {
   "upstream-2": "Upstream session evidence",
 };
 
-export function PrivacyDialog({ state, onClose }: { state: AppState; onClose(): void }): React.JSX.Element {
-  return <AppDialog title="Privacy verification" className="sm:max-w-2xl" onClose={onClose}>
+export function PrivacyDialog({ state, ...control }: { state: AppState } & DialogControl): React.JSX.Element {
+  return <AppDialog {...control} title="Privacy verification" className="sm:max-w-2xl">
     <div className="-mx-6 min-h-0 overflow-y-auto px-6"><PrivacyVerification state={state} /></div>
     <DoneFooter />
   </AppDialog>;

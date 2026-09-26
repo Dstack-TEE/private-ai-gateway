@@ -29,7 +29,7 @@ export interface Shell {
   toggleProtection(): void;
   setRequireProductionOs(required: boolean): void;
   resetSettings(): void;
-  /** A dialog request never replaces a dialog that is already open. */
+  /** A dialog request never replaces an open dialog, only one that is animating out. */
   openDialog(dialog: AppDialog): void;
   /** Profiles, or a new profile when there is none. */
   openProfiles(): void;
