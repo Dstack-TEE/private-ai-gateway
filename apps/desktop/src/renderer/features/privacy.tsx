@@ -1,21 +1,20 @@
 import React from "react";
-import { Check, LockOpen, RefreshCw, ShieldCheck, ShieldX } from "lucide-react";
+import { Check, Info, LockOpen, Minus, RefreshCw, ShieldCheck, ShieldX, X, type LucideIcon } from "lucide-react";
 import { AppDialog, DoneFooter, type DialogControl } from "../components/app-dialog";
 import type { AppState, VerificationCheck } from "../../shared/contracts";
 import { hasLiveVerification } from "../lib/protection";
 import { formatTimestamp, hardwareName, shorten, trustName } from "../lib/format";
 import { Detail } from "../components/detail";
-import { VerificationVerdict } from "../components/verification-verdict";
-import { cn } from "../lib/utils";
-import { toneTextClass } from "../lib/tone";
+import { StateLabel } from "../components/state-label";
+import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
+import { Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemTitle } from "../components/ui/item";
 import type { Tone } from "../../shared/contracts";
 
-const CHECK_ICON_CLASS = "grid size-4.5 flex-none place-items-center rounded-full";
-const CHECK_PRESENTATION: Record<VerificationCheck["status"], { iconClass: string; tone: Tone }> = {
-  pass: { iconClass: "bg-primary text-primary-foreground", tone: "success" },
-  fail: { iconClass: "bg-[var(--danger-bg)] text-destructive", tone: "danger" },
-  skip: { iconClass: "bg-[var(--warning-bg)] text-warning", tone: "warning" },
-  info: { iconClass: "bg-[var(--warning-bg)] text-warning", tone: "warning" },
+const CHECK_PRESENTATION: Record<VerificationCheck["status"], { icon: LucideIcon; tone: Tone }> = {
+  pass: { icon: Check, tone: "success" },
+  fail: { icon: X, tone: "danger" },
+  skip: { icon: Minus, tone: "warning" },
+  info: { icon: Info, tone: "warning" },
 };
 
 const CHECK_TITLES: Record<string, string> = {
@@ -73,29 +72,26 @@ function PrivacyVerification({ state }: { state: AppState }): React.JSX.Element 
         : "No recent receipts. Each request is verified separately in Usage.",
     },
   ];
-  const verdictTone = verified ? "success" : state.status === "blocked" || state.status === "error" ? "danger" : "neutral";
+  const failed = !verified && (state.status === "blocked" || state.status === "error");
   const VerdictIcon = verified ? ShieldCheck : state.status === "verifying" ? RefreshCw : ShieldX;
   return (
     <section aria-label="Privacy">
-      <VerificationVerdict
-        tone={verdictTone}
-        icon={VerdictIcon}
-        title={verified ? "Service identity and connection verified" : state.status === "verifying" ? "Checking the service" : "No verified live connection"}
-        detail={verified ? "This app checked the service’s hardware evidence and bound the encrypted connection to its attested key." : "A saved profile is not evidence of a currently protected connection. Protection must establish a new verified session."}
-      />
-      <div className="mt-4">
+      <Alert role="status" variant={failed ? "destructive" : "default"}>
+        <VerdictIcon aria-hidden="true" />
+        <AlertTitle>{verified ? "Service identity and connection verified" : state.status === "verifying" ? "Checking the service" : "No verified live connection"}</AlertTitle>
+        <AlertDescription>{verified ? "This app checked the service’s hardware evidence and bound the encrypted connection to its attested key." : "A saved profile is not evidence of a currently protected connection. Protection must establish a new verified session."}</AlertDescription>
+      </Alert>
+      <ItemGroup className="mt-4">
         {facts.map((fact) => (
-          <div className="flex min-h-12.5 items-start gap-3 border-b border-border p-3.5 last:border-b-0" key={fact.title}>
-            <span className={cn(CHECK_ICON_CLASS, CHECK_PRESENTATION[fact.ok ? "pass" : "skip"].iconClass)} aria-hidden="true">
-              {fact.ok ? <Check size={12} /> : <LockOpen size={11} />}
-            </span>
-            <span className="grid min-w-0 flex-auto gap-1.25">
-              <span className="font-medium">{fact.title}</span>
-              <span className="text-xs text-muted-foreground wrap-anywhere">{fact.detail}</span>
-            </span>
-          </div>
+          <Item key={fact.title} variant="outline" size="sm">
+            <ItemMedia variant="icon">{fact.ok ? <Check aria-hidden="true" /> : <LockOpen aria-hidden="true" />}</ItemMedia>
+            <ItemContent className="min-w-0">
+              <ItemTitle>{fact.title}</ItemTitle>
+              <ItemDescription className="line-clamp-none wrap-anywhere">{fact.detail}</ItemDescription>
+            </ItemContent>
+          </Item>
         ))}
-      </div>
+      </ItemGroup>
       <p className="mt-3 mb-4.5 text-xs text-muted-foreground">{passed("id-5") ? "Key custody evidence passed." : "Key custody is not independently established by these checks."} Responses are forwarded immediately; receipts are audited afterward and cannot retract delivered content. This summary does not verify upstream inference or answer accuracy. {!state.config.requireProductionOs && "Development OS images are allowed."}</p>
       {identity && (
         <section className="mt-6" aria-labelledby="verified-identity-title">
@@ -117,7 +113,7 @@ function PrivacyVerification({ state }: { state: AppState }): React.JSX.Element 
       {checks.length > 0 && (
         <section className="mt-6" aria-labelledby="verification-checks-title">
           <SectionHeading id="verification-checks-title" title="Verification checks" summary={`${checks.length} total`} />
-          <div>{checks.map((check) => <CheckRow key={check.id} check={check} />)}</div>
+          <ItemGroup>{checks.map((check) => <CheckRow key={check.id} check={check} />)}</ItemGroup>
         </section>
       )}
     </section>
@@ -126,15 +122,16 @@ function PrivacyVerification({ state }: { state: AppState }): React.JSX.Element 
 
 function CheckRow({ check }: { check: VerificationCheck }): React.JSX.Element {
   const title = CHECK_TITLES[check.id] ?? check.title;
-  const presentation = CHECK_PRESENTATION[check.status];
+  const { icon: Icon, tone } = CHECK_PRESENTATION[check.status];
   return (
-    <div className="grid min-h-9 grid-cols-[18px_minmax(0,_1fr)_auto] items-start gap-3 border-b border-border px-3.5 py-3 last:border-b-0">
-      <span className={cn(CHECK_ICON_CLASS, presentation.iconClass)} aria-hidden="true">
-        {check.status === "pass" && <Check size={12} />}
-      </span>
-      <span className="grid min-w-0 gap-1.25"><span className="font-medium">{title}</span><span className="select-text text-xs text-muted-foreground wrap-anywhere">{check.detail}</span></span>
-      <span className={cn("flex-none text-xs font-semibold", toneTextClass[presentation.tone])}>{checkStatusLabel(check.status)}</span>
-    </div>
+    <Item variant="outline" size="sm">
+      <ItemMedia variant="icon"><Icon aria-hidden="true" /></ItemMedia>
+      <ItemContent className="min-w-0">
+        <ItemTitle>{title}</ItemTitle>
+        <ItemDescription className="line-clamp-none select-text wrap-anywhere">{check.detail}</ItemDescription>
+      </ItemContent>
+      <ItemActions><StateLabel tone={tone} text={checkStatusLabel(check.status)} /></ItemActions>
+    </Item>
   );
 }
 

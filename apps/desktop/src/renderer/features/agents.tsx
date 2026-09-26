@@ -12,7 +12,7 @@ import { StateLabel } from "../components/state-label";
 import { AgentAttention } from "../components/agent-attention";
 import ohMyPiIcon from "../assets/oh-my-pi.svg";
 import type { Tone } from "../../shared/contracts";
-import { Item, ItemActions, ItemContent, ItemTitle } from "../components/ui/item";
+import { Item, ItemActions, ItemContent, ItemMedia, ItemTitle } from "../components/ui/item";
 import { SettingsSection } from "../components/settings";
 import { SwitchControl } from "../components/controls";
 import type { AgentAccessStatus, AgentStatus } from "../../shared/contracts";
@@ -23,25 +23,23 @@ import { useShell } from "../lib/shell";
 import { useAgentConnection } from "../hooks/use-agents";
 import { cn } from "../lib/utils";
 
-const AGENT_ICONS: Record<string, string> = {
-  codex: codexIcon,
-  "claude-code": claudeCodeIcon,
-  opencode: openCodeIcon,
-  pi: piIcon,
-  "oh-my-pi": ohMyPiIcon,
-  hermes: hermesIcon,
-  openclaw: openClawIcon,
+/** Monochrome logos are drawn in black, so they are inverted in the dark theme. */
+const AGENT_ICONS: Record<string, { src: string; monochrome?: boolean }> = {
+  codex: { src: codexIcon },
+  "claude-code": { src: claudeCodeIcon },
+  opencode: { src: openCodeIcon, monochrome: true },
+  pi: { src: piIcon, monochrome: true },
+  "oh-my-pi": { src: ohMyPiIcon },
+  hermes: { src: hermesIcon, monochrome: true },
+  openclaw: { src: openClawIcon },
 };
 
 function AgentMark({ agent }: { agent: Pick<AgentStatus, "id" | "name"> }): React.JSX.Element {
   const icon = AGENT_ICONS[agent.id];
   return (
-    <span className={cn(
-      "grid size-8 flex-none place-items-center overflow-hidden rounded-xl border border-border bg-white text-xs font-bold text-muted-foreground [&_img]:size-5 [&_img]:object-contain",
-      agent.id === "oh-my-pi" && "bg-[#0d0d0d]",
-    )} aria-hidden="true">
-      {icon ? <img src={icon} alt="" /> : agent.name.slice(0, 2).toUpperCase()}
-    </span>
+    <ItemMedia variant="image" aria-hidden="true">
+      {icon ? <img src={icon.src} alt="" className={cn(icon.monochrome && "dark:invert")} /> : agent.name.slice(0, 2).toUpperCase()}
+    </ItemMedia>
   );
 }
 
