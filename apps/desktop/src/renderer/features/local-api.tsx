@@ -8,7 +8,7 @@ import { Field, FieldGroup, FieldLabel, FieldDescription, FieldError, FieldSepar
 import { Item } from "../components/ui/item";
 import { InputGroup, InputGroupInput, InputGroupAddon, InputGroupButton } from "../components/ui/input-group";
 import { IconButton } from "../components/controls";
-import { AppDialog } from "../components/app-dialog";
+import { AppDialog, type DialogControl } from "../components/app-dialog";
 import { useConfirm } from "../components/confirm";
 import { DialogFooter } from "../components/ui/dialog";
 import { DEFAULT_LOCAL_API_CONFIG, type AppState, type ListenConfig } from "../../shared/contracts";
@@ -99,6 +99,7 @@ export function LocalApiDialog({
   onRotate,
   onSave,
   onClose,
+  ...control
 }: {
   state: AppState;
   clientKey: string;
@@ -109,8 +110,7 @@ export function LocalApiDialog({
   onToggleKey(): void;
   onRotate(): Promise<string | undefined>;
   onSave(config: ListenConfig): Promise<string | undefined>;
-  onClose(): void;
-}): React.JSX.Element {
+} & DialogControl): React.JSX.Element {
   const frozen = state.status === "verifying";
   const [draft, setDraft] = useState<ListenConfig>(state.localApi);
   const addressKind = localAddressKind(draft.listenAddress);
@@ -163,7 +163,7 @@ export function LocalApiDialog({
     }
   };
   return (
-    <AppDialog title="Local API settings" className="sm:max-w-xl" dismissible={!saving} onClose={onClose}>
+    <AppDialog {...control} title="Local API settings" className="sm:max-w-xl" dismissible={!saving} onClose={onClose}>
       <form className="flex min-h-0 flex-col gap-4" onSubmit={(event) => void submit(event)}>
         <div className="-mx-6 min-h-0 overflow-y-auto px-6 py-1">
           <FieldGroup>

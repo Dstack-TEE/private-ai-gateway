@@ -20,6 +20,7 @@ import { UsageProofDialog } from "./features/usage";
 import { LocalApiExamplesDialog } from "./components/local-api-examples";
 import { NotificationsDialog, NotificationsProvider } from "./components/notifications";
 import { useConfirm, useConfirmOpen } from "./components/confirm";
+import { useDialog } from "./components/app-dialog";
 import { AppearanceProvider } from "./components/appearance";
 import { Toaster } from "./components/ui/sonner";
 import { localEndpoint } from "./lib/format";
@@ -57,12 +58,10 @@ function Window(): React.JSX.Element {
   const [startingBackend, setStartingBackend] = useState(false);
   const confirm = useConfirm();
   const confirming = useConfirmOpen();
-  const [dialog, setDialog] = useState<AppDialog>();
+  const { payload: dialog, key: dialogKey, show: openDialog, control: dialogControl } = useDialog<AppDialog>();
   // Requests to show a page, from the Settings shortcut, the macOS menu
   // accelerator or the tray, wait until a dialog or confirmation closes.
-  const modalOpen = dialog !== undefined || confirming;
-  const openDialog = useCallback((next: AppDialog) => setDialog((current) => current ?? next), []);
-  const closeDialog = useCallback(() => setDialog(undefined), []);
+  const modalOpen = dialogControl.open || confirming;
   const [copied, setCopied] = useState<string>();
   const copyTimer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(copyTimer.current), []);
@@ -271,42 +270,44 @@ function Window(): React.JSX.Element {
         </div>
       </section>
 
-      {dialog?.kind === "profiles" && <ProfilesDialog
-        state={state} repair={dialog.repair}
-        onActivate={(profileId) => applyStateAction(() => desktopApi.activateProfile(profileId))}
-        onSave={(profile, key) => applyStateAction(() => desktopApi.saveConfiguration(profile, state.config.requireProductionOs, key))}
-        onDelete={(profileId) => applyStateAction(() => desktopApi.deleteProfile(profileId))}
-        onClose={closeDialog}
-      />}
-      {dialog?.kind === "setup-profile" && <ProfileEditorDialog
-        state={state} startAfterSave
-        onSave={(profile, key) => applyStateAction(async () => {
-          const saved = await desktopApi.saveConfiguration(profile, state.config.requireProductionOs, key);
-          return desktopApi.start(saved.config);
-        })}
-        onDelete={(profileId) => applyStateAction(() => desktopApi.deleteProfile(profileId))}
-        onComplete={closeDialog} onDeleted={closeDialog} onClose={closeDialog}
-      />}
-      {dialog?.kind === "privacy" && <PrivacyDialog state={state} onClose={closeDialog} />}
-      {dialog?.kind === "local-api" && <LocalApiDialog
-        state={state} clientKey={clientKey} clientKeyVisible={clientKeyVisible} copied={copied}
-        onCopy={copyValue} onToggleKey={() => setClientKeyVisible((visible) => !visible)}
-        onRotate={rotateClientKey}
-        onSave={(config) => applyStateAction(() => desktopApi.saveLocalApiConfig(config))}
-        onClose={closeDialog}
-      />}
-      {dialog?.kind === "local-api-example" && <LocalApiExamplesDialog
-        apiKey={clientKey} endpoint={state.proxyUrl ?? localEndpoint(state.localApi)} models={state.catalog?.models ?? []}
-        onCopy={(value) => desktopApi.copyText(value)} onClose={closeDialog}
-      />}
-      {dialog?.kind === "notifications" && <NotificationsDialog onClose={closeDialog} />}
-      {dialog?.kind === "web-ui" && <WebUiDialog
-        state={state}
-        onSave={(config) => applyStateAction(() => desktopApi.saveWebUi(config))}
-        onSetPassword={(password, currentPassword) => applyStateAction(() => desktopApi.setWebUiPassword(password, currentPassword))}
-        onClose={closeDialog}
-      />}
-      {dialog?.kind === "usage-proof" && <UsageProofDialog activity={dialog.activity} onClose={closeDialog} />}
+      <React.Fragment key={dialogKey}>
+        {dialog?.kind === "profiles" && <ProfilesDialog
+          state={state} repair={dialog.repair}
+          onActivate={(profileId) => applyStateAction(() => desktopApi.activateProfile(profileId))}
+          onSave={(profile, key) => applyStateAction(() => desktopApi.saveConfiguration(profile, state.config.requireProductionOs, key))}
+          onDelete={(profileId) => applyStateAction(() => desktopApi.deleteProfile(profileId))}
+          {...dialogControl}
+        />}
+        {dialog?.kind === "setup-profile" && <ProfileEditorDialog
+          state={state} startAfterSave
+          onSave={(profile, key) => applyStateAction(async () => {
+            const saved = await desktopApi.saveConfiguration(profile, state.config.requireProductionOs, key);
+            return desktopApi.start(saved.config);
+          })}
+          onDelete={(profileId) => applyStateAction(() => desktopApi.deleteProfile(profileId))}
+          onComplete={dialogControl.onClose} {...dialogControl}
+        />}
+        {dialog?.kind === "privacy" && <PrivacyDialog state={state} {...dialogControl} />}
+        {dialog?.kind === "local-api" && <LocalApiDialog
+          state={state} clientKey={clientKey} clientKeyVisible={clientKeyVisible} copied={copied}
+          onCopy={copyValue} onToggleKey={() => setClientKeyVisible((visible) => !visible)}
+          onRotate={rotateClientKey}
+          onSave={(config) => applyStateAction(() => desktopApi.saveLocalApiConfig(config))}
+          {...dialogControl}
+        />}
+        {dialog?.kind === "local-api-example" && <LocalApiExamplesDialog
+          apiKey={clientKey} endpoint={state.proxyUrl ?? localEndpoint(state.localApi)} models={state.catalog?.models ?? []}
+          onCopy={(value) => desktopApi.copyText(value)} {...dialogControl}
+        />}
+        {dialog?.kind === "notifications" && <NotificationsDialog {...dialogControl} />}
+        {dialog?.kind === "web-ui" && <WebUiDialog
+          state={state}
+          onSave={(config) => applyStateAction(() => desktopApi.saveWebUi(config))}
+          onSetPassword={(password, currentPassword) => applyStateAction(() => desktopApi.setWebUiPassword(password, currentPassword))}
+          {...dialogControl}
+        />}
+        {dialog?.kind === "usage-proof" && <UsageProofDialog activity={dialog.activity} {...dialogControl} />}
+      </React.Fragment>
     </main>
     </ShellContext.Provider>
   );

@@ -51,7 +51,9 @@ export function ListenAddress({ api, id, value, disabled, onChange }: {
   const error = addressError ? "Network interfaces unavailable. Enter an IP address manually." : undefined;
   const options = [...new Set(["127.0.0.1", "::1", ...addresses.map((item) => item.address), "0.0.0.0", "::"])];
   return <>
-    <Combobox items={options} inputValue={value} onInputValueChange={onChange} value={value}
+    <Combobox items={options} inputValue={value} value={value}
+      // Escape with the list closed would clear the address; let it close the surrounding dialog.
+      onInputValueChange={(next, details) => { if (details.reason === "escape-key") details.allowPropagation(); else onChange(next); }}
       onValueChange={(next) => { if (next) onChange(next); }}>
       <ComboboxInput id={id} aria-label="Listen address" triggerLabel="Choose listen address" required disabled={disabled} autoComplete="off" spellCheck={false} />
       <ComboboxContent>

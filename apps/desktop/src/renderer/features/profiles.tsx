@@ -13,7 +13,7 @@ import { Field, FieldError, FieldGroup, FieldLabel } from "../components/ui/fiel
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Input } from "../components/ui/input";
 import { IconButton } from "../components/controls";
-import { AppDialog } from "../components/app-dialog";
+import { AppDialog, useDialog, type DialogControl } from "../components/app-dialog";
 import { useConfirm } from "../components/confirm";
 import { DialogFooter } from "../components/ui/dialog";
 import { FormField } from "../components/settings";
@@ -31,6 +31,7 @@ export function ProfilesDialog({
   onSave,
   onDelete,
   onClose,
+  ...control
 }: {
   state: AppState;
   /** Opens the active profile's editor on top, for protection that needs its credential. */
@@ -38,17 +39,22 @@ export function ProfilesDialog({
   onActivate(profileId: string): Promise<string | undefined>;
   onSave(profile: ConfidentialProfileInput, key?: string): Promise<string | undefined>;
   onDelete(profileId: string): Promise<string | undefined>;
-  onClose(): void;
-}): React.JSX.Element {
-  const [editor, setEditor] = useState<{ profileId?: string } | undefined>(() => repair && state.activeProfileId ? { profileId: state.activeProfileId } : undefined);
-  const editingProfile = state.profiles.find((profile) => profile.id === editor?.profileId);
+} & DialogControl): React.JSX.Element {
+  const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
+  const editor = useDialog<{ profile?: ConfidentialProfile }>(repair && activeProfile ? { profile: activeProfile } : undefined);
+  const openedProfile = editor.payload?.profile;
+  const liveProfile = openedProfile && state.profiles.find((profile) => profile.id === openedProfile.id);
+  // Deleting the profile, in the editor or elsewhere, closes its editor, which
+  // shows the profile as it was opened until it has closed.
+  if (openedProfile && !liveProfile && editor.control.open) editor.control.onClose();
+  const editingProfile = liveProfile ?? openedProfile;
+  const newProfileButton = useRef<HTMLButtonElement>(null);
   const [transferBusy, setTransferBusy] = useState(false);
   const [transferMessage, setTransferMessage] = useState<string>();
   const [error, setError] = useState<string>();
   const busy = state.status === "verifying";
   const frozen = busy || transferBusy;
   const [workingProfileId, setWorkingProfileId] = useState<string>();
-  const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   const activeProfileAvailable = profileIsAvailable(activeProfile, state);
   const activeConnection = activeProfile && connectionRequirement(activeProfile);
 
@@ -67,9 +73,8 @@ export function ProfilesDialog({
       setWorkingProfileId(undefined);
     }
   };
-  const closeEditor = () => setEditor(undefined);
   return (
-    <AppDialog title="Profiles" className="sm:max-w-xl" dismissible={!workingProfileId && !transferBusy} onClose={onClose}>
+    <AppDialog {...control} title="Profiles" className="sm:max-w-xl" dismissible={!workingProfileId && !transferBusy} onClose={onClose}>
       <p className="text-sm">Choose the service used when protection starts.</p>
       {!activeProfileAvailable && (
         <p className="banner profile-availability flex items-start gap-1.75 rounded-lg bg-[var(--warning-bg)] px-3 py-2.25 text-warning wrap-anywhere">
@@ -95,7 +100,7 @@ export function ProfilesDialog({
                 <span><strong>{profile.name}</strong><small>{serviceHost(profile.remoteUrl)} · {status}</small></span>
                 {working ? <LoaderCircle className="is-spinning animate-control-spin motion-reduce:animate-none" size={16} aria-hidden="true" /> : active ? <Check size={16} aria-hidden="true" /> : null}
               </ActionItem>
-              <IconButton size="icon-sm" aria-haspopup="dialog" label={`Edit ${profile.name}`} disabled={frozen || Boolean(workingProfileId)} onClick={() => setEditor({ profileId: profile.id })}><Pencil /></IconButton>
+              <IconButton size="icon-sm" aria-haspopup="dialog" label={`Edit ${profile.name}`} disabled={frozen || Boolean(workingProfileId)} onClick={() => editor.show({ profile })}><Pencil /></IconButton>
             </div>
           );
         })}
@@ -104,14 +109,14 @@ export function ProfilesDialog({
       {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
       <DialogFooter>
         <div className="flex items-center gap-2 sm:mr-auto">
-          <Button type="button" variant="outline" aria-haspopup="dialog" disabled={frozen || Boolean(workingProfileId)} onClick={() => setEditor({})}><Plus size={15} />New Profile</Button>
+          <Button ref={newProfileButton} type="button" variant="outline" aria-haspopup="dialog" disabled={frozen || Boolean(workingProfileId)} onClick={() => editor.show({})}><Plus size={15} />New Profile</Button>
           <ProfileTransfer api={desktopApi} disabled={busy || Boolean(workingProfileId)} onBusy={setTransferBusy} onMessage={(message, failed) => { setError(failed ? message : undefined); setTransferMessage(failed ? undefined : message); }} />
         </div>
         <Button type="button" variant="outline" disabled={Boolean(workingProfileId) || transferBusy} onClick={onClose}>Done</Button>
       </DialogFooter>
-      {editor && (!editor.profileId || editingProfile) && <ProfileEditorDialog
-        state={state} profile={editingProfile}
-        onSave={onSave} onDelete={onDelete} onComplete={closeEditor} onDeleted={closeEditor} onClose={closeEditor}
+      {editor.payload && <ProfileEditorDialog
+        key={editor.key} state={state} profile={editingProfile} {...editor.control} finalFocus={liveProfile || !openedProfile ? undefined : newProfileButton}
+        onSave={onSave} onDelete={onDelete} onComplete={editor.control.onClose}
       />}
     </AppDialog>
   );
@@ -131,6 +136,7 @@ function randomUuid(): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+/** Its owner closes it when the profile is deleted, as the profile leaves `state`. */
 export function ProfileEditorDialog({
   state,
   profile,
@@ -138,8 +144,8 @@ export function ProfileEditorDialog({
   onSave,
   onDelete,
   onComplete,
-  onDeleted,
   onClose,
+  ...control
 }: {
   state: AppState;
   profile?: ConfidentialProfile;
@@ -147,9 +153,7 @@ export function ProfileEditorDialog({
   onSave(profile: ConfidentialProfileInput, key?: string): Promise<string | undefined>;
   onDelete(profileId: string): Promise<string | undefined>;
   onComplete(): void;
-  onDeleted(): void;
-  onClose(): void;
-}): React.JSX.Element {
+} & DialogControl): React.JSX.Element {
   const busy = state.status === "verifying";
   // Saving or connecting an account restarts protection that is on.
   const running = state.protection.action.operation === "stop";
@@ -265,7 +269,7 @@ export function ProfileEditorDialog({
       if (needsStop) await desktopApi.stop();
       const message = await onDelete(draft.id);
       if (message) reportError(message);
-      else { await account.cancel(); onDeleted(); }
+      else await account.cancel();
     } catch (error) { reportError(error); }
     finally { setSaving(false); }
   };
@@ -312,7 +316,7 @@ export function ProfileEditorDialog({
   }, [authorized, login, provider, workspaces, working, frozen, save, reportError]);
 
   return (
-    <AppDialog title={isNew ? "New profile" : "Edit profile"} className="sm:max-w-lg" dismissible={!saving && !account.working} onClose={() => void closeEditor()}>
+    <AppDialog {...control} title={isNew ? "New profile" : "Edit profile"} className="sm:max-w-lg" dismissible={!saving && !account.working} onClose={() => void closeEditor()}>
       <form className="flex min-h-0 flex-col gap-4" onSubmit={(event) => { event.preventDefault(); void save(); }}>
         <div className="-mx-6 min-h-0 overflow-y-auto px-6 py-1">
         <FieldGroup className="gap-4 [&_[data-slot=field]]:gap-2">

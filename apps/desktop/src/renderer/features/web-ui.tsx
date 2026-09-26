@@ -4,7 +4,7 @@ import { Field, FieldContent, FieldDescription, FieldError, FieldGroup, FieldSep
 import { Input } from "../components/ui/input";
 import { ListenerFields } from "../components/listen-address";
 import { FormField, SettingsList, SettingsToggle } from "../components/settings";
-import { AppDialog } from "../components/app-dialog";
+import { AppDialog, type DialogControl } from "../components/app-dialog";
 import { useConfirm } from "../components/confirm";
 import { DialogFooter } from "../components/ui/dialog";
 import { errorMessage } from "../lib/error-message";
@@ -27,12 +27,12 @@ export function WebUiDialog({
   onSave,
   onSetPassword,
   onClose,
+  ...control
 }: {
   state: AppState;
   onSave(config: WebUiConfig): Promise<string | undefined>;
   onSetPassword(password: string, currentPassword?: string): Promise<string | undefined>;
-  onClose(): void;
-}): React.JSX.Element {
+} & DialogControl): React.JSX.Element {
   const status = state.webUi;
   const [draft, setDraft] = useState<WebUiConfig>(() => webUiConfig(status));
   const [changingPassword, setChangingPassword] = useState(!status.passwordSet);
@@ -106,7 +106,7 @@ export function WebUiDialog({
   };
   const openInBrowser = () => void desktopApi.openWebUi().catch((failure: unknown) => setError(errorMessage(failure)));
   return (
-    <AppDialog title="Web UI settings" className="sm:max-w-lg" dismissible={!saving} onClose={onClose}>
+    <AppDialog {...control} title="Web UI settings" className="sm:max-w-lg" dismissible={!saving} onClose={onClose}>
       <form className="flex min-h-0 flex-col gap-4" onSubmit={(event) => void submit(event)}>
         <div className="-mx-6 min-h-0 overflow-y-auto px-6 py-1">
           <FieldGroup>
