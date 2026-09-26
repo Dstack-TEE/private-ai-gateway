@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.0-beta.7](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.2.0-beta.6...desktop-v0.2.0-beta.7) (2026-09-26)
+
+
+### Bug Fixes
+
+* **desktop:** final audit fixes for beta.6 ([#325](https://github.com/Dstack-TEE/private-ai-gateway/issues/325)) ([6061f60](https://github.com/Dstack-TEE/private-ai-gateway/commit/6061f601f7294bd6686e670ad10222e0b87ef8f0))
+* **desktop:** restore the shadcn default styles ([#324](https://github.com/Dstack-TEE/private-ai-gateway/issues/324)) ([720292f](https://github.com/Dstack-TEE/private-ai-gateway/commit/720292f21f1bd9a38bb0d52cb4fbb8faa618a476))
+* **desktop:** show a signed receipt that is not valid JSON as returned ([1db5247](https://github.com/Dstack-TEE/private-ai-gateway/commit/1db52476442485c37cfe74c11d811ea08be6c243))
+* **desktop:** starting or stopping protection can no longer run twice from a double click ([6457a68](https://github.com/Dstack-TEE/private-ai-gateway/commit/6457a68466f645266c92ffede730b7dea88078c4))
+
 ## [0.2.0-beta.6](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.2.0-beta.5...desktop-v0.2.0-beta.6) (2026-09-26)
 
 
