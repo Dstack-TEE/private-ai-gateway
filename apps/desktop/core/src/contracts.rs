@@ -476,10 +476,6 @@ pub struct WebUiStatus {
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// Whether a sign-in password is set. State never carries the password;
-    /// the desktop app and CLI read it with `get_web_ui_password`.
-    #[serde(default)]
-    pub password_set: bool,
 }
 
 impl From<&crate::config::WebUiConfig> for WebUiStatus {
@@ -492,7 +488,6 @@ impl From<&crate::config::WebUiConfig> for WebUiStatus {
             client_host: config.client_host.clone(),
             url: None,
             error: None,
-            password_set: false,
         }
     }
 }

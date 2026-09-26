@@ -122,7 +122,7 @@ pap settings set web-ui.enabled true
 pap web-ui password show              # the sign-in password; treat the output as a secret
 pap app open --web                    # opens or prints the address
 pap settings set web-ui.port 4182     # default; must differ from the Local API (4180)
-pap settings show                     # settings, file paths, the web UI address or bind error, and passwordSet
+pap settings show                     # settings, file paths, and the web UI address or bind error
 pap settings set web-ui.enabled false # closes the listener and ends every browser session
 ```
 
@@ -141,7 +141,8 @@ pap settings set web-ui.password      # or type your own at a hidden prompt
 ```
 
 A password you choose must be at least 12 characters (at most 256); there are
-no other composition rules. It is never accepted as a command-line argument:
+no other composition rules. Do not reuse a personal password: it is stored in
+plain text so the app can show it. It is never accepted as a command-line argument:
 pass it on stdin with `--value-stdin` (one trailing newline is dropped) or at
 the hidden prompt. Changing or rotating the password ends every browser
 session. Earlier versions kept only an Argon2id hash of a chosen password; it
@@ -196,9 +197,9 @@ Security model:
 - The password is kept in the owner-only `credentials.toml`, like the provider
   API keys, because the desktop app and CLI show it; a hash beside it would
   protect nothing from someone who can read that file. Settings reads,
-  `status`, `settings show`, diagnostics and logs never include it; they show
-  only `passwordSet`. Sign-in compares SHA-256 digests in constant time. A
-  hash kept by an earlier version is verified with Argon2id until replaced.
+  `status`, `settings show`, diagnostics and logs never include it. Sign-in
+  compares SHA-256 digests in constant time. A hash kept by an earlier
+  version is verified with Argon2id until replaced.
 - Sessions are server-side. The browser holds only a 256-bit random token in a
   `pap_session_<port>` cookie with `HttpOnly; SameSite=Strict; Path=/` and a
   12-hour `Max-Age`; the service stores only its SHA-256 digest, so page

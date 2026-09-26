@@ -67,7 +67,8 @@ export function WebUiDialog({
     if (!await confirm({
       title: "Generate a new web UI password?",
       message: "Every browser is signed out.",
-      confirmLabel: "Generate",
+      confirmLabel: "Generate New Password",
+      destructive: true,
     })) return;
     setSaving(true);
     try {
@@ -144,7 +145,7 @@ export function WebUiDialog({
                   <InputGroupAddon align="inline-end">
                     <Hint content={visibilityLabel}><InputGroupButton size="icon-xs" aria-label={visibilityLabel} disabled={!password} onClick={() => setPasswordVisible((visible) => !visible)}>{passwordVisible ? <EyeOff /> : <Eye />}</InputGroupButton></Hint>
                     <Hint content="Copy password"><InputGroupButton size="icon-xs" aria-label="Copy password" disabled={saving || !password} onClick={() => void copyPassword()}>{copied === PASSWORD_LABEL ? <Check /> : <Copy />}</InputGroupButton></Hint>
-                    <Hint content="Generate new password"><InputGroupButton size="icon-xs" aria-label="Generate new password" disabled={saving} onClick={() => void generatePassword()}><RefreshCw /></InputGroupButton></Hint>
+                    <Hint content="Generate New Password"><InputGroupButton size="icon-xs" aria-label="Generate New Password" disabled={saving} onClick={() => void generatePassword()}><RefreshCw /></InputGroupButton></Hint>
                   </InputGroupAddon>
                 </InputGroup>
                 {passwordError && <FieldError>{errorMessage(passwordError)}</FieldError>}

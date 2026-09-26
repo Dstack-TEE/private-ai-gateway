@@ -43,7 +43,6 @@ impl DesktopRuntime {
     pub(super) fn open_web_ui(self: &Arc<Self>, config: &WebUiConfig) {
         let generated = self.ensure_web_ui_password();
         let mut status = WebUiStatus::from(config);
-        status.password_set = self.web_ui.has_password();
         if config.enabled {
             let started = generated
                 .map_err(|error| error.to_string())
@@ -59,9 +58,17 @@ impl DesktopRuntime {
     }
 
     /// The sign-in password, or `None` while only the hash an earlier version
-    /// kept is set.
+    /// kept is set. Without either, it could not be generated or read.
     pub fn web_ui_password(&self) -> Result<Option<String>, Error> {
-        Ok(self.settings.snapshot()?.credentials.web_ui.password)
+        let saved = self.settings.snapshot()?.credentials.web_ui;
+        if saved.password.is_some() || saved.password_hash.is_some() {
+            return Ok(saved.password);
+        }
+        Err(Error::invalid_state(match self.settings.files().error {
+            Some(error) => format!("The web UI password is unavailable: {error}"),
+            None => "No web UI password is saved. Run `pap web-ui password rotate` to create one."
+                .into(),
+        }))
     }
 
     /// Replaces the password with a generated one; every browser session ends.
@@ -105,9 +112,6 @@ impl DesktopRuntime {
             Ok(())
         })?;
         self.web_ui.set_password(Some(Secret::Password(password)));
-        let mut status = self.manager.snapshot()?.web_ui;
-        status.password_set = true;
-        self.manager.set_web_ui(status);
         Ok(())
     }
 }

@@ -227,7 +227,7 @@ pub(crate) fn import_settings(config_dir: &Path, data_dir: &Path) -> Result<Vec<
                 .map_err(|error| error.to_string())?;
             }
         } else {
-            notices.push("Settings: The web UI password from 0.1 could not be read; set it again with `pap settings set web-ui.password`.".to_string());
+            notices.push("Settings: The web UI password from 0.1 could not be read; sign in with the generated one from `pap web-ui password show`.".to_string());
         }
     }
 

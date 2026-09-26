@@ -338,7 +338,6 @@ fn web_ui_opens_with_a_generated_password_only_local_clients_read() {
     let backend = Backend::start();
     let status = &backend.run(&["status"])["gateway"]["webUi"];
     assert_eq!(status["enabled"], false);
-    assert_eq!(status["passwordSet"], true);
     // Revealing the password needs consent, like `token show`.
     let refused = backend
         .command(&["web-ui", "password", "show", "--json"])
@@ -489,6 +488,20 @@ fn web_ui_opens_with_a_generated_password_only_local_clients_read() {
     }
 }
 
+#[test]
+fn an_unreadable_password_reports_its_cause() {
+    // Not TOML, so no password can be read or generated until the file is fixed.
+    let backend = Backend::start_with_credentials("[web-ui\n");
+    let failed = backend
+        .command(&["web-ui", "password", "show", "--yes", "--json"])
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    let error = String::from_utf8_lossy(&failed.stderr);
+    assert!(error.contains("credentials.toml:"), "{error}");
+    assert!(!error.contains("earlier version"), "{error}");
+}
+
 /// `correct horse battery staple` as a version that kept only an Argon2id hash saved it.
 const LEGACY_HASH: &str =
     "$argon2id$v=19$m=19456,t=2,p=1$djbiNHLjbn9XvtGL3ibJIw$m2FuaZoY7r75d2/IFuBacNsBsp03lFrOk8x5zAWO8mU";
@@ -497,10 +510,6 @@ const LEGACY_HASH: &str =
 fn a_password_hash_from_an_earlier_version_signs_in_until_replaced() {
     let backend =
         Backend::start_with_credentials(&format!("[web-ui]\npassword-hash = \"{LEGACY_HASH}\"\n"));
-    assert_eq!(
-        backend.run(&["settings", "show"])["webUi"]["passwordSet"],
-        true
-    );
     // Only the hash is known, so there is nothing to show.
     let hidden = backend
         .command(&["web-ui", "password", "show", "--yes", "--json"])
@@ -873,7 +882,6 @@ fn reset_settings_preserves_user_data_and_requires_explicit_consent() {
     assert_eq!(settings["settings"]["connect-on-launch"], false);
     assert_eq!(settings["settings"]["notifications"]["enabled"], true);
     // A fresh password replaces the chosen one.
-    assert_eq!(settings["webUi"]["passwordSet"], true);
     assert_ne!(backend.web_ui_password(), WEB_PASSWORD);
 }
 

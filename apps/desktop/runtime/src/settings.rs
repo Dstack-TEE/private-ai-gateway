@@ -1,6 +1,6 @@
 //! The settings files the backend owns: `config.toml` (see
 //! `desktop_core::config`) and `credentials.toml`, which holds the user's
-//! credentials: provider API keys and the web UI password hash. Like Cargo's
+//! credentials: provider API keys and the web UI password. Like Cargo's
 //! `credentials.toml` and AWS's `credentials` file it is plain TOML, always
 //! owner-only (0600 on Unix, a protected owner-only DACL on Windows; see
 //! `private_fs::write_private_atomic`). Both
@@ -44,8 +44,8 @@ use sha2::{Digest, Sha256};
 use toml_edit::{DocumentMut, Item, TableLike};
 
 const CREDENTIALS_HEADER: &str =
-    "# Private AI Proxy credentials: provider API keys and the web UI password
-# hash, in plain text. Keep this file owner-only (0600); sync it only where you
+    "# Private AI Proxy credentials: provider API keys and the web UI password,
+# in plain text. Keep this file owner-only (0600); sync it only where you
 # accept plaintext secrets. Saved edits apply immediately.
 #
 # [profiles.<profile id>]
