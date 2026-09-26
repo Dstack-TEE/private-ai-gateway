@@ -4,7 +4,7 @@ import type { RequestActivity } from "../../shared/contracts";
 import { agentName, currency, formatTokens, outcomeOf, usageTokens } from "../lib/usage-presentation";
 import { StateLabel } from "./state-label";
 import { Button } from "./ui/button";
-import { Hint } from "./hint";
+import { Hint, HoverDetails } from "./hint";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 
 const features = tableFeatures({ rowPaginationFeature });
@@ -12,11 +12,11 @@ const features = tableFeatures({ rowPaginationFeature });
 function TokenDetails({ item }: { item: RequestActivity }) {
   const total = usageTokens(item);
   const counts = [["Input", item.inputTokens], ["Output", item.outputTokens], ["Cache read", item.cacheReadTokens], ["Cache write", item.cacheWriteTokens]] as const;
-  return <Hint content={
-      <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-2 tabular-nums">
-        {counts.map(([label, count]) => <div key={label} className="contents"><dt>{label}</dt><dd className="text-right">{count === undefined ? "—" : count.toLocaleString()}</dd></div>)}
-      </dl>
-  }><span tabIndex={0} aria-label="Token details" className="tabular-nums underline decoration-dotted underline-offset-4">{total === undefined ? "—" : formatTokens(total)}</span></Hint>;
+  return <HoverDetails value={<span className="tabular-nums">{total === undefined ? "—" : formatTokens(total)}</span>}>
+    <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-2 tabular-nums">
+      {counts.map(([label, count]) => <div key={label} className="contents"><dt>{label}</dt><dd className="text-right">{count === undefined ? "—" : count.toLocaleString()}</dd></div>)}
+    </dl>
+  </HoverDetails>;
 }
 
 export function UsageTable({ items, loading, pageIndex, pageSize, total, onInspect }: {

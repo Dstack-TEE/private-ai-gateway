@@ -9,7 +9,7 @@ import { ActionItem } from "../components/action-item";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
 import { UsageChart, type UsageMetric } from "../components/usage-chart";
 import { StateLabel } from "../components/state-label";
-import { Hint } from "../components/hint";
+import { HoverDetails } from "../components/hint";
 import { agentName, currency, formatTokens, outcomeOf, usageTokens } from "../lib/usage-presentation";
 import { USAGE_PAGE_SIZES, USAGE_SEARCH_DEFAULTS, usageDateBounds, usageDateLabel, usageDateSearch, usageDateSelection, type UsageSearch } from "../lib/usage-dates";
 import { Field, FieldLabel, FieldSet, FieldLegend } from "../components/ui/field";
@@ -292,5 +292,5 @@ function MissingUsage({ activity }: { activity: Pick<RequestActivity, "leftDevic
     : activity.path === "/v1/messages/count_tokens"
       ? "This endpoint counts a prompt’s tokens; it does not return an inference usage report."
       : "No token count was recorded. The provider may omit usage, or the response may be incomplete or too large to capture. Missing counts are not estimated.";
-  return <Hint content={explanation}><span tabIndex={0} className="text-muted-foreground underline decoration-dotted underline-offset-4">{notApplicable ? "Not applicable" : "Unavailable"}</span></Hint>;
+  return <HoverDetails value={<span className="text-muted-foreground">{notApplicable ? "Not applicable" : "Unavailable"}</span>}>{explanation}</HoverDetails>;
 }

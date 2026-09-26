@@ -252,6 +252,7 @@ function selectProfileBackup(): Promise<ProfileBackup | null> {
     }, { once: true });
     input.click();
   });
+    input.addEventListener("cancel", () => resolve(null), { once: true });
 }
 
 async function parseProfileBackup(file: File): Promise<ProfileBackup> {
