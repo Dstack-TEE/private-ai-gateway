@@ -199,7 +199,7 @@ impl ConfigDoc {
     pub fn get_value(&self, path: &[&str]) -> Option<ConfigValue> {
         match self {
             Self::Json5(text) => {
-                let value = json5_value(text).ok()?;
+                let value = recorded(json5_value(text).ok()?);
                 ConfigValue::from_json(json_get(&value, path)?)
             }
             Self::Json(root) => ConfigValue::from_json(json_get(root, path)?),
@@ -466,7 +466,17 @@ fn edit_json5(text: &str, path: &[&str], value: Option<Value>) -> Result<String,
 }
 
 fn yaml_value(node: yaml_edit::YamlNode) -> Option<ConfigValue> {
-    ConfigValue::from_json(&yaml_json(&node)?)
+    ConfigValue::from_json(&recorded(yaml_json(&node)?))
+}
+
+/// Connection records are serde_json documents and are compared with config
+/// values. JSON configs are read by serde_json too; JSON5 and YAML numbers
+/// are read by other parsers, which can decode a long literal such as
+/// `0.049999999999999996` to a different f64 than serde_json does. Reading
+/// those values back through serde_json gives both sides of a comparison the
+/// same decoder.
+fn recorded(value: Value) -> Value {
+    serde_json::from_str(&value.to_string()).unwrap_or(value)
 }
 
 /// Inspect structured YAML without resolving aliases, tags or merge keys.

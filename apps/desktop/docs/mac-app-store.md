@@ -174,7 +174,7 @@ References: [SDK requirements](https://developer.apple.com/support/third-party-S
   buttons share the same action and query. Before Enable, no picker or Home scan
   occurs and Agent connection toggles are disabled. Cancellation stays inactive;
   the supported Agent catalog remains visible before Enable; successful Enable
-  replaces its states with actual installed Agents without connecting them.
+  replaces its states with the detected Agents without connecting them.
   Keep toggles disabled until the scan completes. Test wrong folders, symlinked
   Home, relaunch and system reboot, recoverable stale app bookmarks, regeneration
   of the backend bookmark, revoked permission and moved Home. Verify a second

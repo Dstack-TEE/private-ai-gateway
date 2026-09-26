@@ -245,7 +245,7 @@ the connection handler enforces the same gate. After activation, Overview shows
 **View all** to open the Agents page.
 
 Before activation, the Agents page still shows the supported Agent catalog with
-an **Access required** state; it does not claim that any Agent is installed.
+an **Access required** state; it does not claim that any Agent is detected.
 
 Enable opens the native directory picker directly, initially at the real Home
 from the OS user account. It accepts directories only, and both selection and
@@ -261,15 +261,24 @@ container. Before every backend launch or restart, the app resolves that bookmar
 and creates a fresh process-shareable bookmark for its owned backend, holding
 scoped access only while it does so. The backend resolves the shared bookmark,
 starts scoped access and holds it for its lifetime, and immediately
-scans and shows the actual installed Agents. Detection derives each Agent's configuration path
-from that authorized Home and checks for the Agent's official executable in the
-user-owned install directories, including common package-manager and version-manager
-shim and managed Node install directories. A configuration folder alone is not treated
-as an installation.
-MAS cannot inspect arbitrary paths outside the selected Home,
-so a CLI installed only in a system-wide location is not reported as installed
-by the sandboxed build. Enable does not connect an Agent. Connect/Disconnect
-remain independent configuration operations and never open the Home picker.
+scans and shows the detected Agents. Detection derives each Agent's configuration path
+from that authorized Home and reports the Agent when the folder holding that file exists
+(for example `~/.codex`). Every supported Agent creates this folder on its first run,
+so detection is the same for every install method (package managers, standalone
+installers, Homebrew, or wrappers such as Superset) and in both distributions, with no
+PATH or login-shell lookup. An Agent installed but never run is listed as not detected
+until its first run; one uninstalled while its folder remains stays listed, and
+connecting it only edits that folder. Other tools can create these folders too:
+Superset writes `~/.claude/settings.json`, `~/.codex/hooks.json`,
+`~/.pi/agent/extensions` and `~/.omp/agent/extensions` whether or not those Agents
+are installed, so they show as detected on a machine that runs Superset.
+Location overrides such as `CODEX_HOME`, `CLAUDE_CONFIG_DIR` or `HERMES_HOME` are
+read only by the Direct build, and only from the backend's own environment. A backend
+started from Finder, the Dock or a login item inherits the launchd environment, not
+variables exported in shell startup files, so it uses the default locations; the MAS
+build always uses them. Enable does not connect an Agent.
+Connect/Disconnect remain independent configuration operations and never open the
+Home picker.
 
 On subsequent launches and refreshes, the persistent app bookmark restores access
 silently; a stale but recoverable bookmark is refreshed while scoped access is

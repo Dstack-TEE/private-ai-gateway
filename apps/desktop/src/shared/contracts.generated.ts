@@ -199,7 +199,12 @@ export type UsageQuery = { agent?: string, model?: string, sessionId?: string, s
 export type UsagePage = { items: Array<RequestActivity>, nextCursor: string | null, summary: UsageSummary, series: Array<UsagePoint>, modelSeries: Array<UsageModelPoint>, agents: Array<string>, models: Array<string>, };
 export type UsagePoint = { day: string, requests: number, inputTokens: number, outputTokens: number, tokens: number, costUsd: number, };
 export type UsageModelPoint = { day: string, model: string | null, requests: number, tokens: number, costUsd: number, };
-export type AgentStatus = { id: string, name: string, configPath: string, installed: boolean,
+export type AgentStatus = { id: string, name: string, configPath: string,
+/**
+ * The agent's configuration folder exists; each agent creates it on
+ * first run, so detection does not depend on how the CLI was installed.
+ */
+installed: boolean,
 /**
  * A connected link, including one suspended until protection resumes.
  */

@@ -237,15 +237,24 @@ impl CatalogModel {
     }
 
     /// Remote pricing is per token. The UI presents the same validated value
-    /// per one million tokens and omits malformed or negative fields.
+    /// per one million tokens and omits malformed or negative fields. The
+    /// decimal point is shifted in the price text instead of multiplying
+    /// floats, so `0.00000005` becomes exactly the f64 nearest `0.05`, whose
+    /// shortest form every JSON and YAML parser reads back identically.
     pub fn price_per_million(&self, name: &str) -> Option<f64> {
-        let value = self.remote.extra.get("pricing")?.get(name)?;
-        let per_token = match value {
-            Value::Number(value) => value.as_f64()?,
-            Value::String(value) => value.parse::<f64>().ok()?,
+        let text = match self.remote.extra.get("pricing")?.get(name)? {
+            Value::Number(value) => value.to_string(),
+            Value::String(value) => value.trim().to_string(),
             _ => return None,
         };
-        (per_token.is_finite() && per_token >= 0.0).then_some(per_token * 1_000_000.0)
+        let (mantissa, exponent) = match text.split_once(['e', 'E']) {
+            Some((mantissa, exponent)) => (mantissa, exponent.parse::<i32>().ok()?),
+            None => (text.as_str(), 0),
+        };
+        let price: f64 = format!("{mantissa}e{}", exponent.checked_add(6)?)
+            .parse()
+            .ok()?;
+        (price.is_finite() && price >= 0.0).then_some(price)
     }
 }
 

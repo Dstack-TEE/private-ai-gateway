@@ -3,8 +3,6 @@ use super::*;
 /// How the bridge reaches and configures each agent.
 pub(crate) trait AgentIntegration {
     fn surface(self) -> Surface;
-    /// The official CLI executable name, for install detection on PATH.
-    fn cli_names(self) -> &'static [&'static str];
     fn format(self) -> Format;
     /// The live user-level config file. With `tool_env` each tool's own
     /// location override is honored.
@@ -20,18 +18,6 @@ impl AgentIntegration for Agent {
             Self::OpenCode | Self::Pi | Self::Hermes | Self::OpenClaw | Self::OhMyPi => {
                 Surface::ChatCompletions
             }
-        }
-    }
-
-    fn cli_names(self) -> &'static [&'static str] {
-        match self {
-            Agent::Codex => &["codex"],
-            Agent::ClaudeCode => &["claude"],
-            Agent::OpenCode => &["opencode"],
-            Agent::Pi => &["pi"],
-            Agent::Hermes => &["hermes"],
-            Agent::OpenClaw => &["openclaw"],
-            Agent::OhMyPi => &["omp"],
         }
     }
 

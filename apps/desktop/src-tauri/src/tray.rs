@@ -221,7 +221,7 @@ fn sync_agents(app: &AppHandle, agents: &[AgentStatus]) {
                 " – Needs Attention"
             }
             Some(agent) if agent.installed => "",
-            _ => " – Not Installed",
+            _ => " – Not Detected",
         };
         let _ = item.set_text(format!("{}{suffix}", kind.name()));
     }

@@ -5,13 +5,7 @@ fn codex_model_changes_keep_credentials_but_endpoint_changes_revoke_them() {
     let sandbox = sandbox("codex-model-preference");
     let agent = Agent::Codex;
     let path = agent.config_path(&sandbox.home, false);
-    write_executable(
-        &sandbox
-            .home
-            .join(".local/bin")
-            .join(if cfg!(windows) { "codex.exe" } else { "codex" }),
-        "test cli",
-    );
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
     let options = claude_options();
     let catalog = catalog();
     let preview = sandbox
@@ -396,13 +390,6 @@ fn inventory_refresh_updates_active_catalog_without_rotating_credentials() {
     let agent = Agent::Pi;
     let path = agent.config_path(&sandbox.home, false);
     write(&path, r#"{"custom":true}"#);
-    write_executable(
-        &sandbox
-            .home
-            .join(".local/bin")
-            .join(if cfg!(windows) { "pi.exe" } else { "pi" }),
-        "test cli",
-    );
     let inventory = crate::catalog::EndpointInventory::bundled().unwrap();
     let value = serde_json::to_value(&inventory).unwrap();
     let model = value["results"]

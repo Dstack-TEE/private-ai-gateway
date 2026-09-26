@@ -73,7 +73,7 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
                 .iter()
                 .map(|agent| {
                     let state = if agent["installed"] == false {
-                        "Not installed"
+                        "Not detected"
                     } else if agent["authorized"] == true {
                         "Connected (authorized)"
                     } else if agent["connected"] == true {

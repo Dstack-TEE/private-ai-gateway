@@ -1,7 +1,7 @@
-//! Oh My Pi v18.1.12, source 4f429faef639d182633d1cb3f6a15254adcf25c1.
+//! Oh My Pi v18.3.2, source 7853b4e499936f9dcc13c9b64adb55f6b342aabf.
 //! models-config.ts/config-file.ts and utils/dirs.ts define the file contract;
-//! model-config-values.ts uses execSync, and model-registry.ts gives !command
-//! precedence over stored auth without falling back when the command fails.
+//! resolve-config-value.ts runs `!command` values through `/bin/sh -c`, and
+//! model-registry.ts gives them precedence over stored auth.
 
 use super::*;
 use serde_json::{json, Value};

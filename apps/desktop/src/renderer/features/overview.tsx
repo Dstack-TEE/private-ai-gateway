@@ -76,7 +76,7 @@ export function OverviewPage(): React.JSX.Element {
             </Button>
           : <Link to="/agents" className={cn(buttonVariants({ variant: "outline", size: "sm" }), "min-w-20")}>View All</Link>}>
           <div className="preview-list [&_>_:last-child]:border-b-0 overview-agent-list [--agent-row-height:calc(2rem_+_1.25rem_+_2px)] grid grid-rows-[repeat(3,_minmax(var(--agent-row-height),_auto))] gap-3 [&_>_.empty-state]:row-span-full">
-            {agents.accessStatus === "authorized" && !agents.agents.some((agent) => agent.installed) ? <EmptyState text={agents.problem ? "Agent detection unavailable" : "No installed agents found"} />
+            {agents.accessStatus === "authorized" && !agents.agents.some((agent) => agent.installed) ? <EmptyState text={agents.problem ? "Agent detection unavailable" : "No agents detected"} />
               : previewAgents.map((agent) => (
               <AgentRow
                 key={agent.id}
