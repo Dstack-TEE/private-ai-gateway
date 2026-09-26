@@ -10,7 +10,6 @@ use std::sync::{Arc, RwLock};
 use crate::aci::tls::{observing_spki_client, SpkiObservations};
 use futures_util::StreamExt;
 use http_body_util::{BodyExt, LengthLimitError, Limited};
-use rand::RngCore;
 
 const CONNECT_TIMEOUT_SECONDS: u64 = 10;
 // Generous read timeout: chat responses stream for a while.
@@ -19,7 +18,7 @@ const READ_TIMEOUT_SECONDS: u64 = 600;
 /// 32 fresh random bytes, hex-encoded — the attestation request nonce.
 pub fn random_nonce_hex() -> String {
     let mut nonce = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut nonce);
+    rand::fill(&mut nonce);
     hex::encode(nonce)
 }
 

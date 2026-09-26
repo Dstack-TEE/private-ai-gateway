@@ -12,7 +12,7 @@ use std::{
 };
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use rand::{rngs::OsRng, RngCore};
+use rand::{rngs::SysRng, TryRng};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
@@ -139,7 +139,9 @@ impl Auth {
 
 fn secret() -> String {
     let mut bytes = [0_u8; 32];
-    OsRng.fill_bytes(&mut bytes);
+    SysRng
+        .try_fill_bytes(&mut bytes)
+        .expect("the system random source failed");
     URL_SAFE_NO_PAD.encode(bytes)
 }
 

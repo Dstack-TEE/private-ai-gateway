@@ -4,8 +4,8 @@
 use k256::ecdsa::{RecoveryId, Signature as K256Signature, VerifyingKey as K256VerifyingKey};
 use k256::EncodedPoint;
 use serde_json::Value;
-use sha2::{Digest, Sha256, Sha384};
-use sha3::Keccak256;
+use sha2::{Digest as _, Sha256, Sha384};
+use sha3::{Digest as _, Keccak256};
 
 use super::decode_hex;
 use super::policy::CustodyPolicy;
