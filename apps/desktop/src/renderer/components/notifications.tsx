@@ -7,9 +7,9 @@ import { DialogFooter } from "./ui/dialog";
 import { Button } from "./ui/button";
 
 /**
- * The notification preferences and the system permission. The permission is
- * requested only when the user turns notifications on or asks for it, as
- * Apple's guidance recommends: in context, when the app needs it.
+ * The notification preferences and the system permission. The shell asks for
+ * the permission once at startup while notifications are on; here it is asked
+ * for again when the user turns notifications on or presses Allow.
  */
 function useNotificationSettings(api: DesktopApi) {
   const client = useQueryClient();

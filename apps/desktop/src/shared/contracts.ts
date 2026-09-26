@@ -51,12 +51,13 @@ export interface DesktopApi {
   setCliRegistration(installed: boolean): Promise<CliRegistration>;
   onStopAllRequest(listener: () => void): () => void;
   stopAllAndQuit(): Promise<void>;
+  // Desktop-only capabilities are absent in the web UI.
   /** Asks in an alert sheet on the window; the macOS app only. */
-  showConfirmation(confirmation: Confirmation): Promise<boolean>;
-  /** Closes the window as its close button does; the app keeps running. Desktop only. */
-  closeWindow(): Promise<void>;
-  /** Quits the app and leaves the background service running; desktop only. */
-  quit(): Promise<void>;
+  showConfirmation: ((confirmation: Confirmation) => Promise<boolean>) | undefined;
+  /** Closes the window as its close button does; the app keeps running. */
+  closeWindow: (() => Promise<void>) | undefined;
+  /** Quits the app and leaves the background service running. */
+  quit: (() => Promise<void>) | undefined;
   copyText(text: string): Promise<void>;
   getClientKey(): Promise<string>;
   rotateClientKey(): Promise<string>;

@@ -47,8 +47,8 @@ export interface UiPlatform {
   setCliRegistration(installed: boolean): Promise<CliRegistration>;
   stopAllAndQuit(): Promise<void>;
   showConfirmation: DesktopApi["showConfirmation"];
-  closeWindow(): Promise<void>;
-  quit(): Promise<void>;
+  closeWindow: DesktopApi["closeWindow"];
+  quit: DesktopApi["quit"];
   copyText(text: string): Promise<void>;
   selectProfileBackup(): Promise<ProfileBackup | null>;
   saveProfileExport(): Promise<boolean>;

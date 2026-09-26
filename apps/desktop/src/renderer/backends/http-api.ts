@@ -67,9 +67,9 @@ const platform: UiPlatform = {
   getCliRegistration: unavailable,
   setCliRegistration: unavailable,
   stopAllAndQuit: async () => undefined,
-  showConfirmation: unavailable,
-  closeWindow: unavailable,
-  quit: unavailable,
+  showConfirmation: undefined,
+  closeWindow: undefined,
+  quit: undefined,
   copyText: async (text) => {
     // Absent outside secure contexts, such as plain HTTP on a network address.
     if (!window.isSecureContext) throw new Error("Copying needs 127.0.0.1 or HTTPS in this browser. Select and copy the text instead.");
