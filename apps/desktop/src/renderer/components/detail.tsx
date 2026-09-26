@@ -1,4 +1,5 @@
 import React from "react";
+import { cn } from "../lib/utils";
 
 export function Detail({
   label,
@@ -12,13 +13,13 @@ export function Detail({
   wide?: boolean;
 }): React.JSX.Element {
   return (
-    <div className={wide ? "wide" : undefined}>
-      <span>{label}</span>
-      <strong className={mono ? "mono font-mono text-xs" : undefined}>{value}</strong>
+    <div className={cn("grid min-w-0 gap-0.5", wide && "col-span-full")}>
+      <span className="text-xs text-muted-foreground">{label}</span>
+      <strong className={cn("font-semibold select-text", mono && "font-mono text-xs font-medium wrap-anywhere")}>{value}</strong>
     </div>
   );
 }
 
 export function EmptyState({ text }: { text: string }): React.JSX.Element {
-  return <div className="empty-state min-h-18 p-3.25 grid place-items-center text-muted-foreground text-xs text-center">{text}</div>;
+  return <div className="grid min-h-18 place-items-center p-3 text-center text-xs text-muted-foreground">{text}</div>;
 }

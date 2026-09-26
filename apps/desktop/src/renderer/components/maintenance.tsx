@@ -40,5 +40,5 @@ export function ExportDiagnostics({ api }: { api: DesktopApi }) {
     onSuccess: (saved) => { if (saved) toast.success("Diagnostics exported", { description: "Without keys, URLs, local paths or request content." }); },
     onError: (error) => toastError("Could not export diagnostics", error),
   });
-  return <SettingsLink title={exportDiagnostics.isPending ? "Exporting diagnostics" : "Export diagnostics"} aria-label="Export diagnostics" disabled={exportDiagnostics.isPending} onClick={() => exportDiagnostics.mutate()} />;
+  return <SettingsLink title={exportDiagnostics.isPending ? "Exporting diagnostics" : "Export diagnostics"} disabled={exportDiagnostics.isPending} onClick={() => exportDiagnostics.mutate()} />;
 }

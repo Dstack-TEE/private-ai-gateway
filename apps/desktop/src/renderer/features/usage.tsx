@@ -2,18 +2,18 @@ import React, { lazy, Suspense, useId, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { usageFilters, usagePageQuery } from "../lib/page-queries";
-import { errorMessage, toastError } from "../lib/error-message";
+import { errorMessage } from "../lib/error-message";
 import { useCopy } from "../hooks/use-copy";
 import { Ban, Check, ChevronLeft, ChevronRight, Copy, ShieldCheck, ShieldX } from "lucide-react";
 import { Button } from "../components/ui/button";
-import { ActionItem } from "../components/action-item";
+import { Item, ItemContent, ItemDescription, ItemTitle } from "../components/ui/item";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
 import { UsageChart, type UsageMetric } from "../components/usage-chart";
 import { StateLabel } from "../components/state-label";
 import { HoverDetails } from "../components/hint";
 import { agentName, currency, formatTokens, outcomeOf, usageTokens } from "../lib/usage-presentation";
 import { USAGE_PAGE_SIZES, USAGE_SEARCH_DEFAULTS, usageDateBounds, usageDateLabel, usageDateSearch, usageDateSelection, type UsageSearch } from "../lib/usage-dates";
-import { Field, FieldLabel, FieldSet, FieldLegend } from "../components/ui/field";
+import { Field, FieldError, FieldLabel, FieldSet, FieldLegend } from "../components/ui/field";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Card, CardHeader, CardTitle, CardDescription, CardAction, CardContent } from "../components/ui/card";
 import { IconButton } from "../components/controls";
@@ -34,16 +34,24 @@ export function UsageRow({ activity, onOpen }: { activity: RequestActivity; onOp
   const tokens = usageTokens(activity);
   const timestamp = new Date(activity.at * 1_000);
   return (
-    <ActionItem size="xs" className="usage-row min-h-15.5 gap-2.5 overflow-hidden [&_.row-main]:min-w-0 [&_.row-main]:flex-1 [&_.row-title]:text-sm [&_.state]:ml-0.5 [&_time]:min-w-17.5 [&_time]:grid [&_time]:text-right @max-[480px]:[&_.usage-cost]:hidden @max-[480px]:[&_.usage-amount]:w-13 max-[620px]:items-start max-[620px]:flex-wrap max-[620px]:[&_.row-main]:flex-[1_1_calc(100%_-_88px)] max-[620px]:[&_time]:order-4 max-[620px]:[&_time]:flex-[1_0_100%] max-[620px]:[&_time]:pl-11 max-[440px]:[&_.row-main]:basis-[calc(100%_-_74px)] max-[440px]:[&_time]:pl-0" onClick={onOpen} aria-label={`${agentName(activity.agent)}, ${outcome.label}, ${activity.model ?? activity.path}. View proof`}>
-      <span className="row-main min-w-0 flex-auto flex flex-wrap items-center gap-y-0.5 gap-x-2">
-        <span className="row-title font-medium">{agentName(activity.agent)}</span>
-        <StateLabel tone={outcome.tone} text={outcome.label} />
-        <code className="flex-[1_0_100%] block text-muted-foreground text-xs wrap-anywhere [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [code&]:overflow-hidden [code&]:text-ellipsis [code&]:whitespace-nowrap">{activity.model ?? activity.path}</code>
-      </span>
-      <span className="usage-amount w-18.5 flex-none grid justify-items-end tabular-nums [&_strong]:max-w-full [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_small]:text-muted-foreground [&_small]:text-xs max-[620px]:w-17 max-[620px]:[&:nth-of-type(3)]:hidden max-[440px]:w-15.5"><strong className="font-medium">{tokens === undefined ? "—" : formatTokens(tokens)}</strong><small>tokens</small></span>
-      <span className="usage-amount w-18.5 flex-none grid justify-items-end tabular-nums [&_strong]:max-w-full [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_small]:text-muted-foreground [&_small]:text-xs max-[620px]:w-17 max-[620px]:[&:nth-of-type(3)]:hidden max-[440px]:w-15.5 usage-cost"><strong className="font-medium">{activity.costUsd === undefined ? "—" : currency(activity.costUsd)}</strong><small>cost</small></span>
-      <time className="row-side flex-none text-muted-foreground text-xs tabular-nums whitespace-nowrap" dateTime={timestamp.toISOString()}><span>{timestamp.toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span><span>{formatTimestamp(timestamp.getTime())}</span></time>
-    </ActionItem>
+    <Item variant="muted" size="xs" render={<button type="button" aria-haspopup="dialog" onClick={onOpen} />}>
+      <ItemContent className="min-w-0">
+        <ItemTitle>{agentName(activity.agent)}<StateLabel tone={outcome.tone} text={outcome.label} /></ItemTitle>
+        <ItemDescription className="truncate"><code>{activity.model ?? activity.path}</code></ItemDescription>
+      </ItemContent>
+      <ItemContent className="items-end">
+        <ItemTitle>{tokens === undefined ? "—" : formatTokens(tokens)}</ItemTitle>
+        <ItemDescription>tokens</ItemDescription>
+      </ItemContent>
+      <ItemContent className="items-end @max-[480px]:hidden">
+        <ItemTitle>{activity.costUsd === undefined ? "—" : currency(activity.costUsd)}</ItemTitle>
+        <ItemDescription>cost</ItemDescription>
+      </ItemContent>
+      <ItemContent className="items-end">
+        <ItemTitle><time dateTime={timestamp.toISOString()}>{formatTimestamp(timestamp.getTime())}</time></ItemTitle>
+        <ItemDescription>{timestamp.toLocaleDateString(undefined, { month: "short", day: "numeric" })}</ItemDescription>
+      </ItemContent>
+    </Item>
   );
 }
 
@@ -85,18 +93,18 @@ export function UsagePage(): React.JSX.Element {
   const modelOptions = Array.from(new Set([...(model ? [model] : []), ...(page?.models ?? [])]));
 
   return (
-    <div className="usage-page max-w-230 min-h-full mt-0 mr-auto mb-0 ml-auto">
-      {error && <Alert variant="destructive" className="mb-4"><AlertTitle>Could not load usage</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
-      <div className="usage-toolbar grid grid-cols-[minmax(150px,_0.8fr)_minmax(210px,_1.25fr)_auto] items-end gap-2.5 [&_select]:w-full [&_select]:min-w-0 max-[780px]:grid-cols-2 max-[440px]:grid-cols-1" role="group" aria-label="Usage filters">
+    <div className="mx-auto flex max-w-230 flex-col gap-4">
+      {error && <Alert variant="destructive"><AlertTitle>Could not load usage</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
+      <div className="grid grid-cols-[minmax(150px,0.8fr)_minmax(210px,1.25fr)_auto] items-end gap-2.5 max-[780px]:grid-cols-2 max-[440px]:grid-cols-1" role="group" aria-label="Usage filters">
         <Field><FieldLabel htmlFor="usage-agent">Agent</FieldLabel><ChoiceSelect id="usage-agent" label="Agent" className="w-full" value={agent} onChange={(value) => filter({ agent: value || undefined })} options={[{ value: "", label: "All agents" }, ...agentOptions.map((entry) => ({ value: entry, label: agentName(entry) }))]} /></Field>
         <Field><FieldLabel htmlFor="usage-model">Model</FieldLabel><ChoiceSelect id="usage-model" label="Model" className="w-full" value={model} onChange={(value) => filter({ model: value || undefined })} options={[{ value: "", label: "All models" }, ...modelOptions.map((entry) => ({ value: entry, label: entry }))]} /></Field>
-        <FieldSet className="time-filter max-[780px]:col-span-full max-[440px]:col-auto min-w-0 gap-0">
-          <FieldLegend variant="label" className="leading-snug">Time</FieldLegend>
+        <FieldSet className="min-w-0 gap-0 max-[780px]:col-span-full max-[440px]:col-auto">
+          <FieldLegend variant="label">Time</FieldLegend>
           <Suspense fallback={<Button variant="outline" disabled>{usageDateLabel(range)}</Button>}><UsageDatePicker value={range} onChange={(next) => filter(usageDateSearch(next))} /></Suspense>
         </FieldSet>
       </div>
       <UsageStats page={page} />
-      <Card size="sm" role="region" className="usage-over-time mt-4" aria-labelledby="usage-chart-title">
+      <Card size="sm" role="region" aria-labelledby="usage-chart-title">
         <Tabs value={metric} onValueChange={(value) => { if (value === "tokens" || value === "cost" || value === "requests") setMetric(value); }}>
           <CardHeader className="items-center gap-3 max-[440px]:grid-cols-1">
             <CardTitle><h2 id="usage-chart-title">Usage over time</h2></CardTitle>
@@ -105,12 +113,12 @@ export function UsagePage(): React.JSX.Element {
           <CardContent><TabsContent value={metric}><UsageChart page={page} loading={loading && !page} range={range.preset} bounds={bounds} metric={metric} /></TabsContent></CardContent>
         </Tabs>
       </Card>
-      <Card size="sm" role="region" className="usage-history mt-4" aria-labelledby="usage-history-title">
+      <Card size="sm" role="region" aria-labelledby="usage-history-title">
         <CardHeader><CardTitle><h2 ref={historyTitle} id="usage-history-title" tabIndex={-1}>Usage history</h2></CardTitle>
           <CardDescription aria-live="polite">{loading ? "Loading" : page ? `${page.summary.requests} records · kept on this device` : "Unavailable"}</CardDescription>
         </CardHeader>
         <CardContent><Suspense fallback={<div className="h-80" aria-busy="true" />}><UsageTable items={page?.items ?? []} loading={loading && !page} pageIndex={cursors.length - 1} pageSize={pageSize} total={page?.summary.requests ?? 0} onInspect={onInspect} /></Suspense>
-        <div className="pagination mt-2.5 flex flex-wrap items-center justify-center gap-3 [&_>_span]:min-w-32 [&_>_span]:text-muted-foreground [&_>_span]:text-center">
+        <div className="mt-2.5 flex flex-wrap items-center justify-center gap-3">
           <Field orientation="horizontal" className="w-auto">
             <FieldLabel htmlFor="usage-page-size">Rows per page</FieldLabel>
             <ChoiceSelect id="usage-page-size" label="Rows per page" size="sm" value={String(pageSize)} disabled={loading} onChange={(value) => filter({ rows: USAGE_PAGE_SIZES.find((size) => String(size) === value) })} options={USAGE_PAGE_SIZES.map((size) => ({ value: String(size), label: String(size) }))} />
@@ -120,7 +128,7 @@ export function UsagePage(): React.JSX.Element {
             disabled={loading || cursors.length === 1}
             onClick={() => showPage(cursors.slice(0, -1))}
           ><ChevronLeft size={16} /></IconButton>
-          <span role="status" aria-live="polite">
+          <span className="min-w-32 text-center text-muted-foreground" role="status" aria-live="polite">
             Page {cursors.length}
             {page && page.items.length > 0
               ? ` · ${(cursors.length - 1) * pageSize + 1}-${(cursors.length - 1) * pageSize + page.items.length} of ${page.summary.requests}`
@@ -152,7 +160,7 @@ function UsageStats({ page }: { page?: UsagePage }): React.JSX.Element {
     ["Estimated cost", summary ? currency(summary.costUsd) : "—", "Based on model prices"],
     ["Protected", forwarded ? `${Math.round(protectedRate * 100)}%` : "—", summary ? `${summary.protected} of ${forwarded} responses` : "—"],
   ];
-  return <div className="usage-stats mt-4 grid grid-cols-4 gap-4 max-[780px]:grid-cols-2">
+  return <div className="grid grid-cols-4 gap-4 max-[780px]:grid-cols-2">
     {stats.map(([label, value, detail]) => <Card key={label} size="sm" className="min-w-0"><CardContent className="grid gap-1"><span className="text-xs text-muted-foreground">{label}</span><strong className="truncate text-xl font-semibold tabular-nums">{value}</strong><small className="truncate text-xs text-muted-foreground">{detail}</small></CardContent></Card>)}
   </div>;
 }
@@ -182,7 +190,7 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
       title={!activity.leftDevice ? "Request kept on this device" : receiptVerified ? "Signed receipt verified" : activity.verified === false ? "Receipt verification failed" : "No verified receipt"}
       detail={!activity.leftDevice ? "Nothing was sent to the provider. No remote receipt is needed." : activity.verified === false ? "Receipt audit failed. Content may already have reached the client and cannot be retracted. See the recorded reason below." : receiptVerified ? "The signed receipt matches the request and response bytes recorded by the verifier." : "No successful verification result is recorded for this request."}
     />
-    <dl className="evidence [&_dd]:select-text grid grid-cols-[82px_minmax(0,_1fr)] gap-y-3.5 gap-x-4 text-sm [&_dt]:text-muted-foreground [&_dt]:font-semibold [&_dd]:min-w-0 [&_dd]:text-muted-foreground [&_dd]:wrap-anywhere [&_dd_>_code]:block [&_dd_>_code]:mt-0.5 [&_dd_>_code]:text-muted-foreground max-[440px]:grid-cols-1 max-[440px]:[&_dt]:mt-1.25">
+    <dl className="grid grid-cols-[82px_minmax(0,1fr)] gap-x-4 gap-y-4.5 text-muted-foreground max-[440px]:grid-cols-1 max-[440px]:gap-y-1 [&_dd]:min-w-0 [&_dd]:wrap-anywhere [&_dd]:select-text [&_dd>code]:block [&_dt]:font-semibold">
       <dt>Request</dt>
       <dd>
         {agentName(activity.agent)} <code>{activity.method} {activity.path}</code>
@@ -191,7 +199,7 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
       <dt>Outcome</dt>
       <dd>
         <StateLabel tone={outcome.tone} text={outcome.label} />
-        {failed && <span className="dim text-muted-foreground"> HTTP {activity.status}</span>}
+        {failed && <> HTTP {activity.status}</>}
       </dd>
       <dt>Network</dt>
       <dd>
@@ -224,13 +232,20 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
         </>
       )}
     </dl>
-    {activity.detail && <section className="proof-explanation pt-3.5 border-t border-t-border [&_h3]:text-xs [&_h3]:font-semibold [&_p]:mt-1.5 [&_p]:text-muted-foreground [&_p]:text-xs" aria-label="Verification details"><h3>Verification details</h3><p className="break-words whitespace-pre-wrap">{activity.detail}</p></section>}
-    {activity.leftDevice && <section className="proof-explanation pt-3.5 border-t border-t-border [&_h3]:text-xs [&_h3]:font-semibold [&_p]:mt-1.5 [&_p]:text-muted-foreground [&_p]:text-xs" aria-label="Proof scope">
-      <h3>What the proof checks</h3>
+    {activity.detail && <ProofNote title="Verification details"><p className="whitespace-pre-wrap wrap-break-word">{activity.detail}</p></ProofNote>}
+    {activity.leftDevice && <ProofNote title="What the proof checks">
       <p>The verifier checks the request digest, the service signature against its attested keyset, and the response digest. This verifies the exchanged data, not answer accuracy.</p>
-    </section>}
+    </ProofNote>}
     </>
   );
+}
+
+function ProofNote({ title, children }: React.PropsWithChildren<{ title: string }>): React.JSX.Element {
+  const titleId = useId();
+  return <section className="grid gap-1.5 border-t pt-3.5 text-xs" aria-labelledby={titleId}>
+    <h3 id={titleId} className="font-semibold">{title}</h3>
+    <div className="text-muted-foreground">{children}</div>
+  </section>;
 }
 
 /** Refreshes the record on open: its receipt may have been verified since the list loaded. */
@@ -241,7 +256,7 @@ export function UsageProofDialog({ activity: listed, ...control }: { activity: R
   return (
     <AppDialog {...control} title="Usage proof" description={formatTimestamp(activity.at * 1_000, true)} className="sm:max-w-xl">
       {error && <Alert variant="destructive"><AlertTitle>Could not refresh this record</AlertTitle><AlertDescription>{errorMessage(error)}</AlertDescription></Alert>}
-      <div className="-mx-6 flex min-h-0 flex-col gap-5 overflow-y-auto px-6 [&_.evidence]:text-sm [&_.evidence]:gap-y-4.5 [&_[data-slot=verification-verdict]]:shrink-0"><Evidence activity={activity} />{activity.receiptId && <SignedReceipt recordId={activity.id} />}</div>
+      <div className="-mx-6 flex min-h-0 flex-col gap-5 overflow-y-auto px-6"><Evidence activity={activity} />{activity.receiptId && <SignedReceipt recordId={activity.id} />}</div>
       <DoneFooter />
     </AppDialog>
   );
@@ -263,7 +278,7 @@ function readableReceipt(receipt: string): string {
 
 /** The receipt document the audit checked. Copy takes it as the service returned it, ready for `pap audit --receipt`. */
 function SignedReceipt({ recordId }: { recordId: string }): React.JSX.Element | null {
-  const { copy, isCopied, status } = useCopy((failure) => toastError("Could not copy the signed receipt", failure));
+  const { copy, isCopied, status, error: copyError } = useCopy();
   const titleId = useId();
   const { data: receipt, error } = useQuery({
     queryKey: ["usage-receipt", recordId], queryFn: () => desktopApi.getUsageReceipt(recordId),
@@ -277,6 +292,7 @@ function SignedReceipt({ recordId }: { recordId: string }): React.JSX.Element | 
       <IconButton size="icon-sm" label="Copy signed receipt" onClick={() => copy("Signed receipt", receipt)}>{isCopied(receipt) ? <Check /> : <Copy />}</IconButton>
     </div>
     {status}
+    <FieldError>{copyError && `Could not copy the signed receipt. ${errorMessage(copyError)}`}</FieldError>
     <pre role="region" tabIndex={0} aria-labelledby={titleId} className="overflow-x-auto rounded-2xl border bg-muted/50 p-4 text-xs leading-relaxed select-text"><code>{readable}</code></pre>
   </section>;
 }

@@ -26,7 +26,7 @@ export function VerificationVerdict({
       "flex items-start gap-3 rounded-2xl border p-3.5 [&_>_svg]:flex-none [&_>_span]:grid [&_>_span]:min-w-0 [&_>_span]:gap-1.5 [&_>_span]:wrap-anywhere [&_small]:text-xs [&_small]:text-muted-foreground [&_strong]:text-foreground",
       toneClass[tone],
       toneTextClass[tone],
-    )} data-slot="verification-verdict">
+    )}>
       <Icon size={22} aria-hidden="true" />
       <span><strong>{title}</strong><small>{detail}</small></span>
     </div>

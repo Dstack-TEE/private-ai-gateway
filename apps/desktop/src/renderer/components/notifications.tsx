@@ -1,8 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { TriangleAlert } from "lucide-react";
 import type { DesktopApi, NotificationConfiguration, NotificationPreferences } from "../../shared/contracts";
-import { SettingsList, SettingsToggle } from "./settings";
+import { SettingsToggle } from "./settings";
 import { AppDialog, type DialogControl } from "./app-dialog";
 import { Alert, AlertDescription } from "./ui/alert";
+import { ItemGroup } from "./ui/item";
 import { DialogFooter } from "./ui/dialog";
 import { Button } from "./ui/button";
 
@@ -58,11 +60,12 @@ function useNotificationSettings(api: DesktopApi) {
 function NotificationPermissionNotice({ data, busy, permissionAction }: Pick<ReturnType<typeof useNotificationSettings>, "data" | "busy" | "permissionAction">) {
   if (!data || !data.preferences.enabled || (data.permission === "granted" && data.alertsEnabled !== false)) return null;
   const supported = data.permission !== "unsupported";
-  return <Alert className="border-warning/30 bg-warning/10">
-    <AlertDescription className="flex flex-wrap items-center justify-between gap-3 text-warning">
-      <span>{data.permission === "granted" ? "Notifications are allowed, but banner alerts are disabled in system settings." : data.permission === "denied" ? "Notifications are disabled in system settings." : data.permission === "notDetermined" ? "System permission is needed to show notifications." : "System notification permission could not be confirmed. Check your desktop notification settings."}</span>
-      {supported && <Button variant="outline" size="sm" disabled={busy} onClick={permissionAction}>{data.permission === "notDetermined" ? "Allow Notifications" : "System Settings"}</Button>}
-    </AlertDescription>
+  return <Alert>
+    <TriangleAlert aria-hidden="true" />
+    <AlertDescription>{data.permission === "granted" ? "Notifications are allowed, but banner alerts are disabled in system settings." : data.permission === "denied" ? "Notifications are disabled in system settings." : data.permission === "notDetermined" ? "System permission is needed to show notifications." : "System notification permission could not be confirmed. Check your desktop notification settings."}</AlertDescription>
+    {supported && <div className="col-start-2 mt-2">
+      <Button variant="outline" size="sm" disabled={busy} onClick={permissionAction}>{data.permission === "notDetermined" ? "Allow Notifications" : "System Settings"}</Button>
+    </div>}
   </Alert>;
 }
 
@@ -74,12 +77,12 @@ export function NotificationsDialog({ api, ...control }: { api: DesktopApi } & D
       <NotificationPermissionNotice {...notifications} />
       {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
       {data && <>
-        <SettingsList><SettingsToggle label="Allow notifications" checked={data.preferences.enabled} disabled={busy} onToggle={() => change("enabled", !data.preferences.enabled)} /></SettingsList>
-        <SettingsList>{([
+        <ItemGroup><SettingsToggle label="Allow notifications" checked={data.preferences.enabled} disabled={busy} onToggle={() => change("enabled", !data.preferences.enabled)} /></ItemGroup>
+        <ItemGroup>{([
           ["gateway", "Protection problems", "Protection, connection and agent configuration errors."],
           ["localApi", "Local API problems", "The local listener becomes unavailable."],
           ["verification", "Response verification failures", "A response fails proof verification."],
-        ] as const).map(([key, label, description]) => <SettingsToggle key={key} label={label} description={description} checked={data.preferences[key]} disabled={busy || !data.preferences.enabled} onToggle={() => change(key, !data.preferences[key])} />)}</SettingsList>
+        ] as const).map(([key, label, description]) => <SettingsToggle key={key} label={label} description={description} checked={data.preferences[key]} disabled={busy || !data.preferences.enabled} onToggle={() => change(key, !data.preferences[key])} />)}</ItemGroup>
       </>}
     </div>
     <DialogFooter><Button variant="outline" disabled={busy} onClick={control.onClose}>Done</Button></DialogFooter>

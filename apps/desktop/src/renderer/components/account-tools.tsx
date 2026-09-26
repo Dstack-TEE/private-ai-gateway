@@ -7,7 +7,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "./ui/avatar";
 import { Button } from "./ui/button";
 import { Hint } from "./hint";
 import { toastError } from "../lib/error-message";
-import { Item, ItemActions, ItemContent, ItemTitle } from "./ui/item";
+import { Item, ItemActions, ItemContent, ItemMedia, ItemTitle } from "./ui/item";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 
 import { distributionCapabilities } from "../lib/environment";
@@ -77,10 +77,10 @@ function AccountDetailsView({ api, provider, target, scope, credentialRef, image
   const owner = displayScope?.organization ?? displayScope?.workspace;
   const name = owner ?? "Account";
   return <div aria-label="Account details">
-    <Item variant="outline" size="sm" className="grid grid-cols-[2rem_minmax(0,_1fr)_auto] gap-x-3">
-      <AccountAvatar name={name} src={images?.organization} />
-      <ItemContent className="min-h-8 min-w-0 justify-center">
-        <ItemTitle className="line-clamp-none wrap-anywhere">{name}</ItemTitle>
+    <Item variant="outline" size="sm">
+      <ItemMedia><AccountAvatar name={name} src={images?.organization} /></ItemMedia>
+      <ItemContent className="min-w-0">
+        <ItemTitle>{name}</ItemTitle>
       </ItemContent>
       <ItemActions>
         {balance && <BillingBalanceButton balance={balance} provider={provider} busy={busy || opening} disabled={disabled || opening}
@@ -103,7 +103,7 @@ function BillingBalanceButton({ balance, provider, busy, disabled = false, onOpe
   const canOpen = balance.canTopUp && Boolean(scopeSlug);
   const promoId = useId();
   const promo = balance.grantedUsd != null && Number(balance.grantedUsd) > 0 ? `${currency(Number(balance.grantedUsd))} promo credits` : undefined;
-  const button = <Button type="button" variant="outline" size="sm" className="tabular-nums"
+  const button = <Button type="button" variant="outline" size="sm"
     aria-label={canOpen ? `Current balance: ${amount}. Open billing` : `Current balance: ${amount}`}
     aria-describedby={promo ? promoId : undefined} aria-busy={busy} disabled={disabled || !canOpen}
     onClick={() => { if (scopeSlug) onOpen(scopeSlug); }}>{amount}</Button>;
