@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, Eye, EyeOff, RefreshCw } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Field, FieldContent, FieldDescription, FieldError, FieldGroup, FieldLabel, FieldSeparator, FieldTitle } from "../components/ui/field";
@@ -13,6 +13,7 @@ import { DialogFooter } from "../components/ui/dialog";
 import { errorMessage } from "../lib/error-message";
 import { localAddressKind } from "../lib/local-api-config";
 import { desktopApi, web } from "../lib/environment";
+import { useCopy } from "../hooks/use-copy";
 import { DEFAULT_WEB_UI_CONFIG, WEB_UI_PASSWORD_MIN_LENGTH as MIN_PASSWORD_LENGTH, type AppState, type WebUiConfig, type WebUiStatus } from "../../shared/contracts";
 
 const PASSWORD_LABEL = "Web UI password";
@@ -29,19 +30,14 @@ function sameConfig(left: WebUiConfig, right: WebUiConfig): boolean {
 
 export function WebUiDialog({
   state,
-  copied,
-  onCopy,
   onSave,
   onSetPassword,
   onClose,
   ...control
 }: {
   state: AppState;
-  copied?: string;
-  /** Rejects when the value was not copied. */
-  onCopy(label: string, value: string): Promise<void>;
-  onSave(config: WebUiConfig): Promise<string | undefined>;
-  onSetPassword(password: string): Promise<string | undefined>;
+  onSave(config: WebUiConfig): Promise<void>;
+  onSetPassword(password: string): Promise<void>;
 } & DialogControl): React.JSX.Element {
   const status = state.webUi;
   const [draft, setDraft] = useState<WebUiConfig>(() => webUiConfig(status));
@@ -54,46 +50,41 @@ export function WebUiDialog({
   const [passwordVisible, setPasswordVisible] = useState(false);
   const addressKind = localAddressKind(draft.listenAddress);
   const networkAccess = Boolean(addressKind && addressKind !== "loopback");
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
+  const report = (failure: unknown) => setError(errorMessage(failure));
   const confirm = useConfirm();
-  const copyPassword = async () => {
+  const { copy, isCopied, status: copyStatus } = useCopy(report);
+  const copyPassword = () => {
     setError(undefined);
-    try { await onCopy(PASSWORD_LABEL, password); }
-    catch (failure) { setError(errorMessage(failure)); }
+    copy(PASSWORD_LABEL, password);
   };
-  const generatePassword = async () => {
-    setError(undefined);
-    if (!await confirm({
-      title: "Generate a new web UI password?",
-      message: "Every browser is signed out.",
-      confirmLabel: "Generate New Password",
-      destructive: true,
-    })) return;
-    setSaving(true);
-    try {
+  // Resolves whether a new password was generated.
+  const generate = useMutation({
+    mutationFn: async () => {
+      if (!await confirm({
+        title: "Generate a new web UI password?",
+        message: "Every browser is signed out.",
+        confirmLabel: "Generate New Password",
+        destructive: true,
+      })) return false;
       client.setQueryData(["web-ui-password"], await desktopApi.rotateWebUiPassword());
+      return true;
+    },
+    onMutate: () => setError(undefined),
+    onSuccess: (generated) => {
+      if (!generated) return;
       setPasswordDraft(undefined);
       setPasswordVisible(true);
-    } catch (failure) {
-      setError(errorMessage(failure));
-    } finally {
-      setSaving(false);
-    }
-  };
-  const submit = async (event: React.FormEvent) => {
-    event.preventDefault();
-    setSaving(true);
-    setError(undefined);
-    try {
-      if (!addressKind) {
-        setError("Enter a valid IPv4 or IPv6 listen address.");
-        return;
-      }
+    },
+    onError: report,
+  });
+  // Resolves whether the settings were saved.
+  const save = useMutation({
+    mutationFn: async () => {
+      if (!addressKind) throw new Error("Enter a valid IPv4 or IPv6 listen address.");
       const passwordChanged = passwordDraft !== undefined && passwordDraft !== (savedPassword ?? "");
       if (passwordChanged && [...passwordDraft].length < MIN_PASSWORD_LENGTH) {
-        setError(`Use a password of at least ${MIN_PASSWORD_LENGTH} characters.`);
-        return;
+        throw new Error(`Use a password of at least ${MIN_PASSWORD_LENGTH} characters.`);
       }
       const config = { ...draft, allowNetworkAccess: networkAccess };
       const configChanged = !sameConfig(config, webUiConfig(status));
@@ -101,35 +92,30 @@ export function WebUiDialog({
         title: "Allow network access?",
         message: `Listen on ${draft.listenAddress}:${draft.port}? The web UI uses unencrypted HTTP, and a signed-in browser can change every setting and read the client key. Only use a trusted network, and never expose this port to the internet. An SSH tunnel or Tailscale is safer.`,
         confirmLabel: "Allow and Save",
-      })) return;
+      })) return false;
       if (web && status.enabled && !config.enabled && !await confirm({
         title: "Turn off the web UI?",
         message: "This browser session ends now. Turn the web UI on again from the desktop app or with pap settings set web-ui.enabled true.",
         confirmLabel: "Turn Off",
-      })) return;
+      })) return false;
       if (passwordChanged) {
-        const message = await onSetPassword(passwordDraft);
-        if (message) {
-          setError(message);
-          return;
-        }
+        await onSetPassword(passwordDraft);
         client.setQueryData(["web-ui-password"], passwordDraft);
         setPasswordDraft(undefined);
       }
-      const message = configChanged ? await onSave(config) : undefined;
-      if (message) setError(message);
-      else onClose();
-    } catch (saveError) {
-      setError(errorMessage(saveError));
-    } finally {
-      setSaving(false);
-    }
-  };
-  const openInBrowser = () => void desktopApi.openWebUi().catch((failure: unknown) => setError(errorMessage(failure)));
+      if (configChanged) await onSave(config);
+      return true;
+    },
+    onMutate: () => setError(undefined),
+    onSuccess: (saved) => { if (saved) onClose(); },
+    onError: report,
+  });
+  const saving = generate.isPending || save.isPending;
+  const openInBrowser = () => void desktopApi.openWebUi().catch(report);
   const visibilityLabel = passwordVisible ? "Hide password" : "Show password";
   return (
     <AppDialog {...control} title="Web UI settings" className="sm:max-w-lg" dismissible={!saving} onClose={onClose}>
-      <form className="flex min-h-0 flex-col gap-4" onSubmit={(event) => void submit(event)}>
+      <form className="flex min-h-0 flex-col gap-4" onSubmit={(event) => { event.preventDefault(); save.mutate(); }}>
         <div className="-mx-6 min-h-0 overflow-y-auto px-6 py-1">
           <FieldGroup>
             <SettingsList>
@@ -144,8 +130,8 @@ export function WebUiDialog({
                   <InputGroupInput id="web-ui-password" className="font-mono" type={passwordVisible ? "text" : "password"} autoComplete="new-password" spellCheck={false} value={password} placeholder={savedPassword === null ? "Hidden" : undefined} disabled={saving} onChange={(event) => setPasswordDraft(event.target.value)} />
                   <InputGroupAddon align="inline-end">
                     <Hint content={visibilityLabel}><InputGroupButton size="icon-xs" aria-label={visibilityLabel} disabled={!password} onClick={() => setPasswordVisible((visible) => !visible)}>{passwordVisible ? <EyeOff /> : <Eye />}</InputGroupButton></Hint>
-                    <Hint content="Copy password"><InputGroupButton size="icon-xs" aria-label="Copy password" disabled={saving || !password} onClick={() => void copyPassword()}>{copied === PASSWORD_LABEL ? <Check /> : <Copy />}</InputGroupButton></Hint>
-                    <Hint content="Generate New Password"><InputGroupButton size="icon-xs" aria-label="Generate New Password" disabled={saving} onClick={() => void generatePassword()}><RefreshCw /></InputGroupButton></Hint>
+                    <Hint content="Copy password"><InputGroupButton size="icon-xs" aria-label="Copy password" disabled={saving || !password} onClick={copyPassword}>{isCopied(password) ? <Check /> : <Copy />}</InputGroupButton></Hint>
+                    <Hint content="Generate New Password"><InputGroupButton size="icon-xs" aria-label="Generate New Password" disabled={saving} onClick={() => generate.mutate()}><RefreshCw /></InputGroupButton></Hint>
                   </InputGroupAddon>
                 </InputGroup>
                 {passwordError && <FieldError>{errorMessage(passwordError)}</FieldError>}
@@ -161,6 +147,7 @@ export function WebUiDialog({
           </FieldGroup>
         </div>
         <FieldError>{error}</FieldError>
+        {copyStatus}
         <DialogFooter>
           <Button type="button" variant="outline" className="sm:mr-auto" disabled={saving} onClick={() => setDraft((current) => ({ ...DEFAULT_WEB_UI_CONFIG, enabled: current.enabled }))}>Use Default</Button>
           <Button type="button" variant="outline" onClick={onClose} disabled={saving}>Cancel</Button>

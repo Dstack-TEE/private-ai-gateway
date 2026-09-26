@@ -1,36 +1,29 @@
-import { useEffect, useMemo, useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
 import { Check, Copy } from "lucide-react";
 import type { ModelSummary } from "../../shared/contracts";
 import { localApiExample, type ExampleLanguage } from "../lib/local-api-example";
+import { useCopy } from "../hooks/use-copy";
 import { AppDialog, DoneFooter, type DialogControl } from "./app-dialog";
 import { IconButton } from "./controls";
 import { Field, FieldError, FieldLabel } from "./ui/field";
 import { ChoiceSelect } from "./choice-select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 
-export function LocalApiExamplesDialog({ endpoint, models: catalogModels, apiKey, onCopy, ...control }: {
+export function LocalApiExamplesDialog({ endpoint, models: catalogModels, apiKey, ...control }: {
   /** The Local API key; empty while it is unavailable. */
   apiKey: string;
   endpoint?: string; models: ModelSummary[];
-  onCopy(value: string): Promise<void>;
 } & DialogControl) {
   const models = catalogModels.filter((model) => model.supportedEndpoints?.includes("/v1/chat/completions") ?? true);
   const [language, setLanguage] = useState<ExampleLanguage>("javascript");
   const [selection, setSelection] = useState("");
-  const [copied, setCopied] = useState<string>();
   const model = models.some((entry) => entry.id === selection) ? selection : models[0]?.id ?? "";
   const code = useMemo(() => {
     if (!endpoint || !apiKey) return undefined;
     try { return localApiExample(language, endpoint, model || "MODEL_ID", apiKey); }
     catch { return undefined; }
   }, [endpoint, language, model, apiKey]);
-  useEffect(() => {
-    if (!copied) return;
-    const timer = window.setTimeout(() => setCopied(undefined), 1_500);
-    return () => window.clearTimeout(timer);
-  }, [copied]);
-  const copy = useMutation({ mutationFn: onCopy, onSuccess: (_, value) => setCopied(value) });
+  const { copy, copying, error, isCopied, status } = useCopy();
   return <AppDialog {...control} title="Local API examples" className="sm:max-w-3xl">
     <Field>
       <FieldLabel htmlFor="example-model">Model</FieldLabel>
@@ -40,14 +33,14 @@ export function LocalApiExamplesDialog({ endpoint, models: catalogModels, apiKey
     <Tabs value={language} className="min-h-0 flex-1" onValueChange={(value) => { if (value === "curl" || value === "python" || value === "javascript") setLanguage(value); }}>
       <div className="flex items-center justify-between gap-2">
         <TabsList aria-label="Code language"><TabsTrigger value="javascript">JavaScript</TabsTrigger><TabsTrigger value="python">Python</TabsTrigger><TabsTrigger value="curl">cURL</TabsTrigger></TabsList>
-        <IconButton label="Copy example" disabled={!code || copy.isPending} onClick={() => { if (code) copy.mutate(code); }}>{copied === code && code ? <Check /> : <Copy />}</IconButton>
+        <IconButton label="Copy example" disabled={!code || copying} onClick={() => { if (code) copy("Example", code); }}>{isCopied(code) ? <Check /> : <Copy />}</IconButton>
       </div>
       <TabsContent value={language} className="min-h-0 overflow-auto rounded-2xl border bg-muted/50">
         <pre className="p-4 text-xs leading-relaxed"><code>{code ?? "Local API example unavailable."}</code></pre>
       </TabsContent>
     </Tabs>
-    <FieldError>{apiKey ? copy.error && "Could not copy the example." : "The Local API key is unavailable."}</FieldError>
-    <span className="sr-only" role="status">{copied === code && code ? "Example copied" : ""}</span>
+    <FieldError>{apiKey ? (error ? "Could not copy the example." : undefined) : "The Local API key is unavailable."}</FieldError>
+    {status}
     <DoneFooter />
   </AppDialog>;
 }

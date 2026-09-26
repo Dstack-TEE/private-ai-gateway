@@ -4,6 +4,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { currency } from "../lib/usage-presentation";
 import { Avatar, AvatarFallback, AvatarImage } from "./ui/avatar";
 import { Button } from "./ui/button";
+import { Hint } from "./hint";
 import { toastError } from "../lib/error-message";
 import { Item, ItemActions, ItemContent, ItemTitle } from "./ui/item";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
@@ -99,11 +100,13 @@ function BillingBalanceButton({ balance, provider, busy, disabled = false, onOpe
   const scopeSlug = provider === "phala" ? balance.scope.workspaceSlug : balance.scope.organizationSlug;
   const amount = currency(Number(balance.balanceUsd));
   const canOpen = balance.canTopUp && Boolean(scopeSlug);
-  return <Button type="button" variant="outline" size="sm" className="tabular-nums"
+  const promo = balance.grantedUsd != null && Number(balance.grantedUsd) > 0 ? `${currency(Number(balance.grantedUsd))} promo credits` : undefined;
+  const button = <Button type="button" variant="outline" size="sm" className="tabular-nums"
     aria-label={canOpen ? `Current balance: ${amount}. Open billing` : `Current balance: ${amount}`}
-    aria-busy={busy} disabled={disabled || !canOpen}
-    title={balance.grantedUsd != null && Number(balance.grantedUsd) > 0 ? `${currency(Number(balance.grantedUsd))} promo credits` : undefined}
+    aria-description={promo} aria-busy={busy} disabled={disabled || !canOpen}
     onClick={() => { if (scopeSlug) onOpen(scopeSlug); }}>{amount}</Button>;
+  // A disabled button gets no pointer events, so a wrapper takes the hint.
+  return promo ? <Hint content={promo}><span className="inline-flex">{button}</span></Hint> : button;
 }
 
 function useAccountPage(onError: (error: unknown) => void, disabled = false) {

@@ -9,8 +9,9 @@ const ConfirmOpenContext = createContext(false);
 /**
  * Asks for a decision and resolves with the answer: in an alert sheet when
  * `ask` shows one (the macOS app, where the confirm button is the default),
- * otherwise in an AlertDialog. The dialog focuses Cancel, the safe choice, so
- * Return never starts the action.
+ * otherwise in an AlertDialog. A destructive action always asks in the
+ * dialog, since its button must never be the default. The dialog focuses
+ * Cancel, the safe choice, so Return never starts the action.
  */
 export function ConfirmProvider({ ask, children }: PropsWithChildren<{ ask?: DesktopApi["showConfirmation"] }>) {
   const [request, setRequest] = useState<Confirmation>();
@@ -28,7 +29,7 @@ export function ConfirmProvider({ ask, children }: PropsWithChildren<{ ask?: Des
     setOpen(false);
   }, []);
   const confirm = useCallback<Confirm>((options) => {
-    if (ask) {
+    if (ask && !options.destructive) {
       setAsking((count) => count + 1);
       return ask(options).finally(() => setAsking((count) => count - 1));
     }

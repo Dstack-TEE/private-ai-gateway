@@ -68,6 +68,7 @@
     "allow-set-cli-registration",
     "allow-show-confirmation",
     "allow-quit-app",
-    "allow-stop-all-and-quit"
+    "allow-stop-all-and-quit",
+    "allow-take-navigation"
   ]
 }

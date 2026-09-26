@@ -46,8 +46,8 @@ pub struct ServiceIdentity {
 }
 
 /// A question the desktop app asks before an action (`useConfirm`). macOS
-/// shows it as an alert sheet on the window; elsewhere the window's own dialog
-/// asks it.
+/// shows one that is not destructive as an alert sheet on the window; the
+/// window's own dialog asks the rest, and every question elsewhere.
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[ts(optional_fields)]
@@ -699,6 +699,8 @@ pub enum NavigationTarget {
     Agents,
     Profiles,
     ProfileSetup,
+    /// The confirmation to stop everything and quit.
+    ConfirmStopAll,
 }
 
 /// The system's permission to show this app's notifications.
@@ -898,11 +900,6 @@ mod typescript {
             (
                 "NAVIGATE_EVENT",
                 ui_api::NAVIGATE_EVENT,
-                NavigationTarget::name(&config),
-            ),
-            (
-                "CONFIRM_STOP_ALL_EVENT",
-                ui_api::CONFIRM_STOP_ALL_EVENT,
                 <()>::name(&config),
             ),
         ];

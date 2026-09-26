@@ -15,40 +15,39 @@ import { DialogFooter } from "../components/ui/dialog";
 import { DEFAULT_LOCAL_API_CONFIG, type AppState, type ListenConfig } from "../../shared/contracts";
 import { maskClientKey } from "../lib/format";
 import { desktopApi } from "../lib/environment";
-import { errorMessage } from "../lib/error-message";
+import { errorMessage, toastError } from "../lib/error-message";
+import { useCopy } from "../hooks/use-copy";
 import { cn } from "../lib/utils";
 
 export function LocalApiPanel({
   proxyUrl,
   clientKey,
   clientKeyVisible,
-  copied,
-  onCopy,
   onToggleKey,
 }: {
   proxyUrl?: string;
   clientKey: string;
   clientKeyVisible: boolean;
-  copied?: string;
-  onCopy(label: string, value: string): void;
   onToggleKey(): void;
 }): React.JSX.Element {
   const endpointLabel = "Local API endpoint";
   const keyLabel = "Local API key";
+  const { copy, isCopied, status } = useCopy((error) => toastError("Could not copy", error));
   return (
     <div className="copy-rows relative grid auto-rows-auto gap-3">
-      <CopyRow title="Endpoint" copyLabel={endpointLabel} value={proxyUrl} copied={copied} onCopy={onCopy} />
+      <CopyRow title="Endpoint" copyLabel={endpointLabel} value={proxyUrl} copied={isCopied(proxyUrl)} onCopy={copy} />
       <CopyRow
         title="API key"
         copyLabel={keyLabel}
         value={clientKey || undefined}
         displayValue={clientKey ? (clientKeyVisible ? clientKey : maskClientKey(clientKey)) : undefined}
         ariaValue={clientKey ? (clientKeyVisible ? clientKey : "hidden") : undefined}
-        copied={copied}
-        onCopy={onCopy}
+        copied={isCopied(clientKey)}
+        onCopy={copy}
       >
         <IconButton className="row-action relative z-2 ml-auto" label={clientKeyVisible ? "Hide Local API key" : "Show Local API key"} disabled={!clientKey} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}</IconButton>
       </CopyRow>
+      {status}
     </div>
   );
 }
@@ -68,10 +67,9 @@ function CopyRow({
   value?: string;
   displayValue?: string;
   ariaValue?: string;
-  copied?: string;
+  copied: boolean;
   onCopy(label: string, value: string): void;
 }>): React.JSX.Element {
-  const isCopied = copied === copyLabel;
   return (
     <Item variant="muted" size="xs" className="copy-row relative h-14 min-w-0 overflow-hidden">
       <Button
@@ -83,7 +81,7 @@ function CopyRow({
       >
         <span className="row-title text-xs font-normal text-muted-foreground">{title}</span>
         <code className="block w-full flex-none overflow-hidden text-ellipsis whitespace-nowrap text-sm text-foreground">{displayValue ?? "Unavailable"}</code>
-        <span className={cn("copy-feedback absolute right-13.5 top-1/2 -translate-y-1/2 text-xs font-semibold text-muted-foreground opacity-0 transition-opacity duration-150", isCopied && "text-primary opacity-100")}>{isCopied ? "Copied" : "Copy"}</span>
+        <span className={cn("copy-feedback absolute right-13.5 top-1/2 -translate-y-1/2 text-xs font-semibold text-muted-foreground opacity-0 transition-opacity duration-150", copied && "text-primary opacity-100")}>{copied ? "Copied" : "Copy"}</span>
       </Button>
       {children}
     </Item>
@@ -94,8 +92,6 @@ export function LocalApiDialog({
   state,
   clientKey,
   clientKeyVisible,
-  copied,
-  onCopy,
   onToggleKey,
   onRotate,
   onSave,
@@ -105,9 +101,6 @@ export function LocalApiDialog({
   state: AppState;
   clientKey: string;
   clientKeyVisible: boolean;
-  copied?: string;
-  /** Rejects when the value was not copied. */
-  onCopy(label: string, value: string): Promise<void>;
   onToggleKey(): void;
   onRotate(): Promise<void>;
   onSave(config: ListenConfig): Promise<void>;
@@ -119,6 +112,7 @@ export function LocalApiDialog({
   const [error, setError] = useState<string>();
   const report = (failure: unknown) => setError(errorMessage(failure));
   const confirm = useConfirm();
+  const { copy, isCopied, status } = useCopy(report);
   const rotate = useMutation({
     mutationFn: async () => {
       if (await confirm({
@@ -150,7 +144,7 @@ export function LocalApiDialog({
   const saving = rotate.isPending || save.isPending;
   const copyKey = () => {
     setError(undefined);
-    onCopy("Local API key", clientKey).catch(report);
+    copy("Local API key", clientKey);
   };
   return (
     <AppDialog {...control} title="Local API settings" className="sm:max-w-xl" dismissible={!saving} onClose={onClose}>
@@ -165,7 +159,7 @@ export function LocalApiDialog({
               <InputGroupInput id="local-client-key" className="mono font-mono text-xs" type={clientKeyVisible ? "text" : "password"} value={clientKey} readOnly />
               <InputGroupAddon align="inline-end">
                 <Hint content={clientKeyVisible ? "Hide Local API key" : "Show Local API key"}><InputGroupButton size="icon-xs" aria-label={clientKeyVisible ? "Hide Local API key" : "Show Local API key"} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff /> : <Eye />}</InputGroupButton></Hint>
-                <Hint content="Copy Local API key"><InputGroupButton size="icon-xs" aria-label="Copy Local API key" disabled={saving || !clientKey} onClick={copyKey}>{copied === "Local API key" ? <Check /> : <Copy />}</InputGroupButton></Hint>
+                <Hint content="Copy Local API key"><InputGroupButton size="icon-xs" aria-label="Copy Local API key" disabled={saving || !clientKey} onClick={copyKey}>{isCopied(clientKey) ? <Check /> : <Copy />}</InputGroupButton></Hint>
                 <Hint content="Rotate key"><InputGroupButton size="icon-xs" aria-label="Rotate key" disabled={frozen || saving} onClick={() => rotate.mutate()}><RefreshCw /></InputGroupButton></Hint>
               </InputGroupAddon>
             </InputGroup>
@@ -174,6 +168,7 @@ export function LocalApiDialog({
           </FieldGroup>
         </div>
         <FieldError>{error}</FieldError>
+        {status}
         <DialogFooter>
           <Button type="button" variant="outline" className="sm:mr-auto" disabled={frozen || saving} onClick={() => setDraft(DEFAULT_LOCAL_API_CONFIG)}>Use Default</Button>
           <Button type="button" variant="outline" onClick={onClose} disabled={saving}>{frozen ? "Done" : "Cancel"}</Button>

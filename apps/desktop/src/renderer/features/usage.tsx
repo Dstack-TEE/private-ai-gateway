@@ -2,7 +2,8 @@ import React, { lazy, Suspense, useId, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { usageFilters, usagePageQuery } from "../lib/page-queries";
-import { errorMessage } from "../lib/error-message";
+import { errorMessage, toastError } from "../lib/error-message";
+import { useCopy } from "../hooks/use-copy";
 import { Ban, Check, ChevronLeft, ChevronRight, Copy, ShieldCheck, ShieldX } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { ActionItem } from "../components/action-item";
@@ -262,7 +263,7 @@ function readableReceipt(receipt: string): string {
 
 /** The receipt document the audit checked. Copy takes it as the service returned it, ready for `pap audit --receipt`. */
 function SignedReceipt({ recordId }: { recordId: string }): React.JSX.Element | null {
-  const shell = useShell();
+  const { copy, isCopied, status } = useCopy((failure) => toastError("Could not copy the signed receipt", failure));
   const titleId = useId();
   const { data: receipt, error } = useQuery({
     queryKey: ["usage-receipt", recordId], queryFn: () => desktopApi.getUsageReceipt(recordId),
@@ -273,8 +274,9 @@ function SignedReceipt({ recordId }: { recordId: string }): React.JSX.Element | 
   return <section className="grid gap-2 border-t border-t-border pt-3.5">
     <div className="flex items-center justify-between gap-3">
       <div className="grid gap-0.5"><h3 id={titleId} className="text-xs font-semibold">Signed receipt</h3><p className="text-xs text-muted-foreground">Indented for reading; Copy gives the original document. It holds hashes and verification metadata, not request or response content.</p></div>
-      <IconButton size="icon-sm" label="Copy signed receipt" onClick={() => shell.copy("Signed receipt", receipt)}>{shell.copied === "Signed receipt" ? <Check /> : <Copy />}</IconButton>
+      <IconButton size="icon-sm" label="Copy signed receipt" onClick={() => copy("Signed receipt", receipt)}>{isCopied(receipt) ? <Check /> : <Copy />}</IconButton>
     </div>
+    {status}
     <pre role="region" tabIndex={0} aria-labelledby={titleId} className="overflow-x-auto rounded-2xl border bg-muted/50 p-4 text-xs leading-relaxed select-text"><code>{readable}</code></pre>
   </section>;
 }

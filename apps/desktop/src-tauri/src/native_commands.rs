@@ -49,6 +49,7 @@ macro_rules! native_commands {
             commands::desktop::show_confirmation,
             commands::desktop::quit_app,
             commands::desktop::stop_all_and_quit,
+            tray::take_navigation,
         }
     };
 }

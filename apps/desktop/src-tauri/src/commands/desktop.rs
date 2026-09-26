@@ -111,9 +111,12 @@ pub(crate) fn show_edit_menu(window: WebviewWindow, editable: bool) -> Result<()
 
 /// Asks for a decision in an alert sheet on the window (NSAlert): the confirm
 /// button is the default (Return) button and Cancel takes Escape; `true` when
-/// the user confirms. Only macOS uses it: on Windows and Linux the system
-/// message dialogs (through rfd) can't make Cancel the default button or, on
-/// Linux, attach to the window, so the window's own dialog asks there.
+/// the user confirms. Only macOS uses it, and only for actions that are not
+/// destructive: the sheet can't make Cancel the default button, and a
+/// destructive button must never be the default (Apple HIG, Buttons). The
+/// window's own dialog, which focuses Cancel, asks for destructive actions and
+/// on Windows and Linux, whose system message dialogs (through rfd) can't make
+/// Cancel the default button or, on Linux, attach to the window.
 #[tauri::command]
 pub(crate) async fn show_confirmation(
     window: WebviewWindow,
@@ -135,7 +138,7 @@ async fn ask_in_sheet(
     window: WebviewWindow,
     confirmation: Confirmation,
 ) -> Result<bool, CallError> {
-    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
     let Confirmation {
         title,
         message,
@@ -143,6 +146,9 @@ async fn ask_in_sheet(
         cancel_label,
         destructive,
     } = confirmation;
+    if destructive.unwrap_or(false) {
+        return Err("Destructive actions are confirmed in the window".into());
+    }
     let cancel_label = cancel_label.unwrap_or_else(|| "Cancel".into());
     if [&title, &message, &confirm_label, &cancel_label]
         .iter()
@@ -155,11 +161,6 @@ async fn ask_in_sheet(
         .dialog()
         .message(message)
         .title(title)
-        .kind(if destructive.unwrap_or(false) {
-            MessageDialogKind::Warning
-        } else {
-            MessageDialogKind::Info
-        })
         .buttons(MessageDialogButtons::OkCancelCustom(
             confirm_label,
             cancel_label,

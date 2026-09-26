@@ -68,6 +68,8 @@ const platform: UiPlatform = {
   setCliRegistration: unavailable,
   stopAllAndQuit: async () => undefined,
   showConfirmation: undefined,
+  // Only the desktop app has a tray and a menu bar.
+  onNavigate: () => () => undefined,
   closeWindow: undefined,
   quit: undefined,
   copyText: async (text) => {

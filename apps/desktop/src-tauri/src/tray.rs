@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use tauri::{
     menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, Wry,
+    AppHandle, Emitter, Manager, State, Wry,
 };
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
@@ -15,7 +15,7 @@ use desktop_core::{
     contracts::{AppState, NavigationTarget, VerificationStatus},
     protection::{ProtectionOperation, ProtectionPhase},
     protocol::rpc,
-    ui_api::{LaunchPreference, CONFIRM_STOP_ALL_EVENT, LAUNCH_PREFERENCES_EVENT, NAVIGATE_EVENT},
+    ui_api::{LaunchPreference, LAUNCH_PREFERENCES_EVENT, NAVIGATE_EVENT},
 };
 
 /// Native menu handles mirror backend state; actions use the same client as the window.
@@ -132,10 +132,7 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
         "profiles" => navigate(app, NavigationTarget::Profiles),
         "autostart" => sync_autostart(app),
         "quit" => app.exit(0),
-        "stop-all-quit" => {
-            show_window(app);
-            let _ = app.emit(CONFIRM_STOP_ALL_EVENT, ());
-        }
+        "stop-all-quit" => navigate(app, NavigationTarget::ConfirmStopAll),
         id if matches!(id, "copy-key" | "copy-endpoint")
             || id.starts_with("profile:")
             || id.starts_with("agent:") =>
@@ -146,10 +143,27 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
     }
 }
 
-/// Shows the window at a page or dialog.
+/// The latest request for the window that it has not taken yet.
+#[derive(Default)]
+pub struct PendingNavigation(Mutex<Option<NavigationTarget>>);
+
+/// Shows the window at a page or dialog. The request waits here until the
+/// renderer takes it, since one made before the renderer listens (while the
+/// app is starting) would otherwise be lost; the event tells a listening
+/// renderer to take it now.
 fn navigate(app: &AppHandle, target: NavigationTarget) {
     show_window(app);
-    let _ = app.emit(NAVIGATE_EVENT, target);
+    if let Ok(mut pending) = app.state::<PendingNavigation>().0.lock() {
+        *pending = Some(target);
+    }
+    let _ = app.emit(NAVIGATE_EVENT, ());
+}
+
+/// Takes the window's pending request; the renderer asks once it listens for
+/// `NAVIGATE_EVENT` and again on each event.
+#[tauri::command]
+pub(crate) fn take_navigation(pending: State<'_, PendingNavigation>) -> Option<NavigationTarget> {
+    pending.0.lock().ok()?.take()
 }
 
 fn perform_action(app: &AppHandle, id: String) {
