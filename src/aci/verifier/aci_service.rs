@@ -489,6 +489,15 @@ impl AciServiceUpstreamVerifier {
         )
     }
 
+    #[cfg(test)]
+    pub(super) fn with_cached(self, cached: CachedAciServiceVerification) -> Self {
+        *self
+            .cache
+            .write()
+            .expect("ACI service verifier cache poisoned") = Some(cached);
+        self
+    }
+
     async fn verify_uncached(
         &self,
     ) -> Result<CachedAciServiceVerification, AciServiceVerificationError> {
@@ -607,6 +616,15 @@ impl UpstreamVerifier for AciServiceUpstreamVerifier {
                 ..Default::default()
             },
         }
+    }
+
+    fn invalidate(&self, _request: &UpstreamVerificationRequest) {
+        // `verify` caches one verification for the whole service regardless of
+        // the request, so invalidation clears that single entry.
+        *self
+            .cache
+            .write()
+            .expect("ACI service verifier cache poisoned") = None;
     }
 }
 

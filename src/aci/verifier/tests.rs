@@ -826,6 +826,50 @@ fn cached_aci_service_verification_preserves_channel_bindings() {
     assert_eq!(event.channel_bindings, cached.channel_bindings);
 }
 
+#[tokio::test]
+async fn aci_service_refresh_bypasses_the_cached_verification() {
+    // Nothing listens on port 1, so any fresh verification fails fast.
+    let verifier = AciServiceUpstreamVerifier::new_with_timeouts(
+        "http://127.0.0.1:1",
+        "http://127.0.0.1:1",
+        AciServiceVerifierPolicy::new(
+            vec!["test-subject".to_string()],
+            Vec::new(),
+            vec![public_key_uncompressed_hex(&signing_key(1))],
+        )
+        .unwrap(),
+        300,
+        1,
+        1,
+    )
+    .unwrap()
+    .with_cached(CachedAciServiceVerification {
+        expires_at: u64::MAX,
+        evidence: None,
+        channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
+            origin: "http://127.0.0.1:1".to_string(),
+            spki_sha256: "aa".repeat(32),
+        }],
+    });
+    let request = UpstreamVerificationRequest {
+        upstream_name: "aci-upstream".to_string(),
+        url_origin: Some("http://127.0.0.1:1".to_string()),
+        model_id: "model-a".to_string(),
+        forwarded_body_hash: format!("sha256:{}", "22".repeat(32)),
+        required: true,
+    };
+
+    let cached = verifier.verify(request.clone()).await;
+    let refreshed = verifier.refresh(request).await;
+
+    assert_eq!(cached.result, VerificationResult::Verified);
+    assert_eq!(
+        refreshed.result,
+        VerificationResult::Failed,
+        "refresh must re-verify instead of returning the cached event"
+    );
+}
+
 #[test]
 fn declared_tls_channel_bindings_preserves_service_wide_pins() {
     let keyset = keyset_with_tls(vec![
