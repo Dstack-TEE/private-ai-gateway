@@ -224,6 +224,8 @@ Checks:
   `unix:/tmp/aci-dstack-sock-dev.dstack.sock`; pass `--dstack-endpoint` to use
   a different endpoint.
 - The gateway binary builds.
+- The Private AI Proxy CLI resolves: `PAP_BIN` if set, else `pap` on `PATH`.
+  The lifecycle and embeddings cases run `pap audit` with it.
 - No live server is already bound to the selected local port.
 
 ### 10 Provider Attestation

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import socket
 import subprocess
 import time
@@ -230,6 +231,97 @@ def run_cmd_json(
     if not isinstance(parsed, dict):
         raise RuntimeError("command returned non-object JSON")
     return parsed
+
+
+def pap_bin() -> str:
+    """Resolve the Private AI Proxy CLI: `PAP_BIN`, else `pap` on PATH."""
+    configured = os.environ.get("PAP_BIN") or "pap"
+    resolved = shutil.which(configured)
+    if resolved is None:
+        raise RuntimeError(
+            f"Private AI Proxy CLI not found: {configured!r}. Install it with "
+            "scripts/install-private-ai-proxy.sh, or set PAP_BIN to a built "
+            "private-ai-proxy binary (cargo build --manifest-path "
+            "apps/desktop/Cargo.toml --bin private-ai-proxy)."
+        )
+    return resolved
+
+
+# Offline `pap audit` leaves id-1 (quote collateral) and the policy/channel
+# checks skipped, so its verdict is PARTIAL; these checks must still pass.
+OFFLINE_AUDIT_REQUIRED_PASSES = (
+    "id-2",
+    "id-3",
+    "receipt-1",
+    "receipt-2",
+    "receipt-3",
+    "receipt-4",
+    "upstream-1",
+)
+
+
+def run_pap_audit(
+    *,
+    report_path: Path,
+    receipt_path: Path,
+    nonce: str,
+    request_path: Path,
+    response_path: Path,
+    timeout: int = 240,
+) -> dict[str, Any]:
+    """Run `pap audit --json` offline and fail on any failed or missing check."""
+    cmd = [
+        pap_bin(),
+        "audit",
+        "--report",
+        str(report_path),
+        "--receipt",
+        str(receipt_path),
+        "--nonce",
+        nonce,
+        "--request-body",
+        str(request_path),
+        "--response-body",
+        str(response_path),
+        "--json",
+    ]
+    printable = " ".join(shlex.quote(part) for part in cmd)
+    result = run_cmd(cmd, timeout=timeout)
+    stderr = result.stderr.decode("utf-8", errors="replace").strip()
+    # Exit 0 is VERIFIED and 1 is not; both print the transcript on stdout.
+    # Command errors also exit 1 but print nothing there.
+    if result.returncode not in (0, 1):
+        raise RuntimeError(f"command failed ({result.returncode}): {printable}\n{stderr}")
+    try:
+        transcript = json.loads(result.stdout.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"command did not return a transcript ({result.returncode}): {printable}\n{stderr}"
+        ) from exc
+    verdict = transcript.get("verdict") if isinstance(transcript, dict) else None
+    checks = transcript.get("checks") if isinstance(transcript, dict) else None
+    if not isinstance(verdict, dict) or not isinstance(checks, list):
+        raise RuntimeError(f"pap audit transcript has no verdict/checks: {printable}")
+    if verdict.get("verified") is not (result.returncode == 0):
+        raise RuntimeError(
+            f"pap audit exit code {result.returncode} disagrees with verdict {verdict!r}"
+        )
+    statuses = {check.get("id"): check.get("status") for check in checks}
+    failed = [check for check in checks if check.get("status") == "fail"]
+    if failed:
+        details = "; ".join(f"{check.get('id')}: {check.get('detail')}" for check in failed)
+        raise RuntimeError(f"pap audit failed checks: {details}")
+    not_passed = [
+        check_id
+        for check_id in OFFLINE_AUDIT_REQUIRED_PASSES
+        if statuses.get(check_id) != "pass"
+    ]
+    if not_passed:
+        raise RuntimeError(
+            "pap audit did not pass "
+            + ", ".join(f"{check_id} ({statuses.get(check_id)})" for check_id in not_passed)
+        )
+    return transcript
 
 
 def request_json(

@@ -4,7 +4,7 @@ import secrets
 from pathlib import Path
 from typing import Any
 
-from ..common import Provider, json_bytes, request_json, run_cmd_json, write_bytes, write_json
+from ..common import Provider, json_bytes, request_json, run_pap_audit, write_bytes, write_json
 from .attested_sessions import assert_upstream_attested_sessions
 
 
@@ -96,28 +96,12 @@ def run_lifecycle_case(
         if not legacy_json.get(field):
             raise RuntimeError(f"{provider.name} legacy signature wrapper missing {field}")
 
-    verifier_summary = run_cmd_json(
-        [
-            "cargo",
-            "run",
-            "--quiet",
-            "--bin",
-            "aci",
-            "--",
-            "audit",
-            "--report",
-            str(report_path),
-            "--receipt",
-            str(receipt_path),
-            "--nonce",
-            nonce,
-            "--request-body",
-            str(request_path),
-            "--response-body",
-            str(response_path),
-            "--json",
-        ],
-        timeout=240,
+    verifier_summary = run_pap_audit(
+        report_path=report_path,
+        receipt_path=receipt_path,
+        nonce=nonce,
+        request_path=request_path,
+        response_path=response_path,
     )
     write_json(provider_dir / "user-verification-summary.json", verifier_summary)
     assert_receipt_log(provider, receipt)
@@ -132,11 +116,9 @@ def run_lifecycle_case(
         "chat_id": chat_id,
         "receipt_id": receipt_id,
         "status": status,
-        "verified": (verifier_summary.get("verdict") or {}).get("verified") is True,
+        "verified": verifier_summary["verdict"].get("verified") is True,
         "checks": {
-            check.get("id"): check.get("status")
-            for check in verifier_summary.get("checks") or []
-            if isinstance(check, dict)
+            check.get("id"): check.get("status") for check in verifier_summary["checks"]
         },
         "attested_sessions": attested_sessions,
     }
