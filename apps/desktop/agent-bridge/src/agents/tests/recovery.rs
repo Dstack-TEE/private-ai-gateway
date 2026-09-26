@@ -536,7 +536,7 @@ fn claude_takes_over_credentials_via_the_secret_store_and_restores_them() {
         serde_json::json!(models
             .models
             .iter()
-            .map(|model| serde_json::json!({"model": model.id()}))
+            .map(|model| serde_json::json!({"model": model.id(), "label": model.display_name()}))
             .collect::<Vec<_>>())
     );
     assert!(
@@ -895,5 +895,104 @@ fn priced_catalogs_use_short_decimals_and_older_float_prices_still_match() {
             assert!(!tokens.is_empty());
             assert!(apply_connect(&sandbox, agent, &catalog, &options).authorized);
         }
+    }
+}
+
+/// Older builds wrote the catalog's names without the `[TEE]` suffix, and no
+/// Claude Code labels, under a revision that did not cover display names.
+/// Those connections stay authorized, and the next reconcile updates the names
+/// as a normal catalog update, keeping the token and the model ids.
+#[test]
+fn older_connections_without_tee_names_update_on_the_next_reconcile() {
+    fn older(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::String(text) => *text = text.replace(" [TEE]", ""),
+            serde_json::Value::Array(items) => items.iter_mut().for_each(older),
+            serde_json::Value::Object(object) => {
+                if object.contains_key("model") {
+                    object.remove("label");
+                }
+                object.values_mut().for_each(older);
+            }
+            _ => {}
+        }
+    }
+    let catalog = Catalog::from_remote(
+        &json!({"data": [
+            {"id": "openai/gpt-oss-120b", "name": "OpenAI: GPT OSS 120B", "is_tee": true},
+            {"id": "phala/qwen", "is_tee": true}
+        ]}),
+        1,
+    )
+    .unwrap();
+    // What older builds computed: the listed entries only.
+    let mut hasher = Sha256::new();
+    for model in &catalog.models {
+        let canonical = serde_json::to_vec(&model.remote).unwrap();
+        hasher.update((canonical.len() as u64).to_be_bytes());
+        hasher.update(&canonical);
+    }
+    let older_revision = hex::encode(hasher.finalize());
+    let options = ConnectOptions {
+        default_model: Some("openai/gpt-oss-120b".to_string()),
+    };
+    for agent in [
+        Agent::Codex,
+        Agent::ClaudeCode,
+        Agent::OpenCode,
+        Agent::Pi,
+        Agent::OhMyPi,
+        Agent::OpenClaw,
+    ] {
+        let sandbox = sandbox(&format!("older-names-{}", agent.id()));
+        fs::create_dir_all(agent.config_path(&sandbox.home, false).parent().unwrap()).unwrap();
+        assert!(apply_connect(&sandbox, agent, &catalog, &options).authorized);
+        let token = sandbox.projector.tokens.read(agent.id()).unwrap();
+        let path = if agent == Agent::Codex {
+            sandbox.projector.codex_catalog_path()
+        } else {
+            agent.config_path(&sandbox.home, false)
+        };
+        let connected = fs::read_to_string(&path).unwrap();
+        assert!(
+            connected.contains("OpenAI: GPT OSS 120B [TEE]")
+                && connected.contains("phala/qwen [TEE]"),
+            "{}",
+            agent.id()
+        );
+        let text = match serde_json::from_str::<serde_json::Value>(&connected) {
+            Ok(mut value) => {
+                older(&mut value);
+                serde_json::to_string_pretty(&value).unwrap()
+            }
+            Err(_) => connected.replace(" [TEE]", ""),
+        };
+        write(&path, &text);
+        let store = sandbox.projector.store_path();
+        let mut record: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&store).unwrap()).unwrap();
+        older(&mut record);
+        record[agent.id()]["catalog_revision"] = json!(older_revision);
+        write(&store, &serde_json::to_string(&record).unwrap());
+
+        let (statuses, _) = sandbox.projector.scan(Some(&catalog)).unwrap();
+        let status = agent_status(&statuses, agent);
+        assert!(status.authorized, "{}: {:?}", agent.id(), status.attention);
+        assert!(sandbox
+            .projector
+            .reconcile(Some(&catalog))
+            .unwrap()
+            .is_empty());
+        let (statuses, _) = sandbox.projector.scan(Some(&catalog)).unwrap();
+        let status = agent_status(&statuses, agent);
+        assert!(status.authorized, "{}: {:?}", agent.id(), status.attention);
+        assert_eq!(sandbox.projector.tokens.read(agent.id()).unwrap(), token);
+        let updated = fs::read_to_string(&path).unwrap();
+        assert!(
+            updated.contains("OpenAI: GPT OSS 120B [TEE]") && updated.contains("phala/qwen [TEE]"),
+            "{}",
+            agent.id()
+        );
+        assert!(apply_connect(&sandbox, agent, &catalog, &options).authorized);
     }
 }
