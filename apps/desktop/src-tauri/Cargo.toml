@@ -47,6 +47,9 @@ futures-util = "0.3"
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = ["Foundation", "UI_Notifications", "UI_ViewManagement"] }
 windows-registry = "0.6.1"
+# The versions Tauri's WebView2 runtime uses, for the webview's settings.
+webview2-com = "0.38"
+windows-version = "0.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"

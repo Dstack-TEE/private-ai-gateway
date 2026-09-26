@@ -4,7 +4,7 @@ use desktop_core::{
     agents::Agent,
     brand::AboutLink,
     client::{CallError, Client},
-    contracts::ServiceProvider,
+    contracts::{Confirmation, ServiceProvider},
 };
 use tauri::{AppHandle, Manager, State, WebviewWindow};
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -107,6 +107,77 @@ pub(crate) fn show_edit_menu(window: WebviewWindow, editable: bool) -> Result<()
     window
         .popup_menu(&menu)
         .map_err(|_| "Cannot open editing menu".into())
+}
+
+/// Asks for a decision in an alert sheet on the window (NSAlert): the confirm
+/// button is the default (Return) button and Cancel takes Escape; `true` when
+/// the user confirms. Only macOS uses it: on Windows and Linux the system
+/// message dialogs (through rfd) can't make Cancel the default button or, on
+/// Linux, attach to the window, so the window's own dialog asks there.
+#[tauri::command]
+pub(crate) async fn show_confirmation(
+    window: WebviewWindow,
+    confirmation: Confirmation,
+) -> Result<bool, CallError> {
+    #[cfg(target_os = "macos")]
+    {
+        ask_in_sheet(window, confirmation).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, confirmation);
+        Err("The system alert is only used on macOS".into())
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn ask_in_sheet(
+    window: WebviewWindow,
+    confirmation: Confirmation,
+) -> Result<bool, CallError> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    let Confirmation {
+        title,
+        message,
+        confirm_label,
+        cancel_label,
+        destructive,
+    } = confirmation;
+    let cancel_label = cancel_label.unwrap_or_else(|| "Cancel".into());
+    if [&title, &message, &confirm_label, &cancel_label]
+        .iter()
+        .any(|text| text.trim().is_empty() || text.len() > 4_096)
+    {
+        return Err("Invalid confirmation".into());
+    }
+    let (send, receive) = tokio::sync::oneshot::channel();
+    window
+        .dialog()
+        .message(message)
+        .title(title)
+        .kind(if destructive.unwrap_or(false) {
+            MessageDialogKind::Warning
+        } else {
+            MessageDialogKind::Info
+        })
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            confirm_label,
+            cancel_label,
+        ))
+        .parent(&window)
+        .show(move |confirmed| {
+            let _ = send.send(confirmed);
+        });
+    Ok(receive
+        .await
+        .map_err(|_| "The confirmation could not complete")?)
+}
+
+/// Quits the app and leaves the background service running, like Quit in the
+/// tray menu.
+#[tauri::command]
+pub(crate) fn quit_app(app: AppHandle) {
+    app.exit(0);
 }
 
 #[tauri::command]

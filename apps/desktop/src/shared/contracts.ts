@@ -3,6 +3,7 @@ import type {
   AboutLink,
   Appearance,
   ConfidentialProfileInput,
+  Confirmation,
   AccountBalance,
   AccountBalanceTarget,
   AccountLoginDetails,
@@ -58,6 +59,12 @@ export interface DesktopApi {
   setCliRegistration(installed: boolean): Promise<CliRegistration>;
   onStopAllRequest(listener: () => void): () => void;
   stopAllAndQuit(): Promise<void>;
+  /** Asks in an alert sheet on the window; the macOS app only. */
+  showConfirmation(confirmation: Confirmation): Promise<boolean>;
+  /** Closes the window as its close button does; the app keeps running. Desktop only. */
+  closeWindow(): Promise<void>;
+  /** Quits the app and leaves the background service running; desktop only. */
+  quit(): Promise<void>;
   copyText(text: string): Promise<void>;
   getClientKey(): Promise<string>;
   rotateClientKey(): Promise<string>;

@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use tauri::{
     menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder, Submenu},
-    tray::TrayIconBuilder,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, Wry,
 };
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -100,7 +100,23 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         .icon_as_template(cfg!(target_os = "macos"))
         .tooltip(tooltip(&protection.title))
         .menu(&menu)
-        .show_menu_on_left_click(true)
+        // Windows opens a notification area app's window on a left click and
+        // its menu on a right click; macOS and Linux show the menu.
+        .show_menu_on_left_click(!cfg!(target_os = "windows"))
+        .on_tray_icon_event(|tray, event| {
+            if cfg!(target_os = "windows")
+                && matches!(
+                    event,
+                    TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    }
+                )
+            {
+                show_window(tray.app_handle());
+            }
+        })
         .on_menu_event(|app, event| match event.id().as_ref() {
             "toggle" => toggle_or_open_settings(app),
             "open" => show_window(app),

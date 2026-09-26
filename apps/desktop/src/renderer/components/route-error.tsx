@@ -1,6 +1,7 @@
 import { useQueryErrorResetBoundary } from "@tanstack/react-query";
 import { useRouter, type ErrorComponentProps } from "@tanstack/react-router";
 import { TriangleAlert } from "lucide-react";
+import { titleBarDragRegion } from "../lib/environment";
 import { errorMessage } from "../lib/error-message";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "./ui/alert";
 import { Button } from "./ui/button";
@@ -16,11 +17,12 @@ export function PageError({ error }: ErrorComponentProps) {
 
 /**
  * The window's layout or the sign-in page failed to render. It fills the
- * window, clear of the macOS title bar controls, and keeps a drag region.
+ * window, clear of the macOS title bar controls, and keeps a drag region
+ * where the title bar is overlaid.
  */
 export function WindowError({ error }: ErrorComponentProps) {
   return <main className="grid min-h-svh place-items-center bg-background px-4 pt-12 pb-4 text-foreground">
-    <div className="fixed inset-x-0 top-0 h-10" data-tauri-drag-region />
+    <div className="fixed inset-x-0 top-0 h-10" {...titleBarDragRegion} />
     <div className="w-full max-w-lg"><ErrorNotice error={error} /></div>
   </main>;
 }
@@ -40,7 +42,7 @@ function ErrorNotice({ error }: { error: unknown }) {
     <AlertDescription>
       <p>Try again. If it keeps happening, export diagnostics from Settings and report the problem.</p>
       <details className="mt-2">
-        <summary className="cursor-pointer">Details</summary>
+        <summary>Details</summary>
         <p className="mt-1 font-mono text-xs wrap-anywhere">{errorMessage(error)}</p>
       </details>
     </AlertDescription>

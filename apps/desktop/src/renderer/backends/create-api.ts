@@ -44,6 +44,9 @@ export interface UiPlatform {
   getCliRegistration(): Promise<CliRegistration>;
   setCliRegistration(installed: boolean): Promise<CliRegistration>;
   stopAllAndQuit(): Promise<void>;
+  showConfirmation: DesktopApi["showConfirmation"];
+  closeWindow(): Promise<void>;
+  quit(): Promise<void>;
   copyText(text: string): Promise<void>;
   selectProfileBackup(): Promise<ProfileBackup | null>;
   saveProfileExport(): Promise<boolean>;
@@ -98,6 +101,9 @@ export function createDesktopApi(transport: UiTransport, platform: UiPlatform): 
     setCliRegistration: platform.setCliRegistration,
     onStopAllRequest: (listener) => subscribe(CONFIRM_STOP_ALL_EVENT, listener),
     stopAllAndQuit: platform.stopAllAndQuit,
+    showConfirmation: platform.showConfirmation,
+    closeWindow: platform.closeWindow,
+    quit: platform.quit,
     copyText: platform.copyText,
     getClientKey: () => call<string>("get_client_key"),
     rotateClientKey: () => call<string>("rotate_client_key"),

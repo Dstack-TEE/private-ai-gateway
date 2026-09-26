@@ -23,9 +23,13 @@
   body { @apply select-none; }
   input, textarea, [contenteditable="true"] { @apply select-text; }
   html, body, #root { @apply size-full; }
+  /* The window doesn't scroll, so it doesn't bounce either. */
+  html, body { @apply overscroll-none; }
   body { @apply m-0 min-w-50 overflow-hidden bg-background text-sm text-foreground; }
   button, input, select { @apply [font:inherit] text-inherit; }
-  button { @apply cursor-default; }
+  /* Controls, in-app links and rows keep the arrow: the pointing hand is for
+     links to the web. */
+  a, button { @apply cursor-default; }
   button:disabled:not([data-slot]) { @apply opacity-40; }
   :focus-visible:not([data-slot], [tabindex="-1"]) { @apply outline-none ring-3 ring-ring/50; }
   /* Only script focuses a tabindex="-1" element, such as the page heading after

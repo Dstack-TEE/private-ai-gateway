@@ -98,7 +98,7 @@ function BillingBalanceButton({ balance, provider, busy, disabled = false, onOpe
   const scopeSlug = provider === "phala" ? balance.scope.workspaceSlug : balance.scope.organizationSlug;
   const amount = currency(Number(balance.balanceUsd));
   const canOpen = balance.canTopUp && Boolean(scopeSlug);
-  return <Button type="button" variant="outline" size="sm" className="tabular-nums"
+  return <Button type="button" variant="outline" size="sm" className="default-look tabular-nums"
     aria-label={canOpen ? `Current balance: ${amount}. Open billing` : `Current balance: ${amount}`}
     aria-busy={busy} disabled={disabled || !canOpen}
     title={balance.grantedUsd != null && Number(balance.grantedUsd) > 0 ? `${currency(Number(balance.grantedUsd))} promo credits` : undefined}
