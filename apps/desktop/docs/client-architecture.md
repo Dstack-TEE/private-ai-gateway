@@ -86,11 +86,16 @@ protection problems, is stored under that key.
   binding. Features never import the app.
 - Dialogs are shadcn `Dialog`s in the one window, in the desktop app and the web
   UI alike. Decisions (`useConfirm`) are an alert sheet on the window in the
-  macOS app and an `AlertDialog` on Windows, Linux and in the web UI.
+  macOS app and an `AlertDialog` on Windows, Linux and in the web UI; a
+  destructive one is always the `AlertDialog`, which focuses Cancel, so it
+  never becomes the default button.
   The shell injects the platform (`<html data-platform>`) for platform
   behaviour such as tooltip delays and drag regions; every platform and the
   web UI use the same shadcn styles. Tray and menu items show the window and
-  send `pap://navigate` for the page or dialog; one requested while a dialog is
+  leave the page or dialog they ask for in the shell, which announces it with
+  `pap://navigate`. The window takes it (`take_navigation`) once its state has
+  loaded and on each event, so a request made while the app starts is handled
+  once, with the real profiles. One requested while a dialog is
   open shows once it closes, and one requested while a confirmation asks for an
   answer is dropped, as with an alert. One app-level handler runs every native
   menu item, the tray's and the menu bar's. Failures show

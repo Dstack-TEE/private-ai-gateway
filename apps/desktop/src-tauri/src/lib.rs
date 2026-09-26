@@ -235,6 +235,7 @@ pub fn run() {
         .manage(updates::PreparedUpdate::default())
         .manage(CliStartup::default())
         .manage(tray::MainWindowPresentation::default())
+        .manage(tray::PendingNavigation::default())
         .plugin(tauri_plugin_notification::init())
         .manage(notifications::Settings::default())
         .invoke_handler(desktop_core::renderer_methods!(invoke_handler))

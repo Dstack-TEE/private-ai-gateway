@@ -2,9 +2,7 @@ import {
   AGENTS_CHANGED_EVENT,
   APPEARANCE_EVENT,
   CLIENT_KEY_CHANGED_EVENT,
-  CONFIRM_STOP_ALL_EVENT,
   LAUNCH_PREFERENCES_EVENT,
-  NAVIGATE_EVENT,
   SETTINGS_RESET_EVENT,
   STATE_EVENT,
   type AgentAccessStatus,
@@ -47,6 +45,7 @@ export interface UiPlatform {
   setCliRegistration(installed: boolean): Promise<CliRegistration>;
   stopAllAndQuit(): Promise<void>;
   showConfirmation: DesktopApi["showConfirmation"];
+  onNavigate: DesktopApi["onNavigate"];
   closeWindow: DesktopApi["closeWindow"];
   quit: DesktopApi["quit"];
   copyText(text: string): Promise<void>;
@@ -106,7 +105,6 @@ export function createDesktopApi(transport: UiTransport, platform: UiPlatform): 
     onLaunchPreferencesChange: (listener) => subscribe(LAUNCH_PREFERENCES_EVENT, listener),
     getCliRegistration: platform.getCliRegistration,
     setCliRegistration: platform.setCliRegistration,
-    onStopAllRequest: (listener) => subscribe(CONFIRM_STOP_ALL_EVENT, listener),
     stopAllAndQuit: platform.stopAllAndQuit,
     showConfirmation: platform.showConfirmation,
     closeWindow: platform.closeWindow,
@@ -133,7 +131,7 @@ export function createDesktopApi(transport: UiTransport, platform: UiPlatform): 
     resetSettings: () => call<AppState>("reset_settings"),
     onSettingsReset: (listener) => subscribe(SETTINGS_RESET_EVENT, listener),
     onStateChange: (listener) => subscribe(STATE_EVENT, listener),
-    onNavigate: (listener) => subscribe(NAVIGATE_EVENT, listener),
+    onNavigate: platform.onNavigate,
     onAgentsChange: (listener) => subscribe(AGENTS_CHANGED_EVENT, listener),
     onClientKeyChange: (listener) => subscribe(CLIENT_KEY_CHANGED_EVENT, listener),
     openAboutLink: platform.openAboutLink,

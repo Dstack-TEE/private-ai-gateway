@@ -6,6 +6,7 @@ import { afterVerification } from "../lib/use-app-state";
 import { AccountTools } from "../components/account-tools";
 import { ToggleGroup, ToggleGroupItem } from "../components/ui/toggle-group";
 import { errorMessage } from "../lib/error-message";
+import { useCopy } from "../hooks/use-copy";
 import { Check, Copy, ExternalLink, LoaderCircle, Pencil, Plus, TriangleAlert, Trash2 } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { ActionItem } from "../components/action-item";
@@ -167,6 +168,7 @@ export function ProfileEditorDialog({
   const confirm = useConfirm();
   const client = useQueryClient();
   const account = useAccountLogin(desktopApi, reportError);
+  const { copy, isCopied, status: copyStatus } = useCopy(reportError);
   const { session: login, auth: authorized } = account;
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<number>();
 
@@ -333,7 +335,7 @@ export function ProfileEditorDialog({
                   <div className="flex items-center justify-between gap-3" role="status" aria-live="polite">
                   <div className="space-y-1 text-sm"><p>Continue in your browser</p>{login.userCode && <p className="font-mono text-muted-foreground">{login.userCode}</p>}</div>
                   <div className="flex items-center gap-1">
-                    <IconButton size="icon-sm" label="Copy connection link" onClick={() => void desktopApi.copyText(login.url).catch(reportError)}><Copy aria-hidden /></IconButton>
+                    <IconButton size="icon-sm" label="Copy connection link" onClick={() => copy("Connection link", login.url)}>{isCopied(login.url) ? <Check aria-hidden /> : <Copy aria-hidden />}</IconButton>
                     <Button type="button" variant="ghost" size="sm" disabled={account.working} onClick={() => void account.cancel()}>Cancel</Button>
                   </div>
                   </div>
@@ -370,6 +372,7 @@ export function ProfileEditorDialog({
         </FieldGroup>
         </div>
         <FieldError>{error}</FieldError>
+        {copyStatus}
         <DialogFooter>
           {!isNew && <Button type="button" variant="destructive" className="sm:mr-auto" disabled={working || frozen} onClick={() => remove.mutate()}><Trash2 size={14} />Delete Profile</Button>}
           <Button type="button" variant="outline" onClick={() => void closeEditor()} disabled={saving || account.working}>Cancel</Button>

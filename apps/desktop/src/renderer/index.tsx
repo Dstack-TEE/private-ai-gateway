@@ -18,7 +18,8 @@ const tooltipDelay = platform === "macos" ? 1_000 : platform ? 500 : 0;
 export function Renderer(): React.JSX.Element {
   // Browsers keep their own context menu, shortcuts and drop behavior.
   useEffect(() => web ? undefined : installNativeInteractions(desktopApi, platform), []);
-  // The macOS app asks in an alert sheet; Windows, Linux and the web UI in the window's dialog.
+  // The macOS app asks in an alert sheet unless the action is destructive;
+  // Windows, Linux and the web UI always ask in the window's dialog.
   return <QueryClientProvider client={queryClient}><TooltipProvider delay={tooltipDelay}><ConfirmProvider ask={platform === "macos" ? desktopApi.showConfirmation : undefined}>
     <RouterProvider router={router} />
   </ConfirmProvider></TooltipProvider></QueryClientProvider>;

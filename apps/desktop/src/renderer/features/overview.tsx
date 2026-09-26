@@ -62,8 +62,6 @@ export function OverviewPage(): React.JSX.Element {
             proxyUrl={state.proxyUrl}
             clientKey={shell.clientKey}
             clientKeyVisible={shell.clientKeyVisible}
-            copied={shell.copied}
-            onCopy={shell.copy}
             onToggleKey={shell.toggleClientKey}
           />
         </OverviewModule>

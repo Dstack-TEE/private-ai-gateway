@@ -1,14 +1,14 @@
-import React, { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import React, { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Outlet, useMatches, useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { useAgents } from "./hooks/use-agents";
 import { useAppState } from "./lib/use-app-state";
-import { errorMessage, toastError } from "./lib/error-message";
+import { toastError } from "./lib/error-message";
 import { useUpdates } from "./updates";
 import { INITIAL_STATE, type AboutLink, type AppState, type NavigationTarget } from "../shared/contracts";
 import { PageHeader, Sidebar } from "./components/navigation";
-import { desktopApi, distributionCapabilities, web } from "./lib/environment";
+import { desktopApi, distributionCapabilities } from "./lib/environment";
 import { unavailableState } from "./lib/protection";
 import { ShellContext, type AppDialog, type Shell } from "./lib/shell";
 import { ProfileEditorDialog, ProfilesDialog } from "./features/profiles";
@@ -52,9 +52,6 @@ function Window(): React.JSX.Element {
   const confirming = useConfirmOpen();
   const dialog = useDialog<AppDialog>();
   const { payload: shownDialog, key: dialogKey, show: openDialog } = dialog;
-  const [copied, setCopied] = useState<string>();
-  const copyTimer = useRef<number | undefined>(undefined);
-  useEffect(() => () => window.clearTimeout(copyTimer.current), []);
   const { data: clientKey = "" } = useQuery({ queryKey: ["client-key"], queryFn: () => desktopApi.getClientKey(), enabled: backendReady });
   const [clientKeyVisible, setClientKeyVisible] = useState(false);
   useEffect(() => desktopApi.onClientKeyChange((available) => {
@@ -94,14 +91,6 @@ function Window(): React.JSX.Element {
     if (next) setState(next);
   };
 
-  const copyValue = useCallback(async (label: string, value: string) => {
-    await desktopApi.copyText(value);
-    setCopied(label);
-    toast.success(`${label} copied`);
-    window.clearTimeout(copyTimer.current);
-    copyTimer.current = window.setTimeout(() => setCopied((current) => (current === label ? undefined : current)), 1_400);
-  }, []);
-
   const rotateClientKey = async (): Promise<void> => {
     try {
       client.setQueryData(["client-key"], await desktopApi.rotateClientKey());
@@ -113,28 +102,52 @@ function Window(): React.JSX.Element {
   };
 
   // Protection needs a usable profile first: create one, or fix the active one.
-  const openProfileSetup = useCallback(() => {
-    if (state.protection.phase === "starting") return;
+  const starting = state.protection.phase === "starting";
+  const openProfileSetup = () => {
+    if (starting) return;
     openDialog(state.profiles.length === 0 ? { kind: "setup-profile" } : { kind: "profiles", repair: state.profiles.some((profile) => profile.id === state.activeProfileId) });
-  }, [state, openDialog]);
+  };
 
-  // The shell's actions read only the values in its dependency list, so the
-  // context changes exactly when one of them does.
-  const shell = useMemo<Shell>(() => {
-    const starting = state.protection.phase === "starting";
-    const runAction = async (title: string, action: () => Promise<AppState | void>) => {
-      try {
-        const next = await action();
-        if (next) setState(next);
-      } catch (error) {
-        toastError(title, error);
-      }
-    };
-    const openProfiles = () => {
-      if (starting) return;
-      openDialog(state.profiles.length === 0 ? { kind: "setup-profile" } : { kind: "profiles", repair: false });
-    };
-    const toggleProtection = () => {
+  const runAction = async (title: string, action: () => Promise<AppState | void>) => {
+    try {
+      const next = await action();
+      if (next) setState(next);
+    } catch (error) {
+      toastError(title, error);
+    }
+  };
+  const resetSettings = async () => {
+    // What a reset leaves alone; the web UI has no notifications or pap command.
+    const kept = new Intl.ListFormat("en").format([
+      "Profiles", "credentials", "the Local API key", "usage history",
+      ...distributionCapabilities.notifications ? ["system notification permission"] : [],
+      ...distributionCapabilities.cliRegistration ? ["the pap command"] : [],
+    ]);
+    try {
+      if (await confirm({
+        title: "Reset settings?",
+        message: `${agents.accessStatus === "authorized" ? "Protection stops, agents disconnect and their configurations are restored," : "Protection stops"} and settings return to their defaults. ${kept} are unchanged.`,
+        confirmLabel: "Reset Settings",
+        destructive: true,
+      })) resetMutate();
+    } catch (error) {
+      toastError("Could not reset settings", error);
+    }
+  };
+  // The state changes with every backend update, so the shell is not memoized.
+  const shell: Shell = {
+    state,
+    agents,
+    updates,
+    clientKey,
+    clientKeyVisible,
+    toggleClientKey: () => setClientKeyVisible((visible) => !visible),
+    applying,
+    startingBackend: startingBackend || starting,
+    startBackend: () => {
+      if (!startingBackend) startBackend();
+    },
+    toggleProtection: () => {
       const { action } = state.protection;
       if (!action.enabled) return;
       if (action.operation === "setUpProfile") {
@@ -143,49 +156,18 @@ function Window(): React.JSX.Element {
       }
       void runAction(action.operation === "stop" ? "Could not stop protection" : "Could not start protection", () =>
         action.operation === "stop" ? desktopApi.stop() : desktopApi.start(state.config));
-    };
-    const resetSettings = async () => {
-      // A browser has no window of the app to resize.
-      const resetItems = new Intl.ListFormat("en").format([
-        "appearance", "notifications", "startup preferences", "development OS policy", "update channel",
-        "Local API settings", "web UI settings", ...web ? [] : ["window size"],
-      ]);
-      try {
-        if (await confirm({
-          title: "Reset settings?",
-          message: `${agents.accessStatus === "authorized" ? "Stop protection, disconnect all agents and restore their configurations," : "Stop protection"} and reset ${resetItems}. Profiles, credentials, the Local API key, and usage history are kept. This does not change system notification permission${distributionCapabilities.cliRegistration ? " or remove the pap command" : ""}.`,
-          confirmLabel: "Reset Settings",
-          destructive: true,
-        })) resetMutate();
-      } catch (error) {
-        toastError("Could not reset settings", error);
-      }
-    };
-    return {
-      state,
-      agents,
-      updates,
-      clientKey,
-      clientKeyVisible,
-      toggleClientKey: () => setClientKeyVisible((visible) => !visible),
-      copied,
-      copyValue,
-      copy: (label, value) => void runAction(`Could not copy the ${label.toLowerCase()}`, () => copyValue(label, value)),
-      applying,
-      startingBackend: startingBackend || starting,
-      startBackend: () => {
-        if (!startingBackend) startBackend();
-      },
-      toggleProtection,
-      setRequireProductionOs: (required) => {
-        if (!applying) setRequireProductionOs(required);
-      },
-      resetSettings: () => void resetSettings(),
-      openDialog,
-      openProfiles,
-      openAboutLink: (target: AboutLink) => void runAction("Could not open the link", () => desktopApi.openAboutLink(target)),
-    };
-  }, [state, agents, updates, clientKey, clientKeyVisible, copied, copyValue, applying, startingBackend, startBackend, setRequireProductionOs, resetMutate, setState, openDialog, openProfileSetup, confirm]);
+    },
+    setRequireProductionOs: (required) => {
+      if (!applying) setRequireProductionOs(required);
+    },
+    resetSettings: () => void resetSettings(),
+    openDialog,
+    openProfiles: () => {
+      if (starting) return;
+      openDialog(state.profiles.length === 0 ? { kind: "setup-profile" } : { kind: "profiles", repair: false });
+    },
+    openAboutLink: (target: AboutLink) => void runAction("Could not open the link", () => desktopApi.openAboutLink(target)),
+  };
 
   const requestStopAllAndQuit = useEffectEvent(async () => {
     try {
@@ -201,22 +183,28 @@ function Window(): React.JSX.Element {
       toastError("Could not stop all services", error);
     }
   });
-  useEffect(() => desktopApi.onStopAllRequest(() => { void requestStopAllAndQuit(); }), []);
 
   // A page or dialog requested by the menu bar, the tray or the Settings
   // shortcut shows once an open dialog has closed, so its draft is not lost.
   // A confirmation is answered first, as an alert is: the request ends there.
-  const deferredRequest = useRef<NavigationTarget | undefined>(undefined);
-  const show = (target: NavigationTarget) => {
+  // Stopping everything asks at once, over any dialog.
+  type PageRequest = Exclude<NavigationTarget, "confirm-stop-all">;
+  const deferredRequest = useRef<PageRequest | undefined>(undefined);
+  const show = (target: PageRequest) => {
     if (target === "profiles") shell.openProfiles();
     else if (target === "profile-setup") openProfileSetup();
     else void navigate({ to: `/${target}` });
   };
   const showRequested = useEffectEvent((target: NavigationTarget) => {
-    if (dialog.control.open) deferredRequest.current = target;
+    if (target === "confirm-stop-all") void requestStopAllAndQuit();
+    else if (dialog.control.open) deferredRequest.current = target;
     else if (!confirming) show(target);
   });
-  useEffect(() => desktopApi.onNavigate((target) => showRequested(target)), []);
+  // A request waits in the shell until the window's state and agents have
+  // loaded, so one made while the app starts sees the real profiles and
+  // agent access.
+  const ready = Boolean(appState.data || appState.error) && (agents.accessStatus !== undefined || agents.problem !== undefined);
+  useEffect(() => ready ? desktopApi.onNavigate((target) => showRequested(target)) : undefined, [ready]);
   const dialogControl = {
     ...dialog.control,
     onOpenChangeComplete: (open: boolean) => {
@@ -280,21 +268,21 @@ function Window(): React.JSX.Element {
         />}
         {shownDialog?.kind === "privacy" && <PrivacyDialog state={state} {...dialogControl} />}
         {shownDialog?.kind === "local-api" && <LocalApiDialog
-          state={state} clientKey={clientKey} clientKeyVisible={clientKeyVisible} copied={copied}
-          onCopy={copyValue} onToggleKey={() => setClientKeyVisible((visible) => !visible)}
+          state={state} clientKey={clientKey} clientKeyVisible={clientKeyVisible}
+          onToggleKey={() => setClientKeyVisible((visible) => !visible)}
           onRotate={rotateClientKey}
           onSave={(config) => applyState(() => desktopApi.saveLocalApiConfig(config))}
           {...dialogControl}
         />}
         {shownDialog?.kind === "local-api-example" && <LocalApiExamplesDialog
           apiKey={clientKey} endpoint={state.proxyUrl ?? localEndpoint(state.localApi)} models={state.catalog?.models ?? []}
-          onCopy={(value) => desktopApi.copyText(value)} {...dialogControl}
+          {...dialogControl}
         />}
         {shownDialog?.kind === "notifications" && <NotificationsDialog api={desktopApi} {...dialogControl} />}
         {shownDialog?.kind === "web-ui" && <WebUiDialog
-          state={state} copied={copied} onCopy={copyValue}
-          onSave={(config) => applyState(() => desktopApi.saveWebUi(config)).then(() => undefined, errorMessage)}
-          onSetPassword={(password) => applyState(() => desktopApi.setWebUiPassword(password)).then(() => undefined, errorMessage)}
+          state={state}
+          onSave={(config) => applyState(() => desktopApi.saveWebUi(config))}
+          onSetPassword={(password) => applyState(() => desktopApi.setWebUiPassword(password))}
           {...dialogControl}
         />}
         {shownDialog?.kind === "usage-proof" && <UsageProofDialog activity={shownDialog.activity} {...dialogControl} />}

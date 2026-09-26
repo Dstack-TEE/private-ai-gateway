@@ -3,7 +3,7 @@ import { invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
-import type { DistributionCapabilities, UiEvent, UiEventPayloads } from "../../shared/contracts";
+import { NAVIGATE_EVENT, type DesktopApi, type DistributionCapabilities, type NavigationTarget, type UiEvent, type UiEventPayloads } from "../../shared/contracts";
 import { createDesktopApi, type Backend, type UiPlatform, type UiTransport } from "./create-api";
 
 declare global {
@@ -39,6 +39,7 @@ const platform: UiPlatform = {
   setCliRegistration: (installed) => invoke("set_cli_registration", { installed }),
   stopAllAndQuit: () => invoke("stop_all_and_quit"),
   showConfirmation: (confirmation) => invoke("show_confirmation", { confirmation }),
+  onNavigate,
   // Goes through the window's close request, which hides it to the tray.
   closeWindow: () => getCurrentWebviewWindow().close(),
   quit: () => invoke("quit_app"),
@@ -64,6 +65,25 @@ function subscribe<E extends UiEvent>(event: E, listener: (payload: UiEventPaylo
   return listening((active) => appWindow.listen<UiEventPayloads[E]>(event, ({ payload }) => {
     if (active()) listener(payload);
   }));
+}
+
+/**
+ * The shell keeps a tray or menu request until the window takes it, and the
+ * event says there is one. Taking it once listening also gets a request made
+ * while the app was starting, before anything listened.
+ */
+function onNavigate(listener: Parameters<DesktopApi["onNavigate"]>[0]): () => void {
+  return listening(async (active) => {
+    const take = () => {
+      if (!active()) return;
+      invoke<NavigationTarget | null>("take_navigation").then((target) => {
+        if (target && active()) listener(target);
+      }, reportError);
+    };
+    const unlisten = await appWindow.listen(NAVIGATE_EVENT, take);
+    take();
+    return unlisten;
+  });
 }
 
 function windowFocus(setFocused: (focused: boolean) => void): () => void {

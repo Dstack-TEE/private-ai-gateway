@@ -221,7 +221,7 @@ alertsEnabled?: boolean, };
 /**
  * What a tray or menu item asks the main window to show or open.
  */
-export type NavigationTarget = "settings" | "agents" | "profiles" | "profile-setup";
+export type NavigationTarget = "settings" | "agents" | "profiles" | "profile-setup" | "confirm-stop-all";
 export type ProfileBackup = { version: number, profiles: Array<ProfileConfiguration>, };
 export type ProfileConfiguration = { name: string, provider: ServiceProvider, remoteUrl: string, };
 export type ImportResult = { imported: number, skipped: number, };
@@ -314,8 +314,8 @@ export type WebBootstrap = { version: string, };
 export type AboutLink = "documentation" | "github" | "aci";
 /**
  * A question the desktop app asks before an action (`useConfirm`). macOS
- * shows it as an alert sheet on the window; elsewhere the window's own dialog
- * asks it.
+ * shows one that is not destructive as an alert sheet on the window; the
+ * window's own dialog asks the rest, and every question elsewhere.
  */
 export type Confirmation = { title: string, message: string, confirmLabel: string, cancelLabel?: string,
 /**
@@ -331,9 +331,8 @@ export const STATE_EVENT = "pap://state";
 export const CLIENT_KEY_CHANGED_EVENT = "pap://client-key-changed";
 export const AGENTS_CHANGED_EVENT = "pap://agents-changed";
 export const NAVIGATE_EVENT = "pap://navigate";
-export const CONFIRM_STOP_ALL_EVENT = "pap://confirm-stop-all";
 /** The payload each event carries. */
-export type UiEventPayloads = { "pap://appearance": Appearance, "pap://launch-preferences": LaunchPreferences, "pap://settings-reset": null, "pap://state": AppState, "pap://client-key-changed": boolean, "pap://agents-changed": null, "pap://navigate": NavigationTarget, "pap://confirm-stop-all": null };
+export type UiEventPayloads = { "pap://appearance": Appearance, "pap://launch-preferences": LaunchPreferences, "pap://settings-reset": null, "pap://state": AppState, "pap://client-key-changed": boolean, "pap://agents-changed": null, "pap://navigate": null };
 export type UiEvent = keyof UiEventPayloads;
 export const ABOUT_LINKS: Record<AboutLink, string> = {"documentation":"https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/quickstart.md","github":"https://github.com/Dstack-TEE/private-ai-gateway","aci":"https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/attested-confidential-inference.md"};
 export const AGENTS: ReadonlyArray<{ id: string, name: string, website: string }> = [{"id":"claude-code","name":"Claude Code","website":"https://code.claude.com"},{"id":"codex","name":"Codex","website":"https://developers.openai.com/codex/cli/"},{"id":"hermes","name":"Hermes Agent","website":"https://hermes-agent.nousresearch.com"},{"id":"pi","name":"Pi","website":"https://pi.dev"},{"id":"oh-my-pi","name":"Oh My Pi","website":"https://omp.sh"},{"id":"opencode","name":"OpenCode","website":"https://opencode.ai"},{"id":"openclaw","name":"OpenClaw","website":"https://openclaw.ai"}];

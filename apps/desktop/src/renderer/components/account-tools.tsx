@@ -1,9 +1,11 @@
+import { useId } from "react";
 import { ArrowLeftRight, Ellipsis, ExternalLink } from "lucide-react";
 import type { AccountBalance, AccountBalanceTarget, AccountImages, AccountScope, DesktopApi, ServiceProvider } from "../../shared/contracts";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { currency } from "../lib/usage-presentation";
 import { Avatar, AvatarFallback, AvatarImage } from "./ui/avatar";
 import { Button } from "./ui/button";
+import { Hint } from "./hint";
 import { toastError } from "../lib/error-message";
 import { Item, ItemActions, ItemContent, ItemTitle } from "./ui/item";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
@@ -99,11 +101,15 @@ function BillingBalanceButton({ balance, provider, busy, disabled = false, onOpe
   const scopeSlug = provider === "phala" ? balance.scope.workspaceSlug : balance.scope.organizationSlug;
   const amount = currency(Number(balance.balanceUsd));
   const canOpen = balance.canTopUp && Boolean(scopeSlug);
-  return <Button type="button" variant="outline" size="sm" className="tabular-nums"
+  const promoId = useId();
+  const promo = balance.grantedUsd != null && Number(balance.grantedUsd) > 0 ? `${currency(Number(balance.grantedUsd))} promo credits` : undefined;
+  const button = <Button type="button" variant="outline" size="sm" className="tabular-nums"
     aria-label={canOpen ? `Current balance: ${amount}. Open billing` : `Current balance: ${amount}`}
-    aria-busy={busy} disabled={disabled || !canOpen}
-    title={balance.grantedUsd != null && Number(balance.grantedUsd) > 0 ? `${currency(Number(balance.grantedUsd))} promo credits` : undefined}
+    aria-describedby={promo ? promoId : undefined} aria-busy={busy} disabled={disabled || !canOpen}
     onClick={() => { if (scopeSlug) onOpen(scopeSlug); }}>{amount}</Button>;
+  // A disabled button gets no pointer events, so a wrapper takes the hint;
+  // the hint is for pointer users, and the hidden text describes the button.
+  return promo ? <Hint content={promo}><span className="inline-flex">{button}<span id={promoId} className="sr-only">{promo}</span></span></Hint> : button;
 }
 
 function useAccountPage(onError: (error: unknown) => void, disabled = false) {

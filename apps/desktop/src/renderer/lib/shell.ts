@@ -16,12 +16,6 @@ export interface Shell {
   clientKey: string;
   clientKeyVisible: boolean;
   toggleClientKey(): void;
-  /** The label of the value copied last, while it shows as copied. */
-  copied?: string;
-  /** Copies a value; rejects when it was not copied. */
-  copyValue(label: string, value: string): Promise<void>;
-  /** Copies a value and reports a failure. */
-  copy(label: string, value: string): void;
   /** A settings change is applying; controls that change settings wait. */
   applying: boolean;
   startingBackend: boolean;

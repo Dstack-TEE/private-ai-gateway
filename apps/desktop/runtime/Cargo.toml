@@ -25,7 +25,6 @@ backon = { version = "1", default-features = false, features = ["std"] }
 async-stream = "0.3"
 base64 = "0.23"
 csv = "1"
-futures-core = "0.3"
 governor = { version = "0.10", default-features = false, features = ["std", "dashmap"], optional = true }
 hex = "0.4"
 indexmap = { version = "2", features = ["serde"] }

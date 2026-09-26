@@ -49,10 +49,9 @@ export interface DesktopApi {
   onLaunchPreferencesChange(listener: (preferences: LaunchPreferences) => void): () => void;
   getCliRegistration(): Promise<CliRegistration>;
   setCliRegistration(installed: boolean): Promise<CliRegistration>;
-  onStopAllRequest(listener: () => void): () => void;
   stopAllAndQuit(): Promise<void>;
   // Desktop-only capabilities are absent in the web UI.
-  /** Asks in an alert sheet on the window; the macOS app only. */
+  /** Asks in an alert sheet on the window; the macOS app only, never for a destructive action. */
   showConfirmation: ((confirmation: Confirmation) => Promise<boolean>) | undefined;
   /** Closes the window as its close button does; the app keeps running. */
   closeWindow: (() => Promise<void>) | undefined;
@@ -85,6 +84,7 @@ export interface DesktopApi {
   resetSettings(): Promise<AppState>;
   onSettingsReset(listener: () => void): () => void;
   onStateChange(listener: (state: AppState) => void): () => void;
+  /** A request from the tray or the menu bar; one made before the window listened comes first. Desktop only. */
   onNavigate(listener: (target: NavigationTarget) => void): () => void;
   onAgentsChange(listener: () => void): () => void;
   onClientKeyChange(listener: (available: boolean) => void): () => void;
