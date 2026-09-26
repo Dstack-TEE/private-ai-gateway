@@ -40,7 +40,9 @@ Review the launcher image, gateway commit, complete compose content, and runtime
 
 ## Prepare the deployment
 
-Choose a reviewed, full 40-character gateway commit and generate a strong admin token. The admin token authorizes runtime upstream replacement.
+Replace `COMMIT_SHA` in the `gateway-pin` config of `compose.yaml` with the full commit hash (40 or 64 hex characters) of the gateway revision you reviewed. Keep it a literal value. dstack measures the compose file before variable substitution, so a commit supplied through a variable would not be part of the measured `compose_hash`, and verifiers could not tell which code runs.
+
+Generate a strong admin token. The admin token authorizes runtime upstream replacement.
 
 The checked-in upstream seed is empty. Before deployment, either:
 
@@ -52,9 +54,10 @@ The checked-in upstream seed is empty. Before deployment, either:
 Do not place plaintext credentials in measured compose content. Supply secrets through the deployment's encrypted environment, KMS, or mounted secret mechanism. Keep only secret-variable references in the manifest.
 
 dstack measures the raw manifest into `compose_hash` and publishes its
-`app_compose` preimage in the attestation report. In this manifest, the
-gateway commit and admin token remain variable references; their encrypted
-values are neither published in `app_compose` nor bound by that preimage.
+`app_compose` preimage in the attestation report. The gateway commit is a
+literal in that manifest, so the compose hash identifies the gateway source.
+The admin token stays a variable reference: its encrypted value is neither
+published in `app_compose` nor bound by the compose hash.
 
 ## One-Command Deploy
 
@@ -62,11 +65,10 @@ From this directory:
 
 ```sh
 phala deploy -n private-ai-gateway -c compose.yaml \
-  -e PRIVATE_AI_GATEWAY_REPO_COMMIT=<full-40-hex-commit> \
   -e PRIVATE_AI_GATEWAY_ADMIN_TOKEN=<long-random-admin-token>
 ```
 
-For a development deployment, [`gateway.env.example`](gateway.env.example) shows the required variables. Passing individual encrypted variables is preferable for a production deployment because it avoids a plaintext secrets file.
+For a development deployment, [`gateway.env.example`](gateway.env.example) shows the required variable. Passing individual encrypted variables is preferable for a production deployment because it avoids a plaintext secrets file.
 
 Wait for the process to build and start, then check liveness:
 
@@ -202,19 +204,20 @@ Before accepting inference, a relying party should check:
 | --- | --- |
 | Compose | Exact services, image digests, mounts, ports, configs, and secret references match reviewed policy. |
 | Launcher image | The attested digest matches the reviewed release, and its Sigstore provenance identifies the expected `Dstack-TEE/dstack-examples` workflow, ref, and commit. |
-| Gateway source | `REPO_URL` and the full `COMMIT_SHA` identify reviewed gateway source. |
+| Gateway source | `REPO_URL` and the literal `COMMIT_SHA` in the measured `gateway-pin` config identify reviewed gateway source. |
 | Gateway static config | Bind address, state paths, dstack endpoint, TLS bindings, admin posture, and middleware settings match policy. |
 | Initial upstream seed | Routes, credentials delivery, provider types, model mappings, verification pins, and refresh settings match policy. |
 | Hardware report | Quote, freshness, nonce, `report_data`, event log, measured compose, and key custody satisfy the verifier profile. |
 | TLS | The client-observed leaf SPKI matches the selected report binding. |
 | Request | The request explicitly requires ACI verification or arrives on a reviewed TEE-only route. |
 
-The gateway reports the `REPO_URL` and `COMMIT_SHA` it observed in the launcher
-config. A verifier must independently approve those values and the launcher
-image; reporting them does not make them trustworthy. It must also hash the
-published `app_compose` and match it to the pre-`system-ready` `compose-hash`
-event replayed into RTMR3. That proves the manifest was measured, not that its
-images, source, compiler, or dependencies are acceptable.
+Read `REPO_URL` and `COMMIT_SHA` from the `gateway-pin` config inside the
+published `app_compose`, after hashing `app_compose` and matching it to the
+pre-`system-ready` `compose-hash` event replayed into RTMR3. The
+`source_provenance` field of the report repeats the same values, but it is the
+gateway's own statement and not evidence. A matching compose hash proves the
+manifest was measured, not that its images, source, compiler, or dependencies
+are acceptable. Approving those is the review step.
 
 Use [Verify an attested inference](../docs/attested-confidential-inference.md) for the artifact flow. The legacy `/v1/attestation/report` endpoint is retained for compatibility; new deployment verification should use `/v1/aci/attestation`.
 

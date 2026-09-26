@@ -379,7 +379,6 @@ The repository entrypoint and deployment manifest also use:
 | `CARGO_HOME` | Cargo cache override used by `entrypoint.sh`. |
 | `RUSTUP_HOME` | Rustup state override used by `entrypoint.sh`. |
 | `CARGO_TARGET_DIR` | Cargo output override used by `entrypoint.sh`. |
-| `PRIVATE_AI_GATEWAY_REPO_COMMIT` | Compose interpolation for the git-launcher source pin. |
 | `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` | Compose interpolation for the static config's admin token. |
 
 Provider credentials belong in the upstream config or the deployment mechanism
