@@ -32,9 +32,9 @@ def main() -> None:
     parser.add_argument("--response-body", type=Path)
     parser.add_argument("--skip-expiry", action="store_true")
     parser.add_argument(
-        "--aci-bin",
-        default=os.environ.get("ACI_BIN", "aci"),
-        help="installed ACI client command (default: %(default)s)",
+        "--pap-bin",
+        default=os.environ.get("PAP_BIN", "pap"),
+        help="Private AI Proxy CLI command (default: %(default)s)",
     )
     args = parser.parse_args()
 
@@ -104,7 +104,7 @@ def run_audit(
     nonce: str | None,
 ) -> int:
     cmd = [
-        args.aci_bin,
+        args.pap_bin,
         "audit",
         "--report",
         str(report_path),
@@ -122,7 +122,7 @@ def run_audit(
         cmd.extend(["--response-body", str(args.response_body)])
     if args.skip_expiry:
         cmd.append("--skip-expiry")
-    # `aci audit --json` prints the transcript on stdout and exits non-zero
+    # `pap audit --json` prints the transcript on stdout and exits non-zero
     # when the verdict is NOT VERIFIED; pass both through.
     result = subprocess.run(cmd, cwd=ROOT, check=False)
     return result.returncode

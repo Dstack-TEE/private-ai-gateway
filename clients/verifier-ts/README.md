@@ -76,8 +76,9 @@ evidence) exactly as observed.
   verifier result for the same quote, event log, and VM configuration. See
   [How the OS image is classified](../../docs/providers/phala-direct/verification.md#how-the-os-image-is-classified).
 - **No custody check.** §9.1 check 5 (the dstack KMS chain) is not
-  implemented in either in-tree verifier; both report an honest skip
-  (conformance gaps item 1).
+  implemented in this package; it reports an honest skip. The `pap` CLI
+  checks receipt-key custody when given `--accept-subject` and
+  `--accept-dstack-kms-root-public-key`.
 - **No TLS observation in a browser.** A browser cannot see the server
   certificate, so id-6 needs the SPKI your own TLS stack observed (the
   `channel` option) — or the `pap` CLI / `pap serve` proxy, which can; with
