@@ -56,7 +56,7 @@ export function UsageRow({ activity, onOpen }: { activity: RequestActivity; onOp
           <ItemDescription>{timestamp.toLocaleDateString(undefined, { month: "short", day: "numeric" })}</ItemDescription>
         </ItemContent>
       </Item>
-      <span id={actionId} className="sr-only">View proof</span>
+      <span id={actionId} hidden>View proof</span>
     </>
   );
 }
