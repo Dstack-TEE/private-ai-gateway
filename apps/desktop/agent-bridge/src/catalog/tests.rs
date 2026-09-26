@@ -188,7 +188,8 @@ fn malformed_optional_metadata_is_omitted() {
             "pricing": {
                 "prompt": "0.000002",
                 "completion": -1,
-                "input_cache_read": "NaN"
+                "input_cache_read": "NaN",
+                "input_cache_write": 5e-8
             }
         }] }),
         1,
@@ -200,4 +201,6 @@ fn malformed_optional_metadata_is_omitted() {
     assert_eq!(model.price_per_million("prompt"), Some(2.0));
     assert_eq!(model.price_per_million("completion"), None);
     assert_eq!(model.price_per_million("input_cache_read"), None);
+    // The decimal point moves in the text; floats are not multiplied.
+    assert_eq!(model.price_per_million("input_cache_write"), Some(0.05));
 }

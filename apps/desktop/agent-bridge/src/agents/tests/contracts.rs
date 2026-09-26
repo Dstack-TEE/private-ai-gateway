@@ -250,12 +250,7 @@ fn links_survive_stop_restart_and_uninstall_without_owning_inactive_configs() {
     let sandbox = sandbox("link-lifecycle");
     let agent = Agent::ClaudeCode;
     let config = agent.config_path(&sandbox.home, false);
-    let cli = sandbox.home.join(".local/bin").join(if cfg!(windows) {
-        "claude.exe"
-    } else {
-        "claude"
-    });
-    write_executable(&cli, "test cli");
+    let directory = config.parent().unwrap().to_path_buf();
     write(
         &config,
         r#"{"model":"original","env":{"ANTHROPIC_AUTH_TOKEN":"original-secret"}}"#,
@@ -308,8 +303,7 @@ fn links_survive_stop_restart_and_uninstall_without_owning_inactive_configs() {
         .reconcile(Some(&catalog()))
         .unwrap()
         .is_empty());
-    fs::remove_file(&cli).unwrap();
-    fs::remove_file(&config).unwrap();
+    fs::remove_dir_all(&directory).unwrap();
     assert!(sandbox
         .projector
         .reconcile(Some(&catalog()))
@@ -328,7 +322,7 @@ fn links_survive_stop_restart_and_uninstall_without_owning_inactive_configs() {
         .find(|s| s.id == agent.id())
         .unwrap();
     assert!(status.connected && !status.authorized && status.attention.is_some());
-    write_executable(&cli, "test cli");
+    fs::create_dir_all(&directory).unwrap();
     assert!(sandbox
         .projector
         .reconcile(Some(&catalog()))
@@ -353,14 +347,7 @@ fn links_survive_stop_restart_and_uninstall_without_owning_inactive_configs() {
 fn temporary_connection_failure_retries_without_clearing_user_conflicts() {
     let sandbox = sandbox("transient-connect");
     let agent = Agent::OpenCode;
-    write_executable(
-        &sandbox.home.join(".opencode/bin").join(if cfg!(windows) {
-            "opencode.exe"
-        } else {
-            "opencode"
-        }),
-        "test cli",
-    );
+    fs::create_dir_all(agent.config_path(&sandbox.home, false).parent().unwrap()).unwrap();
     let options = ConnectOptions::default();
     let catalog = catalog();
     let preview = sandbox
@@ -703,13 +690,7 @@ fn opencode_limits_and_hermes_defaults_do_not_invent_metadata() {
 #[test]
 fn projections_and_codex_defaults_use_the_same_endpoint_filter() {
     let sandbox = sandbox("endpoint-filter");
-    write_executable(
-        &sandbox
-            .home
-            .join(".local/bin")
-            .join(if cfg!(windows) { "codex.exe" } else { "codex" }),
-        "test cli",
-    );
+    fs::create_dir_all(sandbox.home.join(".codex")).unwrap();
     let mut catalog = catalog();
     catalog.models[0].supported_surfaces = Some(vec![Surface::ChatCompletions]);
     catalog.models[1].supported_surfaces = Some(vec![Surface::Responses]);
@@ -755,57 +736,18 @@ fn projections_and_codex_defaults_use_the_same_endpoint_filter() {
     catalog.models[0].supported_surfaces = Some(vec![Surface::Responses]);
     catalog.models[1].supported_surfaces = Some(vec![]);
     catalog.revision = "responses-model-changed".into();
-    assert!(sandbox
-        .projector
-        .reconcile(Some(&catalog))
-        .unwrap()
-        .is_empty());
+    // Pi has no Chat Completions model left, so only it reports a failure.
+    let failures = sandbox.projector.reconcile(Some(&catalog)).unwrap();
+    assert_eq!(
+        failures
+            .iter()
+            .map(|(agent, _)| agent.as_str())
+            .collect::<Vec<_>>(),
+        ["pi"]
+    );
     assert_eq!(
         doc(&sandbox, Agent::Codex).get_str(&["model"]).as_deref(),
         Some("openai/gpt-oss-20b")
-    );
-}
-
-#[test]
-fn installation_detection_uses_executables_not_config_directories() {
-    let sandbox = sandbox("installed");
-    fs::create_dir_all(sandbox.home.join(".pi/agent")).unwrap();
-    let statuses = sandbox.projector.scan(None).unwrap().0;
-    assert!(
-        !statuses
-            .iter()
-            .find(|status| status.id == "pi")
-            .unwrap()
-            .installed
-    );
-
-    let executable =
-        sandbox
-            .home
-            .join(".local/bin")
-            .join(if cfg!(windows) { "pi.exe" } else { "pi" });
-    write_executable(&executable, "#!/bin/sh\n");
-    let statuses = sandbox.projector.scan(None).unwrap().0;
-    assert!(
-        statuses
-            .iter()
-            .find(|status| status.id == "pi")
-            .unwrap()
-            .installed
-    );
-
-    let codex = sandbox
-        .home
-        .join(".nvm/versions/node/v22.19.0/bin")
-        .join(if cfg!(windows) { "codex.cmd" } else { "codex" });
-    write_executable(&codex, "#!/bin/sh\n");
-    let statuses = sandbox.projector.scan(None).unwrap().0;
-    assert!(
-        statuses
-            .iter()
-            .find(|status| status.id == "codex")
-            .unwrap()
-            .installed
     );
 }
 
@@ -1005,9 +947,9 @@ fn drifted_or_broken_configs_deauthorize_tokens_but_stay_recoverable() {
     assert!(sandbox.secrets.holds("sk-old-secret"));
 }
 
-/// Install detection is informational only: with an empty home (and no
-/// CLI consulted), connect still previews and creates the official
-/// settings file from scratch.
+/// Detection is informational only: with an empty home (no Claude Code
+/// configuration folder yet), connect still previews and creates the
+/// official settings file from scratch.
 #[test]
 fn connect_creates_the_official_config_from_scratch() {
     let sandbox = sandbox("fresh-home");

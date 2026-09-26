@@ -855,3 +855,45 @@ fn disconnect_fails_closed_when_revocation_cannot_be_persisted() {
     disconnect(&sandbox, Agent::ClaudeCode);
     assert!(sandbox.projector.load_store().unwrap().is_empty());
 }
+
+/// Prices are written as short decimals: 5e-8 per token becomes `0.05`.
+/// Older builds wrote the float product `0.049999999999999996` into the config
+/// and, after any later save, `0.05` into the record. Those connections stay
+/// authorized and reconnect without manual edits.
+#[test]
+fn priced_catalogs_use_short_decimals_and_older_float_prices_still_match() {
+    const OLDER: &str = "0.049999999999999996";
+    let catalog = Catalog::from_remote(
+        &json!({"data": [{
+            "id": "openai/gpt-5-nano",
+            "pricing": {"prompt": "0.00000005", "completion": "0.0000004"}
+        }]}),
+        1,
+    )
+    .unwrap();
+    let options = ConnectOptions::default();
+    for agent in [Agent::Pi, Agent::OhMyPi, Agent::OpenClaw] {
+        for saved_again in [true, false] {
+            let sandbox = sandbox(&format!("older-prices-{}-{saved_again}", agent.id()));
+            apply_connect(&sandbox, agent, &catalog, &options);
+            let path = agent.config_path(&sandbox.home, false);
+            let text = fs::read_to_string(&path).unwrap();
+            assert!(
+                text.contains("0.05") && !text.contains(OLDER),
+                "{}",
+                agent.id()
+            );
+            write(&path, &text.replacen("0.05", OLDER, 1));
+            if !saved_again {
+                let store = sandbox.projector.store_path();
+                let record = fs::read_to_string(&store).unwrap();
+                write(&store, &record.replacen("0.05", OLDER, 1));
+            }
+            let (statuses, tokens) = sandbox.projector.scan(Some(&catalog)).unwrap();
+            let status = agent_status(&statuses, agent);
+            assert!(status.authorized, "{}: {:?}", agent.id(), status.attention);
+            assert!(!tokens.is_empty());
+            assert!(apply_connect(&sandbox, agent, &catalog, &options).authorized);
+        }
+    }
+}

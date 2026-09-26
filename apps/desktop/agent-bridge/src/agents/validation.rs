@@ -345,7 +345,7 @@ impl Projector {
         catalog: Option<&Catalog>,
     ) -> AgentStatus {
         let path = agent.config_path(&self.home, self.tool_env);
-        let installed = cli_installed(agent, &self.home, self.tool_env);
+        let installed = detected(agent, &self.home, self.tool_env);
         let record = self.current_record(agent, store.get(agent.id()));
         let mut status = AgentStatus {
             id: agent.id().to_string(),
@@ -417,7 +417,8 @@ impl Projector {
             status.connected = true;
             status.attention = record.attention.clone().or_else(|| {
                 (!installed).then(|| {
-                    "CLI not found; configuration stays restored until the agent is available"
+                    "The agent's configuration folder was not found; its configuration stays \
+                     restored until the agent is set up again"
                         .to_string()
                 })
             });

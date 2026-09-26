@@ -643,20 +643,14 @@ fn recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them() {
     {
         runtime_options.agent_home = Some(home.clone());
     }
-    let cli = home.join(".local/bin").join(if cfg!(windows) {
-        "claude.exe"
-    } else {
-        "claude"
-    });
-    std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
-    let codex_cli = cli.with_file_name(if cfg!(windows) { "codex.exe" } else { "codex" });
-    for path in [&cli, &codex_cli, &runtime.helper_path] {
-        std::fs::write(path, "#!/bin/sh\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
-        }
+    // Agents are detected by their configuration folders.
+    std::fs::create_dir_all(home.join(".codex")).unwrap();
+    std::fs::write(&runtime.helper_path, "#!/bin/sh\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&runtime.helper_path, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
     }
     let agent = Agent::ClaudeCode;
     let path = home.join(".claude/settings.json");

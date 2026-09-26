@@ -61,23 +61,26 @@ export function AgentsPage(): React.JSX.Element {
     <div className="max-w-230 min-h-full mt-0 mr-auto mb-0 ml-auto">
       <AgentAccessNotice status={accessStatus} busy={authorizing} onAuthorize={() => void integrations.requestAccess()} />
       {accessStatus === "authorized" && problem && <AgentDetectionNotice busy={authorizing} onRetry={() => void integrations.requestAccess()} />}
-      <SettingsSection title={accessStatus === "authorized" && !problem ? "Installed" : "Agents"} detail={accessStatus === "authorized" && !problem ? `${connected} connected` : undefined}>
+      <SettingsSection title={accessStatus === "authorized" && !problem ? "Detected" : "Agents"} detail={accessStatus === "authorized" && !problem ? `${connected} connected` : undefined}>
         {accessStatus !== "authorized" ? agents.map((agent) => (
           <AgentRow key={agent.id} agent={agent} detectionLabel={detectionLabel} disabled />
         ))
           : problem ? agents.map((agent) => (
             <AgentRow key={agent.id} agent={agent} detectionLabel="Detection unavailable" disabled />
           ))
-          : !agents.some((agent) => agent.installed) ? <EmptyState text="No installed agents found" />
+          : !agents.some((agent) => agent.installed) ? <EmptyState text="No agents detected" />
           : agents.filter((agent) => agent.installed).map((agent) => (
             <AgentRow key={agent.id} agent={agent} disabled={locked} />
           ))}
       </SettingsSection>
-      {accessStatus === "authorized" && !problem && agents.some((agent) => !agent.installed) && <SettingsSection title="Not installed">
+      {accessStatus === "authorized" && !problem && agents.some((agent) => !agent.installed) && <SettingsSection title="Not detected">
         {agents.filter((agent) => !agent.installed).map((agent) => (
           <AgentRow key={agent.id} agent={agent} disabled={locked} />
         ))}
       </SettingsSection>}
+      {accessStatus === "authorized" && !problem && <p className="mx-0.5 mt-3 text-xs leading-5 text-muted-foreground">
+        Agents are detected by the configuration folder each one creates on first run, such as ~/.codex, however it was installed. Run a new agent once to list it here; an uninstalled agent stays listed while its folder remains.
+      </p>}
     </div>
   );
 }
@@ -130,7 +133,7 @@ export function AgentRow({
     : pendingConnection !== undefined
     ? { label: pendingConnection ? "Connecting…" : "Disconnecting…", tone: "neutral" }
     : !agent.installed
-    ? { label: "Not installed", tone: "neutral" }
+    ? { label: "Not detected", tone: "neutral" }
     : agent.attention
       ? { label: "Needs attention", tone: "warning" }
       : agent.error
