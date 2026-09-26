@@ -19,6 +19,7 @@ from live_e2e.common import (  # noqa: E402
     assert_port_free,
     load_dotenv,
     load_providers,
+    pap_bin,
     run_cmd,
 )
 
@@ -46,6 +47,7 @@ def preflight(
     for binary in ("cargo", "uv"):
         if shutil.which(binary) is None:
             raise RuntimeError(f"required binary not found on PATH: {binary}")
+    pap = pap_bin()
 
     # The gateway ships a vendored confidential_verifier; an external checkout is
     # only needed when PRIVATE_AI_VERIFIER_DIR explicitly overrides it.
@@ -81,6 +83,7 @@ def preflight(
         "env_file": str(env_file),
         "private_ai_verifier_dir": str(verifier_dir),
         "dstack_endpoint": dstack_endpoint,
+        "pap_bin": pap,
     }
 
 

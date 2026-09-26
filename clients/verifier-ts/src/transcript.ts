@@ -454,8 +454,8 @@ export async function reportTranscript(
       ID_TITLES,
       'id-5',
       'skip',
-      'key-custody appraisal (§3.3) is not implemented in the in-tree verifiers (conformance gaps item 1)',
-      'custody policy not implemented',
+      'key-custody appraisal (§3.3) is not implemented in this verifier; the pap CLI checks receipt-key custody with --accept-subject and --accept-dstack-kms-root-public-key',
+      'custody not checked by this verifier',
     ),
   );
 

@@ -4,7 +4,7 @@ import secrets
 from pathlib import Path
 from typing import Any
 
-from ..common import Provider, json_bytes, request_json, run_cmd_json, write_bytes, write_json
+from ..common import Provider, json_bytes, request_json, run_pap_audit, write_bytes, write_json
 from .attested_sessions import assert_upstream_attested_sessions
 
 
@@ -96,28 +96,12 @@ def run_lifecycle_case(
         if not legacy_json.get(field):
             raise RuntimeError(f"{provider.name} legacy signature wrapper missing {field}")
 
-    verifier_summary = run_cmd_json(
-        [
-            "cargo",
-            "run",
-            "--quiet",
-            "--bin",
-            "aci",
-            "--",
-            "audit",
-            "--report",
-            str(report_path),
-            "--receipt",
-            str(receipt_path),
-            "--nonce",
-            nonce,
-            "--request-body",
-            str(request_path),
-            "--response-body",
-            str(response_path),
-            "--json",
-        ],
-        timeout=240,
+    verifier_summary = run_pap_audit(
+        report_path=report_path,
+        receipt_path=receipt_path,
+        nonce=nonce,
+        request_path=request_path,
+        response_path=response_path,
     )
     write_json(provider_dir / "user-verification-summary.json", verifier_summary)
     assert_receipt_log(provider, receipt)
@@ -132,11 +116,9 @@ def run_lifecycle_case(
         "chat_id": chat_id,
         "receipt_id": receipt_id,
         "status": status,
-        "verified": (verifier_summary.get("verdict") or {}).get("verified") is True,
+        "verified": verifier_summary["verdict"].get("verified") is True,
         "checks": {
-            check.get("id"): check.get("status")
-            for check in verifier_summary.get("checks") or []
-            if isinstance(check, dict)
+            check.get("id"): check.get("status") for check in verifier_summary["checks"]
         },
         "attested_sessions": attested_sessions,
     }
@@ -153,22 +135,23 @@ def assert_receipt_log(provider: Provider, receipt: dict[str, Any]) -> None:
     ]
     if not upstream:
         raise RuntimeError(f"{provider.name} receipt missing upstream.verified event")
-    verified = [event for event in upstream if event.get("result") == "verified"]
-    if not verified:
+    if not any(event.get("result") == "verified" for event in upstream):
         raise RuntimeError(f"{provider.name} receipt has no verified upstream event")
-    for event in verified:
-        bindings = event.get("channel_bindings")
-        if not isinstance(bindings, list) or not bindings:
-            raise RuntimeError(f"{provider.name} upstream event missing channel binding")
-        if provider.binding not in {binding.get("type") for binding in bindings}:
-            raise RuntimeError(f"{provider.name} upstream event missing {provider.binding}")
-    if provider.public_model != provider.upstream_model:
-        request_modified = any(
-            isinstance(event, dict)
-            and event.get("type") == "transparency.request_modified"
-            for event in events
+    # The channel binding lives in the cited session, checked by
+    # assert_upstream_attested_sessions. A rewrite shows as differing hashes.
+    received = event_body_hash(provider, events, "request.received")
+    forwarded = event_body_hash(provider, events, "request.forwarded")
+    if provider.public_model != provider.upstream_model and received == forwarded:
+        raise RuntimeError(
+            f"{provider.name} receipt records no model rewrite: "
+            "request.forwarded body_hash equals request.received"
         )
-        if not request_modified:
-            raise RuntimeError(
-                f"{provider.name} receipt missing transparency.request_modified"
-            )
+
+
+def event_body_hash(provider: Provider, events: list[Any], event_type: str) -> str:
+    matches = [
+        event for event in events if isinstance(event, dict) and event.get("type") == event_type
+    ]
+    if len(matches) != 1 or not isinstance(matches[0].get("body_hash"), str):
+        raise RuntimeError(f"{provider.name} receipt needs one {event_type} event with body_hash")
+    return matches[0]["body_hash"]
