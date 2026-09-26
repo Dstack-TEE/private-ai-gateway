@@ -1,6 +1,9 @@
 //! The verified remote catalog (`GET /v1/models` through the ACI verifier) is
 //! the only source of model truth. Entries are validated and preserved as the
-//! service lists them; nothing is added or inferred.
+//! service lists them; nothing is added or inferred. The display name shown
+//! in the app and agent pickers is derived from each entry and is part of the
+//! catalog revision, so connected agents pick up a new name like any other
+//! catalog update.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -179,6 +182,7 @@ impl Surface {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CatalogModel {
     pub remote: RemoteModel,
+    display_name: String,
     /// Local endpoint observations, separate from the verified remote metadata.
     /// None means this endpoint has no compatibility inventory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -207,7 +211,7 @@ impl CatalogModel {
         &self.remote.id
     }
     pub fn display_name(&self) -> &str {
-        self.remote.name.as_deref().unwrap_or(&self.remote.id)
+        &self.display_name
     }
 
     pub fn bool_field(&self, name: &str) -> Option<bool> {
@@ -258,6 +262,24 @@ impl CatalogModel {
     }
 }
 
+/// The name people see; requests always use the unchanged `id`. `[TEE]` marks
+/// models the service reports with `is_tee`, which the RedPill and Phala
+/// presets set on every model. A custom ACI service may also route to
+/// upstreams without a TEE, so an unmarked model gets no suffix.
+fn display_name(remote: &RemoteModel) -> String {
+    let name = remote
+        .name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(&remote.id);
+    if remote.extra.get("is_tee").and_then(Value::as_bool) == Some(true) && !name.ends_with("[TEE]")
+    {
+        format!("{name} [TEE]")
+    } else {
+        name.to_string()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Catalog {
     pub revision: String,
@@ -288,14 +310,16 @@ impl Catalog {
             {
                 continue;
             }
-            let canonical = serde_json::to_vec(&entry).map_err(|error| error.to_string())?;
-            hasher.update((canonical.len() as u64).to_be_bytes());
-            hasher.update(&canonical);
-            models.push(CatalogModel {
+            let model = CatalogModel {
+                display_name: display_name(&entry),
                 remote: entry,
                 supported_surfaces: None,
                 agent_surfaces: None,
-            });
+            };
+            let canonical = serde_json::to_vec(&model).map_err(|error| error.to_string())?;
+            hasher.update((canonical.len() as u64).to_be_bytes());
+            hasher.update(&canonical);
+            models.push(model);
         }
         let revision = hex::encode(hasher.finalize());
         Ok(Self {

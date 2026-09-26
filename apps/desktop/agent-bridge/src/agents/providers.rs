@@ -126,7 +126,9 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
                     serde_json::json!({
                         "replaceBuiltInOptions": true,
                         "options": catalog.models.iter().map(|model| {
-                            serde_json::json!({ "model": model.id() })
+                            serde_json::json!({
+                                "model": model.id(), "label": model.display_name(),
+                            })
                         }).collect::<Vec<_>>()
                     }),
                     catalog.models.len(),
