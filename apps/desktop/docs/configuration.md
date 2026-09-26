@@ -6,7 +6,7 @@ directory, which holds nothing else:
 | File | Holds | Permissions |
 | --- | --- | --- |
 | `config.toml` | Profiles (without keys), the active profile, the Local API and web UI listeners, appearance, notifications, update channel, Protect on launch (`connect-on-launch`), command registration | Owner-only when created; never holds a secret |
-| `credentials.toml` | The user's credentials: provider API keys (manual and account sign-in) and the web UI password hash | Always owner-only: `0600` on macOS and Linux, a protected owner-only DACL on Windows |
+| `credentials.toml` | The user's credentials: provider API keys (manual and account sign-in) and the web UI password | Always owner-only: `0600` on macOS and Linux, a protected owner-only DACL on Windows |
 | `config.schema.json` | The JSON Schema of `config.toml`, rewritten by each version | Generated |
 
 The layout follows established tools: one `config.toml` like Cargo
@@ -44,8 +44,14 @@ remote-url = "https://gateway.example"
 api-key = "sk-..."
 
 [web-ui]
-password-hash = "$argon2id$..."
+password = "..."
 ```
+
+The service generates the web UI password when none is set, as code-server
+does on first run; `pap web-ui password show` prints it and
+`pap web-ui password rotate` replaces it (see [the CLI guide](cli.md#web-ui)).
+Earlier versions kept only `password-hash`, an Argon2id hash of a chosen
+password; it keeps signing in until a new password replaces it.
 
 Usage history, agent connection records, agent tokens, caches, locks and logs
 are state, not settings; they stay in the app data directory. So does
@@ -149,7 +155,7 @@ The settings directory contains only settings, so it can be synced as a whole
 - `config.toml` is always safe to sync. Listener addresses and ports apply to
   every synced device.
 - `credentials.toml` holds only the user's credentials (API keys, the web UI
-  password hash), so it is safe to sync with `config.toml`, but it is
+  password), so it is safe to sync with `config.toml`, but it is
   plaintext: sync it only through storage you trust with those secrets.
   Otherwise leave it out and enter keys on each device.
 - `config.schema.json` is generated; each version rewrites it on start.
@@ -211,11 +217,11 @@ another device that upgraded first. Values already in the files win:
   device's 0.1 profiles whose IDs it lacks are added. Otherwise it is created
   from the 0.1 settings. Settings not taken over are listed in a notice and
   kept in `migrated-0.1/`.
-- `credentials.toml`: an existing API key or password hash stays. A 0.1 API
-  key is imported only for a profile that has none and uses the same service
-  URL and the same sign-in (a manual key, or the same provider account) as
-  this device's 0.1 profile of that ID, so a key never lands in another
-  account's profile.
+- `credentials.toml`: an existing API key, password or password hash stays.
+  A 0.1 API key is imported only for a profile that has none and uses the
+  same service URL and the same sign-in (a manual key, or the same provider
+  account) as this device's 0.1 profile of that ID, so a key never lands in
+  another account's profile.
 - `local-state.json`: always this device's; existing entries stay.
 
 A step that fails writes nothing that records it: the old files and the

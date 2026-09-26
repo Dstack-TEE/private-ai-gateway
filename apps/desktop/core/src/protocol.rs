@@ -186,8 +186,13 @@ commands! {
     RotateClientKey -> String;
     SaveLocalApiConfig { config: ListenConfig } -> AppStateWire;
     SaveWebUi { config: WebUiConfig } -> AppStateWire;
-    /// Set or clear the web UI sign-in password; every browser session ends.
-    SetWebUiPassword { password: Option<String> } -> AppStateWire;
+    /// The web UI sign-in password; `None` while only the hash an earlier
+    /// version kept is set.
+    GetWebUiPassword -> Option<String>;
+    /// Replace the web UI password with a generated one; every browser session ends.
+    RotateWebUiPassword -> String;
+    /// Set a chosen web UI password; every browser session ends.
+    SetWebUiPassword { password: String } -> AppStateWire;
     RefreshCatalog -> AppStateWire;
     ListAgents -> Vec<AgentStatus>;
     PreviewAgent { agent_id: String, connect: bool, options: ConnectOptions } -> AgentPreview;

@@ -58,7 +58,6 @@ function CliRegistrationControl(): React.JSX.Element {
 /** One scannable line, like the Local API row; the sheet holds the controls. */
 function webUiSummary(status: WebUiStatus): string {
   if (!status.enabled) return "Off";
-  if (!status.passwordSet) return "Set a password to turn it on";
   if (!status.url) return status.error ?? "Starting…";
   const network = localAddressKind(status.listenAddress) !== "loopback";
   return `${status.listenAddress}:${status.port} · ${network ? "Network access over unencrypted HTTP" : "This device only"}`;

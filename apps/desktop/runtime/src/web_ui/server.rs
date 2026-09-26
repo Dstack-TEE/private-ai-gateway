@@ -15,7 +15,6 @@ use axum::{
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
-use serde_json::json;
 use tokio::{runtime::Handle, sync::Semaphore, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -28,7 +27,7 @@ use desktop_core::{
     contracts::WebBootstrap,
     listen::{url_host, ResolvedListen},
     protocol::{self, ErrorCode, BUILD_VERSION},
-    ui_api::{self, Backend, Method},
+    ui_api::Backend,
 };
 
 /// Built by `npm run build:web`; a missing bundle only disables the web UI.
@@ -40,11 +39,10 @@ struct WebAssets;
 const SESSION_ENDED: &str = "This web UI session has ended or expired. Sign in again.";
 /// The same answer whether the password is wrong or none is set.
 const SIGN_IN_FAILED: &str = "Sign-in failed. Check the password and try again.";
-const WRONG_CURRENT_PASSWORD: &str = "The current password is incorrect.";
 const THROTTLED: &str = "Too many sign-in attempts. Wait a few seconds and try again.";
 /// At most this many password checks run at once, across all clients. Each
-/// Argon2 verification holds 19 MiB, and the per-client throttle alone admits
-/// a burst from every address.
+/// Argon2 verification of a hash from an earlier version holds 19 MiB, and the
+/// per-client throttle alone admits a burst from every address.
 const CONCURRENT_VERIFICATIONS: usize = 2;
 static VERIFICATIONS: Semaphore = Semaphore::const_new(CONCURRENT_VERIFICATIONS);
 
@@ -156,8 +154,8 @@ fn bind(address: SocketAddr) -> Result<std::net::TcpListener, String> {
     Ok(listener)
 }
 
-/// The web UI's own routes around the shared API: sign-in, the bootstrap, a
-/// password change that proves the current password, and the page.
+/// The web UI's own routes around the shared API: sign-in, the bootstrap and
+/// the page.
 pub(crate) fn routes<B: Backend>(routes: Router<Api<B>>) -> Router<Api<B>> {
     routes
         .route("/api/session", post(session).delete(sign_out))
@@ -218,9 +216,7 @@ impl Gate {
                 ));
             }
         }
-        request
-            .extensions_mut()
-            .insert(Caller::Browser { session, peer });
+        request.extensions_mut().insert(Caller::Browser { session });
         request.extensions_mut().insert(self.clone());
         secure_response(next.run(request).await)
     }
@@ -334,14 +330,6 @@ fn session_cookie(name: &str, token: &str) -> Cookie<'static> {
         .build()
 }
 
-/// Sets a fresh session cookie, or expires the request's one when `token` is `None`.
-fn set_session(jar: CookieJar, name: &str, token: Option<&str>) -> CookieJar {
-    match token {
-        Some(token) => jar.add(session_cookie(name, token)),
-        None => expire_session(jar, name),
-    }
-}
-
 /// Expires the session cookie the request carried; without one it sets nothing.
 fn expire_session(jar: CookieJar, name: &str) -> CookieJar {
     jar.remove(session_cookie(name, ""))
@@ -394,51 +382,6 @@ async fn session(
         StatusCode::NO_CONTENT,
     )
         .into_response()
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PasswordChange {
-    password: Option<String>,
-    current_password: Option<String>,
-}
-
-/// `set_web_ui_password` from a browser, which `api::rpc` routes here: it must
-/// prove the current password before changing or clearing it, and draws from
-/// its client's throttle budget to do so. The change ends every session, so
-/// the caller receives a fresh session cookie.
-pub(crate) async fn change_password<B: Backend>(
-    api: &Api<B>,
-    gate: &Gate,
-    peer: IpAddr,
-    headers: &HeaderMap,
-    params: serde_json::Value,
-) -> Response {
-    let Ok(change) = serde_json::from_value::<PasswordChange>(params) else {
-        return api::error(protocol::Error::invalid_request());
-    };
-    let jar = CookieJar::from_headers(headers);
-    if !gate.throttle.allow(peer) {
-        return throttled();
-    }
-    if gate.auth.has_password() {
-        let auth = gate.auth.clone();
-        let current = change.current_password.unwrap_or_default();
-        let verified = verify(move || auth.verify_password(&current))
-            .await
-            .unwrap_or(false);
-        if !verified {
-            return api::error(protocol::Error::invalid_state(WRONG_CURRENT_PASSWORD));
-        }
-    }
-    let params = json!({ "password": change.password });
-    match ui_api::invoke(&api.backend, &api.host, Method::SetWebUiPassword, params).await {
-        Ok(result) => {
-            let jar = set_session(jar, &gate.cookie, gate.auth.open_session().as_deref());
-            (jar, Json(json!({ "result": result }))).into_response()
-        }
-        Err(error) => api::error(error.into_api()),
-    }
 }
 
 /// Signs this browser out; other browser sessions stay open.
@@ -508,7 +451,7 @@ mod tests {
     use super::*;
     use axum::extract::connect_info::MockConnectInfo;
     use desktop_core::{client::CallError, contracts::AppState, protocol::Command};
-    use serde_json::Value;
+    use serde_json::{json, Value};
     use tokio::sync::watch;
     use tower::ServiceExt;
 
@@ -517,24 +460,17 @@ mod tests {
 
     const PASSWORD: &str = "correct horse battery";
 
-    /// Answers `stop` and applies password changes the way the service does.
+    /// Answers `stop` and refuses everything else, as the service may.
     #[derive(Clone)]
-    struct FakeBackend(Arc<Auth>);
+    struct FakeBackend;
 
     impl Backend for FakeBackend {
         async fn execute(&self, command: Command) -> Result<Value, CallError> {
-            let invalid = |message: String| CallError::Api(protocol::Error::invalid_state(message));
             match command {
                 Command::Stop {} => Ok(serde_json::to_value(AppState::default()).unwrap()),
-                Command::SetWebUiPassword { password } => {
-                    let hash = password
-                        .map(|password| super::super::password::hash(&password))
-                        .transpose()
-                        .map_err(invalid)?;
-                    self.0.set_password(hash);
-                    Ok(serde_json::to_value(AppState::default()).unwrap())
-                }
-                _ => Err(invalid("Stop protection before changing this".into())),
+                _ => Err(CallError::Api(protocol::Error::invalid_state(
+                    "Stop protection before changing this",
+                ))),
             }
         }
     }
@@ -562,7 +498,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let (states, receiver) = watch::channel(AppState::default());
         let router = api::router(Api {
-            backend: FakeBackend(auth.clone()),
+            backend: FakeBackend,
             host: ServiceHost::default(),
             states: receiver,
             shutdown: shutdown.clone(),
@@ -608,18 +544,6 @@ mod tests {
         .await
     }
 
-    async fn change_password(router: &Router, token: &str, body: Value) -> Response {
-        send(
-            router,
-            request(HttpMethod::POST, "/api/rpc/set_web_ui_password")
-                .header(header::COOKIE, cookie(token))
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
-        .await
-    }
-
     fn cookie(token: &str) -> String {
         format!("{}={token}", cookie_name(3210))
     }
@@ -638,7 +562,9 @@ mod tests {
     }
 
     fn set_password(auth: &Auth, password: &str) {
-        auth.set_password(Some(super::super::password::hash(password).unwrap()));
+        auth.set_password(Some(super::super::password::Secret::Password(
+            password.into(),
+        )));
     }
 
     async fn json_body(response: Response) -> Value {
@@ -810,94 +736,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn changing_the_password_needs_the_current_one_and_ends_other_sessions() {
+    async fn browsers_cannot_read_or_change_the_password_by_any_spelling() {
         let fixture = fixture();
         set_password(&fixture.auth, PASSWORD);
         let token = fixture.auth.sign_in(PASSWORD).unwrap();
-        let other = fixture.auth.sign_in(PASSWORD).unwrap();
-        let next = "another long passphrase";
-        for current in [None, Some("wrong horse battery")] {
-            let refused = change_password(
-                &fixture.router,
-                &token,
-                json!({ "password": next, "currentPassword": current }),
-            )
-            .await;
-            assert_eq!(refused.status(), StatusCode::CONFLICT);
-            assert_eq!(
-                json_body(refused).await["error"]["message"],
-                WRONG_CURRENT_PASSWORD
-            );
-        }
-        let short = change_password(
-            &fixture.router,
-            &token,
-            json!({ "password": "short", "currentPassword": PASSWORD }),
-        )
-        .await;
-        assert_eq!(short.status(), StatusCode::CONFLICT);
-        assert!(fixture.auth.authorize(&other));
-
-        let changed = change_password(
-            &fixture.router,
-            &token,
-            json!({ "password": next, "currentPassword": PASSWORD }),
-        )
-        .await;
-        assert_eq!(changed.status(), StatusCode::OK);
-        let rotated = set_cookie(&changed).unwrap();
-        assert!(!fixture.auth.authorize(&token));
-        assert!(!fixture.auth.authorize(&other));
-        assert_eq!(
-            stop(&fixture.router, &rotated).await.status(),
-            StatusCode::OK
-        );
-        assert_eq!(fixture.auth.sign_in(PASSWORD), None);
-        assert!(fixture.auth.sign_in(next).is_some());
-
-        // Clearing it ends every session too.
-        let cleared = change_password(
-            &fixture.router,
-            &rotated,
-            json!({ "password": null, "currentPassword": next }),
-        )
-        .await;
-        assert_eq!(cleared.status(), StatusCode::OK);
-        assert!(!fixture.auth.has_password());
-        assert!(!fixture.auth.authorize(&rotated));
-    }
-
-    #[tokio::test]
-    async fn every_spelling_of_the_password_change_needs_the_current_password() {
-        let fixture = fixture();
-        set_password(&fixture.auth, PASSWORD);
-        let token = fixture.auth.sign_in(PASSWORD).unwrap();
-        for (path, status) in [
-            ("/api/rpc/set_web_ui_password", StatusCode::CONFLICT),
-            ("/api/rpc/set_web_ui%5Fpassword", StatusCode::CONFLICT),
-            ("/api/rpc/%73et_web_ui_password", StatusCode::CONFLICT),
-            ("/api/rpc/set%5Fweb%5Fui%5Fpassword", StatusCode::CONFLICT),
-            ("/api/rpc/SET_WEB_UI_PASSWORD", StatusCode::NOT_FOUND),
-            ("/api/rpc/Set_Web_Ui_Password", StatusCode::NOT_FOUND),
+        for path in [
+            "/api/rpc/get_web_ui_password",
+            "/api/rpc/rotate_web_ui_password",
+            "/api/rpc/set_web_ui_password",
+            "/api/rpc/set_web_ui%5Fpassword",
+            "/api/rpc/%73et_web_ui_password",
+            "/api/rpc/set%5Fweb%5Fui%5Fpassword",
+            "/api/rpc/SET_WEB_UI_PASSWORD",
             // U+FF44, a fullwidth "d", and a trailing NUL are other names.
-            (
-                "/api/rpc/set_web_ui_passwor%EF%BD%84",
-                StatusCode::NOT_FOUND,
-            ),
-            ("/api/rpc/set_web_ui_password%00", StatusCode::NOT_FOUND),
+            "/api/rpc/set_web_ui_passwor%EF%BD%84",
+            "/api/rpc/set_web_ui_password%00",
         ] {
             let response = send(
                 &fixture.router,
                 request(HttpMethod::POST, path)
                     .header(header::COOKIE, cookie(&token))
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(json!({ "password": null }).to_string()))
+                    .body(Body::from(
+                        json!({ "password": "another long passphrase" }).to_string(),
+                    ))
                     .unwrap(),
             )
             .await;
-            assert_eq!(response.status(), status, "{path}");
-            assert!(fixture.auth.has_password(), "{path}");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
         }
+        assert!(fixture.auth.authorize(&token));
     }
 
     #[tokio::test]

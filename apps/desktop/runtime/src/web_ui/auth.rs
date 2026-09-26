@@ -1,9 +1,8 @@
 //! The sign-in password and expiring browser sessions for the web UI.
 //!
-//! The password is kept only as an Argon2id hash, and session tokens only as
-//! SHA-256 digests. Signing in sets the token in an `HttpOnly` cookie; the
-//! page never sees it. Sessions end after an idle period and, however active,
-//! after an absolute lifetime. A per-client rate limit bounds sign-in attempts
+//! Session tokens are kept only as SHA-256 digests. Signing in sets the token
+//! in an `HttpOnly` cookie; the page never sees it. Sessions end after an idle
+//! period and, however active, after an absolute lifetime. A per-client rate limit bounds sign-in attempts
 //! and other unauthenticated requests.
 
 use std::{
@@ -16,7 +15,7 @@ use rand::{rngs::SysRng, TryRng};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
-use super::password;
+use super::password::Secret;
 
 pub const SESSION_IDLE: Duration = Duration::from_secs(60 * 60);
 /// Open pages keep a session active, so this bounds every session regardless.
@@ -28,8 +27,8 @@ type Digested = [u8; 32];
 #[derive(Default)]
 pub struct Auth {
     sessions: Mutex<Vec<Session>>,
-    /// Argon2id hash of the sign-in password, when one is set.
-    password: Mutex<Option<String>>,
+    /// What signs a browser in, when set.
+    password: Mutex<Option<Secret>>,
 }
 
 struct Session {
@@ -46,30 +45,25 @@ impl Session {
 }
 
 impl Auth {
-    /// Checks the password and opens a session. Slow by design; run it off the async runtime.
+    /// Checks the password and opens a session. Checking a hash from an earlier
+    /// version is slow by design; run it off the async runtime.
     pub fn sign_in(&self, password: &str) -> Option<String> {
         self.sign_in_at(password, Instant::now())
     }
 
-    /// Checks the password without opening a session. Slow by design.
-    pub fn verify_password(&self, password: &str) -> bool {
-        let hash = self.password.lock().ok().and_then(|hash| hash.clone());
-        hash.is_some_and(|hash| password::verify(&hash, password))
-    }
-
     pub fn has_password(&self) -> bool {
-        self.password.lock().is_ok_and(|hash| hash.is_some())
+        self.password.lock().is_ok_and(|secret| secret.is_some())
     }
 
-    /// Replaces the password hash and ends every session.
-    pub fn set_password(&self, hash: Option<String>) {
+    /// Replaces the password and ends every session.
+    pub fn set_password(&self, secret: Option<Secret>) {
         if let Ok(mut password) = self.password.lock() {
-            *password = hash;
+            *password = secret;
             self.revoke_all();
         }
     }
 
-    /// Opens a session for a caller that already proved the password.
+    #[cfg(test)]
     pub fn open_session(&self) -> Option<String> {
         self.open_session_at(Instant::now())
     }
@@ -95,13 +89,12 @@ impl Auth {
     }
 
     fn sign_in_at(&self, password: &str, now: Instant) -> Option<String> {
-        let hash = self.password.lock().ok()?.clone()?;
-        if !password::verify(&hash, password) {
+        let secret = self.password.lock().ok()?.clone()?;
+        if !secret.verify(password) {
             return None;
         }
         // A password changed during verification must not open a session.
-        let current = self.password.lock().ok()?;
-        if current.as_deref() != Some(hash.as_str()) {
+        if self.password.lock().ok()?.as_ref() != Some(&secret) {
             return None;
         }
         self.open_session_at(now)
@@ -166,9 +159,13 @@ mod tests {
 
     const PASSWORD: &str = "correct horse battery";
 
+    fn chosen(password: &str) -> Option<Secret> {
+        Some(Secret::Password(password.into()))
+    }
+
     fn auth() -> Auth {
         let auth = Auth::default();
-        auth.set_password(Some(password::hash(PASSWORD).unwrap()));
+        auth.set_password(chosen(PASSWORD));
         auth
     }
 
@@ -177,28 +174,35 @@ mod tests {
         let auth = Auth::default();
         assert!(!auth.has_password());
         assert_eq!(auth.sign_in(PASSWORD), None);
-        auth.set_password(Some(password::hash(PASSWORD).unwrap()));
+        auth.set_password(chosen(PASSWORD));
         assert!(auth.has_password());
         assert_eq!(auth.sign_in("wrong horse battery"), None);
         let token = auth.sign_in(PASSWORD).expect("password");
         assert!(auth.authorize(&token));
         assert!(!auth.authorize("guess"));
-        assert!(auth.verify_password(PASSWORD));
-        assert!(!auth.verify_password("wrong horse battery"));
+    }
+
+    #[test]
+    fn a_hash_from_an_earlier_version_still_signs_in() {
+        let auth = Auth::default();
+        auth.set_password(Some(Secret::Hash(
+            super::super::password::LEGACY_HASH.into(),
+        )));
+        assert_eq!(auth.sign_in("wrong horse battery"), None);
+        assert!(auth.sign_in(PASSWORD).is_some());
     }
 
     #[test]
     fn changing_or_clearing_the_password_ends_every_session() {
         let auth = auth();
         let token = auth.sign_in(PASSWORD).unwrap();
-        auth.set_password(Some(password::hash("another long passphrase").unwrap()));
+        auth.set_password(chosen("another long passphrase"));
         assert!(!auth.authorize(&token));
         assert_eq!(auth.sign_in(PASSWORD), None);
         let token = auth.sign_in("another long passphrase").unwrap();
         auth.set_password(None);
         assert!(!auth.authorize(&token));
         assert_eq!(auth.sign_in("another long passphrase"), None);
-        assert!(!auth.verify_password("another long passphrase"));
     }
 
     #[test]

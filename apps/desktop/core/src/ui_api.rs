@@ -56,6 +56,18 @@ macro_rules! methods {
 // the same parameters and answers the same result.
 crate::renderer_methods!(methods);
 
+impl Method {
+    /// Whether a web UI session may call the method. The web UI password is
+    /// read and changed only by the desktop app and CLI, as code-server and
+    /// Jupyter keep theirs outside the browser.
+    pub const fn browser_allowed(self) -> bool {
+        !matches!(
+            self,
+            Self::GetWebUiPassword | Self::RotateWebUiPassword | Self::SetWebUiPassword
+        )
+    }
+}
+
 // Events the renderer subscribes to; `src/shared/contracts.generated.ts`
 // exports the same constants.
 pub const APPEARANCE_EVENT: &str = "pap://appearance";

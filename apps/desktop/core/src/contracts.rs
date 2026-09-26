@@ -476,7 +476,8 @@ pub struct WebUiStatus {
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// Whether a sign-in password is set. The password itself never leaves the service.
+    /// Whether a sign-in password is set. State never carries the password;
+    /// the desktop app and CLI read it with `get_web_ui_password`.
     #[serde(default)]
     pub password_set: bool,
 }

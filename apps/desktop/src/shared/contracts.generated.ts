@@ -136,8 +136,8 @@ export type StartConfig = { remoteUrl: string, requireProductionOs: boolean, };
 export type ListenConfig = { listenAddress: string, allowNetworkAccess: boolean, port: number, clientHost?: string, };
 /**
  * The service-hosted browser UI. It is off until the user enables it and
- * listens on loopback unless network access is explicitly allowed. It
- * cannot turn on without a sign-in password (`pap settings set web-ui.password`).
+ * listens on loopback unless network access is explicitly allowed. Browsers
+ * sign in with a generated password (`pap web-ui password show`).
  */
 export type WebUiConfig = { enabled: boolean, listenAddress: string, allowNetworkAccess: boolean, port: number, clientHost?: string, };
 /**
@@ -149,7 +149,8 @@ export type WebUiStatus = { enabled: boolean, listenAddress: string, allowNetwor
  */
 url?: string, error?: string,
 /**
- * Whether a sign-in password is set. The password itself never leaves the service.
+ * Whether a sign-in password is set. State never carries the password;
+ * the desktop app and CLI read it with `get_web_ui_password`.
  */
 passwordSet: boolean, };
 /**
@@ -283,7 +284,7 @@ export type WebBootstrap = { version: string, };
  */
 export type AboutLink = "documentation" | "github" | "aci";
 /** A method the shared UI API accepts (`ui_api::Method`). */
-export type UiMethod = "get_state" | "start" | "stop" | "set_require_production_os" | "activate_profile" | "delete_profile" | "save_configuration" | "complete_account_login" | "begin_account_login" | "poll_account_login" | "get_account_details" | "get_account_balance" | "cancel_account_login" | "get_client_key" | "rotate_client_key" | "save_local_api_config" | "save_web_ui" | "set_web_ui_password" | "import_profiles" | "export_profiles_content" | "export_diagnostics_content" | "query_usage" | "get_usage_record" | "get_usage_receipt" | "list_agents" | "set_agent_connection" | "start_backend_service" | "save_account_login" | "get_organization_url" | "get_top_up_url" | "list_listen_addresses" | "get_agent_access" | "request_agent_access" | "get_appearance" | "set_appearance" | "get_launch_preferences" | "set_launch_preference" | "get_notification_settings" | "save_notification_settings" | "reset_settings" | "get_update_notice";
+export type UiMethod = "get_state" | "start" | "stop" | "set_require_production_os" | "activate_profile" | "delete_profile" | "save_configuration" | "complete_account_login" | "begin_account_login" | "poll_account_login" | "get_account_details" | "get_account_balance" | "cancel_account_login" | "get_client_key" | "rotate_client_key" | "save_local_api_config" | "save_web_ui" | "get_web_ui_password" | "rotate_web_ui_password" | "set_web_ui_password" | "import_profiles" | "export_profiles_content" | "export_diagnostics_content" | "query_usage" | "get_usage_record" | "get_usage_receipt" | "list_agents" | "set_agent_connection" | "start_backend_service" | "save_account_login" | "get_organization_url" | "get_top_up_url" | "list_listen_addresses" | "get_agent_access" | "request_agent_access" | "get_appearance" | "set_appearance" | "get_launch_preferences" | "set_launch_preference" | "get_notification_settings" | "save_notification_settings" | "reset_settings" | "get_update_notice";
 export const APPEARANCE_EVENT: string = "pap://appearance";
 export const LAUNCH_PREFERENCES_EVENT: string = "pap://launch-preferences";
 export const SETTINGS_RESET_EVENT: string = "pap://settings-reset";

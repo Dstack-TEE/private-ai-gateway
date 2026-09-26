@@ -81,6 +81,12 @@ pub(super) enum Action {
         #[command(subcommand)]
         command: Token,
     },
+    /// Manage the browser UI hosted by the backend.
+    #[command(name = "web-ui")]
+    WebUi {
+        #[command(subcommand)]
+        command: WebUi,
+    },
     /// Manage installation of the private-ai-proxy command.
     Cli {
         #[command(subcommand)]
@@ -121,7 +127,7 @@ pub(super) enum Service {
 pub(super) enum App {
     /// Open the installed desktop UI; its backend may start protection when Protect on launch (`connect-on-launch`) is on.
     /// Without a desktop app or graphical session, or with --web, open or print the
-    /// service-hosted web UI address (offering to enable it once a password is set).
+    /// service-hosted web UI address (offering to enable it).
     Open {
         /// Open or print the web UI address instead of opening the desktop app.
         #[arg(long)]
@@ -155,6 +161,23 @@ pub(super) enum Token {
     Show,
     /// Remove the active profile's stored service credential.
     ClearCredential,
+}
+
+#[derive(Subcommand)]
+pub(super) enum WebUi {
+    /// Show or rotate the sign-in password. Set your own with `settings set web-ui.password`.
+    Password {
+        #[command(subcommand)]
+        command: WebUiPassword,
+    },
+}
+
+#[derive(Subcommand)]
+pub(super) enum WebUiPassword {
+    /// Print the web UI password to stdout. Treat output as a secret.
+    Show,
+    /// Replace the web UI password with a generated one, signing out every browser.
+    Rotate,
 }
 
 #[derive(Subcommand)]
@@ -369,7 +392,7 @@ pub(super) enum Usage {
 
 /// A `settings set` key: the dotted path of the setting in `config.toml`
 /// (`git config` and `cargo config get` name keys the same way).
-/// `web-ui.password` sets the hash kept in `credentials.toml`.
+/// `web-ui.password` sets the password kept in `credentials.toml`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub(super) enum SettingsKey {
     #[value(name = "auto-cli-registration", alias = "autoCliRegistration")]

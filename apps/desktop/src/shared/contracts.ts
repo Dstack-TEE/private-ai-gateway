@@ -63,8 +63,12 @@ export interface DesktopApi {
   rotateClientKey(): Promise<string>;
   saveLocalApiConfig(config: ListenConfig): Promise<AppState>;
   saveWebUi(config: WebUiConfig): Promise<AppState>;
-  /** Sets or (with `null`) removes the web UI password. Browsers must prove the current one. */
-  setWebUiPassword(password: string | null, currentPassword?: string): Promise<AppState>;
+  /** The web UI password; `null` while only the hash an earlier version kept is set. Not for browsers. */
+  getWebUiPassword(): Promise<string | null>;
+  /** Replaces the web UI password with a generated one, signing out every browser. Not for browsers. */
+  rotateWebUiPassword(): Promise<string>;
+  /** Sets a chosen web UI password, signing out every browser. Not for browsers. */
+  setWebUiPassword(password: string): Promise<AppState>;
   /** Opens the listening web UI in the system browser; desktop only. */
   openWebUi(): Promise<void>;
   listListenAddresses(): Promise<ListenAddress[]>;

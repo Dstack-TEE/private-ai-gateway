@@ -54,6 +54,8 @@
     "allow-rotate-client-key",
     "allow-save-local-api-config",
     "allow-save-web-ui",
+    "allow-get-web-ui-password",
+    "allow-rotate-web-ui-password",
     "allow-set-web-ui-password",
     "allow-open-web-ui",
     "allow-list-listen-addresses",

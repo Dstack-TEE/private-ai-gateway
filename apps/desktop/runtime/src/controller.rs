@@ -357,7 +357,7 @@ impl DesktopRuntime {
         if runtime.instance.is_some() {
             runtime
                 .web_ui
-                .set_password(snapshot.credentials.web_ui.password_hash.clone());
+                .set_password(snapshot.credentials.web_ui.secret());
             runtime.open_web_ui(&snapshot.config.web_ui);
             match crate::settings::spawn_watcher(
                 &runtime.settings,

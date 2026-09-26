@@ -159,8 +159,8 @@ impl Default for NotificationPreferences {
 }
 
 /// The service-hosted browser UI. It is off until the user enables it and
-/// listens on loopback unless network access is explicitly allowed. It
-/// cannot turn on without a sign-in password (`pap settings set web-ui.password`).
+/// listens on loopback unless network access is explicitly allowed. Browsers
+/// sign in with a generated password (`pap web-ui password show`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 #[ts(optional_fields)]
@@ -237,8 +237,8 @@ struct ListenTable {
 }
 
 /// The service-hosted browser UI. It is off until the user enables it and
-/// listens on loopback unless network access is explicitly allowed. It
-/// cannot turn on without a sign-in password (`pap settings set web-ui.password`).
+/// listens on loopback unless network access is explicitly allowed. Browsers
+/// sign in with a generated password (`pap web-ui password show`).
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(
     remote = "WebUiConfig",

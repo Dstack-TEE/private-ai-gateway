@@ -301,9 +301,9 @@ function Window(): React.JSX.Element {
         />}
         {dialog?.kind === "notifications" && <NotificationsDialog {...dialogControl} />}
         {dialog?.kind === "web-ui" && <WebUiDialog
-          state={state}
+          state={state} copied={copied} onCopy={copyValue}
           onSave={(config) => applyStateAction(() => desktopApi.saveWebUi(config))}
-          onSetPassword={(password, currentPassword) => applyStateAction(() => desktopApi.setWebUiPassword(password, currentPassword))}
+          onSetPassword={(password) => applyStateAction(() => desktopApi.setWebUiPassword(password))}
           {...dialogControl}
         />}
         {dialog?.kind === "usage-proof" && <UsageProofDialog activity={dialog.activity} {...dialogControl} />}

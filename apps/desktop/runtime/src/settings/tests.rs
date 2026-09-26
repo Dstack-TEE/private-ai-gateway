@@ -239,8 +239,7 @@ fn credentials_stay_owner_only_and_errors_never_quote_values() {
     fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
     settings
         .update_credentials(|credentials| {
-            credentials.web_ui.password_hash =
-                Some(crate::web_ui::password::hash("correct horse battery").unwrap());
+            credentials.web_ui.password = Some("correct horse battery".into());
             Ok(())
         })
         .unwrap();

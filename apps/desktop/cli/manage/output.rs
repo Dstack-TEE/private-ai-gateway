@@ -1,4 +1,6 @@
-use super::{Action, Agents, App, Models, Profiles, Service, Settings, Token, Usage};
+use super::{
+    Action, Agents, App, Models, Profiles, Service, Settings, Token, Usage, WebUi, WebUiPassword,
+};
 use serde_json::Value;
 
 pub(super) fn render(action: &Action, value: &Value) -> String {
@@ -19,7 +21,7 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
             command: App::Open { .. },
         } => match value["url"].as_str() {
             Some(url) => format!(
-                "Web UI (sign in with the web UI password):\n{}{}",
+                "Web UI (sign in with `pap web-ui password show`):\n{}{}",
                 safe(url),
                 if value["browserOpened"] == true {
                     "\nOpened in your browser."
@@ -129,6 +131,16 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
         Action::Token {
             command: Token::ClearCredential,
         } => "Profile credential removed.".into(),
+        Action::WebUi {
+            command: WebUi::Password {
+                command: WebUiPassword::Show,
+            },
+        } => text(&value["password"]),
+        Action::WebUi {
+            command: WebUi::Password {
+                command: WebUiPassword::Rotate,
+            },
+        } => "Web UI password rotated.".into(),
         _ => details(value),
     }
 }

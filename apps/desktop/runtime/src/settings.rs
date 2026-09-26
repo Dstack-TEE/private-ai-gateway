@@ -76,14 +76,26 @@ pub struct ProfileCredential {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct WebUiCredential {
-    /// Argon2id PHC string of the sign-in password.
+    /// The sign-in password.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// Argon2id PHC string of a password set by an earlier version, which
+    /// kept only the hash; [`Self::password`] replaces it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub password_hash: Option<String>,
 }
 
 impl WebUiCredential {
     fn is_empty(&self) -> bool {
-        self.password_hash.is_none()
+        self.password.is_none() && self.password_hash.is_none()
+    }
+
+    pub fn secret(&self) -> Option<crate::web_ui::password::Secret> {
+        use crate::web_ui::password::Secret;
+        self.password
+            .clone()
+            .map(Secret::Password)
+            .or_else(|| self.password_hash.clone().map(Secret::Hash))
     }
 }
 
@@ -545,12 +557,15 @@ pub fn parse_credentials(text: &str) -> Result<Parsed<Credentials>, String> {
         profile.api_key = config::validate_api_key(&profile.api_key)
             .map_err(|message| invalid(vec!["profiles", id, "api-key"], message))?;
     }
+    if let Some(password) = &credentials.web_ui.password {
+        crate::web_ui::password::validate(password)
+            .map_err(|message| invalid(vec!["web-ui", "password"], message))?;
+    }
     if let Some(hash) = &credentials.web_ui.password_hash {
         if !crate::web_ui::password::is_hash(hash) {
             return Err(invalid(
                 vec!["web-ui", "password-hash"],
-                "Expected an Argon2id hash; set the password with `pap settings set web-ui.password`"
-                    .into(),
+                "Expected an Argon2id hash; replace it with `pap web-ui password rotate`".into(),
             ));
         }
     }

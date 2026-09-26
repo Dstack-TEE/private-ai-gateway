@@ -134,6 +134,12 @@ pub(crate) async fn dispatch(
         Command::SaveWebUi { config } => {
             respond_state::<rpc::SaveWebUi, _>(runtime.save_web_ui(config).await)
         }
+        Command::GetWebUiPassword {} => {
+            respond::<rpc::GetWebUiPassword, _>(runtime.web_ui_password())
+        }
+        Command::RotateWebUiPassword {} => {
+            respond::<rpc::RotateWebUiPassword, _>(runtime.rotate_web_ui_password())
+        }
         Command::SetWebUiPassword { password } => {
             respond_state::<rpc::SetWebUiPassword, _>(runtime.set_web_ui_password(password))
         }

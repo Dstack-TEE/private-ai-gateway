@@ -522,7 +522,7 @@ fn a_synced_config_on_a_second_device_keeps_its_values_and_gets_this_devices_sec
         provider = \"custom\"\n\
         remote-url = \"https://gateway.example\"\n";
     fs::write(config_dir.join(CONFIG_FILE), synced).unwrap();
-    let laptop_hash = crate::web_ui::password::hash("laptop password").unwrap();
+    let laptop_hash = "$argon2id$v=19$m=19456,t=2,p=1$PiesE0dTRXTr+ErD9FPgqg$pi4+YZvaut9BAi0h2zfrEgwKt/6n5zmYNMCYQ8FZ6mE";
     fs::write(
         config_dir.join(CREDENTIALS_FILE),
         format!("[web-ui]\npassword-hash = \"{laptop_hash}\"\n"),
@@ -550,7 +550,7 @@ fn a_synced_config_on_a_second_device_keeps_its_values_and_gets_this_devices_sec
     let credentials = read_credentials(&config_dir);
     assert_eq!(
         credentials.web_ui.password_hash.as_deref(),
-        Some(laptop_hash.as_str())
+        Some(laptop_hash)
     );
     assert_eq!(credentials.profiles["home"].api_key, "sk-home");
     assert!(!credentials.profiles.contains_key("work"));
