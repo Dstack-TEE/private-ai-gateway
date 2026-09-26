@@ -3,7 +3,7 @@ mod manage;
 
 use clap::{FromArgMatches, Subcommand};
 use desktop_core::client::CallError;
-use private_ai_proxy::{args, audit, send, serve, sessions, verify};
+use private_ai_proxy::{args, audit, curl, send, serve, sessions, verify};
 use std::{ffi::OsStr, io::IsTerminal, path::Path};
 
 #[tokio::main]
@@ -28,6 +28,7 @@ async fn main() {
         error.exit()
     });
     let json = matches.get_flag("json");
+    let mut failure_code = 1;
     let result = match args::Command::from_arg_matches(&matches) {
         Ok(command) => {
             let production = matches.get_flag("require_production_os");
@@ -36,6 +37,11 @@ async fn main() {
                 args::Command::Audit(a) => audit::run(a, production).await,
                 args::Command::Sessions(a) => sessions::run(a, production).await,
                 args::Command::Send(a) => send::run(a, production).await,
+                args::Command::Curl(a) => {
+                    // Keep pap's own failures apart from curl's exit codes.
+                    failure_code = curl::PAP_FAILURE_EXIT_CODE;
+                    curl::run(a, production).await
+                }
                 args::Command::Serve(mut a) => {
                     a.json_events |= json;
                     serve::run(a, production).await
@@ -57,7 +63,7 @@ async fn main() {
             } else {
                 eprintln!("private-ai-proxy: {error}");
             }
-            1
+            failure_code
         }
     };
     std::process::exit(code);

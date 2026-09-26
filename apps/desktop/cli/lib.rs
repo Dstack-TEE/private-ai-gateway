@@ -8,6 +8,7 @@ pub mod audit;
 mod capture;
 mod checks;
 mod client;
+pub mod curl;
 pub mod send;
 pub mod serve;
 pub mod sessions;

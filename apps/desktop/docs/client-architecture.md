@@ -39,7 +39,7 @@ invoke the same executable rather than separate binaries or crates. `aci`
 prints a one-line note toward `pap` only on an interactive terminal outside
 JSON modes, so scripted use keeps identical output.
 
-`pap verify/audit/sessions/send` do not initialize the managed backend or
+`pap verify/audit/sessions/send/curl` do not initialize the managed backend or
 read the settings files. `pap serve` streams responses immediately and audits receipts
 afterward by default. Receipt checks never gate streaming. `pap --json serve`
 emits lifecycle JSON events.

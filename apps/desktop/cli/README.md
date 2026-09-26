@@ -16,6 +16,7 @@ cargo run --package private-ai-proxy --bin private-ai-proxy -- <command> --help
 | `audit` | The same checks offline, over saved artifacts (report, receipt, bodies, session). |
 | `sessions <url>` | Audit the service's current attested sessions (spec 9.2), optionally under a `--require-claim` policy. The accepted ids are what you pin (spec 5.3). |
 | `send <url>` | One verified chat completion end to end: verify, send over the pinned channel, then verify the receipt and its cited session. |
+| `curl <https-url> -- [options]` | Verify the service, then run system curl for one request with the attested TLS key pinned. |
 | `serve <url>` | Local verifying proxy. Streams over the pinned channel, records each POST exchange's digests, and audits receipts after delivery. Receipt checks never delay response delivery. |
 
 `serve --json-events` emits JSON Lines on stdout: `ready` after verification and the listener is bound,
@@ -53,10 +54,10 @@ on the app-id the verified event log measures. The report's self-asserted
 `image_digest` is never an anchor: nothing measured corroborates it (spec
 4.1), so any app under the same KMS root could claim it. Without a policy
 id-5 is an honest skip; no trust anchors are built in. The flags sit beside
-`--accept-compose` on `verify`, `audit`, `sessions`, `send` and `serve`, and
+`--accept-compose` on `verify`, `audit`, `sessions`, `send`, `curl` and `serve`, and
 `serve`'s `ready` event reports them under `policy`.
 
-All five commands accept `--require-production-os`. Under that strict policy,
+All six commands accept `--require-production-os`. Under that strict policy,
 the client reads the RTMR3-bound `os-image-hash` and requires it to be in the
 verifier's reviewed production-image allowlist. Development and unknown hashes
 fail closed. Updating the allowlist requires a verifier release.
