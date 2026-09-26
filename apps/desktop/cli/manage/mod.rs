@@ -439,6 +439,25 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), CallError> {
                 value(client.call(rpc::ClearApiKey)?)?
             }
         },
+        Action::WebUi {
+            command: WebUi::Password { command },
+        } => match command {
+            WebUiPassword::Show => {
+                confirm(cli, "Reveal the web UI password on stdout?")?;
+                let password = client.call(rpc::GetWebUiPassword)?.ok_or(
+                    "An earlier version saved only a hash of this password, so it cannot be shown. Run `pap web-ui password rotate` to replace it.",
+                )?;
+                json!({ "password": password })
+            }
+            WebUiPassword::Rotate => {
+                confirm(
+                    cli,
+                    "Replace the web UI password and sign out every browser?",
+                )?;
+                client.call(rpc::RotateWebUiPassword)?;
+                json!({ "rotated": true })
+            }
+        },
         Action::Cli { command } => match command {
             Registration::Status => value(install::status()?)?,
             Registration::Install { directory } => value(install::install(directory.clone())?)?,
@@ -531,7 +550,7 @@ fn set_setting(
     if key == SettingsKey::WebUiPassword {
         confirm(
             cli,
-            "Change the web UI password and end every browser session?",
+            "Change the web UI password and sign out every browser?",
         )?;
         let password = read_web_ui_password(cli, input, value_stdin)?;
         return value(client.call(rpc::SetWebUiPassword { password })?);
@@ -622,9 +641,6 @@ fn open_web_ui(cli: &Cli, client: &Client) -> Result<Value, CallError> {
     Client::ensure_service()?;
     let mut status = client.state()?.web_ui;
     if !status.enabled {
-        if !status.password_set {
-            return Err("The web UI is off and has no password. Set one with `pap settings set web-ui.password`, then run `pap settings set web-ui.enabled true`.".into());
-        }
         if !cli.yes && (cli.json || cli.non_interactive || !io::stdin().is_terminal()) {
             return Err("The web UI is off. Enable it with `pap settings set web-ui.enabled true`, or rerun with --yes.".into());
         }
@@ -923,17 +939,14 @@ fn read_key(cli: &Cli, stdin: bool) -> Result<String, String> {
     let key = rpassword::prompt_password("API key: ").map_err(|_| "Cannot read credential")?;
     desktop_core::config::validate_api_key(&key)
 }
-/// Reads a new web UI password from stdin or a hidden prompt. An explicit `""`
-/// removes it; any other command-line value is refused so it never reaches argv.
-fn read_web_ui_password(
-    cli: &Cli,
-    input: Option<&str>,
-    stdin: bool,
-) -> Result<Option<String>, String> {
-    match input {
-        Some("") if !stdin => return Ok(None),
-        Some(_) => return Err("Pass the web UI password with --value-stdin or at the hidden prompt, not as an argument. Use \"\" to remove it.".into()),
-        None => {}
+/// Reads a new web UI password from stdin or a hidden prompt. A command-line
+/// value is refused so it never reaches argv.
+fn read_web_ui_password(cli: &Cli, input: Option<&str>, stdin: bool) -> Result<String, String> {
+    if input.is_some() {
+        return Err(
+            "Pass the web UI password with --value-stdin or at the hidden prompt, not as an argument."
+                .into(),
+        );
     }
     if stdin {
         if io::stdin().is_terminal() {
@@ -950,14 +963,12 @@ fn read_web_ui_password(
         let text = String::from_utf8(bytes).map_err(|_| "Password must be UTF-8")?;
         // The newline `echo` or a file adds is not part of the password.
         let text = text.strip_suffix('\n').unwrap_or(&text);
-        return Ok(Some(text.strip_suffix('\r').unwrap_or(text).to_string()));
+        return Ok(text.strip_suffix('\r').unwrap_or(text).to_string());
     }
     if !io::stdin().is_terminal() || cli.json || cli.non_interactive {
         return Err("Use --value-stdin for noninteractive password input".into());
     }
-    rpassword::prompt_password("Web UI password: ")
-        .map(Some)
-        .map_err(|_| "Cannot read the password".into())
+    rpassword::prompt_password("Web UI password: ").map_err(|_| "Cannot read the password".into())
 }
 fn parse_bool(value: &str) -> Result<bool, String> {
     value.parse().map_err(|_| "Expected true or false".into())

@@ -29,6 +29,8 @@ macro_rules! renderer_methods {
                 rotate_client_key => RotateClientKey,
                 save_local_api_config => SaveLocalApiConfig,
                 save_web_ui => SaveWebUi,
+                get_web_ui_password => GetWebUiPassword,
+                rotate_web_ui_password => RotateWebUiPassword,
                 set_web_ui_password => SetWebUiPassword,
                 import_profiles => ImportProfiles,
                 export_profiles_content => ExportProfilesContent,

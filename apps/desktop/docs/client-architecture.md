@@ -196,10 +196,11 @@ Same-user malicious code and OS administrators are outside this isolation bounda
 Clients check `GET /api/version` on each connection before calling and refuse
 another build. Shutdown names the expected instance ID. Update validation also
 checks that the running executable belongs to the current installation. A
-browser session may run only the renderer's methods; the shutdown, export and
-maintenance commands are the local owner's. Authorization follows the command
-decoded from the path, never the path's spelling: a browser changing the
-password proves the current one however it names `set_web_ui_password`. The
+browser session may run only the renderer's methods other than the web UI
+password's; the shutdown, export and maintenance commands and the password are
+the local owner's. Authorization follows the command decoded from the path,
+never the path's spelling: no spelling of `set_web_ui_password` reaches it from
+a browser. The
 local endpoint runs at most 64 requests at once and bounds response and
 event sizes and exports; accept errors such as `EMFILE` back off for a second
 instead of stopping the service, and malformed or disconnected clients close
@@ -210,10 +211,10 @@ The optional web UI is a second, browser-facing transport owned by the service.
 It is off by default and binds `127.0.0.1` unless network access is explicitly
 allowed; its listener settings share `ListenConfig` and `listen::resolve` with
 the Local API, so non-loopback addresses fail closed without confirmation.
-Setting changes apply live and bind failures are reported in state. It requires
-a sign-in password, stored only as an Argon2id hash in `credentials.toml` and set
-over the local endpoint (its root of trust) or by a signed-in browser that proves
-the current password. Signing in sets an `HttpOnly`, `SameSite=Strict` cookie
+Setting changes apply live and bind failures are reported in state. Browsers
+sign in with a password the service generates when none is set and keeps in
+`credentials.toml`; only the local endpoint (its root of trust) reads, rotates
+or sets it. Signing in sets an `HttpOnly`, `SameSite=Strict` cookie
 for an idle-expiring server-side session; mutations also need an exact
 `Origin`.
 Changing the password, disabling the web UI, moving its listener, resetting

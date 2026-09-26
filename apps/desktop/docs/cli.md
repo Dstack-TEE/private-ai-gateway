@@ -158,28 +158,40 @@ reported as a warning in the same places.
 
 The backend service can also serve the desktop renderer to a browser, like the
 web dashboards of other proxy tools. It is off by default, listens on
-`127.0.0.1` unless you allow network access, requires a sign-in password, and is
-not available in the Mac App Store build. Set it up in the desktop app's
-Settings > Web UI, or with the settings command; changes apply immediately
-without restarting the service:
+`127.0.0.1` unless you allow network access, and is not available in the Mac
+App Store build. Set it up in the desktop app's Settings > Web UI, or with the
+settings command; changes apply immediately without restarting the service:
 
 ```sh
-printf '%s\n' "$PASSWORD" | pap settings set web-ui.password --value-stdin --yes
-pap settings set web-ui.password      # or type it at a hidden prompt
 pap settings set web-ui.enabled true
+pap web-ui password show              # the sign-in password; treat the output as a secret
+pap app open --web                    # opens or prints the address
 pap settings set web-ui.port 4182     # default; must differ from the Local API (4180)
-pap settings show                     # settings, file paths, the web UI address or bind error, and passwordSet
+pap settings show                     # settings, file paths, and the web UI address or bind error
 pap settings set web-ui.enabled false # closes the listener and ends every browser session
 ```
 
-The password must be at least 12 characters (at most 256); there are no other
-composition rules. It is never accepted as a command-line argument: pass it on
-stdin with `--value-stdin` (one trailing newline is dropped) or at the hidden
-prompt. Changing it ends every browser session. While the web UI is off,
-`pap settings set web-ui.password ""` removes it. Turning the web UI on without a
-password fails with a hint to set one, and settings that turn it on without a
-password (for example a hand edit of `config.toml`) leave the listener closed
-until one is set.
+Browsers sign in with a password. As code-server does on first run, the service
+generates one (128 random bits from the operating system, as 32 hex digits)
+when none is set and keeps it in the owner-only `credentials.toml`, next to the
+provider API keys, so the desktop app and CLI can show it like the Local API
+key. The desktop Settings > Web UI shows it with Copy and **Generate New
+Password**; in a terminal:
+
+```sh
+pap web-ui password show              # asks first; --yes for scripts
+pap web-ui password rotate            # generates a new one and signs out every browser
+printf '%s\n' "$PASSWORD" | pap settings set web-ui.password --value-stdin --yes
+pap settings set web-ui.password      # or type your own at a hidden prompt
+```
+
+A password you choose must be at least 12 characters (at most 256); there are
+no other composition rules. Do not reuse a personal password: it is stored in
+plain text so the app can show it. It is never accepted as a command-line argument:
+pass it on stdin with `--value-stdin` (one trailing newline is dropped) or at
+the hidden prompt. Changing or rotating the password ends every browser
+session. Earlier versions kept only an Argon2id hash of a chosen password; it
+keeps signing in, but cannot be shown until you rotate it or set a new one.
 
 Its port may be any of 1–65535, while the Local API requires 1024 or above: the
 Local API port is written into every connected agent's configuration and must
@@ -190,7 +202,7 @@ its status. The listener otherwise uses the same rules as the Local API's
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `web-ui.password` | unset | Sign-in password; required before `web-ui.enabled` can be `true`. Read from stdin or a hidden prompt, stored only as an Argon2id hash in `credentials.toml`. |
+| `web-ui.password` | generated | Sign-in password you choose instead of the generated one. Read from stdin or a hidden prompt and kept in `credentials.toml`. |
 | `web-ui.listen-address` | `127.0.0.1` | IPv4 or IPv6 address to bind. |
 | `web-ui.allow-network-access` | `false` | Required before binding any non-loopback address. |
 | `web-ui.client-host` | unset | Hostname or IP in the printed address and accepted as `Host`. Required when listening on `0.0.0.0` or `::`. |
@@ -206,32 +218,33 @@ Browser**, and in a terminal:
 
 ```sh
 pap app open --web
+pap web-ui password show
 ```
 
 `pap app open` still opens the installed desktop app when one is present and a
 graphical session is available. Without either, or with `--web`, it opens the
 web UI address in a browser in a local graphical session (never a terminal
-browser) and prints it. The address carries no secret. When the web UI is off
-but has a password, it asks `Web UI is off. Enable it on <address>:<port>?
-[y/N]`; `--yes` enables it without prompting, and `--non-interactive` without
+browser) and prints it. The address carries no secret. When the web UI is off,
+it asks `Web UI is off. Enable it on <address>:<port>? [y/N]`; `--yes` enables it without prompting, and `--non-interactive` without
 `--yes` fails with a hint to run `pap settings set web-ui.enabled true`.
 
 Signing in sets a session cookie, so reloading and other tabs of the same
 browser share the session until it ends. Sessions end
 after an hour without requests or an open page, 12 hours after sign-in even
 while a page stays open, when the page signs out (Settings > Connections > Sign
-Out), when the password changes or is removed, when the web UI is turned off or
-its listener moves, when settings are reset, and when the service restarts. The
-page then returns to the sign-in page. A signed-in browser can change the
-password in Settings > Web UI after entering the current one; it stays signed
-in with a fresh session cookie while every other session ends.
+Out), when the password changes, when the web UI is turned off or its listener
+moves, when settings are reset, and when the service restarts. The page then
+returns to the sign-in page. Browsers cannot read or change the password; as
+with code-server and Jupyter, it is managed outside the browser.
 
 Security model:
 
-- The password is stored only as an Argon2id hash (19 MiB, 2 passes, 1 lane:
-  the OWASP minimum) in the owner-only `credentials.toml`. Settings reads,
-  `status`, `settings show`, diagnostics and logs never include the password
-  or its hash; they show only `passwordSet`.
+- The password is kept in the owner-only `credentials.toml`, like the provider
+  API keys, because the desktop app and CLI show it; a hash beside it would
+  protect nothing from someone who can read that file. Settings reads,
+  `status`, `settings show`, diagnostics and logs never include it. Sign-in
+  compares SHA-256 digests in constant time. A hash kept by an earlier
+  version is verified with Argon2id until replaced.
 - Sessions are server-side. The browser holds only a 256-bit random token in a
   `pap_session_<port>` cookie with `HttpOnly; SameSite=Strict; Path=/` and a
   12-hour `Max-Age`; the service stores only its SHA-256 digest, so page
@@ -241,9 +254,8 @@ Security model:
   separate sessions. Signing out, and any response to an ended session,
   expires the cookie.
 - The management socket or named pipe, restricted to the current user, is the
-  root of trust: the desktop app and CLI set or remove the password over it
-  without knowing the old one. A browser must already be signed in and enter
-  the current password to change it.
+  root of trust: only the desktop app and CLI read, rotate or set the password
+  over it. The web UI answers those methods as unknown.
 - The listener binds `127.0.0.1` by default. A non-loopback address fails
   closed unless `web-ui.allow-network-access` is `true`.
 - Requests must carry an allowed `Host`: the bound `IP:PORT`, the client
@@ -262,15 +274,15 @@ Security model:
   state; no CORS access is ever granted, so cross-origin pages cannot read
   responses; and the CSP sets `form-action 'none'` and `frame-ancestors 'none'`.
 - The page and its assets load without a session; every `/api` route except
-  sign-in requires one. Sign-in attempts, password changes from a browser and
-  rejected API requests draw from a per-client rate limit: a burst of 10, then
+  sign-in requires one. Sign-in attempts and rejected API requests draw from a
+  per-client rate limit: a burst of 10, then
   one every 3 seconds, answered with `429` and `Retry-After`. A wrong password
   and an unset one get the same answer. Each IPv4 address and IPv6 /64 has its
   own budget, so one client cannot delay sign-ins from others. Clients reaching
   a loopback listener through a TCP forwarder all appear as that forwarder and
   share its budget. At most two password checks run at once across all
   clients, which bounds Argon2 memory however many addresses send requests.
-  Use a long, unique password on any network listener.
+  A password you choose for a network listener should be long and unique.
 - Browser requests run through the same command admission and dispatch as the
   management endpoint, and errors carry the same sanitized messages as the
   desktop app. Responses set a restrictive CSP, `nosniff`, `no-store` and
@@ -292,8 +304,8 @@ The browser UI degrades desktop-only integration:
 
 ### Remote Access
 
-Prefer these options, in order. Each needs a password first
-(`pap settings set web-ui.password`).
+Prefer these options, in order. Sign in with the password from
+`pap web-ui password show`.
 
 1. **SSH tunnel.** Keep the listener on loopback and forward it:
 
@@ -357,8 +369,8 @@ restored from disk.
 `pap settings reset --yes` stops protection, disconnects managed agents, and
 returns every setting in `config.toml` except the profiles and the active
 profile to its default (including the Local API listener and the production OS
-policy), and removes the web UI password. Profiles, their API keys, the local
-client key and usage history are kept.
+policy), and replaces the web UI password with a new generated one. Profiles,
+their API keys, the local client key and usage history are kept.
 The same operation is available under Settings > Advanced in the desktop, which
 also disables Open at Login. CLI installation and system notification permission
 are unchanged. Failures are reported; retry after resolving the reported conflict.
@@ -469,7 +481,7 @@ directory with the home directory shown as `~`.
 | Core capability | CLI |
 | --- | --- |
 | Backend and protection lifecycle | `service`, `start`, `stop`, `status --watch` |
-| Browser management UI | `settings set web-ui.password --value-stdin`, `settings set web-ui.enabled true`, `web-ui.listen-address`/`web-ui.allow-network-access`/`web-ui.client-host`, `app open --web` |
+| Browser management UI | `settings set web-ui.enabled true`, `web-ui password show`/`rotate`, `settings set web-ui.password --value-stdin`, `web-ui.listen-address`/`web-ui.allow-network-access`/`web-ui.client-host`, `app open --web` |
 | Profile inspection, verification and selection | `profiles list/show/add/edit/verify/use/remove` |
 | Credential replacement and removal | `profiles verify --key-stdin`, `token clear-credential` |
 | Agent configuration review and restoration | `agents list/connect/disconnect/disconnect-all` |
@@ -477,6 +489,7 @@ directory with the home directory shown as `~`.
 | Usage, signed receipts, filtering, pagination, CSV and deletion | `usage list/show [--receipt]/export/clear` |
 | Settings (`config.toml`) and its schema | `settings show/set/schema` |
 | Local inference token | `token show/rotate` |
+| Web UI password | `web-ui password show/rotate`, `settings set web-ui.password` |
 | Configuration backups and redacted diagnostics | `profiles import/export`, `diagnostics` |
 | CLI registration and app opening | `cli status/install/uninstall`, `app open` |
 | Installation and connection diagnostics | `doctor` |

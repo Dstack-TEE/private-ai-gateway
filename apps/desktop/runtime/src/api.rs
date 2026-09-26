@@ -4,7 +4,8 @@
 //! when accepted (Tailscale's LocalAPI over `safesocket`), and the web UI's
 //! TCP listener, whose browsers need a session. One middleware authorizes
 //! each request by its listener; browsers may call only the renderer methods
-//! (`ui_api::Method`), as LocalAPI grants each handler by the peer's access.
+//! (`ui_api::Method`) they are allowed, as LocalAPI grants each handler by the
+//! peer's access.
 
 use std::{
     convert::Infallible,
@@ -121,12 +122,9 @@ pub(crate) enum Listener {
 pub(crate) enum Caller {
     /// The same OS user over the local endpoint: may run every command.
     Owner,
-    /// A signed-in browser: renderer methods only.
+    /// A signed-in browser: the renderer methods browsers may call.
     #[cfg_attr(not(feature = "web-ui"), allow(dead_code))]
-    Browser {
-        session: String,
-        peer: std::net::IpAddr,
-    },
+    Browser { session: String },
 }
 
 #[derive(Clone)]
@@ -196,7 +194,6 @@ async fn rpc<B: Backend>(
     State(api): State<Api<B>>,
     Extension(caller): Extension<Caller>,
     Path(name): Path<String>,
-    #[cfg_attr(not(feature = "web-ui"), allow(unused_variables))] headers: axum::http::HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let body = match body {
@@ -206,14 +203,8 @@ async fn rpc<B: Backend>(
     let Some(params) = parameters(&body) else {
         return error(protocol::Error::invalid_request());
     };
-    let method = Method::from_name(&name);
-    // A browser proves the current password; the local owner is the root of trust.
-    #[cfg(feature = "web-ui")]
-    if let (Listener::Web(gate), Caller::Browser { peer, .. }, Some(Method::SetWebUiPassword)) =
-        (&api.listener, &caller, method)
-    {
-        return crate::web_ui::change_password(&api, gate, *peer, &headers, params).await;
-    }
+    let method = Method::from_name(&name)
+        .filter(|method| matches!(caller, Caller::Owner) || method.browser_allowed());
     let result = match method {
         Some(method) => ui_api::invoke(&api.backend, &api.host, method, params).await,
         None if matches!(caller, Caller::Owner) => match Command::decode(&name, params) {
@@ -441,12 +432,12 @@ mod tests {
         )
         .await;
         assert_eq!((status, body), (StatusCode::OK, json!({ "result": null })));
-        // The owner, the root of trust, sets the web UI password without the old one.
+        // The owner, the root of trust, manages the web UI password.
         let (status, _) = call(
             &router,
             "POST",
             "/api/rpc/set_web_ui%5Fpassword",
-            r#"{"password":null}"#,
+            r#"{"password":"correct horse battery"}"#,
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -455,7 +446,7 @@ mod tests {
             [
                 json!({ "command": "get_state", "params": {} }),
                 json!({ "command": "shutdown", "params": { "instanceId": "1-2", "mode": "updateRestart" } }),
-                json!({ "command": "set_web_ui_password", "params": { "password": null } }),
+                json!({ "command": "set_web_ui_password", "params": { "password": "correct horse battery" } }),
             ]
         );
     }

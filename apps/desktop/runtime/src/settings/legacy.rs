@@ -208,12 +208,12 @@ pub(crate) fn import_settings(config_dir: &Path, data_dir: &Path) -> Result<Vec<
     let password_hash = preferences.web_ui_password_hash.clone();
     let imported = settings_from(service, local_api, preferences, &mut notices);
 
-    // Secrets first: the password hash, into credentials.toml if it has none.
+    // Secrets first: the password hash, into credentials.toml if it has no password.
     if let Some(hash) = password_hash {
         if crate::web_ui::password::is_hash(&hash) {
             let current: Credentials =
                 read_setting(config_dir, CREDENTIALS_FILE, parse_credentials)?.unwrap_or_default();
-            if current.web_ui.password_hash.is_none() {
+            if current.web_ui.is_empty() {
                 let mut next = current.clone();
                 next.web_ui.password_hash = Some(hash);
                 write(
@@ -227,7 +227,7 @@ pub(crate) fn import_settings(config_dir: &Path, data_dir: &Path) -> Result<Vec<
                 .map_err(|error| error.to_string())?;
             }
         } else {
-            notices.push("Settings: The web UI password from 0.1 could not be read; set it again with `pap settings set web-ui.password`.".to_string());
+            notices.push("Settings: The web UI password from 0.1 could not be read; sign in with the generated one from `pap web-ui password show`.".to_string());
         }
     }
 

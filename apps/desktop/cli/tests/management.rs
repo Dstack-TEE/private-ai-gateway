@@ -212,6 +212,11 @@ fn adding_a_profile_requires_consent_before_startup_or_credential_input() {
 
 impl Backend {
     fn start() -> Self {
+        Self::start_with_credentials("")
+    }
+
+    /// Starts with `credentials` as `credentials.toml`, when not empty.
+    fn start_with_credentials(credentials: &str) -> Self {
         let directory = Sandbox::new();
         let binary = |name: &str| directory.path().join(executable(name));
         install(
@@ -246,6 +251,13 @@ impl Backend {
             &format!("# Kept by every write.\n\n[local-api]\nport = {port}\n"),
         )
         .unwrap();
+        if !credentials.is_empty() {
+            desktop_core::private_fs::write_private(
+                &settings.join("credentials.toml"),
+                credentials,
+            )
+            .unwrap();
+        }
         let child = Command::new(binary("private-ai-proxy-service"))
             .env(desktop_core::paths::HOME_OVERRIDE_ENV, &home)
             .stdin(Stdio::null())
@@ -322,31 +334,19 @@ fn install(source: &str, destination: &Path) {
 const WEB_PASSWORD: &str = "correct horse battery staple";
 
 #[test]
-fn web_ui_requires_a_password_that_never_leaves_the_service() {
+fn web_ui_opens_with_a_generated_password_only_local_clients_read() {
     let backend = Backend::start();
     let status = &backend.run(&["status"])["gateway"]["webUi"];
     assert_eq!(status["enabled"], false);
-    assert_eq!(status["passwordSet"], false);
+    // Revealing the password needs consent, like `token show`.
     let refused = backend
-        .command(&["app", "open", "--web", "--non-interactive"])
+        .command(&["web-ui", "password", "show", "--json"])
         .stdin(Stdio::null())
         .output()
         .unwrap();
     assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("pap settings set web-ui.password"));
-    let refused = backend
-        .command(&[
-            "settings",
-            "set",
-            "web-ui.enabled",
-            "true",
-            "--yes",
-            "--json",
-        ])
-        .output()
-        .unwrap();
-    assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("pap settings set web-ui.password"));
+    let password = backend.web_ui_password();
+    assert_eq!(password.len(), 32, "{password}");
     // Passwords never travel in arguments.
     let refused = backend
         .command(&[
@@ -364,18 +364,16 @@ fn web_ui_requires_a_password_that_never_leaves_the_service() {
     let short = backend.set_web_ui_password("too short");
     assert!(!short.status.success());
     assert!(String::from_utf8_lossy(&short.stderr).contains("at least 12 characters"));
-    assert_success(&backend.set_web_ui_password(WEB_PASSWORD));
 
-    let diagnostics = backend.directory.path().join("web-diagnostics.json");
-    backend.run(&["diagnostics", "--output", diagnostics.to_str().unwrap()]);
-    let show = backend.run(&["settings", "show"]);
-    assert_eq!(show["webUi"]["passwordSet"], true);
     let data = backend
         .directory
         .path()
         .join("home/.private-ai-proxy/Config");
     let saved = fs::read_to_string(data.join("credentials.toml")).unwrap();
-    assert!(saved.contains("[web-ui]\npassword-hash = \"$argon2id$"));
+    assert!(
+        saved.contains(&format!("[web-ui]\npassword = \"{password}\"\n")),
+        "{saved}"
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -387,24 +385,22 @@ fn web_ui_requires_a_password_that_never_leaves_the_service() {
     }
     let config = fs::read_to_string(data.join("config.toml")).unwrap();
     assert!(config.starts_with("# Kept by every write.\n"), "{config}");
+    let diagnostics = backend.directory.path().join("web-diagnostics.json");
+    backend.run(&["diagnostics", "--output", diagnostics.to_str().unwrap()]);
     for (name, text) in [
-        ("settings show", show.to_string()),
+        (
+            "settings show",
+            backend.run(&["settings", "show"]).to_string(),
+        ),
         ("status", backend.run(&["status"]).to_string()),
         ("diagnostics", fs::read_to_string(&diagnostics).unwrap()),
-        ("credentials.toml", saved),
         ("config.toml", config),
         (
             "backend log",
             fs::read_to_string(backend.directory.path().join("backend.log")).unwrap(),
         ),
     ] {
-        assert!(!text.contains(WEB_PASSWORD), "{name} contains the password");
-        if name != "credentials.toml" {
-            assert!(
-                !text.contains("$argon2"),
-                "{name} contains the password hash"
-            );
-        }
+        assert!(!text.contains(&password), "{name} contains the password");
     }
 
     let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -437,46 +433,122 @@ fn web_ui_requires_a_password_that_never_leaves_the_service() {
         http(&authority, "POST", "/api/session", None, &wrong).0,
         401
     );
-    let token = web_session(&authority, WEB_PASSWORD);
-    let other = web_session(&authority, WEB_PASSWORD);
+    let token = web_session(&authority, &password);
+    let other = web_session(&authority, &password);
     assert_eq!(
         http(&authority, "GET", "/api/bootstrap", Some(&token), "").0,
         200
     );
     assert_eq!(http(&authority, "GET", "/api/bootstrap", None, "").0, 401);
+    // A signed-in browser can neither read nor change the password.
+    for method in [
+        "get_web_ui_password",
+        "rotate_web_ui_password",
+        "set_web_ui_password",
+    ] {
+        let body = json!({ "password": "another long passphrase" }).to_string();
+        let path = format!("/api/rpc/{method}");
+        assert_eq!(http(&authority, "POST", &path, Some(&token), &body).0, 404);
+    }
 
-    // A new password ends every session; only the new one signs in.
-    let next = "another long passphrase";
-    assert_success(&backend.set_web_ui_password(next));
+    // Rotating ends every session; only the new password signs in.
+    let refused = backend
+        .command(&["web-ui", "password", "rotate", "--json"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    backend.run(&["web-ui", "password", "rotate", "--yes"]);
+    let rotated = backend.web_ui_password();
+    assert_ne!(rotated, password);
     for token in [&token, &other] {
         assert_eq!(
             http(&authority, "GET", "/api/bootstrap", Some(token), "").0,
             401
         );
     }
-    let old = json!({ "password": WEB_PASSWORD }).to_string();
+    let old = json!({ "password": password }).to_string();
     assert_eq!(http(&authority, "POST", "/api/session", None, &old).0, 401);
-    web_session(&authority, next);
+    let token = web_session(&authority, &rotated);
 
-    // The password stays while the web UI is on; turning it off ends sessions.
-    let clear = |backend: &Backend| {
-        backend
-            .command(&["settings", "set", "web-ui.password", "", "--yes", "--json"])
-            .output()
-            .unwrap()
-    };
-    assert!(!clear(&backend).status.success());
+    // A chosen password replaces it the same way.
+    assert_success(&backend.set_web_ui_password(WEB_PASSWORD));
+    assert_eq!(backend.web_ui_password(), WEB_PASSWORD);
+    assert_eq!(
+        http(&authority, "GET", "/api/bootstrap", Some(&token), "").0,
+        401
+    );
+    web_session(&authority, WEB_PASSWORD);
+
     backend.run(&["settings", "set", "web-ui.enabled", "false", "--yes"]);
     let deadline = Instant::now() + Duration::from_secs(5);
     while TcpStream::connect(&authority).is_ok() {
         assert!(Instant::now() < deadline, "the web UI listener stayed open");
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert_success(&clear(&backend));
+}
+
+#[test]
+fn an_unreadable_password_reports_its_cause() {
+    // Not TOML, so no password can be read or generated until the file is fixed.
+    let backend = Backend::start_with_credentials("[web-ui\n");
+    let failed = backend
+        .command(&["web-ui", "password", "show", "--yes", "--json"])
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    let error = String::from_utf8_lossy(&failed.stderr);
+    assert!(error.contains("credentials.toml:"), "{error}");
+    assert!(!error.contains("earlier version"), "{error}");
+}
+
+/// `correct horse battery staple` as a version that kept only an Argon2id hash saved it.
+const LEGACY_HASH: &str =
+    "$argon2id$v=19$m=19456,t=2,p=1$djbiNHLjbn9XvtGL3ibJIw$m2FuaZoY7r75d2/IFuBacNsBsp03lFrOk8x5zAWO8mU";
+
+#[test]
+fn a_password_hash_from_an_earlier_version_signs_in_until_replaced() {
+    let backend =
+        Backend::start_with_credentials(&format!("[web-ui]\npassword-hash = \"{LEGACY_HASH}\"\n"));
+    // Only the hash is known, so there is nothing to show.
+    let hidden = backend
+        .command(&["web-ui", "password", "show", "--yes", "--json"])
+        .output()
+        .unwrap();
+    assert!(!hidden.status.success());
+    assert!(String::from_utf8_lossy(&hidden.stderr).contains("pap web-ui password rotate"));
+    let port = {
+        let free = TcpListener::bind("127.0.0.1:0").unwrap();
+        free.local_addr().unwrap().port().to_string()
+    };
+    backend.run(&["settings", "set", "web-ui.port", &port, "--yes"]);
+    let state = backend.run(&["settings", "set", "web-ui.enabled", "true", "--yes"]);
+    if state["webUi"]["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("assets are not built"))
+    {
+        return;
+    }
+    let authority = format!("127.0.0.1:{port}");
+    let token = web_session(&authority, WEB_PASSWORD);
+
+    backend.run(&["web-ui", "password", "rotate", "--yes"]);
+    let password = backend.web_ui_password();
+    let saved = fs::read_to_string(
+        backend
+            .directory
+            .path()
+            .join("home/.private-ai-proxy/Config/credentials.toml"),
+    )
+    .unwrap();
+    assert!(!saved.contains("password-hash"), "{saved}");
     assert_eq!(
-        backend.run(&["settings", "show"])["webUi"]["passwordSet"],
-        false
+        http(&authority, "GET", "/api/bootstrap", Some(&token), "").0,
+        401
     );
+    let old = json!({ "password": WEB_PASSWORD }).to_string();
+    assert_eq!(http(&authority, "POST", "/api/session", None, &old).0, 401);
+    web_session(&authority, &password);
 }
 #[test]
 fn service_log_keeps_diagnostics_but_never_secrets() {
@@ -680,6 +752,14 @@ impl Backend {
             .unwrap()
     }
 
+    /// Reads the web UI password the way scripts do.
+    fn web_ui_password(&self) -> String {
+        self.run(&["web-ui", "password", "show", "--yes"])["password"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
     /// Sets the web UI password the way scripts do, through stdin.
     fn set_web_ui_password(&self, password: &str) -> Output {
         let mut child = self
@@ -801,7 +881,8 @@ fn reset_settings_preserves_user_data_and_requires_explicit_consent() {
     assert_eq!(settings["settings"]["appearance"], "system");
     assert_eq!(settings["settings"]["connect-on-launch"], false);
     assert_eq!(settings["settings"]["notifications"]["enabled"], true);
-    assert_eq!(settings["webUi"]["passwordSet"], false);
+    // A fresh password replaces the chosen one.
+    assert_ne!(backend.web_ui_password(), WEB_PASSWORD);
 }
 
 /// Reset moves the Local API to its fixed default port, which every test

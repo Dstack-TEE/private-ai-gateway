@@ -50,7 +50,7 @@ export function SignInPage() {
               {error && <FieldError id={errorId}>{error}</FieldError>}
             </Field>
             <Button type="submit" disabled={busy || !password}>{busy ? "Signing In…" : "Sign In"}</Button>
-            <FieldDescription>Set the password in the desktop app under Settings › Web UI, or with <code>pap settings set web-ui.password</code>.</FieldDescription>
+            <FieldDescription>Find the password in the desktop app under Settings › Web UI, or run <code>pap web-ui password show</code>.</FieldDescription>
           </FieldGroup>
         </form>
       </CardContent>

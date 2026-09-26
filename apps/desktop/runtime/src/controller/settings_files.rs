@@ -118,7 +118,7 @@ impl DesktopRuntime {
         }
         if previous.credentials.web_ui != current.credentials.web_ui {
             self.web_ui
-                .set_password(current.credentials.web_ui.password_hash.clone());
+                .set_password(current.credentials.web_ui.secret());
         }
         if old.web_ui != new.web_ui || previous.credentials.web_ui != current.credentials.web_ui {
             self.apply_web_ui(&new.web_ui).await;

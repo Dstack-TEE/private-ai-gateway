@@ -6,6 +6,7 @@ export interface ConfirmationOptions {
   message: string;
   confirmLabel: string;
   cancelLabel?: string;
+  destructive?: boolean;
 }
 
 type Confirm = (options: ConfirmationOptions) => Promise<boolean>;
@@ -44,7 +45,7 @@ export function ConfirmProvider({ children }: PropsWithChildren) {
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>{request?.cancelLabel ?? "Cancel"}</AlertDialogCancel>
-          <AlertDialogAction onClick={() => settle(true)}>{request?.confirmLabel}</AlertDialogAction>
+          <AlertDialogAction variant={request?.destructive ? "destructive" : "default"} onClick={() => settle(true)}>{request?.confirmLabel}</AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

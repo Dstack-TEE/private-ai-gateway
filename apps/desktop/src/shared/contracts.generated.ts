@@ -136,8 +136,8 @@ export type StartConfig = { remoteUrl: string, requireProductionOs: boolean, };
 export type ListenConfig = { listenAddress: string, allowNetworkAccess: boolean, port: number, clientHost?: string, };
 /**
  * The service-hosted browser UI. It is off until the user enables it and
- * listens on loopback unless network access is explicitly allowed. It
- * cannot turn on without a sign-in password (`pap settings set web-ui.password`).
+ * listens on loopback unless network access is explicitly allowed. Browsers
+ * sign in with a generated password (`pap web-ui password show`).
  */
 export type WebUiConfig = { enabled: boolean, listenAddress: string, allowNetworkAccess: boolean, port: number, clientHost?: string, };
 /**
@@ -147,11 +147,7 @@ export type WebUiStatus = { enabled: boolean, listenAddress: string, allowNetwor
 /**
  * Present only while the listener is bound.
  */
-url?: string, error?: string,
-/**
- * Whether a sign-in password is set. The password itself never leaves the service.
- */
-passwordSet: boolean, };
+url?: string, error?: string, };
 /**
  * The settings files the backend reads. Never carries their contents.
  */
@@ -283,7 +279,7 @@ export type WebBootstrap = { version: string, };
  */
 export type AboutLink = "documentation" | "github" | "aci";
 /** A method the shared UI API accepts (`ui_api::Method`). */
-export type UiMethod = "get_state" | "start" | "stop" | "set_require_production_os" | "activate_profile" | "delete_profile" | "save_configuration" | "complete_account_login" | "begin_account_login" | "poll_account_login" | "get_account_details" | "get_account_balance" | "cancel_account_login" | "get_client_key" | "rotate_client_key" | "save_local_api_config" | "save_web_ui" | "set_web_ui_password" | "import_profiles" | "export_profiles_content" | "export_diagnostics_content" | "query_usage" | "get_usage_record" | "get_usage_receipt" | "list_agents" | "set_agent_connection" | "start_backend_service" | "save_account_login" | "get_organization_url" | "get_top_up_url" | "list_listen_addresses" | "get_agent_access" | "request_agent_access" | "get_appearance" | "set_appearance" | "get_launch_preferences" | "set_launch_preference" | "get_notification_settings" | "save_notification_settings" | "reset_settings" | "get_update_notice";
+export type UiMethod = "get_state" | "start" | "stop" | "set_require_production_os" | "activate_profile" | "delete_profile" | "save_configuration" | "complete_account_login" | "begin_account_login" | "poll_account_login" | "get_account_details" | "get_account_balance" | "cancel_account_login" | "get_client_key" | "rotate_client_key" | "save_local_api_config" | "save_web_ui" | "get_web_ui_password" | "rotate_web_ui_password" | "set_web_ui_password" | "import_profiles" | "export_profiles_content" | "export_diagnostics_content" | "query_usage" | "get_usage_record" | "get_usage_receipt" | "list_agents" | "set_agent_connection" | "start_backend_service" | "save_account_login" | "get_organization_url" | "get_top_up_url" | "list_listen_addresses" | "get_agent_access" | "request_agent_access" | "get_appearance" | "set_appearance" | "get_launch_preferences" | "set_launch_preference" | "get_notification_settings" | "save_notification_settings" | "reset_settings" | "get_update_notice";
 export const APPEARANCE_EVENT: string = "pap://appearance";
 export const LAUNCH_PREFERENCES_EVENT: string = "pap://launch-preferences";
 export const SETTINGS_RESET_EVENT: string = "pap://settings-reset";
@@ -298,8 +294,8 @@ export const API_KEY_PAGES: Partial<Record<ServiceProvider, string>> = {"phala":
 export const SERVICE_PROVIDERS: Readonly<Record<ServiceProvider, ServiceProviderInfo>> = {"phala":{"id":"phala","label":"Phala","presetUrl":"https://inference.phala.com","keyLabel":"Phala API key","accountLogin":true,"workspaces":false,"callbackUrl":false},"redpill":{"id":"redpill","label":"RedPill","presetUrl":"https://tee.redpill.ai","keyLabel":"RedPill API key","accountLogin":true,"workspaces":true,"callbackUrl":true},"custom":{"id":"custom","label":"Custom","presetUrl":null,"keyLabel":"API key","accountLogin":false,"workspaces":false,"callbackUrl":false}};
 export const DEFAULT_SERVICE_PROVIDER: ServiceProvider = "redpill";
 export const BYLINE: string = "by dstack TEE";
-export const INITIAL_STATE: AppState = {"clientKeyRevision":0,"status":"stopped","configurationVerification":false,"checks":[],"activity":[],"reconnecting":false,"sessionActive":false,"sessionUsage":{"requests":0,"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"costUsd":0.0,"protected":0,"blockedLocally":0,"failedProof":0},"usageRevision":0,"config":{"remoteUrl":"https://tee.redpill.ai","requireProductionOs":true},"profiles":[],"activeProfileId":"","localApi":{"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4180},"apiKeySaved":false,"webUi":{"enabled":false,"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4182,"passwordSet":false},"configFiles":{"configPath":"","credentialsPath":"","warnings":[],"revision":0},"agentsRevision":0,"protection":{"phase":"profileRequired","title":"Not protected","tone":"neutral","action":{"operation":"setUpProfile","label":"Set Up Profile…","enabled":true}}};
-export const UNAVAILABLE_STATE: AppState = {"clientKeyRevision":0,"backendConnected":false,"status":"error","configurationVerification":false,"endpointError":"The background service stopped.","checks":[],"activity":[],"reconnecting":false,"sessionActive":false,"sessionUsage":{"requests":0,"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"costUsd":0.0,"protected":0,"blockedLocally":0,"failedProof":0},"usageRevision":0,"error":"The background service is unavailable.","config":{"remoteUrl":"https://tee.redpill.ai","requireProductionOs":true},"profiles":[],"activeProfileId":"","localApi":{"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4180},"apiKeySaved":false,"webUi":{"enabled":false,"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4182,"passwordSet":false},"configFiles":{"configPath":"","credentialsPath":"","warnings":[],"revision":0},"agentsRevision":0,"protection":{"phase":"localApiUnavailable","title":"Local API unavailable","tone":"danger","action":{"operation":"setUpProfile","label":"Set Up Profile…","enabled":false}}};
+export const INITIAL_STATE: AppState = {"clientKeyRevision":0,"status":"stopped","configurationVerification":false,"checks":[],"activity":[],"reconnecting":false,"sessionActive":false,"sessionUsage":{"requests":0,"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"costUsd":0.0,"protected":0,"blockedLocally":0,"failedProof":0},"usageRevision":0,"config":{"remoteUrl":"https://tee.redpill.ai","requireProductionOs":true},"profiles":[],"activeProfileId":"","localApi":{"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4180},"apiKeySaved":false,"webUi":{"enabled":false,"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4182},"configFiles":{"configPath":"","credentialsPath":"","warnings":[],"revision":0},"agentsRevision":0,"protection":{"phase":"profileRequired","title":"Not protected","tone":"neutral","action":{"operation":"setUpProfile","label":"Set Up Profile…","enabled":true}}};
+export const UNAVAILABLE_STATE: AppState = {"clientKeyRevision":0,"backendConnected":false,"status":"error","configurationVerification":false,"endpointError":"The background service stopped.","checks":[],"activity":[],"reconnecting":false,"sessionActive":false,"sessionUsage":{"requests":0,"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"costUsd":0.0,"protected":0,"blockedLocally":0,"failedProof":0},"usageRevision":0,"error":"The background service is unavailable.","config":{"remoteUrl":"https://tee.redpill.ai","requireProductionOs":true},"profiles":[],"activeProfileId":"","localApi":{"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4180},"apiKeySaved":false,"webUi":{"enabled":false,"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4182},"configFiles":{"configPath":"","credentialsPath":"","warnings":[],"revision":0},"agentsRevision":0,"protection":{"phase":"localApiUnavailable","title":"Local API unavailable","tone":"danger","action":{"operation":"setUpProfile","label":"Set Up Profile…","enabled":false}}};
 export const WEB_UI_PASSWORD_MIN_LENGTH: number = 12;
 export const WEB_DISTRIBUTION: DistributionCapabilities = {"channel":"web","nativeUpdates":false,"cliRegistration":false,"accountPortalLinks":true,"sandboxHomeAccess":false,"launchAtLogin":false,"notifications":false,"webUi":true};
 export const DEFAULT_LOCAL_API_CONFIG: ListenConfig = {"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4180};
