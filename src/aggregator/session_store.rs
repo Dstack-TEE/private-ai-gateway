@@ -538,9 +538,18 @@ mod tests {
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    /// A fresh log path. The nanosecond stamp keeps a reused PID off an earlier
+    /// run's leftovers, which would otherwise replay into the new store.
     fn temp_path() -> PathBuf {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("pag-sess-{}-{}.jsonl", std::process::id(), n))
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("pag-sess-{}-{nanos}-{n}.jsonl", std::process::id()));
+        cleanup(&path);
+        path
     }
 
     /// Remove the log and the sibling files a store leaves beside it (the lock
@@ -559,8 +568,12 @@ mod tests {
     /// hits this — it holds one lock for its whole life and never re-acquires —
     /// so the retry belongs only in the test harness.
     fn open_store(path: &Path) -> JsonlSessionStore {
+        open_store_at(path, 0)
+    }
+
+    fn open_store_at(path: &Path, now: u64) -> JsonlSessionStore {
         for _ in 0..200 {
-            match JsonlSessionStore::open(path, 0) {
+            match JsonlSessionStore::open(path, now) {
                 Ok(store) => return store,
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -612,21 +625,25 @@ mod tests {
         assert_eq!(count_lines(&path), 2, "both records are on disk");
 
         // Reopened past the lapsed record's deadline but before the live one's.
-        let reopened = JsonlSessionStore::open(&path, 5_000).unwrap();
-        let index = reopened.index.lock().unwrap();
-        assert_eq!(
-            index.by_id.len(),
-            1,
-            "only the live record is resident after replay"
-        );
-        assert!(
-            index.by_fingerprint.contains_key("fp-live"),
-            "the live record survives"
-        );
-        assert!(
-            !index.by_fingerprint.contains_key("fp-lapsed"),
-            "the lapsed record was never inserted"
-        );
+        let reopened = open_store_at(&path, 5_000);
+        {
+            let index = reopened.index.lock().unwrap();
+            assert_eq!(
+                index.by_id.len(),
+                1,
+                "only the live record is resident after replay"
+            );
+            assert!(
+                index.by_fingerprint.contains_key("fp-live"),
+                "the live record survives"
+            );
+            assert!(
+                !index.by_fingerprint.contains_key("fp-lapsed"),
+                "the lapsed record was never inserted"
+            );
+        }
+        drop(reopened);
+        cleanup(&path);
     }
 
     /// The filter is a scheduling change, not a policy one: `now = 0` keeps
@@ -643,8 +660,10 @@ mod tests {
                 .put_session("fp-b", session("b", 0, 1_000), 1_000, 0)
                 .unwrap();
         }
-        let reopened = JsonlSessionStore::open(&path, 0).unwrap();
+        let reopened = open_store(&path);
         assert_eq!(reopened.index.lock().unwrap().by_id.len(), 2);
+        drop(reopened);
+        cleanup(&path);
     }
 
     #[test]
