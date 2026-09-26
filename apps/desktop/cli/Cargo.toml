@@ -26,6 +26,7 @@ path = "service.rs"
 
 [dependencies]
 aci-protocol = { path = "../../../crates/aci-protocol" }
+aci-verify = { path = "../../../crates/aci-verify" }
 agent-bridge = { package = "private-ai-proxy-agent-bridge", path = "../agent-bridge" }
 async-stream = "0.3"
 axum = "0.8"

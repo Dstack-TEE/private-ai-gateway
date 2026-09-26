@@ -61,19 +61,6 @@ pub use report::{
 };
 pub use simple::{PreverifiedUpstreamVerifier, StaticUpstreamVerifier};
 
-fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
-    let value = value.strip_prefix("0x").unwrap_or(value);
-    hex::decode(value).map_err(|e| e.to_string())
-}
-
-fn decode_hex_32(value: &str) -> Result<[u8; 32], String> {
-    let bytes = decode_hex(value)?;
-    bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| format!("expected 32 bytes, got {}", bytes.len()))
-}
-
 fn current_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -72,15 +72,17 @@ boot measurements. See
 
 ## Where verification lives
 
-Every relying-party verification step lives in this package's `aci/` modules:
-quote appraisal, the §9.1(2) binding chain, §3.1 TLS selection, and receipt
-signatures. When the keyset has domain-scoped TLS keys, the channel check and
-the pin use only the entry the report's `downstream_tls_binding` declares
-(§4.2), the same selection Gateway makes for its upstreams. The neutral
-`aci-protocol` crate supplies only wire types, JCS, attestation-statement
-construction, and receipt canonicalization. The CLI maps verification
-outcomes to a pass, fail, or honest skip and does not import a gateway
-implementation.
+This package's `aci/` modules own the relying-party appraisal: DCAP quote
+verification, which checks run, the custody policy, and receipt signatures.
+The policy-neutral mechanisms beneath those checks — the §9.1(2) binding
+chain, dstack event-log replay and the KMS custody chain, and the declared
+TLS selection — come from the neutral `aci-verify` crate, which Gateway uses
+too. When the keyset has domain-scoped TLS keys, the channel check and the
+pin use only the entry the report's `downstream_tls_binding` declares (§4.2).
+The neutral `aci-protocol` crate supplies wire types, JCS,
+attestation-statement construction, and receipt canonicalization. The CLI
+maps verification outcomes to a pass, fail, or honest skip and does not
+import a gateway implementation.
 
 Differences that are deliberate — the CLI's honest skips, and checks only a
 relying party can run — are recorded in
