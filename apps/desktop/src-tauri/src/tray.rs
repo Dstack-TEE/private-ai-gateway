@@ -12,10 +12,10 @@ use desktop_core::agents::{Agent, AgentStatus};
 use desktop_core::brand::PRODUCT_NAME as APP_NAME;
 use desktop_core::{
     client::Client,
-    contracts::{AppState, VerificationStatus},
+    contracts::{AppState, NavigationTarget, VerificationStatus},
     protection::{ProtectionOperation, ProtectionPhase},
     protocol::rpc,
-    ui_api::{CONFIRM_STOP_ALL_EVENT, LAUNCH_PREFERENCES_EVENT, NAVIGATE_EVENT},
+    ui_api::{LaunchPreference, CONFIRM_STOP_ALL_EVENT, LAUNCH_PREFERENCES_EVENT, NAVIGATE_EVENT},
 };
 
 /// Native menu handles mirror backend state; actions use the same client as the window.
@@ -117,31 +117,39 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
                 show_window(tray.app_handle());
             }
         })
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            "toggle" => toggle_or_open_settings(app),
-            "open" => show_window(app),
-            "settings" | "agents" | "profiles" => {
-                show_window(app);
-                let _ = app.emit(NAVIGATE_EVENT, event.id().as_ref());
-            }
-            "autostart" => sync_autostart(app),
-            "quit" => {
-                app.exit(0);
-            }
-            "stop-all-quit" => {
-                show_window(app);
-                let _ = app.emit(CONFIRM_STOP_ALL_EVENT, ());
-            }
-            id if matches!(id, "copy-key" | "copy-endpoint")
-                || id.starts_with("profile:")
-                || id.starts_with("agent:") =>
-            {
-                perform_action(app, id.to_string())
-            }
-            _ => {}
-        })
         .build(app)?;
     Ok(())
+}
+
+/// Runs a tray menu item, or the menu bar's Settings… item, which shares its
+/// id; `menu::handle_event` is the one menu event handler.
+pub fn handle_menu_event(app: &AppHandle, id: &str) {
+    match id {
+        "toggle" => toggle_or_open_settings(app),
+        "open" => show_window(app),
+        "settings" => navigate(app, NavigationTarget::Settings),
+        "agents" => navigate(app, NavigationTarget::Agents),
+        "profiles" => navigate(app, NavigationTarget::Profiles),
+        "autostart" => sync_autostart(app),
+        "quit" => app.exit(0),
+        "stop-all-quit" => {
+            show_window(app);
+            let _ = app.emit(CONFIRM_STOP_ALL_EVENT, ());
+        }
+        id if matches!(id, "copy-key" | "copy-endpoint")
+            || id.starts_with("profile:")
+            || id.starts_with("agent:") =>
+        {
+            perform_action(app, id.to_string())
+        }
+        _ => {}
+    }
+}
+
+/// Shows the window at a page or dialog.
+fn navigate(app: &AppHandle, target: NavigationTarget) {
+    show_window(app);
+    let _ = app.emit(NAVIGATE_EVENT, target);
 }
 
 fn perform_action(app: &AppHandle, id: String) {
@@ -313,8 +321,7 @@ fn toggle_or_open_settings(app: &AppHandle) {
         let result = match action.operation {
             ProtectionOperation::SetUpProfile => {
                 sync(&app, &state);
-                show_window(&app);
-                let _ = app.emit(NAVIGATE_EVENT, "profile-setup");
+                navigate(&app, NavigationTarget::ProfileSetup);
                 return;
             }
             ProtectionOperation::Stop => client
@@ -343,11 +350,11 @@ fn sync_autostart(app: &AppHandle) {
     tauri::async_runtime::spawn(async move {
         let client = app.state::<std::sync::Arc<Client>>().inner().clone();
         let host = crate::ui_api::TauriHost::from_app(app.clone());
-        let result = desktop_core::ui_api::invoke(
+        let result = desktop_core::ui_api::set_launch_preference(
             &client,
             &host,
-            desktop_core::ui_api::Method::SetLaunchPreference,
-            serde_json::json!({ "name": "openAtLogin", "enabled": checked }),
+            LaunchPreference::OpenAtLogin,
+            checked,
         )
         .await;
         if let Err(error) = result {

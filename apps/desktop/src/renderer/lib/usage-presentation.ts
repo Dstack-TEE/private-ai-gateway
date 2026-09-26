@@ -1,6 +1,5 @@
 import { Ban, Shield, ShieldCheck, ShieldX, TriangleAlert } from "lucide-react";
-import type { RequestActivity } from "../../shared/contracts";
-import type { Tone } from "../../shared/contracts";
+import { AGENTS, type RequestActivity, type Tone } from "../../shared/contracts";
 
 export function outcomeOf(activity: RequestActivity): { label: string; tone: Tone; icon: typeof ShieldCheck } {
   if (!activity.leftDevice) return { label: "Blocked locally", tone: "neutral", icon: Ban };
@@ -11,18 +10,10 @@ export function outcomeOf(activity: RequestActivity): { label: string; tone: Ton
   return { label: "Proof unavailable", tone: "warning", icon: ShieldX };
 }
 
+/** The client a usage record names: an agent, or the Local API's own key. */
 export function agentName(id?: string): string {
-  switch (id) {
-    case "codex": return "Codex";
-    case "claude-code": return "Claude Code";
-    case "opencode": return "OpenCode";
-    case "pi": return "Pi";
-    case "hermes": return "Hermes Agent";
-    case "openclaw": return "OpenClaw";
-    case "oh-my-pi": return "Oh My Pi";
-    case "local-tools": return "Local API";
-    default: return id ?? "Unknown client";
-  }
+  if (id === "local-tools") return "Local API";
+  return AGENTS.find((agent) => agent.id === id)?.name ?? id ?? "Unknown client";
 }
 
 export function usageTokens(item: RequestActivity) {

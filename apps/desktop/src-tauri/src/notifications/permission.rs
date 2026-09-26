@@ -1,36 +1,7 @@
+use desktop_core::contracts::{
+    NotificationPermission as Permission, NotificationPermissionStatus as PermissionStatus,
+};
 use tauri::AppHandle;
-
-#[derive(Clone, Copy, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Permission {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    Granted,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    Denied,
-    #[cfg(target_os = "macos")]
-    NotDetermined,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    Unknown,
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    Unsupported,
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PermissionStatus {
-    pub permission: Permission,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub alerts_enabled: Option<bool>,
-}
-
-impl From<Permission> for PermissionStatus {
-    fn from(permission: Permission) -> Self {
-        Self {
-            permission,
-            alerts_enabled: None,
-        }
-    }
-}
 
 #[cfg(target_os = "macos")]
 pub use macos::{query, request};
@@ -140,8 +111,9 @@ mod macos {
                 );
         })
         .map_err(|_| "Could not request notification permission")?;
-        match receiver.await {
-            Ok(true) => Ok(()),
+        // Bounded like `query`, but long enough to answer the system prompt.
+        match tokio::time::timeout(Duration::from_secs(120), receiver).await {
+            Ok(Ok(true)) => Ok(()),
             _ => Err("Could not request notification permission".into()),
         }
     }

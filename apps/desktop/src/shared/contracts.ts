@@ -12,10 +12,14 @@ import type {
   CliRegistration,
   AppState,
   ImportResult,
+  LaunchPreference,
   LaunchPreferences,
   ListenAddress,
   ListenConfig,
   LoginPresentation,
+  NavigationTarget,
+  NotificationConfiguration,
+  NotificationPermissionStatus,
   NotificationPreferences,
   ProfileBackup,
   RequestActivity,
@@ -25,22 +29,10 @@ import type {
   UpdateInfo,
   UsagePage,
   UsageQuery,
-  VerificationCheck,
   WebUiConfig,
 } from "./contracts.generated";
 
 export * from "./contracts.generated";
-
-export type CheckStatus = VerificationCheck["status"];
-
-export interface NotificationConfiguration {
-  preferences: NotificationPreferences;
-  permission: "granted" | "denied" | "notDetermined" | "unknown" | "unsupported";
-  alertsEnabled?: boolean;
-}
-
-/** What a tray or menu item asks the main window to show or open. */
-export type NavigationTarget = "settings" | "agents" | "profiles" | "profile-setup";
 
 export interface DesktopApi {
   startBackendService(): Promise<AppState>;
@@ -53,18 +45,19 @@ export interface DesktopApi {
   prepareUpdate(): Promise<UpdateInfo>;
   restartToUpdate(): Promise<void>;
   getLaunchPreferences(): Promise<LaunchPreferences>;
-  setLaunchPreference(name: keyof LaunchPreferences, enabled: boolean): Promise<LaunchPreferences>;
+  setLaunchPreference(name: LaunchPreference, enabled: boolean): Promise<LaunchPreferences>;
   onLaunchPreferencesChange(listener: (preferences: LaunchPreferences) => void): () => void;
   getCliRegistration(): Promise<CliRegistration>;
   setCliRegistration(installed: boolean): Promise<CliRegistration>;
   onStopAllRequest(listener: () => void): () => void;
   stopAllAndQuit(): Promise<void>;
+  // Desktop-only capabilities are absent in the web UI.
   /** Asks in an alert sheet on the window; the macOS app only. */
-  showConfirmation(confirmation: Confirmation): Promise<boolean>;
-  /** Closes the window as its close button does; the app keeps running. Desktop only. */
-  closeWindow(): Promise<void>;
-  /** Quits the app and leaves the background service running; desktop only. */
-  quit(): Promise<void>;
+  showConfirmation: ((confirmation: Confirmation) => Promise<boolean>) | undefined;
+  /** Closes the window as its close button does; the app keeps running. */
+  closeWindow: (() => Promise<void>) | undefined;
+  /** Quits the app and leaves the background service running. */
+  quit: (() => Promise<void>) | undefined;
   copyText(text: string): Promise<void>;
   getClientKey(): Promise<string>;
   rotateClientKey(): Promise<string>;
@@ -86,7 +79,7 @@ export interface DesktopApi {
   saveDiagnosticsExport(): Promise<boolean>;
   importProfiles(backup: ProfileBackup): Promise<ImportResult>;
   saveNotificationSettings(config: NotificationPreferences): Promise<void>;
-  requestNotificationPermission(): Promise<Pick<NotificationConfiguration, "permission" | "alertsEnabled">>;
+  requestNotificationPermission(): Promise<NotificationPermissionStatus>;
   openNotificationSettings(): Promise<void>;
   getState(): Promise<AppState>;
   resetSettings(): Promise<AppState>;

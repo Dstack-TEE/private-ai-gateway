@@ -923,3 +923,46 @@ fn proxy_receipt_and_usage_events_merge_into_one_complete_activity() {
     );
     assert_eq!(proof.verified, Some(false));
 }
+
+/// Clients keep the newest state by its sequence, so every state the manager
+/// publishes or returns names this backend and none goes back, including
+/// across a start, a stop and a restored snapshot, which rebuild the state.
+#[test]
+fn published_and_returned_states_carry_this_backend_and_an_increasing_sequence() {
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let (events, _) = tokio::sync::mpsc::channel(8);
+    let proxy = ProxyState::new(events).unwrap();
+    let manager = Arc::new(SessionManager::new(
+        proxy,
+        Arc::new(UsageStore::memory().unwrap()),
+        Arc::new(StopTrackingLauncher(Arc::new(
+            std::sync::atomic::AtomicBool::new(false),
+        ))),
+        executor.handle().clone(),
+        AppState::default(),
+    ));
+    let published = manager.subscribe();
+    let instance = Some(crate::api::version().instance_id.clone());
+    let initial = manager.snapshot().unwrap();
+    let started = manager
+        .start(StartConfig {
+            remote_url: "https://inference.phala.com".into(),
+            require_production_os: true,
+        })
+        .unwrap();
+    let stopped = manager.stop().unwrap();
+    manager.restore_snapshot(initial.clone());
+    let restored = manager.snapshot().unwrap();
+    let states = [&initial, &started, &stopped, &restored];
+    for state in states {
+        assert_eq!(state.backend_instance, instance);
+    }
+    for pair in states.windows(2) {
+        assert!(pair[0].sequence < pair[1].sequence, "{pair:?}");
+    }
+    // A snapshot is the published state, content and sequence together.
+    assert_eq!(
+        serde_json::to_value(&*published.borrow()).unwrap(),
+        serde_json::to_value(&restored).unwrap()
+    );
+}

@@ -1,4 +1,5 @@
 import { focusManager, QueryClient } from "@tanstack/react-query";
+import { windowFocus } from "./environment";
 
 // Commands use local IPC even when the browser reports the network as offline.
 export const queryClient = new QueryClient({
@@ -8,13 +9,6 @@ export const queryClient = new QueryClient({
   },
 });
 
-// Webview window activation also needs revalidation, not just tab visibility.
-focusManager.setEventListener((onFocus) => {
-  const refresh = () => onFocus();
-  window.addEventListener("focus", refresh);
-  document.addEventListener("visibilitychange", refresh);
-  return () => {
-    window.removeEventListener("focus", refresh);
-    document.removeEventListener("visibilitychange", refresh);
-  };
-});
+// Queries refetch when the desktop window becomes active, as a browser tab
+// does when it becomes visible.
+if (windowFocus) focusManager.setEventListener(windowFocus);

@@ -1,13 +1,12 @@
 import React, { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Outlet, useMatches, useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { useAgents } from "./hooks/use-agents";
-import { cliRegistrationQuery, usagePageQuery } from "./lib/page-queries";
 import { useAppState } from "./lib/use-app-state";
 import { errorMessage, toastError } from "./lib/error-message";
 import { useUpdates } from "./updates";
-import { INITIAL_STATE, type AboutLink, type AppState, type ConfidentialProfile, type NavigationTarget } from "../shared/contracts";
+import { INITIAL_STATE, type AboutLink, type AppState, type NavigationTarget } from "../shared/contracts";
 import { PageHeader, Sidebar } from "./components/navigation";
 import { desktopApi, distributionCapabilities, web } from "./lib/environment";
 import { unavailableState } from "./lib/protection";
@@ -18,7 +17,7 @@ import { LocalApiDialog } from "./features/local-api";
 import { WebUiDialog } from "./features/web-ui";
 import { UsageProofDialog } from "./features/usage";
 import { LocalApiExamplesDialog } from "./components/local-api-examples";
-import { NotificationsDialog, NotificationsProvider } from "./components/notifications";
+import { NotificationsDialog } from "./components/notifications";
 import { useConfirm, useConfirmOpen } from "./components/confirm";
 import { useDialog } from "./components/app-dialog";
 import { AppearanceProvider } from "./components/appearance";
@@ -35,7 +34,7 @@ export function AppLayout(): React.JSX.Element {
     toast.success("Settings reset");
   }), [client, navigate]);
   return <AppearanceProvider api={desktopApi}>
-    <NotificationsProvider api={desktopApi}><Window /></NotificationsProvider>
+    <Window />
     <Toaster />
   </AppearanceProvider>;
 }
@@ -44,24 +43,15 @@ function Window(): React.JSX.Element {
   const client = useQueryClient();
   const navigate = useNavigate();
   const updates = useUpdates(desktopApi, distributionCapabilities.nativeUpdates || distributionCapabilities.channel === "web");
-  const appState = useAppState(desktopApi, INITIAL_STATE);
+  const appState = useAppState(desktopApi);
   const state = useMemo(() => appState.error ? unavailableState(appState.error) : appState.data ?? INITIAL_STATE, [appState.error, appState.data]);
   const setState = appState.setState;
   const agents = useAgents(desktopApi, state, distributionCapabilities.sandboxHomeAccess);
   const backendReady = Boolean(appState.data) && state.backendConnected !== false;
-  useEffect(() => {
-    if (!backendReady) return;
-    // Prefetch shares page caches; failures are presented when the page is opened.
-    void client.prefetchQuery(usagePageQuery());
-    if (distributionCapabilities.cliRegistration) void client.prefetchQuery(cliRegistrationQuery());
-  }, [client, backendReady]);
-  const [startingBackend, setStartingBackend] = useState(false);
   const confirm = useConfirm();
   const confirming = useConfirmOpen();
-  const { payload: dialog, key: dialogKey, show: openDialog, control: dialogControl } = useDialog<AppDialog>();
-  // Requests to show a page, from the Settings shortcut, the macOS menu
-  // accelerator or the tray, wait until a dialog or confirmation closes.
-  const modalOpen = dialogControl.open || confirming;
+  const dialog = useDialog<AppDialog>();
+  const { payload: shownDialog, key: dialogKey, show: openDialog } = dialog;
   const [copied, setCopied] = useState<string>();
   const copyTimer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(copyTimer.current), []);
@@ -71,28 +61,37 @@ function Window(): React.JSX.Element {
     if (available) void client.invalidateQueries({ queryKey: ["client-key"] });
     else client.setQueryData(["client-key"], "");
   }), [client]);
-  const [applying, setApplying] = useState(false);
+  const osPolicy = useMutation({
+    mutationFn: async (required: boolean) => {
+      if (state.protection.action.operation === "stop" && !await confirm({
+        title: required ? "Require production OS?" : "Allow development OS?",
+        message: "Protection stops before the policy changes.",
+        confirmLabel: "Stop and Change",
+      })) return;
+      setState(await desktopApi.setRequireProductionOs(required));
+    },
+    onError: (error) => toastError("Could not change the OS policy", error),
+  });
+  const reset = useMutation({
+    mutationFn: () => desktopApi.resetSettings(),
+    onSuccess: setState,
+    onError: (error) => toastError("Could not reset settings", error),
+  });
+  const backendStart = useMutation({
+    mutationFn: () => desktopApi.startBackendService(),
+    onSuccess: setState,
+    onError: (error) => toastError("Could not start the background service", error),
+  });
+  /** A settings change is applying; controls that change settings wait. */
+  const applying = osPolicy.isPending || reset.isPending;
+  const { mutate: setRequireProductionOs } = osPolicy;
+  const { mutate: resetMutate } = reset;
+  const { mutate: startBackend, isPending: startingBackend } = backendStart;
 
-  // An account connection saved from the browser finishes in the backend.
-  const previousProfiles = useRef<ConfidentialProfile[] | undefined>(undefined);
-  useEffect(() => {
-    if (!appState.data) return;
-    const previous = previousProfiles.current;
-    previousProfiles.current = state.profiles;
-    if (!previous) return;
-    const saved = state.profiles.find((profile) => profile.auth.kind === "oauth" && profile.credentialSaved &&
-      !previous.some((old) => old.id === profile.id && old.credentialRef === profile.credentialRef && old.verifiedAt === profile.verifiedAt));
-    if (saved) toast.success(`${saved.name} saved`);
-  }, [appState.data, state.profiles]);
-
-  /** For dialogs that show the failure themselves. */
-  const applyStateAction = async (action: () => Promise<AppState | void>): Promise<string | undefined> => {
-    try {
-      const next = await action();
-      if (next) setState(next);
-    } catch (error) {
-      return errorMessage(error);
-    }
+  /** For dialogs that present the failure themselves. */
+  const applyState = async (action: () => Promise<AppState | void>): Promise<void> => {
+    const next = await action();
+    if (next) setState(next);
   };
 
   const copyValue = useCallback(async (label: string, value: string) => {
@@ -103,14 +102,13 @@ function Window(): React.JSX.Element {
     copyTimer.current = window.setTimeout(() => setCopied((current) => (current === label ? undefined : current)), 1_400);
   }, []);
 
-  const rotateClientKey = async (): Promise<string | undefined> => {
+  const rotateClientKey = async (): Promise<void> => {
     try {
       client.setQueryData(["client-key"], await desktopApi.rotateClientKey());
       setClientKeyVisible(true);
-      return undefined;
     } catch (error) {
       setClientKeyVisible(false);
-      return errorMessage(error);
+      throw error;
     }
   };
 
@@ -146,53 +144,22 @@ function Window(): React.JSX.Element {
       void runAction(action.operation === "stop" ? "Could not stop protection" : "Could not start protection", () =>
         action.operation === "stop" ? desktopApi.stop() : desktopApi.start(state.config));
     };
-    const setRequireProductionOs = async (required: boolean) => {
-      if (applying) return;
-      setApplying(true);
-      try {
-        if (state.protection.action.operation === "stop" && !await confirm({
-          title: required ? "Require production OS?" : "Allow development OS?",
-          message: "Protection stops before the policy changes.",
-          confirmLabel: "Stop and Change",
-        })) return;
-        setState(await desktopApi.setRequireProductionOs(required));
-      } catch (error) { toastError("Could not change the OS policy", error); }
-      finally { setApplying(false); }
-    };
     const resetSettings = async () => {
       // A browser has no window of the app to resize.
       const resetItems = new Intl.ListFormat("en").format([
         "appearance", "notifications", "startup preferences", "development OS policy", "update channel",
         "Local API settings", "web UI settings", ...web ? [] : ["window size"],
       ]);
-      let confirmed: boolean;
       try {
-        confirmed = await confirm({
+        if (await confirm({
           title: "Reset settings?",
           message: `${agents.accessStatus === "authorized" ? "Stop protection, disconnect all agents and restore their configurations," : "Stop protection"} and reset ${resetItems}. Profiles, credentials, the Local API key, and usage history are kept. This does not change system notification permission${distributionCapabilities.cliRegistration ? " or remove the pap command" : ""}.`,
           confirmLabel: "Reset Settings",
           destructive: true,
-        });
+        })) resetMutate();
       } catch (error) {
         toastError("Could not reset settings", error);
-        return;
       }
-      if (!confirmed) return;
-      setApplying(true);
-      try {
-        setState(await desktopApi.resetSettings());
-      } catch (error) {
-        toastError("Could not reset settings", error);
-      } finally {
-        setApplying(false);
-      }
-    };
-    const startBackend = async () => {
-      if (startingBackend) return;
-      setStartingBackend(true);
-      try { setState(await desktopApi.startBackendService()); }
-      catch (error) { toastError("Could not start the background service", error); }
-      finally { setStartingBackend(false); }
     };
     return {
       state,
@@ -206,15 +173,19 @@ function Window(): React.JSX.Element {
       copy: (label, value) => void runAction(`Could not copy the ${label.toLowerCase()}`, () => copyValue(label, value)),
       applying,
       startingBackend: startingBackend || starting,
-      startBackend: () => void startBackend(),
+      startBackend: () => {
+        if (!startingBackend) startBackend();
+      },
       toggleProtection,
-      setRequireProductionOs: (required) => void setRequireProductionOs(required),
+      setRequireProductionOs: (required) => {
+        if (!applying) setRequireProductionOs(required);
+      },
       resetSettings: () => void resetSettings(),
       openDialog,
       openProfiles,
       openAboutLink: (target: AboutLink) => void runAction("Could not open the link", () => desktopApi.openAboutLink(target)),
     };
-  }, [state, agents, updates, clientKey, clientKeyVisible, copied, copyValue, applying, startingBackend, setState, openDialog, openProfileSetup, confirm]);
+  }, [state, agents, updates, clientKey, clientKeyVisible, copied, copyValue, applying, startingBackend, startBackend, setRequireProductionOs, resetMutate, setState, openDialog, openProfileSetup, confirm]);
 
   const requestStopAllAndQuit = useEffectEvent(async () => {
     try {
@@ -232,82 +203,101 @@ function Window(): React.JSX.Element {
   });
   useEffect(() => desktopApi.onStopAllRequest(() => { void requestStopAllAndQuit(); }), []);
 
-  const showRequested = useEffectEvent((target: NavigationTarget) => {
+  // A page or dialog requested by the menu bar, the tray or the Settings
+  // shortcut shows once an open dialog has closed, so its draft is not lost.
+  // A confirmation is answered first, as an alert is: the request ends there.
+  const deferredRequest = useRef<NavigationTarget | undefined>(undefined);
+  const show = (target: NavigationTarget) => {
     if (target === "profiles") shell.openProfiles();
     else if (target === "profile-setup") openProfileSetup();
-    else if (!modalOpen) void navigate({ to: `/${target}` });
+    else void navigate({ to: `/${target}` });
+  };
+  const showRequested = useEffectEvent((target: NavigationTarget) => {
+    if (dialog.control.open) deferredRequest.current = target;
+    else if (!confirming) show(target);
   });
   useEffect(() => desktopApi.onNavigate((target) => showRequested(target)), []);
+  const dialogControl = {
+    ...dialog.control,
+    onOpenChangeComplete: (open: boolean) => {
+      dialog.control.onOpenChangeComplete(open);
+      const target = deferredRequest.current;
+      if (open || !target) return;
+      deferredRequest.current = undefined;
+      show(target);
+    },
+  };
 
   // Navigating from the sidebar keeps focus there; any other navigation,
   // including history traversal, lands on the new page heading.
   const page = useMatches({ select: (matches) => matches.at(-1)?.routeId });
   const shownPage = useRef(page);
+  const navigation = useRef<HTMLElement>(null);
+  const pageTitle = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
     if (shownPage.current === page) return;
     shownPage.current = page;
-    if (!document.getElementById("main-navigation")?.contains(document.activeElement)) document.getElementById("page-title")?.focus();
+    if (!navigation.current?.contains(document.activeElement)) pageTitle.current?.focus();
   }, [page]);
 
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
       if (event.key !== "," || !(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
-      if (modalOpen) return;
       event.preventDefault();
-      void navigate({ to: "/settings" });
+      showRequested("settings");
     };
     window.addEventListener("keydown", shortcut);
     return () => window.removeEventListener("keydown", shortcut);
-  }, [navigate, modalOpen]);
+  }, []);
 
   return (
     <ShellContext.Provider value={shell}>
     <main className="w-full h-full grid grid-cols-[var(--sidebar-width)_minmax(0,_1fr)] overflow-hidden max-[780px]:grid-cols-[154px_minmax(0,_1fr)] max-[620px]:grid-cols-[68px_minmax(0,_1fr)] max-[440px]:grid-cols-[56px_minmax(0,_1fr)]">
-      <Sidebar />
+      <Sidebar navigationRef={navigation} />
       <section className="min-w-0 min-h-0 flex flex-col bg-background">
-        <PageHeader />
-        <div className="flex-auto min-w-0 min-h-0 overflow-auto pt-4 pr-6 pb-6 pl-6 [&_>_[role=alert]]:mb-4 max-[780px]:p-4 max-[440px]:p-3" key={page}>
+        <PageHeader titleRef={pageTitle} />
+        <div id="page-content" className="flex-auto min-w-0 min-h-0 overflow-auto pt-4 pr-6 pb-6 pl-6 [&_>_[role=alert]]:mb-4 max-[780px]:p-4 max-[440px]:p-3">
           <Outlet />
         </div>
       </section>
 
       <React.Fragment key={dialogKey}>
-        {dialog?.kind === "profiles" && <ProfilesDialog
-          state={state} repair={dialog.repair}
-          onActivate={(profileId) => applyStateAction(() => desktopApi.activateProfile(profileId))}
-          onSave={(profile, key) => applyStateAction(() => desktopApi.saveConfiguration(profile, state.config.requireProductionOs, key))}
-          onDelete={(profileId) => applyStateAction(() => desktopApi.deleteProfile(profileId))}
+        {shownDialog?.kind === "profiles" && <ProfilesDialog
+          state={state} repair={shownDialog.repair}
+          onActivate={(profileId) => applyState(() => desktopApi.activateProfile(profileId))}
+          onSave={(profile, key) => applyState(() => desktopApi.saveConfiguration(profile, state.config.requireProductionOs, key))}
+          onDelete={(profileId) => applyState(() => desktopApi.deleteProfile(profileId))}
           {...dialogControl}
         />}
-        {dialog?.kind === "setup-profile" && <ProfileEditorDialog
+        {shownDialog?.kind === "setup-profile" && <ProfileEditorDialog
           state={state} startAfterSave
-          onSave={(profile, key) => applyStateAction(async () => {
+          onSave={(profile, key) => applyState(async () => {
             const saved = await desktopApi.saveConfiguration(profile, state.config.requireProductionOs, key);
             return desktopApi.start(saved.config);
           })}
-          onDelete={(profileId) => applyStateAction(() => desktopApi.deleteProfile(profileId))}
+          onDelete={(profileId) => applyState(() => desktopApi.deleteProfile(profileId))}
           onComplete={dialogControl.onClose} {...dialogControl}
         />}
-        {dialog?.kind === "privacy" && <PrivacyDialog state={state} {...dialogControl} />}
-        {dialog?.kind === "local-api" && <LocalApiDialog
+        {shownDialog?.kind === "privacy" && <PrivacyDialog state={state} {...dialogControl} />}
+        {shownDialog?.kind === "local-api" && <LocalApiDialog
           state={state} clientKey={clientKey} clientKeyVisible={clientKeyVisible} copied={copied}
           onCopy={copyValue} onToggleKey={() => setClientKeyVisible((visible) => !visible)}
           onRotate={rotateClientKey}
-          onSave={(config) => applyStateAction(() => desktopApi.saveLocalApiConfig(config))}
+          onSave={(config) => applyState(() => desktopApi.saveLocalApiConfig(config))}
           {...dialogControl}
         />}
-        {dialog?.kind === "local-api-example" && <LocalApiExamplesDialog
+        {shownDialog?.kind === "local-api-example" && <LocalApiExamplesDialog
           apiKey={clientKey} endpoint={state.proxyUrl ?? localEndpoint(state.localApi)} models={state.catalog?.models ?? []}
           onCopy={(value) => desktopApi.copyText(value)} {...dialogControl}
         />}
-        {dialog?.kind === "notifications" && <NotificationsDialog {...dialogControl} />}
-        {dialog?.kind === "web-ui" && <WebUiDialog
+        {shownDialog?.kind === "notifications" && <NotificationsDialog api={desktopApi} {...dialogControl} />}
+        {shownDialog?.kind === "web-ui" && <WebUiDialog
           state={state} copied={copied} onCopy={copyValue}
-          onSave={(config) => applyStateAction(() => desktopApi.saveWebUi(config))}
-          onSetPassword={(password) => applyStateAction(() => desktopApi.setWebUiPassword(password))}
+          onSave={(config) => applyState(() => desktopApi.saveWebUi(config)).then(() => undefined, errorMessage)}
+          onSetPassword={(password) => applyState(() => desktopApi.setWebUiPassword(password)).then(() => undefined, errorMessage)}
           {...dialogControl}
         />}
-        {dialog?.kind === "usage-proof" && <UsageProofDialog activity={dialog.activity} {...dialogControl} />}
+        {shownDialog?.kind === "usage-proof" && <UsageProofDialog activity={shownDialog.activity} {...dialogControl} />}
       </React.Fragment>
     </main>
     </ShellContext.Provider>

@@ -89,7 +89,10 @@ protection problems, is stored under that key.
   macOS app and an `AlertDialog` on Windows, Linux and in the web UI.
   The shell injects the platform (`<html data-platform>`) for the platform
   metrics in `semantic.css`; a browser keeps the defaults. Tray and menu items show the window and
-  send `pap://navigate` for the page, dialog or documentation link. Failures show
+  send `pap://navigate` for the page or dialog; one requested while a dialog is
+  open shows once it closes, and one requested while a confirmation asks for an
+  answer is dropped, as with an alert. One app-level handler runs every native
+  menu item, the tray's and the menu bar's. Failures show
   inline in their dialog, form or page, and as a toast for other in-window
   actions, including app-menu items. Failed tray actions are only logged, like
   other tray apps; the tray and the window show the state that applies.
@@ -105,15 +108,18 @@ protection problems, is stored under that key.
   Tauri app manifest, while `src-tauri/capabilities` grants them to windows.
   `src-tauri/src/native_commands.rs` lists the shell's own commands for the
   same handler and manifest, and a test checks that the capability grants
-  exactly the desktop commands. Event names, project links and web UI defaults
-  come from Rust as generated constants in `src/shared/contracts.generated.ts`.
+  exactly the desktop commands. Event names and payload types, the supported
+  agents, project links and web UI defaults come from Rust as generated
+  constants and types in `src/shared/contracts.generated.ts`.
   A method is either the management command of the same name or composed by a
   `Host` (tray state, Open at Login, notifications) from commands. The names
   are the Tauri command names and the web RPC paths, so the renderer, the CLI
   and both transports use one name per command. The desktop shell runs methods with its own host
   and sends commands to the service; the service answers browsers' methods with
   its own. The renderer builds one `DesktopApi` from a transport and platform
-  primitives.
+  primitives. The backend numbers the states it publishes (`sequence`), so the
+  window keeps the newest state whether a read, an event or a command result
+  brings it.
 - Core tests are grouped by behavior. Layout, color and asset-name assertions are
   excluded; authorization, recovery, ownership, accounting and cache isolation
   remain covered. Self-spawned tests retain explicit, checked test selectors.

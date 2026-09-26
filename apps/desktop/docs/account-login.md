@@ -116,7 +116,8 @@ has no separate organization tier: its workspace (team) is selected in the brows
 
 Balances load in the profile editor after authorization or when opening a saved
 account. Overview does not query balances or read credentials for this purpose.
-The editor refreshes every minute and revalidates on focus after 30 seconds.
+The editor refreshes every minute and whenever the window becomes active, as on
+returning from the billing page.
 The runtime coalesces concurrent windows by login ID or profile ID plus
 credential reference; successful results live for 30 seconds and failures for 10.
 A replaced credential cannot reuse an old cache entry. Balance reads do not update

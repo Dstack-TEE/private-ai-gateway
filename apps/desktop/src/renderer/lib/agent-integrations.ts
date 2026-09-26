@@ -1,22 +1,14 @@
-import type { QueryClient } from "@tanstack/react-query";
+import { mutationOptions, type QueryClient } from "@tanstack/react-query";
+// Node runs `npm run test:agents` on this file as is, so a value import names its file.
+import { AGENTS } from "../../shared/contracts.generated.ts";
 import type { AgentAccessStatus, AgentStatus, DesktopApi } from "../../shared/contracts";
 
 export type AgentIntegrations = { accessStatus: AgentAccessStatus; agents: AgentStatus[] };
 type AccessApi = Pick<DesktopApi, "getAgentAccess" | "requestAgentAccess" | "listAgents">;
 
-// Keep the pre-authorization catalog available without touching Home.
-const SUPPORTED_AGENTS = [
-  ["claude-code", "Claude Code"],
-  ["codex", "Codex"],
-  ["hermes", "Hermes Agent"],
-  ["pi", "Pi"],
-  ["oh-my-pi", "Oh My Pi"],
-  ["opencode", "OpenCode"],
-  ["openclaw", "OpenClaw"],
-] as const;
-
+/** The supported agents, listed before authorization without touching Home. */
 export function supportedAgentStatuses(): AgentStatus[] {
-  return SUPPORTED_AGENTS.map(([id, name]) => ({
+  return AGENTS.map(({ id, name }) => ({
     id,
     name,
     configPath: "",
@@ -58,24 +50,19 @@ export function agentIntegrationsLocked(accessStatus: AgentAccessStatus | undefi
   return pending || accessStatus !== "authorized";
 }
 
-/** One explicit authorization action, including its scan and cache publication. */
-export function createAgentAccessAction(api: AccessApi, requiresAuthorization: boolean, client: QueryClient, onPendingChange: (pending: boolean) => void) {
-  let pending = false;
-  return {
-    get pending() { return pending; },
-    async run() {
-      if (!requiresAuthorization || pending) return;
-      pending = true;
-      onPendingChange(true);
-      try {
-        await client.cancelQueries({ queryKey: ["agents"] });
-        const integrations = await readAgentIntegrations(api, requiresAuthorization, true);
-        await client.cancelQueries({ queryKey: ["agents"] });
-        client.setQueryData<AgentIntegrations>(["agents"], integrations);
-      } finally {
-        pending = false;
-        onPendingChange(false);
-      }
+/**
+ * The only action that requests access. Its scan replaces the agents every
+ * `["agents"]` query lists, so the pages unlock with the result.
+ */
+export function agentAccessMutation(api: AccessApi, requiresAuthorization: boolean, client: QueryClient) {
+  return mutationOptions({
+    mutationFn: async () => {
+      await client.cancelQueries({ queryKey: ["agents"] });
+      return readAgentIntegrations(api, requiresAuthorization, true);
     },
-  };
+    onSuccess: async (integrations: AgentIntegrations) => {
+      await client.cancelQueries({ queryKey: ["agents"] });
+      client.setQueriesData<AgentIntegrations>({ queryKey: ["agents"] }, integrations);
+    },
+  });
 }

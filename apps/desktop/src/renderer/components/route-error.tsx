@@ -1,10 +1,10 @@
 import { useQueryErrorResetBoundary } from "@tanstack/react-query";
-import { useRouter, type ErrorComponentProps } from "@tanstack/react-router";
+import { Link, useRouter, type ErrorComponentProps } from "@tanstack/react-router";
 import { TriangleAlert } from "lucide-react";
 import { titleBarDragRegion } from "../lib/environment";
 import { errorMessage } from "../lib/error-message";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "./ui/alert";
-import { Button } from "./ui/button";
+import { Button, buttonVariants } from "./ui/button";
 
 /**
  * A page that failed to render, in place of the page (the router's
@@ -13,6 +13,22 @@ import { Button } from "./ui/button";
  */
 export function PageError({ error }: ErrorComponentProps) {
   return <div className="max-w-230 mx-auto"><ErrorNotice error={error} /></div>;
+}
+
+/**
+ * An address with no page (the root route's `notFoundComponent`), laid out
+ * like `WindowError`; the web UI signs in on the way to Overview.
+ */
+export function PageNotFound() {
+  return <main className="grid min-h-svh place-items-center bg-background px-4 pt-12 pb-4 text-foreground">
+    <div className="fixed inset-x-0 top-0 h-10" {...titleBarDragRegion} />
+    <div className="w-full max-w-lg"><Alert>
+      <TriangleAlert aria-hidden="true" />
+      <AlertTitle>This page doesn’t exist</AlertTitle>
+      <AlertDescription>Check the address, or go to Overview.</AlertDescription>
+      <AlertAction><Link to="/" className={buttonVariants({ variant: "outline", size: "sm" })}>Go to Overview</Link></AlertAction>
+    </Alert></div>
+  </main>;
 }
 
 /**

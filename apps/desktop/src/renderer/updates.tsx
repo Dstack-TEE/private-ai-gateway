@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import React, { useCallback, useMemo, useRef } from "react";
+import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { RotateCw } from "lucide-react";
 import type { DesktopApi, UpdateInfo, UpdateChannel } from "../shared/contracts";
 import { Button } from "./components/ui/button";
@@ -9,26 +9,70 @@ import { Item, ItemContent, ItemTitle, ItemDescription, ItemActions } from "./co
 import { useConfirm } from "./components/confirm";
 import { toastError } from "./lib/error-message";
 
+const CHECK_INTERVAL = 6 * 60 * 60_000;
+
+/** Channel changes and installs, which run one at a time and pause checks. */
+const UPDATE_OPERATION = ["app-update-operation"];
+
 /** `checks` is false only where the App Store owns updates. */
 export function useUpdates(api: DesktopApi, checks: boolean) {
-  const [operation, setBusy] = useState<"restarting" | "changing">();
-  const mounted = useRef(false);
-  const inFlight = useRef(false);
-  const readUpdate = useCallback(() => api.prepareUpdate(), [api]);
   const client = useQueryClient();
-  const { data: snapshot, error: checkError, isFetching: checking, refetch } = useQuery<UpdateInfo>({ queryKey: ["app-update"], queryFn: readUpdate, enabled: checks && !operation,
-    refetchInterval: (query) => query.state.error ? 60_000 : 6 * 60 * 60_000, staleTime: 15 * 60_000, retry: false,
+  const confirm = useConfirm();
+  const operating = useIsMutating({ mutationKey: UPDATE_OPERATION }) > 0;
+  // The query counts every failed check; these came before the last success.
+  const earlierFailures = useRef(0);
+  const { data: snapshot, error: checkError, isFetching: checking, refetch } = useQuery<UpdateInfo>({
+    queryKey: ["app-update"], queryFn: () => api.prepareUpdate(), enabled: checks && !operating,
+    // A failed check runs again after 1 minute, then backs off up to the
+    // interval. Unlike retries, which wait for the window to be focused, the
+    // interval keeps running while it is hidden: a tray app prepares updates
+    // while its window is hidden or inactive.
+    refetchInterval: ({ state }) => {
+      if (state.status === "success") earlierFailures.current = state.errorUpdateCount;
+      const failures = state.errorUpdateCount - earlierFailures.current;
+      return failures ? Math.min(60_000 * 2 ** (failures - 1), CHECK_INTERVAL) : CHECK_INTERVAL;
+    },
+    refetchIntervalInBackground: true,
+    staleTime: 15 * 60_000,
+    retry: false,
   });
   const { data: installedVersion } = useQuery({ queryKey: ["app-version"], queryFn: () => api.getAppVersion(), staleTime: Infinity });
-  const confirm = useConfirm();
-  const refresh = useCallback(async () => {
+  /** Checks again now, in place of a check in progress. */
+  const recheck = useCallback(async () => {
     await client.cancelQueries({ queryKey: ["app-update"] });
-    return refetch();
+    void refetch();
   }, [client, refetch]);
-  useEffect(() => {
-    mounted.current = true;
-    return () => { mounted.current = false; };
-  }, [api]);
+  const scope = { id: "app-update" };
+  const changeChannel = useMutation({
+    mutationKey: UPDATE_OPERATION,
+    scope,
+    mutationFn: (next: UpdateChannel) => api.setUpdateChannel(next),
+    onSuccess: async (saved) => {
+      client.setQueryData<UpdateInfo | undefined>(["app-update"], (current) => current ? { ...current, channel: saved, version: null } : current);
+      await recheck();
+    },
+    onError: (error) => toastError("Could not change the update channel", error),
+  });
+  const restart = useMutation({
+    mutationKey: UPDATE_OPERATION,
+    scope,
+    mutationFn: async () => {
+      // The latest release, checked once: a failure ends the restart.
+      await client.cancelQueries({ queryKey: ["app-update"] });
+      const latest = await api.prepareUpdate();
+      client.setQueryData(["app-update"], latest);
+      if (!latest.version) return;
+      if (!await confirm({ title: "Restart to update?", message: `Version ${latest.version} is ready. Protection will pause during the restart and resume only after fresh verification. In-flight requests may be interrupted.`, confirmLabel: "Restart to Update" })) return;
+      try {
+        await api.restartToUpdate();
+      } catch (error) {
+        // A failed install used the prepared update; prepare it again.
+        void recheck();
+        throw error;
+      }
+    },
+    onError: (error) => toastError("Could not install the update", error),
+  });
 
   return useMemo(() => {
     const info = checkError && snapshot ? { ...snapshot, version: null } : snapshot;
@@ -36,52 +80,18 @@ export function useUpdates(api: DesktopApi, checks: boolean) {
     // Only in-app installs restart to update; other installations show their upgrade steps.
     const ready = Boolean(info?.enabled && info.version);
     const currentVersion = installedVersion ?? info?.currentVersion;
-    const busy = operation ?? (checking ? "checking" : undefined);
+    const busy = changeChannel.isPending ? "changing" : restart.isPending ? "restarting" : checking ? "checking" : undefined;
     const error = checkError ? "Could not prepare software updates. Retrying automatically." : undefined;
-
-    const changeChannel = async (next: UpdateChannel) => {
-      if (inFlight.current || checking || next === channel) return;
-      inFlight.current = true;
-      setBusy("changing");
-      try {
-        const saved = await api.setUpdateChannel(next);
-        if (!mounted.current) return;
-        client.setQueryData<UpdateInfo | undefined>(["app-update"], (current) => current ? { ...current, channel: saved, version: null } : current);
-        await refresh();
-      } catch (error) {
-        if (mounted.current) toastError("Could not change the update channel", error);
-      } finally {
-        inFlight.current = false;
-        if (mounted.current) setBusy(undefined);
-      }
+    return {
+      info, ready, currentVersion, busy, error, channel, checks,
+      changeChannel: (next: UpdateChannel) => {
+        if (!busy && next !== channel) changeChannel.mutate(next);
+      },
+      restart: () => {
+        if (!busy && ready) restart.mutate();
+      },
     };
-
-    const restart = async () => {
-      if (inFlight.current || checking || !ready) return;
-      inFlight.current = true;
-      setBusy("restarting");
-      let retry = false;
-      let installAttempted = false;
-      try {
-        const latest = await refresh();
-        if (latest.error) throw latest.error;
-        if (!latest.data?.version) return;
-        if (!await confirm({ title: "Restart to update?", message: `Version ${latest.data.version} is ready. Protection will pause during the restart and resume only after fresh verification. In-flight requests may be interrupted.`, confirmLabel: "Restart to Update" })) return;
-        installAttempted = true;
-        await api.restartToUpdate();
-      } catch (failure) {
-        if (mounted.current) {
-          toastError("Could not install the update", failure);
-          retry = installAttempted;
-        }
-      } finally {
-        inFlight.current = false;
-        if (mounted.current) setBusy(undefined);
-      }
-      if (retry && mounted.current) void refresh();
-    };
-    return { info, ready, currentVersion, busy, error, channel, checks, changeChannel, restart };
-  }, [api, checks, client, confirm, refresh, snapshot, checkError, checking, installedVersion, operation]);
+  }, [checks, snapshot, checkError, checking, installedVersion, changeChannel.isPending, changeChannel.mutate, restart.isPending, restart.mutate]);
 }
 
 export function UpdateChannelControl({ updates }: { updates: ReturnType<typeof useUpdates> }): React.JSX.Element {
@@ -92,7 +102,7 @@ export function UpdateChannelControl({ updates }: { updates: ReturnType<typeof u
     </ItemContent>
     <ItemActions>
       <ToggleGroup size="sm" variant="outline" spacing={0} aria-labelledby="update-channel-label" aria-describedby="update-channel-note" value={updates.channel ? [updates.channel] : []} disabled={!updates.channel || Boolean(updates.busy)} onValueChange={([value]) => {
-        if (value === "stable" || value === "beta") void updates.changeChannel(value);
+        if (value === "stable" || value === "beta") updates.changeChannel(value);
       }}><ToggleGroupItem value="stable">Stable</ToggleGroupItem><ToggleGroupItem value="beta">Beta</ToggleGroupItem></ToggleGroup>
     </ItemActions>
   </Item>;
@@ -119,7 +129,7 @@ export function UpdateControl({ updates, productName, desktop }: { updates: Retu
     </ItemContent>
     <ItemActions className="ml-auto max-w-full flex-wrap justify-end text-right">
       <span className="text-sm font-medium tabular-nums" data-slot="app-version">{currentVersion ? `v${currentVersion}` : "Version unavailable"}</span>
-      {ready ? <Button disabled={Boolean(busy)} onClick={() => void updates.restart()}><RotateCw aria-hidden="true" />Restart to Update</Button> : <ItemDescription className="max-w-sm text-right" role="status">{label}</ItemDescription>}
+      {ready ? <Button disabled={Boolean(busy)} onClick={updates.restart}><RotateCw aria-hidden="true" />Restart to Update</Button> : <ItemDescription className="max-w-sm text-right" role="status">{label}</ItemDescription>}
       {ready && <span role="status" className="sr-only">{label}</span>}
     </ItemActions>
   </Item>;

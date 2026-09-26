@@ -16,7 +16,7 @@
     "build:sidecars": "node scripts/bundle-sidecars.mjs",
     "build:sidecars:debug": "node scripts/bundle-sidecars.mjs --debug",
     "package:cli": "node scripts/package-cli.mjs",
-    "check": "tsc --noEmit && npm run test:agents",
+    "check": "tsc --noEmit && npm run test:agents && npm run test:state",
     "check:contracts": "node scripts/generate-contracts.mjs --check",
     "dev": "npm run build:sidecars:debug && tauri dev",
     "dev:renderer": "vite --host 127.0.0.1 --port 1420",
@@ -24,6 +24,7 @@
     "dist:app-store": "node scripts/dist.mjs --distribution mac-app-store",
     "generate:contracts": "node scripts/generate-contracts.mjs",
     "test:agents": "node --test scripts/agent-integrations.test.mjs",
+    "test:state": "node --test scripts/app-state.test.mjs",
     "test:probe": "node --test scripts/probe-model-endpoints.test.mjs",
     "test:release": "node --test scripts/create-update-manifest.test.mjs scripts/package-app-store.test.mjs scripts/package-cli.test.mjs scripts/package-linux.test.mjs scripts/npm-install.test.mjs scripts/npm-registry.test.mjs scripts/package-npm.test.mjs scripts/release-channel.test.mjs scripts/release-config.test.mjs scripts/release-workflow.test.mjs",
     "package:npm": "node scripts/package-npm.mjs"

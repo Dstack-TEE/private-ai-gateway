@@ -1,10 +1,12 @@
 import {
   ABOUT_LINKS,
-  AGENT_WEBSITES,
+  AGENTS,
   API_KEY_PAGES,
   SERVICE_PROVIDERS,
   WEB_DISTRIBUTION,
   type ProfileBackup,
+  type UiEvent,
+  type UiEventPayloads,
   type UiMethod,
   type UpdateInfo,
   type UpdateNotice,
@@ -12,11 +14,10 @@ import {
 } from "../../shared/contracts";
 import { createDesktopApi, type Backend, type UiPlatform, type UiTransport, type WebSession } from "./create-api";
 
-type EventListener = (payload: never) => void;
-
 const sessionEnded = "Your web UI session ended or expired. Sign in again.";
 const signedOut = "You signed out. Sign in again to continue.";
-const listeners = new Map<string, Set<EventListener>>();
+/** Dispatches each event of the stream as a `MessageEvent` of its name. */
+const listeners = new EventTarget();
 const endListeners = new Set<(notice: string) => void>();
 let events: EventSource | undefined;
 /** A session was confirmed and has not ended since, so its end is announced once. */
@@ -37,6 +38,7 @@ export function createBackend(): Backend {
     desktopApi: createDesktopApi(transport, platform),
     distributionCapabilities: WEB_DISTRIBUTION,
     session,
+    windowFocus: undefined,
   };
 }
 
@@ -65,9 +67,9 @@ const platform: UiPlatform = {
   getCliRegistration: unavailable,
   setCliRegistration: unavailable,
   stopAllAndQuit: async () => undefined,
-  showConfirmation: unavailable,
-  closeWindow: unavailable,
-  quit: unavailable,
+  showConfirmation: undefined,
+  closeWindow: undefined,
+  quit: undefined,
   copyText: async (text) => {
     // Absent outside secure contexts, such as plain HTTP on a network address.
     if (!window.isSecureContext) throw new Error("Copying needs 127.0.0.1 or HTTPS in this browser. Select and copy the text instead.");
@@ -88,7 +90,7 @@ const platform: UiPlatform = {
     throw new Error("The web UI is already open in this browser");
   },
   openAboutLink: async (target) => openAllowed(ABOUT_LINKS[target]),
-  openAgentWebsite: async (agentId) => openAllowed(AGENT_WEBSITES[agentId]),
+  openAgentWebsite: async (agentId) => openAllowed(AGENTS.find((agent) => agent.id === agentId)?.website),
   openApiKeyPage: async (provider) => openAllowed(API_KEY_PAGES[provider]),
   presentAccountLogin: (login) => {
     // The login sheet keeps a manual link, so a blocked or rejected tab must not fail the login.
@@ -133,7 +135,7 @@ async function signIn(password: string): Promise<void> {
 
 /** Ends this browser's session on the server. */
 async function signOut(): Promise<void> {
-  await request<undefined>("/api/session", { method: "DELETE" });
+  await answer(await fetch("/api/session", { method: "DELETE", cache: "no-store", credentials: "same-origin" }));
   endSession(signedOut);
 }
 
@@ -157,19 +159,23 @@ async function rpc<T>(method: UiMethod, params: Record<string, unknown> = {}): P
   return response.result;
 }
 
+/** Answers are `{"result": …}` in the shapes the generated contracts declare. */
 async function request<T>(path: string, init: RequestInit): Promise<T> {
-  return read<T>(await fetch(path, { ...init, cache: "no-store", credentials: "same-origin" }));
+  return read(await fetch(path, { ...init, cache: "no-store", credentials: "same-origin" }));
 }
 
-/** Answers are `{"result": …}`, or `{"error": {code, message}}` with the status of its code. */
 async function read<T>(response: Response): Promise<T> {
-  const payload: unknown = await response.json().catch(() => undefined);
+  return (await answer(response)).json();
+}
+
+/** A failed answer is `{"error": {code, message}}` with the status of its code. */
+async function answer(response: Response): Promise<Response> {
   if (response.status === 401) {
     endSession(sessionEnded);
     throw new Error(sessionEnded);
   }
-  if (!response.ok) throw errorFrom(payload, "Web UI request failed");
-  return payload as T;
+  if (!response.ok) throw errorFrom(await response.json().catch(() => undefined), "Web UI request failed");
+  return response;
 }
 
 function errorFrom(payload: unknown, fallback: string): Error {
@@ -182,16 +188,12 @@ function errorFrom(payload: unknown, fallback: string): Error {
   return new Error(fallback);
 }
 
-function subscribe<T>(event: string, listener: (payload: T) => void): () => void {
-  const wrapped: EventListener = listener as EventListener;
-  const current = listeners.get(event) ?? new Set<EventListener>();
-  current.add(wrapped);
-  listeners.set(event, current);
-  return () => current.delete(wrapped);
-}
-
-function emit(event: string, payload: unknown): void {
-  for (const listener of listeners.get(event) ?? []) listener(payload as never);
+function subscribe<E extends UiEvent>(event: E, listener: (payload: UiEventPayloads[E]) => void): () => void {
+  const receive = (message: Event) => {
+    if (message instanceof MessageEvent) listener(message.data);
+  };
+  listeners.addEventListener(event, receive);
+  return () => listeners.removeEventListener(event, receive);
 }
 
 /** The server sends a full state snapshot on every connection, so reconnecting loses nothing. */
@@ -204,7 +206,7 @@ function readEvents(): EventSource {
     } catch {
       return;
     }
-    if (isWebEvent(decoded)) emit(decoded.event, decoded.payload);
+    if (isWebEvent(decoded)) listeners.dispatchEvent(new MessageEvent(decoded.event, { data: decoded.payload }));
   });
   // EventSource retries dropped connections itself but stops at an error
   // response, such as after the session ended.
@@ -250,6 +252,7 @@ function selectProfileBackup(): Promise<ProfileBackup | null> {
       }
       void parseProfileBackup(file).then(resolve, reject);
     }, { once: true });
+    input.addEventListener("cancel", () => resolve(null), { once: true });
     input.click();
   });
 }

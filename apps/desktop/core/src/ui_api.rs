@@ -10,7 +10,9 @@ use crate::{
     client::{CallError, Client},
     config::{Appearance, Config, NotificationPreferences},
     contracts::{
-        AccountSaveResult, AppState, AppStateWire, ConfidentialProfileInput, ServiceProvider,
+        AccountSaveResult, AppState, AppStateWire, ConfidentialProfileInput,
+        NotificationConfiguration, NotificationPermission, NotificationPermissionStatus,
+        ServiceProvider,
     },
     protocol::{self, rpc, Call, Command, Preference},
 };
@@ -156,6 +158,14 @@ pub struct LaunchPreferences {
     pub connect_on_launch: bool,
 }
 
+/// One of the [`LaunchPreferences`].
+#[derive(Clone, Copy, Debug, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub enum LaunchPreference {
+    OpenAtLogin,
+    ConnectOnLaunch,
+}
+
 #[derive(Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ListenAddress {
@@ -227,13 +237,15 @@ pub trait Host: Clone + Send + Sync + 'static {
     fn notification_configuration(
         &self,
         preferences: NotificationPreferences,
-    ) -> impl Future<Output = Result<Value, String>> + Send {
+    ) -> impl Future<Output = NotificationConfiguration> + Send {
         async move {
-            Ok(json!({
-                "preferences": preferences,
-                "permission": "unsupported",
-                "alertsEnabled": false
-            }))
+            NotificationConfiguration {
+                preferences,
+                system: NotificationPermissionStatus {
+                    permission: NotificationPermission::Unsupported,
+                    alerts_enabled: Some(false),
+                },
+            }
         }
     }
 
@@ -318,25 +330,13 @@ pub async fn invoke(
         Method::GetUpdateNotice => Ok(value(crate::updates::check_installation().await?)?),
         Method::SetLaunchPreference => {
             let input: LaunchPreferenceParams = params(input)?;
-            match input.name.as_str() {
-                "openAtLogin" => {
-                    let host = host.clone();
-                    blocking(move || host.set_open_at_login(input.enabled)).await?;
-                }
-                "connectOnLaunch" => {
-                    set_preference(backend, Preference::ConnectOnLaunch(input.enabled)).await?;
-                }
-                _ => return Err("Unknown startup preference".into()),
-            }
-            let preferences = launch_preferences(backend, host).await?;
-            if let Ok(event) = Event::serialized(LAUNCH_PREFERENCES_EVENT, &preferences) {
-                let _ = host.emit(event);
-            }
-            Ok(value(preferences)?)
+            Ok(value(
+                set_launch_preference(backend, host, input.name, input.enabled).await?,
+            )?)
         }
         Method::GetNotificationSettings => {
             let preferences = preferences(backend).await?.notifications;
-            Ok(host.notification_configuration(preferences).await?)
+            Ok(value(host.notification_configuration(preferences).await)?)
         }
         Method::SaveNotificationSettings => {
             let preferences = params::<NotificationsParams>(input)?.config;
@@ -432,6 +432,29 @@ pub async fn refresh_preferences(
     Ok(())
 }
 
+/// Changes one startup preference and announces the preferences that apply.
+pub async fn set_launch_preference(
+    backend: &impl Backend,
+    host: &impl Host,
+    preference: LaunchPreference,
+    enabled: bool,
+) -> Result<LaunchPreferences, CallError> {
+    match preference {
+        LaunchPreference::OpenAtLogin => {
+            let host = host.clone();
+            blocking(move || host.set_open_at_login(enabled)).await?;
+        }
+        LaunchPreference::ConnectOnLaunch => {
+            set_preference(backend, Preference::ConnectOnLaunch(enabled)).await?;
+        }
+    }
+    let preferences = launch_preferences(backend, host).await?;
+    if let Ok(event) = Event::serialized(LAUNCH_PREFERENCES_EVENT, &preferences) {
+        let _ = host.emit(event);
+    }
+    Ok(preferences)
+}
+
 pub async fn launch_preferences(
     backend: &impl Backend,
     host: &impl Host,
@@ -495,7 +518,7 @@ struct AppearanceParams {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LaunchPreferenceParams {
-    name: String,
+    name: LaunchPreference,
     enabled: bool,
 }
 

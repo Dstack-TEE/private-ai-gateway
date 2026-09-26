@@ -23,7 +23,7 @@ use desktop_core::{
 };
 use tauri::{
     webview::{PageLoadEvent, WebviewWindowBuilder},
-    AppHandle, Emitter, Manager, WindowEvent,
+    AppHandle, Manager, WindowEvent,
 };
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_shell::ShellExt;
@@ -99,8 +99,10 @@ impl BackendInstance {
     }
 }
 
-#[derive(Default)]
-struct CliStartup(tokio::sync::Mutex<CliStartupState>);
+/// The automatic `pap` registration of a launch. It holds the lock while it
+/// runs, so reading or changing the registration waits for it.
+#[derive(Clone, Default)]
+struct CliStartup(std::sync::Arc<tokio::sync::Mutex<CliStartupState>>);
 
 #[derive(Default)]
 struct CliStartupState {
@@ -132,9 +134,10 @@ fn allow_automatic_cli_registration() -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-async fn register_cli_on_startup(app: &AppHandle) {
-    let startup = app.state::<CliStartup>();
-    let mut state = startup.0.lock().await;
+async fn register_cli_on_startup(
+    app: &AppHandle,
+    mut state: tokio::sync::OwnedMutexGuard<CliStartupState>,
+) {
     if state.attempted {
         return;
     }
@@ -312,22 +315,8 @@ pub fn run() {
             if let Some(theme) = native_theme(appearance) {
                 window.set_theme(Some(theme))?;
             }
-            let window_for_events = window.clone();
             let app_for_events = app.handle().clone();
-            let client_for_events = client.clone();
             window.on_window_event(move |event| {
-                if matches!(event, WindowEvent::Focused(true)) {
-                    let _ = window_for_events.emit(desktop_core::ui_api::AGENTS_CHANGED_EVENT, ());
-                    let host = ui_api::TauriHost::new(window_for_events.clone());
-                    let client = client_for_events.clone();
-                    tauri::async_runtime::spawn(async move {
-                        if let Err(error) =
-                            desktop_core::ui_api::refresh_preferences(&client, &host).await
-                        {
-                            tracing::warn!("Cannot refresh desktop preferences: {}", error);
-                        }
-                    });
-                }
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     tray::hide_window(&app_for_events);
@@ -346,6 +335,7 @@ pub fn run() {
             if let Err(error) = menu::setup(app.handle()) {
                 tracing::warn!("The application menu is unavailable: {error}");
             }
+            app.on_menu_event(menu::handle_event);
 
             let handle = app.handle().clone();
             let mut states = client.subscribe();
@@ -357,6 +347,11 @@ pub fn run() {
             // A backend that was already running may have answered before
             // this subscription: handle the current state as a change too.
             let mut backend = BackendInstance::default();
+            // The notification permission is asked for once per launch, once a
+            // backend answers with its preferences.
+            let permission_asked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                !distribution::CAPABILITIES.notifications,
+            ));
             states.mark_changed();
             tauri::async_runtime::spawn(async move {
                 while states.changed().await.is_ok() {
@@ -366,19 +361,33 @@ pub fn run() {
                     #[cfg(target_os = "macos")]
                     if connected && distribution::CAPABILITIES.cli_registration {
                         let app = handle.clone();
+                        let startup = handle.state::<CliStartup>().inner().clone();
+                        // Taken before the window hears of this backend, so its
+                        // first read of the registration waits for this one.
+                        let taken = startup.0.clone().try_lock_owned();
                         tauri::async_runtime::spawn(async move {
-                            register_cli_on_startup(&app).await;
+                            let state = match taken {
+                                Ok(state) => state,
+                                Err(_) => startup.0.lock_owned().await,
+                            };
+                            register_cli_on_startup(&app, state).await;
                         });
                     }
                     if projection.settings_changed(&state) || connected {
                         // A backend that (re)connected, or an edit of
                         // config.toml, for example: reapply preferences.
                         let (client, host) = (client.clone(), host.clone());
+                        let (app, asked) = (handle.clone(), permission_asked.clone());
                         tauri::async_runtime::spawn(async move {
                             if let Err(error) =
                                 desktop_core::ui_api::refresh_preferences(&client, &host).await
                             {
                                 tracing::warn!("Cannot refresh desktop preferences: {}", error);
+                            } else if !asked.swap(true, std::sync::atomic::Ordering::SeqCst)
+                                && !notifications::request_startup_permission(&app, &client).await
+                            {
+                                // The preferences were unavailable: ask after a later refresh.
+                                asked.store(false, std::sync::atomic::Ordering::SeqCst);
                             }
                         });
                     }

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { cliRegistrationQuery } from "../lib/page-queries";
 import { errorMessage, toastError } from "../lib/error-message";
@@ -12,7 +12,7 @@ import { Item, ItemActions, ItemContent, ItemTitle, ItemDescription } from "../c
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
 import { SettingsSection, SettingsList, SettingsLink, SettingsToggle } from "../components/settings";
-import type { LaunchPreferences, WebUiStatus } from "../../shared/contracts";
+import type { LaunchPreference, WebUiStatus } from "../../shared/contracts";
 import { desktopApi, distributionCapabilities as distribution, session } from "../lib/environment";
 import { parentDirectory, serviceHost } from "../lib/format";
 import { localAddressKind } from "../lib/local-api-config";
@@ -29,11 +29,6 @@ function CliRegistrationControl(): React.JSX.Element {
   });
   const busy = mutation.isPending;
   const error = mutation.error || readError ? errorMessage(mutation.error ?? readError) : undefined;
-  const change = async () => {
-    if (!registration || busy) return;
-    try { await mutation.mutateAsync(!registration.installed); }
-    catch { /* The item shows the mutation failure. */ }
-  };
   const directory = registration ? parentDirectory(registration.commandPath) : undefined;
   const description = registration?.installed
       ? registration.onPath
@@ -48,7 +43,7 @@ function CliRegistrationControl(): React.JSX.Element {
       {failure && <ItemDescription role="alert" className="text-destructive">{failure}</ItemDescription>}
     </ItemContent>
     <ItemActions>
-      <Button variant="outline" disabled={busy || !registration} onClick={() => void change()}>
+      <Button variant="outline" disabled={busy || !registration} onClick={() => { if (registration) mutation.mutate(!registration.installed); }}>
         {busy ? "Working…" : registration?.installed ? "Remove" : "Install"}
       </Button>
     </ItemActions>
@@ -86,12 +81,12 @@ function useLaunchPreferences() {
     void client.cancelQueries({ queryKey: ["launch-preferences"] }).then(() => client.setQueryData(["launch-preferences"], next));
   }), [client]);
   const mutation = useMutation({
-    mutationFn: ({ name, enabled }: { name: keyof LaunchPreferences; enabled: boolean }) => desktopApi.setLaunchPreference(name, enabled),
+    mutationFn: ({ name, enabled }: { name: LaunchPreference; enabled: boolean }) => desktopApi.setLaunchPreference(name, enabled),
     onMutate: () => client.cancelQueries({ queryKey: ["launch-preferences"] }),
     onSuccess: (next) => { client.setQueryData(["launch-preferences"], next); },
     onError: (error) => toastError("Could not change the launch preference", error),
   });
-  return { preferences: data, saving: mutation.isPending, change: (name: keyof LaunchPreferences, enabled: boolean) => mutation.mutate({ name, enabled }) };
+  return { preferences: data, saving: mutation.isPending, change: (name: LaunchPreference, enabled: boolean) => mutation.mutate({ name, enabled }) };
 }
 
 export function SettingsPage(): React.JSX.Element {
@@ -100,7 +95,6 @@ export function SettingsPage(): React.JSX.Element {
   const launch = useLaunchPreferences();
   const locked = shell.applying || shell.agents.changing;
   const allowDevelopmentOs = !state.config.requireProductionOs;
-  const [diagnosticMessage, setDiagnosticMessage] = useState<string>();
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   const starting = state.protection.phase === "starting";
   return (
@@ -141,7 +135,7 @@ export function SettingsPage(): React.JSX.Element {
               <ItemDescription className="break-all">{state.configFiles.configPath}. API keys and the web UI password are in credentials.toml beside it.</ItemDescription>
             </ItemContent>
           </Item>}
-          <ExportDiagnostics api={desktopApi} onMessage={setDiagnosticMessage} />
+          <ExportDiagnostics api={desktopApi} />
           <SettingsLink title="Reset settings" disabled={locked} onClick={shell.resetSettings} />
           </SettingsList>
         </CollapsibleContent>
@@ -152,7 +146,6 @@ export function SettingsPage(): React.JSX.Element {
           <UpdateControl updates={updates} productName={brand.productName} desktop={distribution.channel !== "web"} />
           {([ ["documentation", "Documentation"], ["github", "GitHub"] ] as const).map(([target, label]) => <SettingsLink key={target} title={label} external onClick={() => shell.openAboutLink(target)} />)}
       </SettingsSection>
-      {diagnosticMessage && <p role="status" className="text-sm text-muted-foreground">{diagnosticMessage}</p>}
     </div>
   );
 }

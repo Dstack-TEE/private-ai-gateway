@@ -1,11 +1,15 @@
 mod permission;
 use desktop_core::{
-    client::CallError,
+    client::{CallError, Client},
     config::NotificationPreferences,
-    contracts::{AppState, VerificationStatus},
+    contracts::{
+        AppState, NotificationConfiguration, NotificationPermission, NotificationPermissionStatus,
+        VerificationStatus,
+    },
+    protocol::rpc,
 };
 use std::{
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, Manager};
@@ -14,22 +18,14 @@ use tauri_plugin_notification::NotificationExt;
 #[derive(Default)]
 pub struct Settings(Mutex<NotificationPreferences>);
 
-#[derive(serde::Serialize)]
-pub struct Configuration {
-    preferences: NotificationPreferences,
-    #[serde(flatten)]
-    system: permission::PermissionStatus,
-}
-
 pub async fn configuration(
     app: &AppHandle,
     preferences: NotificationPreferences,
-) -> Result<serde_json::Value, String> {
-    serde_json::to_value(Configuration {
+) -> NotificationConfiguration {
+    NotificationConfiguration {
         preferences,
         system: permission::query(app).await,
-    })
-    .map_err(|_| "Management response failed".to_string())
+    }
 }
 
 pub fn set_cached_preferences(
@@ -43,10 +39,28 @@ pub fn set_cached_preferences(
     Ok(())
 }
 
+/// Asks for the system permission at startup while the backend's preferences
+/// have notifications on and the user has not decided yet, so alerts can show
+/// without opening Settings. Where the system has no prompt, it never opens
+/// anything. Returns whether the preferences could be read, which decides.
+pub async fn request_startup_permission(app: &AppHandle, client: &Arc<Client>) -> bool {
+    let Ok(settings) = desktop_core::ui_api::call(client, rpc::Settings).await else {
+        return false;
+    };
+    if settings.notifications.enabled
+        && permission::query(app).await.permission == NotificationPermission::NotDetermined
+    {
+        if let Err(error) = permission::request(app).await {
+            tracing::warn!("Cannot request notification permission: {error}");
+        }
+    }
+    true
+}
+
 #[tauri::command]
 pub async fn request_notification_permission(
     app: AppHandle,
-) -> Result<permission::PermissionStatus, CallError> {
+) -> Result<NotificationPermissionStatus, CallError> {
     permission::request(&app).await?;
     Ok(permission::query(&app).await)
 }

@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useLayoutEffect, type PropsWithChildren } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, type PropsWithChildren } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Hint } from "./hint";
 import type { Appearance, DesktopApi } from "../../shared/contracts";
@@ -8,7 +8,7 @@ import { toastError } from "../lib/error-message";
 import { Monitor, Sun, Moon } from "lucide-react";
 import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group";
 
-const AppearanceContext = createContext({ value: "system" as Appearance, busy: false, change: (_value: Appearance) => {} });
+const AppearanceContext = createContext<{ value: Appearance; busy: boolean; change(value: Appearance): void } | null>(null);
 
 /**
  * Selects the document's appearance while mounted; `public/appearance-init.js`
@@ -36,19 +36,29 @@ export function AppearanceProvider({ api, children }: PropsWithChildren<{ api: D
     onError: (error) => toastError("Could not change the appearance", error),
   });
   const busy = mutation.isPending;
+  const { mutate } = mutation;
   useEffect(() => api.onAppearanceChange((next) => { void client.cancelQueries({ queryKey: ["appearance"] }).then(() => client.setQueryData(["appearance"], next)); }), [api, client]);
   useAppearanceTheme(value);
-  const change = (next: Appearance) => {
-    if (busy) return;
-    mutation.mutate(next);
-  };
-  return <AppearanceContext.Provider value={{ value, busy, change }}>{children}</AppearanceContext.Provider>;
+  const appearance = useMemo(() => ({
+    value,
+    busy,
+    change: (next: Appearance) => {
+      if (!busy) mutate(next);
+    },
+  }), [value, busy, mutate]);
+  return <AppearanceContext.Provider value={appearance}>{children}</AppearanceContext.Provider>;
 }
 
-export function useAppearance() { return useContext(AppearanceContext).value; }
+function useAppearanceContext() {
+  const appearance = useContext(AppearanceContext);
+  if (!appearance) throw new Error("AppearanceProvider is required");
+  return appearance;
+}
+
+export function useAppearance() { return useAppearanceContext().value; }
 
 export function AppearanceControl() {
-  const appearance = useContext(AppearanceContext);
+  const appearance = useAppearanceContext();
   return <Item><ItemContent><ItemTitle><FieldLabel id="appearance-label">Theme</FieldLabel></ItemTitle></ItemContent><ItemActions>
     <ToggleGroup size="sm" variant="outline" spacing={0} aria-labelledby="appearance-label" value={[appearance.value]} disabled={appearance.busy} onValueChange={([value]) => {
       if (value === "system" || value === "light" || value === "dark") appearance.change(value);

@@ -1,7 +1,7 @@
-import React, { lazy, Suspense, useEffect, useId, useMemo, useRef, useState } from "react";
+import React, { lazy, Suspense, useId, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { usagePageQuery } from "../lib/page-queries";
+import { usageFilters, usagePageQuery } from "../lib/page-queries";
 import { errorMessage } from "../lib/error-message";
 import { Ban, Check, ChevronLeft, ChevronRight, Copy, ShieldCheck, ShieldX } from "lucide-react";
 import { Button } from "../components/ui/button";
@@ -9,7 +9,7 @@ import { ActionItem } from "../components/action-item";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
 import { UsageChart, type UsageMetric } from "../components/usage-chart";
 import { StateLabel } from "../components/state-label";
-import { Hint } from "../components/hint";
+import { HoverDetails } from "../components/hint";
 import { agentName, currency, formatTokens, outcomeOf, usageTokens } from "../lib/usage-presentation";
 import { USAGE_PAGE_SIZES, USAGE_SEARCH_DEFAULTS, usageDateBounds, usageDateLabel, usageDateSearch, usageDateSelection, type UsageSearch } from "../lib/usage-dates";
 import { Field, FieldLabel, FieldSet, FieldLegend } from "../components/ui/field";
@@ -52,30 +52,29 @@ export function UsagePage(): React.JSX.Element {
   const onInspect = (activity: RequestActivity) => shell.openDialog({ kind: "usage-proof", activity });
   const search = useSearch({ from: "/_app/usage" });
   const navigate = useNavigate({ from: "/usage" });
-  const filter = (next: UsageSearch) => void navigate({ search: (current) => ({ ...current, ...next }) });
+  // Filtering keeps the page where it is scrolled.
+  const filter = (next: UsageSearch) => void navigate({ search: (current) => ({ ...current, ...next }), resetScroll: false });
   const agent = search.agent ?? "";
   const model = search.model ?? "";
   const range = usageDateSelection(search);
   const pageSize = search.rows ?? USAGE_SEARCH_DEFAULTS.rows;
   const [metric, setMetric] = useState<UsageMetric>("tokens");
   const bounds = usageDateBounds(range);
-  const { since, until } = bounds;
-  const filters = { agent: search.agent, model: search.model, since, until, limit: pageSize };
+  const filters = usageFilters(search);
   // Cursors are opaque positions in one filtered result, so the page stack
   // stays in memory and restarts whenever the filters in the URL change.
   const filterKey = JSON.stringify(filters);
-  const [pagination, setPagination] = useState({ filterKey, cursors: [undefined] as (string | undefined)[] });
+  const [pagination, setPagination] = useState<{ filterKey: string; cursors: (string | undefined)[] }>({ filterKey, cursors: [undefined] });
   const cursors = pagination.filterKey === filterKey ? pagination.cursors : [undefined];
-  const focusAfterPage = useRef(false);
+  // Paging disables its buttons while it loads, so focus moves to the list.
+  const historyTitle = useRef<HTMLHeadingElement>(null);
+  const showPage = (next: (string | undefined)[]) => {
+    historyTitle.current?.focus();
+    setPagination({ filterKey, cursors: next });
+  };
   const usageQuery = { ...filters, cursor: cursors[cursors.length - 1] };
   const { data: page, error: queryError, isPending: loading } = useQuery(usagePageQuery(usageQuery));
   const error = queryError ? errorMessage(queryError) : undefined;
-  useEffect(() => {
-    if (!loading && focusAfterPage.current) {
-      focusAfterPage.current = false;
-      window.requestAnimationFrame(() => document.getElementById("usage-history-title")?.focus());
-    }
-  }, [loading, page, queryError]);
 
   const agentOptions = Array.from(new Set([
     ...(agent ? [agent] : []),
@@ -106,7 +105,7 @@ export function UsagePage(): React.JSX.Element {
         </Tabs>
       </Card>
       <Card size="sm" role="region" className="usage-history mt-4" aria-labelledby="usage-history-title">
-        <CardHeader><CardTitle><h2 id="usage-history-title" tabIndex={-1}>Usage history</h2></CardTitle>
+        <CardHeader><CardTitle><h2 ref={historyTitle} id="usage-history-title" tabIndex={-1}>Usage history</h2></CardTitle>
           <CardDescription aria-live="polite">{loading ? "Loading" : page ? `${page.summary.requests} records · kept on this device` : "Unavailable"}</CardDescription>
         </CardHeader>
         <CardContent><Suspense fallback={<div className="h-80" aria-busy="true" />}><UsageTable items={page?.items ?? []} loading={loading && !page} pageIndex={cursors.length - 1} pageSize={pageSize} total={page?.summary.requests ?? 0} onInspect={onInspect} /></Suspense>
@@ -118,10 +117,7 @@ export function UsagePage(): React.JSX.Element {
           <IconButton
             label="Previous usage page"
             disabled={loading || cursors.length === 1}
-            onClick={() => {
-              focusAfterPage.current = true;
-              setPagination({ filterKey, cursors: cursors.slice(0, -1) });
-            }}
+            onClick={() => showPage(cursors.slice(0, -1))}
           ><ChevronLeft size={16} /></IconButton>
           <span role="status" aria-live="polite">
             Page {cursors.length}
@@ -134,9 +130,7 @@ export function UsagePage(): React.JSX.Element {
             disabled={loading || !page?.nextCursor}
             onClick={() => {
               const next = page?.nextCursor;
-              if (!next) return;
-              focusAfterPage.current = true;
-              setPagination({ filterKey, cursors: [...cursors, next] });
+              if (next) showPage([...cursors, next]);
             }}
           ><ChevronRight size={16} /></IconButton>
         </div>
@@ -292,5 +286,5 @@ function MissingUsage({ activity }: { activity: Pick<RequestActivity, "leftDevic
     : activity.path === "/v1/messages/count_tokens"
       ? "This endpoint counts a prompt’s tokens; it does not return an inference usage report."
       : "No token count was recorded. The provider may omit usage, or the response may be incomplete or too large to capture. Missing counts are not estimated.";
-  return <Hint content={explanation}><span tabIndex={0} className="text-muted-foreground underline decoration-dotted underline-offset-4">{notApplicable ? "Not applicable" : "Unavailable"}</span></Hint>;
+  return <HoverDetails value={<span className="text-muted-foreground">{notApplicable ? "Not applicable" : "Unavailable"}</span>}>{explanation}</HoverDetails>;
 }
