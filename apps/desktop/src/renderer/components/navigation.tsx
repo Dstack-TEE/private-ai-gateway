@@ -2,7 +2,7 @@ import React, { type RefObject } from "react";
 import { Link, useMatches, useRouter } from "@tanstack/react-router";
 import { RotateCw } from "lucide-react";
 import { brand } from "../brand/brand";
-import { Badge } from "./ui/badge";
+import { Button } from "./ui/button";
 import { SidebarMenu, SidebarMenuItem, SidebarMenuButton } from "./ui/sidebar";
 import { overlaidTitleBar, titleBarDragRegion } from "../lib/environment";
 import { useShell } from "../lib/shell";
@@ -50,9 +50,9 @@ export function Sidebar({ navigationRef }: { navigationRef: RefObject<HTMLElemen
         </SidebarMenu>
       </nav>
       {updates.ready && <div className="mt-auto pt-4">
-        <Badge variant="outline" className="h-8 w-full gap-2 text-sm hover:bg-muted [&>svg]:size-4!" render={<button type="button" disabled={Boolean(updates.busy)} />} aria-label="Restart to Update" onClick={updates.restart}>
+        <Button type="button" variant="outline" size="sm" disabled={Boolean(updates.busy)} aria-label="Restart to Update" onClick={updates.restart}>
           <RotateCw aria-hidden="true" /><span className="max-[620px]:hidden">Restart to Update</span>
-        </Badge>
+        </Button>
       </div>}
     </aside>
   );

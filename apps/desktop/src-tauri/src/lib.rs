@@ -283,30 +283,14 @@ pub fn run() {
             let appearance = desktop_core::config::load()
                 .map(|saved| saved.appearance)
                 .unwrap_or_default();
-            #[cfg(target_os = "windows")]
-            let backdrop = windows_window::mica_supported().then_some("mica");
-            #[cfg(not(target_os = "windows"))]
-            let backdrop = None;
-            let builder = WebviewWindowBuilder::from_config(app, config)?
-                .initialization_script(distribution::initialization_script(backdrop))
+            let window = WebviewWindowBuilder::from_config(app, config)?
+                .initialization_script(distribution::initialization_script())
                 .on_page_load(|window, payload| {
                     if matches!(payload.event(), PageLoadEvent::Finished) {
                         tray::main_window_ready(window.app_handle());
                     }
-                });
-            // Windows 11 draws Mica behind a transparent window; the page
-            // shows it only where it has no background of its own.
-            #[cfg(target_os = "windows")]
-            let builder = if backdrop.is_some() {
-                builder.transparent(true).effects(
-                    tauri::window::EffectsBuilder::new()
-                        .effect(tauri::window::Effect::Mica)
-                        .build(),
-                )
-            } else {
-                builder
-            };
-            let window = builder.build()?;
+                })
+                .build()?;
             #[cfg(target_os = "windows")]
             windows_window::disable_browser_accelerator_keys(&window);
             // A new window follows the system, so only a saved light or dark

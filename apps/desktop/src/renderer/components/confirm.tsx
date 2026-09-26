@@ -1,6 +1,5 @@
 import { createContext, useCallback, useContext, useRef, useState, type PropsWithChildren } from "react";
 import type { Confirmation, DesktopApi } from "../../shared/contracts";
-import { platform } from "../lib/environment";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "./ui/alert-dialog";
 
 type Confirm = (options: Confirmation) => Promise<boolean>;
@@ -11,8 +10,7 @@ const ConfirmOpenContext = createContext(false);
  * Asks for a decision and resolves with the answer: in an alert sheet when
  * `ask` shows one (the macOS app, where the confirm button is the default),
  * otherwise in an AlertDialog. The dialog focuses Cancel, the safe choice, so
- * Return never starts the action; Windows orders the buttons
- * confirm-then-Cancel, other platforms Cancel-then-confirm.
+ * Return never starts the action.
  */
 export function ConfirmProvider({ ask, children }: PropsWithChildren<{ ask?: DesktopApi["showConfirmation"] }>) {
   const [request, setRequest] = useState<Confirmation>();
@@ -43,7 +41,6 @@ export function ConfirmProvider({ ask, children }: PropsWithChildren<{ ask?: Des
       setOpen(true);
     });
   }, [ask]);
-  const cancelButton = <AlertDialogCancel ref={cancel}>{request?.cancelLabel ?? "Cancel"}</AlertDialogCancel>;
   return <ConfirmContext.Provider value={confirm}><ConfirmOpenContext.Provider value={open || asking > 0}>
     {children}
     <AlertDialog open={open} onOpenChange={(next) => { if (!next) settle(false); }}>
@@ -53,9 +50,8 @@ export function ConfirmProvider({ ask, children }: PropsWithChildren<{ ask?: Des
           <AlertDialogDescription className="whitespace-pre-line">{request?.message}</AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
-          {platform !== "windows" && cancelButton}
+          <AlertDialogCancel ref={cancel}>{request?.cancelLabel ?? "Cancel"}</AlertDialogCancel>
           <AlertDialogAction variant={request?.destructive ? "destructive" : "default"} onClick={() => settle(true)}>{request?.confirmLabel}</AlertDialogAction>
-          {platform === "windows" && cancelButton}
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

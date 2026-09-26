@@ -1,15 +1,9 @@
-//! The main window on Windows: the Windows 11 Mica material, a webview
-//! without browser shortcuts, and the one-time notice that closing the window
-//! leaves the app in the notification area.
+//! The main window on Windows: a webview without browser shortcuts, and the
+//! one-time notice that closing the window leaves the app in the notification
+//! area.
 
 use tauri::{AppHandle, WebviewWindow};
 use tauri_plugin_notification::NotificationExt;
-
-/// Windows 11 (build 22000) is the first with Mica; elsewhere the window stays
-/// opaque, since a transparent window without a backdrop shows the desktop.
-pub fn mica_supported() -> bool {
-    windows_version::OsVersion::current() >= windows_version::OsVersion::new(10, 0, 0, 22000)
-}
 
 /// Turns off WebView2's browser accelerator keys (Find, Print, Reload, zoom,
 /// caret browsing and the like); text editing and navigation keys keep working.

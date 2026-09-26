@@ -87,8 +87,9 @@ protection problems, is stored under that key.
 - Dialogs are shadcn `Dialog`s in the one window, in the desktop app and the web
   UI alike. Decisions (`useConfirm`) are an alert sheet on the window in the
   macOS app and an `AlertDialog` on Windows, Linux and in the web UI.
-  The shell injects the platform (`<html data-platform>`) for the platform
-  metrics in `semantic.css`; a browser keeps the defaults. Tray and menu items show the window and
+  The shell injects the platform (`<html data-platform>`) for platform
+  behaviour such as tooltip delays and drag regions; every platform and the
+  web UI use the same shadcn styles. Tray and menu items show the window and
   send `pap://navigate` for the page or dialog; one requested while a dialog is
   open shows once it closes, and one requested while a confirmation asks for an
   answer is dropped, as with an alert. One app-level handler runs every native
