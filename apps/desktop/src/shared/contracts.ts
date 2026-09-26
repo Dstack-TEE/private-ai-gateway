@@ -106,6 +106,8 @@ export interface DesktopApi {
   stop(): Promise<AppState>;
   queryUsage(query: UsageQuery): Promise<UsagePage>;
   getUsageRecord(recordId: string): Promise<RequestActivity>;
+  /** The signed receipt document a record's audit checked, exactly as the service returned it. */
+  getUsageReceipt(recordId: string): Promise<string | null>;
   listAgents(): Promise<AgentStatus[]>;
   getAgentAccess(): Promise<AgentAccessStatus>;
   requestAgentAccess(): Promise<AgentAccessStatus>;

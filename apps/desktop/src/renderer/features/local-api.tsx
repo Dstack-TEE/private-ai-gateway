@@ -4,7 +4,7 @@ import { Button } from "../components/ui/button";
 import { ListenerFields } from "../components/listen-address";
 import { localAddressKind } from "../lib/local-api-config";
 import { Hint } from "../components/hint";
-import { Field, FieldGroup, FieldLabel, FieldDescription, FieldError, FieldSeparator } from "../components/ui/field";
+import { Field, FieldGroup, FieldLabel, FieldError, FieldSeparator } from "../components/ui/field";
 import { Item } from "../components/ui/item";
 import { InputGroup, InputGroupInput, InputGroupAddon, InputGroupButton } from "../components/ui/input-group";
 import { IconButton } from "../components/controls";
@@ -179,7 +179,6 @@ export function LocalApiDialog({
                 <Hint content="Rotate key"><InputGroupButton size="icon-xs" aria-label="Rotate key" disabled={frozen || saving} onClick={() => void rotateKey()}><RefreshCw /></InputGroupButton></Hint>
               </InputGroupAddon>
             </InputGroup>
-            {copied === "Local API key" && <FieldDescription role="status">Copied</FieldDescription>}
             {!clientKey && <FieldError>The Local API key is unavailable. Rotate it to restore access.</FieldError>}
           </Field>
           </FieldGroup>

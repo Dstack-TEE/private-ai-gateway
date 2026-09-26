@@ -692,6 +692,7 @@ async fn stale_verifier_generation_cannot_record_activity() {
         status: 200,
         streamed: true,
         receipt_id: Some("stale-receipt".to_string()),
+        receipt: None,
         verified: Some(false),
         detail: "late verdict".to_string(),
         at: 1,
@@ -715,6 +716,50 @@ async fn stale_verifier_generation_cannot_record_activity() {
         0
     );
 }
+#[tokio::test]
+async fn a_verdict_saves_the_checked_receipt_with_its_record() {
+    let (events, _) = tokio::sync::mpsc::channel(8);
+    let manager = SessionManager::new(
+        ProxyState::new(events).unwrap(),
+        Arc::new(UsageStore::memory().unwrap()),
+        Arc::new(WaitingSidecar),
+        Handle::current(),
+        AppState::default(),
+    );
+    let generation = manager.lock().unwrap().generation;
+    let receipt = r#"{"api_version":"aci/1","receipt_id":"rcpt-1"}"#;
+
+    manager.record_proxy_event(ProxyEvent {
+        generation,
+        request_id: "request-1".to_string(),
+        session_id: "session-1".to_string(),
+        agent: Some("codex".to_string()),
+        method: "POST".to_string(),
+        path: "/v1/responses".to_string(),
+        model: Some("test-model".to_string()),
+        status: 200,
+        streamed: true,
+        receipt_id: Some("rcpt-1".to_string()),
+        receipt: Some(receipt.to_string()),
+        verified: Some(true),
+        detail: "receipt verified".to_string(),
+        at: 1,
+        local_policy_applied: Some(true),
+        rewritten: Some(false),
+        left_device: true,
+        input_tokens: None,
+        output_tokens: None,
+        cache_read_tokens: None,
+        cache_write_tokens: None,
+        cost_usd: None,
+    });
+
+    assert_eq!(
+        manager.usage.receipt("request-1").unwrap(),
+        Some(Some(receipt.to_string()))
+    );
+}
+
 use serde_json::json;
 
 fn identity_event(value: serde_json::Value) -> IdentityEvent {

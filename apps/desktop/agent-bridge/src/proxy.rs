@@ -135,6 +135,9 @@ pub struct ProxyEvent {
     pub status: u16,
     pub streamed: bool,
     pub receipt_id: Option<String>,
+    /// The receipt document the verifier checked, exactly as the service
+    /// returned it.
+    pub receipt: Option<String>,
     pub verified: Option<bool>,
     pub detail: String,
     pub at: u64,
@@ -744,6 +747,7 @@ async fn forward(
         status,
         streamed,
         receipt_id: receipt_id.clone(),
+        receipt: None,
         verified: None,
         detail: String::new(),
         at: now_secs(),
@@ -786,6 +790,7 @@ async fn forward(
                 status,
                 streamed,
                 receipt_id: event_receipt_id,
+                receipt: None,
                 verified: None,
                 detail: String::new(),
                 at: now_secs(),
@@ -931,6 +936,7 @@ fn reject_with_context(
         status: rejection.status.as_u16(),
         streamed: false,
         receipt_id: None,
+        receipt: None,
         verified: None,
         detail: rejection.message.clone(),
         at: now_secs(),

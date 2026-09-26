@@ -40,6 +40,7 @@ desktop-runtime = { package = "private-ai-proxy-runtime", path = "../runtime" }
 ed25519-dalek = "2"
 futures-util = "0.3"
 hex = "0.4"
+http-body-util = "0.1"
 k256 = { version = "0.13", features = ["ecdsa"] }
 open = "5"
 rand = "0.8"

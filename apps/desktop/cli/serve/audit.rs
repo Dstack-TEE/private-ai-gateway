@@ -14,7 +14,7 @@ use super::{ProxyState, RecordedExchange, RequestOutcome, ResponseDelivery, Trus
 use crate::checks::{
     parse_receipt_document, run_response_checks, session_id_from_receipt, UpstreamContext,
 };
-use crate::client::HttpResult;
+use crate::client::{GetError, HttpResult};
 use crate::transcript::Transcript;
 
 pub(super) fn audit_exchange(
@@ -25,7 +25,7 @@ pub(super) fn audit_exchange(
 ) {
     let report_state = state.clone();
     let report_exchange = exchange.clone();
-    let report = move |verified, detail, rewritten| {
+    let report = move |verified, detail, rewritten, receipt| {
         let state = &report_state;
         let exchange = &report_exchange;
         if let Some(entry) = state
@@ -44,6 +44,7 @@ pub(super) fn audit_exchange(
             status: exchange.status,
             streamed: exchange.streamed,
             receipt_id: Some(exchange.receipt_id.clone()),
+            receipt,
             verified,
             detail,
             context: exchange.context.clone(),
@@ -59,6 +60,7 @@ pub(super) fn audit_exchange(
                 "Response delivery failed before the complete response was received; the receipt does not match the partial response."
                     .into(),
                 None,
+                None,
             );
             return;
         }
@@ -68,6 +70,7 @@ pub(super) fn audit_exchange(
                 "Response stream was canceled or protection stopped; no complete response proof was recorded."
                     .into(),
                 None,
+                None,
             );
             return;
         }
@@ -76,6 +79,7 @@ pub(super) fn audit_exchange(
         report(
             None,
             "Response delivered; receipt audit deferred because the audit limit was reached".into(),
+            None,
             None,
         );
         return;
@@ -90,17 +94,19 @@ pub(super) fn audit_exchange(
             ) => result,
         };
         match result {
-            Ok(Ok((transcript, detail))) => report(
+            Ok(Ok((transcript, detail, receipt))) => report(
                 Some(transcript.verified()),
                 format!("Post-delivery receipt audit: {detail}"),
                 Some(rewrite_noted(&transcript)),
+                receipt,
             ),
-            Ok(Err(_)) => report(
+            Ok(Err(error)) => report(
                 None,
                 format!(
-                    "Response delivered; receipt audit could not complete. Standalone serve can retry with POST /receipts/{}/verify.",
+                    "Response delivered; receipt audit could not complete: {error}. Standalone serve can retry with POST /receipts/{}/verify.",
                     exchange.receipt_id
                 ),
+                None,
                 None,
             ),
             Err(_) => report(
@@ -109,6 +115,7 @@ pub(super) fn audit_exchange(
                     "Response delivered; receipt audit timed out. Standalone serve can retry with POST /receipts/{}/verify.",
                     exchange.receipt_id
                 ),
+                None,
                 None,
             ),
         }
@@ -120,7 +127,7 @@ pub(super) async fn verify_exchange(
     trusted: &TrustedIdentity,
     exchange: &RecordedExchange,
     bearer: Option<&str>,
-) -> Result<(Transcript, String), String> {
+) -> Result<(Transcript, String, Option<String>), String> {
     if matches!(&exchange.delivery, ResponseDelivery::Cancelled) {
         return Err(
             "the client canceled the response stream before its complete bytes were observed"
@@ -129,6 +136,8 @@ pub(super) async fn verify_exchange(
     }
     let receipt_resp = fetch_receipt_for_audit(state, &exchange.receipt_id, bearer).await?;
     let receipt = receipt_resp.json().and_then(parse_receipt_document)?;
+    // JSON is UTF-8 (RFC 8259 §8.1), so the checked document keeps its bytes.
+    let document = String::from_utf8(receipt_resp.body).ok();
 
     let mut transcript = Transcript::default();
     let (session_resp, no_session_reason) = fetch_session_for_audit(state, &receipt).await;
@@ -167,7 +176,7 @@ pub(super) async fn verify_exchange(
             exchange.response.len
         ));
     }
-    Ok((transcript, detail))
+    Ok((transcript, detail, document))
 }
 
 fn transient_audit_status(status: u16) -> bool {
@@ -177,15 +186,47 @@ fn transient_audit_status(status: u16) -> bool {
 enum AuditFetchError {
     Status(u16),
     Transport(String),
+    /// The body exceeded this many bytes; retrying cannot help.
+    TooLarge(usize),
+}
+
+impl From<String> for AuditFetchError {
+    fn from(error: String) -> Self {
+        Self::Transport(error)
+    }
+}
+
+impl From<GetError> for AuditFetchError {
+    fn from(error: GetError) -> Self {
+        match error {
+            GetError::Failed(error) => Self::Transport(error),
+            GetError::TooLarge(limit) => Self::TooLarge(limit),
+        }
+    }
+}
+
+impl std::fmt::Display for AuditFetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Status(status) => write!(f, "fetch returned HTTP {status}"),
+            Self::Transport(error) => write!(f, "fetch failed: {error}"),
+            Self::TooLarge(limit) => write!(
+                f,
+                "the document exceeds the {} KiB limit, so it was not checked or saved",
+                limit / 1024
+            ),
+        }
+    }
 }
 
 /// Fetches a receipt or session, retrying transport failures and statuses
 /// that may clear (not yet published, rate limited, server errors) four
 /// times, 100 ms apart and doubling up to 1 s.
-async fn fetch_audit_artifact<F, Fut>(mut fetch: F) -> Result<HttpResult, AuditFetchError>
+async fn fetch_audit_artifact<F, Fut, E>(mut fetch: F) -> Result<HttpResult, AuditFetchError>
 where
     F: FnMut() -> Fut,
-    Fut: Future<Output = Result<HttpResult, String>>,
+    Fut: Future<Output = Result<HttpResult, E>>,
+    E: Into<AuditFetchError>,
 {
     let attempt = || {
         let response = fetch();
@@ -193,7 +234,7 @@ where
             match response.await {
                 Ok(response) if (200..300).contains(&response.status) => Ok(response),
                 Ok(response) => Err(AuditFetchError::Status(response.status)),
-                Err(error) => Err(AuditFetchError::Transport(error)),
+                Err(error) => Err(error.into()),
             }
         }
     };
@@ -207,6 +248,7 @@ where
         .when(|error| match error {
             AuditFetchError::Status(status) => transient_audit_status(*status),
             AuditFetchError::Transport(_) => true,
+            AuditFetchError::TooLarge(_) => false,
         })
         .await
 }
@@ -216,17 +258,13 @@ async fn fetch_receipt_for_audit(
     receipt_id: &str,
     bearer: Option<&str>,
 ) -> Result<HttpResult, String> {
-    match fetch_audit_artifact(|| {
+    fetch_audit_artifact(|| {
         state
             .client
             .fetch_receipt(&state.base_url, receipt_id, bearer)
     })
     .await
-    {
-        Ok(response) => Ok(response),
-        Err(AuditFetchError::Status(status)) => Err(format!("fetch returned HTTP {status}")),
-        Err(AuditFetchError::Transport(error)) => Err(format!("fetch failed: {error}")),
-    }
+    .map_err(|error| error.to_string())
 }
 
 async fn fetch_session_for_audit(
@@ -241,12 +279,6 @@ async fn fetch_session_for_audit(
     };
     match fetch_audit_artifact(|| state.client.fetch_session(&state.base_url, &session_id)).await {
         Ok(response) => (Some(response), String::new()),
-        Err(AuditFetchError::Status(status)) => (
-            None,
-            format!("session {session_id} fetch returned HTTP {status}"),
-        ),
-        Err(AuditFetchError::Transport(error)) => {
-            (None, format!("session {session_id} fetch failed: {error}"))
-        }
+        Err(error) => (None, format!("session {session_id} {error}")),
     }
 }

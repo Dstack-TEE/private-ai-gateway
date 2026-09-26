@@ -363,9 +363,17 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), CallError> {
             Usage::List { filter, page } => value(client.call(rpc::QueryUsage {
                 query: query(filter, Some(page)),
             })?)?,
-            Usage::Show { id } => value(client.call(rpc::GetUsageRecord {
+            Usage::Show { id, receipt: false } => value(client.call(rpc::GetUsageRecord {
                 record_id: id.clone(),
             })?)?,
+            Usage::Show { id, receipt: true } => {
+                let receipt = client
+                    .call(rpc::GetUsageReceipt {
+                        record_id: id.clone(),
+                    })?
+                    .ok_or("No receipt is saved for this usage record.")?;
+                return finish_output(write_bytes(receipt.as_bytes()));
+            }
             Usage::Export { filter, output, .. } => {
                 let path = std::path::absolute(output).map_err(|_| "Cannot resolve export path")?;
                 if path.exists() {
@@ -947,14 +955,9 @@ fn read_web_ui_password(
     if !io::stdin().is_terminal() || cli.json || cli.non_interactive {
         return Err("Use --value-stdin for noninteractive password input".into());
     }
-    let password =
-        rpassword::prompt_password("Web UI password: ").map_err(|_| "Cannot read the password")?;
-    let confirmation =
-        rpassword::prompt_password("Confirm password: ").map_err(|_| "Cannot read the password")?;
-    if password != confirmation {
-        return Err("Passwords do not match".into());
-    }
-    Ok(Some(password))
+    rpassword::prompt_password("Web UI password: ")
+        .map(Some)
+        .map_err(|_| "Cannot read the password".into())
 }
 fn parse_bool(value: &str) -> Result<bool, String> {
     value.parse().map_err(|_| "Expected true or false".into())

@@ -120,7 +120,7 @@ without restarting the service:
 
 ```sh
 printf '%s\n' "$PASSWORD" | pap settings set web-ui.password --value-stdin --yes
-pap settings set web-ui.password      # or type it twice at a hidden prompt
+pap settings set web-ui.password      # or type it at a hidden prompt
 pap settings set web-ui.enabled true
 pap settings set web-ui.port 4182     # default; must differ from the Local API (4180)
 pap settings show                     # settings, file paths, the web UI address or bind error, and passwordSet
@@ -429,7 +429,7 @@ directory with the home directory shown as `~`.
 | Credential replacement and removal | `profiles verify --key-stdin`, `token clear-credential` |
 | Agent configuration review and restoration | `agents list/connect/disconnect/disconnect-all` |
 | Verified model catalog | `models list --refresh` |
-| Usage, filtering, pagination, CSV and deletion | `usage list/show/export/clear` |
+| Usage, signed receipts, filtering, pagination, CSV and deletion | `usage list/show [--receipt]/export/clear` |
 | Settings (`config.toml`) and its schema | `settings show/set/schema` |
 | Local inference token | `token show/rotate` |
 | Configuration backups and redacted diagnostics | `profiles import/export`, `diagnostics` |
@@ -439,6 +439,12 @@ directory with the home directory shown as `~`.
 Usage time filters are Unix seconds. List pagination uses `--cursor` and
 `--limit`; CSV export covers all records matching its filters, not just the
 currently displayed page. Exports refuse existing destination files.
+
+`usage show <id> --receipt` prints the signed receipt document (ACI spec §7.2)
+the record's audit checked, byte for byte as the service returned it, to archive
+or re-verify offline with `pap audit --receipt`. Receipts hold hashes and
+verification metadata, never request or response content. They stay in the
+local usage database, and `usage clear` deletes them with the records.
 
 OS login startup, notification permissions and installer-based app updates stay
 in the desktop UI or OS installer. `doctor` also reports whether the saved update

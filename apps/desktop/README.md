@@ -66,7 +66,9 @@ coding agent
 Identity, policy, credential ownership, and model admission gate request
 delivery. Response bytes stream immediately. Signed receipts are fetched and
 audited afterward; an audit failure updates Usage but cannot retract bytes that
-were already delivered.
+were already delivered. Usage keeps each checked receipt as the service returned
+it, shown in the request's proof details and printed by
+`pap usage show <id> --receipt`.
 
 Only agents that are both linked and currently protected receive the local API
 configuration. Stop, shutdown, verification failure, or disconnect restores the

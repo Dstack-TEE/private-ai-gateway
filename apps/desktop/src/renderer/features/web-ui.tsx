@@ -38,12 +38,13 @@ export function WebUiDialog({
   const [changingPassword, setChangingPassword] = useState(!status.passwordSet);
   const [currentPassword, setCurrentPassword] = useState("");
   const [password, setPassword] = useState("");
-  const [confirmation, setConfirmation] = useState("");
   const addressKind = localAddressKind(draft.listenAddress);
   const networkAccess = Boolean(addressKind && addressKind !== "loopback");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
   const confirm = useConfirm();
+  // A browser that changes the password stays signed in.
+  const passwordChangeNote = `Changing it signs out ${web ? "other browser sessions" : "every browser session"}.`;
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     setSaving(true);
@@ -55,14 +56,10 @@ export function WebUiDialog({
       }
       const config = { ...draft, allowNetworkAccess: networkAccess };
       const configChanged = !sameConfig(config, webUiConfig(status));
-      const newPassword = changingPassword && Boolean(password || confirmation);
+      const newPassword = changingPassword && Boolean(password);
       if (newPassword) {
         if ([...password].length < MIN_PASSWORD_LENGTH) {
           setError(`Use a password of at least ${MIN_PASSWORD_LENGTH} characters.`);
-          return;
-        }
-        if (password !== confirmation) {
-          setError("The passwords do not match.");
           return;
         }
         if (web && !currentPassword) {
@@ -93,7 +90,6 @@ export function WebUiDialog({
         setChangingPassword(false);
         setCurrentPassword("");
         setPassword("");
-        setConfirmation("");
       }
       const message = configChanged ? await onSave(config) : undefined;
       if (message) setError(message);
@@ -111,25 +107,22 @@ export function WebUiDialog({
         <div className="-mx-6 min-h-0 overflow-y-auto px-6 py-1">
           <FieldGroup>
             <SettingsList>
-              <SettingsToggle label="Web UI" description="Manage this app from a browser. Browsers sign in with the password below." checked={draft.enabled} disabled={saving} onToggle={() => setDraft((current) => ({ ...current, enabled: !current.enabled }))} />
+              <SettingsToggle label="Web UI" description="Manage this app from a browser." checked={draft.enabled} disabled={saving} onToggle={() => setDraft((current) => ({ ...current, enabled: !current.enabled }))} />
             </SettingsList>
             <ListenerFields api={desktopApi} idPrefix="web-ui" value={draft} minPort={1} access="are protected only by the web UI password" clientHostNote="Optional host shown in the web UI address. Does not change the listener." disabled={saving} onChange={(listener) => setDraft((current) => ({ ...current, ...listener }))} />
-            <FieldDescription>Saving listener changes restarts the web UI and signs out every browser session.</FieldDescription>
+            <FieldDescription>Saving listener changes signs out every browser session.</FieldDescription>
             <FieldSeparator />
             {changingPassword ? <>
               {web && <FormField id="web-ui-current-password" label="Current password">
                 <Input id="web-ui-current-password" type="password" autoComplete="current-password" value={currentPassword} disabled={saving} onChange={(event) => setCurrentPassword(event.target.value)} />
               </FormField>}
-              <FormField id="web-ui-password" label={status.passwordSet ? "New password" : "Password"} description={`At least ${MIN_PASSWORD_LENGTH} characters. Changing it signs out every browser session.`}>
+              <FormField id="web-ui-password" label={status.passwordSet ? "New password" : "Password"} description={`At least ${MIN_PASSWORD_LENGTH} characters.${status.passwordSet ? ` ${passwordChangeNote}` : ""}`}>
                 <Input id="web-ui-password" aria-describedby="web-ui-password-note" type="password" autoComplete="new-password" value={password} disabled={saving} onChange={(event) => setPassword(event.target.value)} />
-              </FormField>
-              <FormField id="web-ui-password-confirmation" label="Confirm password">
-                <Input id="web-ui-password-confirmation" type="password" autoComplete="new-password" value={confirmation} disabled={saving} onChange={(event) => setConfirmation(event.target.value)} />
               </FormField>
             </> : <Field orientation="horizontal">
               <FieldContent>
                 <FieldTitle>Password</FieldTitle>
-                <FieldDescription>Set. Changing it signs out every browser session.</FieldDescription>
+                <FieldDescription>Set. {passwordChangeNote}</FieldDescription>
               </FieldContent>
               <Button type="button" variant="outline" disabled={saving} onClick={() => setChangingPassword(true)}>Change Password</Button>
             </Field>}

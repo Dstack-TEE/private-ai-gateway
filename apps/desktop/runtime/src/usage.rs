@@ -211,6 +211,33 @@ impl UsageStore {
             .map_err(db_error)
     }
 
+    /// Keeps the receipt document an audit checked, exactly as the service
+    /// returned it, with its record.
+    pub fn save_receipt(&self, record_id: &str, receipt: &str) -> Result<(), String> {
+        self.lock()?
+            .execute(
+                "UPDATE usage_records SET receipt = ?2 WHERE id = ?1",
+                params![record_id, receipt],
+            )
+            .map(|_| ())
+            .map_err(|error| format!("Cannot save the receipt: {error}"))
+    }
+
+    /// A record's saved receipt document (`Some(None)` when its audit fetched
+    /// none); `None` when there is no such record.
+    pub fn receipt(&self, record_id: &str) -> Result<Option<Option<String>>, String> {
+        let record_id = clean_filter(Some(record_id), "record")?
+            .ok_or_else(|| "Invalid usage record".to_string())?;
+        self.lock()?
+            .query_row(
+                "SELECT receipt FROM usage_records WHERE id = ? AND path != '/v1/models'",
+                [record_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_error)
+    }
+
     pub fn export_csv(&self, query: &UsageQuery, path: &Path) -> Result<usize, String> {
         if path.as_os_str().is_empty() {
             return Err("Choose a destination for the CSV export".to_string());
@@ -351,7 +378,11 @@ const SCHEMA_V1: &str = "CREATE TABLE IF NOT EXISTS active_session (
      CREATE INDEX IF NOT EXISTS usage_records_model ON usage_records(model, at DESC);
      CREATE INDEX IF NOT EXISTS usage_records_session ON usage_records(session_id, at DESC);";
 
-const MIGRATIONS_SLICE: &[M<'_>] = &[M::up(SCHEMA_V1)];
+const MIGRATIONS_SLICE: &[M<'_>] = &[
+    M::up(SCHEMA_V1),
+    // The receipt document as the service returned it (spec §7.2).
+    M::up("ALTER TABLE usage_records ADD COLUMN receipt TEXT;"),
+];
 const MIGRATIONS: Migrations<'_> = Migrations::from_slice(MIGRATIONS_SLICE);
 
 fn initialize(connection: &mut Connection) -> Result<(), String> {
@@ -870,19 +901,40 @@ mod tests {
         }
         let store = UsageStore::open(path.clone()).unwrap();
         assert_eq!(store.get("kept").unwrap().unwrap().session_id, "session-0");
+        // Migration 2 added the receipt column.
+        store.save_receipt("kept", "{}").unwrap();
+        assert_eq!(store.receipt("kept").unwrap(), Some(Some("{}".to_string())));
         let version: i64 = store
             .lock()
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, MIGRATIONS_SLICE.len() as i64);
         drop(store);
         // A database from a newer release is refused, not silently rewritten.
         Connection::open(&path)
             .unwrap()
-            .pragma_update(None, "user_version", 2)
+            .pragma_update(None, "user_version", MIGRATIONS_SLICE.len() + 1)
             .unwrap();
         assert!(UsageStore::open(path).is_err());
+    }
+
+    #[test]
+    fn keeps_the_checked_receipt_document_verbatim() {
+        let store = UsageStore::memory().unwrap();
+        store.upsert(&item("a1", 10, "codex", "model-a")).unwrap();
+        assert_eq!(store.receipt("a1").unwrap(), Some(None));
+        let document = "{\"api_version\": \"aci/1\",\n  \"served_at\": 1750000000}";
+        store.save_receipt("a1", document).unwrap();
+        // Later events for the record do not clear it.
+        store.upsert(&item("a1", 10, "codex", "model-a")).unwrap();
+        assert_eq!(
+            store.receipt("a1").unwrap(),
+            Some(Some(document.to_string()))
+        );
+        assert_eq!(store.receipt("missing").unwrap(), None);
+        store.clear().unwrap();
+        assert_eq!(store.receipt("a1").unwrap(), None);
     }
 
     #[test]

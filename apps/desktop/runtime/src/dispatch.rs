@@ -112,6 +112,14 @@ pub(crate) async fn dispatch(
             )),
             Err(error) => Err(error.into()),
         },
+        Command::GetUsageReceipt { record_id } => match runtime.usage_receipt(&record_id) {
+            Ok(Some(receipt)) => encode::<rpc::GetUsageReceipt>(receipt),
+            Ok(None) => Err(protocol::Error::new(
+                ErrorCode::NotFound,
+                "Usage record not found",
+            )),
+            Err(error) => Err(error.into()),
+        },
         Command::ExportUsage { query, path } => {
             respond::<rpc::ExportUsage, _>(runtime.export_usage_csv(query, absolute(path)?))
         }

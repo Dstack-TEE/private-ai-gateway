@@ -4982,6 +4982,7 @@ dependencies = [
  "ed25519-dalek",
  "futures-util",
  "hex",
+ "http-body-util",
  "k256",
  "open",
  "private-ai-proxy-agent-bridge",
