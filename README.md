@@ -112,8 +112,8 @@ also sees the prompt and response.
 The optional control plane never receives prompt or response bodies, raw
 bearer tokens, or provider credentials. It does receive routing features
 derived from the request, including a token estimate and a hash of the first
-4 KiB of the conversation. Without `middleware.prefix_hash_secret`, that hash
-lets the control plane confirm a prefix it already knows. The
+4 KiB of the conversation. The hash is keyed inside the TEE, so it shows when
+two requests share a prefix but cannot be tested against a guessed prefix. The
 [security model](docs/attested-confidential-inference.md#who-receives-what)
 lists every field that leaves the request path.
 

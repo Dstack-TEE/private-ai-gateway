@@ -94,12 +94,11 @@ that fails partway (`stream_abort`, the one line that carries a request ID).
 Such a line can name the requested model or the request host. It never carries
 request or response content.
 
-`prefixHash` is derived from content: a digest of the conversation's first
-4 KiB, truncated to 32 hex characters, used for cache-affinity routing. It lets
-the control plane see when two requests share a prefix. With
-`middleware.prefix_hash_secret` set, it is an HMAC the control plane cannot
-test guesses against. Without the secret it is a plain SHA-256, which also lets
-the control plane confirm a prefix it already knows. See the
+`prefixHash` is derived from content: an HMAC-SHA256 of the conversation's
+first 4 KiB, truncated to 32 hex characters, used for cache-affinity routing.
+The gateway derives the HMAC key from dstack KMS, so the key never leaves the
+TEE. The control plane can see when two requests share a prefix, but it cannot
+test a guessed prefix against the hash. See the
 [control-plane contract](control-plane-contract.md) for every field.
 
 Provider workloads can have their own internal routing, telemetry, or storage

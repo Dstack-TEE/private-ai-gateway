@@ -113,7 +113,6 @@ These boundaries should inform deployment decisions:
 
 ### Middleware and control plane
 
-- Derive the middleware prefix-hash HMAC key from dstack KMS inside the gateway, and remove `prefix_hash_secret` and the unkeyed hash ([#315](https://github.com/Dstack-TEE/private-ai-gateway/issues/315)). An unkeyed or operator-supplied key lets an operator who also runs the control plane confirm a guessed prompt prefix.
 - Provide a production-grade reference control plane or narrow the example contract further so its intended scope is unmistakable.
 - Add contract tests for catalog subpaths, query preservation, TEE-only domain filtering, candidate ordering, and failover decisions.
 - Document control-plane authentication and transport requirements for deployments that cross a trust boundary.

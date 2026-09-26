@@ -69,7 +69,7 @@ list of what the control plane receives, see
 | `inputModalities` | Deduplicated, stably ordered values from `text`, `image`, `file`, `audio`, and `video`. |
 | `reasoning` | Client intent: `enabled`, `disabled`, or `unspecified`. Response-visibility controls do not change this value. |
 | `responseFormat` | `text`, `json_object`, or `json_schema`. A missing response format becomes `text`. |
-| `prefixHash` | Optional 32-character lowercase hex cache-affinity key for the canonical first 4 KiB of a conversation. It is present only when that prefix fills the 4 KiB cap. With `middleware.prefix_hash_secret` set, it is HMAC-SHA256 and reveals only whether two prefixes are equal. Without the secret, it is plain SHA-256, so the control plane can also confirm a prefix it already knows by hashing it. It does not prove prompt contents or request authenticity. |
+| `prefixHash` | Optional 32-character lowercase hex cache-affinity key for the canonical first 4 KiB of a conversation. It is present only when that prefix fills the 4 KiB cap. It is HMAC-SHA256 under a key the gateway derives from dstack KMS, so it reveals only whether two prefixes are equal. It does not prove prompt contents or request authenticity. |
 
 Treat these fields as routing hints. They are counts, booleans, closed enums,
 and one digest. They carry no prompt text, but they do describe the request,
