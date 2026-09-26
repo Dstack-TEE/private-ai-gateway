@@ -124,6 +124,8 @@ It runs `scripts/soundness_phala_direct.py`, which stubs the HTTP fetch, dstack 
 | Fingerprint that differs from the one bound in `report_data` | Rejected as a `report_data` binding failure. |
 | Debug TD | Rejected. |
 | dstack verifier returns `is_valid: false` | Rejected. |
+| `app_compose` that differs from the measured `compose-hash` event, even with a matching `info.compose_hash` | Rejected. |
+| dstack verifier result without a measured compose hash | Rejected. |
 | GPU nonce mismatch | Verified with `gpu_evidence_nonce_matched: false` and `gpu_verified: false`. |
 | NRAS failure | Verified with `gpu_verified: false`. |
 | Unresolvable OS image | Verified with `production_os_image: null`. |
