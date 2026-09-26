@@ -458,6 +458,50 @@ async fn standalone_control_lists_and_retries_recorded_exchanges() {
 }
 
 #[tokio::test]
+async fn an_oversized_receipt_is_refused_once_and_not_kept() {
+    let receipt_calls = Arc::new(AtomicUsize::new(0));
+    let upstream = Router::new().route(
+        "/v1/aci/receipts/{id}",
+        get({
+            let calls = receipt_calls.clone();
+            move || {
+                let calls = calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let mut receipt = vector_receipt_envelope();
+                    receipt["padding"] = json!("x".repeat(crate::client::MAX_RECEIPT_BYTES));
+                    json_response(StatusCode::OK, receipt)
+                }
+            }
+        }),
+    );
+    let base = spawn_server(upstream).await;
+    let (tx, _outcomes) = mpsc::unbounded_channel();
+    let state = state_over(base, tx);
+    let exchange = RecordedExchange {
+        receipt_id: "rcpt-0001".to_string(),
+        path: "/v1/chat/completions".to_string(),
+        status: 200,
+        streamed: true,
+        request: BodyDigest::of(REQUEST_BODY),
+        response: BodyDigest::of(RESPONSE_BODY),
+        delivery: ResponseDelivery::Complete,
+        pinned_sessions: Vec::new(),
+        at: 1,
+        verified: None,
+        context: None,
+        local_policy_applied: false,
+    };
+
+    let Err(error) = verify_exchange(&state, &state.snapshot(), &exchange, None).await else {
+        panic!("an oversized receipt must not be checked");
+    };
+
+    assert!(error.contains("exceeds the 64 KiB limit"), "{error}");
+    assert_eq!(receipt_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn transient_receipt_and_session_fetches_are_retried() {
     let receipt_calls = Arc::new(AtomicUsize::new(0));
     let session_calls = Arc::new(AtomicUsize::new(0));

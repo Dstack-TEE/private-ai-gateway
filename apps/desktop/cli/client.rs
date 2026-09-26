@@ -9,6 +9,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::aci::tls::{observing_spki_client, SpkiObservations};
 use futures_util::StreamExt;
+use http_body_util::{BodyExt, LengthLimitError, Limited};
 use rand::RngCore;
 
 const CONNECT_TIMEOUT_SECONDS: u64 = 10;
@@ -37,6 +38,37 @@ pub fn host_of(url: &str) -> Result<String, String> {
         Some(url::Host::Ipv4(ip)) => Ok(ip.to_string()),
         Some(url::Host::Ipv6(ip)) => Ok(ip.to_string()),
         None => Err(format!("URL {url:?} has no host")),
+    }
+}
+
+/// The largest receipt document read. A §7.3 receipt is a few fixed members
+/// plus one flat object per event (a type, a `sha256:` hash or a few
+/// identifiers); the spec test vector is under 1 KiB. 64 KiB leaves room for
+/// dozens of implementation events (§7.4) while bounding what an audit holds
+/// in memory and saves with usage.
+pub const MAX_RECEIPT_BYTES: usize = 64 * 1024;
+
+/// Why a bounded GET produced no response.
+#[derive(Debug)]
+pub enum GetError {
+    /// The request or its body read failed.
+    Failed(String),
+    /// The body exceeded this many bytes.
+    TooLarge(usize),
+}
+
+impl std::fmt::Display for GetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Failed(error) => f.write_str(error),
+            Self::TooLarge(limit) => write!(f, "response body exceeds {} KiB", limit / 1024),
+        }
+    }
+}
+
+impl From<GetError> for String {
+    fn from(error: GetError) -> Self {
+        error.to_string()
     }
 }
 
@@ -143,14 +175,7 @@ impl AciClient {
     }
 
     pub async fn get(&self, url: &str, bearer: Option<&str>) -> Result<HttpResult, String> {
-        let mut req = self.http().get(url);
-        if let Some(token) = bearer {
-            req = req.bearer_auth(token);
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| format!("GET {url} failed: {e}"))?;
+        let resp = self.send_get(url, bearer).await?;
         let status = resp.status().as_u16();
         let headers = resp.headers().clone();
         let body = resp
@@ -163,6 +188,45 @@ impl AciClient {
             headers,
             body,
         })
+    }
+
+    /// A GET whose body read stops with `GetError::TooLarge` past `limit` bytes.
+    async fn get_limited(
+        &self,
+        url: &str,
+        bearer: Option<&str>,
+        limit: usize,
+    ) -> Result<HttpResult, GetError> {
+        let resp = self.send_get(url, bearer).await.map_err(GetError::Failed)?;
+        let status = resp.status().as_u16();
+        let headers = resp.headers().clone();
+        let body = Limited::new(reqwest::Body::from(resp), limit)
+            .collect()
+            .await
+            .map_err(|error| {
+                if error.is::<LengthLimitError>() {
+                    GetError::TooLarge(limit)
+                } else {
+                    GetError::Failed(format!("GET {url}: failed to read body: {error}"))
+                }
+            })?
+            .to_bytes()
+            .to_vec();
+        Ok(HttpResult {
+            status,
+            headers,
+            body,
+        })
+    }
+
+    async fn send_get(&self, url: &str, bearer: Option<&str>) -> Result<reqwest::Response, String> {
+        let mut req = self.http().get(url);
+        if let Some(token) = bearer {
+            req = req.bearer_auth(token);
+        }
+        req.send()
+            .await
+            .map_err(|e| format!("GET {url} failed: {e}"))
     }
 
     pub async fn fetch_attestation(
@@ -182,14 +246,20 @@ impl AciClient {
         base_url: &str,
         receipt_id: &str,
         bearer: Option<&str>,
-    ) -> Result<HttpResult, String> {
+    ) -> Result<HttpResult, GetError> {
         // The id came from a response header; it becomes a path segment, so
         // constrain it before it can steer the request elsewhere.
         if !is_url_safe_id(receipt_id) {
-            return Err(format!("receipt id {receipt_id:?} is not a URL-safe id"));
+            return Err(GetError::Failed(format!(
+                "receipt id {receipt_id:?} is not a URL-safe id"
+            )));
         }
-        self.get(&format!("{base_url}/v1/aci/receipts/{receipt_id}"), bearer)
-            .await
+        self.get_limited(
+            &format!("{base_url}/v1/aci/receipts/{receipt_id}"),
+            bearer,
+            MAX_RECEIPT_BYTES,
+        )
+        .await
     }
 
     /// Fetch one attested session; the path takes the session id exactly as

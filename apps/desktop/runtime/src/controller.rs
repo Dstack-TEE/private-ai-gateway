@@ -508,7 +508,7 @@ impl DesktopRuntime {
         Ok(self.usage.get(record_id)?)
     }
 
-    pub fn usage_receipt(&self, record_id: &str) -> Result<Option<String>, Error> {
+    pub fn usage_receipt(&self, record_id: &str) -> Result<Option<Option<String>>, Error> {
         Ok(self.usage.receipt(record_id)?)
     }
 

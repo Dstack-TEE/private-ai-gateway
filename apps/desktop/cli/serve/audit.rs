@@ -14,7 +14,7 @@ use super::{ProxyState, RecordedExchange, RequestOutcome, ResponseDelivery, Trus
 use crate::checks::{
     parse_receipt_document, run_response_checks, session_id_from_receipt, UpstreamContext,
 };
-use crate::client::HttpResult;
+use crate::client::{GetError, HttpResult};
 use crate::transcript::Transcript;
 
 pub(super) fn audit_exchange(
@@ -100,10 +100,10 @@ pub(super) fn audit_exchange(
                 Some(rewrite_noted(&transcript)),
                 receipt,
             ),
-            Ok(Err(_)) => report(
+            Ok(Err(error)) => report(
                 None,
                 format!(
-                    "Response delivered; receipt audit could not complete. Standalone serve can retry with POST /receipts/{}/verify.",
+                    "Response delivered; receipt audit could not complete: {error}. Standalone serve can retry with POST /receipts/{}/verify.",
                     exchange.receipt_id
                 ),
                 None,
@@ -186,15 +186,47 @@ fn transient_audit_status(status: u16) -> bool {
 enum AuditFetchError {
     Status(u16),
     Transport(String),
+    /// The body exceeded this many bytes; retrying cannot help.
+    TooLarge(usize),
+}
+
+impl From<String> for AuditFetchError {
+    fn from(error: String) -> Self {
+        Self::Transport(error)
+    }
+}
+
+impl From<GetError> for AuditFetchError {
+    fn from(error: GetError) -> Self {
+        match error {
+            GetError::Failed(error) => Self::Transport(error),
+            GetError::TooLarge(limit) => Self::TooLarge(limit),
+        }
+    }
+}
+
+impl std::fmt::Display for AuditFetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Status(status) => write!(f, "fetch returned HTTP {status}"),
+            Self::Transport(error) => write!(f, "fetch failed: {error}"),
+            Self::TooLarge(limit) => write!(
+                f,
+                "the document exceeds the {} KiB limit, so it was not checked or saved",
+                limit / 1024
+            ),
+        }
+    }
 }
 
 /// Fetches a receipt or session, retrying transport failures and statuses
 /// that may clear (not yet published, rate limited, server errors) four
 /// times, 100 ms apart and doubling up to 1 s.
-async fn fetch_audit_artifact<F, Fut>(mut fetch: F) -> Result<HttpResult, AuditFetchError>
+async fn fetch_audit_artifact<F, Fut, E>(mut fetch: F) -> Result<HttpResult, AuditFetchError>
 where
     F: FnMut() -> Fut,
-    Fut: Future<Output = Result<HttpResult, String>>,
+    Fut: Future<Output = Result<HttpResult, E>>,
+    E: Into<AuditFetchError>,
 {
     let attempt = || {
         let response = fetch();
@@ -202,7 +234,7 @@ where
             match response.await {
                 Ok(response) if (200..300).contains(&response.status) => Ok(response),
                 Ok(response) => Err(AuditFetchError::Status(response.status)),
-                Err(error) => Err(AuditFetchError::Transport(error)),
+                Err(error) => Err(error.into()),
             }
         }
     };
@@ -216,6 +248,7 @@ where
         .when(|error| match error {
             AuditFetchError::Status(status) => transient_audit_status(*status),
             AuditFetchError::Transport(_) => true,
+            AuditFetchError::TooLarge(_) => false,
         })
         .await
 }
@@ -225,17 +258,13 @@ async fn fetch_receipt_for_audit(
     receipt_id: &str,
     bearer: Option<&str>,
 ) -> Result<HttpResult, String> {
-    match fetch_audit_artifact(|| {
+    fetch_audit_artifact(|| {
         state
             .client
             .fetch_receipt(&state.base_url, receipt_id, bearer)
     })
     .await
-    {
-        Ok(response) => Ok(response),
-        Err(AuditFetchError::Status(status)) => Err(format!("fetch returned HTTP {status}")),
-        Err(AuditFetchError::Transport(error)) => Err(format!("fetch failed: {error}")),
-    }
+    .map_err(|error| error.to_string())
 }
 
 async fn fetch_session_for_audit(
@@ -250,12 +279,6 @@ async fn fetch_session_for_audit(
     };
     match fetch_audit_artifact(|| state.client.fetch_session(&state.base_url, &session_id)).await {
         Ok(response) => (Some(response), String::new()),
-        Err(AuditFetchError::Status(status)) => (
-            None,
-            format!("session {session_id} fetch returned HTTP {status}"),
-        ),
-        Err(AuditFetchError::Transport(error)) => {
-            (None, format!("session {session_id} fetch failed: {error}"))
-        }
+        Err(error) => (None, format!("session {session_id} {error}")),
     }
 }

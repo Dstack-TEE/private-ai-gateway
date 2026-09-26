@@ -14,6 +14,7 @@ export function useAppState(api: DesktopApi, fallback: AppState) {
     usageRevision.current = query.data?.usageRevision;
     void client.invalidateQueries({ queryKey: ["usage"] });
     void client.invalidateQueries({ queryKey: ["usage-record"] });
+    void client.invalidateQueries({ queryKey: ["usage-receipt"] });
   }, [client, query.data?.usageRevision]);
   const setState = useCallback((next: SetStateAction<AppState>) => {
     void client.cancelQueries({ queryKey: key }).then(() => {

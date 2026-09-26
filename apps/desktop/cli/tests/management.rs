@@ -925,7 +925,7 @@ fn two_cli_clients_share_state_and_disconnect_does_not_stop_service() {
         .output()
         .unwrap();
     assert!(!receipt.status.success());
-    assert!(String::from_utf8_lossy(&receipt.stderr).contains("No receipt is saved"));
+    assert!(String::from_utf8_lossy(&receipt.stderr).contains("Usage record not found"));
     assert_eq!(
         backend.run(&["status"])["backend"]["instanceId"],
         first["backend"]["instanceId"]

@@ -43,6 +43,8 @@ export function WebUiDialog({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
   const confirm = useConfirm();
+  // A browser that changes the password stays signed in.
+  const passwordChangeNote = `Changing it signs out ${web ? "other browser sessions" : "every browser session"}.`;
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     setSaving(true);
@@ -114,13 +116,13 @@ export function WebUiDialog({
               {web && <FormField id="web-ui-current-password" label="Current password">
                 <Input id="web-ui-current-password" type="password" autoComplete="current-password" value={currentPassword} disabled={saving} onChange={(event) => setCurrentPassword(event.target.value)} />
               </FormField>}
-              <FormField id="web-ui-password" label={status.passwordSet ? "New password" : "Password"} description={`At least ${MIN_PASSWORD_LENGTH} characters.`}>
+              <FormField id="web-ui-password" label={status.passwordSet ? "New password" : "Password"} description={`At least ${MIN_PASSWORD_LENGTH} characters.${status.passwordSet ? ` ${passwordChangeNote}` : ""}`}>
                 <Input id="web-ui-password" aria-describedby="web-ui-password-note" type="password" autoComplete="new-password" value={password} disabled={saving} onChange={(event) => setPassword(event.target.value)} />
               </FormField>
             </> : <Field orientation="horizontal">
               <FieldContent>
                 <FieldTitle>Password</FieldTitle>
-                <FieldDescription>Set. Changing it signs out every browser session.</FieldDescription>
+                <FieldDescription>Set. {passwordChangeNote}</FieldDescription>
               </FieldContent>
               <Button type="button" variant="outline" disabled={saving} onClick={() => setChangingPassword(true)}>Change Password</Button>
             </Field>}

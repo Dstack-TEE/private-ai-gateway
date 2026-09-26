@@ -755,8 +755,8 @@ async fn a_verdict_saves_the_checked_receipt_with_its_record() {
     });
 
     assert_eq!(
-        manager.usage.receipt("request-1").unwrap().as_deref(),
-        Some(receipt)
+        manager.usage.receipt("request-1").unwrap(),
+        Some(Some(receipt.to_string()))
     );
 }
 

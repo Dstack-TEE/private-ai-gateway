@@ -177,7 +177,8 @@ commands! {
     QueryUsage { query: UsageQuery } -> UsagePage;
     GetUsageRecord { record_id: String } -> RequestActivity;
     /// The signed receipt document a record's audit checked, exactly as the
-    /// service returned it; `None` when no receipt was fetched.
+    /// service returned it; `None` when no receipt was fetched. An unknown
+    /// record is `not_found`.
     GetUsageReceipt { record_id: String } -> Option<String>;
     ExportUsage { query: UsageQuery, path: String } -> usize;
     ClearUsage -> u64;

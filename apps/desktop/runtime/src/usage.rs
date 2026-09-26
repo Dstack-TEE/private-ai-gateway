@@ -223,8 +223,9 @@ impl UsageStore {
             .map_err(|error| format!("Cannot save the receipt: {error}"))
     }
 
-    /// The saved receipt document of a record, when its audit fetched one.
-    pub fn receipt(&self, record_id: &str) -> Result<Option<String>, String> {
+    /// A record's saved receipt document (`Some(None)` when its audit fetched
+    /// none); `None` when there is no such record.
+    pub fn receipt(&self, record_id: &str) -> Result<Option<Option<String>>, String> {
         let record_id = clean_filter(Some(record_id), "record")?
             .ok_or_else(|| "Invalid usage record".to_string())?;
         self.lock()?
@@ -234,7 +235,6 @@ impl UsageStore {
                 |row| row.get(0),
             )
             .optional()
-            .map(Option::flatten)
             .map_err(db_error)
     }
 
@@ -901,6 +901,9 @@ mod tests {
         }
         let store = UsageStore::open(path.clone()).unwrap();
         assert_eq!(store.get("kept").unwrap().unwrap().session_id, "session-0");
+        // Migration 2 added the receipt column.
+        store.save_receipt("kept", "{}").unwrap();
+        assert_eq!(store.receipt("kept").unwrap(), Some(Some("{}".to_string())));
         let version: i64 = store
             .lock()
             .unwrap()
@@ -920,12 +923,15 @@ mod tests {
     fn keeps_the_checked_receipt_document_verbatim() {
         let store = UsageStore::memory().unwrap();
         store.upsert(&item("a1", 10, "codex", "model-a")).unwrap();
-        assert_eq!(store.receipt("a1").unwrap(), None);
+        assert_eq!(store.receipt("a1").unwrap(), Some(None));
         let document = "{\"api_version\": \"aci/1\",\n  \"served_at\": 1750000000}";
         store.save_receipt("a1", document).unwrap();
         // Later events for the record do not clear it.
         store.upsert(&item("a1", 10, "codex", "model-a")).unwrap();
-        assert_eq!(store.receipt("a1").unwrap().as_deref(), Some(document));
+        assert_eq!(
+            store.receipt("a1").unwrap(),
+            Some(Some(document.to_string()))
+        );
         assert_eq!(store.receipt("missing").unwrap(), None);
         store.clear().unwrap();
         assert_eq!(store.receipt("a1").unwrap(), None);

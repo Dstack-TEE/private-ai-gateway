@@ -253,30 +253,35 @@ export function UsageProofDialog({ activity: listed, onClose }: { activity: Requ
 }
 
 /**
- * The receipt document the audit checked. The signature covers the document's
- * JCS form, whose numbers and strings serialize as ECMAScript's do (RFC 8785),
- * so indenting it with `JSON.stringify` shows exactly the signed values. Copy
- * takes the document as the service returned it, ready for `pap audit --receipt`.
+ * A receipt document indented for reading. Parsing keeps every string and
+ * safe integer exactly, so only whitespace changes; a document with any other
+ * number (the verifier accepts any 64-bit integer) is shown as returned.
  */
+function readableReceipt(receipt: string): string {
+  let exact = true;
+  const document: unknown = JSON.parse(receipt, (_key, value: unknown) => {
+    if (typeof value === "number" && !Number.isSafeInteger(value)) exact = false;
+    return value;
+  });
+  return exact ? JSON.stringify(document, null, 2) : receipt;
+}
+
+/** The receipt document the audit checked. Copy takes it as the service returned it, ready for `pap audit --receipt`. */
 function SignedReceipt({ recordId }: { recordId: string }): React.JSX.Element | null {
   const shell = useShell();
   const titleId = useId();
   const { data: receipt, error } = useQuery({
     queryKey: ["usage-receipt", recordId], queryFn: () => desktopApi.getUsageReceipt(recordId),
   });
-  const formatted = useMemo(() => {
-    if (!receipt) return undefined;
-    try { return JSON.stringify(JSON.parse(receipt), null, 2); }
-    catch { return receipt; }
-  }, [receipt]);
+  const readable = useMemo(() => receipt && readableReceipt(receipt), [receipt]);
   if (error) return <Alert variant="destructive"><AlertTitle>Could not load the signed receipt</AlertTitle><AlertDescription>{errorMessage(error)}</AlertDescription></Alert>;
   if (!receipt) return null;
-  return <section className="grid gap-2 border-t border-t-border pt-3.5" aria-labelledby={titleId}>
+  return <section className="grid gap-2 border-t border-t-border pt-3.5">
     <div className="flex items-center justify-between gap-3">
-      <div className="grid gap-0.5"><h3 id={titleId} className="text-xs font-semibold">Signed receipt</h3><p className="text-xs text-muted-foreground">As returned by the service. It holds hashes and verification metadata, not request or response content.</p></div>
+      <div className="grid gap-0.5"><h3 id={titleId} className="text-xs font-semibold">Signed receipt</h3><p className="text-xs text-muted-foreground">Indented for reading; Copy gives the original document. It holds hashes and verification metadata, not request or response content.</p></div>
       <IconButton size="icon-sm" label="Copy signed receipt" onClick={() => shell.copy("Signed receipt", receipt)}>{shell.copied === "Signed receipt" ? <Check /> : <Copy />}</IconButton>
     </div>
-    <pre className="overflow-x-auto rounded-2xl border bg-muted/50 p-4 text-xs leading-relaxed select-text"><code>{formatted}</code></pre>
+    <pre role="region" tabIndex={0} aria-labelledby={titleId} className="overflow-x-auto rounded-2xl border bg-muted/50 p-4 text-xs leading-relaxed select-text"><code>{readable}</code></pre>
   </section>;
 }
 
