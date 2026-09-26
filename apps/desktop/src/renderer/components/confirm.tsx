@@ -17,6 +17,10 @@ export function ConfirmProvider({ children }: PropsWithChildren) {
   const [request, setRequest] = useState<ConfirmationOptions>();
   const [open, setOpen] = useState(false);
   const resolve = useRef<((confirmed: boolean) => void) | undefined>(undefined);
+  // Focus returns to the element focused when the question was asked. When it is
+  // gone by then (a deleted item's controls) or nothing had focus (a button that
+  // disabled itself before asking), the action that follows decides where focus goes.
+  const opener = useRef<Element | null>(null);
   const settle = useCallback((confirmed: boolean) => {
     resolve.current?.(confirmed);
     resolve.current = undefined;
@@ -26,13 +30,14 @@ export function ConfirmProvider({ children }: PropsWithChildren) {
     // A newer question replaces one that is still open.
     resolve.current?.(false);
     resolve.current = next;
+    opener.current = document.activeElement;
     setRequest(options);
     setOpen(true);
   }), []);
   return <ConfirmContext.Provider value={confirm}><ConfirmOpenContext.Provider value={open}>
     {children}
     <AlertDialog open={open} onOpenChange={(next) => { if (!next) settle(false); }}>
-      <AlertDialogContent>
+      <AlertDialogContent finalFocus={() => opener.current !== document.body && Boolean(opener.current?.isConnected)}>
         <AlertDialogHeader>
           <AlertDialogTitle>{request?.title}</AlertDialogTitle>
           <AlertDialogDescription className="whitespace-pre-line">{request?.message}</AlertDialogDescription>

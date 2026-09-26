@@ -285,7 +285,7 @@ function Window(): React.JSX.Element {
             return desktopApi.start(saved.config);
           })}
           onDelete={(profileId) => applyStateAction(() => desktopApi.deleteProfile(profileId))}
-          onComplete={dialogControl.onClose} onDeleted={dialogControl.onClose} {...dialogControl}
+          onComplete={dialogControl.onClose} {...dialogControl}
         />}
         {dialog?.kind === "privacy" && <PrivacyDialog state={state} {...dialogControl} />}
         {dialog?.kind === "local-api" && <LocalApiDialog

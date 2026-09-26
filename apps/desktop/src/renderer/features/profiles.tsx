@@ -116,7 +116,7 @@ export function ProfilesDialog({
       </DialogFooter>
       {editor.payload && <ProfileEditorDialog
         key={editor.key} state={state} profile={editingProfile} {...editor.control} finalFocus={liveProfile || !openedProfile ? undefined : newProfileButton}
-        onSave={onSave} onDelete={onDelete} onComplete={editor.control.onClose} onDeleted={editor.control.onClose}
+        onSave={onSave} onDelete={onDelete} onComplete={editor.control.onClose}
       />}
     </AppDialog>
   );
@@ -136,6 +136,7 @@ function randomUuid(): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+/** Its owner closes it when the profile is deleted, as the profile leaves `state`. */
 export function ProfileEditorDialog({
   state,
   profile,
@@ -143,7 +144,6 @@ export function ProfileEditorDialog({
   onSave,
   onDelete,
   onComplete,
-  onDeleted,
   onClose,
   ...control
 }: {
@@ -153,7 +153,6 @@ export function ProfileEditorDialog({
   onSave(profile: ConfidentialProfileInput, key?: string): Promise<string | undefined>;
   onDelete(profileId: string): Promise<string | undefined>;
   onComplete(): void;
-  onDeleted(): void;
 } & DialogControl): React.JSX.Element {
   const busy = state.status === "verifying";
   // Saving or connecting an account restarts protection that is on.
@@ -270,7 +269,7 @@ export function ProfileEditorDialog({
       if (needsStop) await desktopApi.stop();
       const message = await onDelete(draft.id);
       if (message) reportError(message);
-      else { await account.cancel(); onDeleted(); }
+      else await account.cancel();
     } catch (error) { reportError(error); }
     finally { setSaving(false); }
   };

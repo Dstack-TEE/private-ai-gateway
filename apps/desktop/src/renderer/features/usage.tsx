@@ -245,7 +245,7 @@ export function UsageProofDialog({ activity: listed, ...control }: { activity: R
     queryKey: ["usage-record", listed.id], queryFn: () => desktopApi.getUsageRecord(listed.id), initialData: listed,
   });
   return (
-    <AppDialog title="Usage proof" description={formatTimestamp(activity.at * 1_000, true)} className="sm:max-w-xl" {...control}>
+    <AppDialog {...control} title="Usage proof" description={formatTimestamp(activity.at * 1_000, true)} className="sm:max-w-xl">
       {error && <Alert variant="destructive"><AlertTitle>Could not refresh this record</AlertTitle><AlertDescription>{errorMessage(error)}</AlertDescription></Alert>}
       <div className="-mx-6 flex min-h-0 flex-col gap-5 overflow-y-auto px-6 [&_.evidence]:text-sm [&_.evidence]:gap-y-4.5 [&_[data-slot=verification-verdict]]:shrink-0"><Evidence activity={activity} /></div>
       <DoneFooter />
