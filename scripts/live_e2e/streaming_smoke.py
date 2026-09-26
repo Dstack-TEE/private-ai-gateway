@@ -50,7 +50,11 @@ def main() -> int:
         }
         print(f"POST {base}/v1/chat/completions  (stream=true, model={provider.public_model})")
         resp = requests.post(
-            f"{base}/v1/chat/completions", json=body, stream=True, timeout=180
+            f"{base}/v1/chat/completions",
+            json=body,
+            headers={"Authorization": f"Bearer {agg.inference_token}"},
+            stream=True,
+            timeout=180,
         )
         raw = bytearray()
         for chunk in resp.iter_content(chunk_size=None):
@@ -72,7 +76,11 @@ def main() -> int:
             print("  FAIL: no x-receipt-id header")
             return 1
 
-        r2 = requests.get(f"{base}/v1/aci/receipts/{receipt_id}", timeout=30)
+        r2 = requests.get(
+            f"{base}/v1/aci/receipts/{receipt_id}",
+            headers={"Authorization": f"Bearer {agg.inference_token}"},
+            timeout=30,
+        )
         if r2.status_code != 200:
             print(f"  FAIL: receipt fetch {r2.status_code}: {r2.text[:300]}")
             return 1

@@ -4,11 +4,15 @@ import secrets
 from pathlib import Path
 from typing import Any
 
-from ..common import Provider, json_bytes, request_json, run_cmd_json, write_bytes, write_json
+from ..common import (
+    Provider,
+    audit_aci_artifacts,
+    json_bytes,
+    request_json,
+    write_bytes,
+    write_json,
+)
 from .attested_sessions import assert_upstream_attested_sessions
-
-
-REQUESTER_TOKEN = "live-e2e-requester"
 
 
 def run_lifecycle_case(
@@ -16,6 +20,7 @@ def run_lifecycle_case(
     base_url: str,
     provider: Provider,
     artifact_dir: Path,
+    inference_token: str,
 ) -> dict[str, Any]:
     provider_dir = artifact_dir / provider.name / "lifecycle"
     body = {
@@ -36,7 +41,7 @@ def run_lifecycle_case(
         "POST",
         f"{base_url}/v1/chat/completions",
         headers={
-            "Authorization": f"Bearer {REQUESTER_TOKEN}",
+            "Authorization": f"Bearer {inference_token}",
             "Content-Type": "application/json",
         },
         body=request_body,
@@ -74,7 +79,7 @@ def run_lifecycle_case(
     receipt_status, _, receipt_body, receipt = request_json(
         "GET",
         f"{base_url}/v1/aci/receipts/{receipt_id}",
-        headers={"Authorization": f"Bearer {REQUESTER_TOKEN}"},
+        headers={"Authorization": f"Bearer {inference_token}"},
         timeout=120,
     )
     receipt_path = provider_dir / "receipt.json"
@@ -87,7 +92,7 @@ def run_lifecycle_case(
     legacy_status, _, _, legacy_json = request_json(
         "GET",
         f"{base_url}/v1/signature/{chat_id}",
-        headers={"Authorization": f"Bearer {REQUESTER_TOKEN}"},
+        headers={"Authorization": f"Bearer {inference_token}"},
         timeout=120,
     )
     if legacy_status != 200 or not isinstance(legacy_json, dict):
@@ -96,30 +101,6 @@ def run_lifecycle_case(
         if not legacy_json.get(field):
             raise RuntimeError(f"{provider.name} legacy signature wrapper missing {field}")
 
-    verifier_summary = run_cmd_json(
-        [
-            "cargo",
-            "run",
-            "--quiet",
-            "--bin",
-            "aci",
-            "--",
-            "audit",
-            "--report",
-            str(report_path),
-            "--receipt",
-            str(receipt_path),
-            "--nonce",
-            nonce,
-            "--request-body",
-            str(request_path),
-            "--response-body",
-            str(response_path),
-            "--json",
-        ],
-        timeout=240,
-    )
-    write_json(provider_dir / "user-verification-summary.json", verifier_summary)
     assert_receipt_log(provider, receipt)
     attested_sessions = assert_upstream_attested_sessions(
         base_url=base_url,
@@ -127,15 +108,25 @@ def run_lifecycle_case(
         receipt=receipt,
         artifact_dir=provider_dir,
     )
+    if len(attested_sessions) != 1:
+        raise RuntimeError(f"{provider.name} expected one serving attested session")
+    audit_summary = audit_aci_artifacts(
+        report=report_path,
+        receipt=receipt_path,
+        session=provider_dir / "attested-session-0.json",
+        nonce=nonce,
+        request_body=request_path,
+        response_body=response_path,
+    )
+    write_json(provider_dir / "receipt-audit.json", audit_summary)
     return {
         "provider": provider.name,
         "chat_id": chat_id,
         "receipt_id": receipt_id,
         "status": status,
-        "verified": (verifier_summary.get("verdict") or {}).get("verified") is True,
         "checks": {
             check.get("id"): check.get("status")
-            for check in verifier_summary.get("checks") or []
+            for check in audit_summary.get("checks") or []
             if isinstance(check, dict)
         },
         "attested_sessions": attested_sessions,
@@ -157,18 +148,19 @@ def assert_receipt_log(provider: Provider, receipt: dict[str, Any]) -> None:
     if not verified:
         raise RuntimeError(f"{provider.name} receipt has no verified upstream event")
     for event in verified:
-        bindings = event.get("channel_bindings")
-        if not isinstance(bindings, list) or not bindings:
-            raise RuntimeError(f"{provider.name} upstream event missing channel binding")
-        if provider.binding not in {binding.get("type") for binding in bindings}:
-            raise RuntimeError(f"{provider.name} upstream event missing {provider.binding}")
+        session_id = event.get("session_id")
+        if not isinstance(session_id, str) or len(session_id) != 64:
+            raise RuntimeError(f"{provider.name} upstream event missing session_id")
     if provider.public_model != provider.upstream_model:
-        request_modified = any(
-            isinstance(event, dict)
-            and event.get("type") == "transparency.request_modified"
+        hashes = {
+            event.get("type"): event.get("body_hash")
             for event in events
-        )
-        if not request_modified:
+            if isinstance(event, dict)
+            and event.get("type") in {"request.received", "request.forwarded"}
+        }
+        if not hashes.get("request.forwarded") or hashes.get(
+            "request.received"
+        ) == hashes.get("request.forwarded"):
             raise RuntimeError(
-                f"{provider.name} receipt missing transparency.request_modified"
+                f"{provider.name} receipt did not record the model rewrite"
             )

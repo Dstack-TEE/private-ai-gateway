@@ -53,7 +53,8 @@ pub use dstack::{dstack_rtmr3_event, verify_dstack_event_log, DstackEventLog};
 pub use external::ProviderVerifierConfigError;
 pub use providers::{
     ChutesProviderVerifier, NearAiProviderVerifier, PhalaDirectProviderVerifier,
-    RoutingUpstreamVerifier, SecretAiProviderVerifier, TinfoilProviderVerifier,
+    PrivatemodeProviderVerifier, RoutingUpstreamVerifier, SecretAiProviderVerifier,
+    TinfoilProviderVerifier,
 };
 pub use quote::QuoteStepError;
 pub use report::{

@@ -30,7 +30,8 @@ use std::time::Duration;
 use private_ai_gateway::aci::keys::{KeyProvider, Quoter};
 use private_ai_gateway::aci::types::{ServiceCapabilities, SourceProvenance, TlsSpki};
 use private_ai_gateway::aci::upstream::{
-    DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS, DEFAULT_UPSTREAM_READ_TIMEOUT_SECONDS,
+    PrivatemodeProxyDeployment, DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS,
+    DEFAULT_UPSTREAM_READ_TIMEOUT_SECONDS,
 };
 use private_ai_gateway::aci::verifier::DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS;
 use private_ai_gateway::aggregator::service::{
@@ -43,7 +44,9 @@ use private_ai_gateway::aggregator::upstream_config::{
     UpstreamPullConfig, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
 use private_ai_gateway::dstack::{DstackAciProvider, DstackAciProviderConfig};
-use private_ai_gateway::http::{build_router_with_admin, build_router_with_admin_and_middleware};
+use private_ai_gateway::http::{
+    build_router_with_admin, build_router_with_admin_and_middleware, InferenceAccess,
+};
 use private_ai_gateway::middleware::{Middleware, MiddlewareConfig};
 use rand::Rng;
 use serde::Deserialize;
@@ -59,6 +62,110 @@ fn env_non_empty(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// Describe a dotenv error without echoing file content: a `LineParse` error
+/// carries the offending line, which may hold a secret.
+fn describe_env_file_error(err: &dotenvy::Error) -> String {
+    match err {
+        dotenvy::Error::LineParse(_, index) => format!("invalid syntax at line index {index}"),
+        other => other.to_string(),
+    }
+}
+
+fn env_file_non_empty(path: &str, name: &str) -> Result<Option<String>, String> {
+    let entries = dotenvy::from_path_iter(path).map_err(|err| {
+        format!(
+            "failed to read encrypted environment file {path}: {}",
+            describe_env_file_error(&err)
+        )
+    })?;
+    let mut value = None;
+    for entry in entries {
+        let (key, candidate) = entry.map_err(|err| {
+            format!(
+                "failed to parse encrypted environment file {path}: {}",
+                describe_env_file_error(&err)
+            )
+        })?;
+        if key == name {
+            value = Some(candidate);
+        }
+    }
+    Ok(value
+        .map(|candidate| candidate.trim().to_string())
+        .filter(|candidate| !candidate.is_empty()))
+}
+
+fn validate_sha256_secret_policy(
+    name: &str,
+    secret: Option<&str>,
+    expected: Option<&str>,
+) -> Result<(), String> {
+    let Some(expected_bytes) = parse_sha256_policy(name, expected)? else {
+        return Ok(());
+    };
+    let secret = secret.ok_or_else(|| format!("{name}_sha256 requires {name}"))?;
+    let actual: [u8; 32] = Sha256::digest(secret.as_bytes()).into();
+    if actual != expected_bytes {
+        return Err(format!("{name} does not match static {name}_sha256 policy"));
+    }
+    Ok(())
+}
+
+fn parse_sha256_policy(name: &str, expected: Option<&str>) -> Result<Option<[u8; 32]>, String> {
+    let Some(expected) = expected else {
+        return Ok(None);
+    };
+    let expected = expected
+        .trim()
+        .strip_prefix("sha256:")
+        .unwrap_or(expected.trim());
+    let expected_bytes =
+        hex::decode(expected).map_err(|err| format!("invalid {name}_sha256: {err}"))?;
+    expected_bytes
+        .try_into()
+        .map(Some)
+        .map_err(|bytes: Vec<u8>| {
+            format!(
+                "invalid {name}_sha256: expected 32 bytes, got {}",
+                bytes.len()
+            )
+        })
+}
+
+fn validate_inference_auth_policy(
+    privatemode_configured: bool,
+    middleware_configured: bool,
+    inference_token_sha256: Option<[u8; 32]>,
+) -> Result<(), String> {
+    if middleware_configured && inference_token_sha256.is_some() {
+        return Err(
+            "inference_token_sha256 cannot be used with middleware; middleware authorizes each client bearer"
+                .to_string(),
+        );
+    }
+    if privatemode_configured && !middleware_configured && inference_token_sha256.is_none() {
+        return Err("privatemode_proxy requires inference_token_sha256".to_string());
+    }
+    Ok(())
+}
+
+fn validate_client_e2ee_policy(
+    require_client_e2ee: bool,
+    enable_e2ee: bool,
+    middleware_configured: bool,
+) -> Result<(), String> {
+    if !require_client_e2ee {
+        return Ok(());
+    }
+    if !enable_e2ee {
+        return Err("require_client_e2ee requires enable_e2ee".to_string());
+    }
+    if middleware_configured {
+        return Err("require_client_e2ee applies only to direct mode".to_string());
+    }
+    Ok(())
+}
+
 fn invalid_input(message: impl Into<String>) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidInput, message.into())
 }
@@ -71,6 +178,10 @@ struct GatewayConfigFile {
     upstream_config_seed_path: Option<String>,
     upstream_pull: Option<UpstreamPullConfig>,
     admin_token: Option<String>,
+    admin_token_sha256: Option<String>,
+    /// Measured digest of the direct-mode inference bearer. Middleware mode
+    /// preserves each client's bearer for control-plane authorization.
+    inference_token_sha256: Option<String>,
     /// Keyset lifetime in seconds: `not_after` = launch time + this (§3.4).
     /// Defaults to [`DEFAULT_KEYSET_NOT_AFTER_SECONDS`] (30 days).
     keyset_not_after_seconds: Option<u64>,
@@ -86,8 +197,25 @@ struct GatewayConfigFile {
     /// default to preserve the deployed v2 contract. Operators may disable it
     /// explicitly for a plaintext/TLS-only deployment.
     enable_e2ee: bool,
+    /// Reject direct-mode inference requests without E2EE v2. Set it when the
+    /// public TLS endpoint terminates outside the attested workload.
+    require_client_e2ee: bool,
     dstack_endpoint: Option<String>,
     middleware: Option<MiddlewareConfig>,
+    /// Deployment-owned Privatemode sidecar policy. Unlike upstream routes,
+    /// this is static so the admin API cannot redirect plaintext to another
+    /// proxy or change the measured proxy-image pin.
+    privatemode_proxy: Option<PrivatemodeProxyConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrivatemodeProxyConfig {
+    base_url: String,
+    manifest_log_path: String,
+    credential_path: String,
+    credential_sha256: String,
+    proxy_image_digest: String,
 }
 
 impl Default for GatewayConfigFile {
@@ -98,13 +226,17 @@ impl Default for GatewayConfigFile {
             upstream_config_seed_path: None,
             upstream_pull: None,
             admin_token: None,
+            admin_token_sha256: None,
+            inference_token_sha256: None,
             keyset_not_after_seconds: None,
             subject: None,
             tls: GatewayTlsConfig::default(),
             direct_serving: false,
             enable_e2ee: true,
+            require_client_e2ee: false,
             dstack_endpoint: None,
             middleware: None,
+            privatemode_proxy: None,
         }
     }
 }
@@ -149,11 +281,14 @@ fn session_log_path(state_dir: &Path) -> PathBuf {
     state_dir.join("sessions.jsonl")
 }
 
-fn validate_pull_token_separation(config: &GatewayConfigFile) -> Result<(), String> {
+fn validate_pull_token_separation(
+    config: &GatewayConfigFile,
+    admin_token: Option<&str>,
+) -> Result<(), String> {
     let Some(pull) = &config.upstream_pull else {
         return Ok(());
     };
-    if config.admin_token.as_deref() == Some(pull.token.as_str()) {
+    if admin_token == Some(pull.token.as_str()) {
         return Err("upstream_pull.token must be distinct from admin_token".to_string());
     }
     if config
@@ -393,7 +528,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session_log_path = session_log_path(&state_dir);
     let upstream_config_seed_path = gateway_config.upstream_config_seed_path.clone();
     let upstream_pull_config = gateway_config.upstream_pull.clone();
-    let admin_token = gateway_config.admin_token.clone();
+    let admin_token = match env_non_empty("PRIVATE_AI_GATEWAY_ADMIN_TOKEN") {
+        Some(token) => Some(token),
+        None => match env_non_empty("PRIVATE_AI_GATEWAY_ENV_FILE") {
+            Some(path) => env_file_non_empty(&path, "PRIVATE_AI_GATEWAY_ADMIN_TOKEN")
+                .map_err(invalid_input)?
+                .or_else(|| gateway_config.admin_token.clone()),
+            None => gateway_config.admin_token.clone(),
+        },
+    };
+    validate_sha256_secret_policy(
+        "admin_token",
+        admin_token.as_deref(),
+        gateway_config.admin_token_sha256.as_deref(),
+    )
+    .map_err(invalid_input)?;
+    let inference_token_sha256 = parse_sha256_policy(
+        "inference_token",
+        gateway_config.inference_token_sha256.as_deref(),
+    )
+    .map_err(invalid_input)?;
+    validate_inference_auth_policy(
+        gateway_config.privatemode_proxy.is_some(),
+        gateway_config.middleware.is_some(),
+        inference_token_sha256,
+    )
+    .map_err(invalid_input)?;
+    validate_client_e2ee_policy(
+        gateway_config.require_client_e2ee,
+        gateway_config.enable_e2ee,
+        gateway_config.middleware.is_some(),
+    )
+    .map_err(invalid_input)?;
+    let inference_access = InferenceAccess {
+        token_sha256: inference_token_sha256,
+        require_client_e2ee: gateway_config.require_client_e2ee,
+    };
     let source_provenance = resolve_source_provenance()?;
     let tls_public_keys = resolve_tls_public_keys(&gateway_config.tls)?;
     let dstack_endpoint = gateway_config.dstack_endpoint.clone();
@@ -405,7 +575,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
-    validate_pull_token_separation(&gateway_config).map_err(invalid_input)?;
+    validate_pull_token_separation(&gateway_config, admin_token.as_deref())
+        .map_err(invalid_input)?;
+    let privatemode_proxy = gateway_config
+        .privatemode_proxy
+        .as_ref()
+        .map(|config| {
+            PrivatemodeProxyDeployment::new(
+                &config.base_url,
+                &config.manifest_log_path,
+                &config.credential_path,
+                &config.credential_sha256,
+                &config.proxy_image_digest,
+            )
+            .map(Arc::new)
+            .map_err(|err| invalid_input(err.to_string()))
+        })
+        .transpose()?;
 
     let provider = Arc::new(
         DstackAciProvider::new(dstack_endpoint, DstackAciProviderConfig::default()).await?,
@@ -425,6 +611,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             connect_timeout_seconds: DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS,
             read_timeout_seconds: DEFAULT_UPSTREAM_READ_TIMEOUT_SECONDS,
             verifier_request_timeout_seconds: DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS,
+            privatemode_proxy,
         },
     )?);
     let upstream_puller = match upstream_pull_config {
@@ -582,7 +769,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         build_router_with_admin_and_middleware(service, upstream_config, admin_token, middleware)
     } else {
-        build_router_with_admin(service, upstream_config, admin_token)
+        build_router_with_admin(service, upstream_config, admin_token, inference_access)
     };
 
     tracing::info!(%bind, "private-ai-gateway listening");
@@ -792,10 +979,11 @@ mod tests {
     use private_ai_gateway::aggregator::upstream_config::{parse_config_text, UpstreamProvider};
 
     use super::{
-        load_gateway_config, resolve_state_dir, resolve_tls_public_keys,
-        seed_upstream_config_if_empty, session_log_path,
+        env_file_non_empty, load_gateway_config, parse_sha256_policy, resolve_state_dir,
+        resolve_tls_public_keys, seed_upstream_config_if_empty, session_log_path,
         source_provenance_from_git_launcher_config, upstream_config_path,
-        validate_pull_token_separation,
+        validate_client_e2ee_policy, validate_inference_auth_policy,
+        validate_pull_token_separation, validate_sha256_secret_policy,
     };
 
     const TEST_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
@@ -830,6 +1018,69 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
         ));
         std::fs::write(&path, TEST_CERT_PEM).unwrap();
         path
+    }
+
+    #[test]
+    fn encrypted_env_admin_token_is_parsed_and_digest_bound() {
+        let path = temp_path("gateway-encrypted-env");
+        std::fs::write(
+            &path,
+            "IGNORED=value\nPRIVATE_AI_GATEWAY_ADMIN_TOKEN='admin token'\n",
+        )
+        .unwrap();
+        let token =
+            env_file_non_empty(path.to_str().unwrap(), "PRIVATE_AI_GATEWAY_ADMIN_TOKEN").unwrap();
+        assert_eq!(token.as_deref(), Some("admin token"));
+        let digest = private_ai_gateway::aci::digest::sha256_hex(b"admin token");
+        validate_sha256_secret_policy("admin_token", token.as_deref(), Some(&digest)).unwrap();
+        let err = validate_sha256_secret_policy("admin_token", Some("different"), Some(&digest))
+            .unwrap_err();
+        assert!(err.contains("does not match static admin_token_sha256"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn encrypted_env_parse_errors_do_not_echo_secret_lines() {
+        let path = temp_path("gateway-encrypted-env-invalid");
+        std::fs::write(&path, "PRIVATEMODE_API_KEY='unterminated-secret\n").unwrap();
+        let err = env_file_non_empty(path.to_str().unwrap(), "PRIVATE_AI_GATEWAY_ADMIN_TOKEN")
+            .unwrap_err();
+        assert!(err.contains("invalid syntax"), "{err}");
+        assert!(!err.contains("unterminated-secret"), "{err}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn inference_token_digest_policy_is_validated_without_loading_the_secret() {
+        let prefixed = private_ai_gateway::aci::digest::sha256_hex(b"client token");
+        let digest = prefixed.strip_prefix("sha256:").unwrap();
+        let parsed = parse_sha256_policy("inference_token", Some(digest))
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.as_slice(), hex::decode(digest).unwrap());
+
+        assert_eq!(
+            parse_sha256_policy("inference_token", Some(&prefixed)).unwrap(),
+            Some(parsed)
+        );
+        let err = parse_sha256_policy("inference_token", Some("00")).unwrap_err();
+        assert!(err.contains("expected 32 bytes"));
+    }
+
+    #[test]
+    fn privatemode_static_policy_requires_downstream_inference_auth() {
+        assert!(validate_inference_auth_policy(false, false, None).is_ok());
+        assert!(validate_inference_auth_policy(false, false, Some([7; 32])).is_ok());
+        assert!(validate_inference_auth_policy(true, false, Some([7; 32])).is_ok());
+        let err = validate_inference_auth_policy(true, false, None).unwrap_err();
+        assert_eq!(err, "privatemode_proxy requires inference_token_sha256");
+
+        assert!(validate_inference_auth_policy(true, true, None).is_ok());
+        let err = validate_inference_auth_policy(true, true, Some([7; 32])).unwrap_err();
+        assert_eq!(
+            err,
+            "inference_token_sha256 cannot be used with middleware; middleware authorizes each client bearer"
+        );
     }
 
     fn temp_path(name: &str) -> std::path::PathBuf {
@@ -886,6 +1137,59 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
     }
 
     #[test]
+    fn required_client_e2ee_needs_direct_mode_with_e2ee_enabled() {
+        assert!(validate_client_e2ee_policy(false, false, true).is_ok());
+        assert!(validate_client_e2ee_policy(true, true, false).is_ok());
+        assert_eq!(
+            validate_client_e2ee_policy(true, false, false).unwrap_err(),
+            "require_client_e2ee requires enable_e2ee"
+        );
+        assert_eq!(
+            validate_client_e2ee_policy(true, true, true).unwrap_err(),
+            "require_client_e2ee applies only to direct mode"
+        );
+    }
+
+    #[test]
+    fn gateway_config_parses_static_privatemode_proxy_policy() {
+        let config_path = temp_path("gateway-config-privatemode");
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"{{
+                    "privatemode_proxy": {{
+                        "base_url": "http://privatemode-proxy:8080",
+                        "manifest_log_path": "/run/privatemode-manifests/log.txt",
+                        "credential_path": "/run/secrets/privatemode-api-key",
+                        "credential_sha256": "{}",
+                        "proxy_image_digest": "sha256:{}"
+                    }}
+                }}"#,
+                "33".repeat(32),
+                "22".repeat(32)
+            ),
+        )
+        .unwrap();
+
+        let config = load_gateway_config(config_path.to_str().unwrap()).unwrap();
+        let proxy = config
+            .privatemode_proxy
+            .expect("static Privatemode policy should parse");
+        assert_eq!(proxy.base_url, "http://privatemode-proxy:8080");
+        assert_eq!(
+            proxy.manifest_log_path,
+            "/run/privatemode-manifests/log.txt"
+        );
+        assert_eq!(proxy.credential_path, "/run/secrets/privatemode-api-key");
+        assert_eq!(proxy.credential_sha256, "33".repeat(32));
+        assert_eq!(
+            proxy.proxy_image_digest,
+            format!("sha256:{}", "22".repeat(32))
+        );
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[test]
     fn gateway_config_rejects_reused_pull_credentials() {
         for (name, body) in [
             (
@@ -915,10 +1219,23 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
             let config_path = temp_path(&format!("reused-pull-{name}"));
             std::fs::write(&config_path, body).unwrap();
             let config = load_gateway_config(config_path.to_str().unwrap()).unwrap();
-            let err = validate_pull_token_separation(&config).unwrap_err();
+            let err =
+                validate_pull_token_separation(&config, config.admin_token.as_deref()).unwrap_err();
             assert!(err.contains("must be distinct"));
             let _ = std::fs::remove_file(config_path);
         }
+        let config_path = temp_path("reused-pull-env-admin");
+        std::fs::write(
+            &config_path,
+            r#"{"upstream_pull":{"url":"https://service.example/config","token":"0123456789abcdef0123456789abcdef"}}"#,
+        )
+        .unwrap();
+        let config = load_gateway_config(config_path.to_str().unwrap()).unwrap();
+        assert!(
+            validate_pull_token_separation(&config, Some("0123456789abcdef0123456789abcdef"))
+                .is_err()
+        );
+        let _ = std::fs::remove_file(config_path);
     }
 
     #[test]

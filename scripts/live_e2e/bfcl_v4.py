@@ -407,7 +407,7 @@ def run_provider_bfcl(
             "\n".join(
                 [
                     f"OPENAI_BASE_URL={aggregator.base_url.rstrip('/')}/v1",
-                    "OPENAI_API_KEY=aci-local",
+                    f"OPENAI_API_KEY={aggregator.inference_token}",
                     "",
                 ]
             ),
@@ -417,7 +417,7 @@ def run_provider_bfcl(
             **os.environ,
             "BFCL_PROJECT_ROOT": str(bfcl_project),
             "OPENAI_BASE_URL": f"{aggregator.base_url.rstrip('/')}/v1",
-            "OPENAI_API_KEY": "aci-local",
+            "OPENAI_API_KEY": aggregator.inference_token,
             "TOKENIZERS_PARALLELISM": "false",
         }
         generate = run_bfcl(
