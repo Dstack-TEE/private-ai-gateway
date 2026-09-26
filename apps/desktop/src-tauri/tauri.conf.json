@@ -31,7 +31,10 @@
         },
         "hiddenTitle": true,
         "center": true,
-        "visible": false
+        "visible": false,
+        "allowLinkPreview": false,
+        "scrollBarStyle": "fluentOverlay",
+        "generalAutofillEnabled": false
       }
     ],
     "security": {

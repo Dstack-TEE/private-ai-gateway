@@ -126,6 +126,7 @@ export function LocalApiDialog({
         title: "Rotate the Local API key?",
         message: "The old key stops working immediately. Update your tools with the new key. Agent credentials do not change. In-flight requests may be interrupted.",
         confirmLabel: "Rotate Key",
+        destructive: true,
       });
       if (confirmed) setError(await onRotate());
     } catch (failure) {

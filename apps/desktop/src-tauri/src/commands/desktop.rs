@@ -8,6 +8,7 @@ use desktop_core::{
 };
 use tauri::{AppHandle, Manager, State, WebviewWindow};
 use tauri_plugin_clipboard_manager::ClipboardExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 
 use crate::{distribution, open_account_url, run_blocking};
@@ -107,6 +108,69 @@ pub(crate) fn show_edit_menu(window: WebviewWindow, editable: bool) -> Result<()
     window
         .popup_menu(&menu)
         .map_err(|_| "Cannot open editing menu".into())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Confirmation {
+    title: String,
+    message: String,
+    confirm_label: String,
+    cancel_label: Option<String>,
+    destructive: bool,
+}
+
+/// Asks for a decision in the system alert, attached to the window: a sheet on
+/// macOS, a task dialog on Windows and a message dialog on Linux. The confirm
+/// button is the default (Return) button and Cancel takes Escape; `true` when
+/// the user confirms.
+#[tauri::command]
+pub(crate) async fn show_confirmation(
+    window: WebviewWindow,
+    confirmation: Confirmation,
+) -> Result<bool, CallError> {
+    let Confirmation {
+        title,
+        message,
+        confirm_label,
+        cancel_label,
+        destructive,
+    } = confirmation;
+    let cancel_label = cancel_label.unwrap_or_else(|| "Cancel".into());
+    if [&title, &message, &confirm_label, &cancel_label]
+        .iter()
+        .any(|text| text.trim().is_empty() || text.len() > 4_096)
+    {
+        return Err("Invalid confirmation".into());
+    }
+    let (send, receive) = tokio::sync::oneshot::channel();
+    window
+        .dialog()
+        .message(message)
+        .title(title)
+        .kind(if destructive {
+            MessageDialogKind::Warning
+        } else {
+            MessageDialogKind::Info
+        })
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            confirm_label,
+            cancel_label,
+        ))
+        .parent(&window)
+        .show(move |confirmed| {
+            let _ = send.send(confirmed);
+        });
+    Ok(receive
+        .await
+        .map_err(|_| "The confirmation could not complete")?)
+}
+
+/// Quits the app and leaves the background service running, like Quit in the
+/// tray menu.
+#[tauri::command]
+pub(crate) fn quit_app(app: AppHandle) {
+    app.exit(0);
 }
 
 #[tauri::command]

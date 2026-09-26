@@ -46,6 +46,8 @@ macro_rules! native_commands {
             commands::desktop::open_api_key_page,
             commands::desktop::open_about_link,
             commands::desktop::open_web_ui,
+            commands::desktop::show_confirmation,
+            commands::desktop::quit_app,
             commands::desktop::stop_all_and_quit,
         }
     };

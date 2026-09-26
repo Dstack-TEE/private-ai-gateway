@@ -3,8 +3,9 @@
 //! Settings…, Services, Hide, Hide Others, Show All, Quit), Edit (Undo, Redo,
 //! Cut, Copy, Paste, Select All, so text fields in the window get the system
 //! editing commands), View (Full Screen), Window (Minimize, Zoom, Close
-//! Window), and Help with documentation and source links. Every label comes from
-//! the brand module. Other platforms are tray-only and get no menu bar.
+//! Window, Bring All to Front), and Help, which opens with "<App> Help" (the
+//! documentation) and then the source link. Every label comes from the brand
+//! module. Other platforms are tray-only and get no menu bar.
 
 use tauri::AppHandle;
 
@@ -80,10 +81,17 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             &PredefinedMenuItem::maximize(app, None)?,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::close_window(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::bring_all_to_front(app, None)?,
         ],
     )?;
-    let documentation =
-        MenuItem::with_id(app, "documentation", "Documentation", true, None::<&str>)?;
+    let documentation = MenuItem::with_id(
+        app,
+        "documentation",
+        format!("{PRODUCT_NAME} Help"),
+        true,
+        None::<&str>,
+    )?;
     let github = MenuItem::with_id(app, "github", "GitHub", true, None::<&str>)?;
     let help = Submenu::with_id_and_items(
         app,

@@ -85,7 +85,10 @@ protection problems, is stored under that key.
   interactions, and `lib/` contains presentation rules and the live desktop API
   binding. Features never import the app.
 - Dialogs are shadcn `Dialog`s in the one window, in the desktop app and the web
-  UI alike; decisions use `AlertDialog`. Tray and menu items show the window and
+  UI alike. Decisions (`useConfirm`) are the system alert attached to the window
+  in the desktop app (a sheet on macOS) and an `AlertDialog` in the web UI.
+  The shell injects the platform (`<html data-platform>`) for the platform
+  metrics in `semantic.css`; a browser keeps the defaults. Tray and menu items show the window and
   send `pap://navigate` for the page, dialog or documentation link. Failures show
   inline in their dialog, form or page, and as a toast for other in-window
   actions, including app-menu items. Failed tray actions are only logged, like

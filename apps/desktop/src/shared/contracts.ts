@@ -38,6 +38,16 @@ export interface NotificationConfiguration {
   alertsEnabled?: boolean;
 }
 
+/** A question `useConfirm` asks before an action. */
+export interface ConfirmationOptions {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  cancelLabel?: string;
+  /** The action deletes, revokes or resets something that can't be restored. */
+  destructive?: boolean;
+}
+
 /** What a tray or menu item asks the main window to show or open. */
 export type NavigationTarget = "settings" | "agents" | "profiles" | "profile-setup";
 
@@ -58,6 +68,12 @@ export interface DesktopApi {
   setCliRegistration(installed: boolean): Promise<CliRegistration>;
   onStopAllRequest(listener: () => void): () => void;
   stopAllAndQuit(): Promise<void>;
+  /** Asks in the system alert, attached to the window; desktop only. */
+  showConfirmation(options: ConfirmationOptions): Promise<boolean>;
+  /** Closes the window as its close button does; the app keeps running. Desktop only. */
+  closeWindow(): Promise<void>;
+  /** Quits the app and leaves the background service running; desktop only. */
+  quit(): Promise<void>;
   copyText(text: string): Promise<void>;
   getClientKey(): Promise<string>;
   rotateClientKey(): Promise<string>;

@@ -264,6 +264,7 @@ export function ProfileEditorDialog({
         title: `Delete “${draft.name}”?`,
         message: needsStop ? "Protection will stop and connected agent configurations will be restored. This profile will be deleted and its account credential revoked." : "The profile will be deleted. An account credential will also be revoked at its provider.",
         confirmLabel: needsStop ? "Stop and Delete" : "Delete Profile",
+        destructive: true,
       });
       if (!confirmed) return;
       if (needsStop) await desktopApi.stop();
@@ -333,7 +334,7 @@ export function ProfileEditorDialog({
         </ToggleGroup>
         </Field>
           <FormField id="profile-name" label="Profile name"><Input id="profile-name" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} disabled={frozen || working} autoComplete="off" /></FormField>
-          {!provider.presetUrl && <FormField id="profile-endpoint" label="Service endpoint" description={<>Requires ACI support. <Button type="button" variant="link" className="h-auto p-0 text-xs align-baseline" onClick={() => { void desktopApi.openAboutLink("aci").catch(reportError); }}>About ACI<ExternalLink size={12} aria-hidden="true" /></Button></>}><Input id="profile-endpoint" aria-describedby="profile-endpoint-note" value={draft.remoteUrl} onChange={(event) => setDraft((current) => ({ ...current, remoteUrl: event.target.value }))} disabled={frozen || working} spellCheck={false} /></FormField>}
+          {!provider.presetUrl && <FormField id="profile-endpoint" label="Service endpoint" description={<>Requires ACI support. <Button type="button" variant="link" className="h-auto p-0 text-xs align-baseline" onClick={() => { void desktopApi.openAboutLink("aci").catch(reportError); }}>About ACI<ExternalLink size={12} aria-hidden="true" /></Button></>}><Input id="profile-endpoint" aria-describedby="profile-endpoint-note" value={draft.remoteUrl} onChange={(event) => setDraft((current) => ({ ...current, remoteUrl: event.target.value }))} disabled={frozen || working} spellCheck={false} autoComplete="off" /></FormField>}
           <Tabs value={provider.accountLogin ? authMethod : "apiKey"} className="gap-4"
             onValueChange={(next) => { if (next === "account" || next === "apiKey") void chooseAuthMethod(next); }}>
             {provider.accountLogin && <TabsList aria-label="Connection method" className="w-full">
@@ -351,7 +352,7 @@ export function ProfileEditorDialog({
                   </div>
                   </div>
                   {provider.callbackUrl && <details>
-                    <summary className="cursor-pointer text-sm text-muted-foreground">Paste callback link</summary>
+                    <summary className="text-sm text-muted-foreground">Paste callback link</summary>
                     <div className="mt-3 space-y-2">
                       <FormField id="account-callback" label="Callback URL">
                         <Input id="account-callback" type="password" value={callbackDraft} autoComplete="off" spellCheck={false} disabled={account.working}

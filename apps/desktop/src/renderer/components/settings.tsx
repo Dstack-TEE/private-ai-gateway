@@ -7,7 +7,7 @@ import { Separator } from "./ui/separator";
 import { ActionItem } from "./action-item";
 
 export function SettingsList({ children }: PropsWithChildren): React.JSX.Element {
-  return <ItemGroup className="gap-0 has-data-[size=sm]:gap-0 has-data-[size=xs]:gap-0 overflow-hidden rounded-2xl border bg-card text-card-foreground [&>[data-slot=item]]:min-h-13 [&>[data-slot=item]]:border-0 [&>[data-slot=item]]:py-2.5">
+  return <ItemGroup className="gap-0 has-data-[size=sm]:gap-0 has-data-[size=xs]:gap-0 overflow-hidden rounded-(--surface-radius) border bg-card text-card-foreground [&>[data-slot=item]]:min-h-13 [&>[data-slot=item]]:border-0 [&>[data-slot=item]]:py-2.5">
     {Children.toArray(children).map((child, index) => <Fragment key={isValidElement(child) ? child.key : index}>{index > 0 && <Separator />}{child}</Fragment>)}
   </ItemGroup>;
 }

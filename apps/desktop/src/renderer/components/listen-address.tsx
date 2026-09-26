@@ -29,7 +29,7 @@ export function ListenerFields({ api, idPrefix, value, minPort, access, clientHo
       </Field>
       <Field>
         <FieldLabel className="min-h-5" htmlFor={`${idPrefix}-port`}>Port</FieldLabel>
-        <Input id={`${idPrefix}-port`} type="number" min={minPort} max="65535" required value={value.port} disabled={disabled} onChange={(event) => update("port", Number(event.target.value))} />
+        <Input id={`${idPrefix}-port`} type="number" min={minPort} max="65535" required autoComplete="off" value={value.port} disabled={disabled} onChange={(event) => update("port", Number(event.target.value))} />
       </Field>
     </div>
     <FormField id={`${idPrefix}-client-host`} label="Client host" description={addressKind === "unspecified" ? "Required for all-interface listeners. Use an address reachable by your clients." : clientHostNote}>

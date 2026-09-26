@@ -38,6 +38,10 @@ const platform: UiPlatform = {
   getCliRegistration: () => invoke("get_cli_registration"),
   setCliRegistration: (installed) => invoke("set_cli_registration", { installed }),
   stopAllAndQuit: () => invoke("stop_all_and_quit"),
+  showConfirmation: ({ destructive = false, ...options }) => invoke("show_confirmation", { confirmation: { ...options, destructive } }),
+  // Goes through the window's close request, which hides it to the tray.
+  closeWindow: () => getCurrentWebviewWindow().close(),
+  quit: () => invoke("quit_app"),
   copyText: (text) => invoke("copy_text", { text }),
   // The shell shows the system file panels and reads or writes the chosen file.
   selectProfileBackup: () => invoke("select_profile_backup"),

@@ -9,6 +9,7 @@
     "core:event:allow-unlisten",
     "core:window:allow-start-dragging",
     "core:window:allow-internal-toggle-maximize",
+    "core:window:allow-close",
     "allow-show-edit-menu",
     "allow-get-appearance",
     "allow-get-state",
@@ -65,6 +66,8 @@
     "allow-request-agent-access",
     "allow-get-cli-registration",
     "allow-set-cli-registration",
+    "allow-show-confirmation",
+    "allow-quit-app",
     "allow-stop-all-and-quit"
   ]
 }

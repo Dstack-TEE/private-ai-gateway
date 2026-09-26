@@ -24,6 +24,58 @@
   --warning: var(--color-amber-700);
   --warning-bg: color-mix(in oklch, var(--warning) 10%, transparent);
   --danger-bg: color-mix(in oklch, var(--destructive) 10%, transparent);
+
+  /* Platform metrics: group boxes (cards, settings lists, dialogs) and control
+     heights. A browser keeps these; the desktop app follows its platform. */
+  --surface-radius: calc(var(--radius) * 2.6);
+  --surface-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  --control-height: 2.25rem;
+  --control-height-sm: 2rem;
+}
+/* macOS (Apple HIG): 13 pt body and 11 pt small text, small corner radii,
+   group boxes outlined by a hairline rather than a shadow, and controls of
+   AppKit's large and regular sizes. */
+:root[data-platform="macos"] {
+  --text-sm: 13px;
+  --text-xs: 11px;
+  --radius: 6px;
+  --surface-radius: 10px;
+  --surface-shadow: 0 0 0 1px var(--border);
+  --control-height: 28px;
+  --control-height-sm: 24px;
+}
+/* Windows (Fluent 2): 14 px body, 4 px control and 8 px overlay corners,
+   32 px (medium) and 24 px (small) controls, cards with a stroke and no shadow. */
+:root[data-platform="windows"] {
+  --radius: 4px;
+  --surface-radius: 8px;
+  --surface-shadow: 0 0 0 1px var(--border);
+  --control-height: 32px;
+  --control-height-sm: 24px;
+}
+/* Linux (GNOME HIG, libadwaita): 6 px button and 12 px card corners, the
+   card shadow, and 34 px buttons. */
+:root[data-platform="linux"] {
+  --radius: 6px;
+  --surface-radius: 12px;
+  --surface-shadow: 0 0 0 1px rgb(0 0 6 / 0.03), 0 1px 3px 1px rgb(0 0 6 / 0.07), 0 2px 6px 2px rgb(0 0 6 / 0.03);
+  --control-height: 34px;
+  --control-height-sm: 28px;
+}
+/* Windows 11 draws Mica behind the window (the shell sets data-backdrop only
+   when it applied it): it shows in the window and the navigation pane, and the
+   content keeps its opaque layer. With transparency effects off, the window is
+   opaque. */
+@media not (prefers-reduced-transparency: reduce) {
+  :root[data-backdrop="mica"] { --sidebar: transparent; }
+  :root[data-backdrop="mica"] body { background-color: transparent; }
+}
+/* macOS controls, sidebars and lists don't highlight under the pointer; the
+   other platforms keep Tailwind's hover styles. */
+@custom-variant hover {
+  @media (hover: hover) {
+    &:hover:not(:where([data-platform="macos"] *)) { @slot; }
+  }
 }
 :root.dark {
   color-scheme: dark;
@@ -41,4 +93,15 @@
 }
 @media (prefers-reduced-motion: reduce) {
   [data-slot="button"], [data-slot="switch"], [data-slot="switch-thumb"] { transition: none; }
+  /* Dialogs, menus and tooltips fade in place instead of zooming or sliding,
+     and busy spinners stand still. */
+  * {
+    --tw-enter-scale: 1;
+    --tw-exit-scale: 1;
+    --tw-enter-translate-x: 0;
+    --tw-enter-translate-y: 0;
+    --tw-exit-translate-x: 0;
+    --tw-exit-translate-y: 0;
+  }
+  .animate-spin { animation: none; }
 }

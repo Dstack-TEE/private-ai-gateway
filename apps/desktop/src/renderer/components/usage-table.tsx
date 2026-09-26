@@ -37,7 +37,7 @@ export function UsageTable({ items, loading, pageIndex, pageSize, total, onInspe
   return <Table aria-label="Usage history" aria-busy={loading}>
       <TableHeader>{table.getHeaderGroups().map((group) => <TableRow key={group.id}>{group.headers.map((header) => <TableHead key={header.id} className={header.id === "costUsd" || header.id === "tokens" ? "text-right" : undefined}><table.FlexRender header={header} /></TableHead>)}</TableRow>)}</TableHeader>
       <TableBody>
-        {table.getRowModel().rows.map((row) => <TableRow key={row.id} className="cursor-pointer" onClick={(event) => {
+        {table.getRowModel().rows.map((row) => <TableRow key={row.id} onClick={(event) => {
           if (event.target instanceof Element && event.target.closest("button, a, [role=dialog]")) return;
           onInspect(row.original);
         }}>{row.getAllCells().map((cell) => <TableCell key={cell.id} className={cell.column.id === "tokens" ? "text-right" : undefined}><table.FlexRender cell={cell} /></TableCell>)}</TableRow>)}

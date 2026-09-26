@@ -13,6 +13,8 @@ mod tray;
 mod tray_theme;
 mod ui_api;
 mod updates;
+#[cfg(target_os = "windows")]
+mod windows_window;
 
 use desktop_core::{
     client::Client,
@@ -278,14 +280,32 @@ pub fn run() {
             let appearance = desktop_core::config::load()
                 .map(|saved| saved.appearance)
                 .unwrap_or_default();
-            let window = WebviewWindowBuilder::from_config(app, config)?
-                .initialization_script(distribution::initialization_script())
+            #[cfg(target_os = "windows")]
+            let backdrop = windows_window::mica_supported().then_some("mica");
+            #[cfg(not(target_os = "windows"))]
+            let backdrop = None;
+            let builder = WebviewWindowBuilder::from_config(app, config)?
+                .initialization_script(distribution::initialization_script(backdrop))
                 .on_page_load(|window, payload| {
                     if matches!(payload.event(), PageLoadEvent::Finished) {
                         tray::main_window_ready(window.app_handle());
                     }
-                })
-                .build()?;
+                });
+            // Windows 11 draws Mica behind a transparent window; the page
+            // shows it only where it has no background of its own.
+            #[cfg(target_os = "windows")]
+            let builder = if backdrop.is_some() {
+                builder.transparent(true).effects(
+                    tauri::window::EffectsBuilder::new()
+                        .effect(tauri::window::Effect::Mica)
+                        .build(),
+                )
+            } else {
+                builder
+            };
+            let window = builder.build()?;
+            #[cfg(target_os = "windows")]
+            windows_window::disable_browser_accelerator_keys(&window);
             // A new window follows the system, so only a saved light or dark
             // appearance is set, before the page loads. (On Linux the window
             // builder's theme does not apply; `set_theme` does everywhere.)
@@ -311,6 +331,8 @@ pub fn run() {
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     tray::hide_window(&app_for_events);
+                    #[cfg(target_os = "windows")]
+                    windows_window::explain_close_to_tray(&app_for_events);
                 }
             });
             if let Err(error) = tray::setup(app.handle()) {
