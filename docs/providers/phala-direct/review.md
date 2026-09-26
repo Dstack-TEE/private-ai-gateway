@@ -1,5 +1,11 @@
 # PhalaDirect Review
 
+Review record updated: 2026-07-05.
+
+> [!NOTE]
+> This page preserves the admissions decision at that date. Use
+> [verification.md](verification.md) for current adapter behavior.
+
 Provider: `phala-direct` — direct connection to a Phala dstack-vllm-proxy attestation
 endpoint, one per model. Expected to be superseded by an ACI-compatible server later
 (`aci-service` is the eventual target shape); this is the pre-ACI "direct" path.

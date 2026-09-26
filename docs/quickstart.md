@@ -1,8 +1,9 @@
 # ACI Quickstart
 
 Verify a live ACI deployment yourself. The commands below run against
-`https://api.redpill.ai`, a live deployment of the reference implementation;
-point `ACI_URL` at any ACI service to verify that instead.
+`https://tee.redpill.ai`, a live deployment of the reference implementation
+that enforces TEE-only routing. Point `ACI_URL` at any ACI service to verify
+that instead.
 
 You need `pap`, `curl`, `jq`, and `openssl`. Install Private AI Proxy from npm:
 
@@ -18,8 +19,13 @@ available from [GitHub Releases](https://github.com/Dstack-TEE/private-ai-gatewa
 service:
 
 ```bash
-export ACI_URL=https://api.redpill.ai
+export ACI_URL=https://tee.redpill.ai
 ```
+
+For other package managers and native installers, see the
+[install guide](private-ai-proxy-install.md). `private-ai-proxy` and `aci` are
+aliases for `pap`. From a source checkout, replace each `pap` command below
+with `cargo run --manifest-path apps/desktop/Cargo.toml --bin private-ai-proxy --`.
 
 ## 1. Verify the service with one command
 
@@ -36,7 +42,7 @@ PASS  id-2         binding chain: keyset JCS -> digest -> statement for our nonc
 PASS  id-3         keyset not expired (now < not_after) [9.1(3)] — now 1783899770 < not_after 1786491770
 PASS  id-4         source provenance connects workload to public code [9.1(4)] — booted compose measured into RTMR3: compose-hash=7c1e…40db; repo=https://github.com/Dstack-TEE/private-ai-gateway.git commit=58b027d… (published, not independently rebuilt)
 SKIP  id-5         private-key custody and subject per policy [9.1(5)] — custody policy not implemented in this CLI yet; subject: null (no policy constraints applied)
-PASS  id-6         the channel actually used is bound to the attested keyset (TLS SPKI or E2EE key) [9.1(6)] — observed SPKI 6ff3…9d21 for api.redpill.ai is in the attested keyset
+PASS  id-6         the channel actually used is bound to the attested keyset (TLS SPKI or E2EE key) [9.1(6)] — observed SPKI 6ff3…9d21 for tee.redpill.ai is in the attested keyset
 
 VERIFIED (5 pass, 1 skipped: custody policy not implemented)
 ```
@@ -47,6 +53,12 @@ never counted as a pass: the verdict line names each skip and its reason.
 Here id-5 is a `skip` — this CLI has no custody policy, so it does not claim
 to have checked private-key custody. The exit code is `0` only on `VERIFIED`.
 
+The default is a basic hardware-bound policy: verify the quote, nonce and
+keyset binding, keyset lifetime, measured compose, and observed TLS SPKI. The
+compose hash is reported but is not compared with a separate release allowlist.
+The deployment must still keep the client-facing TLS terminator inside the
+attested workload; the current CLI does not verify private-key custody.
+
 `--nonce` supplies your own nonce; `--json` emits the transcript as
 structured data.
 
@@ -54,19 +66,21 @@ What these checks prove and how they compose is [aci.md](../spec/aci.md) §1 (th
 trust model) and the §3 trust-chain diagram.
 
 id-4 verifies that the compose the service booted is the one measured into the
-quote, and prints the hash. It does not decide whether that compose is one you
-want: that is your verifier policy ([aci.md](../spec/aci.md) §1.3). Pin the
-hashes you accept with `--accept-compose`, repeatable and available on
-`verify`, `send`, `serve` and `audit`:
+quote, and prints the hash. To narrow the basic policy to reviewed releases,
+pin their hashes with `--accept-compose`, repeatable and available on
+`verify`, `curl`, `send`, `serve`, and `audit`:
 
 ```bash
-pap serve "$ACI_URL" --accept-compose 7c1e...40db
+pap curl "$ACI_URL/v1/models" --accept-compose 7c1e...40db -- --silent
 ```
+
+Replace the abbreviated hash with the full compose hash printed by your
+verification run. The abbreviation is only for display.
 
 For a production deployment, first run a dstack verifier over the report's
 quote, event log, and VM configuration. Require it to reproduce the boot
 measurements (MRTD and RTMR0-2), establish `os_image_hash`, and return
-`is_valid: true`. The [Phala direct verification path](providers/phala-direct/verification.md#how-the-os-image-is-classified)
+`is_valid: true`. The [Phala-direct verification algorithm](providers/phala-direct/verification.md#verification-algorithm)
 implements this check. Then appraise that hash with the ACI client's production
 allowlist:
 
@@ -85,7 +99,43 @@ The compose hash is the value to pin because it is the one measured into
 RTMR3. `repo_url` and `repo_commit` ride along in the report unpinned: they
 are not bound into the quote, so they are a label to read, not evidence.
 
-## 2. Look at the evidence yourself
+## 2. Send a familiar API request over the verified channel
+
+Replace `YOUR_API_KEY` and `MODEL_ID` with values from your provider:
+
+```bash
+pap curl "$ACI_URL/v1/chat/completions" -- \
+  --fail-with-body \
+  --no-buffer \
+  --header "Authorization: Bearer YOUR_API_KEY" \
+  --header "content-type: application/json" \
+  --data-binary '{
+    "model": "MODEL_ID",
+    "messages": [{"role": "user", "content": "Say hi"}],
+    "stream": true,
+    "provider": {"aci_verified": true}
+  }'
+```
+
+`pap curl` first runs the service checks from step 1. If they pass, it converts
+the observed TLS SPKI digest to curl's `sha256//...` pin format and starts the
+installed curl with that pin. Verification output goes to stderr. The untouched
+API response goes to stdout, including SSE streaming.
+
+The pin binds the client-to-gateway connection. The
+`provider.aci_verified: true` constraint makes the gateway refuse the request
+unless the chosen model backend also passed verification. This command does
+not fetch or verify the response receipt. Use `pap send` or `pap serve` for
+that deeper check.
+
+Put curl arguments after `--`. The wrapper accepts common single-request
+options for headers, bodies, method, output, streaming, timeouts, and status
+display; see the [CLI reference](../apps/desktop/docs/cli.md#aci-commands).
+Pass short options separately, such as `-X POST`. It rejects additional URLs,
+redirects, proxy and TLS overrides, config files, and unknown options so the
+verified transfer cannot silently change destination or policy.
+
+## 3. Look at the evidence yourself
 
 The report is plain JSON, keyset included: `attestation.workload_keyset`
 is the keyset object itself, and its digest is over the keyset's JCS form
@@ -136,7 +186,7 @@ byte. To re-run the checks against saved artifacts:
 pap audit --report report.json --nonce "$NONCE"
 ```
 
-## 3. Use it as a local endpoint
+## 4. Use it as a local endpoint
 
 ```bash
 pap serve "$ACI_URL"
@@ -223,10 +273,11 @@ pap serve "$ACI_URL" --require-claim tee_attested=hardware_proven
 ```
 
 A request that already carries `provider.aci_session_ids` is narrowed to its
-intersection with the local accepted set. On-demand receipt verification also checks the cited session
-against the pins (§9.3(6)) and the required claims (§9.2(3)).
+intersection with the local accepted set. On-demand receipt verification also
+checks the cited session against the pins (§9.3(6)) and the required claims
+(§9.2(3)).
 
-## 4. Verify one inference end to end
+## 5. Verify one inference end to end
 
 ```bash
 export ACI_API_KEY=<your api key>
@@ -260,14 +311,24 @@ structured data. Verified serving is demanded by default (the §5.3
 serve through anything else, and the transcript checks that the receipt
 cites one of yours.
 
-## 5. Verify from a browser or any web app
+With the default constraint, a missing `X-Receipt-Id` is a failure. With
+`--allow-unverified`, an unconstrained stream may have been committed before an
+upstream was selected; in that case `pap send` reads the response `id` and uses
+it to fetch the finalized receipt.
 
-The [`@phala/aci-verifier`](../clients/verifier-ts) library verifies a service
-from a browser tab or any web project in one call:
+## 6. Verify from TypeScript
+
+Install the public ESM package:
+
+```bash
+npm install @phala/aci-verifier
+```
+
+The browser entry verifies a service in one call:
 
 ```ts
 import { verifyService } from '@phala/aci-verifier';
-const { verdict, lines } = await verifyService('https://api.redpill.ai');
+const { verdict, lines } = await verifyService('https://tee.redpill.ai');
 console.log(verdict.line); // VERIFIED / PARTIAL / NOT VERIFIED
 ```
 
@@ -275,11 +336,17 @@ It fetches the report with a fresh nonce and verifies the hardware quote
 (via [`@phala/dcap-qvl`](https://www.npmjs.com/package/@phala/dcap-qvl) against
 the Phala PCCS), the binding chain, and the compose measurement — the same
 §9.1 checks the CLI runs, except key custody (check 5) and the TLS-certificate
-pin (check 6), which a plain browser cannot reach. A prebuilt ESM bundle
-(`npm run build:bundle`) drops into a `<script type="module">` with no build
-step.
+pin (check 6), which a plain browser cannot reach.
 
-## 6. Going deeper
+Node 20.18.1+ and Bun 1.4+ applications can import `connectAci()` from
+`@phala/aci-verifier/runtime` for an instance-scoped, SPKI-pinned fetch
+transport. Authentication remains with your SDK: inject `aci.fetch` into the
+SDK and configure the API key there. The transport retains each request's
+authorization only for that request's private receipt lookup. See the
+[TypeScript client guide](../clients/verifier-ts/README.md) for runnable SDK
+examples and receipt verification.
+
+## 7. Going deeper
 
 [README.md](../spec/README.md) routes the rest by task. [aci.md](../spec/aci.md) §9 is the
 procedure this walkthrough exercised.

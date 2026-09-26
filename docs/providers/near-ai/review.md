@@ -1,6 +1,12 @@
 # NEAR AI Gateway Review
 
 Date: 2026-05-18 UTC.
+
+> [!NOTE]
+> This is a point-in-time admissions audit. It preserves the evidence and
+> decision from the date above. Use [verification.md](verification.md) for the
+> current adapter algorithm, claims, and limitations.
+
 Provider endpoint: `https://cloud-api.near.ai`.
 Gateway source: `nearai/cloud-api`.
 Reviewed gateway commit: `057135fad9e5f656baa94025d831f55391979334`.

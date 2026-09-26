@@ -3,10 +3,11 @@
 Attested AI for Pi, powered by [private-ai-gateway].
 
 A thin, RedPill-branded distribution of the vendor-neutral
-[`@phala/pi-provider-aci`](https://www.npmjs.com/package/@phala/pi-provider-aci): standard
-chat plus **attested TLS (SPKI) pinning** — the prompt and reply are readable
-only by the attested workload. Every response receipt is verified before Pi
-can finish the model turn or continue its tool loop.
+[`@phala/pi-provider-aci`](https://www.npmjs.com/package/@phala/pi-provider-aci).
+It sends inference over an attested, SPKI-pinned gateway connection and requires
+verified provider serving. Remote plaintext is limited to the accepted gateway
+and provider workloads. Every response receipt is verified before Pi can finish
+the model turn or continue its tool loop.
 
 ## Install
 
@@ -46,8 +47,9 @@ only display the evidence or rerun an audit. The local wire-digest history keeps
 the latest 32 receipt-bearing requests by default and is cleared when Pi exits;
 gateway receipt and session artifacts have their own server-side retention.
 
-Interchangeable with `pi-provider-phala-cloud` — both share the same
-protocol core and pin the same attested workload. If you operate your own private-ai-gateway, use the neutral
+It shares its verifier and provider core with `pi-provider-phala-cloud`, but
+the two packages have different product IDs, authentication options, and
+default endpoints. If you operate your own private-ai-gateway, use the neutral
 [`@phala/pi-provider-aci`](https://www.npmjs.com/package/@phala/pi-provider-aci) instead.
 
 [private-ai-gateway]: https://github.com/Dstack-TEE/private-ai-gateway

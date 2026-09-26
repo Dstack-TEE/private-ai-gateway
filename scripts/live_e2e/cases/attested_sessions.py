@@ -83,7 +83,22 @@ def assert_upstream_attested_session(
     if "session_id" in session:
         raise RuntimeError(f"{provider.name} attested session embeds its own id")
     expect_equal(
-        provider, "session.upstream_name", session.get("upstream_name"), provider.name
+        provider,
+        "session.upstream_name",
+        session.get("upstream_name"),
+        provider.name,
+    )
+    expect_equal(
+        provider,
+        "session.upstream_name",
+        session.get("upstream_name"),
+        event.get("upstream_name"),
+    )
+    expect_equal(
+        provider,
+        "session.endpoint",
+        _norm_endpoint(session.get("endpoint")),
+        _norm_endpoint(event.get("url_origin")),
     )
     expect_equal(
         provider,

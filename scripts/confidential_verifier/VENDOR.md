@@ -32,7 +32,8 @@ Keep this list current so we can diff against upstream and re-sync deliberately.
 
 To pull upstream fixes, diff this tree against a fresh checkout at a newer commit, re-apply the local
 changes above, update the baseline commit here, and run the bridge contract test
-(`tests/contract_verifier_bridge.py`) plus `run.py --profile quick`.
+(`cargo test --locked --test contract_verifier_bridge`) plus
+`uv run python scripts/live_e2e/run.py --profile quick`.
 
 ## Runtime dependencies
 

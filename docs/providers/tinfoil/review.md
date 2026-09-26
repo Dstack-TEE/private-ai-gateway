@@ -1,6 +1,12 @@
 # Tinfoil Router-Mode Review
 
 Date: 2026-05-18 UTC.
+
+> [!NOTE]
+> This is a point-in-time admissions audit. It preserves the evidence and
+> decision from the date above. Use [verification.md](verification.md) for the
+> current adapter algorithm, claims, and limitations.
+
 Provider endpoint: `https://inference.tinfoil.sh`.
 Router source: `tinfoilsh/confidential-model-router`.
 Reviewed commit: `41b2e93e099baf3dd8085066c205f030b280cadc`.

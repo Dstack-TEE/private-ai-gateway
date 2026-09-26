@@ -1,9 +1,9 @@
 # Provider Audit Criteria
 
-This document defines the admission bar for adding an upstream provider to the
-Private AI Gateway. It distills the NEAR AI, Tinfoil, and Chutes reviews,
-the workload-identity work, and the implementation constraints we have agreed
-on.
+This document defines the admission bar for adding a verified upstream provider
+to Private AI Gateway. It is a normative review rubric, not a record of current
+provider behavior. Use the [provider index](README.md) and each provider's
+living `verification.md` page for implemented behavior and known limitations.
 
 The goal is a strict but adoptable soundness check. A provider passes only when
 there is no known gap in the path from verified workload identity to protected
@@ -111,7 +111,7 @@ Required behavior:
 - prevent aliases from bypassing the verified model identity
 
 For gateway providers, the verified gateway channel is the authoritative check;
-static catalog metadata is never trusted. NEAR AI is the reference example — it
+static catalog metadata is never trusted. NEAR AI is the reference example: it
 is a router, so the verified gateway channel itself is authoritative; the model
 is only the shape of NEAR's `/v1/attestation/report` endpoint, and the gateway
 attestation it returns is the same for every model:
@@ -288,13 +288,13 @@ A verified measurement only proves "some specific code/firmware is running."
 Provenance proves *which* code, traced to reviewed, ideally reproducible source.
 Two distinct layers must each be covered:
 
-- **Software provenance** — the application/model/gateway code measured into the
+- **Software provenance:** the application/model/gateway code measured into the
   quote (compose hash, image digest, workload id, container measurement) maps to
   reviewed open source at a known commit/release, ideally via a reproducible build
   or a signed provenance attestation (e.g. Sigstore/in-toto with a transparency-log
   entry and a trusted builder identity), not merely "matches the provider's
   currently published value."
-- **Platform/OS provenance** — the platform layer measured into the quote (guest
+- **Platform/OS provenance:** the platform layer measured into the quote (guest
   OS image, kernel + command line, initramfs, bootloader, and the TEE firmware /
   module: TDX module `MR_SEAM`, SEV firmware/ucode level) maps to a reviewed,
   reproducible build or a documented known-good set. The OS and firmware are part
@@ -310,7 +310,7 @@ blocks strict inclusion.
 
 The verifier must read the platform TCB status (Intel TDX/SGX `TcbStatus`, AMD
 SEV-SNP reported TCB against a minimum policy) and apply a documented, consistent
-policy across providers — not silently accept any signed quote. A genuine TEE on
+policy across providers. Do not silently accept any signed quote. A genuine TEE on
 out-of-date microcode (`OutOfDate`) is still exposed to issues fixed in later TCB.
 
 - Require `UpToDate`, or an explicit allowlist (e.g. `SWHardeningNeeded` /
@@ -377,31 +377,31 @@ Every provider adapter should return the same class of result to Rust:
 ```json
 {
   "result": "verified",
-  "provider": "near-ai",
-  "model_id": "canonical-model",
   "verifier_id": "provider-verifier/version",
   "attested_scope": "router",
   "evidence": {
     "digest": "sha256:...",
     "data": "data:application/json;base64,<exact-verifier-input-bytes>"
   },
-  "verified_at": "2026-05-18T00:00:00Z",
-  "expires_at": "2026-05-18T00:05:00Z",
   "channel_bindings": [
     {
       "type": "tls_spki_sha256",
-      "origin": "https://cloud-api.near.ai",
+      "origin": "https://provider.example",
       "spki_sha256": "..."
     }
   ],
   "provider_claims": {
-    "trust_boundary": "near-ai-gateway",
-    "gateway_verified": true,
-    "gateway_tls_spki_sha256": "...",
+    "trust_boundary": "provider-router",
     "tcb_status": "UpToDate"
   }
 }
 ```
+
+The gateway supplies the provider, upstream, model, origin, forwarded-body
+hash, verification requirement, timeout, and provider options in the bridge
+request. The adapter obtains any provider-specific nonce or other freshness
+material. The gateway adds session timestamps and retention policy after the
+adapter returns; those fields are not part of the bridge result.
 
 The exact `provider_claims` fields are provider-owned. Rust should enforce the
 generic fields and the channel binding. Provider-specific meaning belongs in
@@ -435,11 +435,10 @@ The right abstraction is a provider adapter that establishes a verified lease.
 The Rust gateway should stay small: select the lease, enforce the channel,
 forward the request, and record the receipt.
 
-## Current Provider Status
+## Apply the rubric
 
-| Provider | Trust boundary | Decision | Blocking TODOs |
-| --- | --- | --- | --- |
-| NEAR AI | Verified gateway workload | Acceptable with conditions | Pin accepted gateway provenance/runtime policy; define pre-production measurement publication process; confirm no off-TEE TLS termination; finish privacy/log/storage review. |
-| Tinfoil | Verified confidential router | Acceptable with conditions | Pin audited router compose/image digest; define pre-production measurement publication process; decide runtime config update policy; record selected `Tinfoil-Enclave`; finish strict release pins. |
-| Chutes | Verified E2EE model instances | Accepted for limited traffic | Pin exact `chute_id` or unique slug for production models; resolve nonce-throughput limit before general production; document served-model alias limitations. |
-| SecretAI | Measured SecretVM inference origin | Acceptable with conditions | Pin `secretvm-verify`; support optional reviewed workload pins; require CPU-bound NRAS evidence and inference SPKI enforcement; model weights and provider logging remain outside the proof. |
+Start from the [provider matrix](README.md), then read the provider's living
+verification page and dated audit together. The living page defines the current
+algorithm and claims. The dated audit preserves the evidence and admission
+decision at the time of review. Re-run the relevant hermetic and live checks
+before changing production acceptance policy.
