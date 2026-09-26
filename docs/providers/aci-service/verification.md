@@ -4,10 +4,7 @@ Use the `aci-service` provider for an upstream that publishes a canonical ACI
 report and runs on dstack with Intel TDX. The gateway verifies this path in
 native Rust and enforces an attested TLS SPKI before forwarding.
 
-This page is the living reference for operators configuring the verifier and
-reviewers deciding what its `verified` result means.
-
-## Current contract
+## Summary
 
 | Property | Value |
 | --- | --- |
@@ -17,11 +14,12 @@ reviewers deciding what its `verified` result means.
 | Report | `GET /v1/aci/attestation?nonce=<fresh-64-hex>` |
 | CPU evidence | Intel TDX quote verified with `dcap_qvl` |
 | Workload measurement | dstack event-log replay to RTMR3, including `app-id` and `compose-hash` |
-| Key custody | dstack KMS chain for the receipt-signing key |
+| Key custody | dstack KMS signature chain for the receipt key |
 | Enforced channel | `tls_spki_sha256` |
 
-The verifier does not use the Python provider bridge. It shares its ACI §9.1
-appraisal code with the `aci` CLI.
+The verifier does not use the Python provider bridge. The `pap` CLI runs the
+same ACI §9.1 checks with its own implementation in
+`apps/desktop/cli/aci/verifier/`.
 
 ## Required configuration
 
@@ -31,7 +29,10 @@ An `aci-service` upstream must provide:
 - at least one `accepted_dstack_kms_root_public_keys` value; and
 - an HTTPS `base_url` whose service publishes an attested TLS key.
 
-The strongest current identity anchor is a measured subject in this form:
+The gateway refuses to load an `aci-service` entry without these policy
+values.
+
+Use a measured subject as the identity anchor:
 
 ```text
 app-id:0x<hex-encoded-dstack-app-id>
@@ -46,30 +47,63 @@ for all fields, defaults, timeouts, and cache settings.
 
 ## Verification algorithm
 
-For an uncached verification, the gateway:
+For an uncached verification, the gateway generates a fresh 32-byte nonce,
+fetches the canonical ACI report, and runs these checks in order. The first
+failing check becomes the failure reason.
 
-1. Generates a fresh 32-byte nonce and fetches the canonical ACI report.
-2. Recomputes the workload keyset's JCS digest and the nonce-bound ACI
-   statement. It rejects a mismatched `workload_keyset_digest`, mismatched
-   `report_data`, or expired `not_after`.
-3. Parses the TDX quote, fetches DCAP collateral from the configured PCCS,
-   verifies the quote, checks the reported TEE type, and requires the quote's
-   64-byte report-data slot to contain the ACI `report_data` value followed by
-   zeros.
-4. Requires source provenance and a published `app_compose`.
-5. Replays the dstack runtime event log and requires the resulting RTMR3 to
-   match the verified quote.
-6. Requires `sha256(UTF8(app_compose))` to match the pre-`system-ready`
-   `compose-hash` event, then extracts the measured dstack `app-id`.
-7. Applies the configured identity policy to that measured app ID or the
-   accepted image-digest path described under limitations.
-8. Verifies the dstack KMS signature chain for the receipt-signing key against
-   an accepted KMS root and the measured app ID.
-9. Selects an attested TLS SPKI that applies to the upstream origin.
+1. **Quote.** Requires the quote's 64-byte report-data slot to contain the ACI
+   `report_data` value followed by zeros, fetches DCAP collateral from the
+   configured PCCS, verifies the quote to the Intel root, and checks that the
+   reported TEE type matches the quote.
+2. **Binding.** Recomputes the workload keyset's JCS digest and the
+   nonce-bound ACI statement, and requires them to match
+   `workload_keyset_digest` and `report_data`.
+3. **Expiry.** Requires the current time to be before the keyset's
+   `not_after`.
+4. **Provenance.** Requires source provenance and a published `app_compose`,
+   replays the dstack runtime event log to the quote's RTMR3, requires
+   `sha256(UTF8(app_compose))` to match the pre-`system-ready` `compose-hash`
+   event, and extracts the measured dstack `app-id`.
+5. **Custody.** Verifies the dstack KMS signature chain for the receipt key
+   (see [Key custody](#key-custody)), then applies the identity policy: the
+   measured app ID must be in `accepted_subjects`, or the report's
+   `source_provenance.image_digest` must be in `accepted_image_digests`.
+6. **Channel.** Selects the attested TLS SPKI that applies to the upstream
+   origin.
 
-Any missing required evidence, policy mismatch, quote failure, expired keyset,
-custody failure, or unusable channel binding returns a failed verification
-event.
+These rejections identify common tampering:
+
+| Change | Rejection |
+| --- | --- |
+| Edited keyset entry, such as a `tls_public_keys` SPKI | `WorkloadKeysetDigestMismatch` |
+| Edited keyset with a recomputed digest, or a wrong nonce | `ReportDataMismatch` |
+| Report data the quote does not carry | `QuoteReportDataMismatch` |
+| Keyset past `not_after` | `KeysetExpired` |
+| Subject or image digest outside the policy | `PolicyRejected` |
+
+`tests/upstream_verifier.rs` covers the binding rejections.
+
+## Key custody
+
+The gateway derives its receipt and E2EE keys from dstack KMS. The custody
+entry in the report's evidence proves part of that:
+
+- The KMS root signs an app key for the measured app ID, and the app key signs
+  the KMS public key for the `aci.receipt.ed25519.v1` purpose. The verifier
+  recovers both signatures and requires the root to be in
+  `accepted_dstack_kms_root_public_keys`.
+- The entry's receipt public key must be one of the keyset's
+  `receipt_signing_keys`.
+
+The signature chain covers the KMS public key, not the published Ed25519
+receipt key. That the receipt key comes from the KMS derivation is established
+by reviewing the gateway source that the measured compose runs. `pap` runs the
+same custody check under `--accept-subject app-id:0x<hex>` and
+`--accept-dstack-kms-root-public-key`.
+
+An attested TLS SPKI does not by itself show that the TLS private key is inside
+the TEE. That is established only by reviewing the compose that runs the TLS
+terminator.
 
 ## How the TLS binding is selected
 
@@ -108,14 +142,13 @@ Only successful results are cached. A cached result expires at the earlier of:
 - the workload keyset's `not_after`.
 
 Every forward still enforces the cached TLS binding against the connection it
-opens. A binding mismatch invalidates the cache and allows one fresh
-verification before the candidate fails.
+opens. A binding mismatch invalidates the cached result, and the gateway
+re-verifies and retries up to 2 times before the request fails.
 
-A successful result stores the exact ACI report as session evidence. The
-current generic claim mapper records `tee_attested` as verifier-derived. It
-does not promote TCB freshness, OS provenance, serving-software provenance,
-GPU attestation, or model-weight provenance from this verifier into asserted
-typed claims.
+A successful result stores the exact ACI report as session evidence. The claim
+mapper records `tee_attested` as verifier-derived. It does not promote TCB
+freshness, OS provenance, serving-software provenance, GPU attestation, or
+model-weight provenance from this verifier into asserted typed claims.
 
 ## What `verified` means
 
@@ -124,34 +157,30 @@ A verified result establishes that:
 - a genuine TDX quote binds the fresh ACI report and workload keyset;
 - the dstack event log replays to the quote's RTMR3;
 - the published compose preimage matches the measured `compose-hash`;
-- the configured identity policy accepted the report;
-- the receipt key passed the configured dstack KMS custody check; and
+- the receipt key's custody entry chains to an accepted KMS root for the
+  measured app ID;
+- the configured identity policy accepted the report; and
 - the actual upstream TLS connection is restricted to an SPKI from the
   attested keyset.
 
-It does not establish every possible workload claim. Apply the limitations
-below when deciding whether to accept this path.
-
 ## Limitations
 
-- `accepted_image_digests` currently compares an allowlisted value with the
-  report's self-declared `source_provenance.image_digest`. The verifier does
-  not bind that field to the measured compose. Prefer a measured
-  `accepted_subjects` app ID until that conformance gap is closed.
+- `accepted_image_digests` compares an allowlisted value with the report's
+  self-declared `source_provenance.image_digest`. The verifier does not bind
+  that field to the measured compose. Use a measured `accepted_subjects` app ID.
 - The verifier proves that the compose bytes were measured. It does not rebuild
   images, the launcher, dependencies, compiler output, or source from that
   compose.
 - DCAP verification returns the collateral TCB status, but this path does not
-  currently enforce an accepted-status policy or expose the status as a typed
-  session claim.
-- The dstack custody check covers the receipt-signing role. It does not yet
-  establish custody for every E2EE and TLS private key in the workload keyset.
+  enforce an accepted-status policy or expose the status as a typed session
+  claim.
+- The custody check covers the receipt key. The E2EE custody entries are not
+  matched against the keyset, and no custody entry covers TLS.
 - The event-log and KMS checks do not independently reconstruct and accept a
   reviewed dstack OS image from MRTD and RTMR0-2.
 - No GPU evidence or model-weight provenance is verified by this adapter.
 - A service-wide keyset with several TLS SPKIs produces one stored session per
   binding even though the transport accepts any listed binding for the origin.
-  This is a known session-model gap for multi-key channels.
 
 These gaps are also tracked in
 [Reference implementation conformance gaps](../../reviews/aci-spec-conformance-gaps.md).

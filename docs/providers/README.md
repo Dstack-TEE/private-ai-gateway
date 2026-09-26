@@ -4,10 +4,10 @@ This section documents the TEE provider adapters that can produce verified upstr
 
 Provider pages use two document types:
 
-- `verification.md` is a living reference tied to the current adapter and forwarding code.
-- `review.md` is a dated admissions audit. It preserves the evidence and decision at that time and can contain unresolved work that has since moved.
+- `verification.md` describes the adapter and forwarding code in this repository and changes with it.
+- `review.md` is a dated admissions audit. It records the evidence and decision on its date, plus later dated status notes. Its open items may since have been resolved.
 
-Do not use a dated review as a substitute for the living verification page or current source.
+Use the verification page and the source, not a dated review, to learn what the adapter does.
 
 ## Provider matrix
 
@@ -16,7 +16,7 @@ Do not use a dated review as a substitute for the living verification page or cu
 | ACI service | ACI-compatible dstack service | `tls_spki_sha256` | [Verification](aci-service/verification.md) | First-party path; no separate audit |
 | Chutes | Per-instance Intel TDX workload | `e2ee_public_key_sha256` | [Configuration](chutes/configuration.md), [verification](chutes/verification.md) | [Accepted for limited traffic](chutes/review.md), 2026-05-18 |
 | NEAR AI | Intel TDX router gateway | `tls_spki_sha256` | [Verification](near-ai/verification.md) | [Acceptable with conditions](near-ai/review.md), 2026-05-18 |
-| Phala direct | Per-model dstack-vllm-proxy endpoint | `tls_spki_sha256` | [Verification](phala-direct/verification.md) | [Acceptable with conditions](phala-direct/review.md), updated 2026-07-05 |
+| Phala direct | Per-model dstack-vllm-proxy endpoint | `tls_spki_sha256` | [Verification](phala-direct/verification.md) | [Acceptable with conditions](phala-direct/review.md), 2026-06-10 |
 | SecretAI | SecretVM router workload | `tls_spki_sha256` | [Verification](secret-ai/verification.md) | [Acceptable with conditions](secret-ai/review.md), 2026-05-22 |
 | Tinfoil | Confidential model router | `tls_spki_sha256` | [Verification](tinfoil/verification.md) | [Acceptable with conditions](tinfoil/review.md), 2026-05-18 |
 
@@ -31,7 +31,7 @@ A provider verifier can return `verified` only with at least one enforceable cha
 
 The verifier proves that the binding belongs to the attested workload according to that provider's evidence format. The forwarding backend proves that the connection or encrypted request uses the same binding. A receipt records the result and selected session.
 
-This invariant is implemented across `src/aci/verifier/`, `src/aci/upstream/`, and `src/aggregator/service/forward.rs`. It is covered by provider bridge tests, upstream-verifier tests, and channel-binding tests.
+This invariant is implemented across `src/aci/verifier/`, `src/aci/upstream/`, and `src/aggregator/service/forward.rs`. Forwarding fails closed when the selected backend cannot enforce the accepted binding (`tests/upstream_verifier.rs::service_fails_if_selected_backend_cannot_enforce_channel_binding`). `tests/service.rs::verified_upstream_binding_creates_attested_session` covers the session record created from a verified binding.
 
 ## Claims are not uniform
 
@@ -48,7 +48,7 @@ The session layer records these claim states separately:
 
 Each can be asserted, refuted, or unknown. Apply relying-party policy to the claim source and evidence. In particular, do not equate a verified CPU channel with proven model weights or a CPU-bound GPU.
 
-The common audit rubric is [Provider audit criteria](audit-criteria.md). Cross-provider router reviews are preserved in [Router-mode soundness](../reviews/router-mode-soundness.md) and [Router load balancing and cache](../reviews/router-mode-load-balancing-cache.md).
+The common audit rubric is [Provider audit criteria](audit-criteria.md). The cross-provider router reviews are [Router-mode soundness](../reviews/router-mode-soundness.md) and [Router load balancing and cache](../reviews/router-mode-load-balancing-cache.md), and [Router-mode provider review](../router-mode-provider-review.md) records how those reviews were run.
 
 ## Audit a request
 
@@ -62,7 +62,7 @@ For a request that must use a verified provider:
 6. Recompute the session identifier and evidence digest.
 7. Apply the provider-specific policy described by the living verification page.
 
-The full client flow is in [Verify an attested inference](../attested-confidential-inference.md).
+`scripts/live_e2e/user_verify.py` and `scripts/live_e2e/cases/attested_sessions.py` implement this check. The full client flow is in [Verify an attested inference](../attested-confidential-inference.md), and session validity and retention are described in [Upstream verification lifecycle](../upstream-verification-lifecycle.md).
 
 ## Prefix-cache isolation observation
 
@@ -81,7 +81,7 @@ Chutes routes:
 
 At that revision, Tinfoil's behavior was attestation-backed. The observed
 Chutes behavior came from control-plane evidence and was not bound by its
-current attestation. The intended caller-controlled interface was to preserve
+attestation. The intended caller-controlled interface was to preserve
 `cache_salt` for Chutes and translate it to `user_cache_secret` for Tinfoil,
 without deriving or overriding it from RedPill tenant identity in the gateway.
 
@@ -99,7 +99,7 @@ When verifier behavior changes, update the living page in the same change. Inclu
 - how forwarding enforces that value;
 - typed claims and their sources;
 - evidence or checks that are supplemental only;
-- current tests and a repository-relative reproduction command;
+- tests and a repository-relative reproduction command;
 - limitations that affect a relying-party decision.
 
-Preserve old audit results as dated records. Add a short supersession note rather than rewriting what the earlier audit observed.
+Keep audit results as dated records. Add a short dated status note rather than rewriting what the audit observed.

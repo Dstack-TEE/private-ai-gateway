@@ -1,11 +1,14 @@
 # NEAR AI Gateway Review
 
-Date: 2026-05-18 UTC.
+Date: 2026-05-18 UTC. Verdict and lease contract updated 2026-06-15 for
+router-scoped sessions.
 
 > [!NOTE]
-> This is a point-in-time admissions audit. It preserves the evidence and
-> decision from the date above. Use [verification.md](verification.md) for the
-> current adapter algorithm, claims, and limitations.
+> This is a dated admissions audit. It records the evidence and decision from
+> the date above, plus later status notes that carry their own dates. Source
+> paths refer to the repository layout at the time. Use
+> [verification.md](verification.md) for the adapter algorithm, claims, and
+> limitations.
 
 Provider endpoint: `https://cloud-api.near.ai`.
 Gateway source: `nearai/cloud-api`.
@@ -23,8 +26,7 @@ Source reports:
 - [router-mode-soundness.md](../../reviews/router-mode-soundness.md)
 - [router-mode-load-balancing-cache.md](../../reviews/router-mode-load-balancing-cache.md)
 
-> **How the gateway verifies this provider:** see [verification.md](verification.md).
-> Status (2026-06 soundness pass): the gateway now parses `report_data` from the
+> **Status (2026-06 soundness pass):** the gateway now parses `report_data` from the
 > verified quote and enforces the nonce + signing-address + TLS-SPKI binding (commit
 > `ca7ddbd`), addressing the P0 "verify gateway identity/provenance/TLS binding" item
 > below. The strict gateway compose/image digest pin remains a follow-up.

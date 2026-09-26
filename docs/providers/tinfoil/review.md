@@ -3,9 +3,11 @@
 Date: 2026-05-18 UTC.
 
 > [!NOTE]
-> This is a point-in-time admissions audit. It preserves the evidence and
-> decision from the date above. Use [verification.md](verification.md) for the
-> current adapter algorithm, claims, and limitations.
+> This is a dated admissions audit. It records the evidence and decision from
+> the date above, plus later status notes that carry their own dates. Source
+> paths refer to the repository layout at the time. Use
+> [verification.md](verification.md) for the adapter algorithm, claims, and
+> limitations.
 
 Provider endpoint: `https://inference.tinfoil.sh`.
 Router source: `tinfoilsh/confidential-model-router`.
@@ -18,8 +20,7 @@ Source reports:
 - [router-mode-soundness.md](../../reviews/router-mode-soundness.md)
 - [router-mode-load-balancing-cache.md](../../reviews/router-mode-load-balancing-cache.md)
 
-> **How the gateway verifies this provider:** see [verification.md](verification.md).
-> Status (2026-06 soundness pass): the gateway now verifies Tinfoil with the official
+> **Status (2026-06 soundness pass):** the gateway now verifies Tinfoil with the official
 > `tinfoil` SDK — the full AMD signature chain + Sigstore code-provenance + TLS-key
 > binding — surfacing `release_digest`/`config_repo` (commit `747b117`). This review
 > covers the Tinfoil router's own soundness; the strict digest pin/allowlist (P0 below)

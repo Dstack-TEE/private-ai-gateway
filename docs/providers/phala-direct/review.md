@@ -1,16 +1,17 @@
 # PhalaDirect Review
 
-Review record updated: 2026-07-05.
+Date: 2026-06-10 UTC. Updated 2026-06-11 for OS-image classification.
 
 > [!NOTE]
-> This page preserves the admissions decision at that date. Use
-> [verification.md](verification.md) for current adapter behavior.
+> This is a dated admissions audit. It records the evidence and decision from
+> the dates above. Source paths refer to the repository layout at the time. Use
+> [verification.md](verification.md) for the adapter algorithm, claims, and
+> limitations.
 
 Provider: `phala-direct` — direct connection to a Phala dstack-vllm-proxy attestation
 endpoint, one per model. Expected to be superseded by an ACI-compatible server later
 (`aci-service` is the eventual target shape); this is the pre-ACI "direct" path.
 
-> **How the gateway verifies this provider:** see [verification.md](verification.md).
 > Binding is **derive-and-bind**: the TLS SPKI is read from the version-2 attestation
 > report, proven via the `report_data` binding inside the dstack-verified quote, and then
 > pinned on the forward connection. There is no static TLS pin in config.

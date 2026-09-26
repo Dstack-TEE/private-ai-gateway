@@ -1,7 +1,7 @@
 # Provider Audit Criteria
 
 This document defines the admission bar for adding a verified upstream provider
-to Private AI Gateway. It is a normative review rubric, not a record of current
+to Private AI Gateway. It is a normative review rubric, not a record of
 provider behavior. Use the [provider index](README.md) and each provider's
 living `verification.md` page for implemented behavior and known limitations.
 
@@ -437,8 +437,14 @@ forward the request, and record the receipt.
 
 ## Apply the rubric
 
-Start from the [provider matrix](README.md), then read the provider's living
-verification page and dated audit together. The living page defines the current
-algorithm and claims. The dated audit preserves the evidence and admission
-decision at the time of review. Re-run the relevant hermetic and live checks
-before changing production acceptance policy.
+Start from the [provider matrix](README.md), then read the provider's
+verification page and dated audit together. The verification page defines the
+algorithm and claims. The dated audit records the evidence and admission
+decision on its date. Re-run the relevant hermetic and live checks before
+changing production acceptance policy.
+
+## Open items
+
+- No provider has an agreed pre-production measurement publication process
+  ([criterion 7](#7-release-and-measurement-updates)). Until one exists, a
+  strict verifier can only reject a new measurement or accept it unreviewed.

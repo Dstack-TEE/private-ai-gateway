@@ -3,9 +3,11 @@
 Date: 2026-05-18 UTC.
 
 > [!NOTE]
-> This is a point-in-time admissions audit. It preserves the evidence and
-> decision from the date above. Use [verification.md](verification.md) for the
-> current adapter algorithm, claims, and limitations.
+> This is a dated admissions audit. It records the evidence and decision from
+> the date above, plus later status notes that carry their own dates. Source
+> paths refer to the repository layout at the time. Use
+> [verification.md](verification.md) for the adapter algorithm, claims, and
+> limitations.
 
 Provider endpoint: `https://api.chutes.ai`.
 Trust boundary: verified Chutes model instance reached through Chutes E2EE
@@ -16,8 +18,7 @@ Source reports:
 - [upstream-verification-lifecycle.md](../../upstream-verification-lifecycle.md)
 - Chutes catalog and E2EE throughput probes captured during the provider audit.
 
-> **How the gateway verifies this provider:** see [verification.md](verification.md).
-> Status (2026-06 soundness pass): Chutes verification confirmed sound — DCAP quote
+> **Status (2026-06 soundness pass):** Chutes verification confirmed sound — DCAP quote
 > signature verification plus `report_data ↔ SHA256(nonce ‖ e2e_pubkey)`; no change
 > required.
 
