@@ -120,7 +120,7 @@ without restarting the service:
 
 ```sh
 printf '%s\n' "$PASSWORD" | pap settings set web-ui.password --value-stdin --yes
-pap settings set web-ui.password      # or type it twice at a hidden prompt
+pap settings set web-ui.password      # or type it at a hidden prompt
 pap settings set web-ui.enabled true
 pap settings set web-ui.port 4182     # default; must differ from the Local API (4180)
 pap settings show                     # settings, file paths, the web UI address or bind error, and passwordSet

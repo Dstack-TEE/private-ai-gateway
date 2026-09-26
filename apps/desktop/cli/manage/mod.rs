@@ -947,14 +947,9 @@ fn read_web_ui_password(
     if !io::stdin().is_terminal() || cli.json || cli.non_interactive {
         return Err("Use --value-stdin for noninteractive password input".into());
     }
-    let password =
-        rpassword::prompt_password("Web UI password: ").map_err(|_| "Cannot read the password")?;
-    let confirmation =
-        rpassword::prompt_password("Confirm password: ").map_err(|_| "Cannot read the password")?;
-    if password != confirmation {
-        return Err("Passwords do not match".into());
-    }
-    Ok(Some(password))
+    rpassword::prompt_password("Web UI password: ")
+        .map(Some)
+        .map_err(|_| "Cannot read the password".into())
 }
 fn parse_bool(value: &str) -> Result<bool, String> {
     value.parse().map_err(|_| "Expected true or false".into())
