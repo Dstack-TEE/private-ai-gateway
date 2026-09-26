@@ -5,27 +5,19 @@ Verify a live ACI deployment yourself. The commands below run against
 that enforces TEE-only routing. Point `ACI_URL` at any ACI service to verify
 that instead.
 
-You need `pap`, `curl`, `jq`, and `openssl`. Install Private AI Proxy from npm:
+You need `pap`, `curl`, `jq`, and `openssl`. Install Private AI Proxy from npm
+and select the service:
 
 ```bash
 npm install --global private-ai-proxy
 pap --help
-```
-
-The npm package selects the native build for the current operating system and
-CPU architecture. Native desktop installers and portable CLI archives are also
-available from [GitHub Releases](https://github.com/Dstack-TEE/private-ai-gateway/releases).
-`private-ai-proxy` and `aci` remain aliases of the same CLI. Then select the
-service:
-
-```bash
 export ACI_URL=https://tee.redpill.ai
 ```
 
-For other package managers and native installers, see the
-[install guide](private-ai-proxy-install.md). `private-ai-proxy` and `aci` are
-aliases for `pap`. From a source checkout, replace each `pap` command below
-with `cargo run --manifest-path apps/desktop/Cargo.toml --bin private-ai-proxy --`.
+`private-ai-proxy` is the full name of the same command. For Homebrew, native
+installers, and install scripts, see the [install guide](private-ai-proxy-install.md).
+From a source checkout, replace each `pap` command below with
+`cargo run --manifest-path apps/desktop/Cargo.toml --bin private-ai-proxy --`.
 
 ## 1. Verify the service with one command
 
@@ -40,64 +32,75 @@ and runs the six checks of [aci.md](../spec/aci.md) §9.1. Abridged output:
 PASS  id-1         hardware quote verifies to TEE vendor root and binds report_data [9.1(1)] — tdx quote verified (TCB status UpToDate) and binds report_data; collateral from https://pccs.phala.network
 PASS  id-2         binding chain: keyset JCS -> digest -> statement for our nonce -> report_data [9.1(2)] — keyset digest sha256:a1b4…c5c6; statement digest for nonce "9b2c…" matches report_data
 PASS  id-3         keyset not expired (now < not_after) [9.1(3)] — now 1783899770 < not_after 1786491770
-PASS  id-4         source provenance connects workload to public code [9.1(4)] — booted compose measured into RTMR3: compose-hash=7c1e…40db; repo=https://github.com/Dstack-TEE/private-ai-gateway.git commit=58b027d… (published, not independently rebuilt)
-SKIP  id-5         private-key custody and subject per policy [9.1(5)] — custody policy not implemented in this CLI yet; subject: null (no policy constraints applied)
-PASS  id-6         the channel actually used is bound to the attested keyset (TLS SPKI or E2EE key) [9.1(6)] — observed SPKI 6ff3…9d21 for tee.redpill.ai is in the attested keyset
+PASS  id-4         source provenance connects workload to public code [9.1(4)] — compose-hash=7c1e…40db measured into RTMR3; repo=https://github.com/Dstack-TEE/private-ai-gateway.git commit=58b027d… (published, not rebuilt)
+SKIP  id-5         private-key custody and subject per policy [9.1(5)] — no custody policy configured (--accept-dstack-kms-root-public-key with --accept-subject); subject: null (no policy constraints applied)
+PASS  id-6         the channel actually used is bound to the attested keyset (TLS SPKI or E2EE key) [9.1(6)] — observed SPKI 6ff3…9d21 for https://tee.redpill.ai is an attested entry clients pin
 
-VERIFIED (5 pass, 1 skipped: custody policy not implemented)
+VERIFIED (5 pass, 1 skipped: no custody policy configured)
 ```
 
-Each line is the status marker, the check id, its title and spec citation,
-then a `—` detail. Statuses are `pass`, `fail`, `skip`, or `info`. A skip is
-never counted as a pass: the verdict line names each skip and its reason.
-Here id-5 is a `skip` — this CLI has no custody policy, so it does not claim
-to have checked private-key custody. The exit code is `0` only on `VERIFIED`.
+Each line shows the status, the check ID, its title and spec section, then
+the detail. A status is `PASS`, `FAIL`, `SKIP`, or `INFO`. A skip never counts
+as a pass, and the verdict line names each skip. The exit code is `0` only on
+`VERIFIED`.
 
-The default is a basic hardware-bound policy: verify the quote, nonce and
-keyset binding, keyset lifetime, measured compose, and observed TLS SPKI. The
-compose hash is reported but is not compared with a separate release allowlist.
-The deployment must still keep the client-facing TLS terminator inside the
-attested workload; the current CLI does not verify private-key custody.
+`--nonce` supplies your own nonce, and `--json` prints the transcript as
+structured data. [aci.md](../spec/aci.md) §1 explains what the checks prove
+together.
 
-`--nonce` supplies your own nonce; `--json` emits the transcript as
-structured data.
+### Choose what you accept
 
-What these checks prove and how they compose is [aci.md](../spec/aci.md) §1 (the
-trust model) and the §3 trust-chain diagram.
+A passing run proves that genuine TEE hardware booted the compose with hash
+`7c1e…40db`, and that your connection reached the TLS key that workload
+declares. It does not decide whether you accept that compose. You can pin the
+releases you reviewed, rely on the operator to review what it deploys, or
+record the hash and review the release later.
 
-id-4 verifies that the compose the service booted is the one measured into the
-quote, and prints the hash. To narrow the basic policy to reviewed releases,
-pin their hashes with `--accept-compose`, repeatable and available on
-`verify`, `curl`, `send`, `serve`, and `audit`:
+To pin, pass the full compose hash from your run. `--accept-compose` is
+repeatable and works with `verify`, `curl`, `send`, `serve`, `sessions`, and
+`audit`:
 
 ```bash
-pap curl "$ACI_URL/v1/models" --accept-compose 7c1e...40db -- --silent
+pap verify "$ACI_URL" --accept-compose <full-compose-hash>
 ```
 
-Replace the abbreviated hash with the full compose hash printed by your
-verification run. The abbreviation is only for display.
-
-For a production deployment, first run a dstack verifier over the report's
-quote, event log, and VM configuration. Require it to reproduce the boot
-measurements (MRTD and RTMR0-2), establish `os_image_hash`, and return
-`is_valid: true`. The [Phala-direct verification algorithm](providers/phala-direct/verification.md#verification-algorithm)
-implements this check. Then appraise that hash with the ACI client's production
-allowlist:
+The compose hash covers the complete compose file, so it identifies what the
+deployment runs. In the [reference deployment](../deploy/README.md), that file
+names the gateway commit. To read the commit from the measured compose rather
+than from the gateway's own `source_provenance` statement:
 
 ```bash
-pap verify "$ACI_URL" --require-production-os
+curl -sS "$ACI_URL/v1/aci/attestation?nonce=$(openssl rand -hex 32)" \
+  | jq -r '.attestation.evidence.app_compose | fromjson | .docker_compose_file' \
+  | grep -E 'REPO_URL|COMMIT_SHA'
 ```
 
-The ACI client verifies the DCAP quote and replays RTMR3, but does not perform
-the dstack boot-measurement reconstruction. `policy-os: pass` therefore means
-the RTMR3 `os-image-hash` is allowlisted. Treat it as production-OS evidence
-only when the dstack verifier independently bound the same hash to MRTD and
-RTMR0-2. Development, missing, and unknown hashes fail the allowlist; accepting
-a new image requires a verifier update.
+To check custody of the receipt-signing key (id-5), add the measured app ID
+and the dstack KMS root key you trust. The app ID is the `app-id` event in the
+report's RTMR3 event log:
 
-The compose hash is the value to pin because it is the one measured into
-RTMR3. `repo_url` and `repo_commit` ride along in the report unpinned: they
-are not bound into the quote, so they are a label to read, not evidence.
+```bash
+curl -sS "$ACI_URL/v1/aci/attestation?nonce=$(openssl rand -hex 32)" \
+  | jq -r '.attestation.evidence.event_log | fromjson
+           | map(select(.imr == 3 and .event == "app-id")) | .[0].event_payload'
+
+pap verify "$ACI_URL" \
+  --accept-subject app-id:0x<app-id> \
+  --accept-dstack-kms-root-public-key <kms-root-public-key>
+```
+
+id-5 then requires the receipt key's KMS signature chain to end at that root
+for that app. It does not cover the TLS private key. That key stays inside the
+TEE only if the compose you reviewed runs the TLS terminator and keeps its key
+there.
+
+`--require-production-os` also requires the RTMR3 `os-image-hash` to be in the
+CLI's allowlist of reviewed production images. The CLI does not rebuild the
+boot measurements (MRTD and RTMR0-2) from that image. For production, first run
+a dstack verifier over the report's quote, event log, and VM configuration, and
+require `is_valid: true`. The
+[Phala-direct verification algorithm](providers/phala-direct/verification.md#verification-algorithm)
+shows that check.
 
 ## 2. Send a familiar API request over the verified channel
 
@@ -117,16 +120,15 @@ pap curl "$ACI_URL/v1/chat/completions" -- \
   }'
 ```
 
-`pap curl` first runs the service checks from step 1. If they pass, it converts
-the observed TLS SPKI digest to curl's `sha256//...` pin format and starts the
-installed curl with that pin. Verification output goes to stderr. The untouched
-API response goes to stdout, including SSE streaming.
+`pap curl` first runs the checks from step 1 under the same policy flags. If
+they pass, it starts the installed curl pinned to the TLS key the report
+declares. Verification output goes to stderr. The API response goes to stdout
+unchanged, including SSE streaming.
 
-The pin binds the client-to-gateway connection. The
-`provider.aci_verified: true` constraint makes the gateway refuse the request
-unless the chosen model backend also passed verification. This command does
-not fetch or verify the response receipt. Use `pap send` or `pap serve` for
-that deeper check.
+The pin covers the connection from you to the gateway. The
+`provider.aci_verified: true` field makes the gateway refuse the request
+unless the chosen model backend also passes verification. `pap curl` does not
+fetch or verify the response receipt. Use `pap send` or `pap serve` for that.
 
 Put curl arguments after `--`. The wrapper accepts common single-request
 options for headers, bodies, method, output, streaming, timeouts, and status
@@ -153,14 +155,14 @@ jq '{subject, not_after,
      receipt_keys: [.receipt_signing_keys[] | {key_id, algo}],
      e2ee_suites:  [.e2ee_public_keys[].algo]}' keyset.json
 
-# Which public code is it running?
+# Which public code does the gateway say it runs?
 jq '.attestation.source_provenance' report.json
 
 # Which TLS keys is it pinned to, per hostname?
 jq '.tls_public_keys' keyset.json
 ```
 
-The provenance names the exact source to review:
+The gateway fills `source_provenance` from its launcher config:
 
 ```json
 {
@@ -171,19 +173,32 @@ The provenance names the exact source to review:
 }
 ```
 
-The commit changes when the deployment updates. The E2EE v2 extension suite is
+This field is the gateway's own statement. Check it against the commit in the
+measured compose, as shown in [Choose what you accept](#choose-what-you-accept).
+The E2EE v2 extension suite is
 `x25519-aes-256-gcm-hkdf-sha256`; keyset entries with any other `algo` are
 ignored ([ACI §3.1](../spec/aci.md#31-workload-keyset),
 [E2EE v2 §4](../spec/e2ee-v2.md#4-algorithms)).
 
-To recompute any digest by hand, add `--explain` to `pap verify`: each check
-prints the exact material it computed — the decoded keyset bytes, the §3.2
+To recompute any digest by hand, add `--explain` to `pap verify`. Each check
+then prints the exact material it computed: the decoded keyset bytes, the §3.2
 statement bytes, the digests, and the expected values.
 [test-vectors.md](../spec/test-vectors.md) pins the same constructions byte for
 byte. To re-run the checks against saved artifacts:
 
 ```bash
 pap audit --report report.json --nonce "$NONCE"
+```
+
+To audit a saved exchange as well, add the receipt, the exact request and
+response bytes, and the session the receipt cites:
+
+```bash
+pap audit --report report.json --nonce "$NONCE" \
+  --receipt receipt.json \
+  --request-body request.bin \
+  --response-body response.bin \
+  --session session.json
 ```
 
 ## 4. Use it as a local endpoint
@@ -194,8 +209,8 @@ pap serve "$ACI_URL"
 
 `pap serve` verifies the service first, prints the transcript, and refuses
 to start unless the verdict is `VERIFIED`. It then listens on plain HTTP at
-`127.0.0.1:4180` — like a local Ollama — so any OpenAI-compatible client
-can use an unencrypted local API. Send plaintext request bodies without E2EE
+`127.0.0.1:4180`, like a local Ollama, so any OpenAI-compatible client can
+use it as an unencrypted local API. Send plaintext request bodies without E2EE
 headers. The proxy rejects E2EE v2 and legacy E2EE request headers with HTTP
 400 instead of forwarding them:
 
@@ -245,7 +260,7 @@ What the proxy does:
 
   This fetches the receipt and its cited session from the service and runs
   the full [aci.md](../spec/aci.md) §9.3 + §9.2 checks against the recorded
-  digests — signature, keyset binding, body hashes, session audit. The
+  digests: signature, keyset binding, body hashes, and session audit. The
   verdict returns as JSON and prints on the proxy console, loud on failure.
 - If a response carries a different `X-ACI-Keyset-Digest` than the verified
   one, forwarding blocks until a fresh verify passes.
@@ -334,7 +349,7 @@ console.log(verdict.line); // VERIFIED / PARTIAL / NOT VERIFIED
 
 It fetches the report with a fresh nonce and verifies the hardware quote
 (via [`@phala/dcap-qvl`](https://www.npmjs.com/package/@phala/dcap-qvl) against
-the Phala PCCS), the binding chain, and the compose measurement — the same
+the Phala PCCS), the binding chain, and the compose measurement. These are the
 §9.1 checks the CLI runs, except key custody (check 5) and the TLS-certificate
 pin (check 6), which a plain browser cannot reach.
 

@@ -1,7 +1,7 @@
 # Install Private AI Proxy
 
-`pap` is the preferred command. `private-ai-proxy` is the full-name alias and
-`aci` is the protocol-focused alias; all three run the same native CLI.
+`pap` is the preferred command. `private-ai-proxy` is the full-name alias. `aci`
+is a legacy alias kept for existing scripts. All three run the same native CLI.
 
 ## npm
 

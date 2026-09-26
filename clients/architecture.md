@@ -36,7 +36,7 @@ flowchart LR
 | `@phala/aci-provider` | Connection lifecycle, catalog validation, TEE filtering, capabilities, receipt history, response verification, and structured inspection | Host credential storage or host-specific UI |
 | Pi adapter | Pi Provider/Auth APIs, settings, commands, footer state, and native persistence | Independent verification or credential storage |
 | OpenCode adapter | Server-plugin config, auth loader, models, commands, tools, and disposal | Independent verification or credential storage |
-| Branded package | Provider ID, label, endpoint, environment names, accepted release policy, and optional account flow | A fork of the shared trust logic |
+| Branded package | Provider ID, label, endpoint, environment names, and optional account flow | A fork of the shared trust logic |
 
 Applications that accept a custom `fetch` can use `connectAci()` directly.
 Applications with a provider lifecycle should use the provider kernel. A host
@@ -92,6 +92,7 @@ The gateway catalog is the only source of model capabilities:
 
 - `supported_features` controls reasoning and tool support;
 - `supported_sampling_parameters` controls temperature support;
+- an empty capability array turns the capability off;
 - required limits, modalities, prices, and capability arrays must validate;
 - missing optional cache prices remain absent; and
 - clients do not infer a model family or request dialect from the model ID.
@@ -123,12 +124,13 @@ Hardware proof does not identify an approved product release by itself:
 - In **reviewed-release mode**, the client also requires that compose hash to
   appear in a reviewed allowlist.
 
-The report's repository and commit fields are self-declared labels. The compose
-hash is the RTMR3-bound release anchor. RedPill and Phala deployment pipelines
-must publish reviewed compose hashes through an authenticated channel and
-allow a controlled overlap during rotation.
+The report's repository and commit fields are the gateway's own statement. The
+compose hash is the RTMR3-bound release anchor. The branded packages ship no
+accepted compose hashes, so they run in hardware-bound mode unless the user
+supplies hashes.
 
-The remaining release loop is:
+Shipping reviewed hashes in the branded packages is planned. It needs these
+steps:
 
 1. Review the source and complete deployment compose.
 2. Produce the deterministic compose hash.
@@ -136,7 +138,8 @@ The remaining release loop is:
 4. Ship it in the branded client policy.
 5. Exercise accepted and rejected measurements in Rust and TypeScript.
 
-Publishing the npm packages does not, by itself, establish a reviewed-release
+The release channel must allow a controlled overlap during rotation.
+Publishing the npm packages does not by itself establish a reviewed-release
 claim.
 
 ## Boundary of this architecture

@@ -14,15 +14,14 @@ preview.
 
 ## Try it
 
-Install Private AI Proxy's CLI (macOS, Linux, or Windows):
+Install the Private AI Proxy CLI (macOS, Linux, or Windows):
 
 ```bash
 npm install --global private-ai-proxy
 ```
 
 [Other installation options](docs/private-ai-proxy-install.md) include Homebrew,
-desktop packages, and native install scripts. You also need system `curl` for
-the request below.
+desktop packages, and native install scripts. You also need system `curl`.
 
 Then call Chat Completions as usual. Replace `YOUR_API_KEY` and `MODEL_ID`
 with values from your provider:
@@ -41,73 +40,59 @@ pap curl https://tee.redpill.ai/v1/chat/completions -- \
   }'
 ```
 
-Before curl sends the request body, `pap` verifies a fresh hardware quote,
-the measured gateway workload, and the TLS key it reached. It pins curl to
-that key and prints a transcript to stderr while the API response streams on
-stdout:
+Before curl sends anything, `pap` fetches a fresh attestation report and
+verifies it. curl then runs pinned to the TLS key the report declares. The
+verification transcript goes to stderr and the API response streams on stdout.
+Abridged transcript:
 
 ```text
-PASS  id-1  hardware quote verifies and binds report_data
-PASS  id-4  measured workload provenance connects to public source
-PASS  id-6  the TLS channel is bound to the attested keyset
-VERIFIED (5 pass, 1 skipped: custody policy not implemented)
-PINNED      curl -> attested TLS key
+PASS  id-1  hardware quote verifies to TEE vendor root and binds report_data
+PASS  id-4  source provenance connects workload to public code — compose-hash=7c1e…40db
+SKIP  id-5  private-key custody and subject per policy — no custody policy configured
+PASS  id-6  the channel actually used is bound to the attested keyset
+VERIFIED (5 pass, 1 skipped: no custody policy configured)
 ```
 
-The CLI's basic policy checks the hardware quote, nonce, keyset, measured
-compose, and live TLS key. It reports the compose hash without requiring a
-separate release allowlist. Add `--accept-compose` when you want to accept only
-a specific reviewed compose.
+The `provider.aci_verified` field covers the second hop. The gateway refuses
+the request unless the selected model backend passes its own attestation and
+channel-binding checks. See [Make a request fail closed](#make-a-request-fail-closed).
 
-`provider.aci_verified` protects the second hop. It tells the verified gateway
-to refuse the request unless the selected model backend passes its own
-attestation and channel-binding checks.
+`tee.redpill.ai` is a live deployment operated outside this repository, and
+this project does not issue its API keys. The [quickstart](docs/quickstart.md)
+walks through inspecting the evidence, pinning a release, and verifying a
+response receipt, which `pap curl` does not do.
 
-Together, these checks limit remote plaintext access to workloads your policy
-accepts: the gateway's attested workload, any confidential provider router,
-and the model runner. The client-facing TLS terminator must run inside that
-attested workload, alongside the gateway process. The gateway process itself
-serves HTTP behind the terminator.
+## What a passing check proves
 
-Under the TEE threat model, the gateway operator, model operator, and cloud
-host cannot inspect those workloads' protected memory. Your local app still
-sees the prompt and response.
+HTTPS proves that you reached a domain. The checks above prove more:
 
-> [!IMPORTANT]
-> The transcript shows skipped checks. The current CLI does not yet evaluate
-> private-key custody, and `pap curl` does not verify the response receipt.
-> Use [`pap send`](docs/quickstart.md#5-verify-one-inference-end-to-end) or
-> [`pap serve`](docs/quickstart.md#4-use-it-as-a-local-endpoint) when your
-> policy requires receipt verification.
-
-The example is a live deployment operated outside this repository. This
-project does not issue its API credentials. Continue with the
-[full quickstart](docs/quickstart.md) to inspect evidence, pin an accepted
-release, and verify a complete exchange.
-
-## Why HTTPS is not enough
-
-HTTPS proves that you reached a domain. It does not prove:
-
-- which program is handling your prompt;
-- whether that program runs in protected hardware;
-- whether its TLS key belongs to that protected workload; or
-- whether a gateway forwarded the prompt to an unverified model runner.
-
-ACI connects those facts into one chain:
-
-| Proof | What you learn |
+| Check | What you learn |
 | --- | --- |
-| Nonce-bound hardware quote | The report is fresh and comes from a genuine TEE. |
-| Measured workload and attested keyset | Which code and keys are inside that TEE. |
-| Enforced channel binding | The connection carrying plaintext ends at an accepted workload. |
-| Signed response receipt | Which request, response, route, and verification result the gateway recorded. |
-| Attested session | Which provider evidence and channel binding backed an aggregated request. |
+| Hardware quote with your nonce | The report is fresh and comes from genuine TEE hardware. |
+| Measured compose hash | Which compose file the TEE booted. In the [reference deployment](deploy/README.md), that file names the exact gateway commit. |
+| Attested keyset | Which receipt, E2EE, and TLS keys the measured workload uses. |
+| Channel binding | Your connection uses the TLS key the report declares. |
 
-The client checks the quote, measurement, and channel key before `pap curl`
-sends the request. Clients that audit the response also verify receipt hashes
-and signatures locally. A response header that merely says `verified` is not
-evidence.
+The checks do not decide whether that compose, and the code it names, is
+something you accept. You choose how to settle that:
+
+- **Audit and pin.** Review the compose and the gateway commit, then pass
+  `--accept-compose <hash>`. `pap` refuses any other release.
+- **Trust the operator.** Skip pinning and rely on the operator, such as Phala,
+  to review what it deploys. The transcript still prints the compose hash.
+- **Audit afterward.** Record the compose hash from the transcript and review
+  that release later.
+
+Key custody works the same way. The gateway derives its receipt and E2EE keys
+from dstack KMS inside the TEE. With `--accept-subject` and
+`--accept-dstack-kms-root-public-key`, `pap` checks the receipt key's KMS
+chain (id-5). The TLS private key has no such chain: it stays inside the TEE
+only if the reviewed compose runs the TLS terminator and keeps its key there.
+The gateway itself serves plain HTTP behind that terminator.
+
+The [security model](docs/attested-confidential-inference.md) lists what
+remains outside these checks, including provider-side limits and the absence
+of a transparency log.
 
 ## Where your data goes
 
@@ -116,60 +101,49 @@ flowchart LR
     client[Your app] -->|attested, pinned channel| gateway[Attested workload: TLS terminator + gateway]
     gateway -->|verified, bound channel| provider[Accepted provider workload or route]
     provider --> gateway --> client
-    gateway -.->|auth hash, routing, pricing, usage| control[Optional control plane]
+    gateway -.->|key hash, routing features, usage| control[Optional control plane]
 ```
 
-The accepted gateway, provider-router, and model workloads see plaintext when
-they must process it. Infrastructure outside those workloads does not receive
-inference content through the documented path.
+The accepted gateway, provider-router, and model workloads see plaintext
+because they process it. Under the TEE threat model, their operators and the
+cloud host cannot read that plaintext from protected memory. Your local app
+also sees the prompt and response.
 
-The optional control plane receives routing and account metadata, not prompts,
-responses, raw bearer tokens, or provider credentials. The gateway forwards
-the caller's routing object as metadata, so do not place secrets in that
-object. See the exact [control-plane contract](docs/control-plane-contract.md).
+The optional control plane never receives prompt or response bodies, raw
+bearer tokens, or provider credentials. It does receive routing features
+derived from the request, including a token estimate and a hash of the first
+4 KiB of the conversation. Without `middleware.prefix_hash_secret`, that hash
+lets the control plane confirm a prefix it already knows. The
+[security model](docs/attested-confidential-inference.md#who-receives-what)
+lists every field that leaves the request path.
 
-The optional [E2EE v2 compatibility extension](spec/e2ee-v2.md) also keeps
-supported content fields encrypted across infrastructure between the client
-and the gateway workload. It does not remove the gateway or model from the
-trust boundary.
+The optional [E2EE v2 extension](spec/e2ee-v2.md) keeps supported content
+fields encrypted between the client and the gateway workload. The gateway and
+model still see plaintext.
 
 ## Make a request fail closed
 
-Add one field to any supported prompt request that must use a verified
-provider:
+Private inference is opt-in per request. Configuring a TEE provider alone does
+not make requests fail closed. Use one of:
 
-```json
-{
-  "model": "public-model-id",
-  "messages": [
-    {"role": "user", "content": "Explain remote attestation in one sentence."}
-  ],
-  "provider": {
-    "aci_verified": true
-  }
-}
-```
+- `"provider": {"aci_verified": true}` in the request body;
+- a non-empty `provider.aci_session_ids` list, which pins the
+  [attested sessions](docs/attested-confidential-inference.md#pin-an-upstream-session)
+  you accept; or
+- a hostname listed in `middleware.tee_only_domains`.
 
-With that constraint, a verification or channel-binding failure stops the
-request before the provider receives the prompt. A successful response carries
-`x-receipt-id`, which resolves to a signed receipt containing hashes rather
-than the prompt or response body.
+With any of these, a failed verification or channel binding stops the request
+before the provider receives the prompt. Without them, the request may
+continue and the receipt records the failure.
 
-For a stricter policy, verify the current attested sessions first and pass the
-accepted IDs in `provider.aci_session_ids`. See
-[session pinning](docs/attested-confidential-inference.md#pin-an-upstream-session).
-
-> [!WARNING]
-> Private inference is opt-in. Merely configuring a TEE provider does not make
-> every request fail closed. Require `provider.aci_verified`, pass a non-empty
-> `provider.aci_session_ids` list, or use a hostname configured in
-> `middleware.tee_only_domains`.
+A successful response carries `x-receipt-id`. It resolves to a signed receipt
+that holds hashes of the request and response, not their content.
 
 ## Choose a client
 
 | You want to | Use |
 | --- | --- |
-| Make an API request over a verified, SPKI-pinned channel | [`pap curl`](apps/desktop/docs/cli.md#aci-commands) |
+| Make one API request over a verified, pinned channel | [`pap curl`](apps/desktop/docs/cli.md#aci-commands) |
 | Verify one chat response and its receipt end to end | [`pap send`](docs/quickstart.md#5-verify-one-inference-end-to-end) |
 | Give any local OpenAI-compatible app a verified endpoint | [`pap serve`](docs/quickstart.md#4-use-it-as-a-local-endpoint) |
 | Manage profiles and coding agents with a desktop app | [Private AI Proxy](apps/desktop/README.md) |
@@ -177,60 +151,29 @@ accepted IDs in `provider.aci_session_ids`. See
 | Add catalog, lifecycle, receipts, and inspection to a host adapter | [`@phala/aci-provider`](clients/provider/README.md) |
 | Use private inference from Pi or OpenCode | [Coding-agent integrations](clients/coding-agents.md) |
 
-All supported inference transports verify before sending model request bytes.
-Browser JavaScript can verify artifacts but cannot enforce a certificate SPKI
-pin, so use a Node or Bun transport, the CLI, or a local verifying proxy when
-the channel itself must be pinned.
+Browser JavaScript can verify artifacts but cannot pin a TLS key. Use the CLI,
+a Node or Bun transport, or a local verifying proxy when the channel must be
+pinned.
 
 ## Run your own gateway
 
-Self-hosting is the operator path. It requires a dstack SDK endpoint, gateway
-state, at least one upstream, and a deployment policy for authentication,
-networking, measurements, and provider credentials.
+Self-hosting needs a dstack SDK endpoint, gateway state, at least one upstream,
+and your own policy for authentication, networking, measurements, and provider
+credentials.
 
-- [Local development](docs/getting-started.md) starts the gateway against a
+- [Local development](docs/getting-started.md) runs the gateway against a
   forwarded dstack socket.
 - [Configuration reference](docs/configuration-reference.md) defines every
   gateway and upstream field.
 - [Deployment guide](deploy/README.md) deploys the gateway with dstack
   git-launcher.
-- [Live test suite](docs/live-e2e-test-suite.md) exercises local and provider
-  paths.
+- [Testing guide](docs/live-e2e-test-suite.md) covers local and live-provider
+  tests.
 
-The gateway supports two routing modes. Direct mode maps a public model ID to
-a configured upstream. Middleware mode asks an external control plane for
-authorization, pricing, and an ordered route list. Inference handling remains
-inside the Rust gateway process in both modes.
-
-## What you still need to trust
-
-ACI makes the evidence inspectable. It does not choose your policy for you.
-Before treating a deployment as private, decide which hardware roots,
-measurements, workload releases, KMS roots, provider adapters, and claim
-sources you accept.
-
-Current boundaries include:
-
-- The reference CLI verifies the DCAP quote and RTMR3 compose measurement but
-  does not reconstruct all dstack boot measurements or complete the
-  private-key-custody check.
-- A reported repository, commit, image, or model name is not proof by itself.
-  Accept it only when measured evidence or another trusted provenance system
-  corroborates it.
-- Provider verifiers prove different facts. Most do not prove the exact model
-  weights that served a request.
-- Requests without an ACI constraint may continue after verification fails and
-  record that failure in the receipt.
-- Receipts are held in memory for one hour by the reference implementation and
-  disappear on restart. Session records are content-addressed JSONL, not an
-  externally witnessed transparency log.
-- A local process connected to a forwarded development dstack socket inherits
-  the remote CVM's identity. It is not equivalent to a reviewed production
-  deployment.
-
-Read the [verification and security guide](docs/attested-confidential-inference.md)
-for the complete trust boundary, proof layers, and non-goals. Provider-specific
-claims and limitations are in the [provider index](docs/providers/README.md).
+The gateway has two routing modes. Direct mode maps a public model ID to a
+configured upstream. Middleware mode asks an external control plane for
+authorization, pricing, and an ordered route list. Inference handling stays
+inside the gateway process in both modes.
 
 ## API coverage
 
@@ -267,12 +210,15 @@ task:
 
 | Path | Contents |
 | --- | --- |
+| `crates/aci-protocol/` | Shared ACI wire types and deterministic encoding rules |
 | `src/aci/` | ACI types, receipts, E2EE, transports, and verifiers |
-| `apps/desktop/cli/` | Unified `pap` CLI, including ACI verification, curl, send, and local proxy |
+| `src/http/app/` | HTTP routes, handlers, and error envelopes |
+| `apps/desktop/cli/` | `pap` CLI: ACI verification, curl, send, and local proxy |
 | `src/aggregator/` | routing, receipt, session, and metrics services |
 | `src/middleware/` | control-plane client, transforms, failover, and pricing |
 | `clients/` | TypeScript verifier, provider kernel, Pi, and OpenCode adapters |
 | `deploy/` | dstack git-launcher deployment example |
+| `examples/control-plane/` | Reference control-plane server |
 | `docs/` | guides, references, security notes, and review records |
 | `scripts/` | provider verifier bridge and smoke suites |
 | `spec/` | ACI specification and test vectors |

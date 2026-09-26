@@ -29,17 +29,21 @@ custom-fetch hook, a provider-plugin boundary, or a local proxy such as
 Pinned Rust and TypeScript inference transports share these checks:
 
 1. Fetch an attestation report with a fresh nonce.
-2. Verify the TDX quote and the nonce-bound workload keyset.
+2. Verify the TDX quote and the nonce-bound workload keyset. The TypeScript
+   verifier reports the TCB status without enforcing it.
 3. Verify that the published compose is measured into RTMR3.
 4. Reject an expired identity and any configured release-policy mismatch.
-5. Send inference bytes only over TLS whose observed SPKI appears in the
-   attested keyset.
+5. Send inference bytes only over TLS whose observed SPKI is an attested TLS
+   key for the host. The Rust CLI accepts only the entry the report declares in
+   `downstream_tls_binding` when the keyset scopes keys to domains. The
+   TypeScript runtime accepts any attested key for the host.
 6. Fail closed when a required check fails.
 
 Serving and response policy then depends on the client. `pap send`, `pap serve`,
-and the TypeScript runtime require verified serving by default. `pap curl`
-passes the caller's request body unchanged, so include `provider.aci_verified`
-or session IDs when that request must fail closed at the provider hop. Clients
+and the TypeScript runtime require verified serving by default. The TypeScript
+runtime applies this to JSON POST requests. `pap curl` passes the caller's
+request body unchanged, so include `provider.aci_verified` or session IDs when
+the request must fail closed at the provider hop. Clients
 that promise response verification capture exact wire digests and verify signed
 receipts and cited sessions; `pap curl` does not verify a response receipt.
 
@@ -51,23 +55,32 @@ runtime transport, the Rust CLI, or `pap serve` for a pinned channel.
 
 Hardware verification and release acceptance are separate decisions:
 
-- **Hardware-bound mode** proves that a genuine TDX workload owns the
-  attested keys and reports the measured compose.
+- **Hardware-bound mode** proves that a genuine TDX workload booted the
+  measured compose and serves the attested keys.
 - **Reviewed-release mode** also requires the measured compose hash to appear
-  in an operator-supplied allowlist.
+  in an accepted list: `--accept-compose` in Rust, `acceptedComposeHashes` in
+  TypeScript.
 
-`source_provenance.repo_url` and `repo_commit` are useful labels, but they are
-not bound into the quote. The RTMR3-bound compose hash is the value clients can
-pin. A branded production client should obtain accepted compose hashes through
-an authenticated release channel.
+The compose hash is the value to pin. The report's `source_provenance` is the
+gateway's own statement. Read the repository and commit from the measured
+compose instead.
 
-The current Rust CLI and TypeScript verifier honestly skip the complete
-private-key-custody policy. Review all skipped checks before sending sensitive
-data.
+The Pi and OpenCode packages, including the RedPill and Phala Cloud
+distributions, run in hardware-bound mode: they ship no accepted compose
+hashes. Users can supply them through the `trust.acceptedComposeHashes` option
+or the `REDPILL_ACCEPTED_COMPOSE_HASHES` or `PHALA_ACCEPTED_COMPOSE_HASHES`
+environment variable. Shipping
+reviewed hashes through an authenticated release channel is planned.
+
+Key custody is also established by review. The Rust CLI checks custody of the
+receipt-signing key when given `--accept-subject` and
+`--accept-dstack-kms-root-public-key`. The TypeScript verifier does not check
+custody. No client can check where the TLS private key lives: that follows
+from reviewing the compose that runs the TLS terminator.
 
 ## Coding-agent packages
 
-The client workspace publishes eight packages:
+Besides `@phala/aci-verifier`, the client workspace publishes these packages:
 
 | Host | Neutral package | RedPill | Phala Cloud |
 | --- | --- | --- | --- |

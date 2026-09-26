@@ -170,10 +170,11 @@ Supported provider values are:
 
 ## Bind public TLS identities
 
-TLS termination sits outside the gateway process but must remain inside the
-attested workload. The gateway can include the terminator's leaf-certificate
-SPKI in its attested workload keyset. Mount each leaf certificate and add it
-to the static config:
+The gateway serves plain HTTP. Run the TLS terminator as a service in the same
+compose, so it is part of the measured workload, and keep its private key
+inside the TEE. The gateway can include the terminator's leaf-certificate SPKI
+in its attested workload keyset. Mount each leaf certificate and add it to the
+static config:
 
 ```json
 {
@@ -190,11 +191,13 @@ to the static config:
 
 Preserve the original HTTP `Host` when proxying to port `8086`. The canonical `GET /v1/aci/attestation` handler selects the matching domain binding. When domain bindings are configured, an unknown or malformed host receives `404` instead of a report for another identity.
 
-The verifier must also compare that reported SPKI with the certificate served
-to the client. Merely listing a certificate file in the workload does not prove
-that the terminator uses it or that its private key stays inside the attested
-boundary. The current CLI checks the observed SPKI but reports the
-private-key-custody check as skipped.
+Clients compare that reported SPKI with the certificate they are served, and
+`pap` does this in its channel check. Listing a certificate in the keyset does
+not prove where its private key lives. No attestation check covers the TLS
+private key. Verifiers establish its custody by reviewing the compose: which
+terminator image runs, how it obtains or generates the key, and that the key
+never leaves the workload. The checked-in compose has no terminator, so add one
+before exposing an inference endpoint.
 
 ## Verify the deployment
 

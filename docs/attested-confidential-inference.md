@@ -18,11 +18,22 @@ must process it:
    confidential router and model runner when they are separate.
 
 The client verifies the gateway and its channel before sending the request.
-The gateway process serves HTTP, so its TLS terminator must run inside the
-accepted attested workload.
-The measured gateway code verifies the selected provider and enforces the
+The measured gateway code then verifies the selected provider and enforces the
 provider's attested channel binding before forwarding. A failed required check
 stops the request before that hop receives the prompt.
+
+Two parts of this claim come from reviewing the measured release, not from a
+check on the report:
+
+- **Which code runs.** The report proves which compose booted. Whether that
+  compose and the code it names are acceptable is your decision. You can pin
+  reviewed compose hashes, rely on the operator to review its releases, or
+  record the hash and review the release later.
+- **Where private keys live.** The gateway derives its receipt and E2EE keys
+  from dstack KMS inside the TEE, and `pap` can check the receipt key's KMS
+  chain. The TLS private key has no such chain. The gateway serves plain HTTP
+  behind a TLS terminator, and that key stays inside the TEE only if the
+  reviewed compose runs the terminator and keeps its key there.
 
 Under the TEE threat model, the gateway operator, model operator, and cloud host
 cannot inspect protected workload memory. The local application still sees the
@@ -46,12 +57,50 @@ the relying party checks independently.
 | Local client or agent | Plaintext prompt and response | API key and all local context |
 | Attested gateway workload | Plaintext after TLS or E2EE termination | Requested model, credential, routing constraints, and provider response |
 | Accepted provider workload or route | Plaintext needed for routing or inference | Gateway-side provider credential and request metadata |
-| Optional external control plane | No prompt or response body | Bearer-token hash, model, routing options, pricing, usage, and status metadata |
+| Optional external control plane | No prompt or response body | Bearer-token hash, model, routing options, request features including a prefix hash, usage, and status metadata |
 | Cloud host and workload operator | Not through the accepted TEE memory boundary | Network timing, addresses, sizes, and operational metadata |
 
-The gateway forwards the caller's routing object to the control plane as
-metadata. Do not put prompts or secrets there. See the exact
-[control-plane contract](control-plane-contract.md).
+### What leaves the request path
+
+The gateway does not log or report prompts, completions, or upstream error
+messages. Of an upstream response body, only its `usage` object is reported.
+This table lists everything that leaves the request path, so you can check it
+against the code:
+
+| Destination | Contents | Defined in |
+| --- | --- | --- |
+| Pre-request consult to the control plane | SHA-256 of the API key, the requested model, the caller's `provider` routing object, the TEE-only host flag, and, unless `middleware.send_request_features` is `false`, request features: a token estimate, input modalities, tool and response-format flags, reasoning intent, and `prefixHash` | `consult_pre` in `src/middleware/control.rs`, `src/middleware/request_features.rs` |
+| Usage report to the control plane, one per attempt | Request ID, endpoint, status, timings, streaming flag, attempt index, selected route, requested model, the upstream's `usage` object, the consult's routing and billing fields echoed back unchanged, `errorSource`, a failure class in `errorMessage`, and `prefixHash` | `PostReport` in `src/middleware/types.rs` |
+| Receipt | SHA-256 hashes of the request and response bodies, never the bodies | `src/aci/receipt.rs` |
+
+Two properties make this checkable:
+
+- `errorMessage` carries no message text. Its type is `ErrorClass`, an enum
+  with no string-bearing variant, so the value is one token from a closed list,
+  such as `upstream_timeout` or `stream_truncated`. An upstream error body is
+  read only to choose a class (`classify_upstream` in
+  `src/middleware/errors.rs`).
+- `tests/middleware_completion.rs` plants a marker in upstream error text on the
+  buffered, streaming, and in-band stream paths. It captures every log event at
+  `TRACE` and fails if the marker appears in any log line or usage report.
+
+The requested model name and the caller's `provider` object are forwarded as
+the caller sent them, so do not put secrets there. The `usage` object is the
+upstream's, forwarded as received.
+
+The gateway has no access log and no per-request outcome line. It logs its own
+errors, such as a failed control-plane call, an upstream timeout, or a response
+that fails partway (`stream_abort`, the one line that carries a request ID).
+Such a line can name the requested model or the request host. It never carries
+request or response content.
+
+`prefixHash` is derived from content: a digest of the conversation's first
+4 KiB, truncated to 32 hex characters, used for cache-affinity routing. It lets
+the control plane see when two requests share a prefix. With
+`middleware.prefix_hash_secret` set, it is an HMAC the control plane cannot
+test guesses against. Without the secret it is a plain SHA-256, which also lets
+the control plane confirm a prefix it already knows. See the
+[control-plane contract](control-plane-contract.md) for every field.
 
 Provider workloads can have their own internal routing, telemetry, or storage
 boundaries. Accept only the claims that the provider verifier actually proves.
@@ -59,16 +108,18 @@ The [provider verification index](providers/README.md) records those differences
 
 ## The shortest verified path
 
-Install the CLI as shown in the [quickstart](quickstart.md), then establish the
-gateway identity:
+Install the CLI as shown in the [quickstart](quickstart.md), then verify the
+gateway:
 
 ```bash
 pap verify https://tee.redpill.ai
 ```
 
 The command obtains a fresh nonce-bound report and prints each pass, failure,
-or skipped policy check. It exits successfully only when its implemented checks
-produce a verified verdict.
+or skipped check. It exits successfully only on a `VERIFIED` verdict. Without
+`--accept-compose`, a pass means genuine TEE hardware booted the compose whose
+hash the transcript prints. It does not mean you approved that release. See
+[Choose what you accept](quickstart.md#choose-what-you-accept).
 
 To send one chat request and verify its response receipt and cited session:
 
@@ -102,8 +153,10 @@ checks the ACI §9.1 chain:
 
 The last check matters. A valid quote beside an ordinary HTTPS connection does
 not protect the request if TLS terminates outside the accepted workload. The
-Node and Bun runtime clients and the Rust CLI pin the observed certificate
-SPKI to the attested keyset.
+Rust CLI and the Node and Bun runtime clients pin the connection to the TLS key
+the attested keyset lists for that host. The pin proves which key the
+connection used. That the key's private half stays in the TEE follows from the
+reviewed compose, as described in [The privacy claim](#the-privacy-claim).
 
 The browser verifier can check the quote, binding chain, measurement, receipts,
 and sessions. Browser APIs do not expose the peer certificate, so browser-only
@@ -123,8 +176,8 @@ For a request that requires verified serving, the attested gateway:
 
 Each candidate is checked independently. A verified event for one origin,
 model scope, or channel never authorizes another. A binding mismatch invalidates
-the cached result and triggers one fresh verification before the candidate
-fails. The complete state machine is in
+the cached result and triggers up to two fresh verifications before the
+candidate fails. The complete state machine is in
 [Upstream verification lifecycle](upstream-verification-lifecycle.md).
 
 Without an ACI constraint, a provider verification failure may be recorded as
@@ -271,12 +324,20 @@ policy should state at least:
 | Provider evidence | Which verifier versions, channels, claim sources, and model paths are accepted? |
 | Rotation and expiry | How are overlapping releases, keysets, and session changes handled? |
 
-The current `aci` CLI verifies the DCAP quote, nonce/keyset binding, expiry,
-RTMR3 compose measurement, and observed TLS SPKI. It reports private-key custody
-as a skipped check and does not reconstruct the complete dstack boot chain.
-`--require-production-os` appraises an RTMR3-bound OS image hash against a
-reviewed allowlist; it is not a substitute for independently reconstructing
-MRTD and RTMR0-2.
+The `pap` CLI verifies the DCAP quote, the nonce and keyset binding, expiry,
+the RTMR3 compose measurement, and the TLS key the report declares for the
+host. Policy flags narrow what it accepts:
+
+| Flag | Policy input it enforces |
+| --- | --- |
+| `--accept-compose <hash>` | Workload release |
+| `--accept-subject app-id:0x<hex>` with `--accept-dstack-kms-root-public-key <key>` | Key custody for the receipt-signing key |
+| `--require-production-os` | An RTMR3-bound OS image hash on a reviewed allowlist |
+
+Without a custody policy, the CLI reports custody as skipped. It does not
+reconstruct MRTD and RTMR0-2, so `--require-production-os` does not replace a
+dstack verifier run over the same quote, event log, and VM configuration. The
+TypeScript verifier does not check custody.
 
 Do not turn an unproven field into a stronger claim. A reported repository,
 commit, image, model ID, or TCB status remains a label until the applicable
