@@ -69,7 +69,7 @@ export function ProfilesDialog({
   return (
     <AppDialog {...control} title="Profiles" className="sm:max-w-xl" dismissible={!workingProfileId && !transferBusy} onClose={onClose}>
       <p className="text-sm">Choose the service used when protection starts.</p>
-      {!activeProfileAvailable && <Alert>
+      {!activeProfileAvailable && <Alert role="status">
         <TriangleAlert aria-hidden="true" />
         <AlertDescription>{activeProfile ? `${activeConnection} for “${activeProfile.name}” to start protection.` : "Add a profile to start protection."}</AlertDescription>
       </Alert>}

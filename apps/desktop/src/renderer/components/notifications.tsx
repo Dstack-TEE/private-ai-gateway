@@ -3,7 +3,7 @@ import { TriangleAlert } from "lucide-react";
 import type { DesktopApi, NotificationConfiguration, NotificationPreferences } from "../../shared/contracts";
 import { SettingsToggle } from "./settings";
 import { AppDialog, type DialogControl } from "./app-dialog";
-import { Alert, AlertDescription } from "./ui/alert";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "./ui/alert";
 import { ItemGroup } from "./ui/item";
 import { DialogFooter } from "./ui/dialog";
 import { Button } from "./ui/button";
@@ -60,12 +60,17 @@ function useNotificationSettings(api: DesktopApi) {
 function NotificationPermissionNotice({ data, busy, permissionAction }: Pick<ReturnType<typeof useNotificationSettings>, "data" | "busy" | "permissionAction">) {
   if (!data || !data.preferences.enabled || (data.permission === "granted" && data.alertsEnabled !== false)) return null;
   const supported = data.permission !== "unsupported";
+  const [title, description] = data.permission === "granted" ? ["Banner alerts are off", "Notifications are allowed, but banner alerts are disabled in system settings."]
+    : data.permission === "denied" ? ["Notifications are off", "Notifications are disabled in system settings."]
+    : data.permission === "notDetermined" ? ["Permission needed", "System permission is needed to show notifications."]
+    : ["Permission not confirmed", "System notification permission could not be confirmed. Check your desktop notification settings."];
   return <Alert>
     <TriangleAlert aria-hidden="true" />
-    <AlertDescription>{data.permission === "granted" ? "Notifications are allowed, but banner alerts are disabled in system settings." : data.permission === "denied" ? "Notifications are disabled in system settings." : data.permission === "notDetermined" ? "System permission is needed to show notifications." : "System notification permission could not be confirmed. Check your desktop notification settings."}</AlertDescription>
-    {supported && <div className="col-start-2 mt-2">
-      <Button variant="outline" size="sm" disabled={busy} onClick={permissionAction}>{data.permission === "notDetermined" ? "Allow Notifications" : "System Settings"}</Button>
-    </div>}
+    <AlertTitle>{title}</AlertTitle>
+    <AlertDescription>{description}</AlertDescription>
+    {supported && <AlertAction>
+      <Button variant="outline" size="xs" disabled={busy} onClick={permissionAction}>{data.permission === "notDetermined" ? "Allow Notifications" : "System Settings"}</Button>
+    </AlertAction>}
   </Alert>;
 }
 

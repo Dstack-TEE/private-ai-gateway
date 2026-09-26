@@ -71,9 +71,8 @@ export function OverviewPage(): React.JSX.Element {
                 {agents.authorizing && <LoaderCircle className="animate-spin" aria-hidden="true" />}Enable
               </Button>
             : <Link to="/agents" className={cn(buttonVariants({ variant: "outline", size: "sm" }))}>View All</Link>}>
-            <ItemGroup>
-              {agents.accessStatus === "authorized" && !agents.agents.some((agent) => agent.installed) ? <EmptyState text={agents.problem ? "Agent detection unavailable" : "No agents detected"} />
-                : previewAgents.map((agent) => (
+            {agents.accessStatus === "authorized" && !agents.agents.some((agent) => agent.installed) ? <EmptyState text={agents.problem ? "Agent detection unavailable" : "No agents detected"} />
+              : <ItemGroup>{previewAgents.map((agent) => (
                 <AgentRow
                   key={agent.id}
                   agent={agent}
@@ -81,8 +80,7 @@ export function OverviewPage(): React.JSX.Element {
                   detectionLabel={agentDetectionLabel}
                   disabled={shell.applying || agents.controlsLocked || Boolean(agentDetectionLabel)}
                 />
-              ))}
-            </ItemGroup>
+              ))}</ItemGroup>}
           </OverviewModule>
         </div>
         <OverviewModule

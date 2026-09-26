@@ -17,7 +17,7 @@ import { SettingsSection } from "../components/settings";
 import { SwitchControl } from "../components/controls";
 import type { AgentAccessStatus, AgentStatus } from "../../shared/contracts";
 import { EmptyState } from "../components/detail";
-import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { desktopApi } from "../lib/environment";
 import { useShell } from "../lib/shell";
 import { useAgentConnection } from "../hooks/use-agents";
@@ -90,11 +90,11 @@ function AgentDetectionNotice({ busy, onRetry }: { busy: boolean; onRetry(): voi
     <TriangleAlert aria-hidden="true" />
     <AlertTitle>Agent detection unavailable</AlertTitle>
     <AlertDescription>The background service could not use Home access.</AlertDescription>
-    <div className="col-start-2 mt-2">
-      <Button type="button" variant="outline" size="sm" disabled={busy} aria-busy={busy} onClick={onRetry}>
+    <AlertAction>
+      <Button type="button" variant="outline" size="xs" disabled={busy} aria-busy={busy} onClick={onRetry}>
         {busy ? <><LoaderCircle className="animate-spin" aria-hidden="true" />Retrying…</> : "Retry"}
       </Button>
-    </div>
+    </AlertAction>
   </Alert>;
 }
 
@@ -109,11 +109,11 @@ function AgentAccessNotice({ status, busy, onAuthorize }: {
     <FolderLock aria-hidden="true" />
     <AlertTitle>Home access required</AlertTitle>
     <AlertDescription>Allow it to detect installed agents and manage the connections you choose. Workspace files are not read.</AlertDescription>
-    <div className="col-start-2 mt-2">
-      <Button type="button" variant="outline" size="sm" disabled={!status || busy} aria-busy={busy} onClick={onAuthorize}>
+    <AlertAction>
+      <Button type="button" variant="outline" size="xs" disabled={!status || busy} aria-busy={busy} onClick={onAuthorize}>
         {busy ? <><LoaderCircle className="animate-spin" aria-hidden="true" />Waiting…</> : again ? "Re-enable" : "Enable"}
       </Button>
-    </div>
+    </AlertAction>
   </Alert>;
 }
 

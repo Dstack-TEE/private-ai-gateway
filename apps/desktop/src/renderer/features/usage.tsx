@@ -33,25 +33,31 @@ export function UsageRow({ activity, onOpen }: { activity: RequestActivity; onOp
   const outcome = outcomeOf(activity);
   const tokens = usageTokens(activity);
   const timestamp = new Date(activity.at * 1_000);
+  const actionId = useId();
+  // The visible text names the row; the hidden commas pause between its parts.
+  const pause = <span className="sr-only">, </span>;
   return (
-    <Item variant="muted" size="xs" render={<button type="button" aria-haspopup="dialog" onClick={onOpen} />}>
-      <ItemContent className="min-w-0">
-        <ItemTitle>{agentName(activity.agent)}<StateLabel tone={outcome.tone} text={outcome.label} /></ItemTitle>
-        <ItemDescription className="truncate"><code>{activity.model ?? activity.path}</code></ItemDescription>
-      </ItemContent>
-      <ItemContent className="items-end">
-        <ItemTitle>{tokens === undefined ? "—" : formatTokens(tokens)}</ItemTitle>
-        <ItemDescription>tokens</ItemDescription>
-      </ItemContent>
-      <ItemContent className="items-end @max-[480px]:hidden">
-        <ItemTitle>{activity.costUsd === undefined ? "—" : currency(activity.costUsd)}</ItemTitle>
-        <ItemDescription>cost</ItemDescription>
-      </ItemContent>
-      <ItemContent className="items-end">
-        <ItemTitle><time dateTime={timestamp.toISOString()}>{formatTimestamp(timestamp.getTime())}</time></ItemTitle>
-        <ItemDescription>{timestamp.toLocaleDateString(undefined, { month: "short", day: "numeric" })}</ItemDescription>
-      </ItemContent>
-    </Item>
+    <>
+      <Item variant="muted" size="xs" render={<button type="button" aria-haspopup="dialog" aria-describedby={actionId} onClick={onOpen} />}>
+        <ItemContent className="min-w-0">
+          <ItemTitle>{agentName(activity.agent)}{pause}<StateLabel tone={outcome.tone} text={outcome.label} />{pause}</ItemTitle>
+          <ItemDescription className="truncate"><code>{activity.model ?? activity.path}</code>{pause}</ItemDescription>
+        </ItemContent>
+        <ItemContent className="items-end">
+          <ItemTitle>{tokens === undefined ? "—" : formatTokens(tokens)}</ItemTitle>
+          <ItemDescription>tokens{pause}</ItemDescription>
+        </ItemContent>
+        <ItemContent className="items-end @max-[480px]:hidden">
+          <ItemTitle>{activity.costUsd === undefined ? "—" : currency(activity.costUsd)}</ItemTitle>
+          <ItemDescription>cost{pause}</ItemDescription>
+        </ItemContent>
+        <ItemContent className="items-end">
+          <ItemTitle><time dateTime={timestamp.toISOString()}>{formatTimestamp(timestamp.getTime())}</time></ItemTitle>
+          <ItemDescription>{timestamp.toLocaleDateString(undefined, { month: "short", day: "numeric" })}</ItemDescription>
+        </ItemContent>
+      </Item>
+      <span id={actionId} className="sr-only">View proof</span>
+    </>
   );
 }
 
