@@ -270,14 +270,20 @@ export function UsageProofDialog({ activity: listed, ...control }: { activity: R
 /**
  * A receipt document indented for reading. Parsing keeps every string and
  * safe integer exactly, so only whitespace changes; a document with any other
- * number (the verifier accepts any 64-bit integer) is shown as returned.
+ * number (the verifier accepts any 64-bit integer), or one that is not valid
+ * JSON, is shown as returned.
  */
 function readableReceipt(receipt: string): string {
   let exact = true;
-  const document: unknown = JSON.parse(receipt, (_key, value: unknown) => {
-    if (typeof value === "number" && !Number.isSafeInteger(value)) exact = false;
-    return value;
-  });
+  let document: unknown;
+  try {
+    document = JSON.parse(receipt, (_key, value: unknown) => {
+      if (typeof value === "number" && !Number.isSafeInteger(value)) exact = false;
+      return value;
+    });
+  } catch {
+    return receipt;
+  }
   return exact ? JSON.stringify(document, null, 2) : receipt;
 }
 
