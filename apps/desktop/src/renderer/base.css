@@ -27,6 +27,9 @@
   button, input, select { @apply [font:inherit] text-inherit; }
   button { @apply cursor-default; }
   button:disabled:not([data-slot]) { @apply opacity-40; }
-  :focus-visible:not([data-slot]) { @apply outline-none ring-3 ring-ring/50; }
+  :focus-visible:not([data-slot], [tabindex="-1"]) { @apply outline-none ring-3 ring-ring/50; }
+  /* Only script focuses a tabindex="-1" element, such as the page heading after
+     navigation, and it can't be operated, so it shows no focus indicator. */
+  [tabindex="-1"]:focus { @apply outline-none; }
   code { @apply font-mono text-xs; }
 }
