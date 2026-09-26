@@ -78,6 +78,12 @@ curl --fail http://<gateway-host>:8086/health
 
 Liveness only proves that the process is serving requests. It does not prove provider availability or successful attestation.
 
+### Redeploy after changing `configs:` content
+
+dstack starts the app with `docker compose up`, and Docker Compose recreates a container only when its service definition changes. The content of a `configs:` entry is not part of that definition. A redeploy that changes only `configs:` content, such as `COMMIT_SHA` in `gateway-pin`, the static gateway config, or the upstream seed, leaves the old container running with the old content. The attestation then shows the new compose while the gateway still runs the old commit.
+
+When you change `configs:` content, change the gateway's service definition in the same redeploy so Compose recreates the container, or remove the container before the new compose starts. Changes under `environment:`, `image:`, or `command:` are part of the service definition and always recreate the container.
+
 ## Ownership boundary
 
 The launcher is build-system agnostic. It parses rather than sources its
@@ -221,6 +227,14 @@ pre-`system-ready` `compose-hash` event replayed into RTMR3. The
 gateway's own statement and not evidence. A matching compose hash proves the
 manifest was measured, not that its images, source, compiler, or dependencies
 are acceptable. Approving those is the review step.
+
+A measured `configs:` pin is the commit the deployment intends to run. Because
+Compose does not recreate a container for a `configs:`-only change, the running
+container can predate the measured compose (see
+[Redeploy after changing `configs:` content](#redeploy-after-changing-configs-content)).
+A `source_provenance` commit that differs from the measured pin shows a stale
+container. A matching one does not rule it out, because the running gateway
+produces `source_provenance` itself.
 
 Use [Verify an attested inference](../docs/attested-confidential-inference.md) for the artifact flow. The legacy `/v1/attestation/report` endpoint is retained for compatibility; new deployment verification should use `/v1/aci/attestation`.
 

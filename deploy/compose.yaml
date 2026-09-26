@@ -10,6 +10,8 @@
 # upstream config so dstack's compose_hash covers the complete launch policy.
 # The commit must stay a literal: dstack measures this file before variable
 # substitution, so a commit supplied through a variable is not measured.
+# Compose does not recreate a container when only `configs:` content changes;
+# see "Redeploy after changing configs: content" in README.md.
 # The gateway copies the read-only upstream seed into its mutable state path only
 # when no mutable config exists yet; later admin updates replace the mutable file
 # without changing this attested compose.
