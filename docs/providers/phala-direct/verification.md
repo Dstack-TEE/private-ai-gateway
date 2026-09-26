@@ -42,8 +42,9 @@ with a fresh nonce (and the configured `bearer_token`), then:
    TEE guarantee does not hold. (Shared `tdx_debug_enabled`, applied to every TDX provider.)
 3. **Verify the TDX quote.** The dstack-verifier service verifies the quote, event log,
    and VM config (RTMR replay). `is_valid` must be true.
-4. **Verify the compose hash.** `SHA256(app_compose)` must equal the reported
-   `compose_hash`.
+4. **Verify the compose hash.** `SHA256(app_compose)` must equal the `compose-hash`
+   event that the dstack verifier replayed into RTMR3 (`details.app_info.compose_hash`).
+   The report's own `info.compose_hash` field is not used.
 5. **Verify the report_data binding.** Parse `report_data` from the *verified* quote
    bytes (`_tdx_report_data_hex`, TDX v4 offset `quote[48+520 : 48+584]`) and run
    `verify_report_data(report_data, signing_address, nonce, tls_cert_fingerprint)`:
@@ -74,6 +75,8 @@ Pinned hermetically by `tests/phala_direct_bridge.rs` (→ `scripts/soundness_ph
 - Swapped `tls_cert_fingerprint` (MITM attempt) → `report_data binding failed`.
 - Wrong nonce → `report_data binding failed`.
 - dstack quote invalid → rejected (the CPU-TEE gate).
+- `app_compose` that is not the RTMR3-measured compose (even with a matching
+  `info.compose_hash`), or no measured compose hash → rejected.
 
 GPU is **supplemental**, so a GPU evidence nonce mismatch or a failed NRAS result does
 **not** reject — the upstream still verifies, and the outcome is recorded as
