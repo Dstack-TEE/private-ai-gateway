@@ -54,13 +54,18 @@ The schema is:
           "routeId": "upstream-name:public-model",
           "format": "openai",
           "engine": "vllm",
-          "reasoningFormat": "reasoning_effort"
+          "reasoningFormat": "reasoning_effort",
+          "supportedEndpoints": ["/v1/responses"]
         }
       ]
     }
   }
 }
 ```
+
+The server returns `pricing` and `candidates` as written. See the
+[pre-consult response fields](../../docs/control-plane-contract.md#post-consultpre)
+for every pricing and candidate field the gateway reads.
 
 `format` must be `openai` or `anthropic`. Optional `engine` must be `sglang` or
 `vllm`. Optional `reasoningFormat` selects `reasoning_effort`, the nested
@@ -69,6 +74,10 @@ The schema is:
 DeepSeek's `thinking: {"type": ...}` switch and carries the effort level in
 `reasoning_effort`. When omitted, the gateway uses nested `reasoning` for
 managed routes and `reasoning_effort` for routes with an `engine`.
+
+Optional `supportedEndpoints` lists paths the upstream serves natively. Add
+`/v1/responses` when the upstream serves that path; otherwise the gateway sends
+the candidate a chat completion and converts the response.
 
 Declaring a reasoning format also lets the gateway interpret a caller's
 `chat_template_kwargs` thinking switch. A `false` switch is re-encoded in the
@@ -93,10 +102,11 @@ npm ci
 npm run typecheck
 npm run build
 
-CONTROL_CONFIG_PATH=./control.config.example.json \
-PRIVATE_AI_GATEWAY_CONTROL_PORT=8789 \
-node build/server.js
+CONTROL_CONFIG_PATH=./control.config.json node build/server.js --port=8789
 ```
+
+The server listens on port 8789 by default. `--port=<n>` takes precedence over
+`PRIVATE_AI_GATEWAY_CONTROL_PORT`.
 
 Point the gateway at the server:
 

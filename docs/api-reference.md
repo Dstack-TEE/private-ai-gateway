@@ -18,8 +18,9 @@ All responses, including errors, carry:
 | `X-ACI-Keyset-Digest` | digest of the active workload keyset |
 
 The router permits cross-origin browser requests. Inference handlers read JSON
-bodies under a 32 MiB limit. A larger body receives the surface's JSON `413`
-envelope and emits a `request_outcome` record with `phase=body_too_large`.
+bodies under a 32 MiB limit. A larger body receives `413` in the surface's JSON
+error envelope. The Anthropic envelope includes the request ID; the OpenAI
+envelope does not.
 
 ## Inference endpoints
 
@@ -28,7 +29,7 @@ envelope and emits a `request_outcome` record with `phase=body_too_large`.
 | `POST /v1/chat/completions` | OpenAI Chat Completions | Yes | Yes | Primary chat endpoint. |
 | `POST /v1/completions` | OpenAI legacy Completions | Yes | Yes | Encrypts `prompt` in E2EE mode. |
 | `POST /v1/embeddings` | OpenAI Embeddings | No | Yes | The gateway forces a client-supplied `stream: true` back to buffered mode. |
-| `POST /v1/responses` | OpenAI Responses create | Yes | No | E2EE headers return `400 e2ee_unsupported_endpoint`. |
+| `POST /v1/responses` | OpenAI Responses create | Yes | No | E2EE headers return `400 e2ee_unsupported_endpoint`. In middleware mode, a candidate that lists `/v1/responses` in `supportedEndpoints` receives the request unchanged; any other candidate receives a converted chat completion. See the [candidate fields](control-plane-contract.md#post-consultpre). |
 | `POST /v1/messages` | Anthropic Messages | Yes | No; E2EE headers return `400 e2ee_unsupported_endpoint` | Middleware can translate between Anthropic and OpenAI provider formats. |
 
 The normal provider-backed response path adds:
@@ -71,7 +72,8 @@ The request body may contain a gateway-owned provider constraint:
 `aci_verified` must be a boolean. `aci_session_ids` must be a non-empty array of
 bare 64-character lowercase hexadecimal IDs; duplicates are collapsed.
 Supplying session IDs implies `aci_verified: true`; combining session IDs with
-`aci_verified: false` returns `400`.
+`aci_verified: false` returns `400`. Any other `provider` field starting with
+`aci_` also returns `400`.
 
 The constraint causes the gateway to reject before forwarding when:
 
@@ -80,12 +82,25 @@ The constraint causes the gateway to reject before forwarding when:
 - the current session ID is not in the supplied allowlist, or
 - the backend cannot enforce the verified binding.
 
+A rejection carries `X-Receipt-Id` for a signed refusal receipt:
+
+| Status | `error.type` | Meaning |
+| --- | --- | --- |
+| `412` | `session_not_accepted` | None of the pinned `aci_session_ids` is current. Fetch the session list and pin again. |
+| `503` | `upstream_verification_failed` | No eligible route passed verification with an enforceable binding. |
+
+In middleware mode, a request on a hostname listed in
+`middleware.tee_only_domains` requires ACI verification even when it sends
+`aci_verified: false`. When that list is non-empty, a request with a missing or
+malformed `Host` is treated the same way. See
+[TEE-only hostnames](configuration-reference.md#tee-only-hostnames).
+
 Direct mode removes `aci_verified` and `aci_session_ids` before forwarding the
 provider block. Middleware mode sends the original provider block to the
 control plane and builds a provider-specific upstream body from the returned
 route candidate.
 
-`X-Upstream-Verification` is retired. Requests that send it receive `400` with
+`X-Upstream-Verification` is not supported. Requests that send it receive `400` with
 an instruction to use `provider.aci_verified`.
 
 ### Receipt ownership
@@ -117,14 +132,23 @@ client-supplied `tee` query parameter and relays `tee=true`.
 
 | Method and path | Authentication | Response |
 | --- | --- | --- |
-| `GET /v1/aci/attestation?nonce=<value>` | Public | Bare ACI attestation report. The URL-decoded nonce is bound into `report_data`; omission binds JSON `null`. |
+| `GET /v1/aci/attestation?nonce=<value>` | Public | Bare ACI attestation report. `nonce` must be exactly 64 lowercase hex characters; any other value returns `400`. The nonce is bound into `report_data`; omitting it binds JSON `null`. |
 | `GET /v1/aci/receipts/{id}` | Original bearer token for owned receipts | Bare signed receipt. `{id}` accepts `receipt_id` or an upstream chat ID. |
 | `GET /v1/aci/sessions/{session_id}` | Public | Full immutable attested-session record, including evidence data when recorded. |
 | `GET /v1/aci/sessions?upstream_name=<name>&model=<id>` | Public | Newest-first session list. The broad list omits evidence data and keeps its digest. |
 
 Use a fresh, unpredictable attestation nonce for each trust decision. Fetch the
 report through the same public hostname used for inference when downstream TLS
-bindings are configured.
+bindings are configured. On such a deployment, a `Host` that matches no
+configured domain receives `404` instead of a gateway report from both
+`/v1/aci/attestation` and `/v1/attestation/report`.
+
+A session's evidence object has two fields. `data` is a
+`data:<content-type>;base64,<bytes>` URI holding the exact bytes the verifier
+received. `digest` is `sha256:<hex>` over the decoded bytes, not over a parsed
+JSON value. When a verifier keeps several upstream responses, `data` is one
+`multipart/mixed` URI whose parts carry each response's content type, source
+URL, and body, and `digest` covers the whole decoded payload.
 
 ## Legacy compatibility endpoints
 
@@ -155,23 +179,40 @@ token returns `403`.
 ## Middleware failover behavior
 
 The control plane returns ordered route candidates. Middleware mode tries the
-next candidate after provider-specific authentication or credit failures
-(`401`, `402`, `403`), capacity signals (`429`), and selected upstream failures
-(`500`, `502`, `503`, `504`). Request errors such as `400`, `404`, and `422` are
-terminal because another candidate would receive the same invalid request.
+next candidate when the provider answers `401`, `402`, `403`, `404`, `429`,
+`500`, `502`, `503`, or `504`, or any `5xx` whose body carries the provider's
+out-of-capacity marker. A `404` means that provider does not serve the model,
+so another provider may. A `400`, a `422`, or a failed fetch of a
+caller-supplied image URL ends the request, because every candidate would
+receive the same input.
 
-After all candidates report capacity, a non-`basic` user tier can receive one
-delayed retry of the capacity-failed candidates. The retry waits about two
-seconds and is skipped after ten seconds of elapsed forwarding time. The
-receipt records the route that served the response. Per-attempt usage reports
-carry the full failover chain to the control plane.
+When no candidate succeeds and some answered with `429` or the capacity marker,
+the gateway waits 2000 ms plus up to 2000 ms of random jitter and retries those
+candidates once. It skips this retry after ten seconds of forwarding. The
+receipt records the route that served the response. Usage reports carry each
+attempt to the control plane.
 
 ## Error handling
 
-The gateway keeps OpenAI and Anthropic error envelopes separate. It passes
-actionable upstream client errors through the appropriate surface, maps most
-upstream authentication failures to gateway errors, and maps a recognized
-provider capacity-exhaustion response to `429`.
+Middleware errors use the envelope of the requesting surface: OpenAI on the
+OpenAI paths and Anthropic on `/v1/messages`.
+
+| Condition | Response |
+| --- | --- |
+| Control plane denies the request | The denial's `status` and `message`. Default status `403`. |
+| Control plane denies with `429` and a `rateLimit` block | `429` with `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`, and `Retry-After`. |
+| Pre-consult fails, times out, or returns a non-200 status or invalid JSON | `503 control plane unavailable`. |
+| Control plane allows but returns no candidates | `404 model_not_found`. |
+| Catalog request cannot reach the control plane | `502 control plane unavailable`. |
+
+The following errors use the OpenAI envelope on every path, including
+`/v1/messages`: E2EE header and decryption errors, `X-Upstream-Verification`,
+invalid JSON, invalid `provider.aci_*` fields, and errors the gateway generates
+in direct mode other than the `504` for an upstream timeout.
+
+The gateway passes actionable upstream client errors through in its own
+envelope, maps upstream authentication failures to gateway errors, and maps a
+recognized provider capacity-exhaustion response to `429`.
 
 Streaming failures that occur after response headers are sent are represented
 inside the stream where the protocol permits it. This includes failures after

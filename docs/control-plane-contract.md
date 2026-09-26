@@ -58,7 +58,9 @@ The request uses camelCase:
 ### Request features
 
 The gateway derives the optional `request` block without sending the prompt,
-messages, tool arguments, files, or media to the control plane:
+messages, tool arguments, files, or media to the control plane. For the full
+list of what the control plane receives, see
+[What leaves the request path](attested-confidential-inference.md#what-leaves-the-request-path).
 
 | Field | Contract |
 | --- | --- |
@@ -67,11 +69,11 @@ messages, tool arguments, files, or media to the control plane:
 | `inputModalities` | Deduplicated, stably ordered values from `text`, `image`, `file`, `audio`, and `video`. |
 | `reasoning` | Client intent: `enabled`, `disabled`, or `unspecified`. Response-visibility controls do not change this value. |
 | `responseFormat` | `text`, `json_object`, or `json_schema`. A missing response format becomes `text`. |
-| `prefixHash` | Optional 32-character lowercase hex cache-affinity key for the canonical first 4 KiB of a conversation. It is present only when that prefix fills the 4 KiB cap. The digest is HMAC-SHA256 when `middleware.prefix_hash_secret` is set and plain SHA-256 otherwise. It supports prefix matching; it does not prove prompt contents or request authenticity. |
+| `prefixHash` | Optional 32-character lowercase hex cache-affinity key for the canonical first 4 KiB of a conversation. It is present only when that prefix fills the 4 KiB cap. With `middleware.prefix_hash_secret` set, it is HMAC-SHA256 and reveals only whether two prefixes are equal. Without the secret, it is plain SHA-256, so the control plane can also confirm a prefix it already knows by hashing it. It does not prove prompt contents or request authenticity. |
 
-Treat these fields as routing hints. The gateway deliberately uses closed enums,
-counts, booleans, and an optional one-way digest so the external control plane
-does not receive inference content.
+Treat these fields as routing hints. They are counts, booleans, closed enums,
+and one digest. They carry no prompt text, but they do describe the request,
+and `prefixHash` links requests that share a prefix.
 
 An allow response:
 
@@ -102,18 +104,38 @@ An allow response:
 | Response field | Required | Contract |
 | --- | --- | --- |
 | `allow` | Yes | Boolean decision. |
-| `pricing` | No | Opaque pricing object interpreted by the current cost calculator. Use numeric strings or numbers for supported per-token fields. |
+| `pricing` | No | Per-token prices as numeric strings or numbers: `inputCostPerToken`, `outputCostPerToken`, `cacheReadCostPerToken`, and `cacheCreationCostPerToken`. A missing input or output price counts as zero; a missing cache price uses the input price. The object is copied to post-consult reports. |
 | `candidates` | Required for an allowed inference | Ordered route candidates. An empty or missing list produces a no-route error. |
 | `candidates[].routeId` | Yes | `<upstream name>:<public model ID>` matching the active gateway upstream config. |
 | `candidates[].format` | Yes | `openai` or `anthropic`. Selects request and response transformation. |
 | `candidates[].engine` | No | `sglang` or `vllm` for engine-specific shaping. Omit for managed APIs. |
 | `candidates[].reasoningFormat` | No | Upstream reasoning dialect: `reasoning_effort`, `reasoning`, `chat_template_thinking`, `chat_template_enable_thinking`, or `thinking_type`. `thinking_type` writes DeepSeek's `thinking.type` switch and uses `reasoning_effort` for the level. When omitted, managed routes use `reasoning` and self-hosted engines use `reasoning_effort`. |
-| `candidates[].reasoningPolicy` | No | Deployment policy interpreted by the gateway. It can contain `override`, `default`, and a token `threshold`; reasoning configs use `effort`, `maxTokens`, or `enabled` as defined by the current middleware types. |
+| `candidates[].reasoningPolicy` | No | Deployment reasoning policy applied by the gateway. See [Reasoning policy](#reasoning-policy). |
+| `candidates[].supportedEndpoints` | No | Paths the upstream serves natively. A `/v1/responses` request goes unchanged to a candidate that lists `/v1/responses`; any other candidate receives a chat completion, and the gateway converts the response back to the Responses shape. |
 | `userId`, `organizationId`, `workspaceId` | No for anonymous traffic; otherwise all three required | Positive integer tenant identity and resource scope, copied to post-consult reports. Partial groups, zero, and negative values make the consult response invalid. |
 | `virtualKeyId` | No | Opaque integer copied to post-consult reports. |
 | `spendMode` | No | `regular`, `subscription`, or `subscription_overflow`. |
-| `userTier` | No | Passed upstream as `x-user-tier`. The value `basic` disables the delayed capacity retry. |
+| `userTier` | No | Sent to every upstream attempt as the `x-user-tier` header. |
 | `rateLimit` | No | Used on a denied `429`; object fields are `limit` and Unix-seconds `resetAt`. |
+
+### Reasoning policy
+
+`reasoningPolicy` applies to chat completion bodies, including `/v1/responses`
+requests converted to chat:
+
+| Key | Contract |
+| --- | --- |
+| `override` | Reasoning config for structured output: a request with `response_format` and no `tools`. It replaces the caller's reasoning. |
+| `default` | Used in place of `override` when `override` is absent. With neither, the caller's reasoning stays. |
+| `threshold` | For a request with `tools`: when `max_completion_tokens` or `max_tokens` is at or below this value, reasoning is set to effort `none`. |
+| `omitMaxTokens` | When `true` on an `openai` candidate, the gateway removes `max_tokens` and `max_completion_tokens` from a request that asks for `json_object` or `json_schema` output and has no tools or functions. |
+
+A reasoning config has `effort` (`max`, `xhigh`, `high`, `medium`, `low`,
+`minimal`, or `none`), `maxTokens`, and `enabled`. An unknown key in
+`reasoningPolicy` or in a reasoning config makes the whole pre-consult response
+invalid, and the gateway denies the request with `503`.
+
+### Denials
 
 A denial response can return the client-facing status and message:
 
@@ -142,17 +164,17 @@ If `status` is absent, the gateway uses `403`. A denied `429` may include:
 The gateway turns that block into `Retry-After` and `X-RateLimit-*` response
 headers.
 
-Any non-200 response, timeout, transport error, or invalid JSON from
-`/consult/pre` becomes a `503 control plane unavailable` denial. The gateway
+Any non-200 response, timeout, transport error, or body from `/consult/pre`
+that does not parse under the rules above becomes a
+`503 control plane unavailable` denial. The gateway
 does not forward the inference request.
 
-The gateway reports a denial to `POST /consult/post` when the response contains
-a complete tenant identity, or when its status is `429` or `5xx`. An
-identity-free `400`, `401`,
-`402`, or `403` remains tracing-only so unauthenticated traffic cannot flood the
-usage pipeline. An allowed response with no usable candidates becomes a
-reported `404`. These reports have `selectedRouteId: null` and
-`errorSource: "control"`.
+The gateway reports a denial to `POST /consult/post` when the response carries
+a tenant identity or its status is `429` or `5xx`. Any other denial without an
+identity produces no report and no log line, so unauthenticated traffic cannot
+flood the usage pipeline. An allowed response with no usable candidates becomes
+a reported `404 model_not_found`. These reports have `selectedRouteId: null`
+and `errorSource: "control"`.
 
 ## `POST /consult/post`
 
@@ -206,7 +228,7 @@ The stable fields are:
 | `attemptIndex` | Optional | Zero-based attempt order. Use this with `requestId` when ingesting retries. |
 | `spendMode`, `userId`, `organizationId`, `workspaceId`, `virtualKeyId` | Optional | Values copied from the pre-consult; the three tenant identity fields travel together. |
 | `errorSource` | Optional | `control`, `upstream`, or `gateway`. |
-| `errorMessage` | Optional | A fixed gateway error-class token for a failed record, never provider free text. |
+| `errorMessage` | Optional | One failure class from the closed list below, never provider or request text. |
 
 A request can produce multiple reports. Count attempts only when
 `selectedRouteId` is non-null. A record with a null route and a non-empty
@@ -225,9 +247,23 @@ Streaming and cancellation do not erase accounting:
   a keepalive before the upstream answered. If forwarding later fails, the
   in-band error and post-consult record carry the real failure status.
 
-`errorMessage` is a closed vocabulary, not provider text or a request excerpt.
-It still reveals operational failure classes; apply appropriate access and
-retention controls to the full usage report.
+`errorMessage` takes one of these values:
+
+| Origin | `errorMessage` values |
+| --- | --- |
+| Caller | `client_disconnected` |
+| Control plane | `control_denied`, `control_unavailable`, `model_not_found` |
+| Upstream response | `upstream_http_error`, `upstream_quota_exhausted`, `upstream_capacity`, `upstream_image_fetch_failed`, `upstream_malformed_response`, `upstream_response_failed` |
+| Upstream connection | `upstream_timeout`, `upstream_transport`, `upstream_channel_binding_mismatch`, `upstream_verification_failed` |
+| Stream | `stream_inband_error`, `stream_truncated`, `stream_line_overflow` |
+| Gateway | `request_shaping_failed`, `no_eligible_attested_route`, `e2ee_failed`, `receipt_failed`, `downstream_finalizer_failed`, `internal_error` |
+
+These values still reveal operational failure classes; apply access and
+retention controls to usage reports.
+
+Requests the gateway rejects before the pre-consult produce no report. These
+include malformed JSON, E2EE setup failures, an oversized body, and an invalid
+`provider.aci_*` field.
 
 The gateway may retry a broken pooled connection once. A control plane must
 ingest post-consult reports idempotently. At minimum, deduplicate by the stable

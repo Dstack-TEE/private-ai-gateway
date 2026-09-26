@@ -22,29 +22,7 @@ A running gateway also needs a dstack SDK endpoint. See [Local development](docs
 
 ## Required checks
 
-Run the main CI checks before opening a change:
-
-```sh
-cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test --all-targets
-python3 -m compileall scripts
-```
-
-When anything under `clients/` changes, or when a shared ACI construction
-changes, run the unified client workspace checks from the repository root:
-
-```sh
-npm --prefix clients ci
-npm --prefix clients run build
-npm --prefix clients run check
-npm --prefix clients test
-npm --prefix clients run test:bun
-npm --prefix clients run lint
-npm --prefix clients run format:check
-npm --prefix clients run lint:packages
-bash clients/package-smoke.sh
-```
+Before opening a change, run the Rust and Python checks listed in [Run the repository checks](docs/getting-started.md#run-the-repository-checks), plus the TypeScript client checks when you change `clients/` or a shared ACI construction.
 
 Live-provider tests consume credentials and quota, so they are not part of credential-free CI. Use [Run the live end-to-end suite](docs/live-e2e-test-suite.md) for provider adapter, attestation, and forwarding changes.
 

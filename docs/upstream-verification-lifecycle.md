@@ -10,7 +10,10 @@ A request is fail closed only when it requires ACI verification:
 
 - `provider.aci_verified` is `true`;
 - `provider.aci_session_ids` is a non-empty allowlist; or
-- middleware marks the selected route as TEE-only.
+- in middleware mode, the request `Host` matches `middleware.tee_only_domains`.
+  When that list is non-empty, a missing or malformed `Host` also counts as a
+  match. On these hosts a client `aci_verified: false` is ignored, and a model
+  with no attested deployment fails closed with `503`.
 
 For a required request, the gateway does not forward the prompt unless a verifier returns `verified` and the current request can be sent through an enforced channel binding. An unconstrained request can still run the configured verifier and record its result, but a failed or missing result does not by itself block forwarding.
 
@@ -72,12 +75,13 @@ TLS SPKI bindings are enforced by the pinned TLS client. Chutes E2EE public-key 
 
 ## Binding mismatch and reverification
 
-A channel-binding mismatch can indicate normal rotation or an attack. The gateway handles it as a state transition that must be reverified:
+A channel-binding mismatch can indicate normal rotation or an attack. The gateway treats it as a state change that must be verified again. Invalidation works the same way for every provider verifier, including `aci-service`.
 
 1. Invalidate the cached verifier event owned by the gateway.
-2. Run one fresh verification.
-3. Retry only if the new result verifies and its binding can be enforced.
-4. Treat another mismatch as terminal for that candidate and leave the stale cache entry invalidated.
+2. Run a fresh verification that bypasses the cache.
+3. Retry the forward only if the new result verifies and its binding can be enforced.
+4. Repeat for a later mismatch, up to two fresh verifications per candidate.
+5. Treat a mismatch after the second fresh verification as terminal for that candidate, and leave the cache entry invalidated.
 
 Caller-supplied verification events are not placed in the gateway cache, so the gateway does not invalidate or silently replace them.
 
@@ -91,7 +95,7 @@ Chutes has a second lifecycle because its router discovers a changing set of att
 - positive integer: use that interval;
 - `0`: disable proactive session refresh.
 
-The refresh job obtains the verified provider event, refreshes model session nonces through the Chutes backend, and records a result per model. If the backend finds a channel-binding mismatch, the manager forces verifier refresh before considering the session refreshed.
+The refresh job obtains the verified provider event, refreshes model session nonces through the Chutes backend, and logs one `upstream provider session refresh finished` line per model. If the backend finds a channel-binding mismatch, the manager forces a verifier refresh before it counts the session as refreshed. That result is `refreshed_via_verifier`, and it always reports `refreshed_nonces: 0`, even when the verifier recorded fresh nonces.
 
 This provider-session refresh is separate from the general verifier cache refresh. One maintains instance discovery and nonces; the other renews the attestation result used to authorize those instances.
 
@@ -124,11 +128,32 @@ and account, not a current latency or throughput guarantee. They explain why
 prewarm and background session refresh keep evidence discovery off the normal
 request path.
 
+To measure warmed Chutes throughput across several nonce lifetimes, run the
+rate probe against a provider matrix that contains one Chutes entry:
+
+```bash
+python3 scripts/live_e2e/chutes_rate_probe.py \
+  --providers-file /tmp/chutes-provider.json \
+  --provider chutes \
+  --stage 120@0.5 \
+  --stage 180@0.333 \
+  --burst-concurrency 20 \
+  --warmup 1 \
+  --keep-going-after-429 \
+  --port 0
+```
+
+Each `--stage` is `COUNT@INTERVAL_SECONDS`, and `--port 0` picks a free port.
+Besides provider `429` responses, watch whether session refresh keeps the nonce
+pool filled after the first minute and whether any request falls back to slow
+evidence discovery. For the `--providers-file` layout, see
+[Provider matrix format](live-e2e-test-suite.md#provider-matrix-format).
+
 ## Failover interaction
 
 Middleware mode can evaluate several candidate routes. Verification failure on a route required to be attested makes that candidate ineligible. The router can try another eligible candidate without forwarding the prompt to the failed one.
 
-After a request reaches an upstream, the gateway can fail over on configured transient and account-specific statuses: `401`, `402`, `403`, `429`, `500`, `502`, `503`, and `504`. Recognized capacity bodies are also failover signals. Non-basic user tiers can receive one delayed capacity retry within the initial ten-second window.
+After a request reaches an upstream, the gateway fails over on the provider statuses and capacity signals listed in [Middleware failover behavior](api-reference.md#middleware-failover-behavior), and can retry capacity-failed candidates once after a short delay.
 
 Each candidate goes through its own verification and binding checks. A verified event for one upstream never authorizes another.
 

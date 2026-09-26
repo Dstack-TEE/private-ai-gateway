@@ -37,8 +37,8 @@ Minimal container configuration:
 | `admin_token` | string | unset | Bearer token for the upstream admin API. Admin routes return `404` when unset. |
 | `keyset_not_after_seconds` | positive integer | `2592000` | Lifetime of a newly resolved workload keyset. Zero is rejected. |
 | `subject` | string | unset | Optional policy-interpreted workload-keyset subject. The gateway publishes it but generic verifiers do not trust it without an acceptance policy. |
-| `direct_serving` | boolean | `false` | Report `service_capabilities.serving: "direct"` for a workload that performs inference itself and has no upstream hop. |
-| `enable_e2ee` | boolean | `true` | Advertise and terminate the [E2EE v2 compatibility extension](../spec/e2ee-v2.md). When false, the report advertises no supported E2EE versions and v2 requests fail. |
+| `direct_serving` | boolean | `false` | Report `service_capabilities.serving: "direct"` for a workload that performs inference itself and has no upstream hop. Setting it together with `middleware` is a startup error. |
+| `enable_e2ee` | boolean | `true` | Advertise and terminate the [E2EE v2 compatibility extension](../spec/e2ee-v2.md). When false, the report carries `supported_e2ee_versions: []` and v2 requests fail with `400 e2ee_invalid_version`. The legacy `X-Signing-Algo` E2EE path is not affected. |
 | `tls` | object | empty | Downstream certificate bindings published in the attested keyset. See [Downstream TLS binding](#downstream-tls-binding). |
 | `dstack_endpoint` | string | dstack SDK default | dstack SDK endpoint. `unix:/path` and `unix:///path` are normalized to `/path`; HTTP endpoints pass through to the SDK. |
 | `middleware` | object | unset | Enables the in-process middleware and external control-plane client. See [Middleware fields](#middleware-fields). |
@@ -134,8 +134,13 @@ hosts return `404` instead of an unbound report.
 TLS issuance, renewal, SNI routing, and private-key custody remain deployment
 responsibilities. The gateway serves HTTP, so the TLS terminator must run inside
 the accepted attested boundary. A verifier must confirm that the certificate
-served to the client matches the SPKI selected in the report; the current CLI
-does not complete a private-key-custody check.
+served to the client matches the SPKI selected in the report.
+
+A matching SPKI does not show who holds the TLS private key. Establish TLS key
+custody by reviewing the measured compose that runs the TLS terminator. `pap`
+checks custody of the receipt signing key, not the TLS key, when you pass
+`--accept-subject app-id:0x<hex>` together with
+`--accept-dstack-kms-root-public-key`.
 
 ## Middleware fields
 
@@ -159,16 +164,28 @@ control plane over HTTP or HTTPS and then calls the ACI service in-process.
 | `middleware.control_timeout_ms` | integer | `60000` | Timeout for pre-consult and catalog requests. A failed pre-consult denies the inference request. |
 | `middleware.control_post_timeout_ms` | integer | `10000` | Timeout for post-request usage reports. Failure does not change a served response. |
 | `middleware.sse_keepalive_ms` | integer | `5000` | Interval for pre-header processing comments and post-header idle heartbeats. Zero disables both. See [Streaming keepalives and early commit](#streaming-keepalives-and-early-commit). |
-| `middleware.prefix_hash_secret` | string | unset | HMAC key for the consult prefix hash. After trimming, it must contain at least 32 bytes. Every replica must share the same value. When unset, the gateway uses plain SHA-256, which leaves prefix equality linkable. |
-| `middleware.send_request_features` | boolean | `true` | Send content-derived features in pre-consult: a low-biased token estimate, closed-enum modalities, tool and response-format flags, reasoning intent, and an optional prefix hash. No prompt text is sent. Set false to restore the featureless consult body. |
-| `middleware.tee_only_domains` | string array | `[]` | Hostnames whose catalog queries force `tee=true` and whose inference requests require an ACI-verified route. Matching uses the normalized HTTP `Host`. |
+| `middleware.prefix_hash_secret` | string | unset | HMAC key for the consult prefix hash. After trimming, it must contain at least 32 bytes. Every replica must share the same value. When unset, the gateway uses plain SHA-256, so the control plane can link equal prefixes and confirm a prefix it already knows. |
+| `middleware.send_request_features` | boolean | `true` | Send content-derived features in pre-consult: a low-biased token estimate, closed-enum modalities, tool and response-format flags, reasoning intent, and an optional prefix hash. No prompt text is sent. Set false to omit the `request` block. |
+| `middleware.tee_only_domains` | string array | `[]` | Hostnames that serve TEE models only, matched against the normalized HTTP `Host`. See [TEE-only hostnames](#tee-only-hostnames). |
 
 The control plane must implement the
-[control-plane contract](control-plane-contract.md). In particular, it must
-deny non-TEE models when a pre-consult contains `tee: true` if the deployment
-expects a `404` at the catalog and authorization layer. The gateway still
-enforces successful upstream verification before serving any request on a
-TEE-only hostname.
+[control-plane contract](control-plane-contract.md).
+
+### TEE-only hostnames
+
+On a hostname listed in `middleware.tee_only_domains`:
+
+- the catalog relay replaces any client `tee` query parameter with `tee=true`;
+- the pre-consult carries `tee: true`, and the control plane should deny a
+  non-TEE model, normally with `404`;
+- inference requires ACI verification as if the client sent
+  `provider.aci_verified: true`, and a client `aci_verified: false` is ignored;
+- a listed model with no attested deployment fails closed with
+  `503 upstream_verification_failed`.
+
+When the list is non-empty, an inference request whose `Host` is missing or
+malformed is treated as TEE-only. The component in front of the gateway must
+forward the original `Host`.
 
 ### Streaming keepalives and early commit
 
@@ -180,7 +197,9 @@ heartbeats.
 
 Only unconstrained, non-E2EE requests are eligible. The gateway does not commit
 early when the request carries `provider.aci_verified`, pinned session IDs, or
-E2EE headers, or after a candidate has already failed during the same request.
+E2EE headers. It also waits while the candidate in flight has already failed
+once in this request, as in the delayed capacity retry, because that attempt
+usually ends in an HTTP status such as `429` that the client should receive.
 
 An early-committed response cannot carry `X-Receipt-Id` because the upstream
 has not yet been selected. After a successful stream, the receipt is available
@@ -189,33 +208,12 @@ the surface's in-band error event and drafts no receipt. The control-plane usage
 report still records the real failure status rather than the HTTP `200` already
 sent to the client.
 
-### Request outcome logs
+### Failure accounting
 
-Middleware mode emits structured `request_outcome` tracing records for terminal
-failures and anomalous finish reasons. The default info-level record contains
-statuses, route, phase, timing, and sanitized identifiers. Raw upstream detail
-is blank unless `RUST_LOG` enables `request_outcome=debug`; that detail can
-contain provider error text and fragments of client input.
-
-Malformed JSON and E2EE setup failures occur before the middleware completion
-path and do not emit a `request_outcome` record. An oversized inference body is
-handled explicitly: it emits `phase=body_too_large` with the request ID and
-returns the surface's JSON `413` envelope. The Anthropic envelope includes the
-request ID; the OpenAI envelope does not.
-
-The control-plane usage pipeline carries the fuller accounting record. A client
-disconnect before the upstream's first byte is reported as `499` against the
-route in flight, without TTFT. A gateway-enforced connect or read deadline is
-reported as `504`. When a streaming response was committed early as HTTP `200`,
-a later in-band failure is still reported with its real status. Consult denials
-carrying a complete tenant identity, every `429` or `5xx` consult denial, and
-the no-route `404`
-are reported with `errorSource: "control"` and no route. Unauthenticated `401`,
-`402`, and `403` denials remain trace-only.
-
-A request emits at most one primary outcome. A late receipt or E2EE
-finalization error adds one `phase=finalize_error` record with the same
-`request_id`; aggregators should let that record supersede the primary outcome.
+Middleware mode accounts for failed requests in the control-plane usage
+pipeline, with one report per attempt. See
+[`POST /consult/post`](control-plane-contract.md#post-consultpost) for the
+fields, the reported denials, and the `errorMessage` values.
 
 ## Upstream configuration
 
@@ -271,7 +269,7 @@ request time.
 | `name` | string | required | Unique non-empty upstream name. |
 | `provider` | enum | `openai-compatible` | One provider value from the table above. |
 | `base_url` | string | required | Non-empty provider origin. `secret-ai` requires a root HTTPS URL without user info, path, query, or fragment. |
-| `path` | string | unset | Upstream path for chat-shaped surfaces. Leading `/` is added when missing. `anthropic` requires a non-empty path, normally `/v1/messages`. Other surfaces retain their public path. |
+| `path` | string | unset | Upstream path for chat requests. Leading `/` is added when missing. See [Chat request path](#chat-request-path). |
 | `models` | object | required | Non-empty map of public model ID to non-empty provider model ID. |
 | `bearer_token` | string | unset | Provider credential. The gateway never returns its value from the admin API. For `anthropic`, this becomes `x-api-key`. |
 | `basic_auth` | boolean | `false` | Send `Authorization: Basic <bearer_token>`. Allowed only for `openai-compatible` and `chutes`, and requires a token. |
@@ -296,6 +294,14 @@ empty acceptance policy. The upstream keyset does not need to self-assert the
 accepted subject; the verifier derives the `app-id:0x<hex>` subject from
 measured evidence.
 
+### Chat request path
+
+Chat requests, including Anthropic `/v1/messages` requests converted to the
+upstream's chat format, go to the upstream's `path`. Without `path` they go to
+`/v1/chat/completions`. A native `anthropic` upstream requires `path`, normally
+`/v1/messages`. `/v1/completions`, `/v1/embeddings`, and `/v1/responses` keep
+their public path.
+
 Chutes-specific fields on another provider are rejected. For private Chutes
 origins that use Basic authentication, follow the
 [private Chutes configuration](providers/chutes/configuration.md).
@@ -317,8 +323,9 @@ curl --fail --silent --show-error \
   http://127.0.0.1:8086/v1/admin/upstreams
 ```
 
-The response includes `config_path`, a JCS SHA-256 `config_digest`, and redacted
-entries. It replaces `bearer_token` with `bearer_token_configured: true|false`.
+The response includes `config_path`, a `config_digest`, and redacted entries.
+`config_digest` is the SHA-256 of the gateway's JSON serialization of the
+active config. It is a local version stamp, not a canonical JSON digest. It replaces `bearer_token` with `bearer_token_configured: true|false`.
 
 Replace the config atomically:
 
