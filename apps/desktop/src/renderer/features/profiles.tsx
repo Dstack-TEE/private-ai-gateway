@@ -15,11 +15,11 @@ import { Alert, AlertDescription } from "../components/ui/alert";
 import { Input } from "../components/ui/input";
 import { IconButton } from "../components/controls";
 import { AppDialog, useDialog, type DialogControl } from "../components/app-dialog";
-import { useConfirm } from "../components/confirm";
+import { useConfirm, type ConfirmationOptions } from "../components/confirm";
 import { DialogFooter } from "../components/ui/dialog";
 import { FormField } from "../components/settings";
 import { ChoiceSelect } from "../components/choice-select";
-import { DEFAULT_SERVICE_PROVIDER, SERVICE_PROVIDERS, type ConfidentialProfile, type ConfidentialProfileInput, type AppState, type ServiceProvider } from "../../shared/contracts";
+import { DEFAULT_SERVICE_PROVIDER, SERVICE_PROVIDERS, type ConfidentialProfile, type ConfidentialProfileInput, type AppState, type LoginPresentation, type ServiceProvider } from "../../shared/contracts";
 import { desktopApi, distributionCapabilities } from "../lib/environment";
 import { profileIsAvailable } from "../lib/protection";
 import { ServiceLogo } from "../components/brand";
@@ -168,14 +168,6 @@ export function ProfileEditorDialog({
   const { session: login, auth: authorized } = account;
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<number>();
 
-  const signIn = async () => {
-    setSelectedWorkspaceId(undefined);
-    setError(undefined);
-    try {
-      if (running && !await confirm({ title: "Connect and restart protection?", message: "Connecting this account restarts protection. In-flight requests may be interrupted.", confirmLabel: "Continue" })) return;
-      await account.start(draft);
-    } catch (error) { reportError(error); }
-  };
   const provider = SERVICE_PROVIDERS[draft.provider];
   const keyLabel = provider.keyLabel;
   const draftUrl = draft.remoteUrl.trim().replace(/\/$/, "");
@@ -195,9 +187,7 @@ export function ProfileEditorDialog({
   const workspaceError = detailsError ? errorMessage(detailsError) : undefined;
   const workspaces = account.details?.workspaces ?? currentDetails?.workspaces;
   const savedScope = profile?.auth.kind === "oauth" ? profile.auth.scope : undefined;
-  // A workspace chosen before signing in again must be one the sign-in offers.
-  const chosenWorkspaceId = authorized && !workspaces?.some((item) => item.id === selectedWorkspaceId) ? undefined : selectedWorkspaceId;
-  const workspaceId = chosenWorkspaceId ?? (authorized
+  const workspaceId = selectedWorkspaceId ?? (authorized
     ? workspaces?.length === 1 ? workspaces[0]?.id : undefined
     : savedScope?.workspaceId ?? undefined);
   const needsWorkspace = Boolean(authorized && provider.workspaces && workspaces?.length && workspaceId === undefined);
@@ -251,40 +241,62 @@ export function ProfileEditorDialog({
     onMutate: () => setError(undefined),
     onError: reportError,
   });
-  // Resolves whether the editor is done. A sign-in completes in the browser;
-  // Save then saves the account it connected.
-  const save = useMutation({
-    mutationFn: async () => {
-      if (!authorized && running && profile?.id === state.activeProfileId && !await confirm({ title: "Save and reconnect?", message: "Saving this active profile restarts protection. In-flight requests may be interrupted.", confirmLabel: "Save and Reconnect" })) return false;
-      if (!authorized && authMethod === "account" && provider.workspaces
-        && workspaceId !== undefined && workspaceId !== savedScope?.workspaceId) {
-        // Another workspace needs a new sign-in.
-        await account.start(draft);
-        return false;
-      }
-      if (authorized && login && authMethod === "account") {
-        const saved = await desktopApi.saveAccountLogin(login.id, draft, state.config.requireProductionOs, workspaceId);
-        account.consume();
-        toast.success(`${draft.name} saved`);
-        if (startAfterSave) await desktopApi.start(saved.config);
-        return true;
-      }
-      await onSave(draft, authMethod === "apiKey" || !provider.accountLogin ? apiKeyDraft.trim() || undefined : undefined);
-      return true;
+  const saveLogin = useMutation({
+    mutationFn: async ({ login: authorization, workspace }: { login: LoginPresentation; workspace: number | undefined }) => {
+      const saved = await desktopApi.saveAccountLogin(authorization.id, draft, state.config.requireProductionOs, workspace);
+      account.consume();
+      toast.success(`${draft.name} saved`);
+      if (startAfterSave) await desktopApi.start(saved.config);
     },
     onMutate: () => setError(undefined),
-    onSuccess: (done) => { if (done) onComplete(); },
+    onSuccess: onComplete,
     onError: reportError,
   });
-  const saving = save.isPending || remove.isPending;
+  // Signs in, and saves at once when the sign-in leaves nothing to choose:
+  // Phala, whose authorization selects the workspace, or another RedPill
+  // workspace chosen before signing in again. Otherwise Save completes it.
+  const connect = useMutation({
+    mutationFn: async ({ workspace, question }: { workspace: number | undefined; question?: ConfirmationOptions }) => {
+      if (question && !await confirm(question)) return;
+      const signedIn = await account.authorize(draft);
+      if (!signedIn || (provider.workspaces && workspace === undefined)) return;
+      const offered = signedIn.details.workspaces;
+      if (workspace !== undefined && !offered.some((item) => item.id === workspace)) {
+        setSelectedWorkspaceId(undefined);
+        throw new Error("The selected workspace is no longer available. Choose a workspace and save again.");
+      }
+      await saveLogin.mutateAsync({ login: signedIn.login, workspace: workspace ?? (offered.length === 1 ? offered[0]?.id : undefined) });
+    },
+    onMutate: () => setError(undefined),
+    onError: reportError,
+  });
+  const signIn = () => {
+    setSelectedWorkspaceId(undefined);
+    connect.mutate({ workspace: undefined, question: running ? { title: "Connect and restart protection?", message: "Connecting this account restarts protection. In-flight requests may be interrupted.", confirmLabel: "Continue" } : undefined });
+  };
+  const reconnectQuestion = { title: "Save and reconnect?", message: "Saving this active profile restarts protection. In-flight requests may be interrupted.", confirmLabel: "Save and Reconnect" };
+  const save = useMutation({
+    mutationFn: async () => {
+      if (running && profile?.id === state.activeProfileId && !await confirm(reconnectQuestion)) return;
+      await onSave(draft, authMethod === "apiKey" || !provider.accountLogin ? apiKeyDraft.trim() || undefined : undefined);
+      onComplete();
+    },
+    onMutate: () => setError(undefined),
+    onError: reportError,
+  });
+  const saving = save.isPending || saveLogin.isPending || remove.isPending;
   const working = saving || account.busy;
   const closeEditor = async () => {
     if (!saving && await account.cancel()) onClose();
   };
   const submit = () => {
-    if (!working && !frozen && !needsAccountLogin && !needsWorkspace) save.mutate();
+    if (working || frozen || needsAccountLogin || needsWorkspace) return;
+    if (authorized && login && authMethod === "account") saveLogin.mutate({ login, workspace: workspaceId });
+    // Another workspace needs a new sign-in.
+    else if (authMethod === "account" && provider.workspaces && workspaceId !== undefined && workspaceId !== savedScope?.workspaceId) {
+      connect.mutate({ workspace: workspaceId, question: running && profile?.id === state.activeProfileId ? reconnectQuestion : undefined });
+    } else save.mutate();
   };
-  const formError = error ?? (account.error ? errorMessage(account.error) : undefined);
 
   return (
     <AppDialog {...control} title={isNew ? "New profile" : "Edit profile"} className="sm:max-w-lg" dismissible={!saving && !account.working} onClose={() => void closeEditor()}>
@@ -328,7 +340,7 @@ export function ProfileEditorDialog({
                 </div> : selectedAccount ? <>
                   <AccountTools key={login?.id ?? draft.id} api={desktopApi} provider={draft.provider}
                     target={authorized && login ? { kind: "login", id: login.id } : { kind: "profile", profileId: draft.id }}
-                    scope={accountScope} images={selectedAccount.images} onSignIn={() => void signIn()}
+                    scope={accountScope} images={selectedAccount.images} onSignIn={signIn}
                     credentialRef={profile?.credentialRef} onError={reportError} disabled={working || frozen} />
                   {provider.workspaces && Boolean(workspaces?.length || accountScope?.workspace) && <FormField id="profile-workspace" label="Workspace">
                     <ChoiceSelect id="profile-workspace" label="Workspace" className="w-full" value={workspaceId === undefined ? "" : String(workspaceId)} options={[
@@ -339,7 +351,7 @@ export function ProfileEditorDialog({
                     ]} disabled={working || frozen || !workspaces?.length} onChange={(value) => setSelectedWorkspaceId(Number(value))} />
                     {!authorized && <FieldError>{workspaceError && `Could not load account workspaces. ${workspaceError}`}</FieldError>}
                   </FormField>}
-                </> : <Button type="button" variant="default" size="lg" className="w-full [&_.service-logo]:size-4" disabled={working || frozen || !draft.name.trim()} onClick={() => void signIn()}><ServiceLogo provider={draft.provider} />Connect {provider.label}</Button>}
+                </> : <Button type="button" variant="default" size="lg" className="w-full [&_.service-logo]:size-4" disabled={working || frozen || !draft.name.trim()} onClick={signIn}><ServiceLogo provider={draft.provider} />Connect {provider.label}</Button>}
               </FieldGroup>
             </TabsContent>
             <TabsContent value="apiKey">
@@ -353,11 +365,11 @@ export function ProfileEditorDialog({
           </Tabs>
         </FieldGroup>
         </div>
-        <FieldError>{formError}</FieldError>
+        <FieldError>{error}</FieldError>
         <DialogFooter>
           {!isNew && <Button type="button" variant="destructive" className="sm:mr-auto" disabled={working || frozen} onClick={() => remove.mutate()}><Trash2 size={14} />Delete Profile</Button>}
           <Button type="button" variant="outline" onClick={() => void closeEditor()} disabled={saving || account.working}>Cancel</Button>
-          {!needsAccountLogin && <Button type="submit" variant="default" disabled={working || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || needsWorkspace || (!authorized && !savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Saving…" : "Save"}</Button>}
+          {!needsAccountLogin && <Button type="submit" variant="default" disabled={working || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || needsWorkspace || (!authorized && !savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Saving…" : authorized && !provider.workspaces ? "Retry" : "Save"}</Button>}
         </DialogFooter>
       </form>
     </AppDialog>

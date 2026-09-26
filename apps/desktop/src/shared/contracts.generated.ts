@@ -6,7 +6,11 @@
  * and every state event carries one, each built from its state with `From`,
  * so none can carry a presentation of another state.
  */
-export type AppState = { protection: Protection, backendInstance?: string,
+export type AppState = { protection: Protection,
+/**
+ * The backend process whose state this is (its `/api/version` instance).
+ */
+backendInstance?: string,
 /**
  * Increases with every state the backend instance publishes, so a client
  * that receives states from events and command results keeps the newest.

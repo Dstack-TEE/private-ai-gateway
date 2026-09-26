@@ -13,8 +13,9 @@ import { cliRegistrationQuery, usageFilters, usagePageQuery } from "./lib/page-q
 import { queryClient } from "./lib/query-client";
 import { USAGE_SEARCH_DEFAULTS, validateUsageSearch } from "./lib/usage-dates";
 
-// Loaders prefetch the queries their page reads (TanStack Query's router
-// integration); the page presents a failure itself.
+// Loaders start the queries their page reads without awaiting them (TanStack
+// Query's router integration), so navigation never waits; the page shows
+// loading and failures itself.
 const rootRoute = createRootRouteWithContext<{ queryClient: QueryClient }>()({ notFoundComponent: PageNotFound });
 
 /** Only a same-origin path may be the page to return to after sign-in. */
@@ -59,14 +60,18 @@ const usageRoute = createRoute({
   validateSearch: validateUsageSearch,
   search: { middlewares: [stripSearchParams(USAGE_SEARCH_DEFAULTS)] },
   loaderDeps: ({ search }) => search,
-  loader: ({ context, deps }) => context.queryClient.prefetchQuery(usagePageQuery(usageFilters(deps))),
+  loader: ({ context, deps }) => {
+    void context.queryClient.prefetchQuery(usagePageQuery(usageFilters(deps)));
+  },
   component: UsagePage,
   staticData: { title: "Usage", icon: ChartNoAxesColumn },
 });
 const settingsRoute = createRoute({
   getParentRoute: () => appRoute,
   path: "/settings",
-  loader: ({ context }) => distributionCapabilities.cliRegistration ? context.queryClient.prefetchQuery(cliRegistrationQuery()) : undefined,
+  loader: ({ context }) => {
+    if (distributionCapabilities.cliRegistration) void context.queryClient.prefetchQuery(cliRegistrationQuery());
+  },
   component: SettingsPage,
   staticData: { title: "Settings", icon: Settings },
 });

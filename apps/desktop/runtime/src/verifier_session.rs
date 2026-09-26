@@ -181,6 +181,9 @@ impl SessionManager {
             .session_id
             .clone()
             .unwrap_or_else(|| "unscoped".into());
+        // Every read, event and command result names this process, so a
+        // client compares the sequences of one backend instance only.
+        state.backend_instance = Some(crate::api::version().instance_id.clone());
         let (state_tx, _) = watch::channel(state.clone());
         Self {
             inner: Mutex::new(RuntimeState {
@@ -205,8 +208,9 @@ impl SessionManager {
         }
     }
 
+    /// The state as last published, with its sequence.
     pub fn snapshot(&self) -> Result<AppState, String> {
-        Ok(self.lock()?.state.clone())
+        Ok(self.state_tx.borrow().clone())
     }
 
     pub fn subscribe(&self) -> watch::Receiver<AppState> {
@@ -287,7 +291,6 @@ impl SessionManager {
             },
             ..Self::carried(&runtime.state)
         };
-        let state = runtime.state.clone();
         drop(runtime);
 
         self.proxy.publish(Session {
@@ -297,6 +300,7 @@ impl SessionManager {
             ..Session::default()
         });
         self.publish();
+        let state = self.snapshot()?;
         let weak = Arc::downgrade(self);
         let events: VerifierEventSink = Arc::new(move |event| {
             if let Some(manager) = weak.upgrade() {
@@ -399,6 +403,11 @@ impl SessionManager {
             .unwrap_or_else(|| "unscoped".to_string());
         runtime.last_catalog = state.catalog.clone();
         state.wake_monitor_available = runtime.state.wake_monitor_available;
+        // A restored state is newer than every state published before it.
+        state
+            .backend_instance
+            .clone_from(&runtime.state.backend_instance);
+        state.sequence = runtime.state.sequence;
         runtime.state = state;
         drop(runtime);
         self.publish();
@@ -425,7 +434,6 @@ impl SessionManager {
         if reconnecting {
             runtime.state.protected_since = protected_since;
         }
-        let state = runtime.state.clone();
         let epoch = runtime.epoch;
         let session_id = runtime.session_id.clone();
         drop(runtime);
@@ -447,7 +455,7 @@ impl SessionManager {
         }
         self.publish();
         session_result?;
-        Ok(state)
+        self.snapshot()
     }
 
     /// What survives a stop or restart of the verifier: settings and their files, key status,
@@ -455,6 +463,8 @@ impl SessionManager {
     /// belongs to a verified session.
     fn carried(previous: &AppState) -> AppState {
         AppState {
+            backend_instance: previous.backend_instance.clone(),
+            sequence: previous.sequence,
             wake_monitor_available: previous.wake_monitor_available,
             config: previous.config.clone(),
             client_key_revision: previous.client_key_revision,
@@ -836,8 +846,9 @@ impl SessionManager {
             return;
         };
         change(&mut runtime.state);
+        let changes = self.send(&mut runtime);
         drop(runtime);
-        self.publish();
+        changes.write();
     }
 
     fn publish(&self) {

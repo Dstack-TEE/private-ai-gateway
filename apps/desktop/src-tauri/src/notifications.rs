@@ -3,7 +3,8 @@ use desktop_core::{
     client::CallError,
     config::NotificationPreferences,
     contracts::{
-        AppState, NotificationConfiguration, NotificationPermissionStatus, VerificationStatus,
+        AppState, NotificationConfiguration, NotificationPermission, NotificationPermissionStatus,
+        VerificationStatus,
     },
 };
 use std::{
@@ -35,6 +36,24 @@ pub fn set_cached_preferences(
         .lock()
         .map_err(|_| "Notification settings are unavailable")? = preferences;
     Ok(())
+}
+
+/// Asks for the system permission at startup while notifications are on and
+/// the user has not decided yet, so alerts can show without opening
+/// Settings. Where the system has no prompt, it never opens anything.
+pub async fn request_startup_permission(app: &AppHandle) {
+    let enabled = app
+        .state::<Settings>()
+        .0
+        .lock()
+        .is_ok_and(|preferences| preferences.enabled);
+    if !enabled || permission::query(app).await.permission != NotificationPermission::NotDetermined
+    {
+        return;
+    }
+    if let Err(error) = permission::request(app).await {
+        tracing::warn!("Cannot request notification permission: {error}");
+    }
 }
 
 #[tauri::command]

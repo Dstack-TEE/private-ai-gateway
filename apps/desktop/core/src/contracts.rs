@@ -369,6 +369,7 @@ pub struct ConfidentialProfileInput {
 #[serde(rename_all = "camelCase")]
 #[ts(optional_fields)]
 pub struct AppState {
+    /// The backend process whose state this is (its `/api/version` instance).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_instance: Option<String>,
     /// Increases with every state the backend instance publishes, so a client
