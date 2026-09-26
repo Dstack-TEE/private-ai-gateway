@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Outlet, useMatches, useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { useAgents } from "./hooks/use-agents";
@@ -48,7 +48,6 @@ function Window(): React.JSX.Element {
   const setState = appState.setState;
   const agents = useAgents(desktopApi, state, distributionCapabilities.sandboxHomeAccess);
   const backendReady = Boolean(appState.data) && state.backendConnected !== false;
-  const [startingBackend, setStartingBackend] = useState(false);
   const confirm = useConfirm();
   const confirming = useConfirmOpen();
   const dialog = useDialog<AppDialog>();
@@ -62,7 +61,32 @@ function Window(): React.JSX.Element {
     if (available) void client.invalidateQueries({ queryKey: ["client-key"] });
     else client.setQueryData(["client-key"], "");
   }), [client]);
-  const [applying, setApplying] = useState(false);
+  const osPolicy = useMutation({
+    mutationFn: async (required: boolean) => {
+      if (state.protection.action.operation === "stop" && !await confirm({
+        title: required ? "Require production OS?" : "Allow development OS?",
+        message: "Protection stops before the policy changes.",
+        confirmLabel: "Stop and Change",
+      })) return;
+      setState(await desktopApi.setRequireProductionOs(required));
+    },
+    onError: (error) => toastError("Could not change the OS policy", error),
+  });
+  const reset = useMutation({
+    mutationFn: () => desktopApi.resetSettings(),
+    onSuccess: setState,
+    onError: (error) => toastError("Could not reset settings", error),
+  });
+  const backendStart = useMutation({
+    mutationFn: () => desktopApi.startBackendService(),
+    onSuccess: setState,
+    onError: (error) => toastError("Could not start the background service", error),
+  });
+  /** A settings change is applying; controls that change settings wait. */
+  const applying = osPolicy.isPending || reset.isPending;
+  const { mutate: setRequireProductionOs } = osPolicy;
+  const { mutate: resetMutate } = reset;
+  const { mutate: startBackend, isPending: startingBackend } = backendStart;
 
   /** For dialogs that present the failure themselves. */
   const applyState = async (action: () => Promise<AppState | void>): Promise<void> => {
@@ -120,53 +144,22 @@ function Window(): React.JSX.Element {
       void runAction(action.operation === "stop" ? "Could not stop protection" : "Could not start protection", () =>
         action.operation === "stop" ? desktopApi.stop() : desktopApi.start(state.config));
     };
-    const setRequireProductionOs = async (required: boolean) => {
-      if (applying) return;
-      setApplying(true);
-      try {
-        if (state.protection.action.operation === "stop" && !await confirm({
-          title: required ? "Require production OS?" : "Allow development OS?",
-          message: "Protection stops before the policy changes.",
-          confirmLabel: "Stop and Change",
-        })) return;
-        setState(await desktopApi.setRequireProductionOs(required));
-      } catch (error) { toastError("Could not change the OS policy", error); }
-      finally { setApplying(false); }
-    };
     const resetSettings = async () => {
       // A browser has no window of the app to resize.
       const resetItems = new Intl.ListFormat("en").format([
         "appearance", "notifications", "startup preferences", "development OS policy", "update channel",
         "Local API settings", "web UI settings", ...web ? [] : ["window size"],
       ]);
-      let confirmed: boolean;
       try {
-        confirmed = await confirm({
+        if (await confirm({
           title: "Reset settings?",
           message: `${agents.accessStatus === "authorized" ? "Stop protection, disconnect all agents and restore their configurations," : "Stop protection"} and reset ${resetItems}. Profiles, credentials, the Local API key, and usage history are kept. This does not change system notification permission${distributionCapabilities.cliRegistration ? " or remove the pap command" : ""}.`,
           confirmLabel: "Reset Settings",
           destructive: true,
-        });
+        })) resetMutate();
       } catch (error) {
         toastError("Could not reset settings", error);
-        return;
       }
-      if (!confirmed) return;
-      setApplying(true);
-      try {
-        setState(await desktopApi.resetSettings());
-      } catch (error) {
-        toastError("Could not reset settings", error);
-      } finally {
-        setApplying(false);
-      }
-    };
-    const startBackend = async () => {
-      if (startingBackend) return;
-      setStartingBackend(true);
-      try { setState(await desktopApi.startBackendService()); }
-      catch (error) { toastError("Could not start the background service", error); }
-      finally { setStartingBackend(false); }
     };
     return {
       state,
@@ -180,15 +173,19 @@ function Window(): React.JSX.Element {
       copy: (label, value) => void runAction(`Could not copy the ${label.toLowerCase()}`, () => copyValue(label, value)),
       applying,
       startingBackend: startingBackend || starting,
-      startBackend: () => void startBackend(),
+      startBackend: () => {
+        if (!startingBackend) startBackend();
+      },
       toggleProtection,
-      setRequireProductionOs: (required) => void setRequireProductionOs(required),
+      setRequireProductionOs: (required) => {
+        if (!applying) setRequireProductionOs(required);
+      },
       resetSettings: () => void resetSettings(),
       openDialog,
       openProfiles,
       openAboutLink: (target: AboutLink) => void runAction("Could not open the link", () => desktopApi.openAboutLink(target)),
     };
-  }, [state, agents, updates, clientKey, clientKeyVisible, copied, copyValue, applying, startingBackend, setState, openDialog, openProfileSetup, confirm]);
+  }, [state, agents, updates, clientKey, clientKeyVisible, copied, copyValue, applying, startingBackend, startBackend, setRequireProductionOs, resetMutate, setState, openDialog, openProfileSetup, confirm]);
 
   const requestStopAllAndQuit = useEffectEvent(async () => {
     try {

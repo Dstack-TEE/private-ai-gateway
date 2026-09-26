@@ -42,10 +42,16 @@ function useNotificationSettings(api: DesktopApi) {
     data,
     error,
     busy,
+    // One result shows at a time: the latest action's.
     change: (key: keyof NotificationPreferences, enabled: boolean) => {
-      if (data) change.mutate({ key, enabled, current: data });
+      if (!data) return;
+      permission.reset();
+      change.mutate({ key, enabled, current: data });
     },
-    permissionAction: () => permission.mutate(),
+    permissionAction: () => {
+      change.reset();
+      permission.mutate();
+    },
   };
 }
 

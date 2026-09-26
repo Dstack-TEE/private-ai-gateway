@@ -3,7 +3,7 @@ import { keepPreviousData, useIsMutating, useMutation, useMutationState, useQuer
 import { toast } from "sonner";
 import type { AgentStatus, AppState, DesktopApi } from "../../shared/contracts";
 import { errorMessage, toastError } from "../lib/error-message";
-import { agentIntegrationsLocked, completeAgentStatuses, readAgentIntegrations, type AgentIntegrations } from "../lib/agent-integrations";
+import { agentAccessMutation, agentIntegrationsLocked, completeAgentStatuses, readAgentIntegrations, type AgentIntegrations } from "../lib/agent-integrations";
 
 const connectionKey = (agentId: string) => ["agent-connection", agentId];
 
@@ -14,16 +14,8 @@ const connectionKey = (agentId: string) => ["agent-connection", agentId];
  */
 export function useAgents(api: DesktopApi, state: AppState, requiresAuthorization: boolean) {
   const client = useQueryClient();
-  // Only this explicit action requests access; its scan publishes the result.
   const access = useMutation({
-    mutationFn: async () => {
-      await client.cancelQueries({ queryKey: ["agents"] });
-      return readAgentIntegrations(api, requiresAuthorization, true);
-    },
-    onSuccess: async (integrations) => {
-      await client.cancelQueries({ queryKey: ["agents"] });
-      client.setQueriesData<AgentIntegrations>({ queryKey: ["agents"] }, integrations);
-    },
+    ...agentAccessMutation(api, requiresAuthorization, client),
     onError: (failure) => toastError("Could not grant agent access", failure),
   });
   const authorizing = access.isPending;

@@ -1,3 +1,4 @@
+import { mutationOptions, type QueryClient } from "@tanstack/react-query";
 // Node runs `npm run test:agents` on this file as is, so a value import names its file.
 import { AGENTS } from "../../shared/contracts.generated.ts";
 import type { AgentAccessStatus, AgentStatus, DesktopApi } from "../../shared/contracts";
@@ -47,4 +48,21 @@ export async function readAgentIntegrations(api: AccessApi, requiresAuthorizatio
 
 export function agentIntegrationsLocked(accessStatus: AgentAccessStatus | undefined, pending: boolean): boolean {
   return pending || accessStatus !== "authorized";
+}
+
+/**
+ * The only action that requests access. Its scan replaces the agents every
+ * `["agents"]` query lists, so the pages unlock with the result.
+ */
+export function agentAccessMutation(api: AccessApi, requiresAuthorization: boolean, client: QueryClient) {
+  return mutationOptions({
+    mutationFn: async () => {
+      await client.cancelQueries({ queryKey: ["agents"] });
+      return readAgentIntegrations(api, requiresAuthorization, true);
+    },
+    onSuccess: async (integrations: AgentIntegrations) => {
+      await client.cancelQueries({ queryKey: ["agents"] });
+      client.setQueriesData<AgentIntegrations>({ queryKey: ["agents"] }, integrations);
+    },
+  });
 }

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { agentIntegrationsLocked, completeAgentStatuses, readAgentIntegrations, supportedAgentStatuses } from "../src/renderer/lib/agent-integrations.ts";
+import { MutationObserver, QueryClient, QueryObserver } from "@tanstack/react-query";
+import { agentAccessMutation, agentIntegrationsLocked, completeAgentStatuses, readAgentIntegrations, supportedAgentStatuses } from "../src/renderer/lib/agent-integrations.ts";
 
 function fixture(status, enabledStatus = status) {
   const calls = [];
@@ -57,6 +58,76 @@ test("Direct and non-macOS scan without calling authorization APIs", async () =>
   const { api, calls, agents } = fixture("authorizationRequired");
   assert.deepEqual(await readAgentIntegrations(api, false), { accessStatus: "authorized", agents });
   assert.deepEqual(calls, ["scan"]);
+});
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+test("Enable scans once access is granted and publishes the result to every agents query before unlocking", async () => {
+  const { api, calls, agents } = fixture("authorizationRequired");
+  const access = deferred();
+  const scan = deferred();
+  api.requestAgentAccess = () => { calls.push("enable"); return access.promise; };
+  api.listAgents = () => { calls.push("scan"); return scan.promise; };
+  const client = new QueryClient();
+  const key = ["agents", "backend", 1];
+  client.setQueryData(key, { accessStatus: "authorizationRequired", agents: [] });
+  const observed = [];
+  const unsubscribe = new QueryObserver(client, { queryKey: key, enabled: false }).subscribe(({ data }) => observed.push(data));
+  const mutation = new MutationObserver(client, agentAccessMutation(api, true, client));
+  const locked = () => agentIntegrationsLocked(client.getQueryData(key)?.accessStatus, mutation.getCurrentResult().isPending);
+  try {
+    assert.equal(locked(), true);
+    const run = mutation.mutate();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(mutation.getCurrentResult().isPending, true);
+    access.resolve("authorized");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(calls, ["enable", "scan"]);
+    assert.equal(locked(), true);
+    scan.resolve(agents);
+    await run;
+    assert.equal(locked(), false);
+    assert.deepEqual(client.getQueryData(key), { accessStatus: "authorized", agents });
+    assert.deepEqual(observed.at(-1), { accessStatus: "authorized", agents });
+    assert.deepEqual(calls, ["enable", "scan"]); // Enabling never connects.
+  } finally { unsubscribe(); client.clear(); }
+});
+
+test("a cancelled Enable stays locked and can be retried; a failed scan also ends it", async () => {
+  const { api, calls, agents } = fixture("authorizationRequired");
+  const client = new QueryClient();
+  const key = ["agents"];
+  client.setQueryData(key, { accessStatus: "authorizationRequired", agents: [] });
+  const mutation = new MutationObserver(client, agentAccessMutation(api, true, client));
+  try {
+    await mutation.mutate();
+    assert.equal(agentIntegrationsLocked(client.getQueryData(key).accessStatus, mutation.getCurrentResult().isPending), true);
+    assert.deepEqual(calls, ["enable"]);
+    api.requestAgentAccess = async () => "authorized";
+    api.getAgentAccess = async () => "authorized";
+    api.listAgents = async () => { throw new Error("Scan unavailable"); };
+    await assert.rejects(mutation.mutate(), /Scan unavailable/);
+    assert.equal(mutation.getCurrentResult().isPending, false);
+    assert.equal(agentIntegrationsLocked(client.getQueryData(key).accessStatus, false), true);
+    api.listAgents = async () => agents;
+    await mutation.mutate();
+    assert.equal(agentIntegrationsLocked(client.getQueryData(key).accessStatus, false), false);
+  } finally { client.clear(); }
+});
+
+test("without authorization (Direct, Windows, Linux) Enable scans without requesting access", async () => {
+  const { api, calls, agents } = fixture("authorizationRequired");
+  const client = new QueryClient();
+  client.setQueryData(["agents"], { accessStatus: "authorized", agents: [] });
+  try {
+    await new MutationObserver(client, agentAccessMutation(api, false, client)).mutate();
+    assert.deepEqual(calls, ["scan"]);
+    assert.deepEqual(client.getQueryData(["agents"]), { accessStatus: "authorized", agents });
+  } finally { client.clear(); }
 });
 
 test("connection gate covers missing access, revoked access, and the whole pending scan", () => {

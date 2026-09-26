@@ -17,17 +17,24 @@ export function useUpdates(api: DesktopApi, checks: boolean) {
   const client = useQueryClient();
   const confirm = useConfirm();
   const operating = useIsMutating({ mutationKey: UPDATE_OPERATION }) > 0;
-  const { data: snapshot, error: checkError, isFetching: checking, refetch } = useQuery<UpdateInfo>({
+  const { data: snapshot, error, failureReason, failureCount, isFetching, refetch } = useQuery<UpdateInfo>({
     queryKey: ["app-update"], queryFn: () => api.prepareUpdate(), enabled: checks && !operating,
-    refetchInterval: (query) => query.state.error ? 60_000 : 6 * 60 * 60_000,
+    refetchInterval: 6 * 60 * 60_000,
     // A tray app prepares updates while its window is hidden or inactive.
     refetchIntervalInBackground: true,
-    staleTime: 15 * 60_000, retry: false,
+    staleTime: 15 * 60_000,
+    // A failed check retries after 1 minute, then backs off up to the interval.
+    retry: true,
+    retryDelay: (failures) => Math.min(60_000 * 2 ** failures, 6 * 60 * 60_000),
   });
+  // A check that failed and waits to retry is not checking.
+  const checkError = error ?? failureReason;
+  const checking = isFetching && failureCount === 0;
   const { data: installedVersion } = useQuery({ queryKey: ["app-version"], queryFn: () => api.getAppVersion(), staleTime: Infinity });
-  const refresh = useCallback(async () => {
+  /** Checks again now, in place of a check or retry in progress. */
+  const recheck = useCallback(async () => {
     await client.cancelQueries({ queryKey: ["app-update"] });
-    return refetch();
+    void refetch();
   }, [client, refetch]);
   const scope = { id: "app-update" };
   const changeChannel = useMutation({
@@ -36,7 +43,7 @@ export function useUpdates(api: DesktopApi, checks: boolean) {
     mutationFn: (next: UpdateChannel) => api.setUpdateChannel(next),
     onSuccess: async (saved) => {
       client.setQueryData<UpdateInfo | undefined>(["app-update"], (current) => current ? { ...current, channel: saved, version: null } : current);
-      await refresh();
+      await recheck();
     },
     onError: (error) => toastError("Could not change the update channel", error),
   });
@@ -44,15 +51,17 @@ export function useUpdates(api: DesktopApi, checks: boolean) {
     mutationKey: UPDATE_OPERATION,
     scope,
     mutationFn: async () => {
-      const latest = await refresh();
-      if (latest.error) throw latest.error;
-      if (!latest.data?.version) return;
-      if (!await confirm({ title: "Restart to update?", message: `Version ${latest.data.version} is ready. Protection will pause during the restart and resume only after fresh verification. In-flight requests may be interrupted.`, confirmLabel: "Restart to Update" })) return;
+      // The latest release, checked once: a failure ends the restart.
+      await client.cancelQueries({ queryKey: ["app-update"] });
+      const latest = await api.prepareUpdate();
+      client.setQueryData(["app-update"], latest);
+      if (!latest.version) return;
+      if (!await confirm({ title: "Restart to update?", message: `Version ${latest.version} is ready. Protection will pause during the restart and resume only after fresh verification. In-flight requests may be interrupted.`, confirmLabel: "Restart to Update" })) return;
       try {
         await api.restartToUpdate();
       } catch (error) {
         // A failed install used the prepared update; prepare it again.
-        void refresh();
+        void recheck();
         throw error;
       }
     },
