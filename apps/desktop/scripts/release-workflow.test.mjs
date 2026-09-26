@@ -50,7 +50,23 @@ test("only release tags publish, after every package, in order", async () => {
   const steps = direct.jobs.release.steps.map((step) => step.run ?? "");
   const gate = steps.findIndex((run) => run.includes("create-update-manifest.mjs"));
   assert.notEqual(gate, -1);
-  assert.ok(gate < steps.findIndex((run) => run.includes("gh release upload")));
+  const upload = steps.findIndex((run) => run.includes("gh release upload"));
+  assert.ok(gate < upload);
+  // Provenance and SBOM attestations exist before any asset is public.
+  const attestations = direct.jobs.release.steps.flatMap((step, index) => (step.uses?.startsWith("actions/attest@") ? [{ index, ...step.with }] : []));
+  for (const attestation of attestations) assert.ok(attestation.index < upload);
+
+  // The release job attests exactly the SBOMs that verify (which also runs
+  // on pull requests) generates, from outside the published directory.
+  assert.ok(needs("release").includes("verify"));
+  const generate = direct.jobs.verify.steps.find((step) => step.name === "Generate SBOMs").run;
+  const generated = [...new Set(generate.match(/[\w-]+\.cdx\.json/g))].sort();
+  const uploaded = direct.jobs.verify.steps.find((step) => step.uses?.startsWith("actions/upload-artifact@") && step.with.path.endsWith("/sbom/"));
+  const downloaded = direct.jobs.release.steps.find((step) => step.uses?.startsWith("actions/download-artifact@") && step.with.name === uploaded.with.name);
+  const attested = attestations.flatMap((attestation) => attestation["sbom-path"] ?? []);
+  assert.notEqual(downloaded.with.path, "release");
+  assert.deepEqual(attested.map((file) => path.posix.relative(downloaded.with.path, file)).sort(), generated);
+  assert.equal(generated.length, 3);
 });
 
 test("npm publishes the channel wrapper after its platform versions", async () => {

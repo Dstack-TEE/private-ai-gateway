@@ -89,7 +89,14 @@ Once every package and the App Store upload have succeeded, the run:
 
 1. attaches the signed assets, `latest.json` and `SHA256SUMS` to the draft.
    Every file in `SHA256SUMS` gets a signed SLSA build provenance attestation
-   (`gh attestation verify <file> --repo Dstack-TEE/private-ai-gateway`);
+   (`gh attestation verify <file> --repo Dstack-TEE/private-ai-gateway`).
+   Each package also gets CycloneDX SBOM attestations (add
+   `--predicate-type https://cyclonedx.org/bom`): every package for the CLI
+   crates and the web UI renderer's runtime npm dependencies, which the CLI
+   service embeds, and each desktop package for the desktop shell crate too.
+   The renderer SBOM omits devDependencies, such as the build-time CSS
+   tooling. The verify job generates the SBOMs on every run; they are not
+   release assets;
 2. publishes it (stable releases become Latest);
 3. advances the updater feeds. The publish is idempotent, so after a transient
    GitHub failure use **Re-run failed jobs**, which also runs the npm publish

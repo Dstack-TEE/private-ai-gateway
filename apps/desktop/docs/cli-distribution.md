@@ -164,7 +164,8 @@ release; `package_only` skips the full verification.
   assets, including `SHA256SUMS`. In a directory of downloaded assets,
   `sha256sum --ignore-missing -c SHA256SUMS` checks them, and
   `gh attestation verify <file> --repo Dstack-TEE/private-ai-gateway` checks
-  their build provenance.
+  their build provenance. With `--predicate-type https://cyclonedx.org/bom` it
+  checks a package's CycloneDX SBOM attestations instead.
 - Public assets use `private-ai-proxy-<version>-<platform>-<arch>.<format>` or
   `private-ai-proxy-cli-<version>-<platform>-<arch>.<format>`.
 - Stable desktop releases become the repository's Latest release. Beta releases
