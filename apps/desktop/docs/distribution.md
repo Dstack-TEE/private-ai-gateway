@@ -59,9 +59,11 @@ GitHub release with that changelog section as its notes.
 - **Correcting the changelog**: edit the merged PR's body with a
   `BEGIN_COMMIT_OVERRIDE` … `END_COMMIT_OVERRIDE` block
   ([release-please: overriding release PR messages](https://github.com/googleapis/release-please#how-can-i-fix-release-notes)),
-  for example when a squash commit lists its commits as `* type: …` bullets,
-  which release-please cannot parse. Then run `Desktop release PR` manually to
-  refresh the release PR.
+  for example to list a `refactor` PR's user-visible fixes. release-please uses
+  the text after the first occurrence of the start marker in the body, so do
+  not mention the marker anywhere else in the PR description, and separate
+  entries with blank lines. Then run `Desktop release PR` manually to refresh
+  the release PR.
 
 The tag starts `Desktop release` (`desktop-release.yml`), which runs only for
 release tags and calls `Desktop Tauri` (`desktop-native.yml`) at the tagged

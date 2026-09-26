@@ -69,6 +69,14 @@ abbreviated packument and the version from the full packument, and the
 registry CDN caches the two representations separately (`Vary: Accept`,
 `Cache-Control: max-age=300`). Retrying after the cache expires succeeds.
 
+In the same window, an install can also get a packument that already lists the
+new wrapper but not yet every platform version, because the registry is
+eventually consistent. npm then skips the missing optional dependency, and the
+installed `private-ai-proxy` exits with its "native binaries … are not
+installed" message, which says to reinstall. Reinstalling after the cache
+expires fixes it. This happened for a few minutes after `0.2.0-beta.3` was
+published.
+
 ### Linux libc
 
 The Linux binaries require glibc 2.35 or newer. There is no musl build, so
@@ -134,14 +142,12 @@ The channel tag must never point at a wrapper whose platform versions are not
 resolvable, or `npm install private-ai-proxy` fails for every user of that
 channel. Trusted publishing only authorizes `npm publish`, not `npm dist-tag`,
 so the channel tag moves when the wrapper is published, and the wrapper goes
-last. That order alone is enough: every version is part of the one
-`private-ai-proxy` packument, which the registry writes whole on each publish,
-and the platform versions are published before the wrapper. Any copy of the
-packument that lists the new wrapper therefore also lists its platform
-versions. Codex publishes in the same order without waiting in between. The
-job does not install from the registry after publishing, because the registry
-CDN keeps serving cached packuments for several minutes (see
-[Dist-tags and version ranges](#dist-tags-and-version-ranges)). The local
+last, after every platform version has been published. Codex publishes in the
+same order without waiting in between. The order does not make the registry
+consistent at once: for a few minutes a copy of the packument can list the new
+wrapper before all of its platform versions (see
+[Dist-tags and version ranges](#dist-tags-and-version-ranges)). The job does
+not wait for or test that propagation, which the registry does not bound. The local
 tarball install above proves the package contents and commands, and
 `scripts/package-npm.test.mjs` checks that the wrapper's aliases name exactly
 the published platform versions.
