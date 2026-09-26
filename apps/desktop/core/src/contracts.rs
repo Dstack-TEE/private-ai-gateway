@@ -371,6 +371,10 @@ pub struct ConfidentialProfileInput {
 pub struct AppState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_instance: Option<String>,
+    /// Increases with every state the backend instance publishes, so a client
+    /// that receives states from events and command results keeps the newest.
+    #[serde(default)]
+    pub sequence: u64,
     #[serde(default)]
     pub client_key_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -552,6 +556,7 @@ impl Default for AppState {
             status: VerificationStatus::Stopped,
             backend_connected: None,
             backend_instance: None,
+            sequence: 0,
             client_key_revision: 0,
             client_key_available: None,
             wake_monitor_available: None,
@@ -685,6 +690,54 @@ impl DistributionCapabilities {
     };
 }
 
+/// What a tray or menu item asks the main window to show or open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "kebab-case")]
+pub enum NavigationTarget {
+    Settings,
+    Agents,
+    Profiles,
+    ProfileSetup,
+}
+
+/// The system's permission to show this app's notifications.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum NotificationPermission {
+    Granted,
+    Denied,
+    NotDetermined,
+    Unknown,
+    Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(optional_fields)]
+pub struct NotificationPermissionStatus {
+    pub permission: NotificationPermission,
+    /// Whether banner alerts are on, where the system reports it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alerts_enabled: Option<bool>,
+}
+
+impl From<NotificationPermission> for NotificationPermissionStatus {
+    fn from(permission: NotificationPermission) -> Self {
+        Self {
+            permission,
+            alerts_enabled: None,
+        }
+    }
+}
+
+/// The notification preferences and the system permission they need.
+#[derive(Clone, Copy, Debug, Serialize, TS)]
+pub struct NotificationConfiguration {
+    pub preferences: crate::config::NotificationPreferences,
+    #[serde(flatten)]
+    pub system: NotificationPermissionStatus,
+}
+
 /// `GET /api/bootstrap` on the web UI; it also tells whether this browser has
 /// a session.
 #[derive(Clone, Debug, Serialize, TS)]
@@ -710,7 +763,7 @@ mod typescript {
         },
         maintenance::{ImportResult, ProfileBackup, ProfileConfiguration},
         protection::{ProtectionAction, ProtectionOperation, ProtectionPhase, Tone},
-        ui_api::{self, LaunchPreferences, ListenAddress, Method},
+        ui_api::{self, LaunchPreference, LaunchPreferences, ListenAddress, Method},
         updates::{Installation, UpdateInfo, UpdateNotice},
         usage::{UsageModelPoint, UsagePage, UsagePoint, UsageQuery},
     };
@@ -776,6 +829,11 @@ mod typescript {
             UpdateNotice,
             NotificationPreferences,
             LaunchPreferences,
+            LaunchPreference,
+            NotificationPermission,
+            NotificationPermissionStatus,
+            NotificationConfiguration,
+            NavigationTarget,
             ProfileBackup,
             ProfileConfiguration,
             ImportResult,
@@ -804,18 +862,63 @@ mod typescript {
             "/** A method the shared UI API accepts (`ui_api::Method`). */\nexport type UiMethod = {};\n",
             methods.join(" | ")
         ));
-        for (name, value) in [
-            ("APPEARANCE_EVENT", ui_api::APPEARANCE_EVENT),
-            ("LAUNCH_PREFERENCES_EVENT", ui_api::LAUNCH_PREFERENCES_EVENT),
-            ("SETTINGS_RESET_EVENT", ui_api::SETTINGS_RESET_EVENT),
-            ("STATE_EVENT", ui_api::STATE_EVENT),
-            ("CLIENT_KEY_CHANGED_EVENT", ui_api::CLIENT_KEY_CHANGED_EVENT),
-            ("AGENTS_CHANGED_EVENT", ui_api::AGENTS_CHANGED_EVENT),
-            ("NAVIGATE_EVENT", ui_api::NAVIGATE_EVENT),
-            ("CONFIRM_STOP_ALL_EVENT", ui_api::CONFIRM_STOP_ALL_EVENT),
-        ] {
-            output.push_str(&constant(name, "string", serde_json::json!(value)));
+        // Each event with the type of the payload it carries.
+        let events = [
+            (
+                "APPEARANCE_EVENT",
+                ui_api::APPEARANCE_EVENT,
+                Appearance::name(&config),
+            ),
+            (
+                "LAUNCH_PREFERENCES_EVENT",
+                ui_api::LAUNCH_PREFERENCES_EVENT,
+                LaunchPreferences::name(&config),
+            ),
+            (
+                "SETTINGS_RESET_EVENT",
+                ui_api::SETTINGS_RESET_EVENT,
+                <()>::name(&config),
+            ),
+            (
+                "STATE_EVENT",
+                ui_api::STATE_EVENT,
+                AppStateWire::name(&config),
+            ),
+            (
+                "CLIENT_KEY_CHANGED_EVENT",
+                ui_api::CLIENT_KEY_CHANGED_EVENT,
+                bool::name(&config),
+            ),
+            (
+                "AGENTS_CHANGED_EVENT",
+                ui_api::AGENTS_CHANGED_EVENT,
+                <()>::name(&config),
+            ),
+            (
+                "NAVIGATE_EVENT",
+                ui_api::NAVIGATE_EVENT,
+                NavigationTarget::name(&config),
+            ),
+            (
+                "CONFIRM_STOP_ALL_EVENT",
+                ui_api::CONFIRM_STOP_ALL_EVENT,
+                <()>::name(&config),
+            ),
+        ];
+        for (name, value, _) in &events {
+            output.push_str(&format!(
+                "export const {name} = {};\n",
+                serde_json::json!(value)
+            ));
         }
+        let payloads: Vec<_> = events
+            .iter()
+            .map(|(_, event, payload)| format!("{}: {payload}", serde_json::json!(event)))
+            .collect();
+        output.push_str(&format!(
+            "/** The payload each event carries. */\nexport type UiEventPayloads = {{ {} }};\nexport type UiEvent = keyof UiEventPayloads;\n",
+            payloads.join(", ")
+        ));
         let links: serde_json::Map<_, _> = AboutLink::ALL
             .into_iter()
             .map(|link| (name(&link), link.url().into()))
@@ -825,14 +928,16 @@ mod typescript {
             "Record<AboutLink, string>",
             links.into(),
         ));
-        let websites: serde_json::Map<_, _> = Agent::ALL
+        let agents: Vec<_> = Agent::ALL
             .into_iter()
-            .map(|agent| (agent.id().to_string(), agent.website().into()))
+            .map(|agent| {
+                serde_json::json!({ "id": agent.id(), "name": agent.name(), "website": agent.website() })
+            })
             .collect();
         output.push_str(&constant(
-            "AGENT_WEBSITES",
-            "Readonly<Record<string, string>>",
-            websites.into(),
+            "AGENTS",
+            "ReadonlyArray<{ id: string, name: string, website: string }>",
+            agents.into(),
         ));
         let api_key_pages: serde_json::Map<_, _> = ServiceProvider::ALL
             .into_iter()

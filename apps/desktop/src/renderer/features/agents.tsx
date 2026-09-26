@@ -59,8 +59,8 @@ export function AgentsPage(): React.JSX.Element {
   const locked = applying || integrations.controlsLocked;
   return (
     <div className="max-w-230 min-h-full mt-0 mr-auto mb-0 ml-auto">
-      <AgentAccessNotice status={accessStatus} busy={authorizing} onAuthorize={() => void integrations.requestAccess()} />
-      {accessStatus === "authorized" && problem && <AgentDetectionNotice busy={authorizing} onRetry={() => void integrations.requestAccess()} />}
+      <AgentAccessNotice status={accessStatus} busy={authorizing} onAuthorize={integrations.requestAccess} />
+      {accessStatus === "authorized" && problem && <AgentDetectionNotice busy={authorizing} onRetry={integrations.requestAccess} />}
       <SettingsSection title={accessStatus === "authorized" && !problem ? "Detected" : "Agents"} detail={accessStatus === "authorized" && !problem ? `${connected} connected` : undefined}>
         {accessStatus !== "authorized" ? agents.map((agent) => (
           <AgentRow key={agent.id} agent={agent} detectionLabel={detectionLabel} disabled />

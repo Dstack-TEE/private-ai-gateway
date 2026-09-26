@@ -1,17 +1,21 @@
-import { createBrowserHistory, createMemoryHistory, createRootRoute, createRoute, createRouter, redirect, stripSearchParams } from "@tanstack/react-router";
+import type { QueryClient } from "@tanstack/react-query";
+import { createBrowserHistory, createMemoryHistory, createRootRouteWithContext, createRoute, createRouter, redirect, stripSearchParams } from "@tanstack/react-router";
 import { Bot, ChartNoAxesColumn, LayoutGrid, Settings, type LucideIcon } from "lucide-react";
 import { AppLayout } from "./app";
-import { PageError, WindowError } from "./components/route-error";
+import { PageError, PageNotFound, WindowError } from "./components/route-error";
 import { SignInPage } from "./components/sign-in";
 import { AgentsPage } from "./features/agents";
 import { OverviewPage } from "./features/overview";
 import { SettingsPage } from "./features/settings";
 import { UsagePage } from "./features/usage";
-import { session, web } from "./lib/environment";
+import { distributionCapabilities, session, web } from "./lib/environment";
+import { cliRegistrationQuery, usageFilters, usagePageQuery } from "./lib/page-queries";
 import { queryClient } from "./lib/query-client";
 import { USAGE_SEARCH_DEFAULTS, validateUsageSearch } from "./lib/usage-dates";
 
-const rootRoute = createRootRoute();
+// Loaders prefetch the queries their page reads (TanStack Query's router
+// integration); the page presents a failure itself.
+const rootRoute = createRootRouteWithContext<{ queryClient: QueryClient }>()({ notFoundComponent: PageNotFound });
 
 /** Only a same-origin path may be the page to return to after sign-in. */
 function returnPath(value: unknown): string | undefined {
@@ -54,23 +58,30 @@ const usageRoute = createRoute({
   path: "/usage",
   validateSearch: validateUsageSearch,
   search: { middlewares: [stripSearchParams(USAGE_SEARCH_DEFAULTS)] },
+  loaderDeps: ({ search }) => search,
+  loader: ({ context, deps }) => context.queryClient.prefetchQuery(usagePageQuery(usageFilters(deps))),
   component: UsagePage,
   staticData: { title: "Usage", icon: ChartNoAxesColumn },
 });
-const settingsRoute = createRoute({ getParentRoute: () => appRoute, path: "/settings", component: SettingsPage, staticData: { title: "Settings", icon: Settings } });
-const unknownRoute = createRoute({
+const settingsRoute = createRoute({
   getParentRoute: () => appRoute,
-  path: "$",
-  beforeLoad: () => {
-    throw redirect({ to: "/", replace: true });
-  },
+  path: "/settings",
+  loader: ({ context }) => distributionCapabilities.cliRegistration ? context.queryClient.prefetchQuery(cliRegistrationQuery()) : undefined,
+  component: SettingsPage,
+  staticData: { title: "Settings", icon: Settings },
 });
 
 export const router = createRouter({
   routeTree: rootRoute.addChildren([
     signInRoute,
-    appRoute.addChildren([overviewRoute, agentsRoute, usageRoute, settingsRoute, unknownRoute]),
+    appRoute.addChildren([overviewRoute, agentsRoute, usageRoute, settingsRoute]),
   ]),
+  context: { queryClient },
+  // Pages load on intent; TanStack Query decides whether the data is fresh.
+  defaultPreload: "intent",
+  defaultPreloadStaleTime: 0,
+  // Each page starts at its top; the window scrolls the page, not the document.
+  scrollToTopSelectors: ["#page-content"],
   // The web UI has real URLs. The desktop window has no address bar or deep
   // links, so its location stays in memory and the webview keeps loading index.html.
   history: web ? createBrowserHistory() : createMemoryHistory(),

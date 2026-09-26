@@ -1,9 +1,9 @@
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
-import type { DistributionCapabilities } from "../../shared/contracts";
+import type { DistributionCapabilities, UiEvent, UiEventPayloads } from "../../shared/contracts";
 import { createDesktopApi, type Backend, type UiPlatform, type UiTransport } from "./create-api";
 
 declare global {
@@ -58,24 +58,28 @@ const platform: UiPlatform = {
   openTopUp: (provider, scopeSlug) => invoke("open_top_up", { provider, scopeSlug }),
 };
 
-function subscribe<T>(event: string, listener: (payload: T) => void): () => void {
+const appWindow = getCurrentWebviewWindow();
+
+function subscribe<E extends UiEvent>(event: E, listener: (payload: UiEventPayloads[E]) => void): () => void {
+  return listening((active) => appWindow.listen<UiEventPayloads[E]>(event, ({ payload }) => {
+    if (active()) listener(payload);
+  }));
+}
+
+function windowFocus(setFocused: (focused: boolean) => void): () => void {
+  return listening((active) => appWindow.onFocusChanged(({ payload }) => {
+    if (active()) setFocused(payload);
+  }));
+}
+
+/** Tauri adds a listener asynchronously; one it could not add is reported. */
+function listening(add: (active: () => boolean) => Promise<UnlistenFn>): () => void {
   let disposed = false;
-  let unlisten: (() => void) | undefined;
-  try {
-    void listen<T>(event, (received) => {
-      if (!disposed) listener(received.payload);
-    }, {
-      target: { kind: "WebviewWindow", label: getCurrentWebviewWindow().label },
-    }).then(
-      (nextUnlisten) => {
-        if (disposed) nextUnlisten();
-        else unlisten = nextUnlisten;
-      },
-      () => undefined,
-    );
-  } catch {
-    return () => undefined;
-  }
+  let unlisten: UnlistenFn | undefined;
+  add(() => !disposed).then((next) => {
+    if (disposed) next();
+    else unlisten = next;
+  }, reportError);
   return () => {
     disposed = true;
     unlisten?.();
@@ -90,5 +94,6 @@ export function createBackend(): Backend {
     desktopApi: createDesktopApi(transport, platform),
     distributionCapabilities,
     session: undefined,
+    windowFocus,
   };
 }

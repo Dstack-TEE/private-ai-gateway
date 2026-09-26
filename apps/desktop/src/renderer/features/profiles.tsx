@@ -1,5 +1,6 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import React, { useCallback, useRef, useState } from "react";
+import { skipToken, useIsMutating, useMutation, useQuery } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { useAccountLogin } from "../lib/use-account-login";
 import { AccountTools } from "../components/account-tools";
 import { ToggleGroup, ToggleGroupItem } from "../components/ui/toggle-group";
@@ -8,7 +9,7 @@ import { Check, Copy, ExternalLink, LoaderCircle, Pencil, Plus, TriangleAlert, T
 import { Button } from "../components/ui/button";
 import { ActionItem } from "../components/action-item";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
-import { ProfileTransfer } from "../components/maintenance";
+import { PROFILE_TRANSFER, ProfileTransfer } from "../components/maintenance";
 import { Field, FieldError, FieldGroup, FieldLabel } from "../components/ui/field";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Input } from "../components/ui/input";
@@ -36,9 +37,9 @@ export function ProfilesDialog({
   state: AppState;
   /** Opens the active profile's editor on top, for protection that needs its credential. */
   repair: boolean;
-  onActivate(profileId: string): Promise<string | undefined>;
-  onSave(profile: ConfidentialProfileInput, key?: string): Promise<string | undefined>;
-  onDelete(profileId: string): Promise<string | undefined>;
+  onActivate(profileId: string): Promise<void>;
+  onSave(profile: ConfidentialProfileInput, key?: string): Promise<void>;
+  onDelete(profileId: string): Promise<void>;
 } & DialogControl): React.JSX.Element {
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   const editor = useDialog<{ profile?: ConfidentialProfile }>(repair && activeProfile ? { profile: activeProfile } : undefined);
@@ -49,29 +50,19 @@ export function ProfilesDialog({
   if (openedProfile && !liveProfile && editor.control.open) editor.control.onClose();
   const editingProfile = liveProfile ?? openedProfile;
   const newProfileButton = useRef<HTMLButtonElement>(null);
-  const [transferBusy, setTransferBusy] = useState(false);
-  const [transferMessage, setTransferMessage] = useState<string>();
-  const [error, setError] = useState<string>();
+  const transferBusy = useIsMutating({ mutationKey: PROFILE_TRANSFER }) > 0;
+  const [transfer, setTransfer] = useState<{ message: string; failed: boolean }>();
   const busy = state.status === "verifying";
   const frozen = busy || transferBusy;
-  const [workingProfileId, setWorkingProfileId] = useState<string>();
+  const activate = useMutation({ mutationFn: onActivate, onMutate: () => setTransfer(undefined), onSuccess: onClose });
+  const workingProfileId = activate.isPending ? activate.variables : undefined;
+  const error = activate.error ? errorMessage(activate.error) : transfer?.failed ? transfer.message : undefined;
   const activeProfileAvailable = profileIsAvailable(activeProfile, state);
   const activeConnection = activeProfile && connectionRequirement(activeProfile);
 
-  const select = async (profileId: string) => {
-    if (profileId === state.activeProfileId) {
-      onClose();
-      return;
-    }
-    setWorkingProfileId(profileId);
-    setError(undefined);
-    try {
-      const message = await onActivate(profileId);
-      if (message) setError(message);
-      else onClose();
-    } finally {
-      setWorkingProfileId(undefined);
-    }
+  const select = (profileId: string) => {
+    if (profileId === state.activeProfileId) onClose();
+    else activate.mutate(profileId);
   };
   return (
     <AppDialog {...control} title="Profiles" className="sm:max-w-xl" dismissible={!workingProfileId && !transferBusy} onClose={onClose}>
@@ -94,7 +85,7 @@ export function ProfilesDialog({
                 className="profile-select min-w-0 [&_>_span:nth-child(2)]:min-w-0 [&_>_span:nth-child(2)]:flex-auto [&_>_span:nth-child(2)]:grid [&_>_span:nth-child(2)]:gap-0.5 [&_strong]:min-w-0 [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_small]:min-w-0 [&_small]:overflow-hidden [&_small]:text-ellipsis [&_small]:whitespace-nowrap [&_strong]:text-foreground [&_strong]:text-sm [&_strong]:font-semibold [&_small]:text-muted-foreground [&_small]:text-xs [&_>_svg]:flex-none [&_>_svg]:text-foreground"
                 aria-pressed={active}
                 disabled={frozen || Boolean(workingProfileId)}
-                onClick={() => void select(profile.id)}
+                onClick={() => select(profile.id)}
               >
                 <ServiceLogo provider={profile.provider} size="large" />
                 <span><strong>{profile.name}</strong><small>{serviceHost(profile.remoteUrl)} · {status}</small></span>
@@ -105,12 +96,12 @@ export function ProfilesDialog({
           );
         })}
       </div>}
-      {transferMessage && <p role="status" className="text-sm text-muted-foreground">{transferMessage}</p>}
+      {transfer && !transfer.failed && <p role="status" className="text-sm text-muted-foreground">{transfer.message}</p>}
       {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
       <DialogFooter>
         <div className="flex items-center gap-2 sm:mr-auto">
           <Button ref={newProfileButton} type="button" variant="outline" aria-haspopup="dialog" disabled={frozen || Boolean(workingProfileId)} onClick={() => editor.show({})}><Plus size={15} />New Profile</Button>
-          <ProfileTransfer api={desktopApi} disabled={busy || Boolean(workingProfileId)} onBusy={setTransferBusy} onMessage={(message, failed) => { setError(failed ? message : undefined); setTransferMessage(failed ? undefined : message); }} />
+          <ProfileTransfer api={desktopApi} disabled={busy || Boolean(workingProfileId)} onResult={(message, failed) => { activate.reset(); setTransfer({ message, failed }); }} />
         </div>
         <Button type="button" variant="outline" disabled={Boolean(workingProfileId) || transferBusy} onClick={onClose}>Done</Button>
       </DialogFooter>
@@ -150,8 +141,8 @@ export function ProfileEditorDialog({
   state: AppState;
   profile?: ConfidentialProfile;
   startAfterSave?: boolean;
-  onSave(profile: ConfidentialProfileInput, key?: string): Promise<string | undefined>;
-  onDelete(profileId: string): Promise<string | undefined>;
+  onSave(profile: ConfidentialProfileInput, key?: string): Promise<void>;
+  onDelete(profileId: string): Promise<void>;
   onComplete(): void;
 } & DialogControl): React.JSX.Element {
   const busy = state.status === "verifying";
@@ -169,9 +160,6 @@ export function ProfileEditorDialog({
     };
   });
   const [apiKeyDraft, setApiKeyDraft] = useState("");
-  const [saving, setSaving] = useState(false);
-  const saveInFlight = useRef(false);
-  const autoSaveAttempt = useRef<string | undefined>(undefined);
   const [authMethod, setAuthMethod] = useState<"account" | "apiKey">(profile?.auth.kind === "apiKey" ? "apiKey" : "account");
   const [error, setError] = useState<string>();
   const reportError = useCallback((failure: unknown) => setError(errorMessage(failure)), []);
@@ -179,16 +167,8 @@ export function ProfileEditorDialog({
   const account = useAccountLogin(desktopApi, reportError);
   const { session: login, auth: authorized } = account;
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<number>();
-  const pendingWorkspaceSave = useRef<number | undefined>(undefined);
-  const [callbackDraft, setCallbackDraft] = useState("");
-  useEffect(() => setCallbackDraft(""), [login?.id]);
 
-  const working = saving || account.busy;
-  const closeEditor = async () => {
-    if (!saveInFlight.current && await account.cancel()) onClose();
-  };
   const signIn = async () => {
-    pendingWorkspaceSave.current = undefined;
     setSelectedWorkspaceId(undefined);
     setError(undefined);
     try {
@@ -208,13 +188,16 @@ export function ProfileEditorDialog({
     && profile.auth.kind === (authMethod === "account" ? "oauth" : "apiKey");
   const detailsEnabled = savedCredentialApplies && provider.workspaces && authMethod === "account" && Boolean(profile?.id);
   const { data: currentDetails, error: detailsError } = useQuery({
-    queryKey: detailsEnabled ? ["account-details", profile?.id, profile?.credentialRef] : ["account-details", null],
-    queryFn: () => desktopApi.getAccountDetails(profile?.id ?? ""), enabled: detailsEnabled, staleTime: 30_000,
+    queryKey: ["account-details", profile?.id, profile?.credentialRef],
+    queryFn: detailsEnabled && profile ? () => desktopApi.getAccountDetails(profile.id) : skipToken,
+    staleTime: 30_000,
   });
   const workspaceError = detailsError ? errorMessage(detailsError) : undefined;
   const workspaces = account.details?.workspaces ?? currentDetails?.workspaces;
   const savedScope = profile?.auth.kind === "oauth" ? profile.auth.scope : undefined;
-  const workspaceId = selectedWorkspaceId ?? (authorized
+  // A workspace chosen before signing in again must be one the sign-in offers.
+  const chosenWorkspaceId = authorized && !workspaces?.some((item) => item.id === selectedWorkspaceId) ? undefined : selectedWorkspaceId;
+  const workspaceId = chosenWorkspaceId ?? (authorized
     ? workspaces?.length === 1 ? workspaces[0]?.id : undefined
     : savedScope?.workspaceId ?? undefined);
   const needsWorkspace = Boolean(authorized && provider.workspaces && workspaces?.length && workspaceId === undefined);
@@ -233,7 +216,6 @@ export function ProfileEditorDialog({
 
   const chooseService = async (next: ServiceProvider) => {
     if (!await account.cancel()) return;
-    pendingWorkspaceSave.current = undefined;
     setSelectedWorkspaceId(undefined);
     const nextProvider = SERVICE_PROVIDERS[next];
     setDraft((current) => {
@@ -249,15 +231,10 @@ export function ProfileEditorDialog({
     setApiKeyDraft("");
   };
   const chooseAuthMethod = async (next: "account" | "apiKey") => {
-    if (!await account.cancel()) return;
-    pendingWorkspaceSave.current = undefined;
-    setAuthMethod(next);
+    if (await account.cancel()) setAuthMethod(next);
   };
-  const removeProfile = async () => {
-    if (working || frozen) return;
-    setSaving(true);
-    setError(undefined);
-    try {
+  const remove = useMutation({
+    mutationFn: async () => {
       const current = await desktopApi.getState();
       const needsStop = !current.configurationVerification && ["verified", "blocked", "verifying"].includes(current.status);
       const confirmed = await confirm({
@@ -268,57 +245,50 @@ export function ProfileEditorDialog({
       });
       if (!confirmed) return;
       if (needsStop) await desktopApi.stop();
-      const message = await onDelete(draft.id);
-      if (message) reportError(message);
-      else await account.cancel();
-    } catch (error) { reportError(error); }
-    finally { setSaving(false); }
-  };
-  const save = useCallback(async () => {
-    if (saveInFlight.current || working || frozen || needsAccountLogin || needsWorkspace) return;
-    saveInFlight.current = true;
-    setSaving(true);
-    setError(undefined);
-    try {
-      if (!authorized && running && profile?.id === state.activeProfileId && !await confirm({ title: "Save and reconnect?", message: "Saving this active profile restarts protection. In-flight requests may be interrupted.", confirmLabel: "Save and Reconnect" })) return;
+      await onDelete(draft.id);
+      await account.cancel();
+    },
+    onMutate: () => setError(undefined),
+    onError: reportError,
+  });
+  // Resolves whether the editor is done. A sign-in completes in the browser;
+  // Save then saves the account it connected.
+  const save = useMutation({
+    mutationFn: async () => {
+      if (!authorized && running && profile?.id === state.activeProfileId && !await confirm({ title: "Save and reconnect?", message: "Saving this active profile restarts protection. In-flight requests may be interrupted.", confirmLabel: "Save and Reconnect" })) return false;
       if (!authorized && authMethod === "account" && provider.workspaces
         && workspaceId !== undefined && workspaceId !== savedScope?.workspaceId) {
-        pendingWorkspaceSave.current = workspaceId;
-        if (!await account.start(draft)) pendingWorkspaceSave.current = undefined;
-        return;
+        // Another workspace needs a new sign-in.
+        await account.start(draft);
+        return false;
       }
       if (authorized && login && authMethod === "account") {
         const saved = await desktopApi.saveAccountLogin(login.id, draft, state.config.requireProductionOs, workspaceId);
         account.consume();
+        toast.success(`${draft.name} saved`);
         if (startAfterSave) await desktopApi.start(saved.config);
-        onComplete();
-        return;
+        return true;
       }
-      const message = await onSave(draft, authMethod === "apiKey" || !provider.accountLogin ? apiKeyDraft.trim() || undefined : undefined);
-      if (message) reportError(message);
-      else onComplete();
-    } catch (error) { reportError(error); }
-    finally { saveInFlight.current = false; setSaving(false); }
-  }, [working, frozen, needsAccountLogin, needsWorkspace, authorized, running, profile?.id, state.activeProfileId, login, authMethod, draft, provider, state.config.requireProductionOs, workspaceId, account.consume, startAfterSave, onComplete, onSave, apiKeyDraft, savedScope?.workspaceId, account.start, reportError, confirm]);
-
-  useEffect(() => {
-    if (!authorized || !login || working || frozen || autoSaveAttempt.current === login.id) return;
-    const pendingWorkspace = pendingWorkspaceSave.current;
-    // Without a workspace to choose, a completed sign-in saves at once.
-    if (provider.workspaces && pendingWorkspace === undefined) return;
-    pendingWorkspaceSave.current = undefined;
-    autoSaveAttempt.current = login.id;
-    if (pendingWorkspace !== undefined && !workspaces?.some((item) => item.id === pendingWorkspace)) {
-      setSelectedWorkspaceId(undefined);
-      reportError("The selected workspace is no longer available. Choose a workspace and save again.");
-      return;
-    }
-    void save();
-  }, [authorized, login, provider, workspaces, working, frozen, save, reportError]);
+      await onSave(draft, authMethod === "apiKey" || !provider.accountLogin ? apiKeyDraft.trim() || undefined : undefined);
+      return true;
+    },
+    onMutate: () => setError(undefined),
+    onSuccess: (done) => { if (done) onComplete(); },
+    onError: reportError,
+  });
+  const saving = save.isPending || remove.isPending;
+  const working = saving || account.busy;
+  const closeEditor = async () => {
+    if (!saving && await account.cancel()) onClose();
+  };
+  const submit = () => {
+    if (!working && !frozen && !needsAccountLogin && !needsWorkspace) save.mutate();
+  };
+  const formError = error ?? (account.error ? errorMessage(account.error) : undefined);
 
   return (
     <AppDialog {...control} title={isNew ? "New profile" : "Edit profile"} className="sm:max-w-lg" dismissible={!saving && !account.working} onClose={() => void closeEditor()}>
-      <form className="flex min-h-0 flex-col gap-4" onSubmit={(event) => { event.preventDefault(); void save(); }}>
+      <form className="flex min-h-0 flex-col gap-4" onSubmit={(event) => { event.preventDefault(); submit(); }}>
         <div className="-mx-6 min-h-0 overflow-y-auto px-6 py-1">
         <FieldGroup className="gap-4 [&_[data-slot=field]]:gap-2">
         <Field>
@@ -353,13 +323,7 @@ export function ProfileEditorDialog({
                   </div>
                   {provider.callbackUrl && <details>
                     <summary className="text-sm text-muted-foreground">Paste callback link</summary>
-                    <div className="mt-3 space-y-2">
-                      <FormField id="account-callback" label="Callback URL">
-                        <Input id="account-callback" type="password" value={callbackDraft} autoComplete="off" spellCheck={false} disabled={account.working}
-                          placeholder="http://127.0.0.1:4181/oauth/callback?…" onChange={(event) => setCallbackDraft(event.target.value)} />
-                      </FormField>
-                      <Button type="button" variant="outline" disabled={account.working || !callbackDraft.trim()} onClick={() => { const value = callbackDraft; setCallbackDraft(""); void account.complete(value); }}>Continue</Button>
-                    </div>
+                    <CallbackForm key={login.id} disabled={account.working} onContinue={account.complete} />
                   </details>}
                 </div> : selectedAccount ? <>
                   <AccountTools key={login?.id ?? draft.id} api={desktopApi} provider={draft.provider}
@@ -389,13 +353,25 @@ export function ProfileEditorDialog({
           </Tabs>
         </FieldGroup>
         </div>
-        <FieldError>{error}</FieldError>
+        <FieldError>{formError}</FieldError>
         <DialogFooter>
-          {!isNew && <Button type="button" variant="destructive" className="sm:mr-auto" disabled={working || frozen} onClick={() => void removeProfile()}><Trash2 size={14} />Delete Profile</Button>}
+          {!isNew && <Button type="button" variant="destructive" className="sm:mr-auto" disabled={working || frozen} onClick={() => remove.mutate()}><Trash2 size={14} />Delete Profile</Button>}
           <Button type="button" variant="outline" onClick={() => void closeEditor()} disabled={saving || account.working}>Cancel</Button>
-          {!needsAccountLogin && <Button type="submit" variant="default" disabled={working || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || needsWorkspace || (!authorized && !savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Saving…" : authorized && !provider.workspaces ? "Retry" : "Save"}</Button>}
+          {!needsAccountLogin && <Button type="submit" variant="default" disabled={working || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || needsWorkspace || (!authorized && !savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Saving…" : "Save"}</Button>}
         </DialogFooter>
       </form>
     </AppDialog>
   );
+}
+
+/** The callback link a sign-in returns to, pasted by hand; each sign-in starts empty. */
+function CallbackForm({ disabled, onContinue }: { disabled: boolean; onContinue(callbackUrl: string): void }): React.JSX.Element {
+  const [callbackUrl, setCallbackUrl] = useState("");
+  return <div className="mt-3 space-y-2">
+    <FormField id="account-callback" label="Callback URL">
+      <Input id="account-callback" type="password" value={callbackUrl} autoComplete="off" spellCheck={false} disabled={disabled}
+        placeholder="http://127.0.0.1:4181/oauth/callback?…" onChange={(event) => setCallbackUrl(event.target.value)} />
+    </FormField>
+    <Button type="button" variant="outline" disabled={disabled || !callbackUrl.trim()} onClick={() => { setCallbackUrl(""); onContinue(callbackUrl); }}>Continue</Button>
+  </div>;
 }

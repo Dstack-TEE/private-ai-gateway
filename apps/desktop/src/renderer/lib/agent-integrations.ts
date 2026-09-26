@@ -1,22 +1,13 @@
-import type { QueryClient } from "@tanstack/react-query";
+// Node runs `npm run test:agents` on this file as is, so a value import names its file.
+import { AGENTS } from "../../shared/contracts.generated.ts";
 import type { AgentAccessStatus, AgentStatus, DesktopApi } from "../../shared/contracts";
 
 export type AgentIntegrations = { accessStatus: AgentAccessStatus; agents: AgentStatus[] };
 type AccessApi = Pick<DesktopApi, "getAgentAccess" | "requestAgentAccess" | "listAgents">;
 
-// Keep the pre-authorization catalog available without touching Home.
-const SUPPORTED_AGENTS = [
-  ["claude-code", "Claude Code"],
-  ["codex", "Codex"],
-  ["hermes", "Hermes Agent"],
-  ["pi", "Pi"],
-  ["oh-my-pi", "Oh My Pi"],
-  ["opencode", "OpenCode"],
-  ["openclaw", "OpenClaw"],
-] as const;
-
+/** The supported agents, listed before authorization without touching Home. */
 export function supportedAgentStatuses(): AgentStatus[] {
-  return SUPPORTED_AGENTS.map(([id, name]) => ({
+  return AGENTS.map(({ id, name }) => ({
     id,
     name,
     configPath: "",
@@ -56,26 +47,4 @@ export async function readAgentIntegrations(api: AccessApi, requiresAuthorizatio
 
 export function agentIntegrationsLocked(accessStatus: AgentAccessStatus | undefined, pending: boolean): boolean {
   return pending || accessStatus !== "authorized";
-}
-
-/** One explicit authorization action, including its scan and cache publication. */
-export function createAgentAccessAction(api: AccessApi, requiresAuthorization: boolean, client: QueryClient, onPendingChange: (pending: boolean) => void) {
-  let pending = false;
-  return {
-    get pending() { return pending; },
-    async run() {
-      if (!requiresAuthorization || pending) return;
-      pending = true;
-      onPendingChange(true);
-      try {
-        await client.cancelQueries({ queryKey: ["agents"] });
-        const integrations = await readAgentIntegrations(api, requiresAuthorization, true);
-        await client.cancelQueries({ queryKey: ["agents"] });
-        client.setQueryData<AgentIntegrations>(["agents"], integrations);
-      } finally {
-        pending = false;
-        onPendingChange(false);
-      }
-    },
-  };
 }

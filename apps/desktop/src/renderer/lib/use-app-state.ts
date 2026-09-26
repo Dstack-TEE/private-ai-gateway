@@ -1,26 +1,35 @@
-import { useCallback, useEffect, useRef, type SetStateAction } from "react";
+import { useCallback, useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { DesktopApi, AppState } from "../../shared/contracts";
 
 const key = ["app-state"];
 
-/** Rust owns this snapshot. Events and command results supersede pending reads. */
-export function useAppState(api: DesktopApi, fallback: AppState) {
+/**
+ * The newer of two states. Reads, events and command results arrive in any
+ * order; the states of one backend instance carry increasing sequences.
+ */
+function newer(current: AppState | undefined, next: AppState): AppState {
+  return current && current.backendInstance === next.backendInstance && current.sequence > next.sequence ? current : next;
+}
+
+/** Rust owns this snapshot; the window keeps the newest one it receives. */
+export function useAppState(api: DesktopApi) {
   const client = useQueryClient();
-  const query = useQuery({ queryKey: key, queryFn: () => api.getState(), retry: false });
-  const usageRevision = useRef(query.data?.usageRevision);
-  useEffect(() => {
-    if (usageRevision.current === query.data?.usageRevision) return;
-    usageRevision.current = query.data?.usageRevision;
-    void client.invalidateQueries({ queryKey: ["usage"] });
-    void client.invalidateQueries({ queryKey: ["usage-record"] });
-    void client.invalidateQueries({ queryKey: ["usage-receipt"] });
-  }, [client, query.data?.usageRevision]);
-  const setState = useCallback((next: SetStateAction<AppState>) => {
-    void client.cancelQueries({ queryKey: key }).then(() => {
-      client.setQueryData<AppState>(key, (current) => typeof next === "function" ? next(current ?? fallback) : next);
-    });
-  }, [client, fallback]);
+  const query = useQuery({
+    queryKey: key,
+    queryFn: async () => newer(client.getQueryData(key), await api.getState()),
+    retry: false,
+  });
+  const setState = useCallback((next: AppState) => {
+    const current = client.getQueryData<AppState>(key);
+    const state = newer(current, next);
+    if (state === current) return;
+    client.setQueryData(key, state);
+    // Usage queries follow persisted usage, not the bounded activity preview.
+    if (current && current.usageRevision !== state.usageRevision) {
+      for (const queryKey of [["usage"], ["usage-record"], ["usage-receipt"]]) void client.invalidateQueries({ queryKey });
+    }
+  }, [client]);
   useEffect(() => api.onStateChange(setState), [api, setState]);
   return { ...query, setState };
 }

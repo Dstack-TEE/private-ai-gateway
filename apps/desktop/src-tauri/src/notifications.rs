@@ -2,7 +2,9 @@ mod permission;
 use desktop_core::{
     client::CallError,
     config::NotificationPreferences,
-    contracts::{AppState, VerificationStatus},
+    contracts::{
+        AppState, NotificationConfiguration, NotificationPermissionStatus, VerificationStatus,
+    },
 };
 use std::{
     sync::Mutex,
@@ -14,22 +16,14 @@ use tauri_plugin_notification::NotificationExt;
 #[derive(Default)]
 pub struct Settings(Mutex<NotificationPreferences>);
 
-#[derive(serde::Serialize)]
-pub struct Configuration {
-    preferences: NotificationPreferences,
-    #[serde(flatten)]
-    system: permission::PermissionStatus,
-}
-
 pub async fn configuration(
     app: &AppHandle,
     preferences: NotificationPreferences,
-) -> Result<serde_json::Value, String> {
-    serde_json::to_value(Configuration {
+) -> NotificationConfiguration {
+    NotificationConfiguration {
         preferences,
         system: permission::query(app).await,
-    })
-    .map_err(|_| "Management response failed".to_string())
+    }
 }
 
 pub fn set_cached_preferences(
@@ -46,7 +40,7 @@ pub fn set_cached_preferences(
 #[tauri::command]
 pub async fn request_notification_permission(
     app: AppHandle,
-) -> Result<permission::PermissionStatus, CallError> {
+) -> Result<NotificationPermissionStatus, CallError> {
     permission::request(&app).await?;
     Ok(permission::query(&app).await)
 }

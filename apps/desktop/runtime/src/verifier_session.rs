@@ -674,9 +674,9 @@ impl SessionManager {
                 _ => {}
             }
         }
-        let state = runtime.state.clone();
+        let changes = self.send(&mut runtime);
         drop(runtime);
-        self.send(state).write();
+        changes.write();
     }
 
     /// Refresh discovery without revoking the current verified session.
@@ -843,16 +843,19 @@ impl SessionManager {
     fn publish(&self) {
         // Sent under the lock so publications keep their order; logged after it.
         let changes = match self.lock() {
-            Ok(runtime) => self.send(runtime.state.clone()),
+            Ok(mut runtime) => self.send(&mut runtime),
             Err(_) => return,
         };
         changes.write();
     }
 
-    /// Every state change goes through here. A new status or error is also
-    /// logged, so the service log keeps what clients were shown; the caller
-    /// writes it once it holds no lock.
-    fn send(&self, state: AppState) -> StateLog {
+    /// Every state change goes through here, under the lock, and takes the
+    /// next sequence. A new status or error is also logged, so the service log
+    /// keeps what clients were shown; the caller writes it once it holds no
+    /// lock.
+    fn send(&self, runtime: &mut RuntimeState) -> StateLog {
+        runtime.state.sequence += 1;
+        let state = runtime.state.clone();
         let (status, error) = (state.status, state.error.clone());
         let previous = self.state_tx.send_replace(state);
         StateLog {

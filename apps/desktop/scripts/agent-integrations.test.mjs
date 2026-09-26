@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { QueryClient, QueryObserver } from "@tanstack/react-query";
-import { agentIntegrationsLocked, completeAgentStatuses, createAgentAccessAction, readAgentIntegrations, supportedAgentStatuses } from "../src/renderer/lib/agent-integrations.ts";
+import { agentIntegrationsLocked, completeAgentStatuses, readAgentIntegrations, supportedAgentStatuses } from "../src/renderer/lib/agent-integrations.ts";
 
 function fixture(status, enabledStatus = status) {
   const calls = [];
@@ -58,81 +57,6 @@ test("Direct and non-macOS scan without calling authorization APIs", async () =>
   const { api, calls, agents } = fixture("authorizationRequired");
   assert.deepEqual(await readAgentIntegrations(api, false), { accessStatus: "authorized", agents });
   assert.deepEqual(calls, ["scan"]);
-});
-
-function deferred() {
-  let resolve;
-  const promise = new Promise((done) => { resolve = done; });
-  return { promise, resolve };
-}
-
-test("Enable serializes requests and publishes scanned results to shared observers before unlocking", async () => {
-  const { api, calls, agents } = fixture("authorizationRequired");
-  const access = deferred();
-  const scan = deferred();
-  api.requestAgentAccess = () => { calls.push("enable"); return access.promise; };
-  api.listAgents = () => { calls.push("scan"); return scan.promise; };
-  const client = new QueryClient();
-  client.setQueryData(["agents"], { accessStatus: "authorizationRequired", agents: [] });
-  const observed = [];
-  const observer = new QueryObserver(client, { queryKey: ["agents"], enabled: false });
-  const unsubscribe = observer.subscribe(({ data }) => observed.push(data));
-  const pending = [];
-  const action = createAgentAccessAction(api, true, client, (value) => pending.push(value));
-  const locked = () => agentIntegrationsLocked(client.getQueryData(["agents"])?.accessStatus, action.pending);
-  try {
-    assert.equal(locked(), true);
-    const first = action.run();
-    await action.run();
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(action.pending, true);
-    assert.deepEqual(calls, ["enable"]);
-    access.resolve("authorized");
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.deepEqual(calls, ["enable", "scan"]);
-    assert.equal(locked(), true);
-    assert.deepEqual(client.getQueryData(["agents"]).agents, []);
-    scan.resolve(agents);
-    await first;
-    assert.equal(locked(), false);
-    assert.deepEqual(client.getQueryData(["agents"]), { accessStatus: "authorized", agents });
-    assert.deepEqual(observed.at(-1), { accessStatus: "authorized", agents });
-    assert.deepEqual(pending, [true, false]);
-    assert.deepEqual(calls, ["enable", "scan"]); // Enabling never connects.
-  } finally { unsubscribe(); client.clear(); }
-});
-
-test("cancel remains locked and allows retry; failed scans also release the request guard", async () => {
-  const { api, calls, agents } = fixture("authorizationRequired");
-  const client = new QueryClient();
-  const action = createAgentAccessAction(api, true, client, () => {});
-  try {
-    await action.run();
-    assert.equal(action.pending, false);
-    assert.equal(agentIntegrationsLocked(client.getQueryData(["agents"]).accessStatus, action.pending), true);
-    assert.deepEqual(calls, ["enable"]);
-    api.requestAgentAccess = async () => "authorized";
-    api.getAgentAccess = async () => "authorized";
-    api.listAgents = async () => { throw new Error("Scan unavailable"); };
-    await assert.rejects(action.run(), /Scan unavailable/);
-    assert.equal(action.pending, false);
-    assert.equal(agentIntegrationsLocked(client.getQueryData(["agents"]).accessStatus, false), true);
-    api.listAgents = async () => agents;
-    await action.run();
-    assert.equal(agentIntegrationsLocked(client.getQueryData(["agents"]).accessStatus, false), false);
-  } finally { client.clear(); }
-});
-
-test("Direct / Windows / Linux actions never request access, including before the initial scan", async () => {
-  const { api, calls } = fixture("authorizationRequired");
-  const client = new QueryClient();
-  try {
-    const action = createAgentAccessAction(api, false, client, () => assert.fail("must not start authorization"));
-    await action.run();
-    assert.equal(action.pending, false);
-    assert.deepEqual(calls, []);
-    assert.equal(agentIntegrationsLocked("authorized", false), false);
-  } finally { client.clear(); }
 });
 
 test("connection gate covers missing access, revoked access, and the whole pending scan", () => {

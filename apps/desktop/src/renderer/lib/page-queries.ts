@@ -1,14 +1,18 @@
 import { queryOptions } from "@tanstack/react-query";
 import type { UsageQuery } from "../../shared/contracts";
 import { desktopApi } from "./environment";
-import { usageDateBounds } from "./usage-dates";
+import { USAGE_SEARCH_DEFAULTS, usageDateBounds, usageDateSelection, type UsageSearch } from "./usage-dates";
 
-export function usagePageQuery(query?: UsageQuery) {
-  const { since, until } = usageDateBounds({ preset: "7d" });
-  const request = query ?? { since, until, limit: 20 };
+/** The first page of usage the Usage page's filters select. */
+export function usageFilters(search: UsageSearch): UsageQuery {
+  const { since, until } = usageDateBounds(usageDateSelection(search));
+  return { agent: search.agent, model: search.model, since, until, limit: search.rows ?? USAGE_SEARCH_DEFAULTS.rows };
+}
+
+export function usagePageQuery(query: UsageQuery) {
   return queryOptions({
-    queryKey: ["usage", request],
-    queryFn: () => desktopApi.queryUsage(request),
+    queryKey: ["usage", query],
+    queryFn: () => desktopApi.queryUsage(query),
   });
 }
 

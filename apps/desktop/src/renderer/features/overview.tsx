@@ -70,7 +70,7 @@ export function OverviewPage(): React.JSX.Element {
           />
         </OverviewModule>
         <OverviewModule stretch={false} title="Agents" description="Use private AI in your agents." action={agents.accessStatus !== "authorized" || agents.authorizing
-          ? <Button type="button" variant="outline" size="sm" className="relative min-w-20" disabled={!agents.accessStatus || agents.authorizing} aria-busy={agents.authorizing} aria-label="Enable" onClick={() => void agents.requestAccess()}>
+          ? <Button type="button" variant="outline" size="sm" className="relative min-w-20" disabled={!agents.accessStatus || agents.authorizing} aria-busy={agents.authorizing} aria-label="Enable" onClick={agents.requestAccess}>
               <span className={agents.authorizing ? "invisible" : undefined}>Enable</span>
               {agents.authorizing && <LoaderCircle aria-hidden="true" className="absolute animate-spin" />}
             </Button>

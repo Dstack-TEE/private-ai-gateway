@@ -5,10 +5,11 @@ endpoints use manual keys. The API key tab provides a Get API key button for
 Phala and RedPill, opening their official dashboard in the system browser;
 Phala keys are created under Confidential AI API. Account sign-in continues
 to use the existing official authorization flow. Provider buttons with their icons stay in the form
-content. Phala completes automatically after browser authorization, which already
-selects its workspace. RedPill displays a standard workspace selector and Save,
-including when only one workspace is available. Failed persistence
-keeps the authorization available through Retry, without signing in again.
+content. After browser authorization the editor shows the connected account and
+Save stores it. Phala's authorization already selects its workspace; RedPill
+displays a standard workspace selector, including when only one workspace is
+available. Failed persistence keeps the authorization available to Save again,
+without signing in again.
 Manual keys and ordinary profile edits use Save. Persistence does not start gateway verification. Preset service endpoints are hidden. The runtime owns the
 browser authorization, verification and `credentials.toml`; the renderer only
 receives presentation and non-secret account metadata.
@@ -108,15 +109,16 @@ that organization. One workspace is preselected; multiple workspaces require a
 choice. Save sends that workspace ID and the API rechecks its ownership and membership. The saved profile retains non-secret
 organization/workspace names. Changing organization requires signing in again;
 saved RedPill profiles load their workspace options using their managed key.
-Choosing another workspace and clicking Save starts fresh authorization, then
-finishes that same save if the chosen workspace remains available. Cancellation
+Choosing another workspace and clicking Save starts fresh authorization; once it
+completes, Save stores the chosen workspace if the sign-in still offers it. Cancellation
 or failure preserves the saved profile. Deploy the API's managed-key account
 read support before releasing this editor change. Phala
 has no separate organization tier: its workspace (team) is selected in the browser.
 
 Balances load in the profile editor after authorization or when opening a saved
 account. Overview does not query balances or read credentials for this purpose.
-The editor refreshes every minute and revalidates on focus after 30 seconds.
+The editor refreshes every minute and whenever the window becomes active, as on
+returning from the billing page.
 The runtime coalesces concurrent windows by login ID or profile ID plus
 credential reference; successful results live for 30 seconds and failures for 10.
 A replaced credential cannot reuse an old cache entry. Balance reads do not update

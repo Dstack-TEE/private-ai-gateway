@@ -9,9 +9,7 @@ use desktop_core::{
     contracts::CliRegistration,
     maintenance::ProfileBackup,
     protocol::{rpc, Preference},
-    ui_api::Method,
 };
-use serde_json::json;
 use tauri::{AppHandle, Manager, State, WebviewWindow};
 use tauri_plugin_dialog::{DialogExt, FileDialogBuilder, FilePath};
 
@@ -42,15 +40,7 @@ pub(crate) async fn export_profiles(
     window: WebviewWindow,
     client: State<'_, Arc<Client>>,
 ) -> Result<bool, CallError> {
-    let content = crate::ui_api::invoke(
-        window.clone(),
-        client,
-        Method::ExportProfilesContent,
-        json!({}),
-    )
-    .await?;
-    let content: String =
-        serde_json::from_value(content).map_err(|_| "Management response failed")?;
+    let content = desktop_core::ui_api::call(client.inner(), rpc::ExportProfilesContent).await?;
     save(
         &window,
         "Export Profiles (No Keys)",
@@ -162,13 +152,12 @@ pub(crate) async fn get_cli_registration(app: AppHandle) -> Result<CliRegistrati
         distribution::CAPABILITIES.cli_registration,
         "Command registration is unavailable in this distribution",
     )?;
-    #[cfg(target_os = "macos")]
-    crate::register_cli_on_startup(&app).await;
+    let startup = app.state::<CliStartup>().inner().clone();
+    let state = startup.0.lock().await;
     let registration = run_cli_command(&app, vec!["cli", "status", "--json"]).await?;
-    let startup_error = app.state::<CliStartup>().0.lock().await.last_error.clone();
     Ok(CliRegistration {
         registration,
-        startup_error,
+        startup_error: state.last_error.clone(),
     })
 }
 
@@ -181,9 +170,7 @@ pub(crate) async fn set_cli_registration(
         distribution::CAPABILITIES.cli_registration,
         "Command registration is unavailable in this distribution",
     )?;
-    #[cfg(target_os = "macos")]
-    crate::register_cli_on_startup(&app).await;
-    let startup = app.state::<CliStartup>();
+    let startup = app.state::<CliStartup>().inner().clone();
     let mut state = startup.0.lock().await;
     let client = app.state::<Arc<Client>>().inner().clone();
     if !installed {

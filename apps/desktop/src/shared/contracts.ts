@@ -12,10 +12,14 @@ import type {
   CliRegistration,
   AppState,
   ImportResult,
+  LaunchPreference,
   LaunchPreferences,
   ListenAddress,
   ListenConfig,
   LoginPresentation,
+  NavigationTarget,
+  NotificationConfiguration,
+  NotificationPermissionStatus,
   NotificationPreferences,
   ProfileBackup,
   RequestActivity,
@@ -25,22 +29,10 @@ import type {
   UpdateInfo,
   UsagePage,
   UsageQuery,
-  VerificationCheck,
   WebUiConfig,
 } from "./contracts.generated";
 
 export * from "./contracts.generated";
-
-export type CheckStatus = VerificationCheck["status"];
-
-export interface NotificationConfiguration {
-  preferences: NotificationPreferences;
-  permission: "granted" | "denied" | "notDetermined" | "unknown" | "unsupported";
-  alertsEnabled?: boolean;
-}
-
-/** What a tray or menu item asks the main window to show or open. */
-export type NavigationTarget = "settings" | "agents" | "profiles" | "profile-setup";
 
 export interface DesktopApi {
   startBackendService(): Promise<AppState>;
@@ -53,7 +45,7 @@ export interface DesktopApi {
   prepareUpdate(): Promise<UpdateInfo>;
   restartToUpdate(): Promise<void>;
   getLaunchPreferences(): Promise<LaunchPreferences>;
-  setLaunchPreference(name: keyof LaunchPreferences, enabled: boolean): Promise<LaunchPreferences>;
+  setLaunchPreference(name: LaunchPreference, enabled: boolean): Promise<LaunchPreferences>;
   onLaunchPreferencesChange(listener: (preferences: LaunchPreferences) => void): () => void;
   getCliRegistration(): Promise<CliRegistration>;
   setCliRegistration(installed: boolean): Promise<CliRegistration>;
@@ -86,7 +78,7 @@ export interface DesktopApi {
   saveDiagnosticsExport(): Promise<boolean>;
   importProfiles(backup: ProfileBackup): Promise<ImportResult>;
   saveNotificationSettings(config: NotificationPreferences): Promise<void>;
-  requestNotificationPermission(): Promise<Pick<NotificationConfiguration, "permission" | "alertsEnabled">>;
+  requestNotificationPermission(): Promise<NotificationPermissionStatus>;
   openNotificationSettings(): Promise<void>;
   getState(): Promise<AppState>;
   resetSettings(): Promise<AppState>;

@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { useMutation } from "@tanstack/react-query";
 import { Check, Copy, Eye, EyeOff, RefreshCw } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { ListenerFields } from "../components/listen-address";
@@ -108,64 +109,52 @@ export function LocalApiDialog({
   /** Rejects when the value was not copied. */
   onCopy(label: string, value: string): Promise<void>;
   onToggleKey(): void;
-  onRotate(): Promise<string | undefined>;
-  onSave(config: ListenConfig): Promise<string | undefined>;
+  onRotate(): Promise<void>;
+  onSave(config: ListenConfig): Promise<void>;
 } & DialogControl): React.JSX.Element {
   const frozen = state.status === "verifying";
   const [draft, setDraft] = useState<ListenConfig>(state.localApi);
   const addressKind = localAddressKind(draft.listenAddress);
   const networkAccess = Boolean(addressKind && addressKind !== "loopback");
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
+  const report = (failure: unknown) => setError(errorMessage(failure));
   const confirm = useConfirm();
-  const rotateKey = async () => {
-    setSaving(true);
-    setError(undefined);
-    try {
-      const confirmed = await confirm({
+  const rotate = useMutation({
+    mutationFn: async () => {
+      if (await confirm({
         title: "Rotate the Local API key?",
         message: "The old key stops working immediately. Update your tools with the new key. Agent credentials do not change. In-flight requests may be interrupted.",
         confirmLabel: "Rotate Key",
         destructive: true,
-      });
-      if (confirmed) setError(await onRotate());
-    } catch (failure) {
-      setError(errorMessage(failure));
-    } finally {
-      setSaving(false);
-    }
-  };
-  const copyKey = async () => {
-    setError(undefined);
-    try { await onCopy("Local API key", clientKey); }
-    catch (failure) { setError(errorMessage(failure)); }
-  };
-  const submit = async (event: React.FormEvent) => {
-    event.preventDefault();
-    setSaving(true);
-    setError(undefined);
-    try {
-      if (!addressKind) {
-        setError("Enter a valid IPv4 or IPv6 listen address.");
-        return;
-      }
+      })) await onRotate();
+    },
+    onMutate: () => setError(undefined),
+    onError: report,
+  });
+  // Resolves whether the settings were saved.
+  const save = useMutation({
+    mutationFn: async () => {
+      if (!addressKind) throw new Error("Enter a valid IPv4 or IPv6 listen address.");
       if (networkAccess && !await confirm({
         title: "Allow network access?",
         message: `Listen on ${draft.listenAddress}:${draft.port}? The local API uses unencrypted HTTP. Only use a trusted network, and never expose this port to the internet.`,
         confirmLabel: "Allow and Save",
-      })) return;
-      const message = await onSave({ ...draft, allowNetworkAccess: networkAccess });
-      if (message) setError(message);
-      else onClose();
-    } catch (saveError) {
-      setError(errorMessage(saveError));
-    } finally {
-      setSaving(false);
-    }
+      })) return false;
+      await onSave({ ...draft, allowNetworkAccess: networkAccess });
+      return true;
+    },
+    onMutate: () => setError(undefined),
+    onSuccess: (saved) => { if (saved) onClose(); },
+    onError: report,
+  });
+  const saving = rotate.isPending || save.isPending;
+  const copyKey = () => {
+    setError(undefined);
+    onCopy("Local API key", clientKey).catch(report);
   };
   return (
     <AppDialog {...control} title="Local API settings" className="sm:max-w-xl" dismissible={!saving} onClose={onClose}>
-      <form className="flex min-h-0 flex-col gap-4" onSubmit={(event) => void submit(event)}>
+      <form className="flex min-h-0 flex-col gap-4" onSubmit={(event) => { event.preventDefault(); save.mutate(); }}>
         <div className="-mx-6 min-h-0 overflow-y-auto px-6 py-1">
           <FieldGroup>
           <ListenerFields api={desktopApi} idPrefix="local" value={draft} minPort={1024} clientHostNote="Optional host for client URLs and agent configs. Does not change the listener." disabled={frozen || saving} onChange={setDraft} />
@@ -176,8 +165,8 @@ export function LocalApiDialog({
               <InputGroupInput id="local-client-key" className="mono font-mono text-xs" type={clientKeyVisible ? "text" : "password"} value={clientKey} readOnly />
               <InputGroupAddon align="inline-end">
                 <Hint content={clientKeyVisible ? "Hide Local API key" : "Show Local API key"}><InputGroupButton size="icon-xs" aria-label={clientKeyVisible ? "Hide Local API key" : "Show Local API key"} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff /> : <Eye />}</InputGroupButton></Hint>
-                <Hint content="Copy Local API key"><InputGroupButton size="icon-xs" aria-label="Copy Local API key" disabled={saving || !clientKey} onClick={() => void copyKey()}>{copied === "Local API key" ? <Check /> : <Copy />}</InputGroupButton></Hint>
-                <Hint content="Rotate key"><InputGroupButton size="icon-xs" aria-label="Rotate key" disabled={frozen || saving} onClick={() => void rotateKey()}><RefreshCw /></InputGroupButton></Hint>
+                <Hint content="Copy Local API key"><InputGroupButton size="icon-xs" aria-label="Copy Local API key" disabled={saving || !clientKey} onClick={copyKey}>{copied === "Local API key" ? <Check /> : <Copy />}</InputGroupButton></Hint>
+                <Hint content="Rotate key"><InputGroupButton size="icon-xs" aria-label="Rotate key" disabled={frozen || saving} onClick={() => rotate.mutate()}><RefreshCw /></InputGroupButton></Hint>
               </InputGroupAddon>
             </InputGroup>
             {!clientKey && <FieldError>The Local API key is unavailable. Rotate it to restore access.</FieldError>}

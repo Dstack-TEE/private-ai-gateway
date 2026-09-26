@@ -21,3 +21,4 @@ export const desktopApi = backend.desktopApi;
 export const distributionCapabilities = backend.distributionCapabilities;
 /** The browser's sign-in session; only the web build has one. */
 export const session = backend.session;
+export const windowFocus = backend.windowFocus;

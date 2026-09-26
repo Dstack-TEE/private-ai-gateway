@@ -5,7 +5,7 @@ use desktop_core::agent_access::AgentAccessStatus;
 use desktop_core::{
     client::{CallError, Client},
     config::{Appearance, NotificationPreferences},
-    contracts::AppStateWire,
+    contracts::{AppStateWire, NotificationConfiguration},
     protocol::rpc,
     ui_api::{self as shared, Backend, Event, Host, Method},
 };
@@ -78,7 +78,7 @@ impl Host for TauriHost {
     async fn notification_configuration(
         &self,
         preferences: NotificationPreferences,
-    ) -> Result<Value, String> {
+    ) -> NotificationConfiguration {
         notifications::configuration(self.app(), preferences).await
     }
 

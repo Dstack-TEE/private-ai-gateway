@@ -16,12 +16,14 @@ import {
   type AppState,
   type ListenConfig,
   type LoginPresentation,
-  type NotificationConfiguration,
+  type NotificationPermissionStatus,
   type NotificationPreferences,
   type ProfileBackup,
   type RequestActivity,
   type ServiceProvider,
   type StartConfig,
+  type UiEvent,
+  type UiEventPayloads,
   type UiMethod,
   type UpdateChannel,
   type UpdateInfo,
@@ -32,7 +34,7 @@ import {
 
 export interface UiTransport {
   call<T>(method: UiMethod, params?: Record<string, unknown>): Promise<T>;
-  subscribe<T>(event: string, listener: (payload: T) => void): () => void;
+  subscribe<E extends UiEvent>(event: E, listener: (payload: UiEventPayloads[E]) => void): () => void;
 }
 
 export interface UiPlatform {
@@ -51,7 +53,7 @@ export interface UiPlatform {
   selectProfileBackup(): Promise<ProfileBackup | null>;
   saveProfileExport(): Promise<boolean>;
   saveDiagnosticsExport(): Promise<boolean>;
-  requestNotificationPermission(): Promise<Pick<NotificationConfiguration, "permission" | "alertsEnabled">>;
+  requestNotificationPermission(): Promise<NotificationPermissionStatus>;
   openNotificationSettings(): Promise<void>;
   openAboutLink: DesktopApi["openAboutLink"];
   openWebUi(): Promise<void>;
@@ -79,6 +81,11 @@ export interface Backend {
   distributionCapabilities: DistributionCapabilities;
   /** Only the web UI has one. */
   session: WebSession | undefined;
+  /**
+   * Follows the focus of the desktop window for TanStack Query's
+   * `focusManager`; a browser keeps the default, page visibility.
+   */
+  windowFocus: ((setFocused: (focused: boolean) => void) => () => void) | undefined;
 }
 
 export function createDesktopApi(transport: UiTransport, platform: UiPlatform): DesktopApi {

@@ -7,22 +7,16 @@
 //! documentation) and then the source link. Every label comes from the brand
 //! module. Other platforms are tray-only and get no menu bar.
 
-use tauri::AppHandle;
+use desktop_core::brand::AboutLink;
+use tauri::{menu::MenuEvent, AppHandle};
 
 #[cfg(target_os = "macos")]
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
-    use desktop_core::{
-        brand::{AboutLink, ORGANIZATION_NAME, PRODUCT_NAME},
-        ui_api::NAVIGATE_EVENT,
+    use desktop_core::brand::{ORGANIZATION_NAME, PRODUCT_NAME};
+    use tauri::menu::{
+        AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID,
+        WINDOW_SUBMENU_ID,
     };
-    use tauri::{
-        menu::{
-            AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID,
-            WINDOW_SUBMENU_ID,
-        },
-        Emitter,
-    };
-    use tauri_plugin_opener::OpenerExt;
 
     let about = AboutMetadata {
         name: Some(PRODUCT_NAME.to_string()),
@@ -31,7 +25,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         ..AboutMetadata::default()
     };
     // The accelerator sends the same navigate request as the renderer's
-    // shortcut elsewhere; the window ignores it while a modal dialog is open.
+    // shortcut elsewhere; the window shows the page once a modal dialog closes.
     let settings = MenuItem::with_id(app, "settings", "Settings…", true, Some("CmdOrCtrl+,"))?;
     let application = Submenu::with_items(
         app,
@@ -104,28 +98,30 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         app,
         &[&application, &edit, &view, &window, &help],
     )?)?;
-    app.on_menu_event(|app, event| match event.id().as_ref() {
-        "settings" => {
-            crate::tray::show_window(app);
-            let _ = app.emit(NAVIGATE_EVENT, "settings");
-        }
-        "documentation" | "github" => {
-            let link = if event.id().as_ref() == "github" {
-                AboutLink::Github
-            } else {
-                AboutLink::Documentation
-            };
-            if app.opener().open_url(link.url(), None::<&str>).is_err() {
-                crate::notifications::show_failure(
-                    app,
-                    "Could not open the link",
-                    "Your default browser did not open it.",
-                );
-            }
-        }
-        _ => {}
-    });
     Ok(())
+}
+
+/// The one handler of every native menu item. Tauri calls each global menu
+/// listener for every item, `TrayIconBuilder::on_menu_event` registering one
+/// too, so the tray menu and the menu bar share this handler and each item
+/// runs once; Settings… has the same id and action in both.
+pub fn handle_event(app: &AppHandle, event: MenuEvent) {
+    match event.id().as_ref() {
+        "documentation" => open_link(app, AboutLink::Documentation),
+        "github" => open_link(app, AboutLink::Github),
+        id => crate::tray::handle_menu_event(app, id),
+    }
+}
+
+fn open_link(app: &AppHandle, link: AboutLink) {
+    use tauri_plugin_opener::OpenerExt;
+    if app.opener().open_url(link.url(), None::<&str>).is_err() {
+        crate::notifications::show_failure(
+            app,
+            "Could not open the link",
+            "Your default browser did not open it.",
+        );
+    }
 }
 
 #[cfg(not(target_os = "macos"))]

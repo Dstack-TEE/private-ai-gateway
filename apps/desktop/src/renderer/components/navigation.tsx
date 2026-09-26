@@ -1,4 +1,4 @@
-import React from "react";
+import React, { type RefObject } from "react";
 import { Link, useMatches, useRouter } from "@tanstack/react-router";
 import { RotateCw } from "lucide-react";
 import { brand } from "../brand/brand";
@@ -20,7 +20,7 @@ function usePages() {
   });
 }
 
-export function Sidebar(): React.JSX.Element {
+export function Sidebar({ navigationRef }: { navigationRef: RefObject<HTMLElement | null> }): React.JSX.Element {
   const pages = usePages();
   const current = useMatches({ select: (matches) => matches.at(-1)?.routeId });
   const { updates } = useShell();
@@ -31,7 +31,7 @@ export function Sidebar(): React.JSX.Element {
         <BrandMark className="brand-mark size-9" />
         <span className="sidebar-brand-copy min-w-0 flex flex-col gap-0.5 text-sm leading-4.5 [&_small]:text-xs [&_small]:leading-4 [&_small]:font-normal [&_small]:text-muted-foreground"><span>{brand.productName}</span><small>{brand.byline}</small></span>
       </div>
-      <nav className="w-full" id="main-navigation" aria-label="Main navigation">
+      <nav ref={navigationRef} className="w-full" aria-label="Main navigation">
         <SidebarMenu>
         {pages.map((page) => {
           const Icon = page.icon;
@@ -50,7 +50,7 @@ export function Sidebar(): React.JSX.Element {
         </SidebarMenu>
       </nav>
       {updates.ready && <div className="mt-auto pt-4">
-        <Badge variant="outline" className="h-8 w-full gap-2 text-sm hover:bg-muted [&>svg]:size-4!" render={<button type="button" disabled={Boolean(updates.busy)} />} aria-label="Restart to Update" onClick={() => void updates.restart()}>
+        <Badge variant="outline" className="h-8 w-full gap-2 text-sm hover:bg-muted [&>svg]:size-4!" render={<button type="button" disabled={Boolean(updates.busy)} />} aria-label="Restart to Update" onClick={updates.restart}>
           <RotateCw aria-hidden="true" /><span className="max-[620px]:hidden">Restart to Update</span>
         </Badge>
       </div>}
@@ -58,13 +58,13 @@ export function Sidebar(): React.JSX.Element {
   );
 }
 
-export function PageHeader(): React.JSX.Element {
+export function PageHeader({ titleRef }: { titleRef: RefObject<HTMLHeadingElement | null> }): React.JSX.Element {
   const { state, toggleProtection } = useShell();
   const page = useMatches({ select: (matches) => matches.at(-1) });
   const protection = state.protection;
   return (
     <header className="page-header flex-[0_0_56px] mt-0 mr-6 mb-0 ml-6 pt-2 flex items-center justify-between gap-3 [&_h1]:text-xl [&_h1]:font-semibold [&_h1]:tracking-normal [&_h1]:pointer-events-none [&_h1]:select-none max-[620px]:pl-4 max-[620px]:pr-4 max-[440px]:basis-13 max-[440px]:mt-0 max-[440px]:mr-3 max-[440px]:mb-0 max-[440px]:ml-3 max-[440px]:pt-1.75 max-[440px]:gap-2" {...titleBarDragRegion}>
-      <h1 id="page-title" tabIndex={-1}>{page?.staticData.title}</h1>
+      <h1 ref={titleRef} tabIndex={-1}>{page?.staticData.title}</h1>
       {page?.fullPath !== "/" && (
         <div className="page-protection min-w-0 ml-auto flex items-center gap-2">
           <span className={cn("page-switch-copy min-w-0 grid justify-items-end leading-4 [&_strong]:text-xs [&_.protection-status]:grid [&_.protection-status]:grid-cols-[14px_auto] [&_.protection-status]:justify-items-end [&_.protection-status]:gap-x-1.25 [&_.protection-status]:gap-y-0 [&_.protection-duration]:col-span-full", toneTextClass[protection.tone])}>
