@@ -143,7 +143,7 @@ impl MismatchingBackend {
     }
 
     fn ok_response() -> UpstreamResponse {
-        UpstreamResponse {
+        UpstreamResponse { response_attestation: None,
             status_code: 200,
             body: br#"{"id":"chat-ok","object":"chat.completion","model":"model-a","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#.to_vec(),
             headers: std::collections::HashMap::new(),

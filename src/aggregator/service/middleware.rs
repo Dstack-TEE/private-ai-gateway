@@ -20,7 +20,9 @@ use super::{
     ServiceResponseStream, StreamingUpstreamError, UpstreamVerificationError,
 };
 use crate::aci::receipt::{ReceiptBuilder, UpstreamVerifiedEvent};
-use crate::aci::upstream::{UpstreamError, UpstreamRequest, UpstreamResponse};
+use crate::aci::upstream::{
+    UpstreamError, UpstreamRequest, UpstreamResponse, EVENT_UPSTREAM_RESPONSE_ATTESTED,
+};
 use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
 use crate::middleware::errors::{is_upstream_capacity_signal, recorded_attempt_status};
 use crate::sse_framing::SseFramingObserver;
@@ -259,6 +261,11 @@ impl AciService {
         // exact upstream-served model in the receipt's upstream.verified.
         builder.set_upstream_verified_model_id(response_model.clone());
         builder.add_response_received(&response.body)?;
+        // Per-response enclave attestation (NEAR AI), recorded whether or not
+        // it bound, so a verifier can re-check the signature offline.
+        if let Some(fields) = &response.response_attestation {
+            builder.add_extension_event(EVENT_UPSTREAM_RESPONSE_ATTESTED, fields.clone())?;
+        }
 
         Ok(MiddlewareForwardResult::Forwarded(Box::new(
             MiddlewareForwarded {

@@ -279,6 +279,7 @@ impl UpstreamBackend for ModelRouterBackend {
             body,
             headers: HashMap::from([("content-type".to_string(), "application/json".to_string())]),
             served_instance_id: None,
+            response_attestation: None,
         })
     }
 

@@ -70,6 +70,7 @@ impl UpstreamBackend for StubUpstream {
         let mut headers = std::collections::HashMap::new();
         headers.insert("content-type".to_string(), "application/json".to_string());
         Ok(UpstreamResponse {
+            response_attestation: None,
             status_code: 200,
             body: self.body.clone(),
             headers,
@@ -477,7 +478,7 @@ async fn direct_messages_image_fetch_5xx_returns_anthropic_400() {
         async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
             let mut headers = std::collections::HashMap::new();
             headers.insert("content-type".to_string(), "application/json".to_string());
-            Ok(UpstreamResponse {
+            Ok(UpstreamResponse { response_attestation: None,
                 status_code: 500,
                 body: br#"{"error":{"message":"403, message='Forbidden', url='https://img.example/x.jpg'","type":"InternalServerError"}}"#.to_vec(),
                 headers,
