@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0-beta.8](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.2.0-beta.7...desktop-v0.2.0-beta.8) (2026-09-27)
+
+
+### Bug Fixes
+
+* **desktop:** restore grouped lists and fit the default window ([#330](https://github.com/Dstack-TEE/private-ai-gateway/issues/330)) ([f7ea7e0](https://github.com/Dstack-TEE/private-ai-gateway/commit/f7ea7e09110683ae27f1b02116ea07b7e1b1937e))
+
 ## [0.2.0-beta.7](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.2.0-beta.6...desktop-v0.2.0-beta.7) (2026-09-26)
 
 
