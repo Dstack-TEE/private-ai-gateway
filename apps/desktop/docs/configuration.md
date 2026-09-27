@@ -133,10 +133,14 @@ so nothing shows defaults in between.
   one place and the next start finishes it. The old `Config` directory is
   removed once it is empty.
 - Files and directories are compared by identity (device and inode, or
-  volume and file index), not by path. A settings directory or file that is a
-  link to the old one, or the reverse, counts as moved, and nothing the new
+  volume serial number and file index), not by path, which needs only
+  permission to enter their directories. A settings directory or file that is
+  a link to the old one, or the reverse, counts as moved, and nothing the new
   path resolves through is removed. An old link that is redundant (both
-  `config.toml` files link to the same dotfile) is removed.
+  `config.toml` files link to the same dotfile) is removed. An old file is
+  removed only when, right before, the new path is a regular file of its own
+  (not a link) with the same content. Whatever cannot be inspected counts as
+  possibly the same file and is kept.
 - A symlinked old directory that points elsewhere (a dotfiles directory) is
   left alone: nothing is moved out of it, its files stay in use while the
   settings directory has none, and Settings reports that once.

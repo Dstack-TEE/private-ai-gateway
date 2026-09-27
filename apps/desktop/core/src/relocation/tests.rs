@@ -381,7 +381,7 @@ fn a_redundant_old_link_to_the_same_dotfile_is_removed() {
 
 #[cfg(unix)]
 #[test]
-fn only_links_that_go_through_the_old_file_count_as_resolving_through_it() {
+fn links_that_reach_the_old_entry_count_as_resolving_through_it() {
     let dirs = dirs();
     let old = dirs.old.join(CONFIG_FILE);
     fs::create_dir_all(&dirs.new).unwrap();
@@ -395,8 +395,193 @@ fn only_links_that_go_through_the_old_file_count_as_resolving_through_it() {
     let hard = dirs.new.join("hard.toml");
     fs::hard_link(&old, &hard).unwrap();
 
-    assert!(resolves_through(&direct, &old));
-    assert!(resolves_through(&indirect, &old));
-    assert!(!resolves_through(&hard, &old));
-    assert!(same_file(&hard, &old) && same_file(&indirect, &old));
+    assert_eq!(resolves_through(&direct, &old), Some(true));
+    assert_eq!(resolves_through(&indirect, &old), Some(true));
+    // A hard link cannot be told apart from the entry itself: that fails safe.
+    assert_eq!(resolves_through(&hard, &old), Some(true));
+    let elsewhere = dirs.new.join("elsewhere.toml");
+    fs::write(&elsewhere, CONFIG).unwrap();
+    assert_eq!(resolves_through(&elsewhere, &old), Some(false));
+    assert_eq!(same(&hard, &old), Some(true));
+    assert_eq!(same(&indirect, &old), Some(true));
+    assert_eq!(same(&dirs.data.join("missing"), &old), Some(false));
+}
+
+/// Sets a directory's mode for the rest of a test and restores 0700 after,
+/// so the temporary directory can be removed.
+#[cfg(unix)]
+struct Mode(PathBuf);
+
+#[cfg(unix)]
+impl Mode {
+    fn set(path: &Path, mode: u32) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        Self(path.to_path_buf())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Mode {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700));
+    }
+}
+
+/// Permission errors do not happen as root.
+#[cfg(unix)]
+fn root() -> bool {
+    unsafe { libc::geteuid() == 0 }
+}
+
+#[cfg(unix)]
+#[test]
+fn new_links_to_old_files_in_an_unlistable_directory_keep_them() {
+    // An old directory that can be entered but not listed (0300), and new
+    // files that are absolute links to the old ones.
+    let dirs = dirs();
+    fs::create_dir_all(&dirs.new).unwrap();
+    for name in FILES {
+        std::os::unix::fs::symlink(dirs.old.join(name), dirs.new.join(name)).unwrap();
+    }
+    let _old = Mode::set(&dirs.old, 0o300);
+    let _new = Mode::set(&dirs.new, 0o300);
+    for _ in 0..2 {
+        assert_eq!(relocate(&dirs), (dirs.new.clone(), Vec::new()));
+    }
+    assert_eq!(leftover(&dirs), Leftover::None);
+    drop(_new);
+    drop(_old);
+    assert_eq!(text(dirs.old.join(CONFIG_FILE)), CONFIG);
+    assert_eq!(text(dirs.old.join(CREDENTIALS_FILE)), CREDENTIALS);
+    assert_eq!(text(dirs.new.join(CREDENTIALS_FILE)), CREDENTIALS);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_settings_directory_linked_to_an_unlistable_old_one_is_left_alone() {
+    let dirs = dirs();
+    fs::create_dir_all(dirs.new.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&dirs.old, &dirs.new).unwrap();
+    let _old = Mode::set(&dirs.old, 0o300);
+    assert_eq!(relocate(&dirs), (dirs.new.clone(), Vec::new()));
+    assert_eq!(leftover(&dirs), Leftover::None);
+    drop(_old);
+    assert_eq!(text(dirs.old.join(CONFIG_FILE)), CONFIG);
+    assert_eq!(text(dirs.old.join(CREDENTIALS_FILE)), CREDENTIALS);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_inaccessible_old_directory_is_reported_and_stays_in_use() {
+    if root() {
+        return;
+    }
+    let dirs = dirs();
+    let _old = Mode::set(&dirs.old, 0o000);
+    let (dir, notices) = relocate(&dirs);
+    assert_eq!(dir, dirs.old);
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(notices[0].starts_with(FAILED), "{notices:?}");
+    assert_eq!(leftover(&dirs), Leftover::Pending);
+    assert!(!dirs.new.exists(), "nothing placed");
+    drop(_old);
+    assert_eq!(text(dirs.old.join(CREDENTIALS_FILE)), CREDENTIALS);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_link_through_another_name_of_the_old_link_keeps_it() {
+    // A hard link to the old symlink stands in for the same entry reached
+    // under another spelling, as a case-insensitive file system allows.
+    let dirs = dirs();
+    let target = dirs.root.path().join("dotfiles/config.toml");
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(&target, CONFIG).unwrap();
+    let old = dirs.old.join(CONFIG_FILE);
+    fs::remove_file(&old).unwrap();
+    std::os::unix::fs::symlink(&target, &old).unwrap();
+    let alias = dirs.old.join("Config.toml");
+    fs::hard_link(&old, &alias).unwrap();
+    assert!(is_symlink(&alias), "the link itself was linked");
+    fs::create_dir_all(&dirs.new).unwrap();
+    std::os::unix::fs::symlink(&alias, dirs.new.join(CONFIG_FILE)).unwrap();
+
+    assert_eq!(
+        resolves_through(&dirs.new.join(CONFIG_FILE), &old),
+        Some(true)
+    );
+    assert_eq!(relocate(&dirs), (dirs.new.clone(), Vec::new()));
+    assert!(is_symlink(&old), "kept");
+    assert_eq!(text(dirs.new.join(CONFIG_FILE)), CONFIG);
+}
+
+#[test]
+fn an_old_file_goes_only_for_an_independent_copy_with_the_same_content() {
+    let dirs = dirs();
+    fs::create_dir_all(&dirs.new).unwrap();
+    let (old, new) = (dirs.old.join(CONFIG_FILE), dirs.new.join(CONFIG_FILE));
+    fs::write(&new, "appearance = \"light\"\n").unwrap();
+    assert!(!removable(&old, &new), "other content");
+    fs::write(&new, CONFIG).unwrap();
+    assert!(removable(&old, &new));
+    fs::remove_file(&new).unwrap();
+    assert!(!removable(&old, &new), "no new file");
+    fs::hard_link(&old, &new).unwrap();
+    assert!(removable(&old, &new), "a hard link is a file of its own");
+    #[cfg(unix)]
+    {
+        fs::remove_file(&new).unwrap();
+        std::os::unix::fs::symlink(&old, &new).unwrap();
+        assert!(!removable(&old, &new), "a link to it");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn unreadable_old_and_new_files_are_not_taken_as_equal() {
+    use std::os::unix::fs::PermissionsExt;
+    if root() {
+        return;
+    }
+    let dirs = dirs();
+    fs::create_dir_all(&dirs.new).unwrap();
+    fs::write(dirs.new.join(CONFIG_FILE), CONFIG).unwrap();
+    for dir in [&dirs.old, &dirs.new] {
+        fs::set_permissions(dir.join(CONFIG_FILE), fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    fs::remove_file(dirs.old.join(CREDENTIALS_FILE)).unwrap();
+    assert_eq!(leftover(&dirs), Leftover::Kept(vec![CONFIG_FILE]));
+    let (dir, notices) = relocate(&dirs);
+    assert_eq!(dir, dirs.new);
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(dirs.old.join(CONFIG_FILE).exists(), "kept");
+}
+
+#[test]
+fn reports_merge_their_stamps() {
+    let dirs = dirs();
+    let reported_now = || reported(&dirs.data);
+    let stamp = |name: &str| stamp(&dirs.old.join(name), name).unwrap();
+    report(
+        &dirs.data,
+        &reported_now(),
+        vec![stamp(CONFIG_FILE)],
+        "a".into(),
+    );
+    report(
+        &dirs.data,
+        &reported_now(),
+        vec![stamp(CREDENTIALS_FILE)],
+        "b".into(),
+    );
+    let now = reported_now();
+    assert!(now.has(&stamp(CONFIG_FILE)) && now.has(&stamp(CREDENTIALS_FILE)));
+    // A changed file's new stamp replaces its old one.
+    fs::write(dirs.old.join(CONFIG_FILE), "appearance = \"system\"\n").unwrap();
+    report(&dirs.data, &now, vec![stamp(CONFIG_FILE)], "c".into());
+    let record = fs::read_to_string(dirs.data.join(REPORTED_FILE)).unwrap();
+    assert_eq!(record.lines().count(), 2, "{record}");
+    assert!(reported_now().has(&stamp(CONFIG_FILE)));
 }
