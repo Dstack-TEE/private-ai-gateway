@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { keepPreviousData, useIsMutating, useMutation, useMutationState, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { AgentStatus, AppState, DesktopApi } from "../../shared/contracts";
 import { errorMessage } from "../lib/error-message";
@@ -62,10 +62,14 @@ export function useAgentConnection(api: DesktopApi, agent: AgentStatus) {
     mutationFn: () => api.stopAgentService(agent.id),
     onError: (failure) => reportFailure("Could not stop Codex's background service", failure),
   });
+  // One question at a time: a change made while it asks doesn't ask again.
+  const offeringServiceStop = useRef(false);
   const offerServiceStop = async () => {
-    // A service that can't be checked counts as not running, as in the backend.
-    if (!await api.agentServiceRunning(agent.id).catch(() => false)) return;
+    if (offeringServiceStop.current) return;
+    offeringServiceStop.current = true;
     try {
+      // A service that can't be checked counts as not running, as in the backend.
+      if (!await api.agentServiceRunning(agent.id).catch(() => false)) return;
       if (await confirm({
         title: "Restart Codex to apply?",
         message: "Codex's background service still has the previous settings. Stopping it ends running Codex sessions; it starts again the next time you open Codex.",
@@ -75,6 +79,8 @@ export function useAgentConnection(api: DesktopApi, agent: AgentStatus) {
       })) stopService();
     } catch (error) {
       reportFailure("Could not stop Codex's background service", error);
+    } finally {
+      offeringServiceStop.current = false;
     }
   };
   const mutation = useMutation({

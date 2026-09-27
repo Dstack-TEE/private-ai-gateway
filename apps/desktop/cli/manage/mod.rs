@@ -344,7 +344,18 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), CallError> {
                     cli,
                     "Disconnect all managed agents and restore their configuration?",
                 )?;
-                value(client.call(rpc::DisconnectAllAgents)?)?
+                let codex = desktop_core::agents::Agent::Codex.id();
+                let codex_recorded = !cli.json
+                    && client.call(rpc::ListAgents).is_ok_and(|agents| {
+                        agents
+                            .iter()
+                            .any(|agent| agent.id == codex && agent.recorded)
+                    });
+                let statuses = client.call(rpc::DisconnectAllAgents)?;
+                if codex_recorded {
+                    agent_service_hint(&client, cli, codex);
+                }
+                value(statuses)?
             }
         },
         Action::Models {

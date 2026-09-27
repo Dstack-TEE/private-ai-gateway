@@ -7,8 +7,9 @@
 //! home (`codex-rs/app-server-daemon/src/managed_install.rs`), so nothing
 //! depends on PATH. The Mac App Store build cannot run it and never offers to.
 
-use std::{process::Stdio, time::Duration};
+use std::{fmt, process::Stdio, time::Duration};
 
+use desktop_core::protocol::{self, ErrorCode};
 use tokio::process::Command;
 
 use super::*;
@@ -17,8 +18,16 @@ use super::*;
 pub(super) const AVAILABLE: bool = !cfg!(all(target_os = "macos", feature = "mac-app-store"));
 /// `daemon version` probes the socket for at most 2 s and runs `codex --version`.
 const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
-/// Covers the daemon's default 60 s shutdown grace and its 10 s forced exit.
+/// Covers the daemon's default 60 s shutdown grace and its 10 s forced exit,
+/// and stays under the management client's 120 s `REQUEST_TIMEOUT`, so the
+/// window always hears how the stop ended. A grace period configured longer
+/// (Codex allows up to 300 s) can outlast it: the daemon has been asked to
+/// stop and may still exit, but the user sees the "could not be stopped"
+/// alert with the terminal command.
 const STOP_TIMEOUT: Duration = Duration::from_secs(90);
+/// What a caller learns of a failed stop; the diagnostic stays in the log.
+const STOP_FAILED: &str = "Codex's background service could not be stopped. To apply the new \
+    settings, run \"codex app-server daemon restart\" in a terminal.";
 
 /// Codex's background service for the Codex home this app configures.
 pub struct CodexService {
@@ -48,24 +57,25 @@ impl CodexService {
         output.status.success() && reports_managed_daemon(&output.stdout)
     }
 
-    /// Stops the managed daemon, ending running Codex sessions. The error is
-    /// a diagnostic for the service log.
-    pub async fn stop(&self) -> Result<(), String> {
+    /// Stops the managed daemon, ending running Codex sessions.
+    pub async fn stop(&self) -> Result<(), StopFailed> {
         let mut command = self
             .daemon_command("stop")
-            .ok_or("Codex's CLI is unavailable")?;
+            .ok_or_else(|| StopFailed("Codex's CLI is unavailable".into()))?;
         let output = tokio::time::timeout(STOP_TIMEOUT, command.output())
             .await
-            .map_err(|_| "codex app-server daemon stop timed out".to_string())?
-            .map_err(|error| format!("Cannot run codex app-server daemon stop: {error}"))?;
+            .map_err(|_| StopFailed("codex app-server daemon stop timed out".into()))?
+            .map_err(|error| {
+                StopFailed(format!("Cannot run codex app-server daemon stop: {error}"))
+            })?;
         if output.status.success() {
             return Ok(());
         }
-        Err(format!(
+        Err(StopFailed(format!(
             "codex app-server daemon stop failed ({}): {}",
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
-        ))
+        )))
     }
 
     fn daemon_command(&self, action: &str) -> Option<Command> {
@@ -85,6 +95,23 @@ impl CodexService {
         #[cfg(windows)]
         command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
         Some(command)
+    }
+}
+
+/// A failed stop. It displays the diagnostic for the service log; callers
+/// receive only [`STOP_FAILED`].
+#[derive(Debug)]
+pub struct StopFailed(String);
+
+impl fmt::Display for StopFailed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<StopFailed> for protocol::Error {
+    fn from(_: StopFailed) -> Self {
+        Self::new(ErrorCode::OperationFailed, STOP_FAILED)
     }
 }
 
@@ -108,39 +135,55 @@ fn reports_managed_daemon(stdout: &[u8]) -> bool {
         .is_ok_and(|output| output["status"] == "running" && output["backend"] == "pid")
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::agents::tests::write_executable;
 
-    #[test]
-    fn only_a_managed_running_daemon_counts() {
-        assert!(reports_managed_daemon(
-            br#"{"status":"running","backend":"pid","managedCodexPath":"/c","socketPath":"/s"}"#
-        ));
-        for output in [
-            &br#"{"status":"running","managedCodexPath":"/c","socketPath":"/s"}"#[..],
-            br#"{"status":"notRunning"}"#,
-            b"",
-            b"Error: failed to connect",
-        ] {
-            assert!(!reports_managed_daemon(output));
-        }
-    }
-
-    #[test]
-    fn the_daemon_executable_comes_from_its_package() {
+    /// A Codex home whose daemon package holds a fake `codex` that answers
+    /// only for this home and the expected subcommand.
+    fn service(subcommand: &str, reply: &str) -> (tempfile::TempDir, CodexService) {
         let home = tempfile::tempdir().unwrap();
         let codex_home = home.path().join(".codex");
-        assert_eq!(managed_codex(&codex_home), None);
-        let name = if cfg!(windows) { "codex.exe" } else { "codex" };
-        let legacy = codex_home.join("packages/standalone/current").join(name);
-        write_executable(&legacy, "");
-        assert_eq!(managed_codex(&codex_home), Some(legacy));
-        let packaged = codex_home
-            .join("packages/app-server-daemon/current/bin")
-            .join(name);
-        write_executable(&packaged, "");
-        assert_eq!(managed_codex(&codex_home), Some(packaged));
+        write_executable(
+            &codex_home.join("packages/app-server-daemon/current/bin/codex"),
+            &format!(
+                "#!/bin/sh\n[ \"$CODEX_HOME\" = '{}' ] && [ \"$*\" = 'app-server daemon {subcommand}' ] || exit 64\n{reply}\n",
+                codex_home.display()
+            ),
+        );
+        (home, CodexService { codex_home })
+    }
+
+    #[tokio::test]
+    async fn only_a_running_managed_daemon_counts_as_running() {
+        let running = r#"echo '{"status":"running","backend":"pid"}'"#;
+        assert!(service("version", running).1.running().await);
+        for reply in [
+            // No daemon answers: Codex exits non-zero.
+            &format!("{running}; exit 1"),
+            // An app server on the socket that the daemon doesn't manage.
+            r#"echo '{"status":"running"}'"#,
+        ] {
+            assert!(!service("version", reply).1.running().await, "{reply}");
+        }
+        // A fake for another Codex home or subcommand refuses.
+        assert!(!service("stop", running).1.running().await);
+        let empty = tempfile::tempdir().unwrap();
+        let missing = CodexService {
+            codex_home: empty.path().join(".codex"),
+        };
+        assert!(!missing.running().await);
+    }
+
+    #[tokio::test]
+    async fn a_failed_stop_answers_the_fixed_message_without_codex_output() {
+        service("stop", "exit 0").1.stop().await.unwrap();
+        let (_home, failing) = service("stop", "echo 'failed at /private/secret-path' >&2; exit 1");
+        let failure = failing.stop().await.unwrap_err();
+        assert!(failure.to_string().contains("secret-path"));
+        let public = protocol::Error::from(failure);
+        assert_eq!(public.code, ErrorCode::OperationFailed);
+        assert_eq!(public.message, STOP_FAILED);
     }
 }

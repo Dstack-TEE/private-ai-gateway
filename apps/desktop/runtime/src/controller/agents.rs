@@ -3,9 +3,6 @@ use desktop_core::protocol::{self, ErrorCode};
 
 use super::*;
 
-const CODEX_SERVICE_STOP_FAILED: &str = "Codex's background service could not be stopped. To \
-    apply the new settings, run \"codex app-server daemon restart\" in a terminal.";
-
 impl DesktopRuntime {
     fn require_agent_access(&self) -> Result<(), Error> {
         if let Some(error) = &self.agent_access_error {
@@ -262,9 +259,9 @@ impl DesktopRuntime {
         self.agent_service(agent_id)?
             .stop()
             .await
-            .map_err(|detail| {
-                tracing::warn!("Cannot stop Codex's background service: {detail}");
-                protocol::Error::new(ErrorCode::OperationFailed, CODEX_SERVICE_STOP_FAILED).into()
+            .map_err(|failure| {
+                tracing::warn!("Cannot stop Codex's background service: {failure}");
+                protocol::Error::from(failure).into()
             })
     }
 

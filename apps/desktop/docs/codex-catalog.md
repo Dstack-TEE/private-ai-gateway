@@ -7,7 +7,7 @@ compatibility.
 Codex reads the catalog when its app server starts. The CLI reuses a background
 app server that keeps its startup provider and catalog, and restarts it only when
 the Codex version changes; reopening the TUI is not enough. After Codex connects
-or disconnects in the desktop app or the web UI, PAP asks
+or disconnects in the app's window or the web UI, PAP asks
 `codex app-server daemon version` whether that server runs, which never starts
 one. If it does, PAP offers to stop it with `codex app-server daemon stop`,
 which ends running Codex sessions; the next `codex` run starts it again with the

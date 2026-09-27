@@ -81,9 +81,9 @@ impl AgentIntegration for Agent {
                  selected model from the verified catalog, command-backed authentication, and \
                  the app-owned model catalog. Only the Codex baseline pinned by this app is \
                  supported; other versions are not checked or supported. Codex keeps a background \
-                 service with the previous settings: after applying, stop it when this app offers \
-                 to, or run \"codex app-server daemon restart\" (either stops running Codex \
-                 sessions). Then quit and reopen the Codex app."
+                 service with the previous settings. The app offers to stop it; otherwise run \
+                 \"codex app-server daemon restart\" in your terminal. Either stops running \
+                 Codex sessions. Then quit and reopen the Codex app."
             }
             Agent::Codex => {
                 "Codex will use its official custom model provider with the Responses API, the \

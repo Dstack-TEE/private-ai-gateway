@@ -18,7 +18,7 @@ mod registry;
 mod transactions;
 mod validation;
 
-pub use codex_service::CodexService;
+pub use codex_service::{CodexService, StopFailed};
 use discovery::*;
 pub use error::AgentError;
 use projection::*;
