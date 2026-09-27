@@ -103,7 +103,6 @@ def main() -> int:
                     "state_dir": str(state_dir),
                     "upstream_config_seed_path": str(upstream_seed_path),
                     "dstack_endpoint": DEFAULT_DSTACK_ENDPOINT,
-                    "receipt_ttl_seconds": 3600,
                 }
             )
         )
