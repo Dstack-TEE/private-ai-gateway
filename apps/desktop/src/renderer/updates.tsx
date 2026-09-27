@@ -7,7 +7,6 @@ import { ToggleGroup, ToggleGroupItem } from "./components/ui/toggle-group";
 import { FieldLabel } from "./components/ui/field";
 import { Item, ItemContent, ItemTitle, ItemDescription, ItemActions } from "./components/ui/item";
 import { useConfirm, useReportFailure } from "./components/confirm";
-import { errorMessage } from "./lib/error-message";
 
 const CHECK_INTERVAL = 6 * 60 * 60_000;
 
@@ -74,9 +73,8 @@ export function useUpdates(api: DesktopApi, checks: boolean) {
     const ready = Boolean(info?.enabled && info.version);
     const currentVersion = installedVersion ?? info?.currentVersion;
     const busy = changing ? "changing" : restart.isPending ? "restarting" : checking ? "checking" : undefined;
-    const error = checkError ? "Could not prepare software updates. Retrying automatically." : undefined;
     return {
-      info, ready, currentVersion, busy, error, channel, checks, recheck,
+      info, ready, currentVersion, busy, checkFailed: Boolean(checkError), channel, checks, recheck,
       restart: () => {
         if (!busy && ready) restart.mutate();
       },
@@ -86,6 +84,7 @@ export function useUpdates(api: DesktopApi, checks: boolean) {
 
 export function UpdateChannelControl({ api, updates }: { api: DesktopApi; updates: ReturnType<typeof useUpdates> }): React.JSX.Element {
   const client = useQueryClient();
+  const reportFailure = useReportFailure();
   const change = useMutation({
     mutationKey: CHANNEL_CHANGE,
     scope: UPDATE_SCOPE,
@@ -94,14 +93,12 @@ export function UpdateChannelControl({ api, updates }: { api: DesktopApi; update
       client.setQueryData<UpdateInfo | undefined>(["app-update"], (current) => current ? { ...current, channel: saved, version: null } : current);
       await updates.recheck();
     },
+    onError: (error) => reportFailure("Could not change the update channel", error),
   });
-  // A failure shows until the channel changes, here or elsewhere.
-  const error = change.error && updates.channel !== change.variables ? `Could not change the update channel. ${errorMessage(change.error)}` : undefined;
   return <Item>
     <ItemContent>
       <ItemTitle><FieldLabel id="update-channel-label">Update channel</FieldLabel></ItemTitle>
       <ItemDescription id="update-channel-note">{updates.channel === "beta" ? "Beta and stable releases" : "Stable releases"}</ItemDescription>
-      {error && <ItemDescription role="alert" className="text-destructive">{error}</ItemDescription>}
     </ItemContent>
     <ItemActions>
       <ToggleGroup size="sm" variant="outline" spacing={0} aria-labelledby="update-channel-label" aria-describedby="update-channel-note" value={updates.channel ? [updates.channel] : []} disabled={!updates.channel || Boolean(updates.busy)} onValueChange={([value]) => {
@@ -112,10 +109,10 @@ export function UpdateChannelControl({ api, updates }: { api: DesktopApi; update
 }
 
 export function UpdateControl({ updates, productName, desktop }: { updates: ReturnType<typeof useUpdates>; productName: string; desktop: boolean }): React.JSX.Element {
-  const { info, ready, currentVersion, busy, error } = updates;
+  const { info, ready, currentVersion, busy, checkFailed } = updates;
   const label = busy === "changing" ? "Saving update channel…" : busy === "restarting" ? "Restarting to update…" : busy === "checking" ? "Checking for updates…"
     : !updates.checks ? "Updates are provided by the App Store"
-    : error || !info ? "Update status unavailable"
+    : checkFailed || !info ? "Update status unavailable"
     : !info.enabled && !info.systemManaged ? "Automatic updates unavailable in this build"
     : info.version ? `Version ${info.version} is available`
     : "You’re up to date";

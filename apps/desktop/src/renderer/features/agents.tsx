@@ -1,5 +1,5 @@
 import React from "react";
-import { ExternalLink, FolderLock, LoaderCircle, TriangleAlert } from "lucide-react";
+import { ExternalLink, FolderLock, LoaderCircle } from "lucide-react";
 import claudeCodeIcon from "@lobehub/icons-static-svg/icons/claudecode-color.svg";
 import codexIcon from "@lobehub/icons-static-svg/icons/codex-color.svg";
 import hermesIcon from "@lobehub/icons-static-svg/icons/hermesagent.svg";
@@ -60,7 +60,6 @@ export function AgentsPage(): React.JSX.Element {
   return (
     <div className="max-w-230 min-h-full mt-0 mr-auto mb-0 ml-auto">
       <AgentAccessNotice status={accessStatus} busy={authorizing} onAuthorize={integrations.requestAccess} />
-      {accessStatus === "authorized" && problem && <AgentDetectionNotice busy={authorizing} onRetry={integrations.requestAccess} />}
       <SettingsSection title={accessStatus === "authorized" && !problem ? "Detected" : "Agents"} detail={accessStatus === "authorized" && !problem ? `${connected} connected` : undefined}>
         {accessStatus !== "authorized" ? agents.map((agent) => (
           <AgentRow key={agent.id} agent={agent} detectionLabel={detectionLabel} disabled />
@@ -83,18 +82,6 @@ export function AgentsPage(): React.JSX.Element {
       </p>}
     </div>
   );
-}
-
-function AgentDetectionNotice({ busy, onRetry }: { busy: boolean; onRetry(): void }): React.JSX.Element {
-  return <Alert role="status" className="mb-5 rounded-xl border-border bg-muted/35 px-3.5 py-2.5">
-    <TriangleAlert size={16} aria-hidden="true" />
-    <AlertDescription className="col-start-2 flex flex-wrap items-center justify-between gap-3 text-xs leading-5">
-      <span className="min-w-0 flex-1"><strong className="font-medium text-foreground">Agent detection unavailable.</strong> The background service could not use Home access.</span>
-      <Button type="button" variant="outline" size="sm" className="shrink-0" disabled={busy} aria-busy={busy} onClick={onRetry}>
-        {busy ? <><LoaderCircle size={14} className="animate-spin" aria-hidden="true" />Retrying…</> : "Retry"}
-      </Button>
-    </AlertDescription>
-  </Alert>;
 }
 
 function AgentAccessNotice({ status, busy, onAuthorize }: {

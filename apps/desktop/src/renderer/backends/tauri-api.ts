@@ -5,6 +5,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 import { NAVIGATE_EVENT, type DesktopApi, type DistributionCapabilities, type NavigationTarget, type UiEvent, type UiEventPayloads } from "../../shared/contracts";
 import { createDesktopApi, type Backend, type UiPlatform, type UiTransport } from "./create-api";
+import { AuthoredError } from "../lib/error-message";
 
 declare global {
   interface Window {
@@ -12,13 +13,17 @@ declare global {
   }
 }
 
-/** Commands reject with the serialized API error `{code, message}`; the renderer shows the message. */
+/**
+ * Commands reject with the serialized API error `{code, message}`, whose
+ * message is authored; Tauri's own failures, such as invalid arguments,
+ * reject with plain text.
+ */
 async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> {
   try {
     return await tauriInvoke<T>(command, args);
   } catch (error) {
     if (error && typeof error === "object" && "message" in error && typeof error.message === "string") {
-      throw new Error(error.message);
+      throw new AuthoredError(error.message);
     }
     throw error instanceof Error ? error : new Error(String(error));
   }

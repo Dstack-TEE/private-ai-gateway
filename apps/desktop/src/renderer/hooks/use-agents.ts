@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 import { keepPreviousData, useIsMutating, useMutation, useMutationState, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { AgentStatus, AppState, DesktopApi } from "../../shared/contracts";
 import { errorMessage } from "../lib/error-message";
-import { useConfirm, useReportFailure } from "../components/confirm";
+import { useConfirm, useReportFailure, useReportFailureOnce } from "../components/confirm";
 import { agentAccessMutation, agentIntegrationsLocked, completeAgentStatuses, readAgentIntegrations, type AgentIntegrations } from "../lib/agent-integrations";
 
 const connectionKey = (agentId: string) => ["agent-connection", agentId];
@@ -42,12 +42,10 @@ export function useAgents(api: DesktopApi, state: AppState, requiresAuthorizatio
         cancelLabel: "Later",
         destructive: true,
       })) stopService();
-    } catch (error) {
-      reportFailure("Could not stop Codex's background service", error);
     } finally {
       offeringServiceStop.current = false;
     }
-  }, [api, confirm, reportFailure, stopService]);
+  }, [api, confirm, stopService]);
   const access = useMutation({
     ...agentAccessMutation(api, requiresAuthorization, client),
     onError: (failure) => reportFailure("Could not grant agent access", failure),
@@ -59,6 +57,7 @@ export function useAgents(api: DesktopApi, state: AppState, requiresAuthorizatio
     enabled: !authorizing,
     placeholderData: keepPreviousData,
   });
+  useReportFailureOnce("Could not detect agents", error);
   useEffect(() => api.onAgentsChange(() => { void client.invalidateQueries({ queryKey: ["agents"] }); }), [api, client]);
   const accessStatus = requiresAuthorization ? data?.accessStatus : "authorized";
   const changing = useIsMutating({ mutationKey: ["agent-connection"] }) > 0;

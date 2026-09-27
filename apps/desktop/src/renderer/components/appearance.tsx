@@ -2,9 +2,9 @@ import { createContext, useContext, useEffect, useLayoutEffect, type PropsWithCh
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Hint } from "./hint";
 import type { Appearance, DesktopApi } from "../../shared/contracts";
-import { Item, ItemContent, ItemTitle, ItemDescription, ItemActions } from "./ui/item";
+import { Item, ItemContent, ItemTitle, ItemActions } from "./ui/item";
 import { FieldLabel } from "./ui/field";
-import { errorMessage } from "../lib/error-message";
+import { useReportFailure } from "./confirm";
 import { Monitor, Sun, Moon } from "lucide-react";
 import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group";
 
@@ -43,17 +43,14 @@ export function useAppearance(): Appearance {
 export function AppearanceControl({ api }: { api: DesktopApi }) {
   const client = useQueryClient();
   const appearance = useAppearance();
+  const reportFailure = useReportFailure();
   const mutation = useMutation({
     mutationFn: (next: Appearance) => api.setAppearance(next),
-    // The appearance the change started from: a failure shows until it changes.
-    onMutate: async () => {
-      await client.cancelQueries({ queryKey: ["appearance"] });
-      return appearance;
-    },
+    onMutate: () => client.cancelQueries({ queryKey: ["appearance"] }),
     onSuccess: (_, next) => { client.setQueryData(["appearance"], next); },
+    onError: (error) => reportFailure("Could not change the appearance", error),
   });
-  const error = mutation.error && mutation.context === appearance ? `Could not change the appearance. ${errorMessage(mutation.error)}` : undefined;
-  return <Item><ItemContent><ItemTitle><FieldLabel id="appearance-label">Theme</FieldLabel></ItemTitle>{error && <ItemDescription role="alert" className="text-destructive">{error}</ItemDescription>}</ItemContent><ItemActions>
+  return <Item><ItemContent><ItemTitle><FieldLabel id="appearance-label">Theme</FieldLabel></ItemTitle></ItemContent><ItemActions>
     <ToggleGroup size="sm" variant="outline" spacing={0} aria-labelledby="appearance-label" value={[appearance]} disabled={mutation.isPending} onValueChange={([value]) => {
       if (!mutation.isPending && (value === "system" || value === "light" || value === "dark")) mutation.mutate(value);
     }}>{([["system", "System", Monitor], ["light", "Light", Sun], ["dark", "Dark", Moon]] as const).map(([value, label, Icon]) => <Hint key={value} content={label}><ToggleGroupItem value={value} aria-label={label}><Icon className="size-4" /></ToggleGroupItem></Hint>)}</ToggleGroup>

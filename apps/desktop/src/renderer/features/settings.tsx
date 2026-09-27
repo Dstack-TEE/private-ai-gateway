@@ -1,7 +1,8 @@
 import React, { useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { cliRegistrationQuery } from "../lib/page-queries";
-import { errorMessage } from "../lib/error-message";
+import { AuthoredError } from "../lib/error-message";
+import { useReportFailure, useReportFailureOnce } from "../components/confirm";
 import { ChevronRight } from "lucide-react";
 import { brand } from "../brand/brand";
 import { UpdateControl, UpdateChannelControl } from "../updates";
@@ -21,26 +22,28 @@ import { OS_POLICY_CHANGE, useShell } from "../lib/shell";
 
 function CliRegistrationControl(): React.JSX.Element {
   const client = useQueryClient();
+  const reportFailure = useReportFailure();
   const { data: registration, error: readError } = useQuery(cliRegistrationQuery());
+  useReportFailureOnce("Could not read the pap command", readError);
+  // The shell's automatic registration at startup.
+  useReportFailureOnce("Could not register the pap command", registration?.startupError && new AuthoredError(registration.startupError));
   const mutation = useMutation({
     mutationFn: (installed: boolean) => desktopApi.setCliRegistration(installed),
     onMutate: () => client.cancelQueries({ queryKey: ["cli-registration"] }),
     onSuccess: (next) => { client.setQueryData(["cli-registration"], next); },
+    onError: (error, installed) => reportFailure(installed ? "Could not install the pap command" : "Could not remove the pap command", error),
   });
   const busy = mutation.isPending;
-  const error = mutation.error || readError ? errorMessage(mutation.error ?? readError) : undefined;
   const directory = registration ? parentDirectory(registration.commandPath) : undefined;
   const description = registration?.installed
       ? registration.onPath
         ? <>Installed at {directory}. This app can run <code>pap</code>; your terminal’s PATH may differ.</>
         : <>Installed at {directory}. Add this directory to your terminal’s PATH.</>
       : directory ? `Default location: ${directory}` : "Command registration is unavailable.";
-  const failure = error ?? registration?.startupError;
   return <Item>
     <ItemContent>
       <ItemTitle><code>pap</code> command</ItemTitle>
       <ItemDescription>{description}</ItemDescription>
-      {failure && <ItemDescription role="alert" className="text-destructive">{failure}</ItemDescription>}
     </ItemContent>
     <ItemActions>
       <Button variant="outline" disabled={busy || !registration} onClick={() => { if (registration) mutation.mutate(!registration.installed); }}>
@@ -50,7 +53,7 @@ function CliRegistrationControl(): React.JSX.Element {
   </Item>;
 }
 
-/** One scannable line, like the Local API row; the sheet holds the controls. */
+/** One scannable line, like the Local API row; the dialog holds the controls. */
 function webUiSummary(status: WebUiStatus): string {
   if (!status.enabled) return "Off";
   if (!status.url) return status.error ?? "Starting…";
@@ -59,12 +62,12 @@ function webUiSummary(status: WebUiStatus): string {
 }
 
 function SignOutControl({ onSignOut }: { onSignOut(): Promise<void> }): React.JSX.Element {
-  const mutation = useMutation({ mutationFn: onSignOut });
+  const reportFailure = useReportFailure();
+  const mutation = useMutation({ mutationFn: onSignOut, onError: (error) => reportFailure("Could not sign out", error) });
   return <Item>
     <ItemContent>
       <ItemTitle>This browser</ItemTitle>
       <ItemDescription>Signing out ends this browser session. Sign in again with the web UI password.</ItemDescription>
-      {mutation.error && <ItemDescription role="alert" className="text-destructive">Could not sign out. {errorMessage(mutation.error)}</ItemDescription>}
     </ItemContent>
     <ItemActions>
       <Button variant="outline" disabled={mutation.isPending} onClick={() => mutation.mutate()}>
@@ -76,7 +79,9 @@ function SignOutControl({ onSignOut }: { onSignOut(): Promise<void> }): React.JS
 
 function useLaunchPreferences() {
   const client = useQueryClient();
-  const { data } = useQuery({ queryKey: ["launch-preferences"], queryFn: () => desktopApi.getLaunchPreferences() });
+  const reportFailure = useReportFailure();
+  const { data, error } = useQuery({ queryKey: ["launch-preferences"], queryFn: () => desktopApi.getLaunchPreferences() });
+  useReportFailureOnce("Could not read launch preferences", error);
   useEffect(() => desktopApi.onLaunchPreferencesChange((next) => {
     void client.cancelQueries({ queryKey: ["launch-preferences"] }).then(() => client.setQueryData(["launch-preferences"], next));
   }), [client]);
@@ -84,24 +89,25 @@ function useLaunchPreferences() {
     mutationFn: ({ name, enabled }: { name: LaunchPreference; enabled: boolean }) => desktopApi.setLaunchPreference(name, enabled),
     onMutate: () => client.cancelQueries({ queryKey: ["launch-preferences"] }),
     onSuccess: (next) => { client.setQueryData(["launch-preferences"], next); },
+    onError: (failure) => reportFailure("Could not change the preference", failure),
   });
   return {
     preferences: data,
     saving: mutation.isPending,
     change: (name: LaunchPreference, enabled: boolean) => mutation.mutate({ name, enabled }),
-    /** Why the last change of `name` failed; its row shows it until the preference changes. */
-    error: (name: LaunchPreference) => mutation.error && mutation.variables?.name === name && data?.[name] !== mutation.variables.enabled
-      ? `Could not change the preference. ${errorMessage(mutation.error)}` : undefined,
   };
 }
 
 function DevelopmentOsControl({ disabled }: { disabled: boolean }): React.JSX.Element {
   const shell = useShell();
   const required = shell.state.config.requireProductionOs;
-  const mutation = useMutation({ mutationKey: OS_POLICY_CHANGE, mutationFn: shell.changeRequireProductionOs });
-  // A failure shows until the policy changes, here or elsewhere.
-  const error = mutation.error && required !== mutation.variables ? `Could not change the OS policy. ${errorMessage(mutation.error)}` : undefined;
-  return <SettingsToggle label="Allow development OS" checked={!required} developmentMode={!required} disabled={disabled} error={error} onToggle={() => {
+  const reportFailure = useReportFailure();
+  const mutation = useMutation({
+    mutationKey: OS_POLICY_CHANGE,
+    mutationFn: shell.changeRequireProductionOs,
+    onError: (error) => reportFailure("Could not change the OS policy", error),
+  });
+  return <SettingsToggle label="Allow development OS" checked={!required} developmentMode={!required} disabled={disabled} onToggle={() => {
     if (!shell.applying) mutation.mutate(!required);
   }} />;
 }
@@ -120,14 +126,14 @@ export function SettingsPage(): React.JSX.Element {
         <AlertDescription className="whitespace-pre-wrap font-mono text-xs">{state.configFiles.error}</AlertDescription>
         <AlertDescription>The previous settings stay in effect until the file is fixed.</AlertDescription>
       </Alert>}
-      {state.configFiles.warnings.length > 0 && <Alert className="mb-5">
+      {state.configFiles.warnings.length > 0 && <Alert role="status" className="mb-5">
         <AlertTitle>Check your settings</AlertTitle>
         <AlertDescription className="whitespace-pre-wrap font-mono text-xs">{state.configFiles.warnings.join("\n")}</AlertDescription>
       </Alert>}
 
       <SettingsSection title="General">
-          {distribution.launchAtLogin && <SettingsToggle label="Open at Login" checked={launch.preferences?.openAtLogin ?? false} disabled={!launch.preferences || launch.saving} error={launch.error("openAtLogin")} onToggle={() => launch.change("openAtLogin", !launch.preferences?.openAtLogin)} />}
-          <SettingsToggle label="Protect on launch" checked={launch.preferences?.connectOnLaunch ?? false} disabled={!launch.preferences || launch.saving} error={launch.error("connectOnLaunch")} onToggle={() => launch.change("connectOnLaunch", !launch.preferences?.connectOnLaunch)} />
+          {distribution.launchAtLogin && <SettingsToggle label="Open at Login" checked={launch.preferences?.openAtLogin ?? false} disabled={!launch.preferences || launch.saving} onToggle={() => launch.change("openAtLogin", !launch.preferences?.openAtLogin)} />}
+          <SettingsToggle label="Protect on launch" checked={launch.preferences?.connectOnLaunch ?? false} disabled={!launch.preferences || launch.saving} onToggle={() => launch.change("connectOnLaunch", !launch.preferences?.connectOnLaunch)} />
           <AppearanceControl api={desktopApi} />
           {distribution.notifications && <SettingsLink title="Notifications" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "notifications" })} />}
       </SettingsSection>

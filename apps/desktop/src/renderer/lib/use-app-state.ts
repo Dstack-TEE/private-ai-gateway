@@ -36,7 +36,15 @@ export function useAppState(api: DesktopApi) {
     queryFn: async () => newerState(client.getQueryData(key), await api.getState()),
     retry: false,
   });
-  const setState = useCallback((next: AppState) => {
+  const setState = useSetAppState();
+  useEffect(() => api.onStateChange(setState), [api, setState]);
+  return { ...query, setState };
+}
+
+/** Applies a state a command returned, unless the window has a newer one. */
+export function useSetAppState() {
+  const client = useQueryClient();
+  return useCallback((next: AppState) => {
     const current = client.getQueryData<AppState>(key);
     const state = newerState(current, next);
     if (state === current) return;
@@ -51,6 +59,4 @@ export function useAppState(api: DesktopApi) {
       void client.invalidateQueries({ queryKey: ["cli-registration"] });
     }
   }, [client]);
-  useEffect(() => api.onStateChange(setState), [api, setState]);
-  return { ...query, setState };
 }

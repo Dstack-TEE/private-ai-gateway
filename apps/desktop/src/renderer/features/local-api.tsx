@@ -15,7 +15,7 @@ import { DialogFooter } from "../components/ui/dialog";
 import { DEFAULT_LOCAL_API_CONFIG, type AppState, type ListenConfig } from "../../shared/contracts";
 import { maskClientKey } from "../lib/format";
 import { desktopApi } from "../lib/environment";
-import { errorMessage } from "../lib/error-message";
+import { AuthoredError, errorMessage } from "../lib/error-message";
 import { useReportFailure } from "../components/confirm";
 import { useCopy } from "../hooks/use-copy";
 import { cn } from "../lib/utils";
@@ -101,7 +101,8 @@ export function LocalApiDialog({
   ...control
 }: {
   state: AppState;
-  clientKey: string;
+  /** Undefined until the key has been read; the window reports a failed read. */
+  clientKey: string | undefined;
   clientKeyVisible: boolean;
   onToggleKey(): void;
   onRotate(): Promise<void>;
@@ -130,11 +131,12 @@ export function LocalApiDialog({
   // Resolves whether the settings were saved.
   const save = useMutation({
     mutationFn: async () => {
-      if (!addressKind) throw new Error("Enter a valid IPv4 or IPv6 listen address.");
+      if (!addressKind) throw new AuthoredError("Enter a valid IPv4 or IPv6 listen address.");
       if (networkAccess && !await confirm({
         title: "Allow network access?",
         message: `Listen on ${draft.listenAddress}:${draft.port}? The local API uses unencrypted HTTP. Only use a trusted network, and never expose this port to the internet.`,
         confirmLabel: "Allow and Save",
+        destructive: true,
       })) return false;
       await onSave({ ...draft, allowNetworkAccess: networkAccess });
       return true;
@@ -146,7 +148,7 @@ export function LocalApiDialog({
   const saving = rotate.isPending || save.isPending;
   const copyKey = () => {
     setError(undefined);
-    copy("Local API key", clientKey);
+    if (clientKey) copy("Local API key", clientKey);
   };
   return (
     <AppDialog {...control} title="Local API settings" className="sm:max-w-xl" dismissible={!saving} onClose={onClose}>
@@ -158,14 +160,14 @@ export function LocalApiDialog({
           <Field>
             <FieldLabel htmlFor="local-client-key">Local API key</FieldLabel>
             <InputGroup>
-              <InputGroupInput id="local-client-key" className="mono font-mono text-xs" type={clientKeyVisible ? "text" : "password"} value={clientKey} readOnly />
+              <InputGroupInput id="local-client-key" className="mono font-mono text-xs" type={clientKeyVisible ? "text" : "password"} value={clientKey ?? ""} readOnly />
               <InputGroupAddon align="inline-end">
                 <Hint content={clientKeyVisible ? "Hide Local API key" : "Show Local API key"}><InputGroupButton size="icon-xs" aria-label={clientKeyVisible ? "Hide Local API key" : "Show Local API key"} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff /> : <Eye />}</InputGroupButton></Hint>
                 <Hint content="Copy Local API key"><InputGroupButton size="icon-xs" aria-label="Copy Local API key" disabled={saving || !clientKey} onClick={copyKey}>{isCopied(clientKey) ? <Check /> : <Copy />}</InputGroupButton></Hint>
                 <Hint content="Rotate key"><InputGroupButton size="icon-xs" aria-label="Rotate key" disabled={frozen || saving} onClick={() => rotate.mutate()}><RefreshCw /></InputGroupButton></Hint>
               </InputGroupAddon>
             </InputGroup>
-            {!clientKey && <FieldError>The Local API key is unavailable. Rotate it to restore access.</FieldError>}
+            {clientKey === "" && <FieldError>The Local API key is unavailable. Rotate it to restore access.</FieldError>}
           </Field>
           </FieldGroup>
         </div>

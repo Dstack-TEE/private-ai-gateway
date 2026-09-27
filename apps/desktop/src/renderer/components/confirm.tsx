@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useRef, useState, type PropsWithChildren } from "react";
+import { createContext, useCallback, useContext, useEffect, useEffectEvent, useRef, useState, type PropsWithChildren } from "react";
 import { createDialogQueue } from "../lib/dialog-queue";
 import { errorMessage } from "../lib/error-message";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "./ui/alert-dialog";
@@ -91,6 +91,21 @@ export function useConfirm(): Confirm {
 export function useReportFailure(): (title: string, error: unknown) => void {
   const ask = useConfirmContext();
   return useCallback((title, error) => void ask({ kind: "alert", title, message: errorMessage(error) }), [ask]);
+}
+
+/**
+ * Reports a failure that lasts, such as a read that keeps failing, as
+ * `useReportFailure` does, once when it starts rather than on every retry.
+ * The controls it feeds stay disabled or empty until a later read, such as
+ * when the window is focused again, succeeds.
+ */
+export function useReportFailureOnce(title: string, error: unknown): void {
+  const reportFailure = useReportFailure();
+  const failed = Boolean(error);
+  const report = useEffectEvent(() => reportFailure(title, error));
+  useEffect(() => {
+    if (failed) report();
+  }, [failed]);
 }
 
 /** Whether a confirmation or an alert is waiting for an answer. */

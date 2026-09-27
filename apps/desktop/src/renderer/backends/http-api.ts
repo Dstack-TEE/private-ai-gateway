@@ -3,7 +3,10 @@ import {
   AGENTS,
   API_KEY_PAGES,
   SERVICE_PROVIDERS,
+  STATE_EVENT,
+  UNAVAILABLE_STATE,
   WEB_DISTRIBUTION,
+  type AppState,
   type ProfileBackup,
   type UiEvent,
   type UiEventPayloads,
@@ -13,6 +16,7 @@ import {
   type WebBootstrap,
 } from "../../shared/contracts";
 import { createDesktopApi, type Backend, type UiPlatform, type UiTransport, type WebSession } from "./create-api";
+import { AuthoredError } from "../lib/error-message";
 
 const sessionEnded = "Your web UI session ended or expired. Sign in again.";
 const signedOut = "You signed out. Sign in again to continue.";
@@ -43,7 +47,7 @@ export function createBackend(): Backend {
 }
 
 const unavailable = async (): Promise<never> => {
-  throw new Error("This is only available in the desktop app");
+  throw new AuthoredError("This is only available in the desktop app");
 };
 
 const platform: UiPlatform = {
@@ -73,7 +77,7 @@ const platform: UiPlatform = {
   quit: undefined,
   copyText: async (text) => {
     // Absent outside secure contexts, such as plain HTTP on a network address.
-    if (!window.isSecureContext) throw new Error("Copying needs 127.0.0.1 or HTTPS in this browser. Select and copy the text instead.");
+    if (!window.isSecureContext) throw new AuthoredError("Copying needs 127.0.0.1 or HTTPS in this browser. Select and copy the text instead.");
     await navigator.clipboard.writeText(text);
   },
   selectProfileBackup,
@@ -88,13 +92,13 @@ const platform: UiPlatform = {
   requestNotificationPermission: async () => ({ permission: "unsupported", alertsEnabled: false }),
   openNotificationSettings: async () => undefined,
   openWebUi: async () => {
-    throw new Error("The web UI is already open in this browser");
+    throw new AuthoredError("The web UI is already open in this browser");
   },
   openAboutLink: async (target) => openAllowed(ABOUT_LINKS[target]),
   openAgentWebsite: async (agentId) => openAllowed(AGENTS.find((agent) => agent.id === agentId)?.website),
   openApiKeyPage: async (provider) => openAllowed(API_KEY_PAGES[provider]),
   presentAccountLogin: (login) => {
-    // The login sheet keeps a manual link, so a blocked or rejected tab must not fail the login.
+    // The sign-in also shows a link to the page, so a blocked or rejected tab must not fail the login.
     try {
       openAllowed(login.url);
     } catch {
@@ -131,7 +135,7 @@ async function signIn(password: string): Promise<void> {
   });
   if (response.ok) return;
   const payload: unknown = await response.json().catch(() => undefined);
-  throw errorFrom(payload, "Sign-in failed. Try again.");
+  throw errorFrom(payload);
 }
 
 /** Ends this browser's session on the server. */
@@ -173,20 +177,21 @@ async function read<T>(response: Response): Promise<T> {
 async function answer(response: Response): Promise<Response> {
   if (response.status === 401) {
     endSession(sessionEnded);
-    throw new Error(sessionEnded);
+    throw new AuthoredError(sessionEnded);
   }
-  if (!response.ok) throw errorFrom(await response.json().catch(() => undefined), "Web UI request failed");
+  if (!response.ok) throw errorFrom(await response.json().catch(() => undefined));
   return response;
 }
 
-function errorFrom(payload: unknown, fallback: string): Error {
+/** The backend's API error, whose message is authored; any other answer, such as a proxy's, is not. */
+function errorFrom(payload: unknown): Error {
   if (payload && typeof payload === "object" && "error" in payload) {
     const error = payload.error;
     if (error && typeof error === "object" && "message" in error && typeof error.message === "string") {
-      return new Error(error.message);
+      return new AuthoredError(error.message);
     }
   }
-  return new Error(fallback);
+  return new Error("Web UI request failed");
 }
 
 function subscribe<E extends UiEvent>(event: E, listener: (payload: UiEventPayloads[E]) => void): () => void {
@@ -210,9 +215,14 @@ function readEvents(): EventSource {
     if (isWebEvent(decoded)) listeners.dispatchEvent(new MessageEvent(decoded.event, { data: decoded.payload }));
   });
   // EventSource retries dropped connections itself but stops at an error
-  // response, such as after the session ended.
+  // response, such as after the session ended. Meanwhile the state is read
+  // again, so a backend that stopped doesn't keep showing its last state.
   source.addEventListener("error", () => {
-    if (source.readyState === EventSource.CLOSED && events === source) window.setTimeout(() => void resumeEvents(source), 1_000);
+    if (events !== source) return;
+    rpc<AppState>("get_state").then(publishState, () => {
+      if (signedIn) publishState(UNAVAILABLE_STATE);
+    });
+    if (source.readyState === EventSource.CLOSED) window.setTimeout(() => void resumeEvents(source), 1_000);
   });
   return source;
 }
@@ -227,6 +237,10 @@ async function resumeEvents(closed: EventSource): Promise<void> {
     return;
   }
   if (events === closed) events = readEvents();
+}
+
+function publishState(state: AppState): void {
+  listeners.dispatchEvent(new MessageEvent(STATE_EVENT, { data: state }));
 }
 
 function isWebEvent(value: unknown): value is { event: string; payload: unknown } {
@@ -248,7 +262,7 @@ function selectProfileBackup(): Promise<ProfileBackup | null> {
         return;
       }
       if (file.size > 256 * 1024) {
-        reject(new Error("Profile configuration file is too large"));
+        reject(new AuthoredError("Profile configuration file is too large"));
         return;
       }
       void parseProfileBackup(file).then(resolve, reject);
@@ -263,9 +277,9 @@ async function parseProfileBackup(file: File): Promise<ProfileBackup> {
   try {
     parsed = JSON.parse(await file.text());
   } catch {
-    throw new Error("Could not read the profile configuration file");
+    throw new AuthoredError("Could not read the profile configuration file");
   }
-  if (!isProfileBackup(parsed)) throw new Error("The profile configuration file is invalid");
+  if (!isProfileBackup(parsed)) throw new AuthoredError("The profile configuration file is invalid");
   return parsed;
 }
 
@@ -293,8 +307,8 @@ function download(name: string, content: string): boolean {
 }
 
 function openAllowed(url: string | undefined): void {
-  if (!url) throw new Error("This link is unavailable");
+  if (!url) throw new AuthoredError("This link is unavailable");
   const parsed = new URL(url);
-  if (parsed.protocol !== "https:") throw new Error("Only secure external links are allowed");
+  if (parsed.protocol !== "https:") throw new AuthoredError("Only secure external links are allowed");
   window.open(parsed.href, "_blank", "noopener,noreferrer");
 }

@@ -10,7 +10,7 @@ import { SettingsList, SettingsToggle } from "../components/settings";
 import { AppDialog, type DialogControl } from "../components/app-dialog";
 import { useConfirm } from "../components/confirm";
 import { DialogFooter } from "../components/ui/dialog";
-import { errorMessage } from "../lib/error-message";
+import { AuthoredError, errorMessage } from "../lib/error-message";
 import { localAddressKind } from "../lib/local-api-config";
 import { desktopApi, web } from "../lib/environment";
 import { useCopy } from "../hooks/use-copy";
@@ -81,10 +81,10 @@ export function WebUiDialog({
   // Resolves whether the settings were saved.
   const save = useMutation({
     mutationFn: async () => {
-      if (!addressKind) throw new Error("Enter a valid IPv4 or IPv6 listen address.");
+      if (!addressKind) throw new AuthoredError("Enter a valid IPv4 or IPv6 listen address.");
       const passwordChanged = passwordDraft !== undefined && passwordDraft !== (savedPassword ?? "");
       if (passwordChanged && [...passwordDraft].length < MIN_PASSWORD_LENGTH) {
-        throw new Error(`Use a password of at least ${MIN_PASSWORD_LENGTH} characters.`);
+        throw new AuthoredError(`Use a password of at least ${MIN_PASSWORD_LENGTH} characters.`);
       }
       const config = { ...draft, allowNetworkAccess: networkAccess };
       const configChanged = !sameConfig(config, webUiConfig(status));
@@ -92,6 +92,7 @@ export function WebUiDialog({
         title: "Allow network access?",
         message: `Listen on ${draft.listenAddress}:${draft.port}? The web UI uses unencrypted HTTP, and a signed-in browser can change every setting and read the client key. Only use a trusted network, and never expose this port to the internet. An SSH tunnel or Tailscale is safer.`,
         confirmLabel: "Allow and Save",
+        destructive: true,
       })) return false;
       if (web && status.enabled && !config.enabled && !await confirm({
         title: "Turn off the web UI?",

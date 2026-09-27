@@ -240,7 +240,7 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
 /** Refreshes the record on open: its receipt may have been verified since the list loaded. */
 export function UsageProofDialog({ activity: listed, ...control }: { activity: RequestActivity } & DialogControl): React.JSX.Element {
   const { data: activity = listed, error } = useQuery({
-    queryKey: ["usage-record", listed.id], queryFn: () => desktopApi.getUsageRecord(listed.id), initialData: listed,
+    queryKey: ["usage-record", listed.id], queryFn: () => desktopApi.getUsageRecord(listed.id), initialData: listed, initialDataUpdatedAt: 0,
   });
   return (
     <AppDialog {...control} title="Usage proof" description={formatTimestamp(activity.at * 1_000, true)} className="sm:max-w-xl">

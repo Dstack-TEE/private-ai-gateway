@@ -16,7 +16,7 @@ import { WebUiDialog } from "./features/web-ui";
 import { UsageProofDialog } from "./features/usage";
 import { LocalApiExamplesDialog } from "./components/local-api-examples";
 import { NotificationsDialog } from "./components/notifications";
-import { useConfirm, useConfirmOpen, useReportFailure } from "./components/confirm";
+import { useConfirm, useConfirmOpen, useReportFailure, useReportFailureOnce } from "./components/confirm";
 import { useDialog } from "./components/app-dialog";
 import { AppearanceProvider } from "./components/appearance";
 import { localEndpoint } from "./lib/format";
@@ -28,7 +28,8 @@ export function AppLayout(): React.JSX.Element {
   // The reset settings show on the Settings page; only screen readers are told.
   const [announcement, setAnnouncement] = useState("");
   useEffect(() => desktopApi.onSettingsReset(() => {
-    void client.resetQueries();
+    // The window's state is the backend's, which a reset doesn't clear.
+    void client.resetQueries({ predicate: (query) => query.queryKey[0] !== "app-state" });
     void navigate({ to: "/settings", replace: true });
     setAnnouncement("Settings reset");
   }), [client, navigate]);
@@ -57,7 +58,9 @@ function Window(): React.JSX.Element {
   const confirming = useConfirmOpen();
   const dialog = useDialog<AppDialog>();
   const { payload: shownDialog, key: dialogKey, show: openDialog } = dialog;
-  const { data: clientKey = "" } = useQuery({ queryKey: ["client-key"], queryFn: () => desktopApi.getClientKey(), enabled: backendReady });
+  const clientKeyRead = useQuery({ queryKey: ["client-key"], queryFn: () => desktopApi.getClientKey(), enabled: backendReady });
+  const clientKey = clientKeyRead.data ?? "";
+  useReportFailureOnce("Could not read the Local API key", clientKeyRead.error);
   const [clientKeyVisible, setClientKeyVisible] = useState(false);
   useEffect(() => desktopApi.onClientKeyChange((available) => {
     if (available) void client.invalidateQueries({ queryKey: ["client-key"] });
@@ -131,16 +134,12 @@ function Window(): React.JSX.Element {
       ...distributionCapabilities.notifications ? ["system notification permission"] : [],
       ...distributionCapabilities.cliRegistration ? ["the pap command"] : [],
     ]);
-    try {
-      if (await confirm({
-        title: "Reset settings?",
-        message: `${agents.accessStatus === "authorized" ? "Protection stops, agents disconnect and their configurations are restored," : "Protection stops"} and settings return to their defaults. ${kept} are unchanged.`,
-        confirmLabel: "Reset Settings",
-        destructive: true,
-      })) resetMutate();
-    } catch (error) {
-      reportFailure("Could not reset settings", error);
-    }
+    if (await confirm({
+      title: "Reset settings?",
+      message: `${agents.accessStatus === "authorized" ? "Protection stops, agents disconnect and their configurations are restored," : "Protection stops"} and settings return to their defaults. ${kept} are unchanged.`,
+      confirmLabel: "Reset Settings",
+      destructive: true,
+    })) resetMutate();
   };
   // The state changes with every backend update, so the shell is not memoized.
   const shell: Shell = {
@@ -278,7 +277,7 @@ function Window(): React.JSX.Element {
         />}
         {shownDialog?.kind === "privacy" && <PrivacyDialog state={state} {...dialogControl} />}
         {shownDialog?.kind === "local-api" && <LocalApiDialog
-          state={state} clientKey={clientKey} clientKeyVisible={clientKeyVisible}
+          state={state} clientKey={clientKeyRead.data} clientKeyVisible={clientKeyVisible}
           onToggleKey={() => setClientKeyVisible((visible) => !visible)}
           onRotate={rotateClientKey}
           onSave={(config) => applyState(() => desktopApi.saveLocalApiConfig(config))}
