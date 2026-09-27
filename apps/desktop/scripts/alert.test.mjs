@@ -88,3 +88,18 @@ test("closing the dialog after its answer never answers the next request", async
   queue.answer(true);
   assert.equal(await second, true);
 });
+
+test("a close while a request is shown never replaces it", async () => {
+  const { screen, queue } = dialog();
+  const first = queue.ask("Reset settings?");
+  const second = queue.ask("Could not open the link");
+  // A stray close report while the question is still on screen.
+  assert.equal(queue.closed(), true);
+  assert.deepEqual(screen.shown, ["Reset settings?"]);
+  queue.answer(true);
+  assert.equal(await first, true);
+  assert.equal(queue.closed(), true);
+  queue.answer(true);
+  assert.equal(await second, true);
+  assert.equal(queue.closed(), false);
+});

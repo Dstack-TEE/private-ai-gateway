@@ -172,7 +172,11 @@ function Window(): React.JSX.Element {
     openAboutLink: (target: AboutLink) => void runAction("Could not open the link", () => desktopApi.openAboutLink(target)),
   };
 
+  // A repeated request while one asks is ignored: one answer settles it.
+  const askingStopAll = useRef(false);
   const requestStopAllAndQuit = useEffectEvent(async () => {
+    if (askingStopAll.current) return;
+    askingStopAll.current = true;
     try {
       const confirmed = await confirm({
         title: "Stop all services and quit?",
@@ -184,6 +188,8 @@ function Window(): React.JSX.Element {
       if (confirmed) await desktopApi.stopAllAndQuit();
     } catch (error) {
       reportFailure("Could not stop all services", error);
+    } finally {
+      askingStopAll.current = false;
     }
   });
 

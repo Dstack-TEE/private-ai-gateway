@@ -28,35 +28,40 @@ export function ConfirmProvider({ ask, tell, children }: PropsWithChildren<{ ask
   // nothing outside the dialog had focus then (a button that disabled itself
   // before asking, or the answer to the previous request), to the one before.
   // When that is gone too (a deleted item's controls), the action that follows
-  // decides where focus goes.
+  // decides where focus goes. A request shown after the queue drained never
+  // falls back to the previous opener.
   const opener = useRef<HTMLElement | null>(null);
+  const drained = useRef(true);
   const popup = useRef<HTMLDivElement>(null);
   const cancel = useRef<HTMLButtonElement>(null);
   const acknowledge = useRef<HTMLButtonElement>(null);
   const [queue] = useState(() => createDialogQueue<Request>((next) => {
     const focused = document.activeElement;
-    if (focused instanceof HTMLElement && focused !== document.body && !popup.current?.contains(focused)) opener.current = focused;
+    const outside = focused instanceof HTMLElement && focused !== document.body && !popup.current?.contains(focused) ? focused : null;
+    if (outside || drained.current) opener.current = outside;
+    drained.current = false;
     setRequest(next);
     setOpen(true);
   }, () => setOpen(false)));
-  const inSheet = useCallback(<T,>(present: () => Promise<T>) => {
+  /** Counts a request as open until it is answered, in a sheet or in the queue. */
+  const pending = useCallback(<T,>(present: () => Promise<T>) => {
     setAsking((count) => count + 1);
     return present().finally(() => setAsking((count) => count - 1));
   }, []);
   const confirm = useCallback<Confirm>((options) => {
-    if (ask && !options.destructive) return inSheet(() => ask(options));
-    return queue.ask({ kind: "confirm", options });
-  }, [ask, inSheet, queue]);
+    if (ask && !options.destructive) return pending(() => ask(options));
+    return pending(() => queue.ask({ kind: "confirm", options }));
+  }, [ask, pending, queue]);
   const alert = useCallback<Alert>((options) => presentAlert(
     options,
-    tell && ((next) => inSheet(() => tell(next))),
-    (next) => queue.ask({ kind: "alert", options: next }),
-  ), [tell, inSheet, queue]);
+    tell && ((next) => pending(() => tell(next))),
+    (next) => pending(() => queue.ask({ kind: "alert", options: next })),
+  ), [tell, pending, queue]);
   const alerting = request?.kind === "alert";
   const value = useMemo(() => ({ confirm, alert }), [confirm, alert]);
   return <ConfirmContext.Provider value={value}><ConfirmOpenContext.Provider value={open || asking > 0}>
     {children}
-    <AlertDialog open={open} onOpenChange={(next) => { if (!next) queue.answer(false); }} onOpenChangeComplete={(next) => { if (!next) queue.closed(); }}>
+    <AlertDialog open={open} onOpenChange={(next) => { if (!next) queue.answer(false); }} onOpenChangeComplete={(next) => { if (!next) drained.current = !queue.closed(); }}>
       <AlertDialogContent ref={popup} initialFocus={alerting ? acknowledge : cancel} finalFocus={() => opener.current?.isConnected ? opener.current : false}>
         <AlertDialogHeader>
           <AlertDialogTitle>{request?.options.title}</AlertDialogTitle>

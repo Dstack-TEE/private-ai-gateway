@@ -53,10 +53,15 @@ export function createDialogQueue<T>(show: (request: T) => void, hide: () => voi
       shown = undefined;
       hide();
     },
-    /** The dialog finished closing; the next request, if any, shows. */
+    /**
+     * The dialog finished closing; the next request, if any, shows. Returns
+     * whether one did. A close while a request is shown is ignored.
+     */
     closed: () => {
+      if (shown) return true;
       busy = false;
       next();
+      return Boolean(shown);
     },
   };
 }
