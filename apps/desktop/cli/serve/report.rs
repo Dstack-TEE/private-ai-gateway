@@ -11,14 +11,21 @@ use crate::aci::types::AttestationReport;
 use crate::checks::EstablishedIdentity;
 use crate::transcript::{Status, Transcript};
 
-/// One-line receipt summary: signature, wire hash, and the asserted upstream
-/// claims (e.g. `signature ok, wire hash ok, upstream tee_attested asserted (hardware_proven)`).
+/// One-line receipt summary: every failed check first, then signature, wire
+/// hash, and the asserted upstream claims (e.g. `signature ok, wire hash ok,
+/// upstream tee_attested asserted (hardware_proven)`).
 pub(super) fn summarize(transcript: &Transcript, session: Option<&Value>, serving: &str) -> String {
-    let mut parts = vec![
+    let mut parts: Vec<String> = transcript
+        .checks
+        .iter()
+        .filter(|check| check.status == Status::Fail)
+        .map(|check| format!("{} FAILED: {}", check.def.id, check.detail))
+        .collect();
+    parts.extend([
         check_clause(transcript, "receipt-1", "signature"),
         check_clause(transcript, "receipt-4", "wire hash"),
         upstream_clause(transcript, session, serving),
-    ];
+    ]);
     parts.retain(|part| !part.is_empty());
     parts.join(", ")
 }
@@ -33,14 +40,17 @@ fn check_clause(transcript: &Transcript, id: &str, label: &str) -> String {
 }
 
 /// `upstream <name status (source)>...` over the asserted claims of the cited
-/// session (§8.3), or a loud clause if the shallow audit (upstream-1) did not pass.
+/// session (§8.3), or a loud clause if the shallow audit (upstream-1) did not
+/// pass or the deep audit (upstream-2) failed.
 fn upstream_clause(transcript: &Transcript, session: Option<&Value>, serving: &str) -> String {
     // §4.1/§5.3: a direct service has no upstream hop — "UNVERIFIED" would
     // misread the workload the client itself verified.
     if serving == "direct" {
         return "direct service, no upstream hop".to_string();
     }
-    if status_of(transcript, "upstream-1") != Some(Status::Pass) {
+    if status_of(transcript, "upstream-1") != Some(Status::Pass)
+        || status_of(transcript, "upstream-2") == Some(Status::Fail)
+    {
         return "upstream UNVERIFIED".to_string();
     }
     let claims = session

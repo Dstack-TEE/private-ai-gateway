@@ -258,8 +258,15 @@ unlocked OS keychain for a process running as you.
 - **Verification failures fail closed.** When verification fails or is
   blocked, connected agents stay pointed at the Local API, which refuses
   their requests until protection is verified again; they never fall back to
-  their original provider. Stopping protection, quitting, or disconnecting an
-  agent restores its own configuration.
+  their original provider. A Local API address change rewrites them to the
+  new address, unless the backend has not verified a catalog since it
+  started; then they are restored until verification projects them again.
+  Stopping protection, Stop All and Quit, `pap service stop`, Reset settings,
+  or disconnecting an agent restores its own configuration. Quitting the app
+  from the tray or menu leaves the backend running and the agents pointed at
+  it. A backend that is not running cannot restore agents, so before
+  uninstalling, stop it while it runs (`pap service start`, then
+  `pap service stop`).
 
 ## Upgrading from 0.1
 
@@ -283,9 +290,11 @@ steps (`runtime/src/settings/legacy.rs`):
    key you replaced since) is left alone.
    `migrated-0.1/import-complete` records the step once every entry is
    deleted. Each store operation may take at most 60 seconds, which leaves
-   time to answer a macOS Keychain prompt. The step runs once: if it fails,
-   `migrated-0.1/import-abandoned` records that and the store is never asked
-   again, so a denied Keychain prompt does not come back on every start.
+   time to answer a macOS Keychain prompt. If the store itself fails,
+   `migrated-0.1/import-abandoned` records that with the reason and the store
+   is never asked again, so a denied Keychain prompt does not come back on
+   every start. A problem with this app's own files (for example a damaged
+   `local-state.json`) leaves the step pending for the next start instead.
    While the step runs, disconnecting an agent whose original key has not
    been imported yet fails with the same "agent credential could not be
    restored" error 0.1 gave while the credential store was unavailable,
@@ -313,8 +322,8 @@ credential store entries stay where they are, the error stays in Settings,
 step 1 has not succeeded, settings cannot be changed, so nothing can be saved
 that the import would then have to merge with. If step 2 fails because the
 credential store is locked, unavailable (for example Linux without a Secret
-Service) or a macOS prompt is denied or left unanswered, or because a file
-cannot be written, the settings are still in effect, Settings and
+Service) or a macOS prompt is denied or left unanswered, the settings are
+still in effect, Settings and
 `pap doctor` name the profiles whose API key to re-enter once, and those
 profiles show no saved key until you sign in again or enter one. The entries
 stay in the credential store; remove them there if you like.

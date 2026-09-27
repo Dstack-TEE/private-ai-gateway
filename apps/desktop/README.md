@@ -74,12 +74,23 @@ it, shown in the request's proof details and printed by
 `pap usage show <id> --receipt`.
 
 Only agents that are both linked and currently protected are authorized on the
-Local API. Stopping protection, quitting, Reset settings, or disconnecting
-restores the owned configuration. A verification failure or block, a network
-loss, and a restart for an update, a profile switch or a settings change keep
-linked agents pointed at the Local API, which refuses them until protection is
-verified again, so their requests never fall back to the original provider.
-External edits are preserved and incomplete restoration is kept retryable.
+Local API. Stopping protection, Stop All and Quit, `pap service stop`, Reset
+settings, or disconnecting restores the owned configuration; quitting the app
+from the tray or menu leaves the backend running and the agents pointed at it.
+A verification failure or block, a network loss, and a restart for an update,
+a profile switch or a settings change keep linked agents pointed at the Local
+API, which refuses them until protection is verified again, so their requests
+never fall back to the original provider. A Local API address change during
+the session rewrites them to the new address from the last verified catalog;
+only when this backend has not verified a catalog yet are they restored until
+verification projects them again. External edits are preserved and
+incomplete restoration is kept retryable.
+
+A backend that is not running restores nothing: `pap service stop` and
+uninstalling cannot restore agents it left projected (for example after an
+update installed without relaunching the app). Run `pap service start` and
+then `pap service stop`, or choose Stop All and Quit in the app, before
+uninstalling.
 
 ## Development
 

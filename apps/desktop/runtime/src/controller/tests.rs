@@ -103,6 +103,7 @@ fn test_runtime(
         endpoint: EndpointRuntime::new(executor.handle().clone()),
         agent_policy: Mutex::new(()),
         reported_agents: Mutex::new(Vec::new()),
+        verified_catalog: Mutex::new(None),
         lifecycle: tokio::sync::Mutex::new(()),
         exiting: AtomicBool::new(false),
         helper_path: directory.join("helper"),
@@ -792,10 +793,33 @@ fn recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them() {
         restored(),
         serde_json::from_str::<serde_json::Value>(original).unwrap()
     );
+    // A Local API address change while the session goes on offline rewrites
+    // the projection to the new address rather than restoring it.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    runtime.manager.restore_snapshot(AppState {
+        status: VerificationStatus::Stopped,
+        reconnecting: true,
+        ..verified.clone()
+    });
+    runtime.recovery.available.store(false, Ordering::Release);
+    executor
+        .block_on(runtime.apply_local_api(ListenConfig {
+            port,
+            ..ListenConfig::default()
+        }))
+        .unwrap();
+    let moved = std::fs::read(&path).unwrap();
+    assert_ne!(moved, reprojected);
+    assert!(String::from_utf8_lossy(&moved).contains(&format!("127.0.0.1:{port}")));
+    assert!(runtime.proxy.tokens().agent_for(&token).is_none());
     executor
         .block_on(runtime.shutdown(desktop_core::protocol::ShutdownMode::UpdateRestart, true))
         .unwrap();
-    assert_eq!(std::fs::read(&path).unwrap(), reprojected);
+    assert_eq!(std::fs::read(&path).unwrap(), moved);
 }
 
 #[test]

@@ -27,10 +27,10 @@
 //!    `migrated-0.1/import-complete` records the step once all are deleted.
 //!    Every store operation has a deadline, because a macOS Keychain entry
 //!    created by the 0.1 app can make the service wait for an authorization
-//!    prompt. The step runs once: when it fails (the store is unavailable,
-//!    a prompt was denied or timed out, or a file could not be written),
-//!    `migrated-0.1/import-abandoned` records that, so the store is never
-//!    asked again.
+//!    prompt. When the store itself fails (it is unavailable, or a prompt was
+//!    denied or timed out), `migrated-0.1/import-abandoned` records that
+//!    with the reason, so the store is never asked again. A problem with
+//!    this app's own files leaves the step pending for the next start.
 //!
 //! Values already in the files win, so a synced `config.toml` is never
 //! overwritten and a rerun after a crash is harmless:
@@ -360,12 +360,13 @@ pub(crate) fn secrets_pending(data_dir: &Path) -> bool {
 
 /// Step 2: imports the credential store entries this device's 0.1 files
 /// reference and deletes them from the store. Returns notices for anything
-/// the user has to redo. The step runs once: it is recorded as done, or as
-/// abandoned when it fails, so an unavailable store or a denied macOS
-/// Keychain prompt is not asked again on every start. `Err` means not even
-/// that could be recorded; the step then reruns on the next start.
+/// the user has to redo. The step is recorded as done, or as abandoned when
+/// the credential store itself fails (unavailable, a denied or unanswered
+/// macOS Keychain prompt), so the store is not asked again on every start.
+/// `Err` is a problem with this app's own files; nothing records the step
+/// then, and it reruns on the next start without prompting again first.
 ///
-/// While the step runs, an agent restore value missing from
+/// While the step is pending, an agent restore value missing from
 /// `local-state.json` may still be in the store, so [`LocalState`] reports it
 /// as unavailable rather than absent: a disconnect then fails instead of
 /// dropping the user's key. Once the step is recorded, a value it did not
@@ -376,24 +377,17 @@ pub(crate) fn import_secrets(
     data_dir: &Path,
     keychain: &dyn Keychain,
 ) -> Result<Vec<String>, String> {
-    let result =
-        import_pending_secrets(settings, local, data_dir, keychain).or_else(|error| {
-            tracing::warn!("Abandoning the 0.1 credential import: {error}");
-            abandon(data_dir).map(|()| {
-                vec![format!(
-                    "Settings: Saved credentials could not be imported from 0.1: {error}. {ABANDONED_ADVICE}"
-                )]
-            })
-        });
+    let result = import_pending_secrets(settings, local, data_dir, keychain);
     local.set_importing(secrets_pending(data_dir));
     result
 }
 
-/// Records step 2 as abandoned.
-fn abandon(data_dir: &Path) -> Result<(), String> {
+/// Records step 2 as abandoned, with the credential store's failure.
+fn abandon(data_dir: &Path, failure: &str) -> Result<(), String> {
+    tracing::warn!("Abandoning the 0.1 credential import: {failure}");
     private_fs::write_atomic(
         &data_dir.join(BACKUP_DIR).join(ABANDONED_FILE),
-        "The saved credentials of Private AI Proxy 0.1 could not be imported; they are not asked for again.\n",
+        &format!("The 0.1 credential import was abandoned: {failure}\n"),
         None,
     )
     .map_err(|error| format!("Cannot record the abandoned 0.1 import: {error}"))
@@ -527,8 +521,7 @@ fn import_pending_secrets(
 
     let mut notices = Vec::new();
     if let Some(failure) = import.failure {
-        tracing::warn!("Abandoning the 0.1 credential import: {failure}");
-        abandon(data_dir)?;
+        abandon(data_dir, &failure)?;
         let profiles = if missing.is_empty() {
             String::new()
         } else {
@@ -684,8 +677,8 @@ impl Import<'_> {
         }
     }
 
-    /// Deletes what the files now hold. A failure leaves the step pending, so
-    /// the next start deletes what is left.
+    /// Deletes what the files now hold. A failure abandons the step: what is
+    /// left stays in the store, which is not asked again.
     fn delete_imported(&mut self) {
         if self.failure.is_some() {
             return;

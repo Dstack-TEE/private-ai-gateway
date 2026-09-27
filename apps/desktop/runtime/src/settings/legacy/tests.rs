@@ -405,7 +405,8 @@ fn an_unavailable_credential_store_is_asked_once_and_the_import_abandoned() {
     // Keychain prompt is not shown again on every start.
     assert_eq!(locked.entries.borrow().len(), 5);
     assert!(!secrets_pending(&data));
-    assert!(data.join(BACKUP_DIR).join(ABANDONED_FILE).exists());
+    let marker = fs::read_to_string(data.join(BACKUP_DIR).join(ABANDONED_FILE)).unwrap();
+    assert!(marker.contains("locked"), "{marker}");
     assert!(!data.join(BACKUP_DIR).join(COMPLETE_FILE).exists());
     // The profiles show no key, and the user signs in again.
     let profiles = settings.profile_views(&settings.snapshot().unwrap());
@@ -420,6 +421,21 @@ fn an_unavailable_credential_store_is_asked_once_and_the_import_abandoned() {
     assert!(problems.is_empty(), "{problems:?}");
     assert!(unlocked.reads.borrow().is_empty());
     assert_eq!(settings.profile_key("work").unwrap(), None);
+}
+
+#[test]
+fn a_problem_with_our_own_files_leaves_the_credential_import_pending() {
+    let root = tempfile::tempdir().unwrap();
+    let (config_dir, data) = (root.path().join("config"), root.path().join("data"));
+    write_legacy(&data);
+    let (settings, _) = Settings::open(config_dir, &data);
+    fs::write(data.join(LOCAL_STATE_FILE), "{ damaged").unwrap();
+    let local = LocalState::open(&data);
+    let keychain = keychain();
+    assert!(import_secrets(&settings, &local, &data, &keychain).is_err());
+    assert!(secrets_pending(&data) && local.importing());
+    assert!(!data.join(BACKUP_DIR).join(ABANDONED_FILE).exists());
+    assert_eq!(keychain.entries.borrow().len(), 5);
 }
 
 #[test]

@@ -100,6 +100,9 @@ pap service stop --yes
 protection. `stop` stops protection and restores managed agent configuration
 but keeps management available.
 `service stop` shuts down the backend. Closing the desktop app does not stop it.
+When no backend is running, `service stop` restores nothing: run
+`service start` first if agents may still point at the Local API, for example
+before uninstalling after an update that was not relaunched.
 Stopping first restores the coding-agent configuration; if that fails, `service
 stop` is refused so agents are not left pointing at a stopped Local API: it
 reports that the backend keeps running, and the service log has the reason. Mac

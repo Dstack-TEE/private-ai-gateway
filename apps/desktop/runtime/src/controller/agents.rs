@@ -341,6 +341,9 @@ impl DesktopRuntime {
             return Ok(());
         }
         let catalog = if protected { session.catalog } else { None };
+        if let (Some(catalog), Ok(mut verified)) = (&catalog, self.verified_catalog.lock()) {
+            *verified = Some(catalog.clone());
+        }
         if protected && !self.recovery.agents_ready() {
             return Ok(());
         }
@@ -354,6 +357,25 @@ impl DesktopRuntime {
         let failures = outcome?;
         let tokens = projector.scan(catalog.as_ref())?.1;
         self.publish_agent_tokens(tokens)?;
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(agent_failures(failures).into())
+        }
+    }
+
+    /// Points connected agents at the current Local API address; see
+    /// `Projector::retarget`.
+    pub(super) fn retarget_agents(&self, catalog: &Catalog) -> Result<(), Error> {
+        if !self.agent_configuration_enabled() || self.instance.is_none() {
+            return Ok(());
+        }
+        let _guard = self
+            .agent_policy
+            .lock()
+            .map_err(|_| "Agent state unavailable")?;
+        let failures = self.current_projector()?.retarget(catalog)?;
+        self.manager.agents_changed();
         if failures.is_empty() {
             Ok(())
         } else {

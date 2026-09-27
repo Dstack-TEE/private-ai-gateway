@@ -53,10 +53,21 @@ impl DesktopRuntime {
             return Ok(previous);
         }
         let reconnect = self.manager.is_running()? && !previous.configuration_verification;
-        // The projections name the Local API URL: restore them before it
-        // changes; reconnecting rebuilds them against the new endpoint.
-        self.stop_verifier(reconnect || previous.reconnecting, true)?;
+        // The projections name the Local API URL. While the session goes on,
+        // they are rewritten to the new address from the last verified
+        // catalog, so agents never fall back to their own provider. Without
+        // one they are restored, and verification projects them again.
+        let reconnecting = reconnect || previous.reconnecting;
+        let catalog = (reconnecting && previous.session_active)
+            .then(|| self.verified_catalog.lock().ok()?.clone())
+            .flatten();
+        self.stop_verifier(reconnecting, catalog.is_none())?;
         let result = self.rebind_local_api(config, current, resolved).await;
+        if let Some(catalog) = catalog {
+            if let Err(error) = self.retarget_agents(&catalog) {
+                self.report_error(error);
+            }
+        }
         if self.manager.snapshot()?.endpoint_error.is_some() {
             self.recovery.cancel();
             self.manager.cancel_reconnection();

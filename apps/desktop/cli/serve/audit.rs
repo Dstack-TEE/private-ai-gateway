@@ -87,7 +87,15 @@ pub(super) fn audit_exchange(
             .await
         };
         let result = tokio::select! {
-            _ = state.shutdown.cancelled() => return,
+            _ = state.shutdown.cancelled() => {
+                report(
+                    None,
+                    "Response delivered; protection stopped before its receipt was audited.".into(),
+                    None,
+                    None,
+                );
+                return;
+            }
             result = audit => result,
         };
         match result {
