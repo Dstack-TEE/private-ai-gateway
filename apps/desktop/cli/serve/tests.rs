@@ -419,6 +419,69 @@ async fn client_cancelled_stream_is_not_a_failed_proof() {
 }
 
 #[tokio::test]
+async fn audits_past_the_concurrency_limit_wait_instead_of_being_skipped() {
+    // The receipt service answers only once more audits than may run at once
+    // are waiting for it.
+    let (open, opened) = tokio::sync::watch::channel(false);
+    let receipt_calls = Arc::new(AtomicUsize::new(0));
+    let upstream = Router::new()
+        .route(
+            "/v1/aci/receipts/{id}",
+            get({
+                let calls = receipt_calls.clone();
+                move || {
+                    let (calls, mut opened) = (calls.clone(), opened.clone());
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        let _ = opened.wait_for(|open| *open).await;
+                        json_response(StatusCode::OK, vector_receipt_envelope())
+                    }
+                }
+            }),
+        )
+        .route(
+            "/v1/aci/sessions/{id}",
+            get(|| async {
+                Response::builder()
+                    .header("content-type", "application/json")
+                    .body(Body::from(vector_session_bytes()))
+                    .unwrap()
+            }),
+        );
+    let base = spawn_server(upstream).await;
+    let (tx, mut outcomes) = mpsc::unbounded_channel();
+    let state = state_over(base, tx);
+    let limit = state.audits.available_permits();
+    let audits = limit + 4;
+    for index in 0..audits {
+        let exchange = RecordedExchange {
+            receipt_id: format!("rcpt-{index}"),
+            path: "/v1/chat/completions".to_string(),
+            status: 200,
+            streamed: true,
+            request: BodyDigest::of(REQUEST_BODY),
+            response: BodyDigest::of(RESPONSE_BODY),
+            delivery: ResponseDelivery::Complete,
+            pinned_sessions: Vec::new(),
+            at: 1,
+            verified: None,
+            context: None,
+            local_policy_applied: false,
+        };
+        audit_exchange(state.clone(), state.snapshot(), exchange, None);
+    }
+    wait_until(|| receipt_calls.load(Ordering::SeqCst) == limit).await;
+    assert!(outcomes.try_recv().is_err(), "no audit is skipped");
+
+    open.send(true).unwrap();
+    for _ in 0..audits {
+        let outcome = outcomes.recv().await.unwrap();
+        assert_eq!(outcome.verified, Some(true), "{}", outcome.detail);
+    }
+    assert_eq!(receipt_calls.load(Ordering::SeqCst), audits);
+}
+
+#[tokio::test]
 async fn standalone_control_lists_and_retries_recorded_exchanges() {
     let (tx, _outcomes) = mpsc::unbounded_channel();
     let state = state_over("http://127.0.0.1:9".to_string(), tx);

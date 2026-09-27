@@ -156,7 +156,8 @@ protection problems, is stored under that key.
   an installer or updater holds it exclusively while it stops the backend and
   replaces files, and clients report it after 5 s instead of waiting.
 - Shutdown enters draining before taking the exclusive operation gate, waits
-  for existing mutations, restores managed agent configuration, stops listeners,
+  for existing mutations, restores managed agent configuration (an update
+  restart keeps it for the updated backend to resume), stops listeners,
   and awaits process exit. When a client requested it, failure to restore
   leaves management available for recovery instead of closing the inference
   listener halfway through shutdown; a signal or the owning app's exit stops

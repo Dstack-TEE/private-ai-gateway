@@ -73,10 +73,13 @@ were already delivered. Usage keeps each checked receipt as the service returned
 it, shown in the request's proof details and printed by
 `pap usage show <id> --receipt`.
 
-Only agents that are both linked and currently protected receive the local API
-configuration. Stop, shutdown, verification failure, or disconnect restores the
-owned configuration. External edits are preserved and incomplete restoration is
-kept retryable.
+Only agents that are both linked and currently protected are authorized on the
+Local API. Stopping protection, quitting, Reset settings, or disconnecting
+restores the owned configuration. A verification failure or block, a network
+loss, and a restart for an update, a profile switch or a settings change keep
+linked agents pointed at the Local API, which refuses them until protection is
+verified again, so their requests never fall back to the original provider.
+External edits are preserved and incomplete restoration is kept retryable.
 
 ## Development
 

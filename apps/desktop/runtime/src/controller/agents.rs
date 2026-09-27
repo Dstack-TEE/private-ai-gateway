@@ -72,7 +72,8 @@ impl DesktopRuntime {
         }
         let projector = self.current_projector()?;
         projector.initialize_store()?;
-        if !crate::recovery::connection_intended(&self.manager.snapshot()?) {
+        // Only a session the user ended restores the agents' configuration.
+        if !self.manager.snapshot()?.session_active {
             let failures = projector.reconcile(None)?;
             if !failures.is_empty() {
                 return Err(agent_failures(failures).into());
@@ -332,7 +333,10 @@ impl DesktopRuntime {
         let state = self.manager.snapshot()?;
         let session = self.proxy.session();
         let protected = state.is_protected() && session.verified;
-        if !protected && crate::recovery::connection_intended(&state) {
+        // Until the user ends the session, agents stay pointed at the Local
+        // API, which refuses them while protection is not verified: during a
+        // restart, a network loss, or a verification failure or block.
+        if !protected && state.session_active {
             self.publish_agent_tokens(TokenSet::default())?;
             return Ok(());
         }

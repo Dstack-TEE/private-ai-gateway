@@ -25,7 +25,7 @@ const CHECK_TITLES: Record<string, string> = {
   "id-4": "Service is built from public source",
   "id-5": "Private key stays inside the enclave",
   "id-6": "Connection uses the attested key",
-  "policy-os": "Production OS image",
+  "policy-os": "Production OS image (reported by the service)",
   "receipt-1": "Receipt signature",
   "receipt-2": "Receipt matches verified service",
   "receipt-3": "Request bytes match receipt",

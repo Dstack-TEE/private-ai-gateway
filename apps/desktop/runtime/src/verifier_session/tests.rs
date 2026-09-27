@@ -501,7 +501,7 @@ fn keyset_change_requests_fresh_verification_without_ending_the_session() {
 }
 
 #[test]
-fn security_blocks_survive_process_failure_without_cancelling_candidate_sessions() {
+fn security_blocks_survive_process_failure_and_keep_the_session_until_stopped() {
     for verification_only in [false, true] {
         let executor = tokio::runtime::Runtime::new().unwrap();
         let (events, _) = tokio::sync::mpsc::channel(8);
@@ -533,7 +533,7 @@ fn security_blocks_survive_process_failure_without_cancelling_candidate_sessions
                 },
             )
             .unwrap();
-        assert_eq!(usage.active_session().unwrap().is_some(), verification_only);
+        assert!(usage.active_session().unwrap().is_some());
         let running = manager.is_running().unwrap();
         manager
             .handle_event(
@@ -548,7 +548,7 @@ fn security_blocks_survive_process_failure_without_cancelling_candidate_sessions
             manager.snapshot().unwrap().status,
             VerificationStatus::Blocked
         );
-        assert_eq!(usage.active_session().unwrap().is_some(), verification_only);
+        assert!(usage.active_session().unwrap().is_some());
         assert_eq!(manager.is_running().unwrap(), running);
         manager
             .handle_event(
@@ -567,6 +567,10 @@ fn security_blocks_survive_process_failure_without_cancelling_candidate_sessions
         assert_eq!(state.configuration_verification, verification_only);
         assert!(!crate::recovery::should_retry(&state));
         assert!(!proxy.session().verified);
+        // A relaunch resumes the blocked session; only a stop ends it.
+        assert!(state.session_active);
+        manager.stop().unwrap();
+        assert!(usage.active_session().unwrap().is_none());
     }
 }
 

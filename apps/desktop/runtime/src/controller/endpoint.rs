@@ -53,8 +53,9 @@ impl DesktopRuntime {
             return Ok(previous);
         }
         let reconnect = self.manager.is_running()? && !previous.configuration_verification;
-        // Suspend projections before changing the URL; reconnect rebuilds them against the new endpoint.
-        self.stop_with_reconnect(reconnect || previous.reconnecting)?;
+        // The projections name the Local API URL: restore them before it
+        // changes; reconnecting rebuilds them against the new endpoint.
+        self.stop_verifier(reconnect || previous.reconnecting, true)?;
         let result = self.rebind_local_api(config, current, resolved).await;
         if self.manager.snapshot()?.endpoint_error.is_some() {
             self.recovery.cancel();

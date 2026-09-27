@@ -63,25 +63,48 @@ async fn open_account_url(app: AppHandle, url: String) -> Result<(), String> {
     .await
 }
 
+/// `pap cli` only reads and writes a few local files; one still running after
+/// this is stuck, and holding the registration lock.
+const CLI_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 async fn run_cli_command(
     app: &AppHandle,
     arguments: Vec<&str>,
 ) -> Result<CommandRegistration, String> {
-    let output = app
+    use tauri_plugin_shell::process::CommandEvent;
+
+    let (mut events, child) = app
         .shell()
         .sidecar("private-ai-proxy")
         .map_err(|_| "The bundled pap command is unavailable in this installation")?
         .args(arguments)
-        .output()
-        .await
+        .spawn()
         .map_err(|_| "The pap command could not complete")?;
-    if !output.status.success() {
+    let finished = async {
+        let (mut stdout, mut code) = (Vec::new(), None);
+        while let Some(event) = events.recv().await {
+            match event {
+                CommandEvent::Stdout(line) => {
+                    stdout.extend(line);
+                    stdout.push(b'\n');
+                }
+                CommandEvent::Terminated(payload) => code = payload.code,
+                _ => {}
+            }
+        }
+        (stdout, code)
+    };
+    let Ok((stdout, code)) = tokio::time::timeout(CLI_COMMAND_TIMEOUT, finished).await else {
+        let _ = child.kill();
+        return Err("The pap command did not finish in time".to_string());
+    };
+    if code != Some(0) {
         return Err("The pap command could not update command-line access".to_string());
     }
-    if output.stdout.len() > 64 * 1024 {
+    if stdout.len() > 64 * 1024 {
         return Err("The pap command returned an invalid response".to_string());
     }
-    serde_json::from_slice(&output.stdout)
+    serde_json::from_slice(&stdout)
         .map_err(|_| "The pap command returned an invalid response".to_string())
 }
 

@@ -108,7 +108,8 @@ and `kill` send) always stops the backend, since a service manager would kill it
 next; a restore that failed is logged and retried when the backend next starts.
 A signal during a `service stop` waits for it, and stops the backend itself only
 if that stop was refused. On Windows, signing out or shutting down ends the
-windowless backend without this sequence; the next start restores what it left.
+windowless backend without this sequence; the next start resumes the
+protection session it left, and until then agents stay pointed at the Local API.
 Shutdown is bounded: running commands get 10 seconds, then open connections and
 leftover background tasks 5 seconds each, and the process exits at the latest 30
 seconds after the shutdown began.

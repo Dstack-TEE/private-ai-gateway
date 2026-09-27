@@ -12,7 +12,6 @@ impl SessionManager {
         }
 
         let mut load_catalog = false;
-        let mut end_session = false;
         let mut retired_task = None;
         match event {
             // Identity in (or rotated): a new epoch; the session stays closed
@@ -44,10 +43,11 @@ impl SessionManager {
             // Verification lost: one atomic barrier. The epoch moves so a
             // read still in flight can neither publish nor clear this error,
             // and the identity must be reported again before anything opens.
+            // The session goes on, also across a restart, until the user
+            // stops it: agents stay pointed at the refusing Local API.
             VerifierEvent::Blocked { code, reason } => {
                 let rotating = code.as_deref() == Some("keyset_changed")
                     && runtime.state.status != VerificationStatus::Blocked;
-                end_session = !rotating && !runtime.verification_only;
                 runtime.epoch += 1;
                 runtime.identity_ready = false;
                 runtime.state.status = if rotating {
@@ -90,11 +90,6 @@ impl SessionManager {
                 service: runtime.service.clone(),
                 ..Session::default()
             });
-        }
-        // Use the same runtime -> usage lock order as start_inner, so this
-        // blocked event cannot delete the resume marker of a newer Start.
-        if end_session && self.usage.end_session().is_err() {
-            tracing::warn!("Could not persist the end of a blocked protection session");
         }
         drop(runtime);
         if let Some(mut task) = retired_task {

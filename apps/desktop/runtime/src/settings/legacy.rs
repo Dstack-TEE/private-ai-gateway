@@ -27,7 +27,10 @@
 //!    `migrated-0.1/import-complete` records the step once all are deleted.
 //!    Every store operation has a deadline, because a macOS Keychain entry
 //!    created by the 0.1 app can make the service wait for an authorization
-//!    prompt.
+//!    prompt. The step runs once: when it fails (the store is unavailable,
+//!    a prompt was denied or timed out, or a file could not be written),
+//!    `migrated-0.1/import-abandoned` records that, so the store is never
+//!    asked again.
 //!
 //! Values already in the files win, so a synced `config.toml` is never
 //! overwritten and a rerun after a crash is harmless:
@@ -41,9 +44,11 @@
 //!   device's 0.1 profile of that ID.
 //! - `local-state.json`: existing entries stay.
 //!
-//! A failed step writes nothing that records it, keeps the old files and the
-//! credential store entries where they are, is reported in the state and by
-//! `pap doctor`, and reruns on the next start.
+//! A failed step 1 writes nothing that records it, keeps the old files and
+//! the credential store entries where they are, is reported in the state and
+//! by `pap doctor`, and reruns on the next start. An abandoned step 2 is
+//! reported once; the profiles whose keys it did not import show the missing
+//! credential, as any profile without a key does.
 
 use std::{
     collections::BTreeMap,
@@ -79,6 +84,10 @@ const AGENTS_FILE: &str = "agent-connections.json";
 const BACKUP_DIR: &str = "migrated-0.1";
 /// Written into [`BACKUP_DIR`] when step 2 is done.
 const COMPLETE_FILE: &str = "import-complete";
+/// Written into [`BACKUP_DIR`] when step 2 failed; it is not tried again.
+const ABANDONED_FILE: &str = "import-abandoned";
+/// What an abandoned step 2 asks of the user.
+const ABANDONED_ADVICE: &str = "It is not tried again: sign in again or re-enter the API key of any profile that shows none. Disconnecting an agent connected in 0.1 leaves a credential that was not imported unset.";
 const LEGACY_FILES: [&str; 4] = [SERVICE_FILE, LOCAL_API_FILE, PREFERENCES_FILE, CLEANUP_FILE];
 /// How long one credential store operation may take, including a macOS
 /// Keychain authorization prompt the user has to answer.
@@ -340,32 +349,54 @@ fn read_setting<T>(
 }
 
 /// Whether saved credentials from 0.1 may still be in the credential store:
-/// step 1 has not run, or step 2 has not been recorded.
+/// step 1 has not run, or step 2 has not been recorded as done or abandoned.
 pub(crate) fn secrets_pending(data_dir: &Path) -> bool {
     let backup = data_dir.join(BACKUP_DIR);
     LEGACY_FILES.iter().any(|name| data_dir.join(name).exists())
-        || (backup.is_dir() && !backup.join(COMPLETE_FILE).exists())
+        || (backup.is_dir()
+            && !backup.join(COMPLETE_FILE).exists()
+            && !backup.join(ABANDONED_FILE).exists())
 }
 
 /// Step 2: imports the credential store entries this device's 0.1 files
 /// reference and deletes them from the store. Returns notices for anything
-/// the user has to redo. The step is recorded as done unless the store
-/// failed or timed out; then it reruns on the next start.
+/// the user has to redo. The step runs once: it is recorded as done, or as
+/// abandoned when it fails, so an unavailable store or a denied macOS
+/// Keychain prompt is not asked again on every start. `Err` means not even
+/// that could be recorded; the step then reruns on the next start.
 ///
-/// Until it is recorded, an agent restore value missing from
+/// While the step runs, an agent restore value missing from
 /// `local-state.json` may still be in the store, so [`LocalState`] reports it
-/// as unavailable rather than absent: a disconnect then fails and is retried,
-/// as it did in 0.1 while the credential store was unavailable
-/// (`AgentError::CredentialStore`), instead of dropping the user's key.
+/// as unavailable rather than absent: a disconnect then fails instead of
+/// dropping the user's key. Once the step is recorded, a value it did not
+/// import is absent, and a disconnect leaves that field unset.
 pub(crate) fn import_secrets(
     settings: &Settings,
     local: &LocalState,
     data_dir: &Path,
     keychain: &dyn Keychain,
 ) -> Result<Vec<String>, String> {
-    let result = import_pending_secrets(settings, local, data_dir, keychain);
+    let result =
+        import_pending_secrets(settings, local, data_dir, keychain).or_else(|error| {
+            tracing::warn!("Abandoning the 0.1 credential import: {error}");
+            abandon(data_dir).map(|()| {
+                vec![format!(
+                    "Settings: Saved credentials could not be imported from 0.1: {error}. {ABANDONED_ADVICE}"
+                )]
+            })
+        });
     local.set_importing(secrets_pending(data_dir));
     result
+}
+
+/// Records step 2 as abandoned.
+fn abandon(data_dir: &Path) -> Result<(), String> {
+    private_fs::write_atomic(
+        &data_dir.join(BACKUP_DIR).join(ABANDONED_FILE),
+        "The saved credentials of Private AI Proxy 0.1 could not be imported; they are not asked for again.\n",
+        None,
+    )
+    .map_err(|error| format!("Cannot record the abandoned 0.1 import: {error}"))
 }
 
 fn import_pending_secrets(
@@ -496,13 +527,15 @@ fn import_pending_secrets(
 
     let mut notices = Vec::new();
     if let Some(failure) = import.failure {
+        tracing::warn!("Abandoning the 0.1 credential import: {failure}");
+        abandon(data_dir)?;
         let profiles = if missing.is_empty() {
             String::new()
         } else {
             format!(" Re-enter the API key for: {}.", missing.join(", "))
         };
         notices.push(format!(
-            "Settings: Saved credentials from 0.1 could not be fully imported because {failure}.{profiles} The import is retried on the next start."
+            "Settings: Saved credentials from 0.1 could not be fully imported because {failure}.{profiles} {ABANDONED_ADVICE}"
         ));
     } else {
         // 3. Done on this device.
