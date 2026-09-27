@@ -16,10 +16,12 @@ import { WebUiDialog } from "./features/web-ui";
 import { UsageProofDialog } from "./features/usage";
 import { LocalApiExamplesDialog } from "./components/local-api-examples";
 import { NotificationsDialog } from "./components/notifications";
-import { useConfirm, useConfirmOpen, useReportFailure, useReportFailureOnce } from "./components/confirm";
+import { useConfirm, useConfirmOpen, useReportFailure, useReportReadFailure } from "./components/confirm";
 import { useDialog } from "./components/app-dialog";
 import { AppearanceProvider } from "./components/appearance";
 import { localEndpoint } from "./lib/format";
+import { AuthoredError } from "./lib/error-message";
+import { cliRegistrationQuery } from "./lib/page-queries";
 
 /** The signed-in window: the sidebar, the page header and the page. */
 export function AppLayout(): React.JSX.Element {
@@ -60,7 +62,16 @@ function Window(): React.JSX.Element {
   const { payload: shownDialog, key: dialogKey, show: openDialog } = dialog;
   const clientKeyRead = useQuery({ queryKey: ["client-key"], queryFn: () => desktopApi.getClientKey(), enabled: backendReady });
   const clientKey = clientKeyRead.data ?? "";
-  useReportFailureOnce("Could not read the Local API key", clientKeyRead.error);
+  useReportReadFailure("Could not read the Local API key", clientKeyRead);
+  // The shell registers the `pap` command at startup; its failure is reported once.
+  const { data: cliRegistration } = useQuery({ ...cliRegistrationQuery(), enabled: distributionCapabilities.cliRegistration, staleTime: Infinity });
+  const cliStartupError = cliRegistration?.startupError;
+  const reportedCliStartupError = useRef<string>(undefined);
+  useEffect(() => {
+    if (!cliStartupError || cliStartupError === reportedCliStartupError.current) return;
+    reportedCliStartupError.current = cliStartupError;
+    reportFailure("Could not register the pap command", new AuthoredError(cliStartupError));
+  }, [cliStartupError, reportFailure]);
   const [clientKeyVisible, setClientKeyVisible] = useState(false);
   useEffect(() => desktopApi.onClientKeyChange((available) => {
     if (available) void client.invalidateQueries({ queryKey: ["client-key"] });
@@ -211,8 +222,9 @@ function Window(): React.JSX.Element {
   });
   // A request waits in the shell until the window's state and agents have
   // loaded, so one made while the app starts sees the real profiles and
-  // agent access.
-  const ready = Boolean(appState.data || appState.error) && (agents.accessStatus !== undefined || agents.problem !== undefined);
+  // agent access. Agents aren't read while the backend is unavailable.
+  const backendUnavailable = state.backendConnected === false && state.protection.phase !== "starting";
+  const ready = Boolean(appState.data || appState.error) && (agents.accessStatus !== undefined || agents.problem !== undefined || backendUnavailable);
   useEffect(() => ready ? desktopApi.onNavigate((target) => showRequested(target)) : undefined, [ready]);
   const dialogControl = {
     ...dialog.control,

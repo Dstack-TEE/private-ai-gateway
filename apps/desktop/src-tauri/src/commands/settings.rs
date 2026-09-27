@@ -33,13 +33,13 @@ pub(crate) async fn select_profile_backup(
     ))
 }
 
-/// Exports the profiles, without keys, where the user chooses; `false` when
-/// they cancel.
+/// Exports the profiles, without keys, where the user chooses, unless they
+/// cancel.
 #[tauri::command]
 pub(crate) async fn export_profiles(
     window: WebviewWindow,
     client: State<'_, Arc<Client>>,
-) -> Result<bool, CallError> {
+) -> Result<(), CallError> {
     let content = desktop_core::ui_api::call(client.inner(), rpc::ExportProfilesContent).await?;
     save(
         &window,
@@ -50,12 +50,12 @@ pub(crate) async fn export_profiles(
     .await
 }
 
-/// Exports redacted diagnostics where the user chooses; `false` when they cancel.
+/// Exports redacted diagnostics where the user chooses, unless they cancel.
 #[tauri::command]
 pub(crate) async fn export_diagnostics(
     window: WebviewWindow,
     client: State<'_, Arc<Client>>,
-) -> Result<bool, CallError> {
+) -> Result<(), CallError> {
     let version = window.app_handle().package_info().version.to_string();
     let client = client.inner().clone();
     let content = run_blocking(move || {
@@ -103,7 +103,7 @@ async fn save(
     title: &str,
     file_name: &str,
     content: String,
-) -> Result<bool, CallError> {
+) -> Result<(), CallError> {
     let (send, receive) = tokio::sync::oneshot::channel();
     json_dialog(window, title)
         .set_file_name(file_name)
@@ -111,14 +111,14 @@ async fn save(
             let _ = send.send(path);
         });
     let Some(path) = chosen_path(receive.await)? else {
-        return Ok(false);
+        return Ok(());
     };
     run_blocking(move || {
         write_chosen(&path, content.as_bytes())
             .map_err(|_| "Could not save the file. Check that the folder is writable.".into())
     })
     .await?;
-    Ok(true)
+    Ok(())
 }
 
 /// Writes the file the user chose in a save panel, which already asked before

@@ -5,6 +5,9 @@
  */
 export class AuthoredError extends Error {}
 
+/** A web UI request refused because the session ended; the window returns to sign-in. */
+export class SessionEndedError extends AuthoredError {}
+
 /** The message of a failed call; only an authored message is shown as it is. */
 export function errorMessage(error: unknown): string {
   return error instanceof AuthoredError && error.message ? error.message : "The operation could not complete. Try again.";

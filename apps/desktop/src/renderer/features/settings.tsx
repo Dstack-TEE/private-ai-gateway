@@ -1,8 +1,7 @@
 import React, { useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { cliRegistrationQuery } from "../lib/page-queries";
-import { AuthoredError } from "../lib/error-message";
-import { useReportFailure, useReportFailureOnce } from "../components/confirm";
+import { useReportFailure, useReportReadFailure } from "../components/confirm";
 import { ChevronRight } from "lucide-react";
 import { brand } from "../brand/brand";
 import { UpdateControl, UpdateChannelControl } from "../updates";
@@ -23,10 +22,9 @@ import { OS_POLICY_CHANGE, useShell } from "../lib/shell";
 function CliRegistrationControl(): React.JSX.Element {
   const client = useQueryClient();
   const reportFailure = useReportFailure();
-  const { data: registration, error: readError } = useQuery(cliRegistrationQuery());
-  useReportFailureOnce("Could not read the pap command", readError);
-  // The shell's automatic registration at startup.
-  useReportFailureOnce("Could not register the pap command", registration?.startupError && new AuthoredError(registration.startupError));
+  const registrationRead = useQuery(cliRegistrationQuery());
+  const { data: registration } = registrationRead;
+  useReportReadFailure("Could not read the pap command", registrationRead);
   const mutation = useMutation({
     mutationFn: (installed: boolean) => desktopApi.setCliRegistration(installed),
     onMutate: () => client.cancelQueries({ queryKey: ["cli-registration"] }),
@@ -80,8 +78,9 @@ function SignOutControl({ onSignOut }: { onSignOut(): Promise<void> }): React.JS
 function useLaunchPreferences() {
   const client = useQueryClient();
   const reportFailure = useReportFailure();
-  const { data, error } = useQuery({ queryKey: ["launch-preferences"], queryFn: () => desktopApi.getLaunchPreferences() });
-  useReportFailureOnce("Could not read launch preferences", error);
+  const preferencesRead = useQuery({ queryKey: ["launch-preferences"], queryFn: () => desktopApi.getLaunchPreferences() });
+  const { data } = preferencesRead;
+  useReportReadFailure("Could not read launch preferences", preferencesRead);
   useEffect(() => desktopApi.onLaunchPreferencesChange((next) => {
     void client.cancelQueries({ queryKey: ["launch-preferences"] }).then(() => client.setQueryData(["launch-preferences"], next));
   }), [client]);

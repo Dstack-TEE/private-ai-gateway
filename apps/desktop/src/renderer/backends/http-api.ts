@@ -16,7 +16,7 @@ import {
   type WebBootstrap,
 } from "../../shared/contracts";
 import { createDesktopApi, type Backend, type UiPlatform, type UiTransport, type WebSession } from "./create-api";
-import { AuthoredError } from "../lib/error-message";
+import { AuthoredError, SessionEndedError } from "../lib/error-message";
 
 const sessionEnded = "Your web UI session ended or expired. Sign in again.";
 const signedOut = "You signed out. Sign in again to continue.";
@@ -177,7 +177,7 @@ async function read<T>(response: Response): Promise<T> {
 async function answer(response: Response): Promise<Response> {
   if (response.status === 401) {
     endSession(sessionEnded);
-    throw new AuthoredError(sessionEnded);
+    throw new SessionEndedError(sessionEnded);
   }
   if (!response.ok) throw errorFrom(await response.json().catch(() => undefined));
   return response;
@@ -294,7 +294,7 @@ function isProfileBackup(value: unknown): value is ProfileBackup {
   ));
 }
 
-function download(name: string, content: string): boolean {
+function download(name: string, content: string): void {
   const url = URL.createObjectURL(new Blob([content], { type: "application/json" }));
   const link = document.createElement("a");
   link.href = url;
@@ -303,7 +303,6 @@ function download(name: string, content: string): boolean {
   link.click();
   link.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
-  return true;
 }
 
 function openAllowed(url: string | undefined): void {

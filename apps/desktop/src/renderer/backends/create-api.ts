@@ -49,8 +49,8 @@ export interface UiPlatform {
   quit: DesktopApi["quit"];
   copyText(text: string): Promise<void>;
   selectProfileBackup(): Promise<ProfileBackup | null>;
-  saveProfileExport(): Promise<boolean>;
-  saveDiagnosticsExport(): Promise<boolean>;
+  saveProfileExport(): Promise<void>;
+  saveDiagnosticsExport(): Promise<void>;
   requestNotificationPermission(): Promise<NotificationPermissionStatus>;
   openNotificationSettings(): Promise<void>;
   openAboutLink: DesktopApi["openAboutLink"];

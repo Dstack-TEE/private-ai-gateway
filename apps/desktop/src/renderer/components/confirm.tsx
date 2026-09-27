@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useEffectEvent, useRef, useState, type PropsWithChildren } from "react";
 import { createDialogQueue } from "../lib/dialog-queue";
-import { errorMessage } from "../lib/error-message";
+import type { UseQueryResult } from "@tanstack/react-query";
+import { errorMessage, SessionEndedError } from "../lib/error-message";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "./ui/alert-dialog";
 
 /** A question asked before an action (`useConfirm`). */
@@ -90,22 +91,34 @@ export function useConfirm(): Confirm {
  */
 export function useReportFailure(): (title: string, error: unknown) => void {
   const ask = useConfirmContext();
-  return useCallback((title, error) => void ask({ kind: "alert", title, message: errorMessage(error) }), [ask]);
+  // The sign-in page says the session ended; nothing is reported over it.
+  return useCallback((title, error) => {
+    if (!(error instanceof SessionEndedError)) void ask({ kind: "alert", title, message: errorMessage(error) });
+  }, [ask]);
 }
 
+/** The reads whose failure was reported, by title, until one succeeds. */
+const reportedReads = new Set<string>();
+
 /**
- * Reports a failure that lasts, such as a read that keeps failing, as
- * `useReportFailure` does, once when it starts rather than on every retry.
- * The controls it feeds stay disabled or empty until a later read, such as
- * when the window is focused again, succeeds.
+ * Reports a read that fails, as `useReportFailure` does, once per failure:
+ * not again when it is retried, read under another key or read by a page
+ * shown again, until it succeeds. Its controls stay disabled or empty
+ * meanwhile, and it is read again when the window is focused.
  */
-export function useReportFailureOnce(title: string, error: unknown): void {
+export function useReportReadFailure(title: string, { error, isSuccess, isPlaceholderData }: Pick<UseQueryResult, "error" | "isSuccess" | "isPlaceholderData">): void {
   const reportFailure = useReportFailure();
   const failed = Boolean(error);
-  const report = useEffectEvent(() => reportFailure(title, error));
+  const succeeded = isSuccess && !isPlaceholderData;
+  const report = useEffectEvent(() => {
+    if (error instanceof SessionEndedError || reportedReads.has(title)) return;
+    reportedReads.add(title);
+    reportFailure(title, error);
+  });
   useEffect(() => {
-    if (failed) report();
-  }, [failed]);
+    if (succeeded) reportedReads.delete(title);
+    else if (failed) report();
+  }, [title, failed, succeeded]);
 }
 
 /** Whether a confirmation or an alert is waiting for an answer. */

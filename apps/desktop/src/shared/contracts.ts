@@ -71,8 +71,8 @@ export interface DesktopApi {
   getNotificationSettings(): Promise<NotificationConfiguration>;
   selectProfileBackup(): Promise<ProfileBackup | null>;
   /** Saves where the user chooses; `false` when they cancel. */
-  saveProfileExport(): Promise<boolean>;
-  saveDiagnosticsExport(): Promise<boolean>;
+  saveProfileExport(): Promise<void>;
+  saveDiagnosticsExport(): Promise<void>;
   importProfiles(backup: ProfileBackup): Promise<ImportResult>;
   saveNotificationSettings(config: NotificationPreferences): Promise<void>;
   requestNotificationPermission(): Promise<NotificationPermissionStatus>;

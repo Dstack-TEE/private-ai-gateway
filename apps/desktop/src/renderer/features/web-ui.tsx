@@ -92,7 +92,6 @@ export function WebUiDialog({
         title: "Allow network access?",
         message: `Listen on ${draft.listenAddress}:${draft.port}? The web UI uses unencrypted HTTP, and a signed-in browser can change every setting and read the client key. Only use a trusted network, and never expose this port to the internet. An SSH tunnel or Tailscale is safer.`,
         confirmLabel: "Allow and Save",
-        destructive: true,
       })) return false;
       if (web && status.enabled && !config.enabled && !await confirm({
         title: "Turn off the web UI?",

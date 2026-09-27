@@ -136,7 +136,6 @@ export function LocalApiDialog({
         title: "Allow network access?",
         message: `Listen on ${draft.listenAddress}:${draft.port}? The local API uses unencrypted HTTP. Only use a trusted network, and never expose this port to the internet.`,
         confirmLabel: "Allow and Save",
-        destructive: true,
       })) return false;
       await onSave({ ...draft, allowNetworkAccess: networkAccess });
       return true;
