@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createDialogQueue } from "../src/renderer/lib/alert.ts";
+import { createDialogQueue } from "../src/renderer/lib/dialog-queue.ts";
 
 function dialog() {
   const screen = { shown: [], open: false };

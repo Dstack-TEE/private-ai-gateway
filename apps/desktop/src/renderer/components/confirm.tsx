@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useRef, useState, type PropsWithChildren } from "react";
-import { createDialogQueue } from "../lib/alert";
+import { createDialogQueue } from "../lib/dialog-queue";
 import { errorMessage } from "../lib/error-message";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "./ui/alert-dialog";
 
@@ -13,7 +13,7 @@ export type Confirmation = {
   destructive?: boolean;
 };
 type Confirm = (options: Confirmation) => Promise<boolean>;
-type Request = ({ kind: "confirm" } & Confirmation) | { kind: "alert"; title: string; message: string };
+type Request = ({ kind: "confirm" } & Confirmation) | ({ kind: "alert" } & Pick<Confirmation, "title" | "message">);
 const ConfirmContext = createContext<((request: Request) => Promise<boolean>) | null>(null);
 const ConfirmOpenContext = createContext(false);
 
@@ -52,7 +52,7 @@ export function ConfirmProvider({ children }: PropsWithChildren) {
     setAsking((count) => count + 1);
     return queue.ask(next).finally(() => setAsking((count) => count - 1));
   }, [queue]);
-  return <ConfirmContext.Provider value={ask}><ConfirmOpenContext.Provider value={open || asking > 0}>
+  return <ConfirmContext.Provider value={ask}><ConfirmOpenContext.Provider value={asking > 0}>
     {children}
     <AlertDialog open={open} onOpenChange={(next) => { if (!next) queue.answer(false); }} onOpenChangeComplete={(next) => { if (!next) drained.current = !queue.closed(); }}>
       <AlertDialogContent ref={popup} initialFocus={request?.kind === "confirm" && request.destructive ? cancel : action} finalFocus={() => opener.current?.isConnected ? opener.current : false}>
@@ -81,7 +81,7 @@ function useConfirmContext() {
 
 export function useConfirm(): Confirm {
   const ask = useConfirmContext();
-  return useCallback((options) => ask({ kind: "confirm", ...options }), [ask]);
+  return useCallback((options) => ask({ ...options, kind: "confirm" }), [ask]);
 }
 
 /**
