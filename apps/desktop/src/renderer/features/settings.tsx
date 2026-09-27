@@ -17,7 +17,7 @@ import { desktopApi, distributionCapabilities as distribution, session } from ".
 import { parentDirectory, serviceHost } from "../lib/format";
 import { localAddressKind } from "../lib/local-api-config";
 import { profileIsAvailable } from "../lib/protection";
-import { useShell } from "../lib/shell";
+import { OS_POLICY_CHANGE, useShell } from "../lib/shell";
 
 function CliRegistrationControl(): React.JSX.Element {
   const client = useQueryClient();
@@ -85,14 +85,25 @@ function useLaunchPreferences() {
     onMutate: () => client.cancelQueries({ queryKey: ["launch-preferences"] }),
     onSuccess: (next) => { client.setQueryData(["launch-preferences"], next); },
   });
-  const failed = mutation.error ? mutation.variables?.name : undefined;
   return {
     preferences: data,
     saving: mutation.isPending,
     change: (name: LaunchPreference, enabled: boolean) => mutation.mutate({ name, enabled }),
-    /** Why the last change of `name` failed; its row shows it. */
-    error: (name: LaunchPreference) => failed === name ? `Could not change the preference. ${errorMessage(mutation.error)}` : undefined,
+    /** Why the last change of `name` failed; its row shows it until the preference changes. */
+    error: (name: LaunchPreference) => mutation.error && mutation.variables?.name === name && data?.[name] !== mutation.variables.enabled
+      ? `Could not change the preference. ${errorMessage(mutation.error)}` : undefined,
   };
+}
+
+function DevelopmentOsControl({ disabled }: { disabled: boolean }): React.JSX.Element {
+  const shell = useShell();
+  const required = shell.state.config.requireProductionOs;
+  const mutation = useMutation({ mutationKey: OS_POLICY_CHANGE, mutationFn: shell.changeRequireProductionOs });
+  // A failure shows until the policy changes, here or elsewhere.
+  const error = mutation.error && required !== mutation.variables ? `Could not change the OS policy. ${errorMessage(mutation.error)}` : undefined;
+  return <SettingsToggle label="Allow development OS" checked={!required} developmentMode={!required} disabled={disabled} error={error} onToggle={() => {
+    if (!shell.applying) mutation.mutate(!required);
+  }} />;
 }
 
 export function SettingsPage(): React.JSX.Element {
@@ -100,7 +111,6 @@ export function SettingsPage(): React.JSX.Element {
   const { state, updates } = shell;
   const launch = useLaunchPreferences();
   const locked = shell.applying || shell.agents.changing;
-  const allowDevelopmentOs = !state.config.requireProductionOs;
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   const starting = state.protection.phase === "starting";
   return (
@@ -118,7 +128,7 @@ export function SettingsPage(): React.JSX.Element {
       <SettingsSection title="General">
           {distribution.launchAtLogin && <SettingsToggle label="Open at Login" checked={launch.preferences?.openAtLogin ?? false} disabled={!launch.preferences || launch.saving} error={launch.error("openAtLogin")} onToggle={() => launch.change("openAtLogin", !launch.preferences?.openAtLogin)} />}
           <SettingsToggle label="Protect on launch" checked={launch.preferences?.connectOnLaunch ?? false} disabled={!launch.preferences || launch.saving} error={launch.error("connectOnLaunch")} onToggle={() => launch.change("connectOnLaunch", !launch.preferences?.connectOnLaunch)} />
-          <AppearanceControl />
+          <AppearanceControl api={desktopApi} />
           {distribution.notifications && <SettingsLink title="Notifications" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "notifications" })} />}
       </SettingsSection>
       <SettingsSection title="Connections">
@@ -132,8 +142,8 @@ export function SettingsPage(): React.JSX.Element {
         <CollapsibleTrigger render={<Button variant="ghost" />}><ChevronRight size={15} aria-hidden="true" /><span>Advanced</span></CollapsibleTrigger>
         <CollapsibleContent>
           <SettingsList>
-          <SettingsToggle label="Allow development OS" checked={allowDevelopmentOs} developmentMode={allowDevelopmentOs} disabled={locked} error={shell.requireProductionOsError} onToggle={() => shell.setRequireProductionOs(allowDevelopmentOs)} />
-          {distribution.nativeUpdates && <UpdateChannelControl updates={updates} />}
+          <DevelopmentOsControl disabled={locked} />
+          {distribution.nativeUpdates && <UpdateChannelControl api={desktopApi} updates={updates} />}
           {distribution.cliRegistration && <CliRegistrationControl />}
           {state.configFiles.configPath && <Item>
             <ItemContent>

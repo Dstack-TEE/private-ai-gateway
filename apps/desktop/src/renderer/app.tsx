@@ -1,15 +1,14 @@
 import React, { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Outlet, useMatches, useNavigate } from "@tanstack/react-router";
 import { useAgents } from "./hooks/use-agents";
 import { useAppState } from "./lib/use-app-state";
-import { errorMessage } from "./lib/error-message";
 import { useUpdates } from "./updates";
 import { INITIAL_STATE, type AboutLink, type AppState, type NavigationTarget } from "../shared/contracts";
 import { PageHeader, Sidebar } from "./components/navigation";
 import { desktopApi, distributionCapabilities } from "./lib/environment";
 import { unavailableState } from "./lib/protection";
-import { ShellContext, type AppDialog, type Shell } from "./lib/shell";
+import { OS_POLICY_CHANGE, ShellContext, type AppDialog, type Shell } from "./lib/shell";
 import { ProfileEditorDialog, ProfilesDialog } from "./features/profiles";
 import { PrivacyDialog } from "./features/privacy";
 import { LocalApiDialog } from "./features/local-api";
@@ -64,16 +63,15 @@ function Window(): React.JSX.Element {
     if (available) void client.invalidateQueries({ queryKey: ["client-key"] });
     else client.setQueryData(["client-key"], "");
   }), [client]);
-  const osPolicy = useMutation({
-    mutationFn: async (required: boolean) => {
-      if (state.protection.action.operation === "stop" && !await confirm({
-        title: required ? "Require production OS?" : "Allow development OS?",
-        message: "Protection stops before the policy changes.",
-        confirmLabel: "Stop and Change",
-      })) return;
-      setState(await desktopApi.setRequireProductionOs(required));
-    },
-  });
+  const changeRequireProductionOs = async (required: boolean) => {
+    if (state.protection.action.operation === "stop" && !await confirm({
+      title: required ? "Require production OS?" : "Allow development OS?",
+      message: "Protection stops before the policy changes.",
+      confirmLabel: "Stop and Change",
+    })) return;
+    setState(await desktopApi.setRequireProductionOs(required));
+  };
+  const changingOsPolicy = useIsMutating({ mutationKey: OS_POLICY_CHANGE }) > 0;
   const reset = useMutation({
     mutationFn: () => desktopApi.resetSettings(),
     onSuccess: setState,
@@ -90,8 +88,7 @@ function Window(): React.JSX.Element {
     onError: (error) => reportFailure("Could not start the background service", error),
   });
   /** A settings change is applying; controls that change settings wait. */
-  const applying = osPolicy.isPending || reset.isPending;
-  const { mutate: setRequireProductionOs } = osPolicy;
+  const applying = changingOsPolicy || reset.isPending;
   const { mutate: resetMutate } = reset;
   const { mutate: startBackend, isPending: startingBackend } = backendStart;
   const { mutate: toggleProtection, isPending: protectionPending } = protection;
@@ -165,10 +162,7 @@ function Window(): React.JSX.Element {
       if (action.operation === "setUpProfile") openProfileSetup();
       else toggleProtection(action.operation);
     },
-    setRequireProductionOs: (required) => {
-      if (!applying) setRequireProductionOs(required);
-    },
-    requireProductionOsError: osPolicy.error ? `Could not change the OS policy. ${errorMessage(osPolicy.error)}` : undefined,
+    changeRequireProductionOs,
     resetSettings: () => void resetSettings(),
     openDialog,
     openProfiles: () => {
