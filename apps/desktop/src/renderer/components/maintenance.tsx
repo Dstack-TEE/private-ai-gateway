@@ -1,11 +1,10 @@
 import { useMutation } from "@tanstack/react-query";
 import { Download, Upload } from "lucide-react";
-import { toast } from "sonner";
 import type { DesktopApi } from "../../shared/contracts";
 import { IconButton } from "./controls";
 import { SettingsLink } from "./settings";
-import { useConfirm } from "./confirm";
-import { errorMessage, toastError } from "../lib/error-message";
+import { useConfirm, useReportFailure } from "./confirm";
+import { errorMessage } from "../lib/error-message";
 
 /** The mutation key of an import or export, which keeps the Profiles dialog open. */
 export const PROFILE_TRANSFER = ["profile-transfer"];
@@ -34,11 +33,12 @@ export function ProfileTransfer({ api, disabled, onResult }: {
   </div>;
 }
 
+/** The save panel is the feedback: an export that completes says nothing more. */
 export function ExportDiagnostics({ api }: { api: DesktopApi }) {
+  const reportFailure = useReportFailure();
   const exportDiagnostics = useMutation({
     mutationFn: () => api.saveDiagnosticsExport(),
-    onSuccess: (saved) => { if (saved) toast.success("Diagnostics exported", { description: "Without keys, URLs, local paths or request content." }); },
-    onError: (error) => toastError("Could not export diagnostics", error),
+    onError: (error) => reportFailure("Could not export diagnostics", error),
   });
   return <SettingsLink title={exportDiagnostics.isPending ? "Exporting diagnostics" : "Export diagnostics"} disabled={exportDiagnostics.isPending} onClick={() => exportDiagnostics.mutate()} />;
 }

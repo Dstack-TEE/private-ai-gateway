@@ -1,6 +1,5 @@
 import React, { useCallback, useRef, useState } from "react";
 import { skipToken, useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
 import { useAccountLogin } from "../lib/use-account-login";
 import { afterVerification } from "../lib/use-app-state";
 import { AccountTools } from "../components/account-tools";
@@ -249,7 +248,6 @@ export function ProfileEditorDialog({
     mutationFn: async ({ login: authorization, workspace }: { login: LoginPresentation; workspace: number | undefined }) => {
       const saved = await desktopApi.saveAccountLogin(authorization.id, draft, state.config.requireProductionOs, workspace);
       account.consume();
-      toast.success(`${draft.name} saved`);
       if (startAfterSave) await desktopApi.start(saved.config);
     },
     onMutate: () => setError(undefined),

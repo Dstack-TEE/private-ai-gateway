@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 /**
  * Tauri adds a nonce to style-src for every <style> element in the bundled
  * HTML, and a nonce makes browsers ignore the CSP's 'unsafe-inline', which the
- * styles Sonner inserts at runtime need. Keep the desktop HTML free of them.
+ * inline styles set at runtime (popup positions, charts) need. Keep the
+ * desktop HTML free of them.
  */
 function noInlineStyleElements(): Plugin {
   return {

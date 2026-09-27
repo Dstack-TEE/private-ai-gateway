@@ -23,7 +23,8 @@ export interface Shell {
   /** Protection is starting or stopping at the window's request. */
   protectionPending: boolean;
   toggleProtection(): void;
-  setRequireProductionOs(required: boolean): void;
+  /** Asks first when protection must stop; its row runs it as `OS_POLICY_CHANGE`. */
+  changeRequireProductionOs(required: boolean): Promise<void>;
   resetSettings(): void;
   /** A dialog request never replaces an open dialog, only one that is animating out. */
   openDialog(dialog: AppDialog): void;
@@ -31,6 +32,9 @@ export interface Shell {
   openProfiles(): void;
   openAboutLink(target: AboutLink): void;
 }
+
+/** The mutation key of an OS policy change, which makes the window `applying`. */
+export const OS_POLICY_CHANGE = ["os-policy-change"];
 
 export const ShellContext = createContext<Shell | null>(null);
 

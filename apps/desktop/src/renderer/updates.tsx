@@ -6,19 +6,23 @@ import { Button } from "./components/ui/button";
 import { ToggleGroup, ToggleGroupItem } from "./components/ui/toggle-group";
 import { FieldLabel } from "./components/ui/field";
 import { Item, ItemContent, ItemTitle, ItemDescription, ItemActions } from "./components/ui/item";
-import { useConfirm } from "./components/confirm";
-import { toastError } from "./lib/error-message";
+import { useConfirm, useReportFailure } from "./components/confirm";
+import { errorMessage } from "./lib/error-message";
 
 const CHECK_INTERVAL = 6 * 60 * 60_000;
 
 /** Channel changes and installs, which run one at a time and pause checks. */
 const UPDATE_OPERATION = ["app-update-operation"];
+const CHANNEL_CHANGE = [...UPDATE_OPERATION, "channel"];
+const UPDATE_SCOPE = { id: "app-update" };
 
 /** `checks` is false only where the App Store owns updates. */
 export function useUpdates(api: DesktopApi, checks: boolean) {
   const client = useQueryClient();
   const confirm = useConfirm();
+  const reportFailure = useReportFailure();
   const operating = useIsMutating({ mutationKey: UPDATE_OPERATION }) > 0;
+  const changing = useIsMutating({ mutationKey: CHANNEL_CHANGE }) > 0;
   // The query counts every failed check; these came before the last success.
   const earlierFailures = useRef(0);
   const { data: snapshot, error: checkError, isFetching: checking, refetch } = useQuery<UpdateInfo>({
@@ -42,20 +46,9 @@ export function useUpdates(api: DesktopApi, checks: boolean) {
     await client.cancelQueries({ queryKey: ["app-update"] });
     void refetch();
   }, [client, refetch]);
-  const scope = { id: "app-update" };
-  const changeChannel = useMutation({
-    mutationKey: UPDATE_OPERATION,
-    scope,
-    mutationFn: (next: UpdateChannel) => api.setUpdateChannel(next),
-    onSuccess: async (saved) => {
-      client.setQueryData<UpdateInfo | undefined>(["app-update"], (current) => current ? { ...current, channel: saved, version: null } : current);
-      await recheck();
-    },
-    onError: (error) => toastError("Could not change the update channel", error),
-  });
   const restart = useMutation({
     mutationKey: UPDATE_OPERATION,
-    scope,
+    scope: UPDATE_SCOPE,
     mutationFn: async () => {
       // The latest release, checked once: a failure ends the restart.
       await client.cancelQueries({ queryKey: ["app-update"] });
@@ -71,7 +64,7 @@ export function useUpdates(api: DesktopApi, checks: boolean) {
         throw error;
       }
     },
-    onError: (error) => toastError("Could not install the update", error),
+    onError: (error) => reportFailure("Could not install the update", error),
   });
 
   return useMemo(() => {
@@ -80,29 +73,39 @@ export function useUpdates(api: DesktopApi, checks: boolean) {
     // Only in-app installs restart to update; other installations show their upgrade steps.
     const ready = Boolean(info?.enabled && info.version);
     const currentVersion = installedVersion ?? info?.currentVersion;
-    const busy = changeChannel.isPending ? "changing" : restart.isPending ? "restarting" : checking ? "checking" : undefined;
+    const busy = changing ? "changing" : restart.isPending ? "restarting" : checking ? "checking" : undefined;
     const error = checkError ? "Could not prepare software updates. Retrying automatically." : undefined;
     return {
-      info, ready, currentVersion, busy, error, channel, checks,
-      changeChannel: (next: UpdateChannel) => {
-        if (!busy && next !== channel) changeChannel.mutate(next);
-      },
+      info, ready, currentVersion, busy, error, channel, checks, recheck,
       restart: () => {
         if (!busy && ready) restart.mutate();
       },
     };
-  }, [checks, snapshot, checkError, checking, installedVersion, changeChannel.isPending, changeChannel.mutate, restart.isPending, restart.mutate]);
+  }, [checks, snapshot, checkError, checking, installedVersion, changing, recheck, restart.isPending, restart.mutate]);
 }
 
-export function UpdateChannelControl({ updates }: { updates: ReturnType<typeof useUpdates> }): React.JSX.Element {
+export function UpdateChannelControl({ api, updates }: { api: DesktopApi; updates: ReturnType<typeof useUpdates> }): React.JSX.Element {
+  const client = useQueryClient();
+  const change = useMutation({
+    mutationKey: CHANNEL_CHANGE,
+    scope: UPDATE_SCOPE,
+    mutationFn: (next: UpdateChannel) => api.setUpdateChannel(next),
+    onSuccess: async (saved) => {
+      client.setQueryData<UpdateInfo | undefined>(["app-update"], (current) => current ? { ...current, channel: saved, version: null } : current);
+      await updates.recheck();
+    },
+  });
+  // A failure shows until the channel changes, here or elsewhere.
+  const error = change.error && updates.channel !== change.variables ? `Could not change the update channel. ${errorMessage(change.error)}` : undefined;
   return <Item>
     <ItemContent>
       <ItemTitle><FieldLabel id="update-channel-label">Update channel</FieldLabel></ItemTitle>
       <ItemDescription id="update-channel-note">{updates.channel === "beta" ? "Beta and stable releases" : "Stable releases"}</ItemDescription>
+      {error && <ItemDescription role="alert" className="text-destructive">{error}</ItemDescription>}
     </ItemContent>
     <ItemActions>
       <ToggleGroup size="sm" variant="outline" spacing={0} aria-labelledby="update-channel-label" aria-describedby="update-channel-note" value={updates.channel ? [updates.channel] : []} disabled={!updates.channel || Boolean(updates.busy)} onValueChange={([value]) => {
-        if (value === "stable" || value === "beta") updates.changeChannel(value);
+        if (!updates.busy && (value === "stable" || value === "beta") && value !== updates.channel) change.mutate(value);
       }}><ToggleGroupItem value="stable">Stable</ToggleGroupItem><ToggleGroupItem value="beta">Beta</ToggleGroupItem></ToggleGroup>
     </ItemActions>
   </Item>;

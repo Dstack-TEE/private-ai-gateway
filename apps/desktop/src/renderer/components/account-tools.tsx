@@ -6,7 +6,7 @@ import { currency } from "../lib/usage-presentation";
 import { Avatar, AvatarFallback, AvatarImage } from "./ui/avatar";
 import { Button } from "./ui/button";
 import { Hint } from "./hint";
-import { toastError } from "../lib/error-message";
+import { useReportFailure } from "./confirm";
 import { Item, ItemActions, ItemContent, ItemTitle } from "./ui/item";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 
@@ -56,7 +56,8 @@ function useAccountBalance({ api, provider, target, credentialRef, enabled = tru
 /** Compact account balance for a profile whose credential is already in active use. */
 export function AccountBalanceValue(props: BalanceProps) {
   const { data: balance, isFetching } = useAccountBalance(props);
-  const { opening, openPage } = useAccountPage((error) => toastError("Could not open billing", error));
+  const reportFailure = useReportFailure();
+  const { opening, openPage } = useAccountPage((error) => reportFailure("Could not open billing", error));
   if (!balance) return null;
   return <BillingBalanceButton balance={balance} provider={props.provider} busy={isFetching || opening} disabled={opening}
     onOpen={(scopeSlug) => openPage(() => props.api.openTopUp(props.provider, scopeSlug))} />;

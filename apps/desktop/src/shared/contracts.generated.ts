@@ -322,6 +322,11 @@ export type Confirmation = { title: string, message: string, confirmLabel: strin
  * The action deletes, revokes or resets something that can't be restored.
  */
 destructive?: boolean, };
+/**
+ * A failed action the desktop app reports (`useReportFailure`). macOS shows it as an
+ * alert sheet on the window; the window's own dialog shows it elsewhere.
+ */
+export type AlertMessage = { title: string, message: string, };
 /** A method the shared UI API accepts (`ui_api::Method`). */
 export type UiMethod = "get_state" | "start" | "stop" | "set_require_production_os" | "activate_profile" | "delete_profile" | "save_configuration" | "complete_account_login" | "begin_account_login" | "poll_account_login" | "get_account_details" | "get_account_balance" | "cancel_account_login" | "get_client_key" | "rotate_client_key" | "save_local_api_config" | "save_web_ui" | "get_web_ui_password" | "rotate_web_ui_password" | "set_web_ui_password" | "import_profiles" | "export_profiles_content" | "export_diagnostics_content" | "query_usage" | "get_usage_record" | "get_usage_receipt" | "list_agents" | "set_agent_connection" | "start_backend_service" | "save_account_login" | "get_organization_url" | "get_top_up_url" | "list_listen_addresses" | "get_agent_access" | "request_agent_access" | "get_appearance" | "set_appearance" | "get_launch_preferences" | "set_launch_preference" | "get_notification_settings" | "save_notification_settings" | "reset_settings" | "get_update_notice";
 export const APPEARANCE_EVENT = "pap://appearance";
