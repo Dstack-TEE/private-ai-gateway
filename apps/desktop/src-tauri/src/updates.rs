@@ -157,8 +157,8 @@ pub async fn prepare_update(
     Ok(info)
 }
 
-/// The newer release `feed` announces. A release outside the feed's channel
-/// is not an update for it.
+/// The newer release `feed` announces, as `updates::offers_update` decides in
+/// place of the plugin's default comparison.
 async fn feed_update(
     app: &AppHandle,
     endpoint: tauri::Url,
@@ -169,7 +169,7 @@ async fn feed_update(
         .endpoints(vec![endpoint])
         .map_err(|_| "Invalid update endpoint")?
         .version_comparator(move |current, release| {
-            release.version > current && updates::belongs_to_feed(&release.version, feed)
+            updates::offers_update(&current, &release.version, feed)
         })
         .timeout(Duration::from_secs(30))
         .build()

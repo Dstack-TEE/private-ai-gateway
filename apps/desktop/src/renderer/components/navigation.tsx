@@ -49,7 +49,7 @@ export function Sidebar({ navigationRef }: { navigationRef: RefObject<HTMLElemen
         })}
         </SidebarMenu>
       </nav>
-      {updates.ready && <div className="mt-auto pt-4">
+      {updates.ready && <div className="mt-auto flex justify-center-safe pt-4">
         <Button type="button" variant="outline" size="sm" disabled={Boolean(updates.busy)} aria-label="Restart to Update" onClick={updates.restart}>
           <RotateCw aria-hidden="true" /><span className="max-[620px]:hidden">Restart to Update</span>
         </Button>
