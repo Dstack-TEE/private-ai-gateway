@@ -2,7 +2,7 @@
 //! from `aci-verify`; this module feeds them the DCAP quote and applies the
 //! custody policy's accepted KMS roots.
 
-pub use aci_verify::dstack::{dstack_rtmr3_event, DstackEventLog};
+pub use aci_verify::dstack::{dstack_rtmr3_event, DstackEventLog, VerifiedEventLog};
 use aci_verify::dstack::{verify_dstack_kms_receipt_chain, KeyCustodyError};
 use serde_json::Value;
 
@@ -10,11 +10,11 @@ use super::policy::CustodyPolicy;
 use crate::aci::types::WorkloadKeyset;
 
 /// Replay the dstack event log to RTMR3 and require it to match the quote,
-/// returning the verified events.
+/// returning the verified log.
 pub fn verify_dstack_event_log(
     evidence: &Value,
     report: &dcap_qvl::quote::Report,
-) -> Result<Vec<DstackEventLog>, String> {
+) -> Result<VerifiedEventLog, String> {
     aci_verify::dstack::verify_dstack_event_log(evidence, dcap_rtmr3(report))
 }
 

@@ -14,7 +14,7 @@ pub use appraisal::{
     appraise_report, Appraisal, AppraisalInputs, ChannelEvidence, CheckId, CheckResult,
     CustodyEvidence, FailureCause, Outcome, QuoteSource,
 };
-pub use dstack::{dstack_rtmr3_event, verify_dstack_event_log, DstackEventLog};
+pub use dstack::{dstack_rtmr3_event, verify_dstack_event_log, DstackEventLog, VerifiedEventLog};
 pub use policy::{CustodyPolicy, CustodyPolicyError};
 pub use quote::QuoteStepError;
 

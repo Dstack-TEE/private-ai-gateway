@@ -28,17 +28,23 @@ pub struct DstackEventLog {
     pub event_payload: String,
 }
 
+/// An event log whose replay matched a quote's RTMR3. Only
+/// [`verify_dstack_event_log`] builds one, so a measurement read from it is
+/// always one the quote binds.
+#[derive(Debug)]
+pub struct VerifiedEventLog(Vec<DstackEventLog>);
+
 #[derive(Debug, thiserror::Error)]
 #[error("invalid dstack event_log evidence: {0}")]
 struct InvalidEventLog(String);
 
 /// Replay the dstack event log to RTMR3 and require it to match the quote's
 /// `rt_mr3` (`None` for a quote that is not TDX), returning the verified
-/// events.
+/// log.
 pub fn verify_dstack_event_log(
     evidence: &Value,
     quote_rtmr3: Option<&[u8; 48]>,
-) -> Result<Vec<DstackEventLog>, String> {
+) -> Result<VerifiedEventLog, String> {
     let event_log = evidence
         .get("event_log")
         .and_then(Value::as_str)
@@ -50,7 +56,7 @@ pub fn verify_dstack_event_log(
     if rtmr3.as_slice() != quote_rtmr3 {
         return Err("dstack event_log RTMR3 does not match verified quote".to_string());
     }
-    Ok(events)
+    Ok(VerifiedEventLog(events))
 }
 
 /// The single pre-`system-ready` dstack runtime event named `event_name`
@@ -95,9 +101,9 @@ fn runtime_event_before_system_ready<'a>(
 /// it.
 pub fn verify_dstack_compose_measurement(
     evidence: &Value,
-    events: &[DstackEventLog],
+    events: &VerifiedEventLog,
 ) -> Result<String, String> {
-    let measured = dstack_rtmr3_event(events, "compose-hash")
+    let measured = dstack_rtmr3_event(&events.0, "compose-hash")
         .map_err(|e| format!("dstack event log rejected: {e}"))?
         .ok_or_else(|| "verified event log carries no compose-hash event".to_string())?;
     let measured_hash: [u8; 32] = decode_hex(&measured.event_payload)?
@@ -110,8 +116,8 @@ pub fn verify_dstack_compose_measurement(
 
 /// The RTMR3-measured app-id, which the custody chain and the policy anchor
 /// on (§9.1(5)).
-pub fn dstack_app_id(events: &[DstackEventLog]) -> Result<Vec<u8>, String> {
-    let event = dstack_rtmr3_event(events, "app-id")
+pub fn dstack_app_id(events: &VerifiedEventLog) -> Result<Vec<u8>, String> {
+    let event = dstack_rtmr3_event(&events.0, "app-id")
         .map_err(|e| format!("dstack event log rejected: {e}"))?
         .ok_or_else(|| "verified event log carries no app-id event".to_string())?;
     decode_hex(&event.event_payload)
@@ -192,6 +198,7 @@ pub enum KeyCustodyError {
 /// self-asserted `kms_public_key`, and the link from that k256 scalar to the
 /// published Ed25519 receipt key rests on the measured workload code — which
 /// is why the policy anchor must itself be measured.
+#[must_use = "the recovered KMS root must be checked against the custody policy"]
 pub fn verify_dstack_kms_receipt_chain(
     evidence: &Value,
     keyset: &WorkloadKeyset,

@@ -64,6 +64,16 @@ GitHub release with that changelog section as its notes.
   not mention the marker anywhere else in the PR description, and separate
   entries with blank lines. Then run `Desktop release PR` manually to refresh
   the release PR.
+- **Shared crates**: release-please assigns a commit to the desktop only if
+  it changes a file under `apps/desktop/`
+  ([commit splitting](https://github.com/googleapis/release-please/blob/v17.11.2/src/util/commit-split.ts)),
+  and it has no option to add other paths. A commit that changes only
+  `crates/aci-protocol` or `crates/aci-verify` therefore never reaches the
+  desktop changelog or version, even when run manually. When such a change
+  affects the desktop, include a desktop-facing change in the same commit,
+  or follow it with an empty commit whose Conventional Commit title
+  describes the desktop change (release-please counts an empty commit for
+  every package), then run `Desktop release PR` manually.
 
 The tag starts `Desktop release` (`desktop-release.yml`), which runs only for
 release tags and calls `Desktop Tauri` (`desktop-native.yml`) at the tagged
