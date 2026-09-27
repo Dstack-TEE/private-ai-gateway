@@ -8,7 +8,6 @@ import { IconButton } from "./controls";
 import { Field, FieldError, FieldLabel } from "./ui/field";
 import { ChoiceSelect } from "./choice-select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
-import { CodeBlock } from "./code-block";
 
 export function LocalApiExamplesDialog({ endpoint, models: catalogModels, apiKey, ...control }: {
   /** The Local API key; empty while it is unavailable. */
@@ -37,7 +36,7 @@ export function LocalApiExamplesDialog({ endpoint, models: catalogModels, apiKey
         <IconButton label="Copy example" disabled={!code || copying} onClick={() => { if (code) copy("Example", code); }}>{isCopied(code) ? <Check /> : <Copy />}</IconButton>
       </div>
       <TabsContent value={language} className="flex min-h-0 flex-col">
-        <CodeBlock className="min-h-0">{code ?? "Local API example unavailable."}</CodeBlock>
+        <pre className="min-h-0 overflow-auto rounded-2xl border bg-muted/50 p-4 text-xs leading-relaxed"><code>{code ?? "Local API example unavailable."}</code></pre>
       </TabsContent>
     </Tabs>
     <FieldError>{apiKey ? (error ? "Could not copy the example." : undefined) : "The Local API key is unavailable."}</FieldError>

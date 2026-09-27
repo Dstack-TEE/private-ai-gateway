@@ -23,7 +23,7 @@ import { ChoiceSelect } from "../components/choice-select";
 import type { RequestActivity, UsagePage } from "../../shared/contracts";
 import { useShell } from "../lib/shell";
 import { formatTimestamp } from "../lib/format";
-import { CodeBlock } from "../components/code-block";
+import { VerificationVerdict } from "../components/verification-verdict";
 
 const UsageDatePicker = lazy(() => import("../components/usage-date-picker").then((module) => ({ default: module.UsageDatePicker })));
 
@@ -133,7 +133,7 @@ export function UsagePage(): React.JSX.Element {
             label="Previous usage page"
             disabled={loading || cursors.length === 1}
             onClick={() => showPage(cursors.slice(0, -1))}
-          ><ChevronLeft /></IconButton>
+          ><ChevronLeft size={16} /></IconButton>
           <span className="min-w-32 text-center text-muted-foreground" role="status" aria-live="polite">
             Page {cursors.length}
             {page && page.items.length > 0
@@ -147,7 +147,7 @@ export function UsagePage(): React.JSX.Element {
               const next = page?.nextCursor;
               if (next) showPage([...cursors, next]);
             }}
-          ><ChevronRight /></IconButton>
+          ><ChevronRight size={16} /></IconButton>
         </div>
       </CardContent></Card>
     </div>
@@ -187,14 +187,15 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
       : undefined,
     activity.rewritten ? "The service rewrote the request before inference; the receipt records it." : undefined,
   ].filter(Boolean);
-  const receiptFailed = activity.leftDevice && activity.verified === false;
+  const verdictTone = receiptVerified ? "success" : activity.leftDevice && activity.verified === false ? "danger" : "neutral";
   return (
     <>
-    <Alert role="status" variant={receiptFailed ? "destructive" : "default"}>
-      <ReceiptIcon aria-hidden="true" />
-      <AlertTitle>{!activity.leftDevice ? "Request kept on this device" : receiptVerified ? "Signed receipt verified" : activity.verified === false ? "Receipt verification failed" : "No verified receipt"}</AlertTitle>
-      <AlertDescription>{!activity.leftDevice ? "Nothing was sent to the provider. No remote receipt is needed." : activity.verified === false ? "Receipt audit failed. Content may already have reached the client and cannot be retracted. See the recorded reason below." : receiptVerified ? "The signed receipt matches the request and response bytes recorded by the verifier." : "No successful verification result is recorded for this request."}</AlertDescription>
-    </Alert>
+    <VerificationVerdict
+      tone={verdictTone}
+      icon={ReceiptIcon}
+      title={!activity.leftDevice ? "Request kept on this device" : receiptVerified ? "Signed receipt verified" : activity.verified === false ? "Receipt verification failed" : "No verified receipt"}
+      detail={!activity.leftDevice ? "Nothing was sent to the provider. No remote receipt is needed." : activity.verified === false ? "Receipt audit failed. Content may already have reached the client and cannot be retracted. See the recorded reason below." : receiptVerified ? "The signed receipt matches the request and response bytes recorded by the verifier." : "No successful verification result is recorded for this request."}
+    />
     <dl className="grid grid-cols-[82px_minmax(0,1fr)] gap-x-4 gap-y-4.5 text-muted-foreground max-[440px]:grid-cols-1 max-[440px]:gap-y-1 [&_dd]:min-w-0 [&_dd]:wrap-anywhere [&_dd]:select-text [&_dd>code]:block [&_dt]:font-semibold">
       <dt>Request</dt>
       <dd>
@@ -270,20 +271,14 @@ export function UsageProofDialog({ activity: listed, ...control }: { activity: R
 /**
  * A receipt document indented for reading. Parsing keeps every string and
  * safe integer exactly, so only whitespace changes; a document with any other
- * number (the verifier accepts any 64-bit integer), or one that is not valid
- * JSON, is shown as returned.
+ * number (the verifier accepts any 64-bit integer) is shown as returned.
  */
 function readableReceipt(receipt: string): string {
   let exact = true;
-  let document: unknown;
-  try {
-    document = JSON.parse(receipt, (_key, value: unknown) => {
-      if (typeof value === "number" && !Number.isSafeInteger(value)) exact = false;
-      return value;
-    });
-  } catch {
-    return receipt;
-  }
+  const document: unknown = JSON.parse(receipt, (_key, value: unknown) => {
+    if (typeof value === "number" && !Number.isSafeInteger(value)) exact = false;
+    return value;
+  });
   return exact ? JSON.stringify(document, null, 2) : receipt;
 }
 
@@ -304,7 +299,7 @@ function SignedReceipt({ recordId }: { recordId: string }): React.JSX.Element | 
     </div>
     {status}
     <FieldError>{copyError && `Could not copy the signed receipt. ${errorMessage(copyError)}`}</FieldError>
-    <CodeBlock role="region" tabIndex={0} aria-labelledby={titleId}>{readable}</CodeBlock>
+    <pre role="region" tabIndex={0} aria-labelledby={titleId} className="overflow-x-auto rounded-2xl border bg-muted/50 p-4 text-xs leading-relaxed select-text"><code>{readable}</code></pre>
   </section>;
 }
 

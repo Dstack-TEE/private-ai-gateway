@@ -7,7 +7,6 @@ import { ToggleGroup, ToggleGroupItem } from "./components/ui/toggle-group";
 import { FieldLabel } from "./components/ui/field";
 import { Item, ItemContent, ItemTitle, ItemDescription, ItemActions } from "./components/ui/item";
 import { useConfirm } from "./components/confirm";
-import { CodeBlock } from "./components/code-block";
 import { toastError } from "./lib/error-message";
 
 const CHECK_INTERVAL = 6 * 60 * 60_000;
@@ -125,7 +124,7 @@ export function UpdateControl({ updates, productName, desktop }: { updates: Retu
       {manual && <>
         <ItemDescription>{commands.length ? (desktop ? `Quit ${productName}, then run:` : "Run:")
           : manual.downloadUrl ? "Extract this archive into a new directory:" : `Update it from the ${productName} desktop app or its package manager.`}</ItemDescription>
-        {(commands.length > 0 || manual.downloadUrl) && <CodeBlock className="whitespace-pre-wrap break-all">{commands.length ? commands.join("\n") : manual.downloadUrl}</CodeBlock>}
+        {(commands.length > 0 || manual.downloadUrl) && <pre className="whitespace-pre-wrap break-all rounded-md bg-muted px-3 py-2 text-xs select-text">{commands.length ? commands.join("\n") : manual.downloadUrl}</pre>}
       </>}
     </ItemContent>
     <ItemActions className="ml-auto max-w-full flex-wrap justify-end text-right">
