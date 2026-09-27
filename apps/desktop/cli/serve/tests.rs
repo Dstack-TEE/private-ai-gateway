@@ -1415,10 +1415,15 @@ async fn a_repin_drops_connections_made_under_the_old_pin() {
     assert!(crate::aci::tls::is_pin_mismatch(&refused), "{refused:?}");
 }
 
-/// A base URL on a local port nothing listens on: connecting is refused.
-fn refused_base(scheme: &str) -> String {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    format!("{scheme}://{}", listener.local_addr().unwrap())
+/// A base URL on a local port that refuses connections, with the socket
+/// holding it: bound but never listening, so connecting is refused (RST) on
+/// every platform, and no concurrent test can bind the port while the caller
+/// keeps the socket alive. A dropped listener's port could be taken first.
+fn refused_base(scheme: &str) -> (String, tokio::net::TcpSocket) {
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind(([127, 0, 0, 1], 0).into()).unwrap();
+    let base = format!("{scheme}://{}", socket.local_addr().unwrap());
+    (base, socket)
 }
 
 fn capture_events(state: &mut Arc<ProxyState>) -> mpsc::UnboundedReceiver<VerifierEvent> {
@@ -1458,7 +1463,8 @@ fn keyset_changed() -> Option<String> {
 #[tokio::test]
 async fn a_connect_failure_without_a_pin_keeps_the_502() {
     let (tx, _rx) = mpsc::unbounded_channel();
-    let state = state_over(refused_base("http"), tx);
+    let (base, _refusing) = refused_base("http");
+    let state = state_over(base, tx);
     assert!(state.client.pinned_spkis(&state.host).is_empty());
 
     let proxy = spawn_server(build_proxy_router(state)).await;
@@ -1482,7 +1488,8 @@ async fn a_connect_failure_without_a_pin_keeps_the_502() {
 #[tokio::test]
 async fn a_refused_port_on_a_pinned_host_does_not_reverify() {
     let (tx, _rx) = mpsc::unbounded_channel();
-    let mut state = state_over(refused_base("https"), tx);
+    let (base, _refusing) = refused_base("https");
+    let mut state = state_over(base, tx);
     let mut events = capture_events(&mut state);
     let pin = vec![PINNED_KEY.spki()];
     state.client.pin(&state.host, &pin).unwrap();
