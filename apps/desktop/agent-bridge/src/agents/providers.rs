@@ -423,10 +423,13 @@ pub(super) fn codex_catalog(catalog: &Catalog) -> Result<serde_json::Value, Stri
                 "supports_search_tool".to_string(),
                 serde_json::Value::Bool(capabilities.iter().any(|value| value == "web_search")),
             );
-            // PAP provides streaming HTTP Responses, not Codex-specific transports.
+            // PAP provides streaming HTTP Responses, not Codex-specific transports
+            // or reasoning-effort configuration_update items.
             value.insert("use_responses_lite".to_string(), serde_json::Value::Bool(false));
-            value.insert("prefer_websockets".to_string(), serde_json::Value::Bool(false));
             value.insert("supports_experimental_context".to_string(), serde_json::Value::Bool(false));
+            value.insert("supports_reasoning_effort_updates".to_string(), serde_json::Value::Bool(false));
+            // Upstream templates still carry this, but it is not a ModelInfo field.
+            value.remove("prefer_websockets");
             if matched_template.is_none() {
                 value.insert("experimental_supported_tools".to_string(), serde_json::json!([]));
                 value.insert("multi_agent_reasoning_effort".to_string(), serde_json::Value::Null);
@@ -450,9 +453,14 @@ pub(super) fn codex_catalog(catalog: &Catalog) -> Result<serde_json::Value, Stri
         .collect::<Result<Vec<_>, String>>()?;
     // model_catalog_json replaces the entire upstream catalog. Preserve every
     // bundled entry, overlay exact slugs once, and append provider-specific IDs.
+    // Bundled entries stay for Codex internals but are hidden: the proxy cannot
+    // serve them, and Codex defaults to the first picker-visible model.
     let entries = bundled["models"]
         .as_array_mut()
         .ok_or_else(|| "The app-owned Codex model catalog is malformed".to_string())?;
+    for entry in entries.iter_mut() {
+        entry["visibility"] = serde_json::Value::String("hide".to_string());
+    }
     for model in models {
         if let Some(existing) = entries
             .iter_mut()
