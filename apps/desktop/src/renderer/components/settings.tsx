@@ -21,10 +21,13 @@ export function SettingsSection({ title, detail, children }: PropsWithChildren<{
   </section>;
 }
 
+/** A row that opens a dialog, a page or a link; `title` names it and `description` describes it. */
 export function SettingsLink({ title, description, external = false, ...props }: Omit<ComponentProps<typeof ActionItem>, "title" | "children" | "className"> & { title: string; description?: ReactNode; external?: boolean }): React.JSX.Element {
   const Icon = external ? ExternalLink : ChevronRight;
-  return <ActionItem {...props}>
-    <ItemContent><ItemTitle>{title}</ItemTitle>{description && <ItemDescription>{description}</ItemDescription>}</ItemContent>
+  const titleId = useId();
+  const descriptionId = useId();
+  return <ActionItem aria-labelledby={titleId} aria-describedby={description ? descriptionId : undefined} {...props}>
+    <ItemContent><ItemTitle id={titleId}>{title}</ItemTitle>{description && <ItemDescription id={descriptionId}>{description}</ItemDescription>}</ItemContent>
     <ItemActions><Icon className="size-4 text-muted-foreground" aria-hidden="true" /></ItemActions>
   </ActionItem>;
 }

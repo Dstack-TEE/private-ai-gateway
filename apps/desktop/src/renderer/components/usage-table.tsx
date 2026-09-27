@@ -8,6 +8,8 @@ import { Hint, HoverDetails } from "./hint";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 
 const features = tableFeatures({ rowPaginationFeature });
+/** Cells with their own controls; a click in one, or in a popover it opens, is not a click on the row. */
+const CONTROL_COLUMNS = new Set(["agent", "tokens"]);
 
 function TokenDetails({ item }: { item: RequestActivity }) {
   const total = usageTokens(item);
@@ -37,10 +39,8 @@ export function UsageTable({ items, loading, pageIndex, pageSize, total, onInspe
   return <Table aria-label="Usage history" aria-busy={loading}>
       <TableHeader>{table.getHeaderGroups().map((group) => <TableRow key={group.id}>{group.headers.map((header) => <TableHead key={header.id} className={header.id === "costUsd" || header.id === "tokens" ? "text-right" : undefined}><table.FlexRender header={header} /></TableHead>)}</TableRow>)}</TableHeader>
       <TableBody>
-        {table.getRowModel().rows.map((row) => <TableRow key={row.id} onClick={(event) => {
-          if (event.target instanceof Element && event.target.closest("button, a, [role=dialog]")) return;
-          onInspect(row.original);
-        }}>{row.getAllCells().map((cell) => <TableCell key={cell.id} className={cell.column.id === "tokens" ? "text-right" : undefined}><table.FlexRender cell={cell} /></TableCell>)}</TableRow>)}
+        {table.getRowModel().rows.map((row) => <TableRow key={row.id} onClick={() => onInspect(row.original)}>{row.getAllCells().map((cell) => <TableCell key={cell.id} className={cell.column.id === "tokens" ? "text-right" : undefined}
+          onClick={CONTROL_COLUMNS.has(cell.column.id) ? (event) => event.stopPropagation() : undefined}><table.FlexRender cell={cell} /></TableCell>)}</TableRow>)}
         {items.length === 0 && <TableRow><TableCell colSpan={columns.length} className="h-24 text-center text-muted-foreground">{loading ? "Loading usage history…" : "No saved usage matches these filters."}</TableCell></TableRow>}
       </TableBody>
     </Table>;

@@ -59,7 +59,7 @@ export function Sidebar({ navigationRef }: { navigationRef: RefObject<HTMLElemen
 }
 
 export function PageHeader({ titleRef }: { titleRef: RefObject<HTMLHeadingElement | null> }): React.JSX.Element {
-  const { state, toggleProtection } = useShell();
+  const { state, protectionPending, toggleProtection } = useShell();
   const page = useMatches({ select: (matches) => matches.at(-1) });
   const protection = state.protection;
   return (
@@ -70,7 +70,7 @@ export function PageHeader({ titleRef }: { titleRef: RefObject<HTMLHeadingElemen
           <span className={cn("page-switch-copy min-w-0 grid justify-items-end leading-4 [&_strong]:text-xs [&_.protection-status]:grid [&_.protection-status]:grid-cols-[14px_auto] [&_.protection-status]:justify-items-end [&_.protection-status]:gap-x-1.25 [&_.protection-status]:gap-y-0 [&_.protection-duration]:col-span-full", toneTextClass[protection.tone])}>
             <strong><ProtectionStatus state={state} /></strong>
           </span>
-          <ProtectedControl state={state} compact iconOnly onToggle={toggleProtection} />
+          <ProtectedControl state={state} pending={protectionPending} compact iconOnly onToggle={toggleProtection} />
         </div>
       )}
     </header>

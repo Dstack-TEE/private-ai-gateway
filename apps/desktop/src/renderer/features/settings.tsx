@@ -113,12 +113,12 @@ export function SettingsPage(): React.JSX.Element {
           {distribution.launchAtLogin && <SettingsToggle label="Open at Login" checked={launch.preferences?.openAtLogin ?? false} disabled={!launch.preferences || launch.saving} onToggle={() => launch.change("openAtLogin", !launch.preferences?.openAtLogin)} />}
           <SettingsToggle label="Protect on launch" checked={launch.preferences?.connectOnLaunch ?? false} disabled={!launch.preferences || launch.saving} onToggle={() => launch.change("connectOnLaunch", !launch.preferences?.connectOnLaunch)} />
           <AppearanceControl />
-          {distribution.notifications && <SettingsLink title="Notifications" aria-label="Notifications" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "notifications" })} />}
+          {distribution.notifications && <SettingsLink title="Notifications" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "notifications" })} />}
       </SettingsSection>
       <SettingsSection title="Connections">
-          <SettingsLink title="Profiles" aria-label="Profiles" aria-haspopup="dialog" disabled={starting} onClick={shell.openProfiles} description={activeProfile ? `${activeProfile.name} · ${serviceHost(activeProfile.remoteUrl)} · ${state.protection.phase === "protected" ? "Protected" : profileIsAvailable(activeProfile, state) ? "Ready" : "Connect account or add an API key"}` : "No provider configured"} />
-          <SettingsLink title="Local API" description="Listener and client access" aria-label="Local API settings" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "local-api" })} />
-          {distribution.webUi && <SettingsLink title="Web UI" description={webUiSummary(state.webUi)} aria-label="Web UI settings" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "web-ui" })} />}
+          <SettingsLink title="Profiles" aria-haspopup="dialog" disabled={starting} onClick={shell.openProfiles} description={activeProfile ? `${activeProfile.name} · ${serviceHost(activeProfile.remoteUrl)} · ${state.protection.phase === "protected" ? "Protected" : profileIsAvailable(activeProfile, state) ? "Ready" : "Connect account or add an API key"}` : "No provider configured"} />
+          <SettingsLink title="Local API" description="Listener and client access" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "local-api" })} />
+          {distribution.webUi && <SettingsLink title="Web UI" description={webUiSummary(state.webUi)} aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "web-ui" })} />}
           {session && <SignOutControl onSignOut={session.signOut} />}
       </SettingsSection>
 

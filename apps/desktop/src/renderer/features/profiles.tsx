@@ -85,7 +85,7 @@ export function ProfilesDialog({
               <ActionItem
                 type="button"
                 className="profile-select min-w-0 [&_>_span:nth-child(2)]:min-w-0 [&_>_span:nth-child(2)]:flex-auto [&_>_span:nth-child(2)]:grid [&_>_span:nth-child(2)]:gap-0.5 [&_strong]:min-w-0 [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_small]:min-w-0 [&_small]:overflow-hidden [&_small]:text-ellipsis [&_small]:whitespace-nowrap [&_strong]:text-foreground [&_strong]:text-sm [&_strong]:font-semibold [&_small]:text-muted-foreground [&_small]:text-xs [&_>_svg]:flex-none [&_>_svg]:text-foreground"
-                aria-pressed={active}
+                aria-current={active || undefined}
                 disabled={frozen || Boolean(workingProfileId)}
                 onClick={() => select(profile.id)}
               >

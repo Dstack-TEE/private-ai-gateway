@@ -132,7 +132,7 @@ function StatusSurface(): React.JSX.Element {
         <IconButton size="icon-sm" label="Privacy verification" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "privacy" })}><Info aria-hidden="true" /></IconButton>
         </>}
         </div>
-        <ProtectedControl state={state} onToggle={shell.toggleProtection} iconOnly />
+        <ProtectedControl state={state} pending={shell.protectionPending} onToggle={shell.toggleProtection} iconOnly />
       </CardContent>
     </Card>
   );

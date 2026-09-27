@@ -74,6 +74,11 @@ function Window(): React.JSX.Element {
     onSuccess: setState,
     onError: (error) => toastError("Could not reset settings", error),
   });
+  const protection = useMutation({
+    mutationFn: (operation: "start" | "stop") => operation === "stop" ? desktopApi.stop() : desktopApi.start(state.config),
+    onSuccess: setState,
+    onError: (error, operation) => toastError(operation === "stop" ? "Could not stop protection" : "Could not start protection", error),
+  });
   const backendStart = useMutation({
     mutationFn: () => desktopApi.startBackendService(),
     onSuccess: setState,
@@ -84,6 +89,7 @@ function Window(): React.JSX.Element {
   const { mutate: setRequireProductionOs } = osPolicy;
   const { mutate: resetMutate } = reset;
   const { mutate: startBackend, isPending: startingBackend } = backendStart;
+  const { mutate: toggleProtection, isPending: protectionPending } = protection;
 
   /** For dialogs that present the failure themselves. */
   const applyState = async (action: () => Promise<AppState | void>): Promise<void> => {
@@ -147,15 +153,12 @@ function Window(): React.JSX.Element {
     startBackend: () => {
       if (!startingBackend) startBackend();
     },
+    protectionPending,
     toggleProtection: () => {
       const { action } = state.protection;
-      if (!action.enabled) return;
-      if (action.operation === "setUpProfile") {
-        openProfileSetup();
-        return;
-      }
-      void runAction(action.operation === "stop" ? "Could not stop protection" : "Could not start protection", () =>
-        action.operation === "stop" ? desktopApi.stop() : desktopApi.start(state.config));
+      if (!action.enabled || protectionPending) return;
+      if (action.operation === "setUpProfile") openProfileSetup();
+      else toggleProtection(action.operation);
     },
     setRequireProductionOs: (required) => {
       if (!applying) setRequireProductionOs(required);

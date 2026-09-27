@@ -33,16 +33,20 @@ export function UsageRow({ activity, onOpen }: { activity: RequestActivity; onOp
   const outcome = outcomeOf(activity);
   const tokens = usageTokens(activity);
   const timestamp = new Date(activity.at * 1_000);
+  const actionId = useId();
+  // The visible text names the row; the hidden commas pause between its parts.
+  const pause = <span className="sr-only">, </span>;
   return (
-    <ActionItem size="xs" className="usage-row min-h-15.5 gap-2.5 overflow-hidden [&_.row-main]:min-w-0 [&_.row-main]:flex-1 [&_.row-title]:text-sm [&_.state]:ml-0.5 [&_time]:min-w-17.5 [&_time]:grid [&_time]:text-right @max-[480px]:[&_.usage-cost]:hidden @max-[480px]:[&_.usage-amount]:w-13 max-[620px]:items-start max-[620px]:flex-wrap max-[620px]:[&_.row-main]:flex-[1_1_calc(100%_-_88px)] max-[620px]:[&_time]:order-4 max-[620px]:[&_time]:flex-[1_0_100%] max-[620px]:[&_time]:pl-11 max-[440px]:[&_.row-main]:basis-[calc(100%_-_74px)] max-[440px]:[&_time]:pl-0" onClick={onOpen} aria-label={`${agentName(activity.agent)}, ${outcome.label}, ${activity.model ?? activity.path}. View proof`}>
+    <ActionItem size="xs" className="usage-row min-h-15.5 gap-2.5 overflow-hidden [&_.row-main]:min-w-0 [&_.row-main]:flex-1 [&_.row-title]:text-sm [&_.state]:ml-0.5 [&_time]:min-w-17.5 [&_time]:grid [&_time]:text-right @max-[480px]:[&_.usage-cost]:hidden @max-[480px]:[&_.usage-amount]:w-13 max-[620px]:items-start max-[620px]:flex-wrap max-[620px]:[&_.row-main]:flex-[1_1_calc(100%_-_88px)] max-[620px]:[&_time]:order-4 max-[620px]:[&_time]:flex-[1_0_100%] max-[620px]:[&_time]:pl-11 max-[440px]:[&_.row-main]:basis-[calc(100%_-_74px)] max-[440px]:[&_time]:pl-0" aria-haspopup="dialog" aria-describedby={actionId} onClick={onOpen}>
       <span className="row-main min-w-0 flex-auto flex flex-wrap items-center gap-y-0.5 gap-x-2">
-        <span className="row-title font-medium">{agentName(activity.agent)}</span>
-        <StateLabel tone={outcome.tone} text={outcome.label} />
-        <code className="flex-[1_0_100%] block text-muted-foreground text-xs wrap-anywhere [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [code&]:overflow-hidden [code&]:text-ellipsis [code&]:whitespace-nowrap">{activity.model ?? activity.path}</code>
+        <span className="row-title font-medium">{agentName(activity.agent)}{pause}</span>
+        <StateLabel tone={outcome.tone} text={outcome.label} />{pause}
+        <code className="flex-[1_0_100%] block text-muted-foreground text-xs wrap-anywhere [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [code&]:overflow-hidden [code&]:text-ellipsis [code&]:whitespace-nowrap">{activity.model ?? activity.path}{pause}</code>
       </span>
-      <span className="usage-amount w-18.5 flex-none grid justify-items-end tabular-nums [&_strong]:max-w-full [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_small]:text-muted-foreground [&_small]:text-xs max-[620px]:w-17 max-[620px]:[&:nth-of-type(3)]:hidden max-[440px]:w-15.5"><strong className="font-medium">{tokens === undefined ? "—" : formatTokens(tokens)}</strong><small>tokens</small></span>
-      <span className="usage-amount w-18.5 flex-none grid justify-items-end tabular-nums [&_strong]:max-w-full [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_small]:text-muted-foreground [&_small]:text-xs max-[620px]:w-17 max-[620px]:[&:nth-of-type(3)]:hidden max-[440px]:w-15.5 usage-cost"><strong className="font-medium">{activity.costUsd === undefined ? "—" : currency(activity.costUsd)}</strong><small>cost</small></span>
+      <span className="usage-amount w-18.5 flex-none grid justify-items-end tabular-nums [&_strong]:max-w-full [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_small]:text-muted-foreground [&_small]:text-xs max-[620px]:w-17 max-[620px]:[&:nth-of-type(3)]:hidden max-[440px]:w-15.5"><strong className="font-medium">{tokens === undefined ? "—" : formatTokens(tokens)}</strong><small>tokens{pause}</small></span>
+      <span className="usage-amount w-18.5 flex-none grid justify-items-end tabular-nums [&_strong]:max-w-full [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_small]:text-muted-foreground [&_small]:text-xs max-[620px]:w-17 max-[620px]:[&:nth-of-type(3)]:hidden max-[440px]:w-15.5 usage-cost"><strong className="font-medium">{activity.costUsd === undefined ? "—" : currency(activity.costUsd)}</strong><small>cost{pause}</small></span>
       <time className="row-side flex-none text-muted-foreground text-xs tabular-nums whitespace-nowrap" dateTime={timestamp.toISOString()}><span>{timestamp.toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span><span>{formatTimestamp(timestamp.getTime())}</span></time>
+      <span id={actionId} hidden>View proof</span>
     </ActionItem>
   );
 }
@@ -250,14 +254,20 @@ export function UsageProofDialog({ activity: listed, ...control }: { activity: R
 /**
  * A receipt document indented for reading. Parsing keeps every string and
  * safe integer exactly, so only whitespace changes; a document with any other
- * number (the verifier accepts any 64-bit integer) is shown as returned.
+ * number (the verifier accepts any 64-bit integer), or one that is not valid
+ * JSON, is shown as returned.
  */
 function readableReceipt(receipt: string): string {
   let exact = true;
-  const document: unknown = JSON.parse(receipt, (_key, value: unknown) => {
-    if (typeof value === "number" && !Number.isSafeInteger(value)) exact = false;
-    return value;
-  });
+  let document: unknown;
+  try {
+    document = JSON.parse(receipt, (_key, value: unknown) => {
+      if (typeof value === "number" && !Number.isSafeInteger(value)) exact = false;
+      return value;
+    });
+  } catch {
+    return receipt;
+  }
   return exact ? JSON.stringify(document, null, 2) : receipt;
 }
 

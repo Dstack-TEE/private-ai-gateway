@@ -38,11 +38,14 @@ export function ProtectionStatus({ state }: { state: AppState }): React.JSX.Elem
 /** The protection switch; its action is the tray's protection item. */
 export function ProtectedControl({
   state,
+  pending,
   compact = false,
   iconOnly = false,
   onToggle,
 }: {
   state: AppState;
+  /** A start or stop is in flight. */
+  pending: boolean;
   compact?: boolean;
   iconOnly?: boolean;
   onToggle(): void;
@@ -57,7 +60,8 @@ export function ProtectedControl({
         size="default"
         checked={action.operation === "stop"}
         label={action.label}
-        disabled={!action.enabled}
+        disabled={!action.enabled || pending}
+        aria-busy={pending}
         developmentMode={developmentMode}
         onToggle={onToggle}
       />
