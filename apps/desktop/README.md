@@ -10,8 +10,10 @@ The desktop product and the remote Private AI Gateway are independent projects:
   receipt production.
 - Proxy owns local profiles, relying-party verification, post-delivery receipt
   audits, agent configuration, usage history, and desktop lifecycle.
-- They share only the neutral `aci-protocol` wire types and canonical encoding
-  crate. Producer logic and relying-party verification remain independent.
+- They share only neutral crates: `aci-protocol` for wire types and canonical
+  encoding, and `aci-verify` for policy-neutral verification mechanisms.
+  Producer logic and each relying-party verification policy remain
+  independent.
 
 The preferred user-facing command is `pap`; `private-ai-proxy` is the
 canonical executable name. `aci` is a legacy alias kept for existing scripts:
@@ -42,6 +44,7 @@ interactive terminal outside JSON modes.
 | `agent-bridge` | Coding-agent bridge: Local API proxy, agent tokens, catalog, reversible agent configuration, and the `private-ai-proxy-helper` binary |
 | `gateway/src/endpoint-support.json` | Published model endpoint inventory; released apps fetch this path, so it stays put |
 | `../../crates/aci-protocol` | Shared ACI wire types and deterministic encoding rules |
+| `../../crates/aci-verify` | Shared policy-neutral ACI verification mechanisms: report binding, dstack event-log replay and KMS custody chain, declared TLS selection |
 | `brand` | Source branding and icon assets |
 | `scripts` | Reproducible build, packaging, release, and endpoint-probe tooling |
 

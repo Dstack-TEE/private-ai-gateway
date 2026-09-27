@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/aci-protocol"]
+members = ["crates/aci-protocol", "crates/aci-verify"]
 default-members = ["."]
 resolver = "2"
 
@@ -20,6 +20,7 @@ path = "src/main.rs"
 
 [dependencies]
 aci-protocol = { path = "crates/aci-protocol" }
+aci-verify = { path = "crates/aci-verify" }
 # Canonical-JSON, types, and serialization.
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

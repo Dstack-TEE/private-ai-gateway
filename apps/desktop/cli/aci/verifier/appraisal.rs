@@ -4,18 +4,17 @@
 //! The client renders each result as a transcript line and fails closed when
 //! any required check cannot be established.
 
+use aci_verify::channel::declared_tls_pins;
+use aci_verify::decode_hex_32;
+use aci_verify::dstack::{dstack_app_id, verify_dstack_compose_measurement};
+use aci_verify::quote::quote_binds_report_data;
+use aci_verify::report::{verify_report_binding, AciReportValidationError, ReportBinding};
 use serde_json::Value;
 
-use super::channel::declared_tls_pins;
-use super::dstack::{
-    dstack_app_id, verify_dstack_compose_measurement, verify_dstack_kms_receipt_custody,
-};
+use super::dstack::verify_dstack_kms_receipt_custody;
 use super::policy::CustodyPolicy;
-use super::quote::{
-    parse_quote_evidence, quote_binds_report_data, verify_quote_to_root, QuoteStepError,
-};
-use super::report::{verify_report_binding, AciReportValidationError, ReportBinding};
-use super::verify_dstack_event_log;
+use super::quote::{parse_quote_evidence, verify_quote_to_root, QuoteStepError};
+use super::{dcap_report_data, verify_dstack_event_log};
 use crate::aci::types::{AttestationReport, SourceProvenance, WorkloadKeyset};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -149,7 +148,7 @@ pub async fn appraise_report(inputs: AppraisalInputs<'_>) -> Result<Appraisal, S
     // §9.1(1) checks the quote against the report_data the report states;
     // §9.1(2) proves that value is the one the keyset and nonce produce. They
     // are independent, so each reports its own problem.
-    let claimed_report_data = super::decode_hex_32(&report.attestation.report_data_hex);
+    let claimed_report_data = decode_hex_32(&report.attestation.report_data_hex);
     let (quote_result, verified_quote) = match claimed_report_data {
         Ok(claimed) => appraise_quote(&inputs, claimed).await,
         Err(e) => (
@@ -281,10 +280,14 @@ async fn appraise_quote(
         format!(
             "report_data (32 bytes) = {}\nquote report_data slot (64 bytes) = {}",
             inputs.report.attestation.report_data_hex,
-            hex::encode(super::dcap_report_data(&quote.report))
+            hex::encode(dcap_report_data(&quote.report))
         )
     });
-    if let Err(e) = quote_binds_report_data(evidence, &quote.report, claimed_report_data) {
+    if let Err(e) = quote_binds_report_data(
+        evidence,
+        dcap_report_data(&quote.report),
+        claimed_report_data,
+    ) {
         return (
             failed(CheckId::Quote, e.into()).with_explain(explain),
             Some(quote.report),

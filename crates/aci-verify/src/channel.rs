@@ -1,15 +1,11 @@
-//! §9.1(6) channel selection: which attested TLS key clients of this
+//! §9.1(6) channel selection: which attested TLS key clients of a
 //! deployment pin, as the report declares it (§4.2 `downstream_tls_binding`).
-//!
-//! Follows the gateway's `declared_tls_channel_bindings`, so both verifiers
-//! pin the same entry for the same report.
 
+use aci_protocol::types::WorkloadKeyset;
 use serde_json::Value;
 
-use crate::aci::types::WorkloadKeyset;
-
 #[derive(Debug, thiserror::Error)]
-pub(super) enum ChannelBindingError {
+pub enum ChannelBindingError {
     #[error("the keyset publishes no TLS key")]
     MissingTlsSpkiBinding,
     #[error(
@@ -18,6 +14,14 @@ pub(super) enum ChannelBindingError {
     MissingDownstreamTlsBinding,
     #[error("invalid downstream TLS binding: {0}")]
     InvalidDownstreamTlsBinding(String),
+    // The base-URL cases keep their parts apart so a verifier with its own
+    // error surface can word them.
+    #[error("invalid downstream TLS binding: invalid base URL {origin:?}: {reason}")]
+    InvalidBaseUrl { origin: String, reason: String },
+    #[error("invalid downstream TLS binding: base URL {origin:?} has no host")]
+    BaseUrlWithoutHost { origin: String },
+    #[error("invalid downstream TLS binding: invalid base URL host {host:?}: {reason}")]
+    InvalidBaseUrlHost { host: String, reason: String },
     #[error("downstream_tls_binding names {reported:?}, but the channel is to {expected:?}")]
     DownstreamTlsBindingHostMismatch { reported: String, expected: String },
     #[error("downstream_tls_binding names a TLS key the keyset does not attest for its domain")]
@@ -33,7 +37,7 @@ struct SelectedDownstreamTlsBinding {
 /// TLS key when none is domain-scoped, otherwise exactly the entry
 /// `downstream_tls_binding` selects, which must be attested for the origin's
 /// host.
-pub(super) fn declared_tls_pins(
+pub fn declared_tls_pins(
     keyset: &WorkloadKeyset,
     evidence: &Value,
     origin: &str,
@@ -119,18 +123,18 @@ fn selected_downstream_tls_binding(
 }
 
 fn origin_host_domain(origin: &str) -> Result<String, ChannelBindingError> {
-    let url = url::Url::parse(origin).map_err(|e| {
-        ChannelBindingError::InvalidDownstreamTlsBinding(format!(
-            "invalid base URL {origin:?}: {e}"
-        ))
+    let url = url::Url::parse(origin).map_err(|e| ChannelBindingError::InvalidBaseUrl {
+        origin: origin.to_string(),
+        reason: e.to_string(),
     })?;
-    let host = url.host_str().ok_or_else(|| {
-        ChannelBindingError::InvalidDownstreamTlsBinding(format!("base URL {origin:?} has no host"))
-    })?;
-    normalize_tls_domain(host).map_err(|e| {
-        ChannelBindingError::InvalidDownstreamTlsBinding(format!(
-            "invalid base URL host {host:?}: {e}"
-        ))
+    let host = url
+        .host_str()
+        .ok_or_else(|| ChannelBindingError::BaseUrlWithoutHost {
+            origin: origin.to_string(),
+        })?;
+    normalize_tls_domain(host).map_err(|reason| ChannelBindingError::InvalidBaseUrlHost {
+        host: host.to_string(),
+        reason,
     })
 }
 
@@ -161,7 +165,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::aci::types::TlsSpki;
+    use aci_protocol::types::TlsSpki;
 
     fn keyset_with_tls(tls_public_keys: Vec<TlsSpki>) -> WorkloadKeyset {
         WorkloadKeyset {

@@ -11,12 +11,13 @@ use std::process::Stdio;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use aci_verify::decode_hex_32;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use super::{current_unix_secs, decode_hex_32};
+use super::current_unix_secs;
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crate::aci::upstream::{ChutesSessionStore, ChutesVerifiedDiscovery};
 use crate::aggregator::service::UpstreamVerificationRequest;

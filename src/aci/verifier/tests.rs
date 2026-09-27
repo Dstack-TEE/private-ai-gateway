@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use aci_verify::dstack::verify_dstack_app_compose;
 use k256::ecdsa::SigningKey;
 use serde_json::{json, Value};
 use sha2::{Sha256, Sha384};
@@ -7,7 +8,7 @@ use sha3::{Digest, Keccak256};
 
 use super::aci_service::{declared_tls_channel_bindings, CachedAciServiceVerification};
 use super::appraisal::appraise_provenance;
-use super::dstack::{verify_dstack_app_compose, verify_dstack_kms_receipt_custody};
+use super::dstack::verify_dstack_kms_receipt_custody;
 use super::external::ExternalProviderVerifier;
 use super::*;
 use crate::aci::keys::ALGO_ED25519;

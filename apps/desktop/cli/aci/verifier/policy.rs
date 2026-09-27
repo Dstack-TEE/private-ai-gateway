@@ -9,7 +9,8 @@
 
 use std::collections::BTreeSet;
 
-use super::dstack::compressed_k256_public_key_hex;
+use aci_verify::dstack::compressed_k256_public_key_hex;
+
 use crate::aci::types::WorkloadKeyset;
 
 const APP_ID_SUBJECT_PREFIX: &str = "app-id:0x";
