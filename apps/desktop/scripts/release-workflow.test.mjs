@@ -70,6 +70,21 @@ test("only release tags publish, after every package, in order", async () => {
   assert.equal(generated.length, 3);
 });
 
+test("only a release tag's call uploads to App Store Connect", async () => {
+  const appStore = await readWorkflow("desktop-mac-app-store.yml");
+  const steps = appStore.jobs.package.steps;
+  const validate = steps.findIndex((step) => step.run?.includes("altool --validate-app"));
+  const uploads = steps.flatMap((step, index) => (step.run?.includes("--upload-app") ? [index] : []));
+  assert.notEqual(validate, -1);
+  assert.equal(steps[validate].if, undefined);
+  // Only desktop-native.yml passes a build number; a manual run has none, so
+  // it validates the package but never uploads it.
+  assert.equal(uploads.length, 1);
+  assert.equal(steps[uploads[0]].if, "inputs.build_number != ''");
+  assert.equal(appStore.on.workflow_dispatch.inputs?.build_number, undefined);
+  assert.ok(validate < uploads[0]);
+});
+
 test("npm publishes the channel wrapper after its platform versions", async () => {
   const [direct, npm] = await Promise.all([
     readWorkflow("desktop-native.yml"),

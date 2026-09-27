@@ -109,8 +109,10 @@ jobs:
   # A manual run's build number, 99999.<run number>, is above every release
   # build (100 + <Desktop release run number>), since ASC may compare a new
   # build with earlier uploads, and never equal to one. It is never uploaded.
+  # The mac-app-store environment admits only main and release tags, so a
+  # manual run on another branch only verifies.
   package:
-    if: inputs.build_number != '' || inputs.validate_package
+    if: inputs.build_number != '' || (inputs.validate_package && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/desktop-v')))
     needs: verify
     runs-on: macos-26
     timeout-minutes: 120
@@ -283,7 +285,7 @@ jobs:
       - name: Upload package artifact
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: private-ai-proxy-mac-app-store-${{ env.APPLE_APP_STORE_BUILD_NUMBER }}
+          name: private-ai-proxy-mac-app-store-${{ inputs.build_number || format('validate-only-{0}', github.run_number) }}
           path: apps/desktop/release/*-mac-app-store.pkg
           if-no-files-found: error
           retention-days: 14

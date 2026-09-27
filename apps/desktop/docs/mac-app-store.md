@@ -125,8 +125,11 @@ environment admits only `main` and `desktop-v*` tags. App Store versions are
 `x.y.z`, so the run packages its ref as the stable version it leads to
 (`0.2.0-beta.10` as `0.2.0`). Its build number, `99999.<run number>`, is above
 every release build number, in case App Store Connect validation compares it
-with earlier uploads, and never equal to one. Never upload its pkg. Set
-`validate_package` to false to only verify.
+with earlier uploads, and never equal to one. Never upload its pkg, the
+`private-ai-proxy-mac-app-store-validate-only-<run number>` artifact: App Store
+Connect would then require every later build number to exceed 99999, and every
+release tag's upload would fail. On another branch, or with `validate_package`
+set to false, the run only verifies.
 
 A re-run keeps the run number and therefore the build number, and ASC rejects a
 second upload of the same build. If a later job of the tag's `Desktop release`
