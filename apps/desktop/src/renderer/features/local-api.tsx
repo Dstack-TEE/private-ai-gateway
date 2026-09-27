@@ -6,7 +6,7 @@ import { ListenerFields } from "../components/listen-address";
 import { localAddressKind } from "../lib/local-api-config";
 import { Hint } from "../components/hint";
 import { Field, FieldGroup, FieldLabel, FieldError, FieldSeparator } from "../components/ui/field";
-import { Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemTitle } from "../components/ui/item";
+import { Item } from "../components/ui/item";
 import { InputGroup, InputGroupInput, InputGroupAddon, InputGroupButton } from "../components/ui/input-group";
 import { IconButton } from "../components/controls";
 import { AppDialog, type DialogControl } from "../components/app-dialog";
@@ -17,6 +17,7 @@ import { maskClientKey } from "../lib/format";
 import { desktopApi } from "../lib/environment";
 import { errorMessage, toastError } from "../lib/error-message";
 import { useCopy } from "../hooks/use-copy";
+import { cn } from "../lib/utils";
 
 export function LocalApiPanel({
   proxyUrl,
@@ -29,24 +30,25 @@ export function LocalApiPanel({
   clientKeyVisible: boolean;
   onToggleKey(): void;
 }): React.JSX.Element {
+  const endpointLabel = "Local API endpoint";
+  const keyLabel = "Local API key";
   const { copy, isCopied, status } = useCopy((error, label) => toastError(`Could not copy the ${label}`, error));
   return (
-    <>
-      <ItemGroup>
-        <CopyRow title="Endpoint" copyLabel="Local API endpoint" value={proxyUrl} copied={isCopied(proxyUrl)} onCopy={copy} />
-        <CopyRow
-          title="API key"
-          copyLabel="Local API key"
-          value={clientKey || undefined}
-          displayValue={clientKey && !clientKeyVisible ? maskClientKey(clientKey) : undefined}
-          copied={isCopied(clientKey)}
-          onCopy={copy}
-        >
-          <IconButton size="icon-sm" label={clientKeyVisible ? "Hide Local API key" : "Show Local API key"} disabled={!clientKey} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff /> : <Eye />}</IconButton>
-        </CopyRow>
-      </ItemGroup>
+    <div className="copy-rows relative grid auto-rows-auto gap-3">
+      <CopyRow title="Endpoint" copyLabel={endpointLabel} value={proxyUrl} copied={isCopied(proxyUrl)} onCopy={copy} />
+      <CopyRow
+        title="API key"
+        copyLabel={keyLabel}
+        value={clientKey || undefined}
+        displayValue={clientKey ? (clientKeyVisible ? clientKey : maskClientKey(clientKey)) : undefined}
+        ariaValue={clientKey ? (clientKeyVisible ? clientKey : "hidden") : undefined}
+        copied={isCopied(clientKey)}
+        onCopy={copy}
+      >
+        <IconButton className="row-action relative z-2 ml-auto" label={clientKeyVisible ? "Hide Local API key" : "Show Local API key"} disabled={!clientKey} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}</IconButton>
+      </CopyRow>
       {status}
-    </>
+    </div>
   );
 }
 
@@ -55,6 +57,7 @@ function CopyRow({
   copyLabel,
   value,
   displayValue = value,
+  ariaValue = displayValue,
   copied,
   onCopy,
   children,
@@ -63,19 +66,24 @@ function CopyRow({
   copyLabel: string;
   value?: string;
   displayValue?: string;
+  ariaValue?: string;
   copied: boolean;
   onCopy(label: string, value: string): void;
 }>): React.JSX.Element {
   return (
-    <Item variant="muted" size="xs">
-      <ItemContent className="min-w-0">
-        <ItemTitle>{title}</ItemTitle>
-        <ItemDescription><code className="break-all">{displayValue ?? "Unavailable"}</code></ItemDescription>
-      </ItemContent>
-      <ItemActions>
-        {children}
-        <IconButton size="icon-sm" label={`Copy ${copyLabel}`} disabled={!value} onClick={() => { if (value) onCopy(copyLabel, value); }}>{copied ? <Check /> : <Copy />}</IconButton>
-      </ItemActions>
+    <Item variant="muted" size="xs" className="copy-row relative h-14 min-w-0 overflow-hidden">
+      <Button
+        variant="ghost"
+        className="copy-surface absolute inset-0 flex size-full min-h-0 min-w-0 flex-col items-start justify-center gap-0.5 rounded-none border-0 bg-transparent py-2.25 pr-[min(100px,_40%)] pl-3 text-left hover:bg-muted [&:focus-visible_.copy-feedback]:opacity-100 [&:hover_.copy-feedback]:opacity-100 [&_code]:max-w-full [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap"
+        disabled={!value}
+        aria-label={`${copyLabel}: ${ariaValue ?? "Unavailable"}. Copy`}
+        onClick={() => { if (value) onCopy(copyLabel, value); }}
+      >
+        <span className="row-title text-xs font-normal text-muted-foreground">{title}</span>
+        <code className="block w-full flex-none overflow-hidden text-ellipsis whitespace-nowrap text-sm text-foreground">{displayValue ?? "Unavailable"}</code>
+        <span className={cn("copy-feedback absolute right-13.5 top-1/2 -translate-y-1/2 text-xs font-semibold text-muted-foreground opacity-0 transition-opacity duration-150", copied && "text-primary opacity-100")}>{copied ? "Copied" : "Copy"}</span>
+      </Button>
+      {children}
     </Item>
   );
 }
@@ -148,7 +156,7 @@ export function LocalApiDialog({
           <Field>
             <FieldLabel htmlFor="local-client-key">Local API key</FieldLabel>
             <InputGroup>
-              <InputGroupInput id="local-client-key" className="font-mono" type={clientKeyVisible ? "text" : "password"} value={clientKey} readOnly />
+              <InputGroupInput id="local-client-key" className="mono font-mono text-xs" type={clientKeyVisible ? "text" : "password"} value={clientKey} readOnly />
               <InputGroupAddon align="inline-end">
                 <Hint content={clientKeyVisible ? "Hide Local API key" : "Show Local API key"}><InputGroupButton size="icon-xs" aria-label={clientKeyVisible ? "Hide Local API key" : "Show Local API key"} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff /> : <Eye />}</InputGroupButton></Hint>
                 <Hint content="Copy Local API key"><InputGroupButton size="icon-xs" aria-label="Copy Local API key" disabled={saving || !clientKey} onClick={copyKey}>{isCopied(clientKey) ? <Check /> : <Copy />}</InputGroupButton></Hint>

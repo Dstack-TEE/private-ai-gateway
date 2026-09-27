@@ -21,6 +21,6 @@ export function Hint({ content, children }: { content: ReactNode; children: Reac
 export function HoverDetails({ value, children }: { value: ReactNode; children: ReactNode }) {
   return <Popover>
     <PopoverTrigger openOnHover render={<button type="button" className="cursor-default underline decoration-dotted underline-offset-4" />}>{value}</PopoverTrigger>
-    <PopoverContent className="w-auto max-w-72">{children}</PopoverContent>
+    <PopoverContent className="w-auto max-w-72 rounded-2xl p-3 text-xs">{children}</PopoverContent>
   </Popover>;
 }

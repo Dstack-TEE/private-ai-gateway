@@ -20,8 +20,6 @@ export interface Shell {
   applying: boolean;
   startingBackend: boolean;
   startBackend(): void;
-  /** Protection is starting or stopping at the window's request. */
-  protectionPending: boolean;
   toggleProtection(): void;
   setRequireProductionOs(required: boolean): void;
   resetSettings(): void;

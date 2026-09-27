@@ -8,11 +8,10 @@ import { UpdateControl, UpdateChannelControl } from "../updates";
 import { Button } from "../components/ui/button";
 import { AppearanceControl } from "../components/appearance";
 import { ExportDiagnostics } from "../components/maintenance";
-import { Item, ItemActions, ItemContent, ItemTitle, ItemDescription, ItemGroup } from "../components/ui/item";
-import { FieldError } from "../components/ui/field";
+import { Item, ItemActions, ItemContent, ItemTitle, ItemDescription } from "../components/ui/item";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
-import { SettingsSection, SettingsLink, SettingsToggle } from "../components/settings";
+import { SettingsSection, SettingsList, SettingsLink, SettingsToggle } from "../components/settings";
 import type { LaunchPreference, WebUiStatus } from "../../shared/contracts";
 import { desktopApi, distributionCapabilities as distribution, session } from "../lib/environment";
 import { parentDirectory, serviceHost } from "../lib/format";
@@ -37,11 +36,11 @@ function CliRegistrationControl(): React.JSX.Element {
         : <>Installed at {directory}. Add this directory to your terminal’s PATH.</>
       : directory ? `Default location: ${directory}` : "Command registration is unavailable.";
   const failure = error ?? registration?.startupError;
-  return <Item variant="outline">
+  return <Item>
     <ItemContent>
       <ItemTitle><code>pap</code> command</ItemTitle>
       <ItemDescription>{description}</ItemDescription>
-      <FieldError>{failure}</FieldError>
+      {failure && <ItemDescription role="alert" className="text-destructive">{failure}</ItemDescription>}
     </ItemContent>
     <ItemActions>
       <Button variant="outline" disabled={busy || !registration} onClick={() => { if (registration) mutation.mutate(!registration.installed); }}>
@@ -61,11 +60,11 @@ function webUiSummary(status: WebUiStatus): string {
 
 function SignOutControl({ onSignOut }: { onSignOut(): Promise<void> }): React.JSX.Element {
   const mutation = useMutation({ mutationFn: onSignOut });
-  return <Item variant="outline">
+  return <Item>
     <ItemContent>
       <ItemTitle>This browser</ItemTitle>
       <ItemDescription>Signing out ends this browser session. Sign in again with the web UI password.</ItemDescription>
-      <FieldError>{mutation.error && `Could not sign out. ${errorMessage(mutation.error)}`}</FieldError>
+      {mutation.error && <ItemDescription role="alert" className="text-destructive">Could not sign out. {errorMessage(mutation.error)}</ItemDescription>}
     </ItemContent>
     <ItemActions>
       <Button variant="outline" disabled={mutation.isPending} onClick={() => mutation.mutate()}>
@@ -99,38 +98,38 @@ export function SettingsPage(): React.JSX.Element {
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   const starting = state.protection.phase === "starting";
   return (
-    <div className="mx-auto flex max-w-230 flex-col gap-5">
-      {state.configFiles.error && <Alert variant="destructive">
+    <div className="max-w-230 min-h-full mt-0 mr-auto mb-0 ml-auto">
+      {state.configFiles.error && <Alert variant="destructive" className="mb-5">
         <AlertTitle>Settings file not applied</AlertTitle>
-        <AlertDescription><code className="whitespace-pre-wrap">{state.configFiles.error}</code></AlertDescription>
+        <AlertDescription className="whitespace-pre-wrap font-mono text-xs">{state.configFiles.error}</AlertDescription>
         <AlertDescription>The previous settings stay in effect until the file is fixed.</AlertDescription>
       </Alert>}
-      {state.configFiles.warnings.length > 0 && <Alert>
+      {state.configFiles.warnings.length > 0 && <Alert className="mb-5">
         <AlertTitle>Check your settings</AlertTitle>
-        <AlertDescription><code className="whitespace-pre-wrap">{state.configFiles.warnings.join("\n")}</code></AlertDescription>
+        <AlertDescription className="whitespace-pre-wrap font-mono text-xs">{state.configFiles.warnings.join("\n")}</AlertDescription>
       </Alert>}
 
       <SettingsSection title="General">
           {distribution.launchAtLogin && <SettingsToggle label="Open at Login" checked={launch.preferences?.openAtLogin ?? false} disabled={!launch.preferences || launch.saving} onToggle={() => launch.change("openAtLogin", !launch.preferences?.openAtLogin)} />}
           <SettingsToggle label="Protect on launch" checked={launch.preferences?.connectOnLaunch ?? false} disabled={!launch.preferences || launch.saving} onToggle={() => launch.change("connectOnLaunch", !launch.preferences?.connectOnLaunch)} />
           <AppearanceControl />
-          {distribution.notifications && <SettingsLink title="Notifications" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "notifications" })} />}
+          {distribution.notifications && <SettingsLink title="Notifications" aria-label="Notifications" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "notifications" })} />}
       </SettingsSection>
       <SettingsSection title="Connections">
-          <SettingsLink title="Profiles" aria-haspopup="dialog" disabled={starting} onClick={shell.openProfiles} description={activeProfile ? `${activeProfile.name} · ${serviceHost(activeProfile.remoteUrl)} · ${state.protection.phase === "protected" ? "Protected" : profileIsAvailable(activeProfile, state) ? "Ready" : "Connect account or add an API key"}` : "No provider configured"} />
-          <SettingsLink title="Local API" description="Listener and client access" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "local-api" })} />
-          {distribution.webUi && <SettingsLink title="Web UI" description={webUiSummary(state.webUi)} aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "web-ui" })} />}
+          <SettingsLink title="Profiles" aria-label="Profiles" aria-haspopup="dialog" disabled={starting} onClick={shell.openProfiles} description={activeProfile ? `${activeProfile.name} · ${serviceHost(activeProfile.remoteUrl)} · ${state.protection.phase === "protected" ? "Protected" : profileIsAvailable(activeProfile, state) ? "Ready" : "Connect account or add an API key"}` : "No provider configured"} />
+          <SettingsLink title="Local API" description="Listener and client access" aria-label="Local API settings" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "local-api" })} />
+          {distribution.webUi && <SettingsLink title="Web UI" description={webUiSummary(state.webUi)} aria-label="Web UI settings" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "web-ui" })} />}
           {session && <SignOutControl onSignOut={session.signOut} />}
       </SettingsSection>
 
-      <Collapsible className="grid gap-2">
-        <CollapsibleTrigger render={<Button variant="ghost" className="justify-self-start" />}><ChevronRight className="group-data-panel-open/button:rotate-90" aria-hidden="true" />Advanced</CollapsibleTrigger>
+      <Collapsible className="group mt-5 [&:first-child]:mt-0 [&_[data-slot=collapsible-trigger]]:mb-2 [&_[aria-expanded=true]_>_svg]:rotate-90">
+        <CollapsibleTrigger render={<Button variant="ghost" />}><ChevronRight size={15} aria-hidden="true" /><span>Advanced</span></CollapsibleTrigger>
         <CollapsibleContent>
-          <ItemGroup>
-          <SettingsToggle label="Allow development OS" checked={allowDevelopmentOs} disabled={locked} onToggle={() => shell.setRequireProductionOs(allowDevelopmentOs)} />
+          <SettingsList>
+          <SettingsToggle label="Allow development OS" checked={allowDevelopmentOs} developmentMode={allowDevelopmentOs} disabled={locked} onToggle={() => shell.setRequireProductionOs(allowDevelopmentOs)} />
           {distribution.nativeUpdates && <UpdateChannelControl updates={updates} />}
           {distribution.cliRegistration && <CliRegistrationControl />}
-          {state.configFiles.configPath && <Item variant="outline">
+          {state.configFiles.configPath && <Item>
             <ItemContent>
               <ItemTitle>Settings file</ItemTitle>
               <ItemDescription className="break-all">{state.configFiles.configPath}. API keys and the web UI password are in credentials.toml beside it.</ItemDescription>
@@ -138,7 +137,7 @@ export function SettingsPage(): React.JSX.Element {
           </Item>}
           <ExportDiagnostics api={desktopApi} />
           <SettingsLink title="Reset settings" disabled={locked} onClick={shell.resetSettings} />
-          </ItemGroup>
+          </SettingsList>
         </CollapsibleContent>
       </Collapsible>
 

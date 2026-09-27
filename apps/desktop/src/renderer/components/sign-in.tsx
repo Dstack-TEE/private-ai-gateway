@@ -34,7 +34,7 @@ export function SignInPage() {
           <source media="(prefers-color-scheme: dark)" srcSet={brand.appIcon.dark} />
           <img className="size-full object-contain" src={brand.appIcon.light} alt="" />
         </picture>
-        <CardTitle>Sign in to {brand.productName}</CardTitle>
+        <CardTitle className="text-lg">Sign in to {brand.productName}</CardTitle>
         <CardDescription>{notice ?? "Enter the web UI password."}</CardDescription>
       </CardHeader>
       <CardContent>

@@ -6,7 +6,6 @@ import { StateLabel } from "../components/state-label";
 import { currency, formatTokens } from "../lib/usage-presentation";
 import { Card, CardHeader, CardTitle, CardDescription, CardAction, CardContent } from "../components/ui/card";
 import { Separator } from "../components/ui/separator";
-import { ItemGroup } from "../components/ui/item";
 import { IconButton } from "../components/controls";
 import type { UsageSummary } from "../../shared/contracts";
 import { desktopApi } from "../lib/environment";
@@ -18,6 +17,7 @@ import { UsageRow } from "./usage";
 import { ProtectedControl, ProtectionStatus } from "../components/protection";
 import { ServiceLogo } from "../components/brand";
 import { AccountBalanceValue } from "../components/account-tools";
+import { toneTextClass } from "../lib/tone";
 import { cn } from "../lib/utils";
 
 const TLS_TRACKS = [
@@ -51,48 +51,52 @@ export function OverviewPage(): React.JSX.Element {
     ? agents.agents.filter((agent) => agent.installed).slice(0, 3)
     : agents.agents.slice(0, 3);
   return (
-    <div className="@container/overview mx-auto flex max-w-240 flex-col gap-4">
-      <div className="grid grid-cols-2 gap-4 @max-[600px]/overview:grid-cols-1">
-        <StatusSurface />
-        <SessionSummary summary={state.sessionUsage} active={protectedNow || Boolean(state.sessionActive || state.reconnecting)} />
+    <div className="overview-page max-w-240 min-h-full mx-auto flex flex-col @container/overview @max-[600px]/overview:[&_.overview-grid_>_.overview-module:nth-child(n)]:col-auto @max-[600px]/overview:[&_.overview-grid_>_.overview-module:nth-child(n)]:row-auto">
+      <div className="overview-top grid *:min-h-36 grid-cols-2 gap-4 items-stretch [&_.status-surface.status-compact]:min-w-0 @max-[600px]/overview:grid-cols-1">
+      <StatusSurface />
+      <SessionSummary summary={state.sessionUsage} active={protectedNow || Boolean(state.sessionActive || state.reconnecting)} />
       </div>
-      <div className="grid grid-cols-2 gap-4 @max-[600px]/overview:grid-cols-1">
-        <div className="flex min-w-0 flex-col gap-4">
-          <OverviewModule title="Local API" description="Use private AI in your tools." titleAdornment={<IconButton variant="ghost" size="icon-xs" label="Local API examples" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "local-api-example" })}><CircleHelp aria-hidden="true" /></IconButton>} status={<StateLabel tone={localAvailable ? "success" : "neutral"} text={localAvailable ? "Available" : "Unavailable"} />} action={<IconButton label="Local API settings" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "local-api" })}><Settings /></IconButton>}>
-            <LocalApiPanel
-              proxyUrl={state.proxyUrl}
-              clientKey={shell.clientKey}
-              clientKeyVisible={shell.clientKeyVisible}
-              onToggleKey={shell.toggleClientKey}
-            />
-          </OverviewModule>
-          <OverviewModule title="Agents" description="Use private AI in your agents." action={agents.accessStatus !== "authorized" || agents.authorizing
-            ? <Button type="button" variant="outline" size="sm" disabled={!agents.accessStatus || agents.authorizing} aria-busy={agents.authorizing} onClick={agents.requestAccess}>
-                {agents.authorizing && <LoaderCircle className="animate-spin" aria-hidden="true" />}Enable
-              </Button>
-            : <Link to="/agents" className={cn(buttonVariants({ variant: "outline", size: "sm" }))}>View All</Link>}>
+      <div className="overview-grid mt-4 grid grid-cols-2 grid-rows-[auto_auto] gap-4 @max-[600px]/overview:grid-cols-1 [&_>_.overview-module:first-child]:col-start-1 [&_>_.overview-module:first-child]:row-start-1 [&_>_.overview-module:nth-child(2)]:col-start-1 [&_>_.overview-module:nth-child(2)]:row-start-2 [&_>_.overview-module:nth-child(3)]:col-start-2 [&_>_.overview-module:nth-child(3)]:row-[1_/_span_2]">
+        <OverviewModule title="Local API" description="Use private AI in your tools." titleAdornment={<IconButton variant="ghost" size="icon-xs" label="Local API examples" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "local-api-example" })}><CircleHelp aria-hidden="true" /></IconButton>} status={<StateLabel tone={localAvailable ? "success" : "neutral"} text={localAvailable ? "Available" : "Unavailable"} />} action={<IconButton label="Local API settings" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "local-api" })}><Settings size={16} /></IconButton>}>
+          <LocalApiPanel
+            proxyUrl={state.proxyUrl}
+            clientKey={shell.clientKey}
+            clientKeyVisible={shell.clientKeyVisible}
+            onToggleKey={shell.toggleClientKey}
+          />
+        </OverviewModule>
+        <OverviewModule stretch={false} title="Agents" description="Use private AI in your agents." action={agents.accessStatus !== "authorized" || agents.authorizing
+          ? <Button type="button" variant="outline" size="sm" className="relative min-w-20" disabled={!agents.accessStatus || agents.authorizing} aria-busy={agents.authorizing} aria-label="Enable" onClick={agents.requestAccess}>
+              <span className={agents.authorizing ? "invisible" : undefined}>Enable</span>
+              {agents.authorizing && <LoaderCircle aria-hidden="true" className="absolute animate-spin" />}
+            </Button>
+          : <Link to="/agents" className={cn(buttonVariants({ variant: "outline", size: "sm" }), "min-w-20")}>View All</Link>}>
+          <div className="preview-list [&_>_:last-child]:border-b-0 overview-agent-list [--agent-row-height:calc(2rem_+_1.25rem_+_2px)] grid grid-rows-[repeat(3,_minmax(var(--agent-row-height),_auto))] gap-3 [&_>_.empty-state]:row-span-full">
             {agents.accessStatus === "authorized" && !agents.agents.some((agent) => agent.installed) ? <EmptyState text={agents.problem ? "Agent detection unavailable" : "No agents detected"} />
-              : <ItemGroup>{previewAgents.map((agent) => (
-                <AgentRow
-                  key={agent.id}
-                  agent={agent}
-                  compact
-                  detectionLabel={agentDetectionLabel}
-                  disabled={shell.applying || agents.controlsLocked || Boolean(agentDetectionLabel)}
-                />
-              ))}</ItemGroup>}
-          </OverviewModule>
-        </div>
+              : previewAgents.map((agent) => (
+              <AgentRow
+                key={agent.id}
+                agent={agent}
+                compact
+                detectionLabel={agentDetectionLabel}
+                disabled={shell.applying || agents.controlsLocked || Boolean(agentDetectionLabel)}
+              />
+            ))}
+          </div>
+        </OverviewModule>
         <OverviewModule
           title="Recent usage"
           description="Latest requests in this session."
           action={<Link to="/usage" className={cn(buttonVariants({ variant: "outline", size: "sm" }))}>View All</Link>}
+          scrollable
         >
-          {/* Sized by the cards beside it, not by the list; one column gives it a height of its own. */}
-          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain contain-size @max-[600px]/overview:h-80 @max-[600px]/overview:flex-none" role="region" tabIndex={0} aria-label="Recent requests">
-            {recent.length === 0
-              ? <EmptyState text={state.protection.action.operation === "stop" || state.sessionActive ? "No requests in this session yet." : "Start protection to begin a new session."} />
-              : <ItemGroup>{recent.map((item) => <UsageRow key={item.id} activity={item} onOpen={() => shell.openDialog({ kind: "usage-proof", activity: item })} />)}</ItemGroup>}
+          <div className="preview-list flex-1 min-h-0 overflow-y-auto overscroll-contain [&_>_:last-child]:border-b-0" role="region" tabIndex={0} aria-label="Recent requests">
+            {recent.length === 0 && (
+              <EmptyState text={state.protection.action.operation === "stop" || state.sessionActive ? "No requests in this session yet." : "Start protection to begin a new session."} />
+            )}
+            {recent.map((item) => (
+              <React.Fragment key={item.id}><UsageRow activity={item} onOpen={() => shell.openDialog({ kind: "usage-proof", activity: item })} /><Separator className="last:hidden" /></React.Fragment>
+            ))}
           </div>
         </OverviewModule>
       </div>
@@ -103,44 +107,54 @@ export function OverviewPage(): React.JSX.Element {
 function StatusSurface(): React.JSX.Element {
   const shell = useShell();
   const { state } = shell;
-  const protectedNow = state.protection.phase === "protected";
+  const protection = state.protection;
+  const protectedNow = protection.phase === "protected";
+  const developmentMode = !state.config.requireProductionOs;
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   return (
-    <Card size="sm" role="region" className="relative isolate" aria-label="Protection status">
+    <Card size="sm" role="region" className={cn(
+      "status-surface status-compact relative isolate transition-colors duration-200 ease-out motion-reduce:transition-none [&_.protected-control]:col-start-2 [&_.protected-control]:row-start-1 [&_.protected-control]:self-start [&_.protected-control]:justify-self-end [&_.protected-control]:min-h-[calc(var(--text-2xl)_*_var(--text-2xl--line-height))] [&_.status-profile]:w-[min(140px,_100%)] [&_.status-profile]:bg-card [&_.is-icon-only]:m-0 [&_.protection-status]:justify-start [&_.status-heading]:transition-colors [&_.status-heading]:duration-200 [&_.status-heading]:ease-out [&_[data-slot=switch]]:transition-colors [&_[data-slot=switch]]:duration-200 [&_[data-slot=switch]]:ease-out motion-reduce:[&_.status-heading]:transition-none motion-reduce:[&_[data-slot=switch]]:transition-none",
+      protectedNow && (developmentMode ? "ring-warning shadow-warning/10 dark:ring-warning" : "ring-primary shadow-primary/10 dark:ring-primary"),
+    )} aria-label="Protection status">
       <TrackLayer active={protectedNow} />
-      <CardHeader>
-        <CardTitle><ProtectionStatus state={state} /></CardTitle>
-        <CardAction><ProtectedControl state={state} pending={shell.protectionPending} onToggle={shell.toggleProtection} /></CardAction>
-      </CardHeader>
-      <CardContent className="mt-auto flex min-w-0 items-center gap-2">
-        {state.backendConnected === false ? <Button variant="outline" size="sm" disabled={shell.startingBackend} onClick={shell.startBackend}><RefreshCw className={shell.startingBackend ? "animate-spin" : undefined} aria-hidden="true" />{shell.startingBackend ? "Starting…" : "Start Background Service"}</Button> : <>
-        <Button variant="outline" size="sm" className="max-w-40" aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Set Up Profile"} aria-haspopup="dialog" onClick={shell.openProfiles}>
+      <CardContent className="status-compact-content relative z-2 grid grid-cols-[minmax(0,_1fr)_44px] grid-rows-[auto_1fr] gap-y-2 gap-x-3 flex-1 w-full">
+        <div className={cn("status-heading col-start-1 row-start-1 min-w-0 [&_.protection-status]:grid [&_.protection-status]:grid-cols-[24px_minmax(0,_1fr)] [&_.protection-status]:gap-y-1 [&_.protection-status]:gap-x-1.5 [&_.protection-status]:items-center [&_.protection-status]:text-2xl [&_.protection-status]:font-semibold [&_.protection-status_>_svg]:w-6 [&_.protection-status_>_svg]:h-6 [&_.protection-duration]:col-start-2 [&_.protection-duration]:text-xs [&_.protection-duration]:font-normal", toneTextClass[protection.tone])}>
+          <ProtectionStatus state={state} />
+        </div>
+        <div className="status-profile-actions col-span-full row-start-2 self-end flex items-center gap-2 min-w-0">
+        {state.backendConnected === false ? <Button variant="outline" size="sm" disabled={shell.startingBackend} onClick={shell.startBackend}><RefreshCw className={shell.startingBackend ? "animate-control-spin" : undefined} aria-hidden="true" />{shell.startingBackend ? "Starting…" : "Start Background Service"}</Button> : <>
+        <Button id="overview-profile" variant="outline" size="sm" className="status-profile w-[min(128px,_100%)] min-w-0 [&_>_span:not(.service-logo):not(.service-custom-icon)]:min-w-0 [&_>_span:not(.service-logo):not(.service-custom-icon)]:flex-1 [&_>_span:not(.service-logo):not(.service-custom-icon)]:overflow-hidden [&_>_span:not(.service-logo):not(.service-custom-icon)]:text-left [&_>_span:not(.service-logo):not(.service-custom-icon)]:text-ellipsis [&_>_span:not(.service-logo):not(.service-custom-icon)]:whitespace-nowrap [&_>_svg]:flex-none [&_.service-logo]:w-5 [&_.service-logo]:h-5 [&_.service-custom-icon]:w-5 [&_.service-custom-icon]:h-5" aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Set Up Profile"} aria-haspopup="dialog" onClick={shell.openProfiles}>
           {activeProfile ? <ServiceLogo provider={activeProfile.provider} /> : <Plus aria-hidden="true" />}
-          <span className="truncate">{activeProfile?.name ?? "Set Up"}</span>
+          <span>{activeProfile?.name ?? "Set Up"}</span>
           {activeProfile && <ChevronDown aria-hidden="true" />}
         </Button>
         {activeProfile?.auth.kind === "oauth" && <AccountBalanceValue api={desktopApi} provider={activeProfile.provider} target={{ kind: "profile", profileId: activeProfile.id }} credentialRef={activeProfile.credentialRef} enabled={protectedNow} />}
         <IconButton size="icon-sm" label="Privacy verification" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "privacy" })}><Info aria-hidden="true" /></IconButton>
         </>}
+        </div>
+        <ProtectedControl state={state} onToggle={shell.toggleProtection} iconOnly />
       </CardContent>
     </Card>
   );
 }
 
-/** Encrypted records scrolling behind the status while protection is on. */
 const TrackLayer = memo(function TrackLayer({ active }: { active: boolean }): React.JSX.Element {
   return (
-    <div className={cn("pointer-events-none absolute inset-0 -z-1 grid grid-rows-11 items-center overflow-hidden py-2 font-mono text-xs text-muted-foreground/5 transition-opacity duration-500 [mask-image:linear-gradient(to_right,transparent,#000_12%,#000_88%,transparent)] motion-reduce:transition-none", active ? "opacity-100" : "opacity-0")} aria-hidden="true">
-      {TLS_TRACKS.map((line, index) => (
-        <div key={line} className="overflow-hidden whitespace-nowrap">
-          <div className={cn("flex w-max motion-reduce:animate-none", index % 2 === 1 ? "animate-track-right" : "animate-track-left", !active && "[animation-play-state:paused]")}>
-            <span className="pr-8">{line}</span><span className="pr-8">{line}</span>
-          </div>
-        </div>
-      ))}
+    <div className={`track-layer tracks-right absolute inset-0 z-1 grid grid-rows-11 items-center overflow-hidden py-2 pointer-events-none text-[color-mix(in_srgb,_var(--muted-foreground)_5%,_var(--card))] [mask-image:linear-gradient(to_right,_transparent,_#000_12%,_#000_88%,_transparent)] transition-opacity duration-500 motion-reduce:transition-none ${active ? "opacity-100 [&_.track-strip]:[animation-play-state:running]" : "opacity-0"}`} aria-hidden="true">
+      {TLS_TRACKS.map((line, index) => <TrackRow key={line} text={line} reverse={index % 2 === 1} />)}
     </div>
   );
 });
+
+function TrackRow({ text, reverse }: { text: string; reverse: boolean }): React.JSX.Element {
+  return (
+    <div className={`track-row min-w-0 overflow-hidden flex items-center text-xs leading-4.5 font-mono whitespace-nowrap ${reverse ? "track-reverse [&_.track-strip]:animate-track-right" : ""}`}>
+      <div className="track-strip w-[max-content] flex animate-track-left [animation-play-state:paused] motion-reduce:animate-none">
+        <span className="track-copy flex-none pr-8">{text}</span><span className="track-copy flex-none pr-8">{text}</span>
+      </div>
+    </div>
+  );
+}
 
 function OverviewModule({
   title,
@@ -148,6 +162,8 @@ function OverviewModule({
   titleAdornment,
   status,
   action,
+  scrollable = false,
+  stretch = true,
   children,
 }: React.PropsWithChildren<{
   title: string;
@@ -155,15 +171,17 @@ function OverviewModule({
   titleAdornment?: React.ReactNode;
   status?: React.ReactNode;
   action?: React.ReactNode;
+  scrollable?: boolean;
+  stretch?: boolean;
 }>): React.JSX.Element {
   return (
-    <Card size="sm" className="min-w-0">
-      <CardHeader>
-        <CardTitle className="flex flex-wrap items-center gap-2"><h2>{title}</h2>{titleAdornment}{status}</CardTitle>
+    <Card size="sm" className={cn("overview-module min-h-0 min-w-0 flex flex-col [&_.agent-config]:hidden", stretch ? "h-full" : "h-auto self-start")}>
+      <CardHeader className="flex-none items-center">
+        <CardTitle className="overview-module-title flex items-center flex-wrap gap-2"><h2 className="text-base font-medium">{title}</h2>{titleAdornment}{status}</CardTitle>
         {description && <CardDescription>{description}</CardDescription>}
         {action && <CardAction>{action}</CardAction>}
       </CardHeader>
-      <CardContent className="@container flex min-h-0 flex-1 flex-col">{children}</CardContent>
+      <CardContent className={`module flex min-w-0 flex-1 flex-col @container ${scrollable ? "min-h-0 [contain:size] @max-[600px]/overview:h-80 @max-[600px]/overview:flex-none" : "shrink-0"}`}>{children}</CardContent>
     </Card>
   );
 }
@@ -171,21 +189,21 @@ function OverviewModule({
 function SessionSummary({ summary, active }: { summary: UsageSummary; active: boolean }): React.JSX.Element {
   const totalTokens = summary.inputTokens + summary.outputTokens;
   return (
-    <Card size="sm" role="region" className="min-w-0" aria-labelledby="session-usage-heading">
-      <CardHeader><CardTitle><h2 id="session-usage-heading">Current session</h2></CardTitle></CardHeader>
-      <CardContent className="mt-auto flex min-w-0 gap-3" role="group" aria-label="Usage in this session">
-        {[
-          ["Requests", active ? summary.requests.toLocaleString() : "—"],
-          ["Tokens", active ? formatTokens(totalTokens) : "—"],
-          ["Estimated cost", active ? currency(summary.costUsd) : "—"],
-        ].map(([label, value], index) => <React.Fragment key={label}>
-          {index > 0 && <Separator orientation="vertical" />}
-          <div className="flex min-w-0 flex-1 flex-col gap-2">
-            <span className="text-xs text-muted-foreground">{label}</span>
-            <strong className="truncate text-xl font-semibold tabular-nums">{value}</strong>
-          </div>
-        </React.Fragment>)}
-      </CardContent>
+    <Card size="sm" role="region" className="session-overview min-w-0" aria-labelledby="session-usage-heading">
+      <CardHeader><CardTitle><h2 id="session-usage-heading" className="text-base font-medium">Current session</h2></CardTitle></CardHeader>
+    <CardContent className="session-summary mt-auto flex min-w-0 items-stretch gap-3" role="group" aria-label="Usage in this session">
+      {[
+        ["Requests", active ? summary.requests.toLocaleString() : "—"],
+        ["Tokens", active ? formatTokens(totalTokens) : "—"],
+        ["Estimated cost", active ? currency(summary.costUsd) : "—"],
+      ].map(([label, value], index) => <React.Fragment key={label}>
+        {index > 0 && <Separator orientation="vertical" className="h-auto self-stretch" />}
+        <div data-slot="session-metric" className="flex min-w-0 flex-1 flex-col justify-between gap-2">
+          <span className="text-xs text-muted-foreground">{label}</span>
+          <strong className="truncate text-xl font-semibold tabular-nums">{value}</strong>
+        </div>
+      </React.Fragment>)}
+    </CardContent>
     </Card>
   );
 }
