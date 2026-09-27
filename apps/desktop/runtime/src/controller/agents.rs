@@ -72,7 +72,8 @@ impl DesktopRuntime {
         }
         let projector = self.current_projector()?;
         projector.initialize_store()?;
-        if !crate::recovery::connection_intended(&self.manager.snapshot()?) {
+        // Only a session the user ended restores the agents' configuration.
+        if !self.manager.snapshot()?.session_active {
             let failures = projector.reconcile(None)?;
             if !failures.is_empty() {
                 return Err(agent_failures(failures).into());
@@ -332,11 +333,17 @@ impl DesktopRuntime {
         let state = self.manager.snapshot()?;
         let session = self.proxy.session();
         let protected = state.is_protected() && session.verified;
-        if !protected && crate::recovery::connection_intended(&state) {
+        // Until the user ends the session, agents stay pointed at the Local
+        // API, which refuses them while protection is not verified: during a
+        // restart, a network loss, or a verification failure or block.
+        if !protected && state.session_active {
             self.publish_agent_tokens(TokenSet::default())?;
             return Ok(());
         }
         let catalog = if protected { session.catalog } else { None };
+        if let (Some(catalog), Ok(mut verified)) = (&catalog, self.verified_catalog.lock()) {
+            *verified = Some(catalog.clone());
+        }
         if protected && !self.recovery.agents_ready() {
             return Ok(());
         }
@@ -350,6 +357,36 @@ impl DesktopRuntime {
         let failures = outcome?;
         let tokens = projector.scan(catalog.as_ref())?.1;
         self.publish_agent_tokens(tokens)?;
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(agent_failures(failures).into())
+        }
+    }
+
+    /// Points connected agents at the current Local API address; see
+    /// `Projector::retarget`.
+    pub(super) fn retarget_agents(&self, catalog: &Catalog) -> Result<(), Error> {
+        if !self.agent_configuration_enabled() || self.instance.is_none() {
+            return Ok(());
+        }
+        let _guard = self
+            .agent_policy
+            .lock()
+            .map_err(|_| "Agent state unavailable")?;
+        let failures = match self
+            .current_projector()
+            .and_then(|projector| Ok(projector.retarget(catalog)?))
+        {
+            Ok(failures) => failures,
+            // Agents left on the old address would keep calling it and
+            // presenting their tokens there: restore them instead.
+            Err(error) => {
+                tracing::warn!("Cannot re-project agents to the new Local API address: {error}");
+                self.current_projector()?.reconcile(None)?
+            }
+        };
+        self.manager.agents_changed();
         if failures.is_empty() {
             Ok(())
         } else {

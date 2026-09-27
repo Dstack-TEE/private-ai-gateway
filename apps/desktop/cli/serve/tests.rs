@@ -48,6 +48,33 @@ fn summary_over_fixtures_reads_all_ok() {
         summary,
         "signature ok, wire hash ok, upstream tee_attested asserted (hardware_proven)"
     );
+
+    // A failed deep audit is named first, and the upstream is not presented
+    // as verified.
+    let upstream_2 = transcript
+        .checks
+        .iter_mut()
+        .find(|check| check.def.id == "upstream-2")
+        .unwrap();
+    upstream_2.status = crate::transcript::Status::Fail;
+    upstream_2.detail = "record carries no spec 8.2 evidence digest+data".into();
+    assert!(!transcript.verified());
+    assert_eq!(
+        summarize(&transcript, Some(&session), "upstream"),
+        "upstream-2 FAILED: record carries no spec 8.2 evidence digest+data, \
+         signature ok, wire hash ok, upstream UNVERIFIED"
+    );
+    // A failed wire hash is named once, with its detail.
+    let receipt_4 = transcript
+        .checks
+        .iter_mut()
+        .find(|check| check.def.id == "receipt-4")
+        .unwrap();
+    receipt_4.status = crate::transcript::Status::Fail;
+    receipt_4.detail = "response body_hash mismatch".into();
+    let summary = summarize(&transcript, Some(&session), "upstream");
+    assert!(summary.contains("receipt-4 FAILED: response body_hash mismatch"));
+    assert!(!summary.contains("wire hash"), "{summary}");
 }
 
 /// A request that passed the entry checks but has not started sending is
@@ -416,6 +443,83 @@ async fn client_cancelled_stream_is_not_a_failed_proof() {
     let outcome = outcomes.recv().await.expect("cancellation outcome");
     assert_eq!(outcome.verified, None);
     assert!(outcome.detail.contains("canceled or protection stopped"));
+}
+
+#[tokio::test]
+async fn audits_past_the_concurrency_limit_wait_instead_of_being_skipped() {
+    // The receipt service answers only once more audits than may run at once
+    // are waiting for it.
+    let (open, opened) = tokio::sync::watch::channel(false);
+    let receipt_calls = Arc::new(AtomicUsize::new(0));
+    let upstream = Router::new()
+        .route(
+            "/v1/aci/receipts/{id}",
+            get({
+                let calls = receipt_calls.clone();
+                move || {
+                    let (calls, mut opened) = (calls.clone(), opened.clone());
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        let _ = opened.wait_for(|open| *open).await;
+                        json_response(StatusCode::OK, vector_receipt_envelope())
+                    }
+                }
+            }),
+        )
+        .route(
+            "/v1/aci/sessions/{id}",
+            get(|| async {
+                Response::builder()
+                    .header("content-type", "application/json")
+                    .body(Body::from(vector_session_bytes()))
+                    .unwrap()
+            }),
+        );
+    let base = spawn_server(upstream).await;
+    let (tx, mut outcomes) = mpsc::unbounded_channel();
+    let state = state_over(base, tx);
+    let limit = state.audits.available_permits();
+    let audits = limit + 4;
+    let exchange = || RecordedExchange {
+        receipt_id: "rcpt-0001".to_string(),
+        path: "/v1/chat/completions".to_string(),
+        status: 200,
+        streamed: true,
+        request: BodyDigest::of(REQUEST_BODY),
+        response: BodyDigest::of(RESPONSE_BODY),
+        delivery: ResponseDelivery::Complete,
+        pinned_sessions: Vec::new(),
+        at: 1,
+        verified: None,
+        context: None,
+        local_policy_applied: false,
+    };
+    for _ in 0..audits {
+        audit_exchange(state.clone(), state.snapshot(), exchange(), None);
+    }
+    wait_until(|| receipt_calls.load(Ordering::SeqCst) == limit).await;
+    assert!(outcomes.try_recv().is_err(), "no audit is skipped");
+
+    open.send(true).unwrap();
+    for _ in 0..audits {
+        let outcome = outcomes.recv().await.unwrap();
+        assert_eq!(outcome.verified, Some(true), "{}", outcome.detail);
+    }
+    assert_eq!(receipt_calls.load(Ordering::SeqCst), audits);
+
+    // One still queued when protection stops is reported as not audited,
+    // not left pending.
+    open.send(false).unwrap();
+    for _ in 0..=limit {
+        audit_exchange(state.clone(), state.snapshot(), exchange(), None);
+    }
+    wait_until(|| receipt_calls.load(Ordering::SeqCst) == audits + limit).await;
+    state.shutdown.cancel();
+    for _ in 0..=limit {
+        let outcome = outcomes.recv().await.unwrap();
+        assert_eq!(outcome.verified, None);
+        assert!(outcome.detail.contains("before its receipt was audited"));
+    }
 }
 
 #[tokio::test]

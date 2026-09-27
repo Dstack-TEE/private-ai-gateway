@@ -75,23 +75,28 @@ pub(super) fn audit_exchange(
             return;
         }
     }
-    let Ok(permit) = state.audits.clone().try_acquire_owned() else {
-        report(
-            None,
-            "Response delivered; receipt audit deferred because the audit limit was reached".into(),
-            None,
-            None,
-        );
-        return;
-    };
     tokio::spawn(async move {
-        let _permit = permit;
-        let result = tokio::select! {
-            _ = state.shutdown.cancelled() => return,
-            result = tokio::time::timeout(
+        // Every delivered response is audited: past the concurrency limit an
+        // audit waits for a slot, holding only the exchange's digests.
+        let audit = async {
+            let _permit = state.audits.acquire().await;
+            tokio::time::timeout(
                 std::time::Duration::from_secs(30),
                 verify_exchange(&state, &trusted, &exchange, bearer.as_deref()),
-            ) => result,
+            )
+            .await
+        };
+        let result = tokio::select! {
+            _ = state.shutdown.cancelled() => {
+                report(
+                    None,
+                    "Response delivered; protection stopped before its receipt was audited.".into(),
+                    None,
+                    None,
+                );
+                return;
+            }
+            result = audit => result,
         };
         match result {
             Ok(Ok((transcript, detail, receipt))) => report(

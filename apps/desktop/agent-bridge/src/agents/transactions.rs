@@ -151,39 +151,21 @@ impl Projector {
                 } else if record.suspended && record.attention.is_none() {
                     self.suspend(agent, &mut store)
                         .map_err(ConnectFailure::Unavailable)
-                        .and_then(|()| {
-                            self.require_helper()?;
-                            let text = self.read_config(agent)?;
-                            let options = ConnectOptions::default();
-                            let path = self
-                                .action_path(agent, store.get(agent.id()), true)
-                                .map_err(|error| {
-                                    ConnectFailure::Conflict(AgentError::ConfigurationConflict(
-                                        error,
-                                    ))
-                                })?;
-                            self.connect(agent, &mut store, text, &path, catalog, &options)
-                        })
+                        .and_then(|()| self.reproject(agent, &mut store, catalog))
                 } else if !record.suspended
                     && catalog.is_some_and(|catalog| {
                         record.catalog_revision.as_deref() != Some(catalog.revision.as_str())
+                            || record
+                                .endpoint
+                                .as_deref()
+                                .is_some_and(|endpoint| endpoint != self.endpoint)
                             || (record.attention.is_none()
                                 && (record.options.default_model.is_none()
                                     || (matches!(agent, Agent::Pi | Agent::OhMyPi)
                                         && record.selection.is_none())))
                     })
                 {
-                    (|| {
-                        self.require_helper()?;
-                        let text = self.read_config(agent)?;
-                        let options = ConnectOptions::default();
-                        let path = self
-                            .action_path(agent, store.get(agent.id()), true)
-                            .map_err(|error| {
-                                ConnectFailure::Conflict(AgentError::ConfigurationConflict(error))
-                            })?;
-                        self.connect(agent, &mut store, text, &path, catalog, &options)
-                    })()
+                    self.reproject(agent, &mut store, catalog)
                 } else {
                     Ok(())
                 };
@@ -201,6 +183,60 @@ impl Projector {
             }
             Ok(failures)
         })
+    }
+
+    /// Points every connected agent at this projector's endpoint without
+    /// restoring its own configuration first, as a catalog change does. The
+    /// agents keep their tokens, which the proxy honours only while
+    /// protection is verified. An agent that cannot be re-projected is
+    /// suspended, which restores its own configuration.
+    pub fn retarget(&self, catalog: &Catalog) -> Result<Vec<(String, String)>, String> {
+        lock::with_apply_lock(&self.data_dir, || {
+            let mut store = self.load_store()?;
+            let mut failures = Vec::new();
+            for agent in Agent::ALL {
+                let Some(record) = store.get(agent.id()) else {
+                    continue;
+                };
+                if record.disconnected() || record.suspended || record.cleanup_pending {
+                    continue;
+                }
+                if let Err(error) = self.reproject(agent, &mut store, Some(catalog)) {
+                    let suspended = self.suspend(agent, &mut store);
+                    failures.push((
+                        agent.id().to_string(),
+                        match suspended {
+                            Ok(()) => error.message(),
+                            Err(suspend) => format!("{}; {suspend}", error.message()),
+                        },
+                    ));
+                }
+            }
+            Ok(failures)
+        })
+    }
+
+    /// Writes an agent's projection again, against this projector's endpoint
+    /// and the given catalog.
+    fn reproject(
+        &self,
+        agent: Agent,
+        store: &mut Store,
+        catalog: Option<&Catalog>,
+    ) -> Result<(), ConnectFailure> {
+        self.require_helper()?;
+        let text = self.read_config(agent)?;
+        let path = self
+            .action_path(agent, store.get(agent.id()), true)
+            .map_err(|error| ConnectFailure::Conflict(AgentError::ConfigurationConflict(error)))?;
+        self.connect(
+            agent,
+            store,
+            text,
+            &path,
+            catalog,
+            &ConnectOptions::default(),
+        )
     }
 
     pub(super) fn suspend(&self, agent: Agent, store: &mut Store) -> Result<(), AgentError> {
@@ -348,6 +384,7 @@ impl Projector {
         next_record.config_path = path.to_path_buf();
         next_record.options = options.clone();
         next_record.catalog_revision = catalog.map(|catalog| catalog.revision.clone());
+        next_record.endpoint = Some(self.endpoint.clone());
         let mut guard = Rollback::default();
         let result = (|| -> Result<(), AgentError> {
             // A fresh token on every new connection; a leftover file from an

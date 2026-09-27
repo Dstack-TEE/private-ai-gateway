@@ -168,7 +168,19 @@ impl DesktopRuntime {
         self.stop_with_reconnect(false)
     }
 
+    /// Stops the verifier and withdraws every agent token. Only a stop that
+    /// ends the session (the user stopped protection or quit) restores the
+    /// agents' own configuration. A restart keeps them pointed at the Local
+    /// API, which refuses them until protection is verified again.
     pub(super) fn stop_with_reconnect(&self, reconnecting: bool) -> Result<AppState, Error> {
+        self.stop_verifier(reconnecting, !reconnecting)
+    }
+
+    pub(super) fn stop_verifier(
+        &self,
+        reconnecting: bool,
+        restore_agents: bool,
+    ) -> Result<AppState, Error> {
         let _guard = self
             .agent_policy
             .lock()
@@ -180,7 +192,7 @@ impl DesktopRuntime {
         }
         self.proxy
             .set_tokens(with_client_token(TokenSet::default(), &self.credentials)?);
-        if self.agent_configuration_enabled() {
+        if restore_agents && self.agent_configuration_enabled() {
             let failures = self.current_projector()?.reconcile(None)?;
             if !failures.is_empty() {
                 return Err(agent_failures(failures).into());
@@ -204,11 +216,13 @@ impl DesktopRuntime {
         self.recovery.cancel();
         let preserve_session =
             mode == ShutdownMode::UpdateRestart && self.manager.snapshot()?.session_active;
-        tracing::info!("Shutdown: stopping protection and restoring agent configuration");
+        tracing::info!("Shutdown: stopping protection");
         let restored = self.stop_with_reconnect(preserve_session);
-        // Outside the Mac App Store, a client's shutdown never leaves agents
-        // pointing at a stopped Local API: a failed restore keeps the backend
-        // running. A signal or the owning app's exit stops it regardless.
+        // Outside the Mac App Store, a client's shutdown that ends the session
+        // never leaves agents pointing at a stopped Local API: a failed
+        // restore keeps the backend running. An update restart keeps them
+        // pointed at it for the updated backend to resume. A signal or the
+        // owning app's exit stops it regardless.
         if refusable && !cfg!(all(target_os = "macos", feature = "mac-app-store")) {
             restored.as_ref().map_err(Clone::clone)?;
         }

@@ -774,3 +774,37 @@ fn agents_require_a_verified_catalog_model() {
             == desktop_core::protocol::ErrorCode::HelperUnavailable
     );
 }
+
+#[test]
+fn a_record_projected_to_another_endpoint_is_projected_again() {
+    // As after a crash between saving a new Local API address and
+    // re-projecting the agents: the relaunched backend has the new endpoint
+    // and a verified catalog of the same revision.
+    let sandbox = sandbox("endpoint-moved");
+    let agent = Agent::ClaudeCode;
+    let path = agent.config_path(&sandbox.home, false);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let catalog = catalog();
+    apply_connect(&sandbox, agent, &catalog, &claude_options());
+    let moved = Projector::at(
+        sandbox.home.clone(),
+        sandbox.projector.data_dir.clone(),
+        sandbox.projector.helper_exe.clone(),
+        "http://127.0.0.1:5190",
+        false,
+        sandbox.secrets.clone(),
+    );
+    let token = moved.tokens.read(agent.id()).unwrap();
+    assert!(token.is_some());
+
+    moved.reconcile(Some(&catalog)).unwrap();
+
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(
+        text.contains("127.0.0.1:5190") && !text.contains(ENDPOINT),
+        "{text}"
+    );
+    let store = moved.load_store().unwrap();
+    assert!(moved.status(agent, &store, Some(&catalog)).authorized);
+    assert_eq!(moved.tokens.read(agent.id()).unwrap(), token);
+}

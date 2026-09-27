@@ -103,6 +103,7 @@ fn test_runtime(
         endpoint: EndpointRuntime::new(executor.handle().clone()),
         agent_policy: Mutex::new(()),
         reported_agents: Mutex::new(Vec::new()),
+        verified_catalog: Mutex::new(None),
         lifecycle: tokio::sync::Mutex::new(()),
         exiting: AtomicBool::new(false),
         helper_path: directory.join("helper"),
@@ -731,7 +732,13 @@ fn recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them() {
     assert!(statuses.iter().all(|status| !status.authorized));
     assert!(runtime.proxy.tokens().agent_for(&token).is_none());
     assert_eq!(std::fs::read(&path).unwrap(), projected);
-    for status in [VerificationStatus::Error, VerificationStatus::Stopped] {
+    // A verification failure or block keeps the agents pointed at the Local
+    // API, which refuses them; the original provider never gets their requests.
+    for status in [
+        VerificationStatus::Error,
+        VerificationStatus::Stopped,
+        VerificationStatus::Blocked,
+    ] {
         runtime.manager.restore_snapshot(AppState {
             status,
             ..verified.clone()
@@ -745,28 +752,74 @@ fn recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them() {
         assert!(runtime.proxy.tokens().agent_for(&token).is_none());
         assert_eq!(std::fs::read(&path).unwrap(), projected);
     }
-    runtime.manager.restore_snapshot(verified);
-    runtime.proxy.publish(proxy::Session {
-        verified: true,
-        catalog: Some(catalog),
-        ..Default::default()
-    });
-    assert!(runtime
-        .list_agents()
-        .unwrap()
-        .iter()
-        .any(|status| status.id == agent.id() && status.authorized));
+    let reverify = || {
+        runtime.manager.restore_snapshot(verified.clone());
+        runtime.proxy.publish(proxy::Session {
+            verified: true,
+            catalog: Some(catalog.clone()),
+            ..Default::default()
+        });
+        assert!(runtime
+            .list_agents()
+            .unwrap()
+            .iter()
+            .any(|status| status.id == agent.id() && status.authorized));
+    };
+    reverify();
     assert_eq!(
         files.read(agent.id()).unwrap().as_deref(),
         Some(token.as_str())
     );
     assert_eq!(std::fs::read(&path).unwrap(), projected);
+    // So does a restart for a profile switch or a settings reload.
+    runtime.stop_with_reconnect(true).unwrap();
+    assert!(runtime.proxy.tokens().agent_for(&token).is_none());
+    assert_eq!(std::fs::read(&path).unwrap(), projected);
+    reverify();
+    // Only the user ending the session restores the original configuration.
     runtime.stop().unwrap();
     assert!(files.read(agent.id()).unwrap().is_none());
+    let restored =
+        || serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap();
     assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&std::fs::read(path).unwrap()).unwrap(),
+        restored(),
         serde_json::from_str::<serde_json::Value>(original).unwrap()
     );
+    // Verified again, the agent is projected again; an update restart keeps
+    // it for the updated backend to resume.
+    reverify();
+    let reprojected = std::fs::read(&path).unwrap();
+    assert_ne!(
+        restored(),
+        serde_json::from_str::<serde_json::Value>(original).unwrap()
+    );
+    // A Local API address change while the session goes on offline rewrites
+    // the projection to the new address rather than restoring it.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    runtime.manager.restore_snapshot(AppState {
+        status: VerificationStatus::Stopped,
+        reconnecting: true,
+        ..verified.clone()
+    });
+    runtime.recovery.available.store(false, Ordering::Release);
+    executor
+        .block_on(runtime.apply_local_api(ListenConfig {
+            port,
+            ..ListenConfig::default()
+        }))
+        .unwrap();
+    let moved = std::fs::read(&path).unwrap();
+    assert_ne!(moved, reprojected);
+    assert!(String::from_utf8_lossy(&moved).contains(&format!("127.0.0.1:{port}")));
+    assert!(runtime.proxy.tokens().agent_for(&token).is_none());
+    executor
+        .block_on(runtime.shutdown(desktop_core::protocol::ShutdownMode::UpdateRestart, true))
+        .unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), moved);
 }
 
 #[test]

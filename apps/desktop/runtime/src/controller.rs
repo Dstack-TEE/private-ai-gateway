@@ -74,6 +74,9 @@ pub struct DesktopRuntime {
     agent_policy: Mutex<()>,
     /// The agents the last scan reported; see `report_agents`.
     reported_agents: Mutex<Vec<AgentStatus>>,
+    /// The catalog of the last verified session, for re-projecting agents
+    /// when the Local API address changes while protection is not verified.
+    verified_catalog: Mutex<Option<Catalog>>,
     lifecycle: tokio::sync::Mutex<()>,
     exiting: AtomicBool,
     recovery: crate::recovery::Recovery,
@@ -322,6 +325,7 @@ impl DesktopRuntime {
             endpoint: EndpointRuntime::new(task_runtime.clone()),
             agent_policy: Mutex::new(()),
             reported_agents: Mutex::new(Vec::new()),
+            verified_catalog: Mutex::new(None),
             lifecycle: tokio::sync::Mutex::new(()),
             exiting: AtomicBool::new(false),
             recovery: crate::recovery::Recovery::default(),

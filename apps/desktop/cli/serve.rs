@@ -181,7 +181,8 @@ pub struct ProxyState {
     policy: VerifierPolicy,
     /// Apply the production dstack OS-image policy on startup and re-verification.
     require_production_os: bool,
-    audits: Arc<tokio::sync::Semaphore>,
+    /// Receipt audits that run at once; later ones wait for a slot.
+    audits: tokio::sync::Semaphore,
     /// Seconds since the Unix epoch, for keyset expiry (§3.4): the system
     /// clock, which tests replace with the published fixtures' serving time.
     now_secs: fn() -> u64,
@@ -237,7 +238,7 @@ impl ProxyState {
             enforce_verified,
             policy,
             require_production_os,
-            audits: Arc::new(tokio::sync::Semaphore::new(16)),
+            audits: tokio::sync::Semaphore::new(16),
             now_secs: desktop_core::now_secs,
             trusted: Mutex::new(TrustedIdentity::new(
                 report,

@@ -7,10 +7,17 @@
 //! home (`codex-rs/app-server-daemon/src/managed_install.rs`), so nothing
 //! depends on PATH. The Mac App Store build cannot run it and never offers to.
 
-use std::{fmt, process::Stdio, time::Duration};
+use std::{
+    fmt,
+    process::{Output, Stdio},
+    time::Duration,
+};
 
 use desktop_core::protocol::{self, ErrorCode};
-use tokio::process::Command;
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    process::Command,
+};
 
 use super::*;
 
@@ -25,6 +32,9 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 /// stop and may still exit, but the user sees the "could not be stopped"
 /// alert with the terminal command.
 const STOP_TIMEOUT: Duration = Duration::from_secs(90);
+/// The output kept of each stream. `daemon version` prints one short JSON
+/// line, and a failed stop's diagnostic only goes to the log.
+const OUTPUT_LIMIT: u64 = 16 * 1024;
 /// What a caller learns of a failed stop; the diagnostic stays in the log.
 const STOP_FAILED: &str = "Codex's background service could not be stopped. To apply the new \
     settings, run \"codex app-server daemon restart\" in a terminal.";
@@ -48,10 +58,11 @@ impl CodexService {
     /// ever starting one and fails when none answers; any failure counts as
     /// not running.
     pub async fn running(&self) -> bool {
-        let Some(mut command) = self.daemon_command("version") else {
+        let Some(command) = self.daemon_command("version") else {
             return false;
         };
-        let Ok(Ok(output)) = tokio::time::timeout(VERSION_TIMEOUT, command.output()).await else {
+        let Ok(Ok(output)) = tokio::time::timeout(VERSION_TIMEOUT, bounded_output(command)).await
+        else {
             return false;
         };
         output.status.success() && reports_managed_daemon(&output.stdout)
@@ -59,10 +70,10 @@ impl CodexService {
 
     /// Stops the managed daemon, ending running Codex sessions.
     pub async fn stop(&self) -> Result<(), StopFailed> {
-        let mut command = self
+        let command = self
             .daemon_command("stop")
             .ok_or_else(|| StopFailed("Codex's CLI is unavailable".into()))?;
-        let output = tokio::time::timeout(STOP_TIMEOUT, command.output())
+        let output = tokio::time::timeout(STOP_TIMEOUT, bounded_output(command))
             .await
             .map_err(|_| StopFailed("codex app-server daemon stop timed out".into()))?
             .map_err(|error| {
@@ -127,6 +138,31 @@ fn managed_codex(codex_home: &Path) -> Option<PathBuf> {
         .find(|path| executable_metadata(path).is_some())
 }
 
+/// Runs the command, keeping at most [`OUTPUT_LIMIT`] bytes of each stream.
+async fn bounded_output(mut command: Command) -> std::io::Result<Output> {
+    let mut child = command.spawn()?;
+    let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+    let (status, stdout, stderr) =
+        tokio::try_join!(child.wait(), read_bounded(stdout), read_bounded(stderr))?;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Keeps at most [`OUTPUT_LIMIT`] bytes of the stream and reads and drops the
+/// rest, so Codex never blocks on a full pipe.
+async fn read_bounded(stream: Option<impl AsyncRead + Unpin>) -> std::io::Result<Vec<u8>> {
+    let mut kept = Vec::new();
+    if let Some(stream) = stream {
+        let mut limited = stream.take(OUTPUT_LIMIT);
+        limited.read_to_end(&mut kept).await?;
+        tokio::io::copy(&mut limited.into_inner(), &mut tokio::io::sink()).await?;
+    }
+    Ok(kept)
+}
+
 /// `daemon version` prints `{"status":"running","backend":"pid",…}` for a
 /// managed daemon; an app server on the socket that the daemon does not
 /// manage has no backend, and `daemon stop` refuses it.
@@ -174,6 +210,20 @@ mod tests {
             codex_home: empty.path().join(".codex"),
         };
         assert!(!missing.running().await);
+    }
+
+    #[tokio::test]
+    async fn output_beyond_the_limit_is_drained_and_dropped() {
+        use tokio::io::AsyncWriteExt;
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        let written = tokio::spawn(async move {
+            writer
+                .write_all(&vec![b'x'; 4 * OUTPUT_LIMIT as usize])
+                .await
+        });
+        let kept = read_bounded(Some(reader)).await.unwrap();
+        assert_eq!(kept.len() as u64, OUTPUT_LIMIT);
+        written.await.unwrap().unwrap();
     }
 
     #[tokio::test]

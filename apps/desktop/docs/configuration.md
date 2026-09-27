@@ -234,6 +234,42 @@ owner-only from the moment they are created. Neither file is ever shown by the a
 Anyone who can read your files as you can read it, which is also true of an
 unlocked OS keychain for a process running as you.
 
+## Upgrade notes for 0.2.0
+
+- **Credentials leave the OS keychain.** API keys move from the macOS
+  Keychain, Windows Credential Manager or Secret Service to
+  `~/.config/private-ai-proxy/credentials.toml` (the Mac App Store build keeps
+  it in its container; see [Locations](#locations)), a plaintext file readable
+  only by you (`0600`). The keychain entries are deleted once the import has
+  been verified. Do not sync that file anywhere public, such as a public
+  dotfiles repository. The import is tried once: if the keychain is
+  unavailable or its prompt is denied, sign in again or re-enter the key of
+  any profile that shows none. Only if the app cannot write its own settings
+  files during the import does it try again, and may prompt again, on the
+  next start.
+- **Receipt audits report; they do not block.** Responses stream to your
+  agent as they arrive. Each signed receipt is fetched and audited after the
+  response was delivered, and a failed audit is reported in Usage; it cannot
+  retract bytes the agent already received.
+- **The production OS check relies on the service's own report.** It
+  compares the OS image hash that the service records in its RTMR3 event log
+  with a reviewed allowlist. It does not rebuild the MRTD and RTMR0-2 boot
+  measurements from the OS image, so it does not prove on its own which
+  image booted. For that assurance, run a dstack verifier over the same quote
+  (see the [CLI README](../cli/README.md)).
+- **Verification failures fail closed.** When verification fails or is
+  blocked, connected agents stay pointed at the Local API, which refuses
+  their requests until protection is verified again; they never fall back to
+  their original provider. A Local API address change rewrites them to the
+  new address, unless the backend has not verified a catalog since it
+  started; then they are restored until verification projects them again.
+  Stopping protection, Stop All and Quit, `pap service stop`, Reset settings,
+  or disconnecting an agent restores its own configuration. Quitting the app
+  from the tray or menu leaves the backend running and the agents pointed at
+  it. A backend that is not running cannot restore agents, so before
+  uninstalling, stop it while it runs (`pap service start`, then
+  `pap service stop`).
+
 ## Upgrading from 0.1
 
 0.1 stored settings in `confidential-ai.json`, `local-api.json` and
@@ -256,12 +292,16 @@ steps (`runtime/src/settings/legacy.rs`):
    key you replaced since) is left alone.
    `migrated-0.1/import-complete` records the step once every entry is
    deleted. Each store operation may take at most 60 seconds, which leaves
-   time to answer a macOS Keychain prompt. Until the step is recorded, even
-   across restarts after a timeout or a denied prompt, disconnecting an agent
-   whose original key has not been imported yet fails with the same "agent
-   credential could not be restored" error 0.1 gave while the credential
-   store was unavailable, and succeeds once the key is imported, instead of
-   dropping that key.
+   time to answer a macOS Keychain prompt. If the store itself fails,
+   `migrated-0.1/import-abandoned` records that with the reason and the store
+   is never asked again, so a denied Keychain prompt does not come back on
+   every start. A problem with this app's own files (for example a damaged
+   `local-state.json`) leaves the step pending for the next start instead.
+   While the step runs, disconnecting an agent whose original key has not
+   been imported yet fails with the same "agent credential could not be
+   restored" error 0.1 gave while the credential store was unavailable,
+   instead of dropping that key. Once the step is recorded, a disconnect
+   restores what was imported and leaves a key that was not unset.
 
 Progress is recorded in the app data directory, never by the existence of
 `config.toml`, because the settings directory may have been synced from
@@ -278,20 +318,22 @@ another device that upgraded first. Values already in the files win:
   another account's profile.
 - `local-state.json`: always this device's; existing entries stay.
 
-A step that fails writes nothing that records it: the old files and the
+A step 1 that fails writes nothing that records it: the old files and the
 credential store entries stay where they are, the error stays in Settings,
 `pap status` and `pap doctor`, and the step runs again on the next start. While
 step 1 has not succeeded, settings cannot be changed, so nothing can be saved
-that the import would then have to merge with. If the credential store is
-locked, unavailable (for example Linux without a Secret Service) or a macOS
-prompt is denied or left unanswered, the settings are still in effect,
-Settings and `pap doctor` name the profiles whose API key to re-enter, and the
-next start tries the store again. Keys you entered in the meantime are kept.
+that the import would then have to merge with. If step 2 fails because the
+credential store is locked, unavailable (for example Linux without a Secret
+Service) or a macOS prompt is denied or left unanswered, the settings are
+still in effect, Settings and
+`pap doctor` name the profiles whose API key to re-enter once, and those
+profiles show no saved key until you sign in again or enter one. The entries
+stay in the credential store; remove them there if you like.
 
 The backup contains no API keys; `preferences.json` contains the web UI
 password hash. Delete `migrated-0.1/` once you are satisfied (keep
-`import-complete`, or the next start looks for credentials to import once
-more, which is harmless).
+`import-complete` or `import-abandoned`, or the next start looks for
+credentials to import once more).
 
 ## Removal in 0.3
 

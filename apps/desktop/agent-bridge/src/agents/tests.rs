@@ -103,13 +103,27 @@ pub(super) fn write(path: &Path, text: &str) {
     fs::write(path, text).unwrap();
 }
 
+/// Writes a file that a test may then run. On Unix a child `sh` writes it,
+/// so this process never holds a descriptor open for writing to it. If it
+/// did, a process forked by another test thread at that moment would inherit
+/// the descriptor until it execs, and running the file meanwhile fails with
+/// ETXTBSY, "Text file busy" (rust-lang/rust#114554). A test-only lock cannot
+/// close that window: production code forks too, from other tests' threads.
 pub(super) fn write_executable(path: &Path, text: &str) {
-    write(path, text);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let written = std::process::Command::new("/bin/sh")
+            .args(["-c", r#"printf %s "$1" > "$2""#, "sh", text])
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(written.success());
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
     }
+    #[cfg(not(unix))]
+    write(path, text);
 }
 
 fn claude_options() -> ConnectOptions {
