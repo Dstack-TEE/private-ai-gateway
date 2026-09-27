@@ -177,7 +177,7 @@ fn codex_and_opencode_use_official_custom_provider_configs() {
     assert_eq!(custom["web_search_tool_type"], "text");
     assert_eq!(custom["shell_type"], "unified_exec");
     assert_eq!(custom["use_responses_lite"], false);
-    assert_eq!(custom["prefer_websockets"], false);
+    assert_eq!(custom["supports_reasoning_effort_updates"], false);
     assert_eq!(custom["supports_experimental_context"], false);
 
     let config_before = fs::read(&path).unwrap();
@@ -381,7 +381,6 @@ fn codex_overlay_preserves_native_templates_and_unique_slugs() {
     assert_eq!(native["input_modalities"], json!(["text", "image"]));
     assert_eq!(alias["context_window"], 65536);
     assert_eq!(alias["use_responses_lite"], false);
-    assert_eq!(alias["prefer_websockets"], false);
 }
 
 #[test]

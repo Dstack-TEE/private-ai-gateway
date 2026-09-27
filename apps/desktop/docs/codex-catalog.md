@@ -1,8 +1,15 @@
 # Codex catalog
 
-Private AI Proxy supports the **Codex 0.155.1 baseline only**. Other client
+Private AI Proxy supports the **Codex 0.157.1 baseline only**. Other client
 versions may reject its schema; PAP does not detect versions or provide legacy
-compatibility. Restart Codex after connecting or changing the model catalog.
+compatibility.
+
+Codex reads the catalog when its app server starts. The CLI reuses a background
+app server that keeps its startup provider and catalog, and restarts it only when
+the Codex version changes; reopening the TUI is not enough. After connecting or
+changing the model catalog, run `codex app-server daemon restart` (this stops
+running Codex sessions), then quit and reopen the Codex app, which runs its own
+app server. PAP never restarts Codex itself.
 
 Direct and Mac App Store builds compile the same checked-in
 `agent-bridge/resources/codex/models.json` into the agent bridge. No build or runtime step
@@ -32,7 +39,7 @@ for file permissions, rotation and revocation.
 `agent-bridge/resources/codex/manifest.json` is the single machine-readable pin:
 release version, upstream SHA-256, and model count. The input is OpenAI's
 `rust-v<version>/codex-rs/models-manager/models.json`, licensed under
-[Apache-2.0](https://github.com/openai/codex/blob/rust-v0.155.1/LICENSE).
+[Apache-2.0](https://github.com/openai/codex/blob/rust-v0.157.1/LICENSE).
 
 From `apps/desktop`, reproduce the asset with:
 
@@ -48,8 +55,8 @@ builds. Review the artifact and overlay together. The script never resolves
 `latest`, executes Codex, or silently accepts a changed checksum.
 
 The upstream file has no deprecated `base_instructions` fields. Its canonical
-`model_messages` are retained verbatim: the 0.155.1 parser requires an instruction
+`model_messages` are retained verbatim: the 0.157.1 parser requires an instruction
 template. PAP does not restore the removed legacy instruction copies.
 
 References: [configuration contract](https://developers.openai.com/codex/config-reference),
-[pinned model schema](https://github.com/openai/codex/blob/rust-v0.155.1/codex-rs/protocol/src/openai_models.rs).
+[pinned model schema](https://github.com/openai/codex/blob/rust-v0.157.1/codex-rs/protocol/src/openai_models.rs).

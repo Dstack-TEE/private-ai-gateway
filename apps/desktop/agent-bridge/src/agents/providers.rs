@@ -423,10 +423,11 @@ pub(super) fn codex_catalog(catalog: &Catalog) -> Result<serde_json::Value, Stri
                 "supports_search_tool".to_string(),
                 serde_json::Value::Bool(capabilities.iter().any(|value| value == "web_search")),
             );
-            // PAP provides streaming HTTP Responses, not Codex-specific transports.
+            // PAP provides streaming HTTP Responses, not Codex-specific transports
+            // or reasoning-effort configuration_update items.
             value.insert("use_responses_lite".to_string(), serde_json::Value::Bool(false));
-            value.insert("prefer_websockets".to_string(), serde_json::Value::Bool(false));
             value.insert("supports_experimental_context".to_string(), serde_json::Value::Bool(false));
+            value.insert("supports_reasoning_effort_updates".to_string(), serde_json::Value::Bool(false));
             if matched_template.is_none() {
                 value.insert("experimental_supported_tools".to_string(), serde_json::json!([]));
                 value.insert("multi_agent_reasoning_effort".to_string(), serde_json::Value::Null);
