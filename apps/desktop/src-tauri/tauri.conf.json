@@ -34,6 +34,7 @@
         "visible": false,
         "allowLinkPreview": false,
         "scrollBarStyle": "fluentOverlay",
+        "backgroundThrottling": "throttle",
         "generalAutofillEnabled": false
       }
     ],

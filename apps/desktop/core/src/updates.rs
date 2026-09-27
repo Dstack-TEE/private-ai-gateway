@@ -31,6 +31,17 @@ pub fn belongs_to_feed(version: &semver::Version, feed: UpdateChannel) -> bool {
         || feed == UpdateChannel::Beta && version.pre.as_str().starts_with("beta.")
 }
 
+/// Whether `release`, announced by `feed`, updates `current`: a newer release
+/// of the feed, never a reinstall or a downgrade (after switching from beta to
+/// stable, the stable feed may still announce an older release).
+pub fn offers_update(
+    current: &semver::Version,
+    release: &semver::Version,
+    feed: UpdateChannel,
+) -> bool {
+    release > current && belongs_to_feed(release, feed)
+}
+
 /// The channel of the running build, used until one is saved.
 pub fn build_channel(current_version: &str) -> UpdateChannel {
     if semver::Version::parse(current_version).is_ok_and(|version| !version.pre.is_empty()) {
@@ -193,7 +204,7 @@ pub async fn check(
         .build()
         .map_err(|_| "Could not check for updates")?;
     let published = published_version(&client, feed_url(configured, channel)?, channel).await?;
-    let latest = (published > current).then_some(published);
+    let latest = offers_update(&current, &published, channel).then_some(published);
     let (commands, download_url) = match &latest {
         Some(version) => upgrade_steps(
             installation,
@@ -338,6 +349,37 @@ mod tests {
         assert!(belongs("0.2.0-beta.10", UpdateChannel::Beta));
         assert!(!belongs("0.2.0-beta.1", UpdateChannel::Stable));
         assert!(!belongs("0.2.0-rc.1", UpdateChannel::Beta));
+    }
+
+    #[test]
+    fn only_newer_releases_of_the_feed_are_updates() {
+        let offers = |current: &str, release: &str, feed| {
+            offers_update(
+                &semver::Version::parse(current).unwrap(),
+                &semver::Version::parse(release).unwrap(),
+                feed,
+            )
+        };
+        use UpdateChannel::{Beta, Stable};
+        assert!(offers("0.2.0-beta.8", "0.2.0-beta.9", Beta));
+        assert!(
+            offers("0.2.0-beta.8", "0.2.0", Beta),
+            "beta follows a newer stable release"
+        );
+        assert!(offers("0.2.0-beta.8", "0.2.0", Stable));
+        assert!(
+            !offers("0.2.0-beta.8", "0.2.0-beta.8", Beta),
+            "no reinstall"
+        );
+        assert!(
+            !offers("0.2.0-beta.8", "0.2.0-beta.7", Beta),
+            "no downgrade"
+        );
+        assert!(
+            !offers("0.2.0-beta.8", "0.1.9", Stable),
+            "switching to stable waits for a newer stable release"
+        );
+        assert!(!offers("0.2.0", "0.2.1-beta.1", Stable));
     }
 
     #[test]
