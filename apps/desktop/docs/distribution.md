@@ -225,7 +225,8 @@ release, the feeds and npm are unchanged.
 - Otherwise, or if App Store Connect already lists the build, keep the notes,
   delete the draft release and its tag, land the fix on `main` and release
   `0.2.1` with the steps above. release-please has already recorded `0.2.0` on
-  `main` and does not tag it again.
+  `main` and does not tag it again. Its empty commit needs the footer `Release-As: 0.2.1`;
+  without it, prerelease versioning proposes `0.2.1-beta.1`.
 
   ```sh
   gh release view desktop-v0.2.0 --json body --jq .body > notes.md
@@ -247,15 +248,26 @@ every 0.1.6 installation, read. In the beta feed it rewrites only `latest.json`.
    ```
 
    Without the saved copy, the `latest.json` assets of `desktop-v0.1.6` and
-   `desktop-v0.2.0-beta.10` are the previous `latest.json` files, but the
-   per-platform files existed only in the stable feed.
+   of the latest beta tag are the previous `latest.json` files, but the
+   per-platform files existed only in the stable feed. To find the latest
+   beta tag:
+
+   ```sh
+   gh release list --exclude-drafts --json tagName,isPrerelease \
+     --jq '[.[] | select(.isPrerelease and (.tagName | startswith("desktop-v")))][0].tagName'
+   ```
+
 2. Make 0.1.6 the Latest release again: `gh release edit desktop-v0.1.6 --latest`.
 3. From a maintainer's npm login, since OIDC cannot move dist-tags:
-   `npm dist-tag add private-ai-proxy@0.1.6 latest`.
+   `npm dist-tag add private-ai-proxy@0.1.6 latest`. If `beta` was moved to
+   `0.2.0`, move it back with
+   `npm dist-tag add private-ai-proxy@<latest beta version> beta`.
 4. Do not merge the tap's `private-ai-proxy 0.2.0` pull request
-   (`gh pr close <number> --repo Dstack-TEE/homebrew-private-ai`); the tap
-   reads the stable feed, so it proposes nothing newer. Do not submit the App
-   Store build, or withdraw it
+   (`gh pr close <number> --repo Dstack-TEE/homebrew-private-ai`); if it is
+   already merged, revert it
+   (`gh pr revert <number> --repo Dstack-TEE/homebrew-private-ai`) and merge
+   the revert. The tap reads the stable feed, so it then proposes nothing
+   newer. Do not submit the App Store build, or withdraw it
    ([Submit and rollback](mac-app-store.md#submit-and-rollback)).
 5. Ship the fix as `0.2.1` with the promotion steps above.
 
