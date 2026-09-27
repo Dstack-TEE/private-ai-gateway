@@ -1,7 +1,7 @@
 import React, { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Outlet, useMatches, useNavigate } from "@tanstack/react-router";
-import { useAgents } from "./hooks/use-agents";
+import { SERVICE_AGENT, useAgents } from "./hooks/use-agents";
 import { useAppState } from "./lib/use-app-state";
 import { useUpdates } from "./updates";
 import { INITIAL_STATE, type AboutLink, type AppState, type NavigationTarget } from "../shared/contracts";
@@ -196,8 +196,8 @@ function Window(): React.JSX.Element {
   // A page or dialog requested by the menu bar, the tray or the Settings
   // shortcut shows once an open dialog has closed, so its draft is not lost.
   // A confirmation is answered first, as an alert is: the request ends there.
-  // Stopping everything asks at once, over any dialog.
-  type PageRequest = Exclude<NavigationTarget, "confirm-stop-all">;
+  // Stopping everything, or Codex's service, asks at once, over any dialog.
+  type PageRequest = Exclude<NavigationTarget, "confirm-stop-all" | "confirm-codex-service-stop">;
   const deferredRequest = useRef<PageRequest | undefined>(undefined);
   const show = (target: PageRequest) => {
     if (target === "profiles") shell.openProfiles();
@@ -206,6 +206,7 @@ function Window(): React.JSX.Element {
   };
   const showRequested = useEffectEvent((target: NavigationTarget) => {
     if (target === "confirm-stop-all") void requestStopAllAndQuit();
+    else if (target === "confirm-codex-service-stop") void agents.offerServiceStop(SERVICE_AGENT);
     else if (dialog.control.open) deferredRequest.current = target;
     else if (!confirming) show(target);
   });

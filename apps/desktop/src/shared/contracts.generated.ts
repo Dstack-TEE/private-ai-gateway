@@ -221,7 +221,7 @@ alertsEnabled?: boolean, };
 /**
  * What a tray or menu item asks the main window to show or open.
  */
-export type NavigationTarget = "settings" | "agents" | "profiles" | "profile-setup" | "confirm-stop-all";
+export type NavigationTarget = "settings" | "agents" | "profiles" | "profile-setup" | "confirm-stop-all" | "confirm-codex-service-stop";
 export type ProfileBackup = { version: number, profiles: Array<ProfileConfiguration>, };
 export type ProfileConfiguration = { name: string, provider: ServiceProvider, remoteUrl: string, };
 export type ImportResult = { imported: number, skipped: number, };

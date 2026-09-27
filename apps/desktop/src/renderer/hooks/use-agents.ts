@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { keepPreviousData, useIsMutating, useMutation, useMutationState, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { AgentStatus, AppState, DesktopApi } from "../../shared/contracts";
 import { errorMessage } from "../lib/error-message";
@@ -7,16 +7,47 @@ import { agentAccessMutation, agentIntegrationsLocked, completeAgentStatuses, re
 
 const connectionKey = (agentId: string) => ["agent-connection", agentId];
 /** The agent whose background service keeps the settings it started with. */
-const SERVICE_AGENT = "codex";
+export const SERVICE_AGENT = "codex";
 
 /**
  * The agents the backend detects. They change with the backend's
  * `agentsRevision` and verified catalog; returning to the window rescans for
  * agents installed meanwhile.
+ *
+ * Codex's background service keeps the settings it started with, so after a
+ * Codex change, from a row or the tray, `offerServiceStop` offers to stop it.
+ * That ends running Codex sessions, so it asks first; the next Codex run
+ * starts it again with the new settings.
  */
 export function useAgents(api: DesktopApi, state: AppState, requiresAuthorization: boolean) {
   const client = useQueryClient();
+  const confirm = useConfirm();
   const reportFailure = useReportFailure();
+  const { mutate: stopService } = useMutation({
+    mutationFn: () => api.stopAgentService(SERVICE_AGENT),
+    onError: (failure) => reportFailure("Could not stop Codex's background service", failure),
+  });
+  // One question at a time: a change made while it asks doesn't ask again.
+  const offeringServiceStop = useRef(false);
+  const offerServiceStop = useCallback(async (agentId: string) => {
+    if (agentId !== SERVICE_AGENT || offeringServiceStop.current) return;
+    offeringServiceStop.current = true;
+    try {
+      // A service that can't be checked counts as not running, as in the backend.
+      if (!await api.agentServiceRunning(agentId).catch(() => false)) return;
+      if (await confirm({
+        title: "Restart Codex to apply?",
+        message: "Codex's background service still has the previous settings. Stopping it ends running Codex sessions; it starts again the next time you open Codex.",
+        confirmLabel: "Stop Codex Service",
+        cancelLabel: "Later",
+        destructive: true,
+      })) stopService();
+    } catch (error) {
+      reportFailure("Could not stop Codex's background service", error);
+    } finally {
+      offeringServiceStop.current = false;
+    }
+  }, [api, confirm, reportFailure, stopService]);
   const access = useMutation({
     ...agentAccessMutation(api, requiresAuthorization, client),
     onError: (failure) => reportFailure("Could not grant agent access", failure),
@@ -43,46 +74,18 @@ export function useAgents(api: DesktopApi, state: AppState, requiresAuthorizatio
     requestAccess: () => {
       if (requiresAuthorization && !authorizing) requestAccess();
     },
-  }), [data, error, accessStatus, authorizing, changing, requiresAuthorization, requestAccess]);
+    offerServiceStop,
+  }), [data, error, accessStatus, authorizing, changing, requiresAuthorization, requestAccess, offerServiceStop]);
 }
 
 /**
  * Connects or disconnects one agent. Changes of the same agent run one after
- * another (the mutation scope), each with the backend's own preview.
- *
- * Codex's background service keeps the settings it started with, so after a
- * change it offers to stop it; that ends running Codex sessions, so it asks
- * first, and the next Codex run starts it again with the new settings.
+ * another (the mutation scope), each with the backend's own preview; after
+ * each, `offerServiceStop` (from `useAgents`) may offer to stop its service.
  */
-export function useAgentConnection(api: DesktopApi, agent: AgentStatus) {
+export function useAgentConnection(api: DesktopApi, agent: AgentStatus, offerServiceStop: (agentId: string) => Promise<void>) {
   const client = useQueryClient();
-  const confirm = useConfirm();
   const reportFailure = useReportFailure();
-  const { mutate: stopService } = useMutation({
-    mutationFn: () => api.stopAgentService(agent.id),
-    onError: (failure) => reportFailure("Could not stop Codex's background service", failure),
-  });
-  // One question at a time: a change made while it asks doesn't ask again.
-  const offeringServiceStop = useRef(false);
-  const offerServiceStop = async () => {
-    if (offeringServiceStop.current) return;
-    offeringServiceStop.current = true;
-    try {
-      // A service that can't be checked counts as not running, as in the backend.
-      if (!await api.agentServiceRunning(agent.id).catch(() => false)) return;
-      if (await confirm({
-        title: "Restart Codex to apply?",
-        message: "Codex's background service still has the previous settings. Stopping it ends running Codex sessions; it starts again the next time you open Codex.",
-        confirmLabel: "Stop Codex Service",
-        cancelLabel: "Later",
-        destructive: true,
-      })) stopService();
-    } catch (error) {
-      reportFailure("Could not stop Codex's background service", error);
-    } finally {
-      offeringServiceStop.current = false;
-    }
-  };
   const mutation = useMutation({
     mutationKey: connectionKey(agent.id),
     scope: { id: `agent-connection:${agent.id}` },
@@ -92,7 +95,7 @@ export function useAgentConnection(api: DesktopApi, agent: AgentStatus) {
         ...current,
         agents: current.agents.map((entry) => entry.id === status.id ? status : entry),
       }));
-      if (agent.id === SERVICE_AGENT) void offerServiceStop();
+      void offerServiceStop(agent.id);
     },
     onError: (failure, connect) => reportFailure(`${agent.name} could not ${connect ? "connect" : "disconnect"}`, failure),
     onSettled: () => client.invalidateQueries({ queryKey: ["agents"] }),
