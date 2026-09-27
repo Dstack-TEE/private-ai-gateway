@@ -168,6 +168,12 @@ pub(crate) async fn dispatch(
         Command::SetAgentConnection { agent_id, connect } => {
             respond::<rpc::SetAgentConnection, _>(runtime.set_agent_connection(agent_id, connect))
         }
+        Command::AgentServiceRunning { agent_id } => {
+            respond::<rpc::AgentServiceRunning, _>(runtime.agent_service_running(&agent_id).await)
+        }
+        Command::StopAgentService { agent_id } => {
+            respond::<rpc::StopAgentService, _>(runtime.stop_agent_service(&agent_id).await)
+        }
         Command::DisconnectAllAgents {} => {
             respond::<rpc::DisconnectAllAgents, _>(runtime.disconnect_all_agents())
         }

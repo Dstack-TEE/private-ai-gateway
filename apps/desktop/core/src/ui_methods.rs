@@ -40,6 +40,8 @@ macro_rules! renderer_methods {
                 get_usage_receipt => GetUsageReceipt,
                 list_agents => ListAgents,
                 set_agent_connection => SetAgentConnection,
+                agent_service_running => AgentServiceRunning,
+                stop_agent_service => StopAgentService,
             }
             host {
                 start_backend_service => StartBackendService,

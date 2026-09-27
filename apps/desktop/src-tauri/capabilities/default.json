@@ -62,6 +62,8 @@
     "allow-list-listen-addresses",
     "allow-list-agents",
     "allow-set-agent-connection",
+    "allow-agent-service-running",
+    "allow-stop-agent-service",
     "allow-get-agent-access",
     "allow-request-agent-access",
     "allow-get-cli-registration",

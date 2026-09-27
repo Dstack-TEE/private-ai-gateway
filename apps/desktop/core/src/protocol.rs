@@ -208,6 +208,13 @@ commands! {
     /// Connects or disconnects an agent with the configuration a preview
     /// would show, in one step.
     SetAgentConnection { agent_id: String, connect: bool } -> AgentStatus;
+    /// Whether the agent's background service is running, still with the
+    /// settings from before a connection change: Codex's managed app-server
+    /// daemon. `false` when the build cannot tell or stop it.
+    AgentServiceRunning { agent_id: String } -> bool;
+    /// Stops that service, ending the agent's running sessions; the agent
+    /// starts it again with the new settings the next time it opens.
+    StopAgentService { agent_id: String } -> ();
     DisconnectAllAgents -> Vec<AgentStatus>;
     ResetSettings -> AppStateWire;
     /// The settings in effect (`config.toml`); never includes a secret.

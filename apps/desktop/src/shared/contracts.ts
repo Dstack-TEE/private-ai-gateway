@@ -119,4 +119,8 @@ export interface DesktopApi {
   getAgentAccess(): Promise<AgentAccessStatus>;
   requestAgentAccess(): Promise<AgentAccessStatus>;
   setAgentConnection(agentId: string, connect: boolean): Promise<AgentStatus>;
+  /** Whether Codex's background service still runs with the settings from before a change; `false` when the build cannot stop it. */
+  agentServiceRunning(agentId: string): Promise<boolean>;
+  /** Stops Codex's background service, ending its running sessions. */
+  stopAgentService(agentId: string): Promise<void>;
 }

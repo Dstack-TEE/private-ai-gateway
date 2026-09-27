@@ -8,7 +8,7 @@ rust-version = "1.98"
 
 [features]
 default = []
-mac-app-store = ["desktop-core/mac-app-store"]
+mac-app-store = ["agent-bridge/mac-app-store", "desktop-core/mac-app-store"]
 web-ui = ["dep:axum-extra", "dep:governor", "dep:mime", "dep:rust-embed", "dep:time"]
 
 [lib]

@@ -721,12 +721,14 @@ fn agent_change(
             cli,
             "Apply this previously previewed agent configuration revision?",
         )?;
-        return value(client.call(rpc::ApplyAgent {
+        let status = client.call(rpc::ApplyAgent {
             agent_id: id.into(),
             connect,
             revision: revision.into(),
             options,
-        })?);
+        })?;
+        agent_service_hint(client, cli, id);
+        return value(status);
     }
     let preview = client.call(rpc::PreviewAgent {
         agent_id: id.into(),
@@ -740,12 +742,32 @@ fn agent_change(
         eprintln!("{}", output::details(&value(&preview)?));
     }
     confirm(cli, "Apply these agent configuration changes?")?;
-    value(client.call(rpc::ApplyAgent {
+    let status = client.call(rpc::ApplyAgent {
         agent_id: id.into(),
         connect,
         revision: preview.revision,
         options,
-    })?)
+    })?;
+    agent_service_hint(client, cli, id);
+    value(status)
+}
+
+/// Codex's background service keeps the settings it started with. The
+/// desktop app offers to stop it; in a terminal, a restart keeps the
+/// terminal's environment.
+fn agent_service_hint(client: &Client, cli: &Cli, id: &str) {
+    if cli.json || id != desktop_core::agents::Agent::Codex.id() {
+        return;
+    }
+    let running = client.call(rpc::AgentServiceRunning {
+        agent_id: id.into(),
+    });
+    if running.unwrap_or(false) {
+        eprintln!(
+            "Codex's background service still has the previous settings. Run \"codex app-server \
+             daemon restart\" to apply them; this stops running Codex sessions."
+        );
+    }
 }
 
 fn doctor(client: &Client) -> Value {
