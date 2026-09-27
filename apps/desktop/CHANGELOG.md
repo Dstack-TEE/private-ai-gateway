@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.0-beta.9](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.2.0-beta.8...desktop-v0.2.0-beta.9) (2026-09-27)
+
+
+### Features
+
+* **desktop:** keep settings in ~/.config/private-ai-proxy on every platform ([#334](https://github.com/Dstack-TEE/private-ai-gateway/issues/334)) ([f0074a7](https://github.com/Dstack-TEE/private-ai-gateway/commit/f0074a7ebf7674b21f2304d3c41ac4da1f149479))
+
+
+### Bug Fixes
+
+* **desktop:** center the update button; align the update flow with the updater docs ([#335](https://github.com/Dstack-TEE/private-ai-gateway/issues/335)) ([86d5b46](https://github.com/Dstack-TEE/private-ai-gateway/commit/86d5b465f0ce7b4265f103e837146891fa240917))
+
 ## [0.2.0-beta.8](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.2.0-beta.7...desktop-v0.2.0-beta.8) (2026-09-27)
 
 
