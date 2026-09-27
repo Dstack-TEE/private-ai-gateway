@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.0-beta.11](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.2.0-beta.10...desktop-v0.2.0-beta.11) (2026-09-27)
+
+
+### Bug Fixes
+
+* **desktop:** fail closed on verification failure and harden the 0.1 upgrade path ([#347](https://github.com/Dstack-TEE/private-ai-gateway/issues/347)) ([f31fc7f](https://github.com/Dstack-TEE/private-ai-gateway/commit/f31fc7f009348b0d8e58da0cfe9e7a8ef1a6cf33))
+* **desktop:** show failure reasons and report errors in dialogs ([#346](https://github.com/Dstack-TEE/private-ai-gateway/issues/346)) ([9402c4c](https://github.com/Dstack-TEE/private-ai-gateway/commit/9402c4cbe7b16636231cf487b9f7068bbff6af0b))
+* **desktop:** wait for the api.sock endpoint in the App Store smoke test ([#348](https://github.com/Dstack-TEE/private-ai-gateway/issues/348)) ([89f7e2d](https://github.com/Dstack-TEE/private-ai-gateway/commit/89f7e2dc51a57d21f6f91995eb86b8e1d7129a3e))
+
 ## [0.2.0-beta.10](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.2.0-beta.9...desktop-v0.2.0-beta.10) (2026-09-27)
 
 
