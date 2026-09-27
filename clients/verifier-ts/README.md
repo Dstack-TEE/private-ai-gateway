@@ -4,9 +4,9 @@ A TypeScript verifier for [Attested Confidential Inference
 (ACI)](../../spec/aci.md), for the browser, Node 20.18+, and Bun 1.4+.
 `verifyService(url)`
 fetches a service's report with a fresh nonce and returns a full §9.1
-transcript — **including the hardware quote**, verified with
+transcript, **including the hardware quote**, verified with
 [`@phala/dcap-qvl`](https://www.npmjs.com/package/@phala/dcap-qvl) against the
-Phala PCCS. Every other check is Web Crypto — Ed25519, X25519, HKDF, AES-GCM,
+Phala PCCS. Every other check uses Web Crypto: Ed25519, X25519, HKDF, AES-GCM,
 SHA-256. A prebuilt ESM bundle (`npm run build:bundle`) drops into a
 `<script type="module">`.
 
@@ -25,21 +25,25 @@ evidence) exactly as observed.
 ## What it verifies
 
 - **A whole service (§9.1):** `verifyService(url)` fetches the report with a
-  fresh nonce and runs the transcript — the quote to the Intel vendor root
+  fresh nonce and runs the transcript: the quote to the Intel vendor root
   (check 1, via `@phala/dcap-qvl`), the binding chain (checks 2–3), and the
   compose measurement (check 4) when the service publishes `app_compose`.
   Returns `{ verdict, lines, verification, composeHash }`. `verifyQuote` and
   `verifyComposeMeasurement` are the individual checks.
 - **Production OS allowlist (§1.3):** pass `requireProductionOs: true` to
   require the RTMR3 `os-image-hash` to be in this release's reviewed production
-  allowlist. Development and unknown hashes fail closed. This is an appraisal
-  step over RTMR3, not a dstack boot verifier. First use a dstack verifier to
-  reconstruct MRTD/RTMR0-2 from the same evidence and bind them to
-  `os_image_hash`; require the dstack result to report `is_valid: true`.
+  allowlist. Development and unknown hashes fail closed. This package does not
+  reconstruct MRTD/RTMR0-2 from a dstack OS image, so a pass is meaningful only
+  together with a dstack verifier result of `is_valid: true` for the same
+  quote, event log, and VM configuration. See
+  [Build a verifier policy](../../docs/attested-confidential-inference.md#build-a-verifier-policy)
+  and the
+  [Phala-direct verification algorithm](../../docs/providers/phala-direct/verification.md#verification-algorithm).
 - **Reviewed release allowlist (§1.3):** pass `acceptedComposeHashes` to accept
   only reviewed `sha256(app_compose)` values measured into RTMR3. Without an
   allowlist the measurement is verified and reported, but the verifier does
-  not claim that the release was reviewed.
+  not claim that the release was reviewed. See
+  [Release acceptance](../architecture.md#release-acceptance).
 - **Report binding (§9.1 checks 2–3):** `verifyReportBinding(report, nonce)`
   recomputes the keyset digest over the served `workload_keyset` object's
   JCS form, rebuilds the attestation statement for the nonce you
@@ -64,24 +68,18 @@ evidence) exactly as observed.
 - **E2EE key verification, not an E2EE request builder.** Report verification
   establishes the quote-bound `e2ee_public_keys`, including the suites in the
   [E2EE v2 compatibility protocol](../../spec/e2ee-v2.md). This package does
-  not yet encrypt or decrypt content fields. Callers can implement that
-  field-level wire contract or use a separate v2 client.
+  not encrypt or decrypt content fields. Callers can implement that
+  field-level wire contract or use a v2-capable client.
 
 ## Current limits
 
 - **No dstack boot-measurement reconstruction.** Quote verification
-  authenticates the quote's RTMR fields, and this package replays RTMR3. It
-  does not reconstruct MRTD/RTMR0-2 from a dstack OS image. A
-  `requireProductionOs` pass is meaningful only together with a dstack
-  verifier result for the same quote, event log, and VM configuration. See
-  [How the OS image is classified](../../docs/providers/phala-direct/verification.md#how-the-os-image-is-classified).
+  authenticates the quote's RTMR fields, and this package replays RTMR3 only.
 - **No custody check.** §9.1 check 5 (the dstack KMS chain) is not
-  implemented in this package; it reports an honest skip. The `pap` CLI
-  checks receipt-key custody when given `--accept-subject` and
-  `--accept-dstack-kms-root-public-key`.
+  implemented in this package; it reports a skip.
 - **No TLS observation in a browser.** A browser cannot see the server
   certificate, so id-6 needs the SPKI your own TLS stack observed (the
-  `channel` option) — or the `pap` CLI / `pap serve` proxy, which can; with
+  `channel` option), or the `pap` CLI / `pap serve` proxy, which can; with
   neither, a live run fails id-6 (§1.1).
 - **No deep audit of upstream evidence (§9.2(4)).** `checkSessionEvidence`
   proves the cited session's `evidence.data` hashes to `evidence.digest` and
@@ -99,8 +97,7 @@ Verification failures return `{ ok: false, checks }`; malformed input throws.
 
 ## Usage
 
-One call runs the ACI checks and OS-hash appraisal. This example assumes a
-dstack verifier has already returned `is_valid: true` for the same evidence:
+One call runs the ACI checks and OS-hash appraisal:
 
 ```ts
 import { verifyService } from '@phala/aci-verifier';
@@ -172,8 +169,9 @@ authorization in its bounded exchange history and reuses it only for the
 matching private receipt lookup.
 
 For release-level pinning, add the reviewed deployment's compose hash under
-`policy.acceptedComposeHashes`; do not copy a hash from the endpoint and trust
-it on first use.
+`policy.acceptedComposeHashes`. Take the hash from authenticated release
+metadata, never from the endpoint you are verifying: a hash copied from the
+service only trusts it on first use.
 
 The public API is identical in Node and Bun. Internally, Node passes a scoped
 `undici` dispatcher to `fetch`, while Bun passes its documented
@@ -186,12 +184,6 @@ receipt, session, rotation, and lifecycle implementation. Use `/node` or
 only receive a complete transport audit while its exchange is retained; an
 unknown id fails instead of returning a misleading verdict with skipped body
 hashes.
-
-`source_provenance.repo_url` and `repo_commit` are published labels, not a
-cryptographic release identity. `acceptedComposeHashes` pins the value that is
-actually measured into RTMR3. Release automation should publish reviewed
-compose hashes alongside each deployment, and clients should load them from
-that authenticated release metadata.
 
 #### OpenAI Agents SDK
 
@@ -263,10 +255,10 @@ These integrations use documented transport hooks in
 [Vercel AI SDK](https://github.com/vercel/ai/blob/main/packages/openai-compatible/src/openai-compatible-provider.ts),
 and [LangChain JS](https://github.com/langchain-ai/langchainjs/blob/main/libs/providers/langchain-openai/src/chat_models/base.ts).
 
-Browsers cannot observe TLS SPKI, and this transport does not cover WebSocket
-model calls. For browser clients, WebSocket-only frameworks, or software that
-cannot inject a custom `fetch`, run `pap serve` and point the framework at its
-local OpenAI-compatible endpoint instead.
+This transport does not cover WebSocket model calls. For browser clients,
+WebSocket-only frameworks, or software that cannot inject a custom `fetch`, run
+`pap serve` and point the framework at its local OpenAI-compatible endpoint
+instead.
 
 Or drive the individual checks:
 
@@ -293,16 +285,6 @@ if (!(await checkResponseBodyHash(result.payload!, responseBytes))) {
   throw new Error('response bytes do not match the receipt');
 }
 ```
-
-### E2EE
-
-E2EE v2 is a supported field-level compatibility extension, specified
-separately from core ACI in [the v2 protocol](../../spec/e2ee-v2.md). It is
-supported through at least February 10, 2027 and is planned to be replaced by
-E2EE v3. This verifier establishes the attested E2EE keys but does not construct
-encrypted requests or decrypt responses. Use a v2-capable client for those
-operations. Without one, a bound channel needs the caller-observed TLS SPKI
-(`channel`) or the `pap` CLI / `pap serve` proxy.
 
 ## Development
 
