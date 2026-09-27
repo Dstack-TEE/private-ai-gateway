@@ -12,21 +12,25 @@
 //! synced, never over an existing file. Only when every file is in place are
 //! the old ones removed, `credentials.toml` last, so a crash leaves each file
 //! in at least one of the directories, and the next start finishes the move:
-//! an old file whose content the new directory already holds at another path
-//! is removed. A symlinked `config.toml` (a dotfiles link) becomes a link to
-//! the same file. Nothing is removed when both paths resolve to the same file
-//! or directory (a settings directory linked to the old one, or the reverse).
+//! an old file the new directory already holds (the same file at another
+//! path, or a copy) is removed, unless the new path resolves through the old
+//! one. A symlinked `config.toml` (a dotfiles link) becomes a link to the
+//! same file. Files and directories are compared by identity (device and
+//! inode, or volume and file index), not by path.
 //!
 //! A new file with other content wins. The old one is kept, never deleted,
 //! and reported; the data directory records each reported file's size and
 //! modification time, so it is reported again only after it changes, and an
 //! old file whose new copy the user deleted after the move is not brought
-//! back. If a file cannot be moved, what this start placed is undone and the
-//! settings are used from the old directory until a later start succeeds.
+//! back. An old directory that is a link elsewhere (a dotfiles directory) is
+//! left alone: its files stay in effect while the new directory has none, and
+//! that is reported once. If a file cannot be moved, what this start placed
+//! is undone and the settings are used from the old directory until a later
+//! start succeeds.
 //!
-//! Until the move, processes that read the settings without the backend (the
-//! desktop shell's first paint, the CLI) read them where [`current_dir`]
-//! says: the old directory while it holds files the move has yet to bring.
+//! The backend and the processes that read the settings without it (the
+//! desktop shell's first paint, the CLI; see [`current_dir`]) choose the
+//! directory in use by the same rule, [`in_use`].
 
 use std::{
     fs, io,
@@ -42,8 +46,11 @@ use crate::{
 
 /// Moved in this order, so `credentials.toml` leaves the old directory last.
 const FILES: [&str; 2] = [CONFIG_FILE, CREDENTIALS_FILE];
-/// In the data directory: `<file> <size> <modified>` for each reported old file.
+/// In the data directory: `<file> <size> <modified>` for each reported old
+/// file (`directory` for a linked old directory).
 const REPORTED_FILE: &str = "legacy-settings-reported";
+/// How the backend's notice for a failed move starts.
+const FAILED: &str = "Settings: The settings files could not be moved";
 
 /// What the old directory still holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,55 +59,79 @@ pub enum Leftover {
     None,
     /// Files the move has yet to bring; they are the settings in effect.
     Pending,
+    /// The old directory is a link the move leaves alone; its files are the
+    /// settings in effect.
+    Linked,
     /// Old files not used: the settings directory has its own.
     Kept(Vec<&'static str>),
 }
 
 /// The directory the settings are in now: [`config_dir`], or the old
-/// directory while the move is pending.
+/// directory while its files are in effect.
 pub fn current_dir() -> Result<PathBuf, String> {
     let to = config_dir()?;
     Ok(match legacy_config_dir() {
-        Some(from) if leftover(&from, &to, &app_data_dir()?) == Leftover::Pending => from,
+        Some(from) if in_use(&from, &to, &reported(&app_data_dir()?)) => from,
         _ => to,
     })
 }
 
-/// A warning for `pap doctor` about files left in the old directory.
-pub fn diagnostic() -> Option<String> {
+/// A warning for `pap doctor` about files left in the old directory, given
+/// the notices of the running backend, if any.
+pub fn diagnostic(backend: Option<&[String]>) -> Option<String> {
     let (from, to) = (legacy_config_dir()?, config_dir().ok()?);
-    match leftover(&from, &to, &app_data_dir().ok()?) {
+    describe(&from, &to, &app_data_dir().ok()?, backend)
+}
+
+fn describe(from: &Path, to: &Path, data_dir: &Path, backend: Option<&[String]>) -> Option<String> {
+    match leftover(from, to, data_dir) {
         Leftover::None => None,
-        Leftover::Pending => Some(format!(
-            "{} has settings files the backend moves to {} when it starts",
-            from.display(),
-            to.display()
-        )),
-        Leftover::Kept(files) => Some(kept_notice(&from, &to, &files)),
+        Leftover::Pending => Some(match backend {
+            None => format!(
+                "{} has settings files the backend moves to {} when it starts",
+                from.display(),
+                to.display()
+            ),
+            Some(notices) => notices
+                .iter()
+                .find(|notice| notice.starts_with(FAILED))
+                .map(|notice| notice.trim_start_matches("Settings: ").to_string())
+                .unwrap_or_else(|| {
+                    format!(
+                        "{} has settings files the running backend has not moved to {}; restart it to move them",
+                        from.display(),
+                        to.display()
+                    )
+                }),
+        }),
+        Leftover::Linked => Some(linked_notice(from, to)),
+        Leftover::Kept(files) => Some(kept_notice(from, to, &files)),
     }
 }
 
 /// What `from` holds for `to`, without changing anything.
 pub fn leftover(from: &Path, to: &Path, data_dir: &Path) -> Leftover {
-    if !from.is_dir() || same_path(from, to) {
+    if !from.is_dir() || same_file(from, to) {
         return Leftover::None;
     }
     let reported = reported(data_dir);
-    let mut kept = Vec::new();
-    for name in FILES {
-        let (old, new) = (from.join(name), to.join(name));
-        if !old.exists() {
-            continue;
-        }
-        if !new.exists() {
-            if !reported.matches(&old, name) {
-                return Leftover::Pending;
-            }
-            kept.push(name);
-        } else if !same_path(&old, &new) && fs::read(&old).ok() != fs::read(&new).ok() {
-            kept.push(name);
-        }
+    if in_use(from, to, &reported) {
+        return if is_symlink(from) {
+            Leftover::Linked
+        } else {
+            Leftover::Pending
+        };
     }
+    let kept: Vec<_> = FILES
+        .into_iter()
+        .filter(|name| {
+            let (old, new) = (from.join(name), to.join(name));
+            old.exists()
+                && (is_symlink(from)
+                    || !new.exists()
+                    || (!same_file(&old, &new) && fs::read(&old).ok() != fs::read(&new).ok()))
+        })
+        .collect();
     if kept.is_empty() {
         Leftover::None
     } else {
@@ -108,24 +139,67 @@ pub fn leftover(from: &Path, to: &Path, data_dir: &Path) -> Leftover {
     }
 }
 
+/// Whether the settings in effect are in `from`: a file there that `to`
+/// lacks, unless it was reported (its new copy was deleted after the move).
+/// A linked old directory is used while `to` has no settings file.
+fn in_use(from: &Path, to: &Path, reported: &Reported) -> bool {
+    if !from.is_dir() || same_file(from, to) {
+        return false;
+    }
+    let (old, new) = (
+        |name: &str| from.join(name).exists(),
+        |name: &str| to.join(name).exists(),
+    );
+    if is_symlink(from) {
+        return FILES.iter().any(|name| old(name)) && !FILES.iter().any(|name| new(name));
+    }
+    FILES
+        .iter()
+        .any(|name| old(name) && !new(name) && !reported.matches(&from.join(name), name))
+}
+
 /// Moves the settings files from `from` to `to`. Returns the directory to use
 /// and notices for the user.
 pub fn relocate(from: &Path, to: &Path, data_dir: &Path) -> (PathBuf, Vec<String>) {
-    match move_files(from, to, data_dir) {
-        Ok(kept) => (to.to_path_buf(), report(from, to, data_dir, &kept)),
+    let reported = reported(data_dir);
+    if !from.is_dir() || same_file(from, to) {
+        return (to.to_path_buf(), Vec::new());
+    }
+    if is_symlink(from) {
+        // Its target is the user's (a dotfiles directory); nothing is moved out of it.
+        return if in_use(from, to, &reported) {
+            let stamps = link_stamp(from).into_iter().collect();
+            let notices = report(data_dir, &reported, stamps, linked_notice(from, to));
+            (from.to_path_buf(), notices)
+        } else {
+            let kept: Vec<_> = FILES
+                .into_iter()
+                .filter(|name| from.join(name).exists())
+                .collect();
+            (
+                to.to_path_buf(),
+                report_kept(from, to, data_dir, &reported, &kept),
+            )
+        };
+    }
+    match move_files(from, to, &reported) {
+        Ok(kept) => {
+            let notices = report_kept(from, to, data_dir, &reported, &kept);
+            (to.to_path_buf(), notices)
+        }
         Err(error) => {
-            // Never the new directory while a file exists only in the old one.
-            let stay = FILES
-                .iter()
-                .any(|name| from.join(name).exists() && !to.join(name).exists());
-            let dir = if stay { from } else { to };
+            let dir = if in_use(from, to, &reported) {
+                from
+            } else {
+                to
+            };
             tracing::warn!(
                 "Cannot move the settings files from {} to {}: {error}",
                 from.display(),
                 to.display()
             );
             let notice = format!(
-                "Settings: The settings files could not be moved from {} to {}: {error}. Settings are used from {} for now, and the move is retried on the next start.",
+                "{FAILED} from {} to {}: {error}. Settings are used from {} for now, and the move is retried on the next start.",
                 from.display(),
                 to.display(),
                 dir.display()
@@ -135,77 +209,80 @@ pub fn relocate(from: &Path, to: &Path, data_dir: &Path) -> (PathBuf, Vec<String
     }
 }
 
+/// What happens to one old file.
+enum Step {
+    /// Placed in the new directory, then removed.
+    Place(Vec<u8>),
+    /// The new directory already holds it: removed.
+    Remove,
+    /// The new path resolves through it: left alone.
+    Leave,
+    /// The new directory has other content, or deleted its copy after this
+    /// file was reported: kept.
+    Keep,
+}
+
 /// Returns the old files kept because the new directory has its own.
-fn move_files(from: &Path, to: &Path, data_dir: &Path) -> Result<Vec<&'static str>, String> {
-    if fs::symlink_metadata(from).is_err() || same_path(from, to) {
-        return Ok(Vec::new());
-    }
-    if is_symlink(from) {
-        // Its target is the user's (a dotfiles directory); nothing is moved out of it.
-        return if FILES.iter().any(|name| from.join(name).exists()) {
-            Err(format!(
-                "{} is a symlink, so its files are left in place; move them to {} yourself",
-                from.display(),
-                to.display()
-            ))
-        } else {
-            Ok(Vec::new())
-        };
-    }
-    if !from.is_dir() {
-        return Ok(Vec::new());
-    }
+fn move_files(from: &Path, to: &Path, reported: &Reported) -> Result<Vec<&'static str>, String> {
     // Everything is read first: nothing is placed unless both files can be.
-    let mut old = Vec::new();
+    let mut steps = Vec::new();
     for name in FILES {
-        let path = from.join(name);
-        if let Some(content) =
-            read(&path, name).map_err(|error| format!("Cannot read {name}: {error}"))?
-        {
-            old.push((name, path, content));
+        let (old, new) = (from.join(name), to.join(name));
+        if !is_present(&old) {
+            continue;
         }
-    }
-    let reported = reported(data_dir);
-    let (mut moved, mut created, mut kept) = (Vec::new(), Vec::new(), Vec::new());
-    for (name, old, content) in old {
-        let new = to.join(name);
-        let placed = match read(&new, name) {
-            // The same file (a link between the directories): nothing to move.
-            Ok(Some(_)) if same_path(&old, &new) => continue,
-            // Placed by an interrupted earlier move.
-            Ok(Some(existing)) if existing == content => Ok(()),
-            Ok(Some(_)) => {
-                kept.push(name);
-                continue;
+        let step = if same_file(&old, &new) {
+            // The same file under both paths: a link, or an interrupted move.
+            if resolves_through(&new, &old) {
+                Step::Leave
+            } else {
+                Step::Remove
             }
-            // Deleted from the new directory after the move reported this file.
-            Ok(None) if reported.matches(&old, name) => {
-                kept.push(name);
-                continue;
+        } else {
+            let content = match read(&old, name) {
+                Ok(Some(content)) => content,
+                // A dangling link: nothing to move.
+                Ok(None) => continue,
+                Err(error) => return Err(format!("Cannot read {name}: {error}")),
+            };
+            match read(&new, name)
+                .map_err(|error| format!("Cannot read the new {name}: {error}"))?
+            {
+                Some(existing) if existing == content => Step::Remove,
+                Some(_) => Step::Keep,
+                // Deleted from the new directory after the move reported this file.
+                None if reported.matches(&old, name) => Step::Keep,
+                None => Step::Place(content),
             }
-            Ok(None) => private_fs::create_private_dir(to)
-                .and_then(|()| link_or_copy(&old, &new, name, &content))
-                .map(|()| created.push(new)),
-            Err(error) => Err(error),
         };
+        steps.push((name, old, new, step));
+    }
+    let mut created = Vec::new();
+    for (name, old, new, step) in &steps {
+        let Step::Place(content) = step else {
+            continue;
+        };
+        let placed =
+            private_fs::create_private_dir(to).and_then(|()| link_or_copy(old, new, name, content));
         if let Err(error) = placed {
             for path in &created {
                 let _ = fs::remove_file(path);
             }
             return Err(format!("Cannot move {name}: {error}"));
         }
-        moved.push(old);
+        created.push(new.clone());
     }
     // Every file is in the new directory now; the old ones can go.
-    for old in moved {
-        match fs::remove_file(&old) {
-            Ok(()) => tracing::info!(
-                "Moved {} to {}",
-                old.display(),
-                to.join(old.file_name().unwrap_or_default()).display()
-            ),
-            // Its content is in place; the next start removes it.
-            Err(error) => tracing::warn!("Cannot remove {}: {error}", old.display()),
+    let mut kept = Vec::new();
+    for (name, old, new, step) in steps {
+        match step {
+            Step::Place(_) | Step::Remove => match fs::remove_file(&old) {
+                Ok(()) => tracing::info!("Moved {} to {}", old.display(), new.display()),
+                // Its content is in place; the next start removes it.
+                Err(error) => tracing::warn!("Cannot remove {}: {error}", old.display()),
+            },
+            Step::Keep => kept.push(name),
+            Step::Leave => {}
         }
     }
     if !FILES.iter().any(|name| is_present(&from.join(name))) {
@@ -241,12 +318,31 @@ fn is_present(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok()
 }
 
-/// Whether both paths resolve to the same file or directory.
-fn same_path(left: &Path, right: &Path) -> bool {
-    matches!(
-        (fs::canonicalize(left), fs::canonicalize(right)),
-        (Ok(left), Ok(right)) if left == right
-    )
+/// Whether both paths lead to the same file or directory (device and inode on
+/// Unix, volume and file index on Windows), however they are spelled.
+fn same_file(left: &Path, right: &Path) -> bool {
+    same_file::is_same_file(left, right).unwrap_or(false)
+}
+
+/// Whether following the links from `path` passes through `via` itself, so
+/// removing `via` would break `path`.
+fn resolves_through(path: &Path, via: &Path) -> bool {
+    let at = |left: &Path, right: &Path| {
+        left.file_name() == right.file_name()
+            && matches!((left.parent(), right.parent()), (Some(left), Some(right)) if same_file(left, right))
+    };
+    let mut path = path.to_path_buf();
+    // Deeper than the kernel follows (40 on Linux): treated as passing through.
+    for _ in 0..40 {
+        if at(&path, via) {
+            return true;
+        }
+        match fs::read_link(&path) {
+            Ok(target) => path = path.parent().unwrap_or(Path::new(".")).join(target),
+            Err(_) => return false,
+        }
+    }
+    true
 }
 
 /// Places `content`, read from `old`, at `new`, failing if `new` exists.
@@ -290,7 +386,7 @@ fn copy(old: &Path, new: &Path, name: &str, content: &[u8]) -> io::Result<()> {
     })
 }
 
-/// The old files reported so far, as they were then.
+/// What was reported so far, as it was then.
 struct Reported(String);
 
 fn reported(data_dir: &Path) -> Reported {
@@ -299,13 +395,25 @@ fn reported(data_dir: &Path) -> Reported {
 
 impl Reported {
     fn matches(&self, path: &Path, name: &str) -> bool {
-        stamp(path, name).is_some_and(|stamp| self.0.lines().any(|line| line == stamp))
+        stamp(path, name).is_some_and(|stamp| self.has(&stamp))
+    }
+
+    fn has(&self, stamp: &str) -> bool {
+        self.0.lines().any(|line| line == stamp)
     }
 }
 
 /// `<file> <size> <modified>` of an old file, which changes when it is written.
 fn stamp(path: &Path, name: &str) -> Option<String> {
-    let metadata = fs::metadata(path).ok()?;
+    stamp_of(&fs::metadata(path).ok()?, name)
+}
+
+/// The same for a linked old directory's link, which changes when it is replaced.
+fn link_stamp(path: &Path) -> Option<String> {
+    stamp_of(&fs::symlink_metadata(path).ok()?, "directory")
+}
+
+fn stamp_of(metadata: &fs::Metadata, name: &str) -> Option<String> {
     let modified = metadata
         .modified()
         .ok()?
@@ -317,26 +425,34 @@ fn stamp(path: &Path, name: &str) -> Option<String> {
 
 /// Reports old files the new directory overrides, unless they were reported
 /// as they are now.
-fn report(from: &Path, to: &Path, data_dir: &Path, kept: &[&'static str]) -> Vec<String> {
-    let reported = reported(data_dir);
-    if kept
-        .iter()
-        .all(|name| reported.matches(&from.join(name), name))
-    {
-        return Vec::new();
-    }
-    let notice = kept_notice(from, to, kept);
-    tracing::warn!("{notice}");
-    let record: String = kept
+fn report_kept(
+    from: &Path,
+    to: &Path,
+    data_dir: &Path,
+    reported: &Reported,
+    kept: &[&'static str],
+) -> Vec<String> {
+    let stamps = kept
         .iter()
         .filter_map(|name| stamp(&from.join(name), name))
-        .map(|stamp| stamp + "\n")
         .collect();
+    report(data_dir, reported, stamps, kept_notice(from, to, kept))
+}
+
+/// Reports `notice` unless every stamp was reported; records the stamps.
+fn report(
+    data_dir: &Path,
+    reported: &Reported,
+    stamps: Vec<String>,
+    notice: String,
+) -> Vec<String> {
+    if stamps.iter().all(|stamp| reported.has(stamp)) {
+        return Vec::new();
+    }
+    tracing::warn!("{notice}");
+    let record: String = stamps.iter().map(|stamp| format!("{stamp}\n")).collect();
     if let Err(error) = private_fs::write_atomic(&data_dir.join(REPORTED_FILE), &record, None) {
-        tracing::warn!(
-            "Cannot record that {} was reported: {error}",
-            from.display()
-        );
+        tracing::warn!("Cannot record the settings report: {error}");
     }
     vec![format!("Settings: {notice}")]
 }
@@ -350,253 +466,14 @@ fn kept_notice(from: &Path, to: &Path, kept: &[&str]) -> String {
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const CONFIG: &str = "# Mine\nappearance = \"dark\" # night owl\n";
-    const CREDENTIALS: &str = "# Keys\n[profiles.home]\napi-key = \"sk-home\"\n";
-
-    struct Dirs {
-        root: tempfile::TempDir,
-        old: PathBuf,
-        new: PathBuf,
-        data: PathBuf,
-    }
-
-    fn dirs() -> Dirs {
-        let root = tempfile::tempdir().unwrap();
-        let data = root
-            .path()
-            .join("Application Support/org.dstack.private-ai-proxy");
-        let dirs = Dirs {
-            old: data.join("Config"),
-            new: root.path().join(".config/private-ai-proxy"),
-            data,
-            root,
-        };
-        fs::create_dir_all(&dirs.old).unwrap();
-        fs::write(dirs.old.join(CONFIG_FILE), CONFIG).unwrap();
-        private_fs::write_private(&dirs.old.join(CREDENTIALS_FILE), CREDENTIALS).unwrap();
-        fs::write(dirs.old.join(SCHEMA_FILE), "{}").unwrap();
-        dirs
-    }
-
-    fn relocate(dirs: &Dirs) -> (PathBuf, Vec<String>) {
-        super::relocate(&dirs.old, &dirs.new, &dirs.data)
-    }
-
-    fn leftover(dirs: &Dirs) -> Leftover {
-        super::leftover(&dirs.old, &dirs.new, &dirs.data)
-    }
-
-    fn text(path: PathBuf) -> String {
-        fs::read_to_string(path).unwrap()
-    }
-
-    #[test]
-    fn moves_both_files_unchanged_and_removes_the_old_directory() {
-        let dirs = dirs();
-        assert_eq!(leftover(&dirs), Leftover::Pending);
-        assert_eq!(relocate(&dirs), (dirs.new.clone(), Vec::new()));
-        assert_eq!(text(dirs.new.join(CONFIG_FILE)), CONFIG);
-        assert_eq!(text(dirs.new.join(CREDENTIALS_FILE)), CREDENTIALS);
-        assert_eq!(
-            private_fs::readable_by_others(&dirs.new.join(CREDENTIALS_FILE)).unwrap(),
-            Some(false)
-        );
-        assert!(!dirs.old.exists());
-        assert!(dirs.data.exists(), "state stays");
-        assert_eq!(leftover(&dirs), Leftover::None);
-
-        // Done: later starts change nothing.
-        assert_eq!(relocate(&dirs), (dirs.new.clone(), Vec::new()));
-        assert_eq!(text(dirs.new.join(CONFIG_FILE)), CONFIG);
-    }
-
-    #[test]
-    fn a_copy_keeps_the_content_and_credentials_owner_only() {
-        let dirs = dirs();
-        fs::create_dir_all(&dirs.new).unwrap();
-        for (name, content) in [(CONFIG_FILE, CONFIG), (CREDENTIALS_FILE, CREDENTIALS)] {
-            let (old, new) = (dirs.old.join(name), dirs.new.join(name));
-            copy(&old, &new, name, content.as_bytes()).unwrap();
-            assert_eq!(text(new.clone()), content);
-            assert_eq!(
-                copy(&old, &new, name, b"other").unwrap_err().kind(),
-                io::ErrorKind::AlreadyExists
-            );
-            assert_eq!(text(new), content, "never overwritten");
-        }
-        assert_eq!(
-            private_fs::readable_by_others(&dirs.new.join(CREDENTIALS_FILE)).unwrap(),
-            Some(false)
-        );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = |path: PathBuf| fs::metadata(path).unwrap().permissions().mode() & 0o777;
-            assert_eq!(
-                mode(dirs.new.join(CONFIG_FILE)),
-                mode(dirs.old.join(CONFIG_FILE))
-            );
-        }
-    }
-
-    #[test]
-    fn existing_new_files_win_and_old_ones_are_reported_until_they_change() {
-        let dirs = dirs();
-        fs::create_dir_all(&dirs.new).unwrap();
-        fs::write(dirs.new.join(CONFIG_FILE), "appearance = \"light\"\n").unwrap();
-
-        let (dir, notices) = relocate(&dirs);
-        assert_eq!(dir, dirs.new);
-        assert_eq!(notices.len(), 1, "{notices:?}");
-        assert!(notices[0].contains(&dirs.old.display().to_string()));
-        assert_eq!(text(dirs.new.join(CONFIG_FILE)), "appearance = \"light\"\n");
-        // The file the new directory lacked still moves.
-        assert_eq!(text(dirs.new.join(CREDENTIALS_FILE)), CREDENTIALS);
-        assert!(!dirs.old.join(CREDENTIALS_FILE).exists());
-        // The old config.toml is kept, with the directory.
-        assert_eq!(text(dirs.old.join(CONFIG_FILE)), CONFIG);
-        assert_eq!(leftover(&dirs), Leftover::Kept(vec![CONFIG_FILE]));
-
-        // Reported once while it stays as it is...
-        assert_eq!(relocate(&dirs), (dirs.new.clone(), Vec::new()));
-        // ...and again once it changes (an earlier version wrote it).
-        fs::write(dirs.old.join(CONFIG_FILE), "appearance = \"system\"\n").unwrap();
-        let (_, notices) = relocate(&dirs);
-        assert_eq!(notices.len(), 1, "{notices:?}");
-        assert_eq!(text(dirs.new.join(CONFIG_FILE)), "appearance = \"light\"\n");
-    }
-
-    #[test]
-    fn a_reported_old_file_is_not_brought_back_after_the_new_one_is_deleted() {
-        let dirs = dirs();
-        fs::create_dir_all(&dirs.new).unwrap();
-        fs::write(dirs.new.join(CONFIG_FILE), "appearance = \"light\"\n").unwrap();
-        assert_eq!(relocate(&dirs).1.len(), 1);
-
-        fs::remove_file(dirs.new.join(CONFIG_FILE)).unwrap();
-        assert_eq!(leftover(&dirs), Leftover::Kept(vec![CONFIG_FILE]));
-        assert_eq!(relocate(&dirs), (dirs.new.clone(), Vec::new()));
-        assert!(!dirs.new.join(CONFIG_FILE).exists());
-        assert_eq!(text(dirs.old.join(CONFIG_FILE)), CONFIG);
-    }
-
-    #[test]
-    fn an_interrupted_move_is_finished() {
-        // A crash after both files were placed, before the old ones were removed.
-        let dirs = dirs();
-        fs::create_dir_all(&dirs.new).unwrap();
-        fs::hard_link(dirs.old.join(CONFIG_FILE), dirs.new.join(CONFIG_FILE)).unwrap();
-        fs::copy(
-            dirs.old.join(CREDENTIALS_FILE),
-            dirs.new.join(CREDENTIALS_FILE),
-        )
-        .unwrap();
-        assert_eq!(leftover(&dirs), Leftover::None);
-        assert_eq!(relocate(&dirs), (dirs.new.clone(), Vec::new()));
-        assert!(!dirs.old.exists());
-        assert_eq!(text(dirs.new.join(CONFIG_FILE)), CONFIG);
-        assert_eq!(text(dirs.new.join(CREDENTIALS_FILE)), CREDENTIALS);
-    }
-
-    #[test]
-    fn an_unreadable_old_file_places_nothing_and_keeps_the_old_directory() {
-        let dirs = dirs();
-        // A directory where credentials.toml should be cannot be read.
-        fs::remove_file(dirs.old.join(CREDENTIALS_FILE)).unwrap();
-        fs::create_dir(dirs.old.join(CREDENTIALS_FILE)).unwrap();
-        let (dir, notices) = relocate(&dirs);
-        assert_eq!(dir, dirs.old);
-        assert_eq!(notices.len(), 1, "{notices:?}");
-        assert!(!dirs.new.join(CONFIG_FILE).exists(), "nothing placed");
-        assert_eq!(text(dirs.old.join(CONFIG_FILE)), CONFIG);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_failed_move_is_undone_and_the_old_directory_used() {
-        let dirs = dirs();
-        // A symlink where credentials.toml should go makes placing it fail.
-        fs::create_dir_all(&dirs.new).unwrap();
-        std::os::unix::fs::symlink(dirs.data.join("elsewhere"), dirs.new.join(CREDENTIALS_FILE))
-            .unwrap();
-        let (dir, notices) = relocate(&dirs);
-        assert_eq!(dir, dirs.old);
-        assert_eq!(notices.len(), 1, "{notices:?}");
-        assert!(!dirs.new.join(CONFIG_FILE).exists(), "undone");
-        assert_eq!(text(dirs.old.join(CONFIG_FILE)), CONFIG);
-        assert_eq!(text(dirs.old.join(CREDENTIALS_FILE)), CREDENTIALS);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_settings_directory_linked_to_the_old_one_is_left_alone() {
-        let dirs = dirs();
-        fs::create_dir_all(dirs.new.parent().unwrap()).unwrap();
-        std::os::unix::fs::symlink(&dirs.old, &dirs.new).unwrap();
-        assert_eq!(leftover(&dirs), Leftover::None);
-        assert_eq!(relocate(&dirs), (dirs.new.clone(), Vec::new()));
-        assert_eq!(text(dirs.old.join(CONFIG_FILE)), CONFIG);
-        assert_eq!(text(dirs.new.join(CREDENTIALS_FILE)), CREDENTIALS);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_new_file_linked_to_the_old_one_is_left_alone() {
-        let dirs = dirs();
-        fs::create_dir_all(&dirs.new).unwrap();
-        std::os::unix::fs::symlink(dirs.old.join(CONFIG_FILE), dirs.new.join(CONFIG_FILE)).unwrap();
-        assert_eq!(relocate(&dirs), (dirs.new.clone(), Vec::new()));
-        assert_eq!(text(dirs.old.join(CONFIG_FILE)), CONFIG);
-        assert_eq!(text(dirs.new.join(CONFIG_FILE)), CONFIG);
-        assert_eq!(text(dirs.new.join(CREDENTIALS_FILE)), CREDENTIALS);
-        assert!(!dirs.old.join(CREDENTIALS_FILE).exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn an_old_directory_linked_to_the_settings_directory_is_done() {
-        let dirs = dirs();
-        fs::create_dir_all(dirs.new.parent().unwrap()).unwrap();
-        fs::rename(&dirs.old, &dirs.new).unwrap();
-        std::os::unix::fs::symlink(&dirs.new, &dirs.old).unwrap();
-        assert_eq!(leftover(&dirs), Leftover::None);
-        assert_eq!(relocate(&dirs), (dirs.new.clone(), Vec::new()));
-        assert_eq!(text(dirs.new.join(CONFIG_FILE)), CONFIG);
-        assert_eq!(text(dirs.new.join(CREDENTIALS_FILE)), CREDENTIALS);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_linked_config_file_stays_linked_to_its_target() {
-        let dirs = dirs();
-        let target = dirs.root.path().join("dotfiles/config.toml");
-        fs::create_dir_all(target.parent().unwrap()).unwrap();
-        fs::write(&target, CONFIG).unwrap();
-        fs::remove_file(dirs.old.join(CONFIG_FILE)).unwrap();
-        std::os::unix::fs::symlink("../../../dotfiles/config.toml", dirs.old.join(CONFIG_FILE))
-            .unwrap();
-        assert_eq!(text(dirs.old.join(CONFIG_FILE)), CONFIG);
-
-        assert_eq!(relocate(&dirs), (dirs.new.clone(), Vec::new()));
-        let link = dirs.new.join(CONFIG_FILE);
-        assert!(is_symlink(&link));
-        assert_eq!(
-            fs::canonicalize(link).unwrap(),
-            fs::canonicalize(&target).unwrap()
-        );
-        assert!(!dirs.old.exists());
-    }
-
-    #[test]
-    fn nothing_to_move_without_an_old_directory() {
-        let dirs = dirs();
-        fs::remove_dir_all(&dirs.old).unwrap();
-        assert_eq!(leftover(&dirs), Leftover::None);
-        assert_eq!(relocate(&dirs), (dirs.new.clone(), Vec::new()));
-        assert!(!dirs.new.exists());
-    }
+fn linked_notice(from: &Path, to: &Path) -> String {
+    format!(
+        "{} is a symlink, so its settings files are not moved and stay in use; move them to {} (or link {} to them) to use the new location.",
+        from.display(),
+        to.display(),
+        to.display()
+    )
 }
+
+#[cfg(test)]
+mod tests;

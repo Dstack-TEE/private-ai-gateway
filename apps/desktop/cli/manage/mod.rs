@@ -837,7 +837,10 @@ fn settings_diagnostics(
         warnings.insert("settingsFiles".into(), json!(notices));
     }
     // Also without the backend, which reports it only when it starts.
-    if let Some(leftover) = desktop_core::relocation::diagnostic() {
+    let backend_notices = state
+        .as_ref()
+        .map(|state| state.config_files.warnings.as_slice());
+    if let Some(leftover) = desktop_core::relocation::diagnostic(backend_notices) {
         warnings.insert("legacySettingsDirectory".into(), json!(leftover));
     }
     match desktop_core::private_fs::readable_by_others(Path::new(&credentials)) {

@@ -132,12 +132,20 @@ so nothing shows defaults in between.
   `credentials.toml` last, so an interrupted move leaves each file in at least
   one place and the next start finishes it. The old `Config` directory is
   removed once it is empty.
-- A settings directory that is a link to the old one, or the reverse, counts
-  as moved: nothing is removed from either. A symlinked old directory that
-  points elsewhere is left in place and reported.
-- If a file cannot be read or moved, nothing placed in that start remains, the
-  settings are used from the old directory, the error is shown in Settings and
-  `pap doctor`, and the move is retried on the next start.
+- Files and directories are compared by identity (device and inode, or
+  volume and file index), not by path. A settings directory or file that is a
+  link to the old one, or the reverse, counts as moved, and nothing the new
+  path resolves through is removed. An old link that is redundant (both
+  `config.toml` files link to the same dotfile) is removed.
+- A symlinked old directory that points elsewhere (a dotfiles directory) is
+  left alone: nothing is moved out of it, its files stay in use while the
+  settings directory has none, and Settings reports that once.
+- If a file cannot be read or moved, nothing placed in that start remains and
+  the error is shown in Settings and `pap doctor` (which names it also while
+  the backend runs), and the move is retried on the next start. Meanwhile the
+  settings are used from the old directory if it has a file the settings
+  directory lacks, other than a kept one already reported; the desktop app and
+  the CLI choose the directory by the same rule.
 
 Linux, the Mac App Store build and the overrides above keep their location;
 nothing moves there.

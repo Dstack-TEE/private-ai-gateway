@@ -5073,6 +5073,7 @@ dependencies = [
  "objc2",
  "objc2-foundation",
  "reqwest",
+ "same-file",
  "schemars 1.2.2",
  "semver",
  "serde",
