@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.0-beta.10](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.2.0-beta.9...desktop-v0.2.0-beta.10) (2026-09-27)
+
+
+### Features
+
+* **desktop:** offer to restart Codex's background service after connecting ([#342](https://github.com/Dstack-TEE/private-ai-gateway/issues/342)) ([74685e8](https://github.com/Dstack-TEE/private-ai-gateway/commit/74685e82b5f38df024d2271838764577d140b227))
+
+
+### Bug Fixes
+
+* **desktop:** native feedback instead of web toasts ([#340](https://github.com/Dstack-TEE/private-ai-gateway/issues/340)) ([eb200d4](https://github.com/Dstack-TEE/private-ai-gateway/commit/eb200d434ad132aea87ecf330f32fafef943aed9))
+* **desktop:** support the Codex 0.157.1 baseline and explain its background server ([#339](https://github.com/Dstack-TEE/private-ai-gateway/issues/339)) ([d9d3f58](https://github.com/Dstack-TEE/private-ai-gateway/commit/d9d3f58dd849efb63feceabce6c0c33df16dafd6))
+
 ## [0.2.0-beta.9](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.2.0-beta.8...desktop-v0.2.0-beta.9) (2026-09-27)
 
 
