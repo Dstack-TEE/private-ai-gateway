@@ -1,7 +1,18 @@
 # Install Private AI Proxy
 
-`pap` is the preferred command. `private-ai-proxy` is the full-name alias and
-`aci` is the protocol-focused alias; all three run the same native CLI.
+Private AI Proxy ships as the `pap` CLI and a desktop app. Every installation
+method below installs the CLI; Homebrew and GitHub Releases also offer the
+desktop app. [The CLI reference](../apps/desktop/docs/cli.md) describes `pap`
+and its aliases.
+
+The CLI runs on macOS, Windows, and Linux, on arm64 and x64. Linux needs glibc
+2.35 or newer; musl distributions such as Alpine are not supported.
+
+The steps below install the stable release. `pap curl` and the key-custody
+flags (`--accept-subject` with `--accept-dstack-kms-root-public-key`) need
+0.2.0-beta.6 or later. Install that with
+`npm install --global private-ai-proxy@beta` or the install script's beta
+channel (`--channel beta`, or `-Channel beta` on Windows).
 
 ## npm
 
@@ -10,13 +21,25 @@ npm install --global private-ai-proxy
 pap --help
 ```
 
-npm selects the native package for the current operating system and CPU
-architecture. Do not use `--omit=optional` because the native payload is an
-optional dependency.
+npm installs the native executables for the current operating system and CPU
+architecture as an optional dependency. Do not install with `--omit=optional`
+or `--no-optional`: without that dependency, `pap` only prints the reinstall
+command.
+
+Install `private-ai-proxy` (the stable release), `private-ai-proxy@beta`, or an
+exact version such as `private-ai-proxy@0.2.0`. Do not use a prerelease range
+such as `private-ai-proxy@^0.2.0-beta.1`: it can resolve to a platform-specific
+version (for example `0.2.0-beta.2-linux-x64`) instead of the installable
+package.
+
+npm 9.6.3 and 9.6.4, bundled with Node 20.0 and 20.1, skip the Linux native
+executables even on glibc systems. Upgrade npm if `pap` reports that they are
+missing.
 
 ## Homebrew
 
-Install the CLI Formula or macOS desktop Cask directly from the official tap:
+Install the CLI Formula, or the Cask with the desktop app for macOS, directly
+from the official tap:
 
 ```sh
 brew install dstack-tee/private-ai/private-ai-proxy
@@ -102,9 +125,9 @@ PowerShell parameters:
 The default installation directory is
 `%LOCALAPPDATA%\Programs\Private AI Proxy CLI`.
 
-## Native packages and desktop application
+## Desktop app and native packages
 
-Signed desktop installers, portable CLI archives, and Linux DEB, RPM, and Arch
-packages are published on the
+Signed desktop app installers, portable CLI archives, and Linux DEB, RPM, and
+Arch packages are published on the
 [GitHub Releases](https://github.com/Dstack-TEE/private-ai-gateway/releases)
 page. Native package managers own upgrades and removal for their installations.

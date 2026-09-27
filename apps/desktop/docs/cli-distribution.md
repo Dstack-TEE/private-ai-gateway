@@ -1,10 +1,8 @@
 # Private AI Proxy CLI Distribution
 
-There is one user-facing CLI. `pap` is the preferred command,
-`private-ai-proxy` is its canonical executable and full-name alias, and `aci` is
-a legacy alias kept for existing scripts. All three expose the same commands. The
-desktop bundle and standalone CLI distribution do not ship a separate `aci`.
-They contain the same three executables:
+Private AI Proxy has one CLI, `pap`; [CLI](cli.md) lists its commands and
+aliases. The desktop app packages and the standalone CLI packages contain the
+same three executables, and none ships a separate `aci` executable:
 
 - `private-ai-proxy`: canonical CLI executable, backend client and integrated ACI
   verifier (normally invoked as `pap serve`).
@@ -16,20 +14,19 @@ The backend resolves `private-ai-proxy` and the helper next to the canonical
 `private-ai-proxy` executable. These sibling paths are a packaging contract, not a PATH
 lookup.
 
-## Desktop Packages
+## Desktop App Packages
 
-| Platform | Desktop package | Executable location | CLI registration |
+| Platform | Desktop app package | Executable location | CLI registration |
 | --- | --- | --- | --- |
 | Windows | NSIS | The three executables are siblings in the selected app directory | The installer calls `private-ai-proxy cli install`. It records ownership only when it inserts a current-user PATH entry. |
-| macOS | DMG app | `Private AI Proxy.app/Contents/MacOS` | The app registers the bundled CLI automatically on startup without elevation. |
+| macOS | Separate arm64 and x64 DMG apps (only the Mac App Store build is Universal) | `Private AI Proxy.app/Contents/MacOS` | The app registers the bundled CLI automatically on startup without elevation. |
 | Linux | DEB, RPM, or Arch package | `/usr/bin` | The package manager owns all three paths; no registration command is required. |
 
 Windows install, upgrade, and uninstall hooks call `private-ai-proxy --yes service stop`
-before replacing or removing files. The installer holds the same `startup.lock`
-as CLI startup across stop and file replacement, including after the updater UI
-exits. A client that finds the lock held waits out another client's backend
-start, but reports an installer or update holding it within a few seconds. They never use `setx`, rewrite an unrelated
-PATH entry, kill processes by image name, or elevate themselves. A conflicting
+before replacing or removing files. The installer holds the
+[`startup.lock` installer gate](client-architecture.md#lifecycle) across stop
+and file replacement, including after the updater UI exits. The hooks never use
+`setx`, rewrite an unrelated PATH entry, kill processes by image name, or elevate themselves. A conflicting
 unrelated `private-ai-proxy.exe` aborts installation. The Windows workflow contains native
 install/status/uninstall checks, but successful execution on the Windows CI
 runner and a fresh interactive-terminal PATH check remain release gates.
@@ -85,16 +82,14 @@ Linux also publishes CLI-only DEB, RPM, and Arch Linux packages. They install th
 executables under `/usr/libexec/private-ai-proxy` and package-owned
 `/usr/bin/private-ai-proxy`, `pap` and `aci` symlinks. This relies on `private-ai-proxy` canonicalizing itself before it
 locates `private-ai-proxy-service`. [nfpm](https://nfpm.goreleaser.com/) builds
-every Linux package, desktop and CLI, in all three formats
-(`scripts/package-linux.mjs`). The desktop package includes the CLI, so it
+every Linux package, desktop app and CLI-only, in all three formats
+(`scripts/package-linux.mjs`). The desktop app package includes the CLI, so it
 provides `private-ai-proxy-cli`, and each package conflicts with the other; the
 DEBs also declare `Replaces` so dpkg swaps one for the other (Debian Policy
 7.6.2). RPM and Arch packages declare no `Obsoletes` or `replaces`, which would
 swap them on every system upgrade. The packages do not check for running
-processes (see [Distribution](distribution.md#updates-by-installation)): the package manager refuses
-files another package owns, and an upgrade replaces the executables of a running
-backend, which keeps its old build until the next client command restarts it. Run
-`pap --yes service stop` as the owning user to switch at once. The in-app updater
+processes; [Updates by installation](distribution.md#updates-by-installation)
+explains why and what happens to a running backend. The in-app updater
 pauses the user-owned backend before invoking the native installer and preserves an
 active session so protection can resume after fresh verification when the app
 restarts.
@@ -121,7 +116,7 @@ pap --yes service stop && systemctl --user restart private-ai-proxy
 
 A plain `systemctl --user restart` would find that backend holding the instance
 lock: the unit's backend exits with status 75 (already running), and
-`RestartPreventExitStatus=75` keeps systemd from retrying it. The desktop package
+`RestartPreventExitStatus=75` keeps systemd from retrying it. The desktop app package
 ships no unit, because the app manages its own backend.
 
 The web UI renderer comes from `npm run build:web` in `apps/desktop`, which
@@ -142,17 +137,13 @@ not configure a provider or access credentials.
 Releases are cut by merging the release-please PR. The release tag then builds
 and publishes the GitHub release, the updater feeds, the Mac App Store build
 (stable only) and npm; see
-[Release orchestration](distribution.md#release-orchestration). The official
-shell installers read the updater feeds. The Homebrew tap
+[Release orchestration](distribution.md#release-orchestration) and
+[npm distribution](../npm/README.md#release). The official shell installers
+read the updater feeds, so they need no release step. The Homebrew tap
 [`Dstack-TEE/homebrew-private-ai`](https://github.com/Dstack-TEE/homebrew-private-ai)
-is not part of the tag pipeline: its own workflow opens an update pull request
-for each stable release, and a maintainer merges it. The npm publisher
-publishes everything as versions of the one `private-ai-proxy` package, as
-`@openai/codex` does. It uploads the six `<version>-<os>-<cpu>` platform
-versions first, under per-platform dist-tags, then the wrapper under `latest`
-or `beta`, because trusted publishing cannot move a dist-tag after the fact.
-See [`apps/desktop/npm/README.md`](../npm/README.md#release) for why that order
-needs no registry wait.
+is not part of the tag pipeline; the
+[install guide](../../../docs/private-ai-proxy-install.md#homebrew) explains
+how it is updated.
 
 `Desktop Tauri` is also the package-smoke entry point. A manual run on a branch
 builds unsigned test packages of the committed version and never creates a
@@ -168,7 +159,7 @@ release; `package_only` skips the full verification.
   checks a package's CycloneDX SBOM attestations instead.
 - Public assets use `private-ai-proxy-<version>-<platform>-<arch>.<format>` or
   `private-ai-proxy-cli-<version>-<platform>-<arch>.<format>`.
-- Stable desktop releases become the repository's Latest release. Beta releases
+- Stable Private AI Proxy releases become the repository's Latest release. Beta releases
   and updater-feed releases never replace Latest. Stable releases also advance
   the beta updater feed when they are newer than its latest beta.
 
@@ -178,16 +169,13 @@ environment, CI imports the certificate only for the Windows package job. Tauri
 signs the application, bundled executables, and NSIS installer during packaging;
 CI verifies the resulting signatures and removes the certificate afterward.
 Unsigned Windows builds are valid release artifacts but may trigger stronger
-SmartScreen warnings.
+SmartScreen warnings. macOS direct-download builds are signed with a
+Developer ID certificate and notarized.
 
 ## Updates
 
-The update behavior of every installation is in
-[Updates by installation](distribution.md#updates-by-installation). Desktop
-DMG, NSIS, DEB and RPM installs update in-app. Arch Linux packages, CLI-only
-native packages, npm, and portable archives never modify themselves: `pap doctor`,
-the web UI, and (for the Arch desktop package) the desktop app announce a newer
-release in the saved channel together with the exact upgrade commands.
+[Updates by installation](distribution.md#updates-by-installation) describes
+how every installation updates.
 
 AppImage is intentionally unsupported. Its temporary mount cannot provide a
 stable executable lifetime for a backend that survives the UI process. Existing
@@ -195,11 +183,8 @@ AppImage installations cannot automatically change bundle type and require a
 manual migration to a native package.
 
 Arch packages use the standard `.pkg.tar.zst` format for x86_64 and aarch64.
-Install or upgrade a downloaded desktop package with:
+Install or upgrade a downloaded desktop app package with:
 
 ```bash
 sudo pacman -U ./private-ai-proxy-<version>-linux-<arch>.pkg.tar.zst
 ```
-
-A running backend keeps its old build until the next client command restarts
-it; run `pap --yes service stop` as the signed-in user to switch at once.

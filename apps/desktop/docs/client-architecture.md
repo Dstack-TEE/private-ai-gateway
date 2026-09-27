@@ -7,9 +7,9 @@ Status: implemented.
 | Component | Responsibility | Implementation |
 | --- | --- | --- |
 | Private AI Gateway | Remote attested inference service and signed receipts | `src/aggregator`, `src/middleware` |
-| Private AI Proxy | Desktop profiles, agent connections, verification and usage | `apps/desktop` |
+| Private AI Proxy | Desktop app, `pap` CLI and backend service: profiles, agent connections, verification and usage | `apps/desktop` |
 | Local backend | Sessions, configuration transactions, local API and verifier task ownership | `apps/desktop/runtime`, `apps/desktop/agent-bridge` |
-| `private-ai-proxy` | Unified managed CLI and ACI protocol commands | `apps/desktop/cli` |
+| `private-ai-proxy` | The `pap` CLI: management and ACI protocol commands | `apps/desktop/cli` |
 | `private-ai-proxy-service` | Per-user backend entry point | `apps/desktop/cli/service.rs` |
 
 ## Project boundary
@@ -21,8 +21,9 @@ arguments, execution, output and completions live in
 (`cli/serve.rs`, which the backend also runs in managed mode) form the crate's
 library, built once for both executables. The backend crates contain no
 argument parsing or terminal prompting.
-There is one PAP user-facing executable and one PAP relying-party verifier.
-Desktop integration adds lifecycle events for process integration and post-delivery receipt auditing.
+There is one user-facing executable, whose commands and aliases are in
+[CLI](cli.md), and one relying-party verifier. Managed mode adds lifecycle
+events for process integration and post-delivery receipt auditing.
 The Private AI Proxy package owns the user-facing CLI, its managed service binary,
 and its relying-party ACI modules under `apps/desktop/cli/aci`; shared protocol
 encoding lives in `crates/aci-protocol` and shared policy-neutral verification
@@ -36,24 +37,13 @@ both depend on the neutral `aci-protocol` crate for wire types and deterministic
 encoding, and on the neutral `aci-verify` crate for policy-neutral verification
 mechanisms (report binding, dstack event-log replay and KMS custody chain,
 declared TLS selection). Each project keeps its own appraisal, trust anchors,
-and DCAP quote verification, and retains its own workspace and lockfile. `pap` is the preferred
-shell command; the full `private-ai-proxy` name and the legacy `aci` alias
-invoke the same executable rather than separate binaries or crates. `aci`
-prints a one-line note toward `pap` only on an interactive terminal outside
-JSON modes, so scripted use keeps identical output.
-
-`pap verify/audit/sessions/send/curl` do not initialize the managed backend or
-read the settings files. `pap serve` streams responses immediately and audits receipts
-afterward by default. Receipt checks never gate streaming. `pap --json serve`
-emits lifecycle JSON events.
+and DCAP quote verification, and retains its own workspace and lockfile.
 
 `pap start/stop` retain managed profiles, user-session continuity and reversible
 agent configuration. The backend runs the same verifier implementation as
-`private-ai-proxy serve` as an owned Tokio task. The task has no listener of
-its own; stopping or losing the backend drops its only request path.
-Direct and independent CLI packages contain `private-ai-proxy`,
-`private-ai-proxy-service` and the credential helper. MAS contains only the
-service. No distribution contains an independent `aci` executable.
+`pap serve` as an owned Tokio task (see [Verifier execution](#verifier-execution)).
+[CLI distribution](cli-distribution.md) lists the executables each package
+ships.
 
 ## Crate boundaries
 
@@ -177,10 +167,10 @@ use a direct callback, and request delivery, usage and receipt-audit updates all
 flow through `ProxyEvent`.
 
 The verifier runs as a task owned by the backend, so it shares the backend's
-lifetime and has no separately reachable port. Standalone `pap serve` uses the
-same verifier with its own proxy listener and the documented `--control`
-receipt-audit listener; managed mode binds neither and calls the verifier
-directly.
+lifetime and has no separately reachable port; stopping or losing the backend
+drops its only request path. Standalone `pap serve` runs the same verifier
+behind its own listeners, described in
+[Local verifying proxy](cli.md#local-verifying-proxy).
 
 ## Security and Protocol
 
@@ -230,22 +220,13 @@ only their own connection. axum's server sets no header read timeout; the
 endpoint's peers are the same OS user.
 
 The optional web UI is a second, browser-facing transport owned by the service.
-It is off by default and binds `127.0.0.1` unless network access is explicitly
-allowed; its listener settings share `ListenConfig` and `listen::resolve` with
-the Local API, so non-loopback addresses fail closed without confirmation.
-Setting changes apply live and bind failures are reported in state. Browsers
-sign in with a password the service generates when none is set and keeps in
-`credentials.toml`; only the local endpoint (its root of trust) reads, rotates
-or sets it. Signing in sets an `HttpOnly`, `SameSite=Strict` cookie
-for an idle-expiring server-side session; mutations also need an exact
-`Origin`.
-Changing the password, disabling the web UI, moving its listener, resetting
-settings or restarting the service revokes every session. Requests require an
-allowed `Host` (the bound address, the client host, loopback when bound to
-every interface, or `localhost` when loopback reaches the listener), origin
-headers for that host (always present on `POST`) and JSON mutations, then run
-through the same router, admission and dispatch as the local endpoint. Sign-in attempts and rejected requests share a token bucket. Its state
-stream is fed from the controller's state channel. Mac App Store builds omit it.
+Its listener settings share `ListenConfig` and `listen::resolve` with the Local
+API, so non-loopback addresses fail closed without confirmation. Setting
+changes apply live and bind failures are reported in state. Requests that pass
+the web UI's sign-in, `Host` and `Origin` checks run through the same router,
+admission and dispatch as the local endpoint, and its state stream is fed from
+the controller's state channel. Mac App Store builds omit it.
+[Web UI](cli.md#web-ui) describes its password, sessions and security model.
 
 Agent changes retain preview/revision/apply validation. CSV exports are streamed
 one row at a time into a newly created private file; existing targets and symlinks
@@ -260,14 +241,12 @@ on an unattended machine needs no unlocked OS keychain.
 
 The display name is Private AI Proxy, with by dstack TEE attribution.
 The application identifier is `org.dstack.private-ai-proxy`; storage and
-credential services use the new identity and local keys use `sk-pap-`.
-Old beta configuration is not migrated. Command registration installs `pap`,
-`private-ai-proxy`, and `aci`, and refuses unrelated existing commands.
+credential services use the new identity. The local client key is `sk-pap-`
+followed by 64 lowercase hexadecimal characters; it authenticates local
+inference, not backend administration. Old beta configuration is not migrated.
 
 Windows uses the official Tauri NSIS template with branded artwork and
 no legacy-installation branches. Linux packages use the Private AI Proxy name.
-Beta and stable remain separate. Independent CLI archives contain the three
-console executables and do not require the desktop UI.
 
 ## Sources
 

@@ -16,9 +16,9 @@ separate owner-only `credentials.toml` like Cargo's `credentials.toml` and the
 AWS CLI's `credentials`. Keys are kebab-case, like
 [Cargo's configuration](https://doc.rust-lang.org/cargo/reference/config.html),
 [`Tauri.toml`](https://v2.tauri.app/develop/configuration-files/) and
-[Helix](https://docs.helix-editor.com/configuration.html). `pap settings set`
-names a key by its dotted path in the file (`web-ui.port`), as `git config`
-and `cargo config get` do, and `pap settings show` prints the same names.
+[Helix](https://docs.helix-editor.com/configuration.html).
+[`pap settings`](cli.md#settings) names each key by its dotted path in the file,
+such as `web-ui.port`.
 
 ```toml
 #:schema ./config.schema.json
@@ -47,11 +47,9 @@ api-key = "sk-..."
 password = "..."
 ```
 
-The service generates the web UI password when none is set, as code-server
-does on first run; `pap web-ui password show` prints it and
-`pap web-ui password rotate` replaces it (see [the CLI guide](cli.md#web-ui)).
-Earlier versions kept only `password-hash`, an Argon2id hash of a chosen
-password; it keeps signing in until a new password replaces it.
+The service generates the web UI password when none is set; see
+[Web UI](cli.md#web-ui). A `password-hash` in its place comes from an earlier
+version and keeps signing in until a new password replaces it.
 
 Usage history, agent connection records, agent tokens, caches, locks and logs
 are state, not settings; they stay in the app data directory. So does
