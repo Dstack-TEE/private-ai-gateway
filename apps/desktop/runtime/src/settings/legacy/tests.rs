@@ -238,7 +238,7 @@ fn assert_fully_migrated(config_dir: &Path, data: &Path, keychain: &FakeKeychain
 }
 
 #[test]
-fn a_linux_layout_moves_settings_to_the_config_directory() {
+fn a_direct_build_layout_moves_settings_to_the_config_directory() {
     let root = tempfile::tempdir().unwrap();
     let (config_dir, data) = (root.path().join("config"), root.path().join("data"));
     write_legacy(&data);
@@ -265,9 +265,9 @@ fn a_linux_layout_moves_settings_to_the_config_directory() {
 }
 
 #[test]
-fn macos_windows_and_mac_app_store_layouts_use_a_config_subdirectory() {
-    // Direct macOS, Windows and the MAS container keep one app directory;
-    // settings move into its `Config` subdirectory, state stays put.
+fn the_mac_app_store_layout_uses_a_config_subdirectory() {
+    // The MAS container keeps one app directory; settings move into its
+    // `Config` subdirectory, state stays put.
     let root = tempfile::tempdir().unwrap();
     let container = root
         .path()

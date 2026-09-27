@@ -20,6 +20,7 @@
 //! (see `desktop_core::config::parse_toml`).
 
 pub(crate) mod legacy;
+pub(crate) mod relocation;
 #[cfg(test)]
 mod tests;
 
@@ -236,7 +237,9 @@ impl Settings {
         }
     }
 
-    /// Adds what the 0.1 credential import could not bring over.
+    /// Adds notices from after the settings were opened: what the 0.1
+    /// credential import could not bring over, and the settings directory move
+    /// (see [`relocation`]).
     pub(crate) fn add_import_notices(&self, notices: &[String]) {
         if notices.is_empty() {
             return;

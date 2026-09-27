@@ -126,7 +126,9 @@ when it closes, as some remote shells and CI runners use, ends the backend too.
 
 ## Settings
 
-Settings live in `config.toml` and the user's credentials in `credentials.toml`; see
+Settings live in `config.toml` and the user's credentials in `credentials.toml`,
+in `~/.config/private-ai-proxy` on every platform (`$XDG_CONFIG_HOME` when set;
+the Mac App Store build keeps them in its container); see
 [Settings files](configuration.md) for their locations, keys, live reload,
 syncing and the upgrade from 0.1.
 
