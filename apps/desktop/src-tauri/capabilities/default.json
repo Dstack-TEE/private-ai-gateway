@@ -68,8 +68,6 @@
     "allow-request-agent-access",
     "allow-get-cli-registration",
     "allow-set-cli-registration",
-    "allow-show-confirmation",
-    "allow-show-alert",
     "allow-quit-app",
     "allow-stop-all-and-quit",
     "allow-take-navigation"

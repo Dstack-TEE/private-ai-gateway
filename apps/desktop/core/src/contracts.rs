@@ -45,32 +45,6 @@ pub struct ServiceIdentity {
     pub supported_e2ee_versions: Vec<String>,
 }
 
-/// A question the desktop app asks before an action (`useConfirm`). macOS
-/// shows one that is not destructive as an alert sheet on the window; the
-/// window's own dialog asks the rest, and every question elsewhere.
-#[derive(Clone, Debug, Deserialize, Serialize, TS)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[ts(optional_fields)]
-pub struct Confirmation {
-    pub title: String,
-    pub message: String,
-    pub confirm_label: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cancel_label: Option<String>,
-    /// The action deletes, revokes or resets something that can't be restored.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub destructive: Option<bool>,
-}
-
-/// A failed action the desktop app reports (`useReportFailure`). macOS shows it as an
-/// alert sheet on the window; the window's own dialog shows it elsewhere.
-#[derive(Clone, Debug, Deserialize, Serialize, TS)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AlertMessage {
-    pub title: String,
-    pub message: String,
-}
-
 /// One request seen by the local proxy: forwarded through the verifier (with
 /// its receipt verdict) or answered locally (rejected before any receipt).
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
@@ -869,8 +843,6 @@ mod typescript {
             DistributionCapabilities,
             WebBootstrap,
             AboutLink,
-            Confirmation,
-            AlertMessage,
         ) {
             output.push_str(&declaration);
         }

@@ -88,10 +88,10 @@ protection problems, is stored under that key.
   interactions, and `lib/` contains presentation rules and the live desktop API
   binding. Features never import the app.
 - Dialogs are shadcn `Dialog`s in the one window, in the desktop app and the web
-  UI alike. Decisions (`useConfirm`) are an alert sheet on the window in the
-  macOS app and an `AlertDialog` on Windows, Linux and in the web UI; a
-  destructive one is always the `AlertDialog`, which focuses Cancel, so it
-  never becomes the default button.
+  UI alike. Decisions (`useConfirm`) and alerts (`useReportFailure`) share one
+  `AlertDialog` on every platform, like WinUI's ContentDialog and libadwaita's
+  AlertDialog, one request at a time. A destructive decision focuses Cancel,
+  so Return never starts it; any other focuses its action.
   The shell injects the platform (`<html data-platform>`) for platform
   behaviour such as tooltip delays and drag regions; every platform and the
   web UI use the same shadcn styles. Tray and menu items show the window and
@@ -104,10 +104,10 @@ protection problems, is stored under that key.
   menu item, the tray's and the menu bar's. The window shows no success
   messages: the changed value, closed dialog or save panel is the feedback.
   Failures show inline in their dialog, form or settings row, and in an alert
-  for other in-window actions, including app-menu items: a sheet on macOS
-  (NSAlert), the window's AlertDialog elsewhere and in the web UI. Failed tray
-  actions are only logged, like other tray apps; the tray and the window show
-  the state that applies, and system notifications report background failures.
+  for other in-window actions, including app-menu items, with a focused OK.
+  Failed tray actions are only logged, like other tray apps; the tray and the
+  window show the state that applies, and system notifications report
+  background failures.
 - Runtime `controller.rs` owns shared state and launch; its private modules group
   lifecycle, profiles, account login, credentials, agents and local endpoints.
   The same locks and transaction guards span these implementation modules.
