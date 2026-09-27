@@ -1,10 +1,9 @@
 import React, { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Outlet, useMatches, useNavigate } from "@tanstack/react-router";
-import { toast } from "sonner";
 import { useAgents } from "./hooks/use-agents";
 import { useAppState } from "./lib/use-app-state";
-import { toastError } from "./lib/error-message";
+import { errorMessage } from "./lib/error-message";
 import { useUpdates } from "./updates";
 import { INITIAL_STATE, type AboutLink, type AppState, type NavigationTarget } from "../shared/contracts";
 import { PageHeader, Sidebar } from "./components/navigation";
@@ -18,24 +17,30 @@ import { WebUiDialog } from "./features/web-ui";
 import { UsageProofDialog } from "./features/usage";
 import { LocalApiExamplesDialog } from "./components/local-api-examples";
 import { NotificationsDialog } from "./components/notifications";
-import { useConfirm, useConfirmOpen } from "./components/confirm";
+import { useConfirm, useConfirmOpen, useReportFailure } from "./components/confirm";
 import { useDialog } from "./components/app-dialog";
 import { AppearanceProvider } from "./components/appearance";
-import { Toaster } from "./components/ui/sonner";
 import { localEndpoint } from "./lib/format";
 
 /** The signed-in window: the sidebar, the page header and the page. */
 export function AppLayout(): React.JSX.Element {
   const client = useQueryClient();
   const navigate = useNavigate();
+  // The reset settings show on the Settings page; only screen readers are told.
+  const [announcement, setAnnouncement] = useState("");
   useEffect(() => desktopApi.onSettingsReset(() => {
     void client.resetQueries();
     void navigate({ to: "/settings", replace: true });
-    toast.success("Settings reset");
+    setAnnouncement("Settings reset");
   }), [client, navigate]);
+  useEffect(() => {
+    if (!announcement) return;
+    const timer = window.setTimeout(() => setAnnouncement(""), 1_500);
+    return () => window.clearTimeout(timer);
+  }, [announcement]);
   return <AppearanceProvider api={desktopApi}>
     <Window />
-    <Toaster />
+    <span className="sr-only" role="status">{announcement}</span>
   </AppearanceProvider>;
 }
 
@@ -49,6 +54,7 @@ function Window(): React.JSX.Element {
   const agents = useAgents(desktopApi, state, distributionCapabilities.sandboxHomeAccess);
   const backendReady = Boolean(appState.data) && state.backendConnected !== false;
   const confirm = useConfirm();
+  const reportFailure = useReportFailure();
   const confirming = useConfirmOpen();
   const dialog = useDialog<AppDialog>();
   const { payload: shownDialog, key: dialogKey, show: openDialog } = dialog;
@@ -67,22 +73,21 @@ function Window(): React.JSX.Element {
       })) return;
       setState(await desktopApi.setRequireProductionOs(required));
     },
-    onError: (error) => toastError("Could not change the OS policy", error),
   });
   const reset = useMutation({
     mutationFn: () => desktopApi.resetSettings(),
     onSuccess: setState,
-    onError: (error) => toastError("Could not reset settings", error),
+    onError: (error) => reportFailure("Could not reset settings", error),
   });
   const protection = useMutation({
     mutationFn: (operation: "start" | "stop") => operation === "stop" ? desktopApi.stop() : desktopApi.start(state.config),
     onSuccess: setState,
-    onError: (error, operation) => toastError(operation === "stop" ? "Could not stop protection" : "Could not start protection", error),
+    onError: (error, operation) => reportFailure(operation === "stop" ? "Could not stop protection" : "Could not start protection", error),
   });
   const backendStart = useMutation({
     mutationFn: () => desktopApi.startBackendService(),
     onSuccess: setState,
-    onError: (error) => toastError("Could not start the background service", error),
+    onError: (error) => reportFailure("Could not start the background service", error),
   });
   /** A settings change is applying; controls that change settings wait. */
   const applying = osPolicy.isPending || reset.isPending;
@@ -119,7 +124,7 @@ function Window(): React.JSX.Element {
       const next = await action();
       if (next) setState(next);
     } catch (error) {
-      toastError(title, error);
+      reportFailure(title, error);
     }
   };
   const resetSettings = async () => {
@@ -137,7 +142,7 @@ function Window(): React.JSX.Element {
         destructive: true,
       })) resetMutate();
     } catch (error) {
-      toastError("Could not reset settings", error);
+      reportFailure("Could not reset settings", error);
     }
   };
   // The state changes with every backend update, so the shell is not memoized.
@@ -163,6 +168,7 @@ function Window(): React.JSX.Element {
     setRequireProductionOs: (required) => {
       if (!applying) setRequireProductionOs(required);
     },
+    requireProductionOsError: osPolicy.error ? `Could not change the OS policy. ${errorMessage(osPolicy.error)}` : undefined,
     resetSettings: () => void resetSettings(),
     openDialog,
     openProfiles: () => {
@@ -183,7 +189,7 @@ function Window(): React.JSX.Element {
       });
       if (confirmed) await desktopApi.stopAllAndQuit();
     } catch (error) {
-      toastError("Could not stop all services", error);
+      reportFailure("Could not stop all services", error);
     }
   });
 

@@ -2,13 +2,13 @@ import { createContext, useContext, useEffect, useLayoutEffect, useMemo, type Pr
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Hint } from "./hint";
 import type { Appearance, DesktopApi } from "../../shared/contracts";
-import { Item, ItemContent, ItemTitle, ItemActions } from "./ui/item";
+import { Item, ItemContent, ItemTitle, ItemDescription, ItemActions } from "./ui/item";
 import { FieldLabel } from "./ui/field";
-import { toastError } from "../lib/error-message";
+import { errorMessage } from "../lib/error-message";
 import { Monitor, Sun, Moon } from "lucide-react";
 import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group";
 
-const AppearanceContext = createContext<{ value: Appearance; busy: boolean; change(value: Appearance): void } | null>(null);
+const AppearanceContext = createContext<{ value: Appearance; busy: boolean; error?: string; change(value: Appearance): void } | null>(null);
 
 /**
  * Selects the document's appearance while mounted; `public/appearance-init.js`
@@ -33,19 +33,20 @@ export function AppearanceProvider({ api, children }: PropsWithChildren<{ api: D
     mutationFn: (next: Appearance) => api.setAppearance(next),
     onMutate: () => client.cancelQueries({ queryKey: ["appearance"] }),
     onSuccess: (_, next) => { client.setQueryData(["appearance"], next); },
-    onError: (error) => toastError("Could not change the appearance", error),
   });
   const busy = mutation.isPending;
+  const error = mutation.error ? `Could not change the appearance. ${errorMessage(mutation.error)}` : undefined;
   const { mutate } = mutation;
   useEffect(() => api.onAppearanceChange((next) => { void client.cancelQueries({ queryKey: ["appearance"] }).then(() => client.setQueryData(["appearance"], next)); }), [api, client]);
   useAppearanceTheme(value);
   const appearance = useMemo(() => ({
     value,
     busy,
+    error,
     change: (next: Appearance) => {
       if (!busy) mutate(next);
     },
-  }), [value, busy, mutate]);
+  }), [value, busy, error, mutate]);
   return <AppearanceContext.Provider value={appearance}>{children}</AppearanceContext.Provider>;
 }
 
@@ -59,7 +60,7 @@ export function useAppearance() { return useAppearanceContext().value; }
 
 export function AppearanceControl() {
   const appearance = useAppearanceContext();
-  return <Item><ItemContent><ItemTitle><FieldLabel id="appearance-label">Theme</FieldLabel></ItemTitle></ItemContent><ItemActions>
+  return <Item><ItemContent><ItemTitle><FieldLabel id="appearance-label">Theme</FieldLabel></ItemTitle>{appearance.error && <ItemDescription role="alert" className="text-destructive">{appearance.error}</ItemDescription>}</ItemContent><ItemActions>
     <ToggleGroup size="sm" variant="outline" spacing={0} aria-labelledby="appearance-label" value={[appearance.value]} disabled={appearance.busy} onValueChange={([value]) => {
       if (value === "system" || value === "light" || value === "dark") appearance.change(value);
     }}>{([["system", "System", Monitor], ["light", "Light", Sun], ["dark", "Dark", Moon]] as const).map(([value, label, Icon]) => <Hint key={value} content={label}><ToggleGroupItem value={value} aria-label={label}><Icon className="size-4" /></ToggleGroupItem></Hint>)}</ToggleGroup>

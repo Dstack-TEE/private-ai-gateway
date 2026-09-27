@@ -15,7 +15,8 @@ import { DialogFooter } from "../components/ui/dialog";
 import { DEFAULT_LOCAL_API_CONFIG, type AppState, type ListenConfig } from "../../shared/contracts";
 import { maskClientKey } from "../lib/format";
 import { desktopApi } from "../lib/environment";
-import { errorMessage, toastError } from "../lib/error-message";
+import { errorMessage } from "../lib/error-message";
+import { useReportFailure } from "../components/confirm";
 import { useCopy } from "../hooks/use-copy";
 import { cn } from "../lib/utils";
 
@@ -32,7 +33,8 @@ export function LocalApiPanel({
 }): React.JSX.Element {
   const endpointLabel = "Local API endpoint";
   const keyLabel = "Local API key";
-  const { copy, isCopied, status } = useCopy((error, label) => toastError(`Could not copy the ${label}`, error));
+  const reportFailure = useReportFailure();
+  const { copy, isCopied, status } = useCopy((error, label) => reportFailure(`Could not copy the ${label}`, error));
   return (
     <div className="copy-rows relative grid auto-rows-auto gap-3">
       <CopyRow title="Endpoint" copyLabel={endpointLabel} value={proxyUrl} copied={isCopied(proxyUrl)} onCopy={copy} />

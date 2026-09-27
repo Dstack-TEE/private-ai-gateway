@@ -24,6 +24,8 @@ export interface Shell {
   protectionPending: boolean;
   toggleProtection(): void;
   setRequireProductionOs(required: boolean): void;
+  /** Why the last OS policy change failed; its row shows it. */
+  requireProductionOsError: string | undefined;
   resetSettings(): void;
   /** A dialog request never replaces an open dialog, only one that is animating out. */
   openDialog(dialog: AppDialog): void;

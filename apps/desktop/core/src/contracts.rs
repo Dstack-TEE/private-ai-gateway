@@ -62,6 +62,15 @@ pub struct Confirmation {
     pub destructive: Option<bool>,
 }
 
+/// A failed action the desktop app reports (`useReportFailure`). macOS shows it as an
+/// alert sheet on the window; the window's own dialog shows it elsewhere.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AlertMessage {
+    pub title: String,
+    pub message: String,
+}
+
 /// One request seen by the local proxy: forwarded through the verifier (with
 /// its receipt verdict) or answered locally (rejected before any receipt).
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
@@ -858,6 +867,7 @@ mod typescript {
             WebBootstrap,
             AboutLink,
             Confirmation,
+            AlertMessage,
         ) {
             output.push_str(&declaration);
         }

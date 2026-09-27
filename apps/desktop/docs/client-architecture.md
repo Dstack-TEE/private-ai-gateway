@@ -101,10 +101,13 @@ protection problems, is stored under that key.
   once, with the real profiles. One requested while a dialog is
   open shows once it closes, and one requested while a confirmation asks for an
   answer is dropped, as with an alert. One app-level handler runs every native
-  menu item, the tray's and the menu bar's. Failures show
-  inline in their dialog, form or page, and as a toast for other in-window
-  actions, including app-menu items. Failed tray actions are only logged, like
-  other tray apps; the tray and the window show the state that applies.
+  menu item, the tray's and the menu bar's. The window shows no success
+  messages: the changed value, closed dialog or save panel is the feedback.
+  Failures show inline in their dialog, form or settings row, and in an alert
+  for other in-window actions, including app-menu items: a sheet on macOS
+  (NSAlert), the window's AlertDialog elsewhere and in the web UI. Failed tray
+  actions are only logged, like other tray apps; the tray and the window show
+  the state that applies, and system notifications report background failures.
 - Runtime `controller.rs` owns shared state and launch; its private modules group
   lifecycle, profiles, account login, credentials, agents and local endpoints.
   The same locks and transaction guards span these implementation modules.

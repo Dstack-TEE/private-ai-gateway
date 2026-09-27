@@ -4,6 +4,7 @@ import type {
   Appearance,
   ConfidentialProfileInput,
   Confirmation,
+  AlertMessage,
   AccountBalance,
   AccountBalanceTarget,
   AccountLoginDetails,
@@ -53,6 +54,8 @@ export interface DesktopApi {
   // Desktop-only capabilities are absent in the web UI.
   /** Asks in an alert sheet on the window; the macOS app only, never for a destructive action. */
   showConfirmation: ((confirmation: Confirmation) => Promise<boolean>) | undefined;
+  /** Reports a failure in an alert sheet on the window; the macOS app only. */
+  showAlert: ((alert: AlertMessage) => Promise<void>) | undefined;
   /** Closes the window as its close button does; the app keeps running. */
   closeWindow: (() => Promise<void>) | undefined;
   /** Quits the app and leaves the background service running. */

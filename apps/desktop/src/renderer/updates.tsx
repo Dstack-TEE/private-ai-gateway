@@ -6,8 +6,8 @@ import { Button } from "./components/ui/button";
 import { ToggleGroup, ToggleGroupItem } from "./components/ui/toggle-group";
 import { FieldLabel } from "./components/ui/field";
 import { Item, ItemContent, ItemTitle, ItemDescription, ItemActions } from "./components/ui/item";
-import { useConfirm } from "./components/confirm";
-import { toastError } from "./lib/error-message";
+import { useConfirm, useReportFailure } from "./components/confirm";
+import { errorMessage } from "./lib/error-message";
 
 const CHECK_INTERVAL = 6 * 60 * 60_000;
 
@@ -18,6 +18,7 @@ const UPDATE_OPERATION = ["app-update-operation"];
 export function useUpdates(api: DesktopApi, checks: boolean) {
   const client = useQueryClient();
   const confirm = useConfirm();
+  const reportFailure = useReportFailure();
   const operating = useIsMutating({ mutationKey: UPDATE_OPERATION }) > 0;
   // The query counts every failed check; these came before the last success.
   const earlierFailures = useRef(0);
@@ -51,7 +52,6 @@ export function useUpdates(api: DesktopApi, checks: boolean) {
       client.setQueryData<UpdateInfo | undefined>(["app-update"], (current) => current ? { ...current, channel: saved, version: null } : current);
       await recheck();
     },
-    onError: (error) => toastError("Could not change the update channel", error),
   });
   const restart = useMutation({
     mutationKey: UPDATE_OPERATION,
@@ -71,7 +71,7 @@ export function useUpdates(api: DesktopApi, checks: boolean) {
         throw error;
       }
     },
-    onError: (error) => toastError("Could not install the update", error),
+    onError: (error) => reportFailure("Could not install the update", error),
   });
 
   return useMemo(() => {
@@ -82,8 +82,10 @@ export function useUpdates(api: DesktopApi, checks: boolean) {
     const currentVersion = installedVersion ?? info?.currentVersion;
     const busy = changeChannel.isPending ? "changing" : restart.isPending ? "restarting" : checking ? "checking" : undefined;
     const error = checkError ? "Could not prepare software updates. Retrying automatically." : undefined;
+    /** Why the last channel change failed; the channel row shows it. */
+    const channelError = changeChannel.error ? `Could not change the update channel. ${errorMessage(changeChannel.error)}` : undefined;
     return {
-      info, ready, currentVersion, busy, error, channel, checks,
+      info, ready, currentVersion, busy, error, channel, channelError, checks,
       changeChannel: (next: UpdateChannel) => {
         if (!busy && next !== channel) changeChannel.mutate(next);
       },
@@ -91,7 +93,7 @@ export function useUpdates(api: DesktopApi, checks: boolean) {
         if (!busy && ready) restart.mutate();
       },
     };
-  }, [checks, snapshot, checkError, checking, installedVersion, changeChannel.isPending, changeChannel.mutate, restart.isPending, restart.mutate]);
+  }, [checks, snapshot, checkError, checking, installedVersion, changeChannel.isPending, changeChannel.error, changeChannel.mutate, restart.isPending, restart.mutate]);
 }
 
 export function UpdateChannelControl({ updates }: { updates: ReturnType<typeof useUpdates> }): React.JSX.Element {
@@ -99,6 +101,7 @@ export function UpdateChannelControl({ updates }: { updates: ReturnType<typeof u
     <ItemContent>
       <ItemTitle><FieldLabel id="update-channel-label">Update channel</FieldLabel></ItemTitle>
       <ItemDescription id="update-channel-note">{updates.channel === "beta" ? "Beta and stable releases" : "Stable releases"}</ItemDescription>
+      {updates.channelError && <ItemDescription role="alert" className="text-destructive">{updates.channelError}</ItemDescription>}
     </ItemContent>
     <ItemActions>
       <ToggleGroup size="sm" variant="outline" spacing={0} aria-labelledby="update-channel-label" aria-describedby="update-channel-note" value={updates.channel ? [updates.channel] : []} disabled={!updates.channel || Boolean(updates.busy)} onValueChange={([value]) => {

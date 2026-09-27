@@ -2,7 +2,7 @@ import React, { lazy, Suspense, useId, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { usageFilters, usagePageQuery } from "../lib/page-queries";
-import { errorMessage, toastError } from "../lib/error-message";
+import { errorMessage } from "../lib/error-message";
 import { useCopy } from "../hooks/use-copy";
 import { Ban, Check, ChevronLeft, ChevronRight, Copy, ShieldCheck, ShieldX } from "lucide-react";
 import { Button } from "../components/ui/button";
@@ -13,7 +13,7 @@ import { StateLabel } from "../components/state-label";
 import { HoverDetails } from "../components/hint";
 import { agentName, currency, formatTokens, outcomeOf, usageTokens } from "../lib/usage-presentation";
 import { USAGE_PAGE_SIZES, USAGE_SEARCH_DEFAULTS, usageDateBounds, usageDateLabel, usageDateSearch, usageDateSelection, type UsageSearch } from "../lib/usage-dates";
-import { Field, FieldLabel, FieldSet, FieldLegend } from "../components/ui/field";
+import { Field, FieldError, FieldLabel, FieldSet, FieldLegend } from "../components/ui/field";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Card, CardHeader, CardTitle, CardDescription, CardAction, CardContent } from "../components/ui/card";
 import { IconButton } from "../components/controls";
@@ -273,7 +273,7 @@ function readableReceipt(receipt: string): string {
 
 /** The receipt document the audit checked. Copy takes it as the service returned it, ready for `pap audit --receipt`. */
 function SignedReceipt({ recordId }: { recordId: string }): React.JSX.Element | null {
-  const { copy, isCopied, status } = useCopy((failure) => toastError("Could not copy the signed receipt", failure));
+  const { copy, isCopied, status, error: copyError } = useCopy();
   const titleId = useId();
   const { data: receipt, error } = useQuery({
     queryKey: ["usage-receipt", recordId], queryFn: () => desktopApi.getUsageReceipt(recordId),
@@ -287,6 +287,7 @@ function SignedReceipt({ recordId }: { recordId: string }): React.JSX.Element | 
       <IconButton size="icon-sm" label="Copy signed receipt" onClick={() => copy("Signed receipt", receipt)}>{isCopied(receipt) ? <Check /> : <Copy />}</IconButton>
     </div>
     {status}
+    {copyError && <FieldError>Could not copy the signed receipt. {errorMessage(copyError)}</FieldError>}
     <pre role="region" tabIndex={0} aria-labelledby={titleId} className="overflow-x-auto rounded-2xl border bg-muted/50 p-4 text-xs leading-relaxed select-text"><code>{readable}</code></pre>
   </section>;
 }

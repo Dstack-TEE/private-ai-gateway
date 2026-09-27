@@ -1,5 +1,4 @@
 import React from "react";
-import { toastError } from "../lib/error-message";
 import { ExternalLink, FolderLock, LoaderCircle, TriangleAlert } from "lucide-react";
 import claudeCodeIcon from "@lobehub/icons-static-svg/icons/claudecode-color.svg";
 import codexIcon from "@lobehub/icons-static-svg/icons/codex-color.svg";
@@ -21,6 +20,7 @@ import { Alert, AlertDescription } from "../components/ui/alert";
 import { desktopApi } from "../lib/environment";
 import { useShell } from "../lib/shell";
 import { useAgentConnection } from "../hooks/use-agents";
+import { useReportFailure } from "../components/confirm";
 import { cn } from "../lib/utils";
 
 const AGENT_ICONS: Record<string, string> = {
@@ -169,7 +169,8 @@ export function AgentRow({
 }
 
 function AgentWebsite({ agent }: { agent: AgentStatus }): React.JSX.Element {
+  const reportFailure = useReportFailure();
   return <Button variant="outline" onClick={() => {
-    void desktopApi.openAgentWebsite(agent.id).catch((error: unknown) => toastError("Could not open agent website", error));
+    void desktopApi.openAgentWebsite(agent.id).catch((error: unknown) => reportFailure("Could not open agent website", error));
   }}>Website<ExternalLink size={14} aria-hidden="true" /></Button>;
 }

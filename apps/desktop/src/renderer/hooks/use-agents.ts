@@ -1,8 +1,8 @@
 import { useEffect, useMemo } from "react";
 import { keepPreviousData, useIsMutating, useMutation, useMutationState, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
 import type { AgentStatus, AppState, DesktopApi } from "../../shared/contracts";
-import { errorMessage, toastError } from "../lib/error-message";
+import { errorMessage } from "../lib/error-message";
+import { useReportFailure } from "../components/confirm";
 import { agentAccessMutation, agentIntegrationsLocked, completeAgentStatuses, readAgentIntegrations, type AgentIntegrations } from "../lib/agent-integrations";
 
 const connectionKey = (agentId: string) => ["agent-connection", agentId];
@@ -14,9 +14,10 @@ const connectionKey = (agentId: string) => ["agent-connection", agentId];
  */
 export function useAgents(api: DesktopApi, state: AppState, requiresAuthorization: boolean) {
   const client = useQueryClient();
+  const reportFailure = useReportFailure();
   const access = useMutation({
     ...agentAccessMutation(api, requiresAuthorization, client),
-    onError: (failure) => toastError("Could not grant agent access", failure),
+    onError: (failure) => reportFailure("Could not grant agent access", failure),
   });
   const authorizing = access.isPending;
   const { data, error } = useQuery({
@@ -49,6 +50,7 @@ export function useAgents(api: DesktopApi, state: AppState, requiresAuthorizatio
  */
 export function useAgentConnection(api: DesktopApi, agent: AgentStatus) {
   const client = useQueryClient();
+  const reportFailure = useReportFailure();
   const mutation = useMutation({
     mutationKey: connectionKey(agent.id),
     scope: { id: `agent-connection:${agent.id}` },
@@ -58,9 +60,8 @@ export function useAgentConnection(api: DesktopApi, agent: AgentStatus) {
         ...current,
         agents: current.agents.map((entry) => entry.id === status.id ? status : entry),
       }));
-      toast.success(`${agent.name} ${status.recorded ? "connected" : "disconnected"}`);
     },
-    onError: (failure, connect) => toastError(`${agent.name} could not ${connect ? "connect" : "disconnect"}`, failure),
+    onError: (failure, connect) => reportFailure(`${agent.name} could not ${connect ? "connect" : "disconnect"}`, failure),
     onSettled: () => client.invalidateQueries({ queryKey: ["agents"] }),
   });
   const pending = useMutationState({

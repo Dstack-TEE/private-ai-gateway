@@ -1,7 +1,7 @@
 import React, { useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { cliRegistrationQuery } from "../lib/page-queries";
-import { errorMessage, toastError } from "../lib/error-message";
+import { errorMessage } from "../lib/error-message";
 import { ChevronRight } from "lucide-react";
 import { brand } from "../brand/brand";
 import { UpdateControl, UpdateChannelControl } from "../updates";
@@ -84,9 +84,15 @@ function useLaunchPreferences() {
     mutationFn: ({ name, enabled }: { name: LaunchPreference; enabled: boolean }) => desktopApi.setLaunchPreference(name, enabled),
     onMutate: () => client.cancelQueries({ queryKey: ["launch-preferences"] }),
     onSuccess: (next) => { client.setQueryData(["launch-preferences"], next); },
-    onError: (error) => toastError("Could not change the launch preference", error),
   });
-  return { preferences: data, saving: mutation.isPending, change: (name: LaunchPreference, enabled: boolean) => mutation.mutate({ name, enabled }) };
+  const failed = mutation.error ? mutation.variables?.name : undefined;
+  return {
+    preferences: data,
+    saving: mutation.isPending,
+    change: (name: LaunchPreference, enabled: boolean) => mutation.mutate({ name, enabled }),
+    /** Why the last change of `name` failed; its row shows it. */
+    error: (name: LaunchPreference) => failed === name ? `Could not change the preference. ${errorMessage(mutation.error)}` : undefined,
+  };
 }
 
 export function SettingsPage(): React.JSX.Element {
@@ -110,8 +116,8 @@ export function SettingsPage(): React.JSX.Element {
       </Alert>}
 
       <SettingsSection title="General">
-          {distribution.launchAtLogin && <SettingsToggle label="Open at Login" checked={launch.preferences?.openAtLogin ?? false} disabled={!launch.preferences || launch.saving} onToggle={() => launch.change("openAtLogin", !launch.preferences?.openAtLogin)} />}
-          <SettingsToggle label="Protect on launch" checked={launch.preferences?.connectOnLaunch ?? false} disabled={!launch.preferences || launch.saving} onToggle={() => launch.change("connectOnLaunch", !launch.preferences?.connectOnLaunch)} />
+          {distribution.launchAtLogin && <SettingsToggle label="Open at Login" checked={launch.preferences?.openAtLogin ?? false} disabled={!launch.preferences || launch.saving} error={launch.error("openAtLogin")} onToggle={() => launch.change("openAtLogin", !launch.preferences?.openAtLogin)} />}
+          <SettingsToggle label="Protect on launch" checked={launch.preferences?.connectOnLaunch ?? false} disabled={!launch.preferences || launch.saving} error={launch.error("connectOnLaunch")} onToggle={() => launch.change("connectOnLaunch", !launch.preferences?.connectOnLaunch)} />
           <AppearanceControl />
           {distribution.notifications && <SettingsLink title="Notifications" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "notifications" })} />}
       </SettingsSection>
@@ -126,7 +132,7 @@ export function SettingsPage(): React.JSX.Element {
         <CollapsibleTrigger render={<Button variant="ghost" />}><ChevronRight size={15} aria-hidden="true" /><span>Advanced</span></CollapsibleTrigger>
         <CollapsibleContent>
           <SettingsList>
-          <SettingsToggle label="Allow development OS" checked={allowDevelopmentOs} developmentMode={allowDevelopmentOs} disabled={locked} onToggle={() => shell.setRequireProductionOs(allowDevelopmentOs)} />
+          <SettingsToggle label="Allow development OS" checked={allowDevelopmentOs} developmentMode={allowDevelopmentOs} disabled={locked} error={shell.requireProductionOsError} onToggle={() => shell.setRequireProductionOs(allowDevelopmentOs)} />
           {distribution.nativeUpdates && <UpdateChannelControl updates={updates} />}
           {distribution.cliRegistration && <CliRegistrationControl />}
           {state.configFiles.configPath && <Item>
