@@ -29,8 +29,9 @@ test("only release tags publish, after every package, in order", async () => {
   const needs = (job) => [direct.jobs[job].needs ?? []].flat();
   const after = (job, dependency) => needs(job).some((need) => need === dependency || after(need, dependency));
   assert.ok(after("release", "package") && after("release", "mac-app-store"));
-  // The App Store upload cannot be undone.
-  assert.ok(after("mac-app-store", "verify"));
+  // The App Store upload cannot be undone, so it waits for every
+  // verification job that the packages wait for.
+  for (const job of needs("package").filter((need) => need.startsWith("verify"))) assert.ok(after("mac-app-store", job), job);
   assert.ok(after("update-feed", "release"));
   assert.ok(after("publish-npm", "update-feed"));
   // Beta releases skip the App Store job; a later job without a status check
