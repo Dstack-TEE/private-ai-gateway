@@ -22,6 +22,8 @@
 
   --sidebar-width: 196px;
   --warning: var(--color-amber-700);
+  --warning-bg: color-mix(in oklch, var(--warning) 10%, transparent);
+  --danger-bg: color-mix(in oklch, var(--destructive) 10%, transparent);
 }
 :root.dark {
   color-scheme: dark;

@@ -1,13 +1,10 @@
 import React, { useEffect, useState } from "react";
 import { RefreshCw, ShieldCheck, ShieldX } from "lucide-react";
 import { SwitchControl } from "./controls";
-import { StateLabel } from "./state-label";
-import { toneTextClass } from "../lib/tone";
-import { cn } from "../lib/utils";
 import type { AppState } from "../../shared/contracts";
 
 export function ProtectionStatus({ state }: { state: AppState }): React.JSX.Element {
-  const { phase, title, tone } = state.protection;
+  const { phase, title } = state.protection;
   const active = phase === "protected";
   const since = active ? state.protectedSince : undefined;
   const [now, setNow] = useState(() => Date.now());
@@ -29,12 +26,11 @@ export function ProtectionStatus({ state }: { state: AppState }): React.JSX.Elem
   }, [since]);
   const seconds = since === undefined ? undefined : Math.max(0, Math.floor(now / 1_000) - since);
   const elapsed = seconds === undefined ? undefined : [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60].map((value) => String(value).padStart(2, "0")).join(":");
-  const Icon = active ? ShieldCheck : phase === "reconnecting" ? RefreshCw : ShieldX;
   return (
-    <span className={cn("inline-flex min-w-0 flex-wrap items-center gap-x-1.5", toneTextClass[tone])}>
-      <Icon size={14} aria-hidden="true" />
+    <span className="protection-status inline-flex items-center justify-center gap-1.25 max-w-full flex-wrap [&_>_svg]:flex-none">
+      {active ? <ShieldCheck size={14} aria-hidden="true" /> : phase === "reconnecting" ? <RefreshCw size={14} aria-hidden="true" /> : <ShieldX size={14} aria-hidden="true" />}
       <span aria-live="polite">{title}</span>
-      {elapsed !== undefined && <time className="font-mono text-xs font-normal text-muted-foreground tabular-nums" dateTime={`PT${seconds}S`} aria-label={`Session elapsed ${elapsed}`}>{elapsed}</time>}
+      {elapsed !== undefined && <time className="protection-duration w-[8ch] font-medium text-xs leading-4.5 font-mono tabular-nums text-muted-foreground whitespace-nowrap" dateTime={`PT${seconds}S`} aria-label={`Session elapsed ${elapsed}`}>{elapsed}</time>}
     </span>
   );
 }
@@ -44,24 +40,29 @@ export function ProtectedControl({
   state,
   pending,
   compact = false,
+  iconOnly = false,
   onToggle,
 }: {
   state: AppState;
   /** A start or stop is in flight. */
   pending: boolean;
-  /** Leaves out the development OS label. */
   compact?: boolean;
+  iconOnly?: boolean;
   onToggle(): void;
 }): React.JSX.Element {
   const { action } = state.protection;
+  const developmentMode = !state.config.requireProductionOs;
   return (
-    <div className="flex items-center gap-2">
-      {!state.config.requireProductionOs && !compact && <StateLabel tone="warning" text="Dev mode" />}
+    <div className={`protected-control flex items-center gap-2.5 text-xs font-semibold [&.is-compact]:p-0 max-[440px]:[&.is-compact]:gap-1.5 max-[440px]:[&.is-compact]:pl-1.75 max-[440px]:[&.is-compact]:text-xs ${compact ? "is-compact" : ""} ${iconOnly && !compact ? "is-icon-only mt-0.75" : ""}`}>
+      {!iconOnly && <span>Protected</span>}
+      {developmentMode && !compact && <span className="dev-mode-label text-warning text-xs font-semibold">Dev mode</span>}
       <SwitchControl
+        size="default"
         checked={action.operation === "stop"}
         label={action.label}
         disabled={!action.enabled || pending}
         aria-busy={pending}
+        developmentMode={developmentMode}
         onToggle={onToggle}
       />
     </div>

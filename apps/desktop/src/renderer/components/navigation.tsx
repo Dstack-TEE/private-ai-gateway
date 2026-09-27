@@ -8,6 +8,8 @@ import { overlaidTitleBar, titleBarDragRegion } from "../lib/environment";
 import { useShell } from "../lib/shell";
 import { BrandMark } from "./brand";
 import { ProtectedControl, ProtectionStatus } from "./protection";
+import { toneTextClass } from "../lib/tone";
+import { cn } from "../lib/utils";
 
 /** The pages of the window: the routes under the layout that have a title. */
 function usePages() {
@@ -23,22 +25,24 @@ export function Sidebar({ navigationRef }: { navigationRef: RefObject<HTMLElemen
   const current = useMatches({ select: (matches) => matches.at(-1)?.routeId });
   const { updates } = useShell();
   return (
-    <aside className="flex min-w-0 flex-col gap-0.5 border-r border-sidebar-border bg-sidebar px-2 py-3 max-[440px]:px-1.5">
-      {overlaidTitleBar && <div className="h-7 shrink-0" data-tauri-drag-region />}
-      <div className="mx-1.5 mb-5 flex min-h-9.5 items-center gap-2 overflow-hidden font-semibold whitespace-nowrap max-[620px]:mx-0 max-[620px]:justify-center [&>*]:pointer-events-none" {...titleBarDragRegion}>
-        <BrandMark className="size-9" />
-        <span className="flex min-w-0 flex-col gap-0.5 leading-4.5 max-[780px]:text-xs max-[620px]:hidden">
-          <span className="truncate">{brand.productName}</span>
-          <small className="truncate text-xs leading-4 font-normal text-muted-foreground">{brand.byline}</small>
-        </span>
+    <aside className="sidebar min-w-0 pt-3 pr-2 pb-3 pl-2 flex flex-col gap-0.5 bg-sidebar border-r border-r-sidebar-border [&_nav]:grid [&_nav]:gap-0.5 max-[620px]:pl-2 max-[620px]:pr-2 max-[440px]:pl-1.5 max-[440px]:pr-1.5">
+      {overlaidTitleBar && <div className="sidebar-drag relative flex-[0_0_28px]" data-tauri-drag-region />}
+      <div className="sidebar-brand min-h-9.5 mt-0 mr-1.5 mb-5 ml-1.5 flex items-center gap-2.25 font-semibold whitespace-nowrap overflow-hidden [&_>_*]:pointer-events-none [&_span]:overflow-hidden [&_span]:text-ellipsis max-[780px]:[&_>_span:last-child]:text-xs max-[620px]:justify-center max-[620px]:p-0 max-[620px]:[&_>_span:last-child]:hidden" {...titleBarDragRegion}>
+        <BrandMark className="brand-mark size-9" />
+        <span className="sidebar-brand-copy min-w-0 flex flex-col gap-0.5 text-sm leading-4.5 [&_small]:text-xs [&_small]:leading-4 [&_small]:font-normal [&_small]:text-muted-foreground"><span>{brand.productName}</span><small>{brand.byline}</small></span>
       </div>
-      <nav ref={navigationRef} aria-label="Main navigation">
+      <nav ref={navigationRef} className="w-full" aria-label="Main navigation">
         <SidebarMenu>
         {pages.map((page) => {
           const Icon = page.icon;
           return (
-            <SidebarMenuItem key={page.id}><SidebarMenuButton render={<Link to={page.to} />} isActive={current === page.id}>
-              <Icon aria-hidden="true" />
+            <SidebarMenuItem key={page.id}><SidebarMenuButton
+              size="default"
+              render={<Link to={page.to} />}
+              isActive={current === page.id}
+              aria-label={page.title}
+            >
+              <Icon size={18} aria-hidden="true" />
               <span>{page.title}</span>
             </SidebarMenuButton></SidebarMenuItem>
           );
@@ -57,13 +61,16 @@ export function Sidebar({ navigationRef }: { navigationRef: RefObject<HTMLElemen
 export function PageHeader({ titleRef }: { titleRef: RefObject<HTMLHeadingElement | null> }): React.JSX.Element {
   const { state, protectionPending, toggleProtection } = useShell();
   const page = useMatches({ select: (matches) => matches.at(-1) });
+  const protection = state.protection;
   return (
-    <header className="mx-6 flex h-14 shrink-0 items-center justify-between gap-3 pt-2 max-[780px]:mx-4 max-[440px]:mx-3" {...titleBarDragRegion}>
-      <h1 ref={titleRef} tabIndex={-1} className="pointer-events-none text-xl font-semibold">{page?.staticData.title}</h1>
+    <header className="page-header flex-[0_0_56px] mt-0 mr-6 mb-0 ml-6 pt-2 flex items-center justify-between gap-3 [&_h1]:text-xl [&_h1]:font-semibold [&_h1]:tracking-normal [&_h1]:pointer-events-none [&_h1]:select-none max-[620px]:pl-4 max-[620px]:pr-4 max-[440px]:basis-13 max-[440px]:mt-0 max-[440px]:mr-3 max-[440px]:mb-0 max-[440px]:ml-3 max-[440px]:pt-1.75 max-[440px]:gap-2" {...titleBarDragRegion}>
+      <h1 ref={titleRef} tabIndex={-1}>{page?.staticData.title}</h1>
       {page?.fullPath !== "/" && (
-        <div className="flex min-w-0 items-center gap-2">
-          <strong className="min-w-0 text-xs"><ProtectionStatus state={state} /></strong>
-          <ProtectedControl state={state} pending={protectionPending} compact onToggle={toggleProtection} />
+        <div className="page-protection min-w-0 ml-auto flex items-center gap-2">
+          <span className={cn("page-switch-copy min-w-0 grid justify-items-end leading-4 [&_strong]:text-xs [&_.protection-status]:grid [&_.protection-status]:grid-cols-[14px_auto] [&_.protection-status]:justify-items-end [&_.protection-status]:gap-x-1.25 [&_.protection-status]:gap-y-0 [&_.protection-duration]:col-span-full", toneTextClass[protection.tone])}>
+            <strong><ProtectionStatus state={state} /></strong>
+          </span>
+          <ProtectedControl state={state} pending={protectionPending} compact iconOnly onToggle={toggleProtection} />
         </div>
       )}
     </header>

@@ -7,7 +7,6 @@ import { ToggleGroup, ToggleGroupItem } from "./components/ui/toggle-group";
 import { FieldLabel } from "./components/ui/field";
 import { Item, ItemContent, ItemTitle, ItemDescription, ItemActions } from "./components/ui/item";
 import { useConfirm } from "./components/confirm";
-import { CodeBlock } from "./components/code-block";
 import { toastError } from "./lib/error-message";
 
 const CHECK_INTERVAL = 6 * 60 * 60_000;
@@ -96,13 +95,13 @@ export function useUpdates(api: DesktopApi, checks: boolean) {
 }
 
 export function UpdateChannelControl({ updates }: { updates: ReturnType<typeof useUpdates> }): React.JSX.Element {
-  return <Item variant="outline">
+  return <Item>
     <ItemContent>
       <ItemTitle><FieldLabel id="update-channel-label">Update channel</FieldLabel></ItemTitle>
       <ItemDescription id="update-channel-note">{updates.channel === "beta" ? "Beta and stable releases" : "Stable releases"}</ItemDescription>
     </ItemContent>
     <ItemActions>
-      <ToggleGroup variant="outline" spacing={0} aria-labelledby="update-channel-label" aria-describedby="update-channel-note" value={updates.channel ? [updates.channel] : []} disabled={!updates.channel || Boolean(updates.busy)} onValueChange={([value]) => {
+      <ToggleGroup size="sm" variant="outline" spacing={0} aria-labelledby="update-channel-label" aria-describedby="update-channel-note" value={updates.channel ? [updates.channel] : []} disabled={!updates.channel || Boolean(updates.busy)} onValueChange={([value]) => {
         if (value === "stable" || value === "beta") updates.changeChannel(value);
       }}><ToggleGroupItem value="stable">Stable</ToggleGroupItem><ToggleGroupItem value="beta">Beta</ToggleGroupItem></ToggleGroup>
     </ItemActions>
@@ -119,17 +118,17 @@ export function UpdateControl({ updates, productName, desktop }: { updates: Retu
     : "You’re up to date";
   const manual = !busy && !ready && info?.version ? info : undefined;
   const commands = manual?.upgradeCommands ?? [];
-  return <Item variant="outline">
+  return <Item>
     <ItemContent className="min-w-0">
       <ItemTitle>{productName}</ItemTitle>
       {manual && <>
         <ItemDescription>{commands.length ? (desktop ? `Quit ${productName}, then run:` : "Run:")
           : manual.downloadUrl ? "Extract this archive into a new directory:" : `Update it from the ${productName} desktop app or its package manager.`}</ItemDescription>
-        {(commands.length > 0 || manual.downloadUrl) && <CodeBlock className="whitespace-pre-wrap break-all">{commands.length ? commands.join("\n") : manual.downloadUrl}</CodeBlock>}
+        {(commands.length > 0 || manual.downloadUrl) && <pre className="whitespace-pre-wrap break-all rounded-md bg-muted px-3 py-2 text-xs select-text" data-slot="upgrade-commands">{commands.length ? commands.join("\n") : manual.downloadUrl}</pre>}
       </>}
     </ItemContent>
     <ItemActions className="ml-auto max-w-full flex-wrap justify-end text-right">
-      <span className="font-medium tabular-nums">{currentVersion ? `v${currentVersion}` : "Version unavailable"}</span>
+      <span className="text-sm font-medium tabular-nums" data-slot="app-version">{currentVersion ? `v${currentVersion}` : "Version unavailable"}</span>
       {ready ? <Button disabled={Boolean(busy)} onClick={updates.restart}><RotateCw aria-hidden="true" />Restart to Update</Button> : <ItemDescription className="max-w-sm text-right" role="status">{label}</ItemDescription>}
       {ready && <span role="status" className="sr-only">{label}</span>}
     </ItemActions>

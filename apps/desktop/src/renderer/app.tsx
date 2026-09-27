@@ -114,6 +114,14 @@ function Window(): React.JSX.Element {
     openDialog(state.profiles.length === 0 ? { kind: "setup-profile" } : { kind: "profiles", repair: state.profiles.some((profile) => profile.id === state.activeProfileId) });
   };
 
+  const runAction = async (title: string, action: () => Promise<AppState | void>) => {
+    try {
+      const next = await action();
+      if (next) setState(next);
+    } catch (error) {
+      toastError(title, error);
+    }
+  };
   const resetSettings = async () => {
     // What a reset leaves alone; the web UI has no notifications or pap command.
     const kept = new Intl.ListFormat("en").format([
@@ -161,9 +169,7 @@ function Window(): React.JSX.Element {
       if (starting) return;
       openDialog(state.profiles.length === 0 ? { kind: "setup-profile" } : { kind: "profiles", repair: false });
     },
-    openAboutLink: (target: AboutLink) => {
-      desktopApi.openAboutLink(target).catch((error: unknown) => toastError("Could not open the link", error));
-    },
+    openAboutLink: (target: AboutLink) => void runAction("Could not open the link", () => desktopApi.openAboutLink(target)),
   };
 
   const requestStopAllAndQuit = useEffectEvent(async () => {
@@ -237,11 +243,11 @@ function Window(): React.JSX.Element {
 
   return (
     <ShellContext.Provider value={shell}>
-    <main className="grid size-full grid-cols-[var(--sidebar-width)_minmax(0,1fr)] overflow-hidden bg-background max-[780px]:grid-cols-[154px_minmax(0,1fr)] max-[620px]:grid-cols-[68px_minmax(0,1fr)] max-[440px]:grid-cols-[56px_minmax(0,1fr)]">
+    <main className="w-full h-full grid grid-cols-[var(--sidebar-width)_minmax(0,_1fr)] overflow-hidden bg-background max-[780px]:grid-cols-[154px_minmax(0,_1fr)] max-[620px]:grid-cols-[68px_minmax(0,_1fr)] max-[440px]:grid-cols-[56px_minmax(0,_1fr)]">
       <Sidebar navigationRef={navigation} />
       <section className="min-w-0 min-h-0 flex flex-col">
         <PageHeader titleRef={pageTitle} />
-        <div id="page-content" className="min-h-0 min-w-0 flex-auto overflow-auto px-6 pt-4 pb-6 max-[780px]:p-4 max-[440px]:p-3">
+        <div id="page-content" className="flex-auto min-w-0 min-h-0 overflow-auto pt-4 pr-6 pb-6 pl-6 [&_>_[role=alert]]:mb-4 max-[780px]:p-4 max-[440px]:p-3">
           <Outlet />
         </div>
       </section>

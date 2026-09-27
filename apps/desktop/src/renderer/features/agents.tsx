@@ -12,34 +12,36 @@ import { StateLabel } from "../components/state-label";
 import { AgentAttention } from "../components/agent-attention";
 import ohMyPiIcon from "../assets/oh-my-pi.svg";
 import type { Tone } from "../../shared/contracts";
-import { Item, ItemActions, ItemContent, ItemMedia, ItemTitle } from "../components/ui/item";
+import { Item, ItemActions, ItemContent, ItemTitle } from "../components/ui/item";
 import { SettingsSection } from "../components/settings";
 import { SwitchControl } from "../components/controls";
 import type { AgentAccessStatus, AgentStatus } from "../../shared/contracts";
 import { EmptyState } from "../components/detail";
-import { Alert, AlertAction, AlertDescription, AlertTitle } from "../components/ui/alert";
+import { Alert, AlertDescription } from "../components/ui/alert";
 import { desktopApi } from "../lib/environment";
 import { useShell } from "../lib/shell";
 import { useAgentConnection } from "../hooks/use-agents";
 import { cn } from "../lib/utils";
 
-/** Monochrome logos are drawn in black, so they are inverted in the dark theme. */
-const AGENT_ICONS: Record<string, { src: string; monochrome?: boolean }> = {
-  codex: { src: codexIcon },
-  "claude-code": { src: claudeCodeIcon },
-  opencode: { src: openCodeIcon, monochrome: true },
-  pi: { src: piIcon, monochrome: true },
-  "oh-my-pi": { src: ohMyPiIcon },
-  hermes: { src: hermesIcon, monochrome: true },
-  openclaw: { src: openClawIcon },
+const AGENT_ICONS: Record<string, string> = {
+  codex: codexIcon,
+  "claude-code": claudeCodeIcon,
+  opencode: openCodeIcon,
+  pi: piIcon,
+  "oh-my-pi": ohMyPiIcon,
+  hermes: hermesIcon,
+  openclaw: openClawIcon,
 };
 
 function AgentMark({ agent }: { agent: Pick<AgentStatus, "id" | "name"> }): React.JSX.Element {
   const icon = AGENT_ICONS[agent.id];
   return (
-    <ItemMedia variant="image" aria-hidden="true">
-      {icon ? <img src={icon.src} alt="" className={cn(icon.monochrome && "dark:invert")} /> : agent.name.slice(0, 2).toUpperCase()}
-    </ItemMedia>
+    <span className={cn(
+      "grid size-8 flex-none place-items-center overflow-hidden rounded-xl border border-border bg-white text-xs font-bold text-muted-foreground [&_img]:size-5 [&_img]:object-contain",
+      agent.id === "oh-my-pi" && "bg-[#0d0d0d]",
+    )} aria-hidden="true">
+      {icon ? <img src={icon} alt="" /> : agent.name.slice(0, 2).toUpperCase()}
+    </span>
   );
 }
 
@@ -56,7 +58,7 @@ export function AgentsPage(): React.JSX.Element {
         : "Checking access";
   const locked = applying || integrations.controlsLocked;
   return (
-    <div className="mx-auto flex max-w-230 flex-col gap-5">
+    <div className="max-w-230 min-h-full mt-0 mr-auto mb-0 ml-auto">
       <AgentAccessNotice status={accessStatus} busy={authorizing} onAuthorize={integrations.requestAccess} />
       {accessStatus === "authorized" && problem && <AgentDetectionNotice busy={authorizing} onRetry={integrations.requestAccess} />}
       <SettingsSection title={accessStatus === "authorized" && !problem ? "Detected" : "Agents"} detail={accessStatus === "authorized" && !problem ? `${connected} connected` : undefined}>
@@ -76,7 +78,7 @@ export function AgentsPage(): React.JSX.Element {
           <AgentRow key={agent.id} agent={agent} disabled={locked} />
         ))}
       </SettingsSection>}
-      {accessStatus === "authorized" && !problem && <p className="text-xs text-muted-foreground">
+      {accessStatus === "authorized" && !problem && <p className="mx-0.5 mt-3 text-xs leading-5 text-muted-foreground">
         Agents are detected by the configuration folder each one creates on first run, such as ~/.codex, however it was installed. Run a new agent once to list it here; an uninstalled agent stays listed while its folder remains.
       </p>}
     </div>
@@ -84,15 +86,14 @@ export function AgentsPage(): React.JSX.Element {
 }
 
 function AgentDetectionNotice({ busy, onRetry }: { busy: boolean; onRetry(): void }): React.JSX.Element {
-  return <Alert role="status">
-    <TriangleAlert aria-hidden="true" />
-    <AlertTitle>Agent detection unavailable</AlertTitle>
-    <AlertDescription>The background service could not use Home access.</AlertDescription>
-    <AlertAction>
-      <Button type="button" variant="outline" size="xs" disabled={busy} aria-busy={busy} onClick={onRetry}>
-        {busy ? <><LoaderCircle className="animate-spin" aria-hidden="true" />Retrying…</> : "Retry"}
+  return <Alert role="status" className="mb-5 rounded-xl border-border bg-muted/35 px-3.5 py-2.5">
+    <TriangleAlert size={16} aria-hidden="true" />
+    <AlertDescription className="col-start-2 flex flex-wrap items-center justify-between gap-3 text-xs leading-5">
+      <span className="min-w-0 flex-1"><strong className="font-medium text-foreground">Agent detection unavailable.</strong> The background service could not use Home access.</span>
+      <Button type="button" variant="outline" size="sm" className="shrink-0" disabled={busy} aria-busy={busy} onClick={onRetry}>
+        {busy ? <><LoaderCircle size={14} className="animate-spin" aria-hidden="true" />Retrying…</> : "Retry"}
       </Button>
-    </AlertAction>
+    </AlertDescription>
   </Alert>;
 }
 
@@ -100,18 +101,17 @@ function AgentAccessNotice({ status, busy, onAuthorize }: {
   status?: AgentAccessStatus;
   busy: boolean;
   onAuthorize(): void;
-}): React.JSX.Element | null {
-  if (status === "authorized") return null;
+}): React.JSX.Element {
+  if (status === "authorized") return <></>;
   const again = status === "reauthorizationRequired";
-  return <Alert role="status">
-    <FolderLock aria-hidden="true" />
-    <AlertTitle>Home access required</AlertTitle>
-    <AlertDescription>Allow it to detect installed agents and manage the connections you choose. Workspace files are not read.</AlertDescription>
-    <AlertAction>
-      <Button type="button" variant="outline" size="xs" disabled={!status || busy} aria-busy={busy} onClick={onAuthorize}>
-        {busy ? <><LoaderCircle className="animate-spin" aria-hidden="true" />Waiting…</> : again ? "Re-enable" : "Enable"}
+  return <Alert role="status" className="mb-5 rounded-xl border-border bg-muted/35 px-3.5 py-2.5">
+    <FolderLock size={16} aria-hidden="true" />
+    <AlertDescription className="col-start-2 flex flex-wrap items-center justify-between gap-3 text-xs leading-5">
+      <span className="min-w-0 flex-1"><strong className="font-medium text-foreground">Home access required.</strong> Allow it to detect installed agents and manage the connections you choose. Workspace files are not read.</span>
+      <Button type="button" variant="outline" size="sm" className="shrink-0" disabled={!status || busy} aria-busy={busy} onClick={onAuthorize}>
+        {busy ? <><LoaderCircle size={14} className="animate-spin" aria-hidden="true" />Waiting…</> : again ? "Re-enable" : "Enable"}
       </Button>
-    </AlertAction>
+    </AlertDescription>
   </Alert>;
 }
 
@@ -145,11 +145,11 @@ export function AgentRow({
   const actionable = disconnecting || !agent.error;
   const note = agent.attention ?? agent.error;
   return (
-    <Item size={compact ? "xs" : "default"} variant={compact ? "muted" : "outline"}>
+    <Item size={compact ? "xs" : "default"} variant={compact ? "muted" : "default"} className="agent-block">
       <AgentMark agent={agent} />
       <ItemContent className="min-w-0">
-        <ItemTitle>
-          {name}
+        <ItemTitle className="row-title-line max-w-full flex items-center flex-wrap gap-y-1 gap-x-2">
+          <span className="row-title">{name}</span>
           {note && pendingConnection === undefined && !detectionLabel
             ? <AgentAttention name={name} message={note} authorized={agent.authorized} action={!disabled ? agent.repairAction : undefined} onRepair={() => onSelect(agent.repairAction === "reconnect")} />
             : <StateLabel tone={presence.tone} text={presence.label} />}
@@ -171,5 +171,5 @@ export function AgentRow({
 function AgentWebsite({ agent }: { agent: AgentStatus }): React.JSX.Element {
   return <Button variant="outline" onClick={() => {
     void desktopApi.openAgentWebsite(agent.id).catch((error: unknown) => toastError("Could not open agent website", error));
-  }}>Website<ExternalLink data-icon="inline-end" aria-hidden="true" /></Button>;
+  }}>Website<ExternalLink size={14} aria-hidden="true" /></Button>;
 }

@@ -6,8 +6,7 @@ import { Field, FieldContent, FieldDescription, FieldError, FieldGroup, FieldLab
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from "../components/ui/input-group";
 import { Hint } from "../components/hint";
 import { ListenerFields } from "../components/listen-address";
-import { SettingsToggle } from "../components/settings";
-import { ItemGroup } from "../components/ui/item";
+import { SettingsList, SettingsToggle } from "../components/settings";
 import { AppDialog, type DialogControl } from "../components/app-dialog";
 import { useConfirm } from "../components/confirm";
 import { DialogFooter } from "../components/ui/dialog";
@@ -119,9 +118,9 @@ export function WebUiDialog({
       <form className="flex min-h-0 flex-col gap-4" onSubmit={(event) => { event.preventDefault(); save.mutate(); }}>
         <div className="-mx-6 min-h-0 overflow-y-auto px-6 py-1">
           <FieldGroup>
-            <ItemGroup>
+            <SettingsList>
               <SettingsToggle label="Web UI" checked={draft.enabled} disabled={saving} onToggle={() => setDraft((current) => ({ ...current, enabled: !current.enabled }))} />
-            </ItemGroup>
+            </SettingsList>
             <ListenerFields api={desktopApi} idPrefix="web-ui" value={draft} minPort={1} access="are protected only by the web UI password" clientHostNote="Optional host shown in the web UI address. Does not change the listener." disabled={saving} onChange={(listener) => setDraft((current) => ({ ...current, ...listener }))} />
             {!web && <>
               <FieldSeparator />

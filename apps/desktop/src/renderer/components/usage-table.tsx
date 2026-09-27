@@ -29,7 +29,7 @@ export function UsageTable({ items, loading, pageIndex, pageSize, total, onInspe
       const date = new Date(row.original.at * 1000);
       return <time dateTime={date.toISOString()} className="block tabular-nums"><span className="block">{date.toLocaleTimeString()}</span><span className="block text-xs text-muted-foreground">{date.toLocaleDateString()}</span></time>;
     } },
-    { id: "agent", header: "Agent", cell: ({ row }) => <Button variant="link" onClick={() => onInspect(row.original)} aria-label={`${agentName(row.original.agent)}, ${outcomeOf(row.original).label}, ${row.original.model ?? row.original.path}. View proof`}>{agentName(row.original.agent)}</Button> },
+    { id: "agent", header: "Agent", cell: ({ row }) => <Button variant="ghost" className="h-auto p-0 text-left" onClick={() => onInspect(row.original)} aria-label={`${agentName(row.original.agent)}, ${outcomeOf(row.original).label}, ${row.original.model ?? row.original.path}. View proof`}>{agentName(row.original.agent)}</Button> },
     { accessorKey: "model", header: "Model", cell: ({ row }) => <Hint content={row.original.model ?? row.original.path}><span className="block max-w-48 truncate font-mono text-xs">{row.original.model ?? row.original.path}</span></Hint> },
     { id: "tokens", header: "Tokens", cell: ({ row }) => <TokenDetails item={row.original} /> },
     { accessorKey: "costUsd", header: "Cost", cell: ({ row }) => <span className="block text-right tabular-nums">{row.original.costUsd === undefined ? "—" : currency(row.original.costUsd)}</span> },
@@ -41,7 +41,7 @@ export function UsageTable({ items, loading, pageIndex, pageSize, total, onInspe
       <TableBody>
         {table.getRowModel().rows.map((row) => <TableRow key={row.id} onClick={() => onInspect(row.original)}>{row.getAllCells().map((cell) => <TableCell key={cell.id} className={cell.column.id === "tokens" ? "text-right" : undefined}
           onClick={CONTROL_COLUMNS.has(cell.column.id) ? (event) => event.stopPropagation() : undefined}><table.FlexRender cell={cell} /></TableCell>)}</TableRow>)}
-        {items.length === 0 && <TableRow><TableCell colSpan={columns.length} className="h-24 text-center">{loading ? "Loading usage history…" : "No saved usage matches these filters."}</TableCell></TableRow>}
+        {items.length === 0 && <TableRow><TableCell colSpan={columns.length} className="h-24 text-center text-muted-foreground">{loading ? "Loading usage history…" : "No saved usage matches these filters."}</TableCell></TableRow>}
       </TableBody>
     </Table>;
 }
