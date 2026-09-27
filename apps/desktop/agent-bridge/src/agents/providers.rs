@@ -451,9 +451,14 @@ pub(super) fn codex_catalog(catalog: &Catalog) -> Result<serde_json::Value, Stri
         .collect::<Result<Vec<_>, String>>()?;
     // model_catalog_json replaces the entire upstream catalog. Preserve every
     // bundled entry, overlay exact slugs once, and append provider-specific IDs.
+    // Bundled entries stay for Codex internals but are hidden: the proxy cannot
+    // serve them, and Codex defaults to the first picker-visible model.
     let entries = bundled["models"]
         .as_array_mut()
         .ok_or_else(|| "The app-owned Codex model catalog is malformed".to_string())?;
+    for entry in entries.iter_mut() {
+        entry["visibility"] = serde_json::Value::String("hide".to_string());
+    }
     for model in models {
         if let Some(existing) = entries
             .iter_mut()

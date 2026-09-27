@@ -148,8 +148,21 @@ fn codex_and_opencode_use_official_custom_provider_configs() {
         serde_json::from_str(include_str!("../../../resources/codex/models.json")).unwrap();
     let models = generated["models"].as_array().unwrap();
     let bundled = baseline["models"].as_array().unwrap();
-    assert_eq!(&models[..bundled.len()], bundled);
     assert_eq!(models.len(), bundled.len() + 2);
+    // Bundled entries are kept for Codex internals but only provider models are listed.
+    for (projected, original) in models.iter().zip(bundled) {
+        let mut hidden = original.clone();
+        hidden["visibility"] = json!("hide");
+        assert_eq!(projected, &hidden);
+    }
+    assert_eq!(
+        models
+            .iter()
+            .filter(|model| model["visibility"] == "list")
+            .map(|model| model["slug"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["openai/gpt-oss-20b", "phala/qwen"]
+    );
     assert!(models
         .iter()
         .all(|model| model.get("base_instructions").is_none()));
@@ -363,9 +376,19 @@ fn codex_overlay_preserves_native_templates_and_unique_slugs() {
                 original["apply_patch_tool_type"]
             );
         } else {
-            assert_eq!(projected, original);
+            let mut hidden = original.clone();
+            hidden["visibility"] = json!("hide");
+            assert_eq!(projected, &hidden);
         }
     }
+    assert_eq!(
+        models
+            .iter()
+            .filter(|model| model["visibility"] == "list")
+            .map(|model| model["slug"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["gpt-5.4", "openai/gpt-5.4"]
+    );
     assert_eq!(native["context_window"], 32768);
     assert_eq!(native["max_context_window"], 32768);
     assert!(native["auto_compact_token_limit"].is_null());
