@@ -38,8 +38,6 @@ const platform: UiPlatform = {
   getCliRegistration: () => invoke("get_cli_registration"),
   setCliRegistration: (installed) => invoke("set_cli_registration", { installed }),
   stopAllAndQuit: () => invoke("stop_all_and_quit"),
-  showConfirmation: (confirmation) => invoke("show_confirmation", { confirmation }),
-  showAlert: (alert) => invoke("show_alert", { alert }),
   onNavigate,
   // Goes through the window's close request, which hides it to the tray.
   closeWindow: () => getCurrentWebviewWindow().close(),

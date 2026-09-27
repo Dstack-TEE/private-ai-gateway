@@ -44,8 +44,6 @@ export interface UiPlatform {
   getCliRegistration(): Promise<CliRegistration>;
   setCliRegistration(installed: boolean): Promise<CliRegistration>;
   stopAllAndQuit(): Promise<void>;
-  showConfirmation: DesktopApi["showConfirmation"];
-  showAlert: DesktopApi["showAlert"];
   onNavigate: DesktopApi["onNavigate"];
   closeWindow: DesktopApi["closeWindow"];
   quit: DesktopApi["quit"];
@@ -107,8 +105,6 @@ export function createDesktopApi(transport: UiTransport, platform: UiPlatform): 
     getCliRegistration: platform.getCliRegistration,
     setCliRegistration: platform.setCliRegistration,
     stopAllAndQuit: platform.stopAllAndQuit,
-    showConfirmation: platform.showConfirmation,
-    showAlert: platform.showAlert,
     closeWindow: platform.closeWindow,
     quit: platform.quit,
     copyText: platform.copyText,

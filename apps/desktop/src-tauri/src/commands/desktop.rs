@@ -4,7 +4,7 @@ use desktop_core::{
     agents::Agent,
     brand::AboutLink,
     client::{CallError, Client},
-    contracts::{AlertMessage, Confirmation, ServiceProvider},
+    contracts::ServiceProvider,
 };
 use tauri::{AppHandle, Manager, State, WebviewWindow};
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -107,118 +107,6 @@ pub(crate) fn show_edit_menu(window: WebviewWindow, editable: bool) -> Result<()
     window
         .popup_menu(&menu)
         .map_err(|_| "Cannot open editing menu".into())
-}
-
-/// Asks for a decision in an alert sheet on the window (NSAlert): the confirm
-/// button is the default (Return) button and Cancel takes Escape; `true` when
-/// the user confirms. Only macOS uses it, and only for actions that are not
-/// destructive: the sheet can't make Cancel the default button, and a
-/// destructive button must never be the default (Apple HIG, Buttons). The
-/// window's own dialog, which focuses Cancel, asks for destructive actions and
-/// on Windows and Linux, whose system message dialogs (through rfd) can't make
-/// Cancel the default button or, on Linux, attach to the window.
-#[tauri::command]
-pub(crate) async fn show_confirmation(
-    window: WebviewWindow,
-    confirmation: Confirmation,
-) -> Result<bool, CallError> {
-    #[cfg(target_os = "macos")]
-    {
-        ask_in_sheet(window, confirmation).await
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (window, confirmation);
-        Err("The system alert is only used on macOS".into())
-    }
-}
-
-#[cfg(target_os = "macos")]
-async fn ask_in_sheet(
-    window: WebviewWindow,
-    confirmation: Confirmation,
-) -> Result<bool, CallError> {
-    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
-    let Confirmation {
-        title,
-        message,
-        confirm_label,
-        cancel_label,
-        destructive,
-    } = confirmation;
-    if destructive.unwrap_or(false) {
-        return Err("Destructive actions are confirmed in the window".into());
-    }
-    let cancel_label = cancel_label.unwrap_or_else(|| "Cancel".into());
-    if [&title, &message, &confirm_label, &cancel_label]
-        .iter()
-        .any(|text| invalid_alert_text(text))
-    {
-        return Err("Invalid confirmation".into());
-    }
-    let (send, receive) = tokio::sync::oneshot::channel();
-    window
-        .dialog()
-        .message(message)
-        .title(title)
-        .buttons(MessageDialogButtons::OkCancelCustom(
-            confirm_label,
-            cancel_label,
-        ))
-        .parent(&window)
-        .show(move |confirmed| {
-            let _ = send.send(confirmed);
-        });
-    Ok(receive
-        .await
-        .map_err(|_| "The confirmation could not complete")?)
-}
-
-/// Reports a failed action in an alert sheet on the window (NSAlert) and
-/// returns once its OK button dismisses it. Only macOS uses it; Windows and
-/// Linux report in the window's own dialog, as they ask there.
-#[tauri::command]
-pub(crate) async fn show_alert(
-    window: WebviewWindow,
-    alert: AlertMessage,
-) -> Result<(), CallError> {
-    #[cfg(target_os = "macos")]
-    {
-        tell_in_sheet(window, alert).await
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (window, alert);
-        Err("The system alert is only used on macOS".into())
-    }
-}
-
-#[cfg(target_os = "macos")]
-async fn tell_in_sheet(window: WebviewWindow, alert: AlertMessage) -> Result<(), CallError> {
-    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
-    let AlertMessage { title, message } = alert;
-    if [&title, &message]
-        .iter()
-        .any(|text| invalid_alert_text(text))
-    {
-        return Err("Invalid alert".into());
-    }
-    let (send, receive) = tokio::sync::oneshot::channel();
-    window
-        .dialog()
-        .message(message)
-        .title(title)
-        .kind(MessageDialogKind::Warning)
-        .parent(&window)
-        .show(move |_| {
-            let _ = send.send(());
-        });
-    Ok(receive.await.map_err(|_| "The alert could not complete")?)
-}
-
-#[cfg(target_os = "macos")]
-fn invalid_alert_text(text: &str) -> bool {
-    text.trim().is_empty() || text.len() > 4_096
 }
 
 /// Quits the app and leaves the background service running, like Quit in the

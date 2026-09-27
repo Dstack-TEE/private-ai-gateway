@@ -1,26 +1,30 @@
-import { createContext, useCallback, useContext, useMemo, useRef, useState, type PropsWithChildren } from "react";
-import type { AlertMessage, Confirmation, DesktopApi } from "../../shared/contracts";
-import { createDialogQueue, failureAlert, presentAlert } from "../lib/alert";
+import { createContext, useCallback, useContext, useRef, useState, type PropsWithChildren } from "react";
+import { createDialogQueue } from "../lib/alert";
+import { errorMessage } from "../lib/error-message";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "./ui/alert-dialog";
 
+/** A question asked before an action (`useConfirm`). */
+export type Confirmation = {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  cancelLabel?: string;
+  /** The action deletes, revokes or resets something that can't be restored. */
+  destructive?: boolean;
+};
 type Confirm = (options: Confirmation) => Promise<boolean>;
-type Alert = (alert: AlertMessage) => Promise<void>;
-type Request = { kind: "confirm"; options: Confirmation } | { kind: "alert"; options: AlertMessage };
-const ConfirmContext = createContext<{ confirm: Confirm; alert: Alert } | null>(null);
+type Request = ({ kind: "confirm" } & Confirmation) | { kind: "alert"; title: string; message: string };
+const ConfirmContext = createContext<((request: Request) => Promise<boolean>) | null>(null);
 const ConfirmOpenContext = createContext(false);
 
 /**
- * Asks for a decision and resolves with the answer: in an alert sheet when
- * `ask` shows one (the macOS app, where the confirm button is the default),
- * otherwise in an AlertDialog. A destructive action always asks in the
- * dialog, since its button must never be the default. The dialog focuses
- * Cancel, the safe choice, so Return never starts the action. Questions and
- * alerts for the dialog wait their turn (`createDialogQueue`).
- *
- * It reports a failed action the same way (`useReportFailure`): in an alert
- * sheet when `tell` shows one, otherwise in the dialog with only an OK button.
+ * Asks for decisions (`useConfirm`) and reports failed actions
+ * (`useReportFailure`) in an AlertDialog, one request at a time in the order
+ * they were made (`createDialogQueue`). A destructive question focuses
+ * Cancel, the safe choice, so Return never starts the action; any other
+ * question focuses its action, and an alert its only button, OK.
  */
-export function ConfirmProvider({ ask, tell, children }: PropsWithChildren<{ ask?: DesktopApi["showConfirmation"]; tell?: DesktopApi["showAlert"] }>) {
+export function ConfirmProvider({ children }: PropsWithChildren) {
   const [request, setRequest] = useState<Request>();
   const [open, setOpen] = useState(false);
   const [asking, setAsking] = useState(0);
@@ -34,7 +38,7 @@ export function ConfirmProvider({ ask, tell, children }: PropsWithChildren<{ ask
   const drained = useRef(true);
   const popup = useRef<HTMLDivElement>(null);
   const cancel = useRef<HTMLButtonElement>(null);
-  const acknowledge = useRef<HTMLButtonElement>(null);
+  const action = useRef<HTMLButtonElement>(null);
   const [queue] = useState(() => createDialogQueue<Request>((next) => {
     const focused = document.activeElement;
     const outside = focused instanceof HTMLElement && focused !== document.body && !popup.current?.contains(focused) ? focused : null;
@@ -43,36 +47,25 @@ export function ConfirmProvider({ ask, tell, children }: PropsWithChildren<{ ask
     setRequest(next);
     setOpen(true);
   }, () => setOpen(false)));
-  /** Counts a request as open until it is answered, in a sheet or in the queue. */
-  const pending = useCallback(<T,>(present: () => Promise<T>) => {
+  /** Counts a request as open until it is answered, while shown or queued. */
+  const ask = useCallback((next: Request) => {
     setAsking((count) => count + 1);
-    return present().finally(() => setAsking((count) => count - 1));
-  }, []);
-  const confirm = useCallback<Confirm>((options) => {
-    if (ask && !options.destructive) return pending(() => ask(options));
-    return pending(() => queue.ask({ kind: "confirm", options }));
-  }, [ask, pending, queue]);
-  const alert = useCallback<Alert>((options) => presentAlert(
-    options,
-    tell && ((next) => pending(() => tell(next))),
-    (next) => pending(() => queue.ask({ kind: "alert", options: next })),
-  ), [tell, pending, queue]);
-  const alerting = request?.kind === "alert";
-  const value = useMemo(() => ({ confirm, alert }), [confirm, alert]);
-  return <ConfirmContext.Provider value={value}><ConfirmOpenContext.Provider value={open || asking > 0}>
+    return queue.ask(next).finally(() => setAsking((count) => count - 1));
+  }, [queue]);
+  return <ConfirmContext.Provider value={ask}><ConfirmOpenContext.Provider value={open || asking > 0}>
     {children}
     <AlertDialog open={open} onOpenChange={(next) => { if (!next) queue.answer(false); }} onOpenChangeComplete={(next) => { if (!next) drained.current = !queue.closed(); }}>
-      <AlertDialogContent ref={popup} initialFocus={alerting ? acknowledge : cancel} finalFocus={() => opener.current?.isConnected ? opener.current : false}>
+      <AlertDialogContent ref={popup} initialFocus={request?.kind === "confirm" && request.destructive ? cancel : action} finalFocus={() => opener.current?.isConnected ? opener.current : false}>
         <AlertDialogHeader>
-          <AlertDialogTitle>{request?.options.title}</AlertDialogTitle>
-          <AlertDialogDescription className="whitespace-pre-line">{request?.options.message}</AlertDialogDescription>
+          <AlertDialogTitle>{request?.title}</AlertDialogTitle>
+          <AlertDialogDescription className="whitespace-pre-line">{request?.message}</AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
-          {alerting
-            ? <AlertDialogAction ref={acknowledge} onClick={() => queue.answer(true)}>OK</AlertDialogAction>
+          {request?.kind === "alert"
+            ? <AlertDialogAction ref={action} onClick={() => queue.answer(true)}>OK</AlertDialogAction>
             : <>
-              <AlertDialogCancel ref={cancel}>{request?.options.cancelLabel ?? "Cancel"}</AlertDialogCancel>
-              <AlertDialogAction variant={request?.options.destructive ? "destructive" : "default"} onClick={() => queue.answer(true)}>{request?.options.confirmLabel}</AlertDialogAction>
+              <AlertDialogCancel ref={cancel}>{request?.cancelLabel ?? "Cancel"}</AlertDialogCancel>
+              <AlertDialogAction ref={action} variant={request?.destructive ? "destructive" : "default"} onClick={() => queue.answer(true)}>{request?.confirmLabel}</AlertDialogAction>
             </>}
         </AlertDialogFooter>
       </AlertDialogContent>
@@ -87,7 +80,8 @@ function useConfirmContext() {
 }
 
 export function useConfirm(): Confirm {
-  return useConfirmContext().confirm;
+  const ask = useConfirmContext();
+  return useCallback((options) => ask({ kind: "confirm", ...options }), [ask]);
 }
 
 /**
@@ -95,8 +89,8 @@ export function useConfirm(): Confirm {
  * an alert titled with what failed and the reason as its message.
  */
 export function useReportFailure(): (title: string, error: unknown) => void {
-  const { alert } = useConfirmContext();
-  return useCallback((title, error) => void alert(failureAlert(title, error)), [alert]);
+  const ask = useConfirmContext();
+  return useCallback((title, error) => void ask({ kind: "alert", title, message: errorMessage(error) }), [ask]);
 }
 
 /** Whether a confirmation or an alert is waiting for an answer. */
