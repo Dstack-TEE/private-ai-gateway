@@ -13,6 +13,7 @@ export function usagePageQuery(query: UsageQuery) {
   return queryOptions({
     queryKey: ["usage", query],
     queryFn: () => desktopApi.queryUsage(query),
+    meta: { errorTitle: "Could not load usage" },
   });
 }
 
@@ -20,5 +21,6 @@ export function cliRegistrationQuery() {
   return queryOptions({
     queryKey: ["cli-registration"],
     queryFn: () => desktopApi.getCliRegistration(),
+    meta: { errorTitle: "Could not read the pap command" },
   });
 }

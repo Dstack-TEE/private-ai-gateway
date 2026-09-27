@@ -50,6 +50,7 @@ function useAccountBalance({ api, provider, target, credentialRef, enabled = tru
     refetchOnWindowFocus: "always",
     staleTime: 30_000,
     retry: false,
+    meta: { errorTitle: "Could not read the account balance" },
   });
 }
 

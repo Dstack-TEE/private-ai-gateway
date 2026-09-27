@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef } from "react";
 import { QueryObserver, queryOptions, skipToken, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { AccountLoginDetails, ConfidentialProfileInput, DesktopApi, LoginPresentation } from "../../shared/contracts";
+import { AuthoredError } from "./error-message";
 
 type LoginApi = Pick<DesktopApi, "beginAccountLogin" | "pollAccountLogin" | "cancelAccountLogin" | "completeAccountLogin">;
 
@@ -54,7 +55,7 @@ export function useAccountLogin(api: LoginApi, onError: (error: unknown) => void
   const complete = useMutation({
     scope,
     mutationFn: (callbackUrl: string) => {
-      if (!pending.current) throw new Error("Account connection is no longer active");
+      if (!pending.current) throw new AuthoredError("Account connection is no longer active");
       return api.completeAccountLogin(pending.current.id, callbackUrl);
     },
     onError,

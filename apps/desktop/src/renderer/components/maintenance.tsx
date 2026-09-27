@@ -15,8 +15,12 @@ export function ProfileTransfer({ api, disabled, onResult }: {
   const confirm = useConfirm();
   const transfer = useMutation({
     mutationKey: PROFILE_TRANSFER,
+    // The save panel is the feedback of an export; an import reports its count.
     mutationFn: async (importing: boolean): Promise<string | undefined> => {
-      if (!importing) return await api.saveProfileExport() ? "Profile configurations exported without credentials." : undefined;
+      if (!importing) {
+        await api.saveProfileExport();
+        return undefined;
+      }
       const backup = await api.selectProfileBackup();
       if (!backup) return undefined;
       const names = backup.profiles.slice(0, 5).map((profile) => profile.name).join(", ");

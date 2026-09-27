@@ -9,6 +9,13 @@ export const queryClient = new QueryClient({
   },
 });
 
+declare module "@tanstack/react-query" {
+  interface Register {
+    /** `errorTitle` opts a read in to reporting its failure (`ConfirmProvider`). */
+    queryMeta: { errorTitle?: string };
+  }
+}
+
 // Queries refetch when the desktop window becomes active, as a browser tab
 // does when it becomes visible.
 if (windowFocus) focusManager.setEventListener(windowFocus);

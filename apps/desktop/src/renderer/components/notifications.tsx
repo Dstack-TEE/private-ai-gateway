@@ -5,6 +5,7 @@ import { AppDialog, type DialogControl } from "./app-dialog";
 import { Alert, AlertDescription } from "./ui/alert";
 import { DialogFooter } from "./ui/dialog";
 import { Button } from "./ui/button";
+import { errorMessage } from "../lib/error-message";
 
 /**
  * The notification preferences and the system permission. The shell asks for
@@ -34,10 +35,10 @@ function useNotificationSettings(api: DesktopApi) {
     onSettled: refresh,
   });
   const busy = change.isPending || permission.isPending;
-  const error = change.error ? "Could not save notification settings."
+  const error = change.error ? `Could not save notification settings. ${errorMessage(change.error)}`
     : change.data === false ? "Notifications are enabled in this app, but system permission could not be requested."
-    : permission.error ? "Could not open notification permissions. Check your system settings."
-    : readError ? "Could not read notification settings." : undefined;
+    : permission.error ? `Could not open notification permissions. ${errorMessage(permission.error)}`
+    : readError ? `Could not read notification settings. ${errorMessage(readError)}` : undefined;
   return {
     data,
     error,
@@ -58,7 +59,7 @@ function useNotificationSettings(api: DesktopApi) {
 function NotificationPermissionNotice({ data, busy, permissionAction }: Pick<ReturnType<typeof useNotificationSettings>, "data" | "busy" | "permissionAction">) {
   if (!data || !data.preferences.enabled || (data.permission === "granted" && data.alertsEnabled !== false)) return null;
   const supported = data.permission !== "unsupported";
-  return <Alert className="border-warning/30 bg-warning/10">
+  return <Alert role="status" className="border-warning/30 bg-warning/10">
     <AlertDescription className="flex flex-wrap items-center justify-between gap-3 text-warning">
       <span>{data.permission === "granted" ? "Notifications are allowed, but banner alerts are disabled in system settings." : data.permission === "denied" ? "Notifications are disabled in system settings." : data.permission === "notDetermined" ? "System permission is needed to show notifications." : "System notification permission could not be confirmed. Check your desktop notification settings."}</span>
       {supported && <Button variant="outline" size="sm" disabled={busy} onClick={permissionAction}>{data.permission === "notDetermined" ? "Allow Notifications" : "System Settings"}</Button>}

@@ -1,13 +1,13 @@
 import React, { useCallback, useRef, useState } from "react";
 import { skipToken, useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAccountLogin } from "../lib/use-account-login";
-import { afterVerification } from "../lib/use-app-state";
+import { afterVerification, useSetAppState } from "../lib/use-app-state";
 import { AccountTools } from "../components/account-tools";
 import { ToggleGroup, ToggleGroupItem } from "../components/ui/toggle-group";
-import { errorMessage } from "../lib/error-message";
+import { AuthoredError, errorMessage } from "../lib/error-message";
 import { useCopy } from "../hooks/use-copy";
 import { Check, Copy, ExternalLink, LoaderCircle, Pencil, Plus, TriangleAlert, Trash2 } from "lucide-react";
-import { Button } from "../components/ui/button";
+import { Button, buttonVariants } from "../components/ui/button";
 import { ActionItem } from "../components/action-item";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
 import { PROFILE_TRANSFER, ProfileTransfer } from "../components/maintenance";
@@ -21,7 +21,7 @@ import { DialogFooter } from "../components/ui/dialog";
 import { FormField } from "../components/settings";
 import { ChoiceSelect } from "../components/choice-select";
 import { DEFAULT_SERVICE_PROVIDER, SERVICE_PROVIDERS, type ConfidentialProfile, type ConfidentialProfileInput, type AppState, type LoginPresentation, type ServiceProvider } from "../../shared/contracts";
-import { desktopApi, distributionCapabilities } from "../lib/environment";
+import { desktopApi, distributionCapabilities, web } from "../lib/environment";
 import { profileIsAvailable } from "../lib/protection";
 import { ServiceLogo } from "../components/brand";
 import { serviceHost } from "../lib/format";
@@ -166,6 +166,7 @@ export function ProfileEditorDialog({
   const reportError = useCallback((failure: unknown) => setError(errorMessage(failure)), []);
   const confirm = useConfirm();
   const client = useQueryClient();
+  const setState = useSetAppState();
   const account = useAccountLogin(desktopApi, reportError);
   const { copy, isCopied, status: copyStatus } = useCopy(reportError);
   const { session: login, auth: authorized } = account;
@@ -237,7 +238,7 @@ export function ProfileEditorDialog({
         destructive: true,
       });
       if (!confirmed) return;
-      if (needsStop) await desktopApi.stop();
+      if (needsStop) setState(await desktopApi.stop());
       await onDelete(draft.id);
       await account.cancel();
     },
@@ -247,8 +248,9 @@ export function ProfileEditorDialog({
   const saveLogin = useMutation({
     mutationFn: async ({ login: authorization, workspace }: { login: LoginPresentation; workspace: number | undefined }) => {
       const saved = await desktopApi.saveAccountLogin(authorization.id, draft, state.config.requireProductionOs, workspace);
+      setState(saved);
       account.consume();
-      if (startAfterSave) await desktopApi.start(saved.config);
+      if (startAfterSave) setState(await desktopApi.start(saved.config));
     },
     onMutate: () => setError(undefined),
     onSuccess: onComplete,
@@ -265,7 +267,7 @@ export function ProfileEditorDialog({
       const offered = signedIn.details.workspaces;
       if (workspace !== undefined && !offered.some((item) => item.id === workspace)) {
         setSelectedWorkspaceId(undefined);
-        throw new Error("The selected workspace is no longer available. Choose a workspace and save again.");
+        throw new AuthoredError("The selected workspace is no longer available. Choose a workspace and save again.");
       }
       // As the form does, saving waits while protection verifies.
       await afterVerification(client);
@@ -334,6 +336,8 @@ export function ProfileEditorDialog({
                   <div className="space-y-1 text-sm"><p>Continue in your browser</p>{login.userCode && <p className="font-mono text-muted-foreground">{login.userCode}</p>}</div>
                   <div className="flex items-center gap-1">
                     <IconButton size="icon-sm" label="Copy connection link" onClick={() => copy("Connection link", login.url)}>{isCopied(login.url) ? <Check aria-hidden /> : <Copy aria-hidden />}</IconButton>
+                    {/* A browser may block the tab the web UI opens once the sign-in starts; only secure links open. */}
+                    {web && login.url.startsWith("https://") && <a href={login.url} target="_blank" rel="noopener noreferrer" className={buttonVariants({ variant: "ghost", size: "sm" })}>Open Sign-In Page<ExternalLink aria-hidden="true" /></a>}
                     <Button type="button" variant="ghost" size="sm" disabled={account.working} onClick={() => void account.cancel()}>Cancel</Button>
                   </div>
                   </div>

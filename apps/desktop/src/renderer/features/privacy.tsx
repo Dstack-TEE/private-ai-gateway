@@ -1,6 +1,7 @@
 import React from "react";
 import { Check, LockOpen, RefreshCw, ShieldCheck, ShieldX } from "lucide-react";
 import { AppDialog, DoneFooter, type DialogControl } from "../components/app-dialog";
+import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import type { AppState, VerificationCheck } from "../../shared/contracts";
 import { hasLiveVerification } from "../lib/protection";
 import { formatTimestamp, hardwareName, shorten, trustName } from "../lib/format";
@@ -36,7 +37,10 @@ const CHECK_TITLES: Record<string, string> = {
 };
 
 export function PrivacyDialog({ state, ...control }: { state: AppState } & DialogControl): React.JSX.Element {
+  // Why protection failed; the window shows only the title.
+  const failure = state.protection.tone === "danger" ? state.endpointError ?? state.error : undefined;
   return <AppDialog {...control} title="Privacy verification" className="sm:max-w-2xl">
+    {failure && <Alert variant="destructive"><AlertTitle>{state.protection.title}</AlertTitle><AlertDescription>{failure}</AlertDescription></Alert>}
     <div className="-mx-6 min-h-0 overflow-y-auto px-6"><PrivacyVerification state={state} /></div>
     <DoneFooter />
   </AppDialog>;

@@ -1,6 +1,8 @@
-import { createContext, useCallback, useContext, useRef, useState, type PropsWithChildren } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type PropsWithChildren } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { createDialogQueue } from "../lib/dialog-queue";
-import { errorMessage } from "../lib/error-message";
+import { errorMessage, SessionEndedError } from "../lib/error-message";
+import { session } from "../lib/environment";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "./ui/alert-dialog";
 
 /** A question asked before an action (`useConfirm`). */
@@ -19,8 +21,9 @@ const ConfirmOpenContext = createContext(false);
 
 /**
  * Asks for decisions (`useConfirm`) and reports failed actions
- * (`useReportFailure`) in an AlertDialog, one request at a time in the order
- * they were made (`createDialogQueue`). A destructive question focuses
+ * (`useReportFailure`) and reads (`meta.errorTitle`) in an AlertDialog, one
+ * request at a time in the order they were made (`createDialogQueue`). A
+ * destructive question focuses
  * Cancel, the safe choice, so Return never starts the action; any other
  * question focuses its action, and an alert its only button, OK.
  */
@@ -52,6 +55,30 @@ export function ConfirmProvider({ children }: PropsWithChildren) {
     setAsking((count) => count + 1);
     return queue.ask(next).finally(() => setAsking((count) => count - 1));
   }, [queue]);
+
+  // A query with `meta.errorTitle` reports its failure once: when a page
+  // shows it (not a prefetch) and it has no data yet. A failed refetch of
+  // data on screen stays silent. A successful fetch of the query ends its
+  // failure streak, and so does the end of a web UI session.
+  const client = useQueryClient();
+  useEffect(() => {
+    const reported = new Set<string>();
+    const unsubscribe = client.getQueryCache().subscribe((event) => {
+      if (event.type !== "updated") return;
+      const { query, action } = event;
+      if (action.type === "success") reported.delete(query.queryHash);
+      const title = query.meta?.errorTitle;
+      if (action.type !== "error" || !title || action.error instanceof SessionEndedError
+        || query.state.data !== undefined || query.getObserversCount() === 0 || reported.has(query.queryHash)) return;
+      reported.add(query.queryHash);
+      void ask({ kind: "alert", title, message: errorMessage(action.error) });
+    });
+    const unsubscribeSession = session?.onEnded(() => reported.clear());
+    return () => {
+      unsubscribe();
+      unsubscribeSession?.();
+    };
+  }, [client, ask]);
   return <ConfirmContext.Provider value={ask}><ConfirmOpenContext.Provider value={asking > 0}>
     {children}
     <AlertDialog open={open} onOpenChange={(next) => { if (!next) queue.answer(false); }} onOpenChangeComplete={(next) => { if (!next) drained.current = !queue.closed(); }}>
@@ -90,7 +117,10 @@ export function useConfirm(): Confirm {
  */
 export function useReportFailure(): (title: string, error: unknown) => void {
   const ask = useConfirmContext();
-  return useCallback((title, error) => void ask({ kind: "alert", title, message: errorMessage(error) }), [ask]);
+  // The sign-in page says the session ended; nothing is reported over it.
+  return useCallback((title, error) => {
+    if (!(error instanceof SessionEndedError)) void ask({ kind: "alert", title, message: errorMessage(error) });
+  }, [ask]);
 }
 
 /** Whether a confirmation or an alert is waiting for an answer. */
