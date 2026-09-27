@@ -30,7 +30,7 @@ use desktop_core::{
     },
     listen::ResolvedListen,
     lock,
-    paths::{app_data_dir, config_dir},
+    paths::{app_data_dir, config_dir, legacy_config_dir},
     usage::{UsagePage, UsageQuery},
 };
 use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
@@ -243,7 +243,13 @@ impl DesktopRuntime {
                 tracing::warn!("Cannot stage the credential helper: {error}");
             }
         }
-        let (settings, mut settings_problems) = Settings::open(config_dir()?, &data_dir);
+        let (settings_dir, relocation_notices) = match legacy_config_dir() {
+            Some(legacy) => desktop_core::relocation::relocate(&legacy, &config_dir()?, &data_dir),
+            None => (config_dir()?, Vec::new()),
+        };
+        let (settings, mut settings_problems) = Settings::open(settings_dir, &data_dir);
+        settings.add_import_notices(&relocation_notices);
+        settings_problems.extend(relocation_notices);
         let settings = Arc::new(settings);
         let local_state = Arc::new(LocalState::open(&data_dir));
         settings_problems.extend(local_state.read().err());

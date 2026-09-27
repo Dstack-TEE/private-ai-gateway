@@ -21,6 +21,7 @@ pub mod paths;
 pub mod private_fs;
 pub mod protection;
 pub mod protocol;
+pub mod relocation;
 #[cfg(feature = "server")]
 pub mod serve;
 pub mod sse;

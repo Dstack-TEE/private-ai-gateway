@@ -27,7 +27,6 @@ const scratch = await mkdtemp(path.join(os.tmpdir(), "pap-windows-gate-"));
 const portable = path.join(scratch, "bin");
 const appData = path.join(scratch, "appdata");
 const profile = path.join(scratch, "profile");
-const data = path.join(appData, identifier);
 const acquired = path.join(scratch, "acquired");
 const release = path.join(scratch, "release");
 const fixture = path.join(scratch, "gate-fixture.exe");
@@ -116,8 +115,9 @@ try {
   await waitForExit(gate, 10_000);
   assert.equal(gate.exitCode, 0);
 
-  await mkdir(path.join(data, "Config"), { recursive: true });
-  await writeFile(path.join(data, "Config", "config.toml"), `[local-api]\nport = ${await reservePort()}\n`);
+  const settings = path.join(profile, ".config", "private-ai-proxy");
+  await mkdir(settings, { recursive: true });
+  await writeFile(path.join(settings, "config.toml"), `[local-api]\nport = ${await reservePort()}\n`);
   const started = JSON.parse((await execute(pap, ["--json", "service", "start"], { env, timeout: 20_000, windowsHide: true })).stdout);
   assert.ok(Number.isInteger(started.processId) && started.processId > 0);
 } finally {

@@ -126,7 +126,9 @@ when it closes, as some remote shells and CI runners use, ends the backend too.
 
 ## Settings
 
-Settings live in `config.toml` and the user's credentials in `credentials.toml`; see
+Settings live in `config.toml` and the user's credentials in `credentials.toml`,
+in `~/.config/private-ai-proxy` on every platform (`$XDG_CONFIG_HOME` on Linux;
+the Mac App Store build keeps them in its container); see
 [Settings files](configuration.md) for their locations, keys, live reload,
 syncing and the upgrade from 0.1.
 
@@ -460,8 +462,10 @@ retryable.
 prints the partial report on stdout and exits nonzero; the `errors` object
 identifies failed checks. `settings` names the settings files; an invalid file
 is an error. `warnings` lists problems that do not fail `doctor`: a
-`credentials.toml` other users can read (`credentials`) and profiles without a
-saved API key (`profileCredentials`). The `update` check is advisory: when the release
+`credentials.toml` other users can read (`credentials`), profiles without a
+saved API key (`profileCredentials`) and settings files left where macOS and
+Windows builds up to 0.2.0-beta.8 kept them (`legacySettingsDirectory`; see
+[Settings files](configuration.md#moving-from-the-earlier-macos-and-windows-location)). The `update` check is advisory: when the release
 feed is unreachable it reports an `error` inside `update` without failing
 `doctor`. `logs` is the directory of the service's log files.
 

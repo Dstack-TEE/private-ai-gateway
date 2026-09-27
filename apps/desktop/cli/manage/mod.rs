@@ -786,7 +786,8 @@ fn doctor(client: &Client) -> Value {
 /// The settings files as the running backend sees them, or as this user's
 /// environment resolves them. An invalid file, or a 0.1 import the running
 /// backend could not finish, fails the doctor; unknown keys, 0.1 import
-/// notices, a credentials file other users can read and profiles without a
+/// notices, settings files left where macOS and Windows builds up to
+/// 0.2.0-beta.8 kept them, a credentials file other users can read and profiles without a
 /// saved key warn.
 fn settings_diagnostics(
     client: &Client,
@@ -834,6 +835,10 @@ fn settings_diagnostics(
     }
     if !notices.is_empty() {
         warnings.insert("settingsFiles".into(), json!(notices));
+    }
+    // Also without the backend, which reports it only when it starts.
+    if let Some(leftover) = desktop_core::relocation::diagnostic() {
+        warnings.insert("legacySettingsDirectory".into(), json!(leftover));
     }
     match desktop_core::private_fs::readable_by_others(Path::new(&credentials)) {
         Ok(Some(true)) => {
