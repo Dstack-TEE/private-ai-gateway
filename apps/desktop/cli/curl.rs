@@ -201,9 +201,6 @@ fn exit_code(status: ExitStatus) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
-    use std::{fs, os::unix::fs::PermissionsExt, path::Path, path::PathBuf};
-
     use super::*;
     use crate::transcript::{ID_2, ID_6};
 
@@ -378,34 +375,33 @@ mod tests {
         assert!(err.contains("curl was not started"), "{err}");
     }
 
+    /// Runs `script` as curl through `sh -c`, with `curl_args` as its
+    /// positional parameters. The script is never written to a file: exec'ing
+    /// a freshly written file races tests that fork concurrently, whose
+    /// children keep its write descriptor until they exec and so fail this
+    /// exec with ETXTBSY (rust-lang/rust#114554, golang/go#22315).
     #[cfg(unix)]
-    fn fake_curl(directory: &Path, script: &str) -> PathBuf {
-        let path = directory.join("curl");
-        fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
-        let mut permissions = fs::metadata(&path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&path, permissions).unwrap();
-        path
+    fn run_fake_curl(script: &str, curl_args: &[&str]) -> Result<i32, String> {
+        let mut command = args(&["-c", script, "curl"]);
+        command.extend(args(curl_args));
+        run_curl(OsStr::new("/bin/sh"), &command)
     }
 
     #[cfg(unix)]
     #[test]
     fn runs_external_curl_and_preserves_its_exit_code() {
-        let directory = tempfile::tempdir().unwrap();
-        let curl = fake_curl(
-            directory.path(),
+        let code = run_fake_curl(
             "[ \"$1\" = \"-q\" ] || exit 91\n[ \"$2\" = \"--silent\" ] || exit 92\nexit 23",
-        );
-        let code = run_curl(curl.as_os_str(), &args(&["-q", "--silent"])).unwrap();
+            &["-q", "--silent"],
+        )
+        .unwrap();
         assert_eq!(code, 23);
     }
 
     #[cfg(unix)]
     #[test]
     fn reports_a_curl_killed_by_a_signal_as_128_plus_the_signal() {
-        let directory = tempfile::tempdir().unwrap();
-        let curl = fake_curl(directory.path(), "kill -TERM $$");
-        assert_eq!(run_curl(curl.as_os_str(), &[]).unwrap(), 128 + 15);
+        assert_eq!(run_fake_curl("kill -TERM $$", &[]).unwrap(), 128 + 15);
     }
 
     #[test]
