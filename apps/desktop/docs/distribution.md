@@ -55,7 +55,8 @@ GitHub release with that changelog section as its notes.
   An empty commit, as in the release-please README example, pushes nothing
   under `apps/desktop/`, so run `Desktop release PR` from the Actions tab
   (`workflow_dispatch`) afterwards. The next release PR then proposes `0.2.0`.
-  Afterwards, betas continue from the next version.
+  Afterwards, betas continue from the next version. The
+  [Release runbook](#release-runbook) lists every step.
 - **Correcting the changelog**: edit the merged PR's body with a
   `BEGIN_COMMIT_OVERRIDE` … `END_COMMIT_OVERRIDE` block
   ([release-please: overriding release PR messages](https://github.com/googleapis/release-please#how-can-i-fix-release-notes)),
@@ -128,8 +129,10 @@ Authenticode remains optional and does not block the release.
 
 Workflows never start from events that `GITHUB_TOKEN` creates. `Desktop release
 PR` therefore acts as a GitHub App, so its release PR runs CI and its tag starts
-the release build. Until both settings below exist, the workflow fails with a
-message naming them.
+the release build. The Homebrew tap's `update.yml`
+([`Dstack-TEE/homebrew-private-ai`](https://github.com/Dstack-TEE/homebrew-private-ai))
+uses the same App, so its update pull requests run the tap's tests. Until both
+settings below exist, the workflow fails with a message naming them.
 
 1. Create a GitHub App owned by the Dstack-TEE organization. Disable its
    webhook. It needs these repository permissions, with nothing else beyond the
@@ -137,22 +140,136 @@ message naming them.
    - Contents: read and write (release commits, tags, draft releases);
    - Pull requests: read and write (the release PR);
    - Issues: read and write (release PR labels).
-2. Install it only on `Dstack-TEE/private-ai-gateway`.
+2. Install it only on `Dstack-TEE/private-ai-gateway` and
+   `Dstack-TEE/homebrew-private-ai`.
 3. In the `desktop-release` environment, store the App's client ID as the
    variable `DESKTOP_RELEASE_APP_CLIENT_ID` and a private key (the whole `.pem`)
    as the secret `DESKTOP_RELEASE_APP_PRIVATE_KEY`. Keep the environment's
    deployment rules to `main` and `desktop-v*`, so other branches cannot mint
-   the token.
+   the token. The tap stores the same variable and secret at repository level.
 
 To rotate the key:
 
 1. Generate a new private key in the App settings.
-2. Replace the secret.
-3. Confirm the next `Desktop release PR` run succeeds.
+2. Replace the secret here and in the tap.
+3. Confirm the next `Desktop release PR` run and a manual run of the tap's
+   `update.yml` succeed.
 4. Delete the old key in the App settings.
 
 Installation tokens last one hour and are minted per run, so nothing else
 expires.
+
+### Release runbook
+
+#### Promoting a beta to stable
+
+release-please does not aggregate prereleases: the stable section it writes
+lists only the commits since the last beta, so curate the notes before merging.
+
+1. Check the App Store path: `gh workflow run desktop-mac-app-store.yml --ref main`.
+   A manual run packages, signs and validates the App Store build without
+   uploading it ([Mac App Store](mac-app-store.md#build-and-signing-prerequisites)).
+2. Push an empty commit with the stable version in a `Release-As` footer, then
+   run `Desktop release PR`, because an empty commit does not match its path
+   filter:
+
+   ```sh
+   git switch main && git pull --ff-only
+   git commit --allow-empty -m "chore(desktop): release 0.2.0" -m "Release-As: 0.2.0"
+   git push origin main
+   gh workflow run desktop-release-please.yml --ref main
+   ```
+
+3. Curate the release PR (`gh pr list --label "autorelease: pending"`) so that
+   it covers every change since 0.1.6, using the beta sections of
+   `CHANGELOG.md`:
+   - its body becomes the release notes. Keep the header, the `## [0.2.0]`
+     heading and the footer, and replace the sections below the heading:
+     `gh pr edit <number> --body-file notes.md`;
+   - commit the same sections to the top of `apps/desktop/CHANGELOG.md` on
+     its branch, `release-please--branches--main--components--desktop`.
+
+   Every `Desktop release PR` run rewrites both, so while the PR is open, do
+   not push `apps/desktop` changes to `main` or run that workflow.
+4. Save both update feeds, which [stopping a bad stable
+   release](#stopping-a-bad-stable-release) restores, then merge the PR:
+
+   ```sh
+   gh release download desktop-updates-stable --dir feeds/stable
+   gh release download desktop-updates-beta --dir feeds/beta
+   ```
+
+5. If the tag's `Desktop release` run fails, use only **Re-run failed jobs**,
+   never **Re-run all jobs**, which would upload the App Store build number
+   again.
+6. After the release:
+   - submit the uploaded build in App Store Connect
+     ([Submit and rollback](mac-app-store.md#submit-and-rollback));
+   - run the tap's `update.yml`
+     (`gh workflow run update.yml --repo Dstack-TEE/homebrew-private-ai`) or
+     wait for its daily schedule, then merge its `private-ai-proxy 0.2.0` pull
+     request;
+   - optionally, from a maintainer's npm login (OIDC cannot move dist-tags),
+     `npm dist-tag add private-ai-proxy@0.2.0 beta`
+     ([Dist-tags](../npm/README.md#dist-tags-and-version-ranges)).
+
+#### If the App Store job fails on the tag
+
+The release job needs the App Store job, so nothing is published: the draft
+release, the feeds and npm are unchanged.
+
+- If the cause is outside the tagged commit (a secret, certificate, profile or
+  App Store Connect agreement, or the runner), fix it and **Re-run failed
+  jobs**. The build number was never uploaded, so the App Store job can use it
+  again.
+- Otherwise, or if App Store Connect already lists the build, keep the notes,
+  delete the draft release and its tag, land the fix on `main` and release
+  `0.2.1` with the steps above. release-please has already recorded `0.2.0` on
+  `main` and does not tag it again. Its empty commit needs the footer `Release-As: 0.2.1`;
+  without it, prerelease versioning proposes `0.2.1-beta.1`.
+
+  ```sh
+  gh release view desktop-v0.2.0 --json body --jq .body > notes.md
+  gh release delete desktop-v0.2.0 --cleanup-tag --yes
+  ```
+
+#### Stopping a bad stable release
+
+A stable release rewrites the stable feed's `latest.json` and its
+`latest-<os>-<arch>.json` files, which clients up to 0.1.7-beta.4, including
+every 0.1.6 installation, read. In the beta feed it rewrites only `latest.json`.
+
+1. Restore the saved feeds. Installed updates are not rolled back; clients
+   never downgrade.
+
+   ```sh
+   gh release upload desktop-updates-stable feeds/stable/latest*.json --clobber
+   gh release upload desktop-updates-beta feeds/beta/latest.json --clobber
+   ```
+
+   Without the saved copy, the `latest.json` assets of `desktop-v0.1.6` and
+   of the latest beta tag are the previous `latest.json` files, but the
+   per-platform files existed only in the stable feed. To find the latest
+   beta tag:
+
+   ```sh
+   gh release list --exclude-drafts --json tagName,isPrerelease \
+     --jq '[.[] | select(.isPrerelease and (.tagName | startswith("desktop-v")))][0].tagName'
+   ```
+
+2. Make 0.1.6 the Latest release again: `gh release edit desktop-v0.1.6 --latest`.
+3. From a maintainer's npm login, since OIDC cannot move dist-tags:
+   `npm dist-tag add private-ai-proxy@0.1.6 latest`. If `beta` was moved to
+   `0.2.0`, move it back with
+   `npm dist-tag add private-ai-proxy@<latest beta version> beta`.
+4. Do not merge the tap's `private-ai-proxy 0.2.0` pull request
+   (`gh pr close <number> --repo Dstack-TEE/homebrew-private-ai`); if it is
+   already merged, revert it
+   (`gh pr revert <number> --repo Dstack-TEE/homebrew-private-ai`) and merge
+   the revert. The tap reads the stable feed, so it then proposes nothing
+   newer. Do not submit the App Store build, or withdraw it
+   ([Submit and rollback](mac-app-store.md#submit-and-rollback)).
+5. Ship the fix as `0.2.1` with the promotion steps above.
 
 ## Updates by installation
 

@@ -29,8 +29,9 @@ test("only release tags publish, after every package, in order", async () => {
   const needs = (job) => [direct.jobs[job].needs ?? []].flat();
   const after = (job, dependency) => needs(job).some((need) => need === dependency || after(need, dependency));
   assert.ok(after("release", "package") && after("release", "mac-app-store"));
-  // The App Store upload cannot be undone.
-  assert.ok(after("mac-app-store", "verify"));
+  // The App Store upload cannot be undone, so it waits for every
+  // verification job that the packages wait for.
+  for (const job of needs("package").filter((need) => need.startsWith("verify"))) assert.ok(after("mac-app-store", job), job);
   assert.ok(after("update-feed", "release"));
   assert.ok(after("publish-npm", "update-feed"));
   // Beta releases skip the App Store job; a later job without a status check
@@ -67,6 +68,21 @@ test("only release tags publish, after every package, in order", async () => {
   assert.notEqual(downloaded.with.path, "release");
   assert.deepEqual(attested.map((file) => path.posix.relative(downloaded.with.path, file)).sort(), generated);
   assert.equal(generated.length, 3);
+});
+
+test("only a release tag's call uploads to App Store Connect", async () => {
+  const appStore = await readWorkflow("desktop-mac-app-store.yml");
+  const steps = appStore.jobs.package.steps;
+  const validate = steps.findIndex((step) => step.run?.includes("altool --validate-app"));
+  const uploads = steps.flatMap((step, index) => (step.run?.includes("--upload-app") ? [index] : []));
+  assert.notEqual(validate, -1);
+  assert.equal(steps[validate].if, undefined);
+  // Only desktop-native.yml passes a build number; a manual run has none, so
+  // it validates the package but never uploads it.
+  assert.equal(uploads.length, 1);
+  assert.equal(steps[uploads[0]].if, "inputs.build_number != ''");
+  assert.equal(appStore.on.workflow_dispatch.inputs?.build_number, undefined);
+  assert.ok(validate < uploads[0]);
 });
 
 test("npm publishes the channel wrapper after its platform versions", async () => {

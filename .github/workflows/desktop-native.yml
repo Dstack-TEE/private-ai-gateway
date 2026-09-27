@@ -265,9 +265,10 @@ jobs:
 
   # Stable releases also upload the App Store build, in parallel with the
   # Direct packages; the release job publishes only after both succeed. The
-  # upload cannot be undone, so it waits for the full verification.
+  # upload cannot be undone and uses up its build number, so it waits for
+  # every verification job the packages wait for.
   mac-app-store:
-    needs: [version, verify]
+    needs: [version, verify, verify-linux-arm64, verify-windows-x64]
     if: needs.version.outputs.channel == 'stable'
     permissions:
       contents: read

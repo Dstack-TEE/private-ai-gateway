@@ -17,9 +17,6 @@ on:
 permissions:
   contents: read
 
-env:
-  PAP_INSTALL_TEST_VERSION: 0.2.0-beta.2
-
 jobs:
   unix:
     strategy:
@@ -28,8 +25,20 @@ jobs:
         os:
           - macos-26
           - ubuntu-22.04
+        channel: &channels
+          - beta
+          - stable
+        # A published release of each channel.
+        include: &versions
+          - channel: beta
+            version: 0.2.0-beta.2
+          - channel: stable
+            version: 0.1.6
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
+    env:
+      PAP_INSTALL_TEST_CHANNEL: ${{ matrix.channel }}
+      PAP_INSTALL_TEST_VERSION: ${{ matrix.version }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -40,15 +49,23 @@ jobs:
           set -euo pipefail
           root="$RUNNER_TEMP/private-ai-proxy"
           bin="$RUNNER_TEMP/bin"
-          scripts/install-private-ai-proxy.sh --channel beta --version "$PAP_INSTALL_TEST_VERSION" --install-dir "$root" --bin-dir "$bin"
+          scripts/install-private-ai-proxy.sh --channel "$PAP_INSTALL_TEST_CHANNEL" --version "$PAP_INSTALL_TEST_VERSION" --install-dir "$root" --bin-dir "$bin"
           test "$("$bin/pap" --version)" = "private-ai-proxy $PAP_INSTALL_TEST_VERSION"
-          scripts/install-private-ai-proxy.sh --channel beta --version "$PAP_INSTALL_TEST_VERSION" --install-dir "$root" --bin-dir "$bin"
+          scripts/install-private-ai-proxy.sh --channel "$PAP_INSTALL_TEST_CHANNEL" --version "$PAP_INSTALL_TEST_VERSION" --install-dir "$root" --bin-dir "$bin"
           test "$("$bin/private-ai-proxy" --version)" = "private-ai-proxy $PAP_INSTALL_TEST_VERSION"
           test "$("$bin/aci" --version)" = "private-ai-proxy $PAP_INSTALL_TEST_VERSION"
 
   windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: *channels
+        include: *versions
     runs-on: windows-2025
     timeout-minutes: 10
+    env:
+      PAP_INSTALL_TEST_CHANNEL: ${{ matrix.channel }}
+      PAP_INSTALL_TEST_VERSION: ${{ matrix.version }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -58,9 +75,9 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $installDir = Join-Path $env:RUNNER_TEMP 'Private AI Proxy CLI'
-          .\scripts\install-private-ai-proxy.ps1 -Channel beta -Version $env:PAP_INSTALL_TEST_VERSION -InstallDir $installDir
+          .\scripts\install-private-ai-proxy.ps1 -Channel $env:PAP_INSTALL_TEST_CHANNEL -Version $env:PAP_INSTALL_TEST_VERSION -InstallDir $installDir
           if ((& "$installDir\pap.cmd" --version).Trim() -ne "private-ai-proxy $env:PAP_INSTALL_TEST_VERSION") { throw 'pap version mismatch' }
-          .\scripts\install-private-ai-proxy.ps1 -Channel beta -Version $env:PAP_INSTALL_TEST_VERSION -InstallDir $installDir
+          .\scripts\install-private-ai-proxy.ps1 -Channel $env:PAP_INSTALL_TEST_CHANNEL -Version $env:PAP_INSTALL_TEST_VERSION -InstallDir $installDir
           if ((& "$installDir\private-ai-proxy.exe" --version).Trim() -ne "private-ai-proxy $env:PAP_INSTALL_TEST_VERSION") { throw 'CLI version mismatch' }
           if ((& "$installDir\aci.cmd" --version).Trim() -ne "private-ai-proxy $env:PAP_INSTALL_TEST_VERSION") { throw 'aci version mismatch' }
           & "$installDir\private-ai-proxy.exe" --yes cli uninstall | Out-Null
