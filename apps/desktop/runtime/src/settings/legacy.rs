@@ -364,7 +364,9 @@ pub(crate) fn secrets_pending(data_dir: &Path) -> bool {
 /// the credential store itself fails (unavailable, a denied or unanswered
 /// macOS Keychain prompt), so the store is not asked again on every start.
 /// `Err` is a problem with this app's own files; nothing records the step
-/// then, and it reruns on the next start without prompting again first.
+/// then, and it reruns on the next start. A failure after the store was read
+/// (writing `credentials.toml` or `local-state.json`) reads it again, and
+/// may show its prompt again, on every start until the file problem is fixed.
 ///
 /// While the step is pending, an agent restore value missing from
 /// `local-state.json` may still be in the store, so [`LocalState`] reports it
@@ -463,7 +465,9 @@ fn import_pending_secrets(
     import.cleanup_records(&cleanup, &saved, &mut found);
     import.agent_restore_values(&connections, &saved, &mut found);
 
-    // 1. Secrets, durable and verified, before anything is deleted.
+    // 1. Secrets, durable and verified, before anything is deleted. A write
+    // failure here leaves the step pending, so the next start reads the
+    // store, and may prompt, again.
     if !keys.is_empty() {
         settings
             .update_credentials(|credentials| {

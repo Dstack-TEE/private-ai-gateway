@@ -64,6 +64,17 @@ fn summary_over_fixtures_reads_all_ok() {
         "upstream-2 FAILED: record carries no spec 8.2 evidence digest+data, \
          signature ok, wire hash ok, upstream UNVERIFIED"
     );
+    // A failed wire hash is named once, with its detail.
+    let receipt_4 = transcript
+        .checks
+        .iter_mut()
+        .find(|check| check.def.id == "receipt-4")
+        .unwrap();
+    receipt_4.status = crate::transcript::Status::Fail;
+    receipt_4.detail = "response body_hash mismatch".into();
+    let summary = summarize(&transcript, Some(&session), "upstream");
+    assert!(summary.contains("receipt-4 FAILED: response body_hash mismatch"));
+    assert!(!summary.contains("wire hash"), "{summary}");
 }
 
 /// A request that passed the entry checks but has not started sending is

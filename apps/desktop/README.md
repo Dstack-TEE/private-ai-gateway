@@ -83,8 +83,10 @@ API, which refuses them until protection is verified again, so their requests
 never fall back to the original provider. A Local API address change during
 the session rewrites them to the new address from the last verified catalog;
 only when this backend has not verified a catalog yet are they restored until
-verification projects them again. External edits are preserved and
-incomplete restoration is kept retryable.
+verification projects them again. If neither the new address nor the old
+one can be bound, agents stay pointed at an address with no listener, which
+refuses them. External edits are preserved and incomplete restoration is kept
+retryable.
 
 A backend that is not running restores nothing: `pap service stop` and
 uninstalling cannot restore agents it left projected (for example after an

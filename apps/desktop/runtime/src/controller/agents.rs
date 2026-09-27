@@ -374,7 +374,18 @@ impl DesktopRuntime {
             .agent_policy
             .lock()
             .map_err(|_| "Agent state unavailable")?;
-        let failures = self.current_projector()?.retarget(catalog)?;
+        let failures = match self
+            .current_projector()
+            .and_then(|projector| Ok(projector.retarget(catalog)?))
+        {
+            Ok(failures) => failures,
+            // Agents left on the old address would keep calling it and
+            // presenting their tokens there: restore them instead.
+            Err(error) => {
+                tracing::warn!("Cannot re-project agents to the new Local API address: {error}");
+                self.current_projector()?.reconcile(None)?
+            }
+        };
         self.manager.agents_changed();
         if failures.is_empty() {
             Ok(())

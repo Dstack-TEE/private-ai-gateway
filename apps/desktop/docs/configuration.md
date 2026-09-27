@@ -244,7 +244,9 @@ unlocked OS keychain for a process running as you.
   been verified. Do not sync that file anywhere public, such as a public
   dotfiles repository. The import is tried once: if the keychain is
   unavailable or its prompt is denied, sign in again or re-enter the key of
-  any profile that shows none.
+  any profile that shows none. Only if the app cannot write its own settings
+  files during the import does it try again, and may prompt again, on the
+  next start.
 - **Receipt audits report; they do not block.** Responses stream to your
   agent as they arrive. Each signed receipt is fetched and audited after the
   response was delivered, and a failed audit is reported in Usage; it cannot

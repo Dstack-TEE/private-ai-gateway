@@ -112,6 +112,11 @@ struct Connection {
     options: ConnectOptions,
     #[serde(default)]
     attention: Option<String>,
+    /// The Local API endpoint the fields name. Reconcile projects a record
+    /// that names another one again, so an interrupted address change heals;
+    /// a record from before this field is taken to match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    endpoint: Option<String>,
     /// The agent is not authorized (disconnect in progress).
     disabled: bool,
     /// A disconnect started; the record stays until token, parked secrets,

@@ -13,7 +13,8 @@ use crate::transcript::{Status, Transcript};
 
 /// One-line receipt summary: every failed check first, then signature, wire
 /// hash, and the asserted upstream claims (e.g. `signature ok, wire hash ok,
-/// upstream tee_attested asserted (hardware_proven)`).
+/// upstream tee_attested asserted (hardware_proven)`). A failed signature or
+/// wire hash appears only among the failed checks.
 pub(super) fn summarize(transcript: &Transcript, session: Option<&Value>, serving: &str) -> String {
     let mut parts: Vec<String> = transcript
         .checks
@@ -33,7 +34,6 @@ pub(super) fn summarize(transcript: &Transcript, session: Option<&Value>, servin
 fn check_clause(transcript: &Transcript, id: &str, label: &str) -> String {
     match status_of(transcript, id) {
         Some(Status::Pass) => format!("{label} ok"),
-        Some(Status::Fail) => format!("{label} FAILED"),
         Some(Status::Skip) => format!("{label} skipped"),
         _ => String::new(),
     }

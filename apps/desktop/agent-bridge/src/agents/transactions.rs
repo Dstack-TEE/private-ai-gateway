@@ -155,6 +155,10 @@ impl Projector {
                 } else if !record.suspended
                     && catalog.is_some_and(|catalog| {
                         record.catalog_revision.as_deref() != Some(catalog.revision.as_str())
+                            || record
+                                .endpoint
+                                .as_deref()
+                                .is_some_and(|endpoint| endpoint != self.endpoint)
                             || (record.attention.is_none()
                                 && (record.options.default_model.is_none()
                                     || (matches!(agent, Agent::Pi | Agent::OhMyPi)
@@ -380,6 +384,7 @@ impl Projector {
         next_record.config_path = path.to_path_buf();
         next_record.options = options.clone();
         next_record.catalog_revision = catalog.map(|catalog| catalog.revision.clone());
+        next_record.endpoint = Some(self.endpoint.clone());
         let mut guard = Rollback::default();
         let result = (|| -> Result<(), AgentError> {
             // A fresh token on every new connection; a leftover file from an
