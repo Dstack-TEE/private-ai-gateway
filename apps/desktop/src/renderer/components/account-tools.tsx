@@ -6,7 +6,7 @@ import { currency } from "../lib/usage-presentation";
 import { Avatar, AvatarFallback, AvatarImage } from "./ui/avatar";
 import { Button } from "./ui/button";
 import { Hint } from "./hint";
-import { useReportFailure, useReportReadFailure } from "./confirm";
+import { useReportFailure } from "./confirm";
 import { Item, ItemActions, ItemContent, ItemTitle } from "./ui/item";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 
@@ -41,7 +41,7 @@ function balanceCacheKey({ provider, target, credentialRef }: Pick<Props, "provi
 
 function useAccountBalance({ api, provider, target, credentialRef, enabled = true }: BalanceQueryProps & { enabled?: boolean }) {
   const cacheKey = balanceCacheKey({ provider, target, credentialRef });
-  const balanceRead = useQuery({
+  return useQuery({
     queryKey: ["account-balance", cacheKey],
     queryFn: () => api.getAccountBalance(target),
     enabled,
@@ -50,9 +50,8 @@ function useAccountBalance({ api, provider, target, credentialRef, enabled = tru
     refetchOnWindowFocus: "always",
     staleTime: 30_000,
     retry: false,
+    meta: { errorTitle: "Could not read the account balance" },
   });
-  useReportReadFailure("Could not read the account balance", balanceRead);
-  return balanceRead;
 }
 
 /** Compact account balance for a profile whose credential is already in active use. */

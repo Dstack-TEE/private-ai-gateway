@@ -1,7 +1,7 @@
 import React, { useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { cliRegistrationQuery } from "../lib/page-queries";
-import { useReportFailure, useReportReadFailure } from "../components/confirm";
+import { useReportFailure } from "../components/confirm";
 import { ChevronRight } from "lucide-react";
 import { brand } from "../brand/brand";
 import { UpdateControl, UpdateChannelControl } from "../updates";
@@ -22,9 +22,7 @@ import { OS_POLICY_CHANGE, useShell } from "../lib/shell";
 function CliRegistrationControl(): React.JSX.Element {
   const client = useQueryClient();
   const reportFailure = useReportFailure();
-  const registrationRead = useQuery(cliRegistrationQuery());
-  const { data: registration } = registrationRead;
-  useReportReadFailure("Could not read the pap command", registrationRead);
+  const { data: registration } = useQuery(cliRegistrationQuery());
   const mutation = useMutation({
     mutationFn: (installed: boolean) => desktopApi.setCliRegistration(installed),
     onMutate: () => client.cancelQueries({ queryKey: ["cli-registration"] }),
@@ -78,9 +76,11 @@ function SignOutControl({ onSignOut }: { onSignOut(): Promise<void> }): React.JS
 function useLaunchPreferences() {
   const client = useQueryClient();
   const reportFailure = useReportFailure();
-  const preferencesRead = useQuery({ queryKey: ["launch-preferences"], queryFn: () => desktopApi.getLaunchPreferences() });
-  const { data } = preferencesRead;
-  useReportReadFailure("Could not read launch preferences", preferencesRead);
+  const { data } = useQuery({
+    queryKey: ["launch-preferences"],
+    queryFn: () => desktopApi.getLaunchPreferences(),
+    meta: { errorTitle: "Could not read launch preferences" },
+  });
   useEffect(() => desktopApi.onLaunchPreferencesChange((next) => {
     void client.cancelQueries({ queryKey: ["launch-preferences"] }).then(() => client.setQueryData(["launch-preferences"], next));
   }), [client]);

@@ -16,7 +16,7 @@ import { WebUiDialog } from "./features/web-ui";
 import { UsageProofDialog } from "./features/usage";
 import { LocalApiExamplesDialog } from "./components/local-api-examples";
 import { NotificationsDialog } from "./components/notifications";
-import { useConfirm, useConfirmOpen, useReportFailure, useReportReadFailure } from "./components/confirm";
+import { useConfirm, useConfirmOpen, useReportFailure } from "./components/confirm";
 import { useDialog } from "./components/app-dialog";
 import { AppearanceProvider } from "./components/appearance";
 import { localEndpoint } from "./lib/format";
@@ -53,16 +53,20 @@ function Window(): React.JSX.Element {
   const appState = useAppState(desktopApi);
   const state = useMemo(() => appState.error ? unavailableState(appState.error) : appState.data ?? INITIAL_STATE, [appState.error, appState.data]);
   const setState = appState.setState;
-  const agents = useAgents(desktopApi, state, distributionCapabilities.sandboxHomeAccess);
   const backendReady = Boolean(appState.data) && state.backendConnected !== false;
+  const agents = useAgents(desktopApi, state, backendReady, distributionCapabilities.sandboxHomeAccess);
   const confirm = useConfirm();
   const reportFailure = useReportFailure();
   const confirming = useConfirmOpen();
   const dialog = useDialog<AppDialog>();
   const { payload: shownDialog, key: dialogKey, show: openDialog } = dialog;
-  const clientKeyRead = useQuery({ queryKey: ["client-key"], queryFn: () => desktopApi.getClientKey(), enabled: backendReady });
+  const clientKeyRead = useQuery({
+    queryKey: ["client-key"],
+    queryFn: () => desktopApi.getClientKey(),
+    enabled: backendReady,
+    meta: { errorTitle: "Could not read the Local API key" },
+  });
   const clientKey = clientKeyRead.data ?? "";
-  useReportReadFailure("Could not read the Local API key", clientKeyRead);
   // The shell registers the `pap` command at startup; its failure is reported once.
   const { data: cliRegistration } = useQuery({ ...cliRegistrationQuery(), enabled: distributionCapabilities.cliRegistration, staleTime: Infinity });
   const cliStartupError = cliRegistration?.startupError;
@@ -222,9 +226,8 @@ function Window(): React.JSX.Element {
   });
   // A request waits in the shell until the window's state and agents have
   // loaded, so one made while the app starts sees the real profiles and
-  // agent access. Agents aren't read while the backend is unavailable.
-  const backendUnavailable = state.backendConnected === false && state.protection.phase !== "starting";
-  const ready = Boolean(appState.data || appState.error) && (agents.accessStatus !== undefined || agents.problem !== undefined || backendUnavailable);
+  // agent access, or until they can't be read, as when the backend could not start.
+  const ready = Boolean(appState.data || appState.error) && (agents.accessStatus !== undefined || (agents.problem && state.protection.phase !== "starting"));
   useEffect(() => ready ? desktopApi.onNavigate((target) => showRequested(target)) : undefined, [ready]);
   const dialogControl = {
     ...dialog.control,

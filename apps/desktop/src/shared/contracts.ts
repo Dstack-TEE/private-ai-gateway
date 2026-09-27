@@ -70,7 +70,7 @@ export interface DesktopApi {
   listListenAddresses(): Promise<ListenAddress[]>;
   getNotificationSettings(): Promise<NotificationConfiguration>;
   selectProfileBackup(): Promise<ProfileBackup | null>;
-  /** Saves where the user chooses; `false` when they cancel. */
+  /** Saves where the user chooses, unless they cancel. */
   saveProfileExport(): Promise<void>;
   saveDiagnosticsExport(): Promise<void>;
   importProfiles(backup: ProfileBackup): Promise<ImportResult>;

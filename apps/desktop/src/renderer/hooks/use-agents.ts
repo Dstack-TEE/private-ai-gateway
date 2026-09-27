@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { keepPreviousData, useIsMutating, useMutation, useMutationState, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { AgentStatus, AppState, DesktopApi } from "../../shared/contracts";
-import { errorMessage } from "../lib/error-message";
-import { useConfirm, useReportFailure, useReportReadFailure } from "../components/confirm";
+import { useConfirm, useReportFailure } from "../components/confirm";
 import { agentAccessMutation, agentIntegrationsLocked, completeAgentStatuses, readAgentIntegrations, type AgentIntegrations } from "../lib/agent-integrations";
 
 const connectionKey = (agentId: string) => ["agent-connection", agentId];
@@ -19,7 +18,7 @@ export const SERVICE_AGENT = "codex";
  * That ends running Codex sessions, so it asks first; the next Codex run
  * starts it again with the new settings.
  */
-export function useAgents(api: DesktopApi, state: AppState, requiresAuthorization: boolean) {
+export function useAgents(api: DesktopApi, state: AppState, backendReady: boolean, requiresAuthorization: boolean) {
   const client = useQueryClient();
   const confirm = useConfirm();
   const reportFailure = useReportFailure();
@@ -51,15 +50,16 @@ export function useAgents(api: DesktopApi, state: AppState, requiresAuthorizatio
     onError: (failure) => reportFailure("Could not grant agent access", failure),
   });
   const authorizing = access.isPending;
-  // Nothing is read while the backend is unavailable, which the window shows.
-  const agentsRead = useQuery({
+  // Nothing is read until the backend answers. While it is unavailable,
+  // which the window shows, the agents stay locked.
+  const backendUnavailable = state.backendConnected === false;
+  const { data, error } = useQuery({
     queryKey: ["agents", state.backendInstance, state.agentsRevision, state.catalog?.revision, state.protection.phase === "protected"],
     queryFn: () => readAgentIntegrations(api, requiresAuthorization),
-    enabled: !authorizing && state.backendConnected !== false,
+    enabled: !authorizing && backendReady,
     placeholderData: keepPreviousData,
+    meta: { errorTitle: "Could not detect agents" },
   });
-  const { data, error } = agentsRead;
-  useReportReadFailure("Could not detect agents", agentsRead);
   useEffect(() => api.onAgentsChange(() => { void client.invalidateQueries({ queryKey: ["agents"] }); }), [api, client]);
   const accessStatus = requiresAuthorization ? data?.accessStatus : "authorized";
   const changing = useIsMutating({ mutationKey: ["agent-connection"] }) > 0;
@@ -70,13 +70,14 @@ export function useAgents(api: DesktopApi, state: AppState, requiresAuthorizatio
     authorizing,
     /** An agent connection is changing. */
     changing,
-    controlsLocked: agentIntegrationsLocked(accessStatus, authorizing),
-    problem: error ? errorMessage(error) : undefined,
+    controlsLocked: agentIntegrationsLocked(accessStatus, authorizing) || backendUnavailable,
+    /** The agents can't be read: the read failed, or the backend is unavailable. */
+    problem: Boolean(error) || backendUnavailable,
     requestAccess: () => {
       if (requiresAuthorization && !authorizing) requestAccess();
     },
     offerServiceStop,
-  }), [data, error, accessStatus, authorizing, changing, requiresAuthorization, requestAccess, offerServiceStop]);
+  }), [data, error, backendUnavailable, accessStatus, authorizing, changing, requiresAuthorization, requestAccess, offerServiceStop]);
 }
 
 /**

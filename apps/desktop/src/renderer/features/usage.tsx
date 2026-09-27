@@ -3,7 +3,6 @@ import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { usageFilters, usagePageQuery } from "../lib/page-queries";
 import { errorMessage } from "../lib/error-message";
-import { useReportReadFailure } from "../components/confirm";
 import { useCopy } from "../hooks/use-copy";
 import { Ban, Check, ChevronLeft, ChevronRight, Copy, ShieldCheck, ShieldX } from "lucide-react";
 import { Button } from "../components/ui/button";
@@ -79,9 +78,7 @@ export function UsagePage(): React.JSX.Element {
     setPagination({ filterKey, cursors: next });
   };
   const usageQuery = { ...filters, cursor: cursors[cursors.length - 1] };
-  const pageRead = useQuery(usagePageQuery(usageQuery));
-  const { data: page, isPending: loading } = pageRead;
-  useReportReadFailure("Could not load usage", pageRead);
+  const { data: page, isPending: loading } = useQuery(usagePageQuery(usageQuery));
 
   const agentOptions = Array.from(new Set([
     ...(agent ? [agent] : []),
