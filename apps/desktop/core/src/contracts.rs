@@ -710,6 +710,9 @@ pub enum NavigationTarget {
     ProfileSetup,
     /// The confirmation to stop everything and quit.
     ConfirmStopAll,
+    /// The question whether to stop Codex's background service, after the
+    /// tray changed Codex's connection while it runs.
+    ConfirmCodexServiceStop,
 }
 
 /// The system's permission to show this app's notifications.

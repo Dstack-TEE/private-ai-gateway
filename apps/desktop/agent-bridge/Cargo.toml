@@ -14,6 +14,10 @@ path = "src/lib.rs"
 name = "private-ai-proxy-helper"
 path = "src/bin/private-ai-proxy-helper.rs"
 
+[features]
+default = []
+mac-app-store = []
+
 [dependencies]
 desktop-core = { package = "private-ai-proxy-core", path = "../core", features = ["server"] }
 axum = "0.8"
@@ -31,7 +35,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.11"
 shlex = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "sync", "time"] }
 tokio-util = "0.7"
 toml_edit = "0.25"
 yaml-edit = { version = "0.3.1", default-features = false }

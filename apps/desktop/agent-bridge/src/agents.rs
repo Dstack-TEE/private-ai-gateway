@@ -9,6 +9,7 @@
 //! custom-provider settings. Disconnecting never depends on the endpoint or
 //! the catalog, so current connections can be restored while offline.
 
+mod codex_service;
 mod discovery;
 mod error;
 mod projection;
@@ -17,6 +18,7 @@ mod registry;
 mod transactions;
 mod validation;
 
+pub use codex_service::{CodexService, StopFailed};
 use discovery::*;
 pub use error::AgentError;
 use projection::*;

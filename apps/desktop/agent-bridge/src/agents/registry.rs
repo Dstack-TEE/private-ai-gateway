@@ -76,6 +76,15 @@ impl AgentIntegration for Agent {
         match self {
             Agent::OpenClaw => "OpenClaw uses a native-host provider and an executable SecretRef for its local token. Restart OpenClaw after applying.",
             Agent::OhMyPi => "Oh My Pi uses its own local token and native models YAML. Connect selects a compatible default; Disconnect restores the previous selection while keeping the provider. Restart omp after applying. Named profiles and conflicting overrides are not modified.",
+            Agent::Codex if super::codex_service::AVAILABLE => {
+                "Codex will use its official custom model provider with the Responses API, the \
+                 selected model from the verified catalog, command-backed authentication, and \
+                 the app-owned model catalog. Only the Codex baseline pinned by this app is \
+                 supported; other versions are not checked or supported. Codex keeps a background \
+                 service with the previous settings. The app offers to stop it; otherwise run \
+                 \"codex app-server daemon restart\" in your terminal. Either stops running \
+                 Codex sessions. Then quit and reopen the Codex app."
+            }
             Agent::Codex => {
                 "Codex will use its official custom model provider with the Responses API, the \
                  selected model from the verified catalog, command-backed authentication, and \

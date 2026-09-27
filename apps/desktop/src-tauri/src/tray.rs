@@ -208,8 +208,10 @@ fn perform_action(app: &AppHandle, id: String) {
                 })
                 .map(|_| ())
                 .map_err(|error| ("Could not switch profiles", error.into())),
-            _ if id.starts_with("agent:") => set_agent_connection(&client, &id["agent:".len()..])
-                .map_err(|error| ("Could not change the agent connection", error)),
+            _ if id.starts_with("agent:") => {
+                set_agent_connection(&app, &client, &id["agent:".len()..])
+                    .map_err(|error| ("Could not change the agent connection", error))
+            }
             _ => Ok(()),
         };
         if let Err((title, error)) = result {
@@ -226,17 +228,27 @@ fn perform_action(app: &AppHandle, id: String) {
     });
 }
 
-/// Connects a disconnected agent, or disconnects a connected one.
-fn set_agent_connection(client: &Client, agent_id: &str) -> Result<(), String> {
+/// Connects a disconnected agent, or disconnects a connected one. Codex's
+/// background service keeps the previous settings, so while it runs the
+/// window asks whether to stop it, as after a change there. The backend
+/// never reports it running in the Mac App Store build.
+fn set_agent_connection(app: &AppHandle, client: &Client, agent_id: &str) -> Result<(), String> {
     let agent = client
         .call(rpc::ListAgents)?
         .into_iter()
         .find(|agent| agent.id == agent_id)
         .ok_or("The agent is no longer available")?;
     client.call(rpc::SetAgentConnection {
-        agent_id: agent.id,
+        agent_id: agent.id.clone(),
         connect: !agent.recorded,
     })?;
+    if agent.id == Agent::Codex.id()
+        && client
+            .call(rpc::AgentServiceRunning { agent_id: agent.id })
+            .unwrap_or(false)
+    {
+        navigate(app, NavigationTarget::ConfirmCodexServiceStop);
+    }
     Ok(())
 }
 

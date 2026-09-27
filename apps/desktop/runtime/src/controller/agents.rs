@@ -1,4 +1,8 @@
+use agent_bridge::agents::CodexService;
+use desktop_core::protocol::{self, ErrorCode};
+
 use super::*;
+
 impl DesktopRuntime {
     fn require_agent_access(&self) -> Result<(), Error> {
         if let Some(error) = &self.agent_access_error {
@@ -245,6 +249,33 @@ impl DesktopRuntime {
         let options = ConnectOptions::default();
         let preview = self.preview_agent(agent_id.clone(), connect, options.clone())?;
         self.apply_agent(agent_id, connect, preview.revision, options)
+    }
+
+    pub async fn agent_service_running(&self, agent_id: &str) -> Result<bool, Error> {
+        Ok(self.agent_service(agent_id)?.running().await)
+    }
+
+    pub async fn stop_agent_service(&self, agent_id: &str) -> Result<(), Error> {
+        self.agent_service(agent_id)?
+            .stop()
+            .await
+            .map_err(|failure| {
+                tracing::warn!("Cannot stop Codex's background service: {failure}");
+                protocol::Error::from(failure).into()
+            })
+    }
+
+    /// Only Codex keeps a background service.
+    fn agent_service(&self, agent_id: &str) -> Result<CodexService, Error> {
+        if agent_id != Agent::Codex.id() {
+            return Err(protocol::Error::new(
+                ErrorCode::InvalidRequest,
+                "Only Codex has a background service",
+            )
+            .into());
+        }
+        self.require_agent_access()?;
+        Ok(self.current_projector()?.codex_service())
     }
 
     pub fn disconnect_all_agents(&self) -> Result<Vec<AgentStatus>, Error> {

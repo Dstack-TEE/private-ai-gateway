@@ -1077,3 +1077,21 @@ fn inactive_agent_integrations_reject_configuration_and_withdraw_tokens() {
         Some(LOCAL_TOOLS_AGENT)
     );
 }
+
+#[test]
+fn only_codex_has_a_background_service_to_check_or_stop() {
+    use desktop_core::protocol::ErrorCode;
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = test_runtime(&executor, directory.path());
+    let others = Agent::ALL
+        .into_iter()
+        .filter(|agent| *agent != Agent::Codex)
+        .map(Agent::id);
+    for agent_id in others.chain(["", "unknown"]) {
+        let running = executor.block_on(runtime.agent_service_running(agent_id));
+        let stopped = executor.block_on(runtime.stop_agent_service(agent_id));
+        assert_eq!(running.unwrap_err().code(), ErrorCode::InvalidRequest);
+        assert_eq!(stopped.unwrap_err().code(), ErrorCode::InvalidRequest);
+    }
+}

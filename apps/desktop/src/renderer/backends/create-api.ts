@@ -165,5 +165,7 @@ export function createDesktopApi(transport: UiTransport, platform: UiPlatform): 
     getAgentAccess: (): Promise<AgentAccessStatus> => call("get_agent_access"),
     requestAgentAccess: (): Promise<AgentAccessStatus> => call("request_agent_access"),
     setAgentConnection: (agentId, connect): Promise<AgentStatus> => call("set_agent_connection", { agentId, connect }),
+    agentServiceRunning: (agentId): Promise<boolean> => call("agent_service_running", { agentId }),
+    stopAgentService: (agentId): Promise<void> => call("stop_agent_service", { agentId }),
   };
 }

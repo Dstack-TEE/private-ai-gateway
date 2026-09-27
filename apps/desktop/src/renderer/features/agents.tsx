@@ -126,7 +126,8 @@ export function AgentRow({
   detectionLabel?: string;
   compact?: boolean;
 }): React.JSX.Element {
-  const { pending: pendingConnection, change: onSelect } = useAgentConnection(desktopApi, agent);
+  const { agents: { offerServiceStop } } = useShell();
+  const { pending: pendingConnection, change: onSelect } = useAgentConnection(desktopApi, agent, offerServiceStop);
   const name = agent.name;
   const presence: { label: string; tone: Tone } = detectionLabel
     ? { label: detectionLabel, tone: "neutral" }
