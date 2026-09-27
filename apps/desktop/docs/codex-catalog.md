@@ -23,10 +23,11 @@ The file replaces Codex's catalog, so every bundled entry is retained for Codex
 internals but hidden from the model picker, because the proxy cannot serve it.
 Verified Responses-compatible provider models are appended and listed; an exact
 slug match overlays that entry without duplicates. Codex defaults to the first
-listed model, so no bundled OpenAI model becomes the default. Provider context limits replace baseline limits;
-when absent, baseline limits remain. Codex derives automatic compaction at 90%
-of the context window. Custom entries use streaming HTTP Responses and ordinary
-tools without inheriting code-mode-only or experimental tool requirements.
+listed model, so no bundled OpenAI model becomes the default. Provider context
+limits replace baseline limits; when absent, baseline limits remain. Codex
+derives automatic compaction at 90% of the context window. Custom entries use
+streaming HTTP Responses and ordinary tools without inheriting code-mode-only
+or experimental tool requirements.
 
 The catalog contains public model metadata, not credentials. Direct uses the
 bundled credential helper. MAS uses `/bin/cat` with a separate absolute-path

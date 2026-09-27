@@ -428,6 +428,8 @@ pub(super) fn codex_catalog(catalog: &Catalog) -> Result<serde_json::Value, Stri
             value.insert("use_responses_lite".to_string(), serde_json::Value::Bool(false));
             value.insert("supports_experimental_context".to_string(), serde_json::Value::Bool(false));
             value.insert("supports_reasoning_effort_updates".to_string(), serde_json::Value::Bool(false));
+            // Upstream templates still carry this, but it is not a ModelInfo field.
+            value.remove("prefer_websockets");
             if matched_template.is_none() {
                 value.insert("experimental_supported_tools".to_string(), serde_json::json!([]));
                 value.insert("multi_agent_reasoning_effort".to_string(), serde_json::Value::Null);
