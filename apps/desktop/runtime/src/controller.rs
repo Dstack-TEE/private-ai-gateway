@@ -244,9 +244,7 @@ impl DesktopRuntime {
             }
         }
         let (settings_dir, relocation_notices) = match legacy_config_dir() {
-            Some(legacy) => {
-                crate::settings::relocation::relocate(&legacy, &config_dir()?, &data_dir)
-            }
+            Some(legacy) => desktop_core::relocation::relocate(&legacy, &config_dir()?, &data_dir),
             None => (config_dir()?, Vec::new()),
         };
         let (settings, mut settings_problems) = Settings::open(settings_dir, &data_dir);

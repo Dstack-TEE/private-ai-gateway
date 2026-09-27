@@ -36,7 +36,6 @@ const env = {
   APPDATA: appData,
   USERPROFILE: profile,
   HOME: profile,
-  XDG_CONFIG_HOME: "",
   PRIVATE_AI_PROXY_HOME: "",
   PAP_GATE_ACQUIRED: acquired,
   PAP_GATE_RELEASE: release,

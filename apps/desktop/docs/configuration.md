@@ -66,22 +66,33 @@ beside it, it must not be copied to another device.
 | Platform | Settings directory | App data (state) |
 | --- | --- | --- |
 | Linux | `$XDG_CONFIG_HOME/private-ai-proxy` (default `~/.config/private-ai-proxy`) | `$XDG_DATA_HOME/org.dstack.private-ai-proxy` (default `~/.local/share/org.dstack.private-ai-proxy`) |
-| macOS (direct download) | `$XDG_CONFIG_HOME/private-ai-proxy` (default `~/.config/private-ai-proxy`) | `~/Library/Application Support/org.dstack.private-ai-proxy` |
+| macOS (direct download) | `~/.config/private-ai-proxy` | `~/Library/Application Support/org.dstack.private-ai-proxy` |
 | macOS (Mac App Store) | `~/Library/Containers/org.dstack.private-ai-proxy/Data/Library/Application Support/org.dstack.private-ai-proxy/Config` | The same path without `Config` |
-| Windows | `%XDG_CONFIG_HOME%\private-ai-proxy` (default `%USERPROFILE%\.config\private-ai-proxy`) | `%APPDATA%\org.dstack.private-ai-proxy` |
+| Windows | `%USERPROFILE%\.config\private-ai-proxy` | `%APPDATA%\org.dstack.private-ai-proxy` |
 
 The settings directory is always separate from state, so it can be synced as a
-whole. It is the same `~/.config/private-ai-proxy` on every platform, as the
-[XDG base directories](https://specifications.freedesktop.org/basedir/latest/)
-specify, so one dotfiles setup works everywhere; command-line tools such as
-GitHub CLI (`~/.config/gh`) and starship (`~/.config/starship.toml`) use
-`~/.config` on macOS and Windows too. `XDG_CONFIG_HOME` is honoured on every
-platform and `XDG_DATA_HOME` on Linux; as the specification requires, a
-relative value is ignored. App data follows each platform's convention
-(Tauri's `app_data_dir`). The Mac App Store build is sandboxed and cannot
-write the real home directory, so its settings stay in the `Config`
-subdirectory of its container's app directory. `pap settings show` prints the
-paths in use.
+whole. It is `~/.config/private-ai-proxy` on every platform, the default of
+the [XDG base directories](https://specifications.freedesktop.org/basedir/latest/),
+so one dotfiles setup works everywhere; command-line tools such as GitHub CLI
+(`~/.config/gh`) and starship (`~/.config/starship.toml`) use `~/.config` on
+macOS and Windows too. Only Linux honours `XDG_CONFIG_HOME` (and
+`XDG_DATA_HOME`); as the specification requires, a relative value is ignored.
+On macOS and Windows an app started from Finder, the Dock or the Start menu
+does not see a shell's environment, so honouring the variable there would give
+the backend a different settings directory depending on how it was started.
+App data follows each platform's convention (Tauri's `app_data_dir`). The Mac
+App Store build is sandboxed and cannot write the real home directory, so its
+settings stay in the `Config` subdirectory of its container's app directory.
+`pap settings show` prints the paths in use.
+
+On Windows the settings directory is in the user profile, not in the roaming
+`%APPDATA%`: roaming profiles and folder redirection of AppData no longer carry
+the settings to other machines (sync the directory instead; see
+[Syncing between devices](#syncing-between-devices)). Uninstalling with the
+installer's option to delete the app data removes `%APPDATA%` and
+`%LOCALAPPDATA%` data only; delete `%USERPROFILE%\.config\private-ai-proxy`
+yourself to remove the settings and the credentials in `credentials.toml`.
+Likewise, on macOS and Linux removing the app leaves `~/.config/private-ai-proxy`.
 
 Overrides follow the existing `PRIVATE_AI_PROXY_*` variables:
 
@@ -99,25 +110,34 @@ the `Config` subdirectory of the app data directory
 (`~/Library/Application Support/org.dstack.private-ai-proxy/Config`,
 `%APPDATA%\org.dstack.private-ai-proxy\Config`). On start, before it reads
 the settings, the backend moves `config.toml` and `credentials.toml` from there
-to the settings directory above (`runtime/src/settings/relocation.rs`); the
-service log records each move. State stays in the app data directory.
+to the settings directory above (`core/src/relocation.rs`); the service log
+records each move. State stays in the app data directory. Until the backend
+has moved them, the desktop app and the CLI read the settings where they are,
+so nothing shows defaults in between.
 
-- Contents, comments and permissions are kept: on the same volume each file is
-  hard-linked into place, so it is the same file (with the owner-only `0600`
-  or DACL of `credentials.toml`); otherwise it is copied, synced to disk and
-  made owner-only for `credentials.toml`. A symlinked `config.toml` becomes a
-  link to the same file.
+- Both old files are read before anything is placed. Contents, comments and
+  permissions are kept: on the same volume each file is hard-linked into
+  place, so it is the same file (with the owner-only `0600` or DACL of
+  `credentials.toml`); otherwise it is copied, synced to disk and made
+  owner-only for `credentials.toml`. A symlinked `config.toml` becomes a link
+  to the same file; on Windows creating it needs Developer Mode or the "Create
+  symbolic links" privilege, and without it the move fails as described below.
 - Nothing in the settings directory is overwritten. If it already has a file
-  with other content, that file is used and the old one is kept; Settings and
-  `pap doctor` report the old directory once.
+  with other content, that file is used and the old one is kept. Settings
+  reports the old file when the backend starts, again only if the old file
+  changes (an earlier version wrote it), and `pap doctor` reports it for as
+  long as it is there, with or without the backend. A kept old file is never
+  brought back, also not after you delete the new one.
 - The old files are removed only after every file is in place,
   `credentials.toml` last, so an interrupted move leaves each file in at least
   one place and the next start finishes it. The old `Config` directory is
   removed once it is empty.
-- If a file cannot be moved, what was moved is undone, the settings are used
-  from the old directory, the error is shown in Settings and `pap doctor`, and
-  the move is retried on the next start. A symlinked old directory is left in
-  place and reported.
+- A settings directory that is a link to the old one, or the reverse, counts
+  as moved: nothing is removed from either. A symlinked old directory that
+  points elsewhere is left in place and reported.
+- If a file cannot be read or moved, nothing placed in that start remains, the
+  settings are used from the old directory, the error is shown in Settings and
+  `pap doctor`, and the move is retried on the next start.
 
 Linux, the Mac App Store build and the overrides above keep their location;
 nothing moves there.
@@ -308,8 +328,10 @@ lists.
 - `pap cli install` replacing the Windows `.cmd` shims earlier releases wrote
   (`LEGACY_SCRIPT` in `cli/manage/install.rs`).
 - The move of the settings from the earlier macOS and Windows location
-  (`runtime/src/settings/relocation.rs`, `paths::legacy_config_dir` and its
-  call in `DesktopRuntime::launch`), for installations of 0.2 prereleases.
+  (`core/src/relocation.rs`, `paths::legacy_config_dir`, the calls in
+  `DesktopRuntime::launch`, `config::config_path`, `config::credentials_path`
+  and the `legacySettingsDirectory` warning of `pap doctor`), for
+  installations of 0.2 prereleases.
 - `src-tauri/src/autostart/migration.rs`, the bridge from the
   tauri-plugin-autostart login item.
 - The per-platform update manifests `latest-<os>-<arch>.json` that clients up

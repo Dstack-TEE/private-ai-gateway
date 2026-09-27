@@ -27,7 +27,6 @@ use crate::{
         ProfileAuth, ServiceProvider, StartConfig,
     },
     listen::{self, ResolvedListen},
-    paths::config_dir,
 };
 
 pub const CONFIG_FILE: &str = "config.toml";
@@ -381,12 +380,15 @@ pub fn load() -> Result<Config, String> {
     }
 }
 
+/// `config.toml` where the settings are now, for processes that read it
+/// without the backend: in the old directory until the backend has moved it
+/// (see [`crate::relocation`]).
 pub fn config_path() -> Result<PathBuf, String> {
-    Ok(config_dir()?.join(CONFIG_FILE))
+    Ok(crate::relocation::current_dir()?.join(CONFIG_FILE))
 }
 
 pub fn credentials_path() -> Result<PathBuf, String> {
-    Ok(config_dir()?.join(CREDENTIALS_FILE))
+    Ok(crate::relocation::current_dir()?.join(CREDENTIALS_FILE))
 }
 
 /// A settings file that loaded, with a warning for each key it does not know.

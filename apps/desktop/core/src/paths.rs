@@ -12,7 +12,7 @@ pub const HOME_OVERRIDE_ENV: &str = "PRIVATE_AI_PROXY_HOME";
 pub const APP_DATA_OVERRIDE_ENV: &str = "PRIVATE_AI_PROXY_DATA_DIR";
 /// Exact override for the settings directory (`config.toml`, `credentials.toml`).
 pub const CONFIG_OVERRIDE_ENV: &str = "PRIVATE_AI_PROXY_CONFIG_DIR";
-/// The settings directory name under `$XDG_CONFIG_HOME` (default `~/.config`).
+/// The settings directory name under `~/.config` (`$XDG_CONFIG_HOME` on Linux).
 const CONFIG_DIR_NAME: &str = "private-ai-proxy";
 /// The settings subdirectory of the app directory where settings cannot live
 /// in `~/.config`: the Mac App Store container and the overrides. Direct macOS
@@ -85,10 +85,13 @@ pub fn logs_dir() -> Result<PathBuf, String> {
 
 /// The per-user settings directory. It holds only `config.toml`,
 /// `credentials.toml` and the schema, never state, so it can be synced on its
-/// own. Every platform uses `$XDG_CONFIG_HOME/private-ai-proxy` (default
-/// `~/.config/private-ai-proxy`, `%USERPROFILE%\.config\private-ai-proxy` on
-/// Windows), as the XDG base directories specify and as gh and starship do on
-/// macOS and Windows too. The Mac App Store build cannot write the real home,
+/// own. Every platform uses `~/.config/private-ai-proxy`
+/// (`%USERPROFILE%\.config\private-ai-proxy` on Windows), as gh and starship
+/// use `~/.config` on macOS and Windows too. Only Linux honours
+/// `$XDG_CONFIG_HOME`, as the XDG base directories specify: elsewhere apps
+/// started from Finder or the Start menu do not see a shell's environment, so
+/// honouring it would split the settings between those and the terminal.
+/// The Mac App Store build cannot write the real home,
 /// so its settings stay in the `Config` subdirectory of its container's app
 /// directory; an explicit data or home override (tests) does the same.
 pub fn config_dir() -> Result<PathBuf, String> {
@@ -111,7 +114,7 @@ fn config_dir_in(platform: Platform, env: Env) -> Result<PathBuf, String> {
     }
     // The XDG base directory spec: a relative path is invalid and ignored.
     let base = env("XDG_CONFIG_HOME")
-        .filter(|path| path.is_absolute())
+        .filter(|path| platform == Platform::Linux && path.is_absolute())
         .map_or_else(
             || home_dir_in(platform, env).map(|home| home.join(".config")),
             Ok,
@@ -210,29 +213,26 @@ mod tests {
     }
 
     #[test]
-    fn an_absolute_xdg_config_home_is_honoured_everywhere() {
+    fn only_linux_honours_an_absolute_xdg_config_home() {
         let home = absolute("home");
         let xdg = absolute("xdg");
-        for platform in [Platform::Linux, Platform::MacOs, Platform::Windows] {
+        let default = home.join(".config").join("private-ai-proxy");
+        for (platform, expected) in [
+            (Platform::Linux, xdg.join("private-ai-proxy")),
+            (Platform::MacOs, default.clone()),
+            (Platform::Windows, default.clone()),
+        ] {
             let vars = [
                 ("HOME", home.clone()),
                 ("USERPROFILE", home.clone()),
                 ("APPDATA", absolute("appdata")),
                 ("XDG_CONFIG_HOME", xdg.clone()),
             ];
-            assert_eq!(
-                resolve(platform, &vars).0,
-                xdg.join("private-ai-proxy"),
-                "{platform:?}"
-            );
+            assert_eq!(resolve(platform, &vars).0, expected, "{platform:?}");
             // The spec: a relative value is invalid and ignored.
             let mut vars = vars.to_vec();
             vars[3].1 = PathBuf::from("relative");
-            assert_eq!(
-                resolve(platform, &vars).0,
-                home.join(".config").join("private-ai-proxy"),
-                "{platform:?}"
-            );
+            assert_eq!(resolve(platform, &vars).0, default, "{platform:?}");
         }
     }
 
