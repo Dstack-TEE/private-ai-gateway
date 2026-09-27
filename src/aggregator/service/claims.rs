@@ -52,6 +52,170 @@ pub(super) fn session_claims_for_event(event: &UpstreamVerifiedEvent) -> Session
     claims
 }
 
+/// NEAR AI model-enclave signers the verifier proved for this event (lowercase
+/// addresses). Empty for any other provider, or when no enclave verified.
+pub(super) fn near_verified_signers(event: &UpstreamVerifiedEvent) -> Vec<String> {
+    if event.provider_type.as_deref() != Some("near-ai") {
+        return Vec::new();
+    }
+    event
+        .provider_claims
+        .as_ref()
+        .and_then(|c| c.get("verified_signers"))
+        .and_then(Value::as_array)
+        .map(|signers| {
+            signers
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_ascii_lowercase)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn near_event_with_claims(
+    event: &UpstreamVerifiedEvent,
+    provider_claims: serde_json::Map<String, Value>,
+) -> UpstreamVerifiedEvent {
+    UpstreamVerifiedEvent {
+        provider_type: event.provider_type.clone(),
+        verifier_id: event.verifier_id.clone(),
+        result: event.result,
+        provider_claims: Some(Value::Object(provider_claims)),
+        ..Default::default()
+    }
+}
+
+/// UpToDate only when both are UpToDate; otherwise the stale one, so the
+/// tri-state claim refutes. An absent status on either side stays absent.
+fn worse_tcb_status(a: Option<&Value>, b: Option<&Value>) -> Option<Value> {
+    let (Some(a), Some(b)) = (a.and_then(Value::as_str), b.and_then(Value::as_str)) else {
+        return None;
+    };
+    Some(Value::String(
+        if a.eq_ignore_ascii_case("uptodate") {
+            b
+        } else {
+            a
+        }
+        .to_string(),
+    ))
+}
+
+/// The shared NEAR session: the router TEE and its TLS key only. A response is
+/// bound to a model enclave only through that enclave's signature, so this
+/// session asserts nothing about the enclaves.
+pub(super) fn near_router_session_claims(event: &UpstreamVerifiedEvent) -> SessionClaims {
+    let empty = serde_json::Map::new();
+    let full = event
+        .provider_claims
+        .as_ref()
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    let mut pc = serde_json::Map::new();
+    pc.insert(
+        "trust_boundary".to_string(),
+        Value::String("near-ai-gateway".to_string()),
+    );
+    for key in [
+        "gateway_verified",
+        "gateway_tls_spki_sha256",
+        "canonical_model_id",
+        "model_enclaves_verified",
+    ] {
+        if let Some(value) = full.get(key) {
+            pc.insert(key.to_string(), value.clone());
+        }
+    }
+    if let Some(status) = full.get("gateway_tcb_status") {
+        pc.insert("tcb_status".to_string(), status.clone());
+    }
+    if let Some(production) = full.get("gateway_production_os_image") {
+        pc.insert("production_os_image".to_string(), production.clone());
+    }
+    session_claims_for_event(&near_event_with_claims(event, pc))
+}
+
+/// One verified NEAR enclave's session: its own TCB, GPU and OS verdicts. The
+/// router relays the traffic, so its TCB and OS verdicts fold in: a stale router
+/// TCB or a dev router image refutes the enclave session's claim too.
+pub(super) fn near_enclave_session_claims(
+    event: &UpstreamVerifiedEvent,
+    signer: &str,
+) -> SessionClaims {
+    let empty = serde_json::Map::new();
+    let full = event
+        .provider_claims
+        .as_ref()
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    let per = |map: &str| full.get(map).and_then(|m| m.get(signer)).cloned();
+    let mut pc = serde_json::Map::new();
+    pc.insert(
+        "trust_boundary".to_string(),
+        Value::String("near-ai-model-enclave".to_string()),
+    );
+    pc.insert(
+        "evidence_scope".to_string(),
+        Value::String("model_instance".to_string()),
+    );
+    pc.insert(
+        "signing_address".to_string(),
+        Value::String(signer.to_string()),
+    );
+    for key in [
+        "canonical_model_id",
+        "gateway_verified",
+        "gateway_tls_spki_sha256",
+        "gateway_tcb_status",
+    ] {
+        if let Some(value) = full.get(key) {
+            pc.insert(key.to_string(), value.clone());
+        }
+    }
+    let instance_tcb = per("instance_tcb_statuses");
+    // The enclave's own status, kept beside the folded one so a reader can tell
+    // whether the router or the enclave refutes `tcb_up_to_date`.
+    if let Some(status) = &instance_tcb {
+        pc.insert("instance_tcb_status".to_string(), status.clone());
+    }
+    if let Some(status) = worse_tcb_status(full.get("gateway_tcb_status"), instance_tcb.as_ref()) {
+        pc.insert("tcb_status".to_string(), status);
+    }
+    if let Some(Value::Object(gpu)) = per("instance_gpu") {
+        for key in [
+            "gpu_verified",
+            "gpu_evidence_present",
+            "gpu_nonce_matched",
+            "gpu_arch",
+        ] {
+            if let Some(value) = gpu.get(key) {
+                pc.insert(key.to_string(), value.clone());
+            }
+        }
+    }
+    if let Some(Value::Object(workload)) = per("instance_workloads") {
+        for (key, value) in &workload {
+            if key != "production_os_image" {
+                pc.insert(key.clone(), value.clone());
+            }
+        }
+        let enclave_os = workload.get("production_os_image").and_then(Value::as_bool);
+        let router_os = full
+            .get("gateway_production_os_image")
+            .and_then(Value::as_bool);
+        let production = match (router_os, enclave_os) {
+            (Some(false), _) | (_, Some(false)) => Some(false),
+            (_, Some(true)) => enclave_os,
+            _ => None,
+        };
+        if let Some(production) = production {
+            pc.insert("production_os_image".to_string(), Value::Bool(production));
+        }
+    }
+    session_claims_for_event(&near_event_with_claims(event, pc))
+}
+
 /// The Chutes instance id a binding attests, if this is a per-instance Chutes
 /// channel. Chutes seals one session per instance; every other provider has a
 /// single channel (None), so its claims/evidence apply to the event as a whole.
@@ -408,7 +572,10 @@ pub(super) fn secret_ai_gpu_claim(event: &UpstreamVerifiedEvent) -> Claim {
 
 #[cfg(test)]
 mod claim_mapping_tests {
-    use super::session_claims_for_event;
+    use super::{
+        near_enclave_session_claims, near_router_session_claims, near_verified_signers,
+        session_claims_for_event,
+    };
     use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
     use crate::aggregator::session::{ClaimSource, ClaimStatus};
     use serde_json::{json, Value};
@@ -791,5 +958,79 @@ mod claim_mapping_tests {
         let c2 = per_instance_session_claims(&ev, "inst-2");
         assert_eq!(c2.tcb_up_to_date.status, ClaimStatus::Refuted);
         assert_eq!(c2.gpu_attested.status, ClaimStatus::Unknown);
+    }
+
+    fn near_event(router_tcb: &str, router_production_os: bool) -> UpstreamVerifiedEvent {
+        event(
+            Some("near-ai"),
+            VerificationResult::Verified,
+            Some(json!({
+                "trust_boundary": "near-ai-model-enclave",
+                "canonical_model_id": "z-ai/glm-5.3-flash",
+                "gateway_verified": true,
+                "gateway_tls_spki_sha256": "aa".repeat(32),
+                "gateway_tcb_status": router_tcb,
+                "gateway_production_os_image": router_production_os,
+                "tcb_status": router_tcb,
+                "verified_signers": ["0xAbC"],
+                "instance_tcb_statuses": {"0xabc": "UpToDate"},
+                "instance_gpu": {"0xabc": {"gpu_verified": true, "gpu_evidence_present": true, "gpu_nonce_matched": true}},
+                "instance_workloads": {"0xabc": {
+                    "app_id": "2c0a", "compose_hash": "c82b", "os_image_hash": "a6ea",
+                    "compose_hash_verified": true, "production_os_image": true
+                }},
+                "gpu_verified": true,
+            })),
+        )
+    }
+
+    #[test]
+    fn near_signers_are_lowercased_and_only_for_near() {
+        assert_eq!(
+            near_verified_signers(&near_event("UpToDate", true)),
+            vec!["0xabc".to_string()]
+        );
+        let mut other = near_event("UpToDate", true);
+        other.provider_type = Some("chutes".to_string());
+        assert!(near_verified_signers(&other).is_empty());
+    }
+
+    #[test]
+    fn near_router_session_asserts_nothing_about_enclaves() {
+        let claims = near_router_session_claims(&near_event("OutOfDate", true));
+        assert_eq!(claims.gpu_attested.status, ClaimStatus::Unknown);
+        assert_eq!(claims.tcb_up_to_date.status, ClaimStatus::Refuted);
+        assert_eq!(claims.os_known_good.status, ClaimStatus::Asserted);
+        assert_eq!(
+            claims.extra.get("trust_boundary"),
+            Some(&json!("near-ai-gateway"))
+        );
+        assert!(!claims.extra.contains_key("signing_address"));
+    }
+
+    #[test]
+    fn near_enclave_session_carries_its_evidence_and_the_router_tcb() {
+        // The enclave is UpToDate, but the router relays traffic: its stale TCB refutes.
+        let claims = near_enclave_session_claims(&near_event("OutOfDate", true), "0xabc");
+        assert_eq!(claims.tee_attested.status, ClaimStatus::Asserted);
+        assert_eq!(claims.gpu_attested.status, ClaimStatus::Asserted);
+        assert_eq!(claims.tcb_up_to_date.status, ClaimStatus::Refuted);
+        assert_eq!(claims.os_known_good.status, ClaimStatus::Asserted);
+        assert_eq!(claims.extra.get("signing_address"), Some(&json!("0xabc")));
+        assert_eq!(claims.extra.get("compose_hash"), Some(&json!("c82b")));
+        assert_eq!(
+            claims.extra.get("instance_tcb_status"),
+            Some(&json!("UpToDate"))
+        );
+        assert_eq!(claims.extra.get("tcb_status"), Some(&json!("OutOfDate")));
+
+        let current = near_enclave_session_claims(&near_event("UpToDate", true), "0xabc");
+        assert_eq!(current.tcb_up_to_date.status, ClaimStatus::Asserted);
+    }
+
+    #[test]
+    fn near_dev_router_image_refutes_the_enclave_os_claim() {
+        let claims = near_enclave_session_claims(&near_event("UpToDate", false), "0xabc");
+        assert_eq!(claims.os_known_good.status, ClaimStatus::Refuted);
     }
 }

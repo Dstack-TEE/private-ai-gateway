@@ -10,7 +10,7 @@ use super::{
 };
 use crate::aci::digest;
 use crate::aci::upstream::{
-    ChutesProviderBackend, ChutesSessionStore, ModelRoute, ModelRouterBackend,
+    ChutesProviderBackend, ChutesSessionStore, ModelRoute, ModelRouterBackend, NearAiBackend,
     OpenAICompatibleBackend, UpstreamBackend,
 };
 use crate::aci::verifier::{
@@ -108,11 +108,25 @@ fn build_provider_backend(
                 session_store,
             )?))
         }
+        UpstreamProvider::NearAi => {
+            let mut inner = OpenAICompatibleBackend::new_with_timeouts(
+                cfg.base_url.clone(),
+                connect_timeout_seconds,
+                read_timeout_seconds,
+            )
+            .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
+            .with_name(cfg.name.clone());
+            if let Some(token) = &cfg.bearer_token {
+                inner = inner.with_bearer_token(token.clone());
+            }
+            let backend = NearAiBackend::new(inner, cfg.base_url.clone(), cfg.bearer_token.clone())
+                .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?;
+            Ok(Arc::new(backend))
+        }
         UpstreamProvider::OpenAiCompatible
         | UpstreamProvider::Anthropic
         | UpstreamProvider::AciService
         | UpstreamProvider::Tinfoil
-        | UpstreamProvider::NearAi
         | UpstreamProvider::SecretAi
         | UpstreamProvider::PhalaDirect => {
             let mut backend = OpenAICompatibleBackend::new_with_timeouts(

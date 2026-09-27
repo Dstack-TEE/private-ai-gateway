@@ -227,6 +227,7 @@ impl UpstreamBackend for OpenAICompatibleBackend {
             body,
             headers,
             served_instance_id: None,
+            response_attestation: None,
         })
     }
 
@@ -277,6 +278,7 @@ impl UpstreamBackend for OpenAICompatibleBackend {
             body,
             headers,
             served_instance_id: None,
+            response_attestation: None,
         })
     }
 
@@ -374,6 +376,7 @@ impl OpenAICompatibleBackend {
             body,
             headers,
             served_instance_id: None,
+            response_attestation: None,
         })
     }
 

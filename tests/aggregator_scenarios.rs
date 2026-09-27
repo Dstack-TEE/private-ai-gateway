@@ -87,12 +87,14 @@ impl MockUpstream {
                 name: name.to_string(),
                 origin: origin.to_string(),
                 response: Mutex::new(UpstreamResponse {
+                    response_attestation: None,
                     status_code,
                     body: body.to_vec(),
                     headers,
                     served_instance_id: None,
                 }),
                 models_response: Mutex::new(UpstreamResponse {
+                    response_attestation: None,
                     status_code: 200,
                     body: models_body.to_vec(),
                     headers: HashMap::from([(

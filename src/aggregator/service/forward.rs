@@ -8,14 +8,19 @@ use crate::aci::receipt::{
     ChannelBinding, ReceiptBuilder, ReceiptError, SignedReceipt, UpstreamVerifiedEvent,
     VerificationResult,
 };
-use crate::aci::upstream::{PreparedUpstreamRequest, UpstreamError, UpstreamRequest};
+use crate::aci::upstream::{
+    PreparedUpstreamRequest, UpstreamError, UpstreamRequest, EVENT_UPSTREAM_RESPONSE_ATTESTED,
+};
 use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
 use crate::aggregator::session::{
     AttestedSession, EvidenceRef, SessionClaims, SessionDocument, WorkloadIdentityRef,
     SESSION_API_VERSION,
 };
 
-use super::claims::{chutes_instance_id, per_instance_session_claims, session_claims_for_event};
+use super::claims::{
+    chutes_instance_id, near_enclave_session_claims, near_router_session_claims,
+    near_verified_signers, per_instance_session_claims, session_claims_for_event,
+};
 use super::e2ee_crypto::encrypt_e2ee_response_body;
 use super::e2ee_crypto::is_sse_content_type;
 use super::helpers::{
@@ -61,11 +66,15 @@ pub(super) fn cite_served_session(
     sealed: &[SealedSession],
     served_instance_id: Option<&str>,
 ) -> Option<String> {
+    // An instance without its own session (a NEAR enclave outside the verified
+    // set) falls back to the channel's shared session when there is one.
+    let shared = || sealed.iter().find(|s| s.instance_key.is_none());
     let chosen = match served_instance_id {
         Some(id) => sealed
             .iter()
-            .find(|s| s.instance_key.as_deref() == Some(id)),
-        None => sealed.first(),
+            .find(|s| s.instance_key.as_deref() == Some(id))
+            .or_else(shared),
+        None => shared().or_else(|| sealed.first()),
     };
     chosen.map(|s| s.session_id.clone())
 }
@@ -277,6 +286,11 @@ impl AciService {
             // The session is keyed on the requested (routed) model; record the
             // exact upstream-served model in the receipt's event.
             builder.set_upstream_verified_model_id(response_model.clone());
+        }
+        // Per-response enclave attestation (NEAR AI), recorded whether or not
+        // it bound, so a verifier can re-check the signature offline.
+        if let Some(fields) = &upstream_response.response_attestation {
+            builder.add_extension_event(EVENT_UPSTREAM_RESPONSE_ATTESTED, fields.clone())?;
         }
         // §7.4 wire bytes: whatever is actually served — after E2EE sealing
         // or an image-input 400 remap, when either applies.
@@ -693,6 +707,49 @@ impl AciService {
         // separate sessions here, which would be wrong for one logical channel.
         let identity = Self::identity_from_provider_claims(event.provider_claims.as_ref());
         let mut sealed = Vec::with_capacity(event.channel_bindings.len());
+        // NEAR AI: one channel (its router) fronting verified model enclaves.
+        // Seal the router's shared session plus one session per verified enclave
+        // signer; a response cites its enclave's session only when that
+        // enclave's signature binds the exact bytes (see NearAiBackend).
+        let near_signers = near_verified_signers(event);
+        if !near_signers.is_empty() {
+            let evidence = event
+                .evidence
+                .as_ref()
+                .map(EvidenceRef::from_value)
+                .unwrap_or_default();
+            for binding in &event.channel_bindings {
+                let session_id = self.seal_attested_session(
+                    event,
+                    identity.clone(),
+                    vec![binding.clone()],
+                    near_router_session_claims(event),
+                    evidence.clone(),
+                    now,
+                    expires_at,
+                )?;
+                sealed.push(SealedSession {
+                    instance_key: None,
+                    session_id,
+                });
+                for signer in &near_signers {
+                    let session_id = self.seal_attested_session(
+                        event,
+                        identity.clone(),
+                        vec![binding.clone()],
+                        near_enclave_session_claims(event, signer),
+                        evidence.clone(),
+                        now,
+                        expires_at,
+                    )?;
+                    sealed.push(SealedSession {
+                        instance_key: Some(signer.clone()),
+                        session_id,
+                    });
+                }
+            }
+            return Ok(sealed);
+        }
         for binding in &event.channel_bindings {
             let instance = chutes_instance_id(event, binding);
             let claims = match instance {
@@ -937,6 +994,34 @@ mod tests {
         );
         // A served instance with no sealed session cites nothing, not the wrong one.
         assert!(cite_served_session(&sessions, Some("inst-z")).is_none());
+    }
+
+    #[test]
+    fn near_citation_falls_back_to_the_router_session_never_an_enclave() {
+        let sessions = vec![
+            sealed(None, "as_router"),
+            sealed(Some("0xaaa"), "as_enclave"),
+        ];
+        // The signing enclave's own session.
+        assert_eq!(
+            cite_served_session(&sessions, Some("0xaaa")),
+            Some("as_enclave".to_string()),
+        );
+        // A signer outside the verified set: the shared router session.
+        assert_eq!(
+            cite_served_session(&sessions, Some("0xbbb")),
+            Some("as_router".to_string()),
+        );
+        // No binding (streaming, gateway-signed): the router session, even when
+        // an enclave session was sealed first.
+        let enclave_first = vec![
+            sealed(Some("0xaaa"), "as_enclave"),
+            sealed(None, "as_router"),
+        ];
+        assert_eq!(
+            cite_served_session(&enclave_first, None),
+            Some("as_router".to_string()),
+        );
     }
 
     #[test]

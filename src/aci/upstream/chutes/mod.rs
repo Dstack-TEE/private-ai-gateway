@@ -386,6 +386,7 @@ impl UpstreamBackend for ChutesProviderBackend {
                 body,
                 headers,
                 served_instance_id,
+                response_attestation: None,
             });
         }
         let body = decrypt_chutes_response(&body, &invoke.response_sk)?;
@@ -394,6 +395,7 @@ impl UpstreamBackend for ChutesProviderBackend {
             body,
             headers: HashMap::from([("content-type".to_string(), "application/json".to_string())]),
             served_instance_id,
+            response_attestation: None,
         })
     }
 

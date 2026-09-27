@@ -43,10 +43,11 @@ fn test_upstream_config(
 
 #[test]
 fn router_provider_verifies_once_per_channel() {
-    // A router (NEAR AI) with several models yields ONE verification target — the
+    // A router (Tinfoil) with several models yields ONE verification target — the
     // shared gateway channel — so it seals one session per channel, not one per
     // model. A per-model provider keeps one target per model.
-    let mut router = test_upstream_config("near-router", UpstreamProvider::NearAi, "pub-a", "up-a");
+    let mut router =
+        test_upstream_config("tinfoil-router", UpstreamProvider::Tinfoil, "pub-a", "up-a");
     router
         .models
         .insert("pub-b".to_string(), "up-b".to_string());
@@ -70,12 +71,13 @@ fn router_provider_verifies_once_per_channel() {
 
 #[test]
 fn provider_attestation_scopes() {
-    // NEAR AI, Tinfoil, and SecretAI front many models behind one verified
-    // channel, so they are per-router. Phala-direct verifies a TEE per model;
-    // Chutes a key per instance; the rest default to per-model. Only per-router
-    // drops the model from the channel identity.
+    // Tinfoil and SecretAI front many models behind one verified channel, so
+    // they are per-router. NEAR AI's report carries per-model enclave evidence,
+    // so it verifies per model. Phala-direct verifies a TEE per model; Chutes a
+    // key per instance; the rest default to per-model. Only per-router drops the
+    // model from the channel identity.
     use AttestationScope::*;
-    assert_eq!(UpstreamProvider::NearAi.attestation_scope(), PerRouter);
+    assert_eq!(UpstreamProvider::NearAi.attestation_scope(), PerModel);
     assert_eq!(UpstreamProvider::Tinfoil.attestation_scope(), PerRouter);
     assert_eq!(UpstreamProvider::SecretAi.attestation_scope(), PerRouter);
     assert_eq!(UpstreamProvider::PhalaDirect.attestation_scope(), PerModel);
@@ -85,7 +87,10 @@ fn provider_attestation_scopes() {
         PerModel
     );
     assert_eq!(UpstreamProvider::AciService.attestation_scope(), PerModel);
-    assert!(UpstreamProvider::NearAi.attestation_scope().is_per_router());
+    assert!(UpstreamProvider::Tinfoil
+        .attestation_scope()
+        .is_per_router());
+    assert!(!UpstreamProvider::NearAi.attestation_scope().is_per_router());
     assert!(!UpstreamProvider::Chutes.attestation_scope().is_per_router());
 }
 
