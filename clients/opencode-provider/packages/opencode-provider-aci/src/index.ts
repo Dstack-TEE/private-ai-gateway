@@ -3,15 +3,44 @@ import {
   resolveAciProviderConfig,
   resolveAciProviderProfile,
   type AccountApiKeyAuth,
-  type AciModel,
   type AciFetch,
+  type AciModel,
   type AciProvider,
-  type AciProviderConfigInput,
   type AciProviderProfile,
 } from "@phala/aci-provider";
-import type { AuthHook, Config, Plugin, PluginModule, PluginOptions } from "@opencode-ai/plugin";
+import type {
+  AuthHook,
+  Config,
+  Plugin as OpenCodeV1Plugin,
+  PluginModule,
+} from "@opencode-ai/plugin";
+import type { Plugin as OpenCodeV2Plugin } from "@opencode/plugin";
 
 import { createAciInspectTool } from "./inspect.ts";
+import { pluginConfig, type OpenCodeAciPluginOptions } from "./options.ts";
+import type { CreateOpenCodeAciV2PluginOptions } from "./v2.ts";
+
+export {
+  OPENCODE_ACI_PACKAGE,
+  sameEndpoint,
+  sanitizeAciRequestBody,
+  verifiedEndpointOnly,
+} from "./endpoints.ts";
+export type { CreateOpenCodeAciV2PluginOptions };
+export type { OpenCodeAciPluginOptions } from "./options.ts";
+
+/**
+ * Load the OpenCode V2 definition on demand. V1 hosts never import the V2
+ * plugin SDK (`@opencode/plugin`, the AI SDK provider) just to load the
+ * server-plugin entrypoint. Use the synchronous factory from `./v2` when the
+ * definition is already being loaded on a V2 host.
+ */
+export async function loadOpenCodeAciV2Plugin(
+  options: CreateOpenCodeAciV2PluginOptions,
+): Promise<OpenCodeV2Plugin.Plugin> {
+  const module = await import("./v2.ts");
+  return module.createOpenCodeAciV2Plugin(options);
+}
 
 const OPENAI_COMPATIBLE_PACKAGE = "@ai-sdk/openai-compatible";
 
@@ -19,11 +48,6 @@ type OpenCodeProviderConfig = NonNullable<Config["provider"]>[string];
 type OpenCodeCommandConfig = NonNullable<Config["command"]>[string];
 export type OpenCodeModelConfig = NonNullable<OpenCodeProviderConfig["models"]>[string];
 
-type AciReceiptOptions = NonNullable<AciProviderConfigInput["receipts"]>;
-
-export type OpenCodeAciPluginOptions = Omit<AciProviderConfigInput, "receipts"> & {
-  receipts?: Omit<AciReceiptOptions, "verification">;
-};
 export type OpenCodeAciAuthMethod = AuthHook["methods"][number];
 
 export interface CreateOpenCodeAciPluginOptions {
@@ -31,20 +55,6 @@ export interface CreateOpenCodeAciPluginOptions {
   defaults?: OpenCodeAciPluginOptions;
   accountAuth?: AccountApiKeyAuth;
   authMethods?: readonly OpenCodeAciAuthMethod[];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function pluginConfig(options: PluginOptions | undefined): OpenCodeAciPluginOptions {
-  if (!options) return {};
-  return {
-    baseURL: options.baseURL,
-    ...(isRecord(options.models) ? { models: options.models } : {}),
-    ...(isRecord(options.trust) ? { trust: options.trust } : {}),
-    ...(isRecord(options.receipts) ? { receipts: options.receipts } : {}),
-  };
 }
 
 export function mapOpenCodeModel(model: AciModel): OpenCodeModelConfig {
@@ -132,7 +142,7 @@ export function createOpenCodeAciPlugin({
   defaults = {},
   accountAuth,
   authMethods = [],
-}: CreateOpenCodeAciPluginOptions = {}): Plugin {
+}: CreateOpenCodeAciPluginOptions = {}): OpenCodeV1Plugin {
   const profile = resolveAciProviderProfile(profileInput);
   const methods = [
     ...(accountAuth ? [createOpenCodeAccountAuthMethod(accountAuth)] : []),
@@ -153,10 +163,11 @@ export function createOpenCodeAciPlugin({
     };
     const inspectToolName =
       profile.providerId === "aci" ? "aci_inspect" : `${profile.providerId}_aci_inspect`;
+    const inspectTool = await createAciInspectTool(() => active, profile.label);
 
     return {
       tool: {
-        [inspectToolName]: createAciInspectTool(() => active, profile.label),
+        [inspectToolName]: inspectTool,
       },
       async config(config) {
         const baseURL = options.baseURL ?? defaults.baseURL;
@@ -228,8 +239,14 @@ export function createOpenCodeAciPlugin({
 
 export const AciProviderPlugin = createOpenCodeAciPlugin();
 
-const plugin: PluginModule = {
+let v2Definition: OpenCodeV2Plugin.Plugin | undefined;
+
+const plugin: PluginModule & OpenCodeV2Plugin.Plugin = {
   id: "@phala/opencode-provider-aci",
+  async setup(context) {
+    v2Definition ??= await loadOpenCodeAciV2Plugin({ id: "@phala/opencode-provider-aci" });
+    return v2Definition.setup(context);
+  },
   server: AciProviderPlugin,
 };
 

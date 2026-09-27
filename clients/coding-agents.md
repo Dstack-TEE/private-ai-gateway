@@ -8,7 +8,7 @@ persistence, and lifecycle.
 | Host | Official extension point | ACI integration |
 | --- | --- | --- |
 | Pi | Provider extension, auth API, model registry, commands, footer | `pi-provider-redpill`, `pi-provider-phala-cloud`, or `@phala/pi-provider-aci` |
-| OpenCode | Server plugin, provider config, auth hooks, tools, dispose | `opencode-provider-redpill`, `opencode-provider-phala-cloud`, or `@phala/opencode-provider-aci` |
+| OpenCode | Server plugin (V1) and provider, integration, command, tool, and AI SDK hooks (V2) | `opencode-provider-redpill`, `opencode-provider-phala-cloud`, or `@phala/opencode-provider-aci` |
 | Node/Bun SDK application | Per-client custom `fetch` | `connectAci().fetch` |
 | Base-URL-only coding agent | No transport injection point | No native ACI adapter in this release |
 
@@ -71,8 +71,8 @@ opencode plugin opencode-provider-redpill --global
 opencode plugin opencode-provider-phala-cloud --global
 ```
 
-Omit `--global` for a project installation, then restart OpenCode. Use its
-native TUI flow:
+Omit `--global` for a project installation, then restart OpenCode. One default
+export serves OpenCode 1.18.29+ and OpenCode 2. Use its native TUI flow:
 
 ```text
 /connect
@@ -83,8 +83,8 @@ native TUI flow:
 
 The plugin command persists the plugin entry in OpenCode configuration, and
 `/connect` persists the credential in OpenCode's auth store. Do not add a
-separate provider block: the plugin owns the provider, verified fetch, live
-models, and auth loader.
+separate provider block: the plugin owns the provider, verified transport, live
+models, and credential methods.
 
 RedPill currently supports API keys only. Phala Cloud offers both its device
 account flow and an API-key method. The device flow returns the issued
@@ -103,35 +103,38 @@ The branded plugins register matching inspection commands:
 /phala-session <session-id>
 ```
 
-Replace `phala` with `redpill` for RedPill. These OpenCode custom commands
-use OpenCode's official prompt-command mechanism to ask the selected model to
-call the provider-scoped read-only inspect tool. The tool itself performs the
-local inspection; no second verifier is involved. Pi can render the same data
-directly because its extension API supports command callbacks. Attestation and
-response receipt verification already happen automatically and fail closed.
-OpenCode keeps the latest 32 receipt-bearing wire digests by default, and that
-local history is cleared when the process exits.
+Replace `phala` with `redpill` for RedPill. On OpenCode 2 these commands run
+the provider-scoped inspection directly and post the formatted result, so no
+model turn is involved. On OpenCode 1 they use the official prompt-command
+mechanism to ask the selected model to call the provider-scoped read-only
+inspect tool. The tool itself performs the local inspection; no second verifier
+is involved. Pi can render the same data directly because its extension API
+supports command callbacks. Attestation and response receipt verification
+already happen automatically and fail closed. OpenCode keeps the latest 32
+receipt-bearing wire digests by default, and that local history is cleared when
+the process exits.
 
 For another ACI gateway, configure the neutral plugin:
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": [
-    [
-      "@phala/opencode-provider-aci",
-      {
+  "plugins": [
+    {
+      "package": "@phala/opencode-provider-aci",
+      "options": {
         "baseURL": "https://gateway.example.com/v1",
         "trust": {
           "acceptedComposeHashes": ["<reviewed-compose-sha256>"]
         }
       }
-    ]
+    }
   ]
 }
 ```
 
-Then use `/connect` and `/models`, or set `ACI_API_KEY` for the current process.
+On OpenCode 1, keep the V1 tuple form under `plugin`. Then use `/connect` and
+`/models`, or set `ACI_API_KEY` for the current process.
 The read-only `aci_inspect`, `redpill_aci_inspect`, or `phala_aci_inspect` tool
 reports connection status, attestation, receipt history, receipt audits, and
 session audits without returning prompts, responses, or raw evidence.
@@ -197,13 +200,15 @@ path to the attested workload identity.
 
 ## Sources
 
-Checked 2026-08-28:
+Checked 2026-09-24:
 
 - [Pi providers](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/providers.md),
   [custom providers](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/custom-provider.md),
   and [models and thinking](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/keybindings.md#models-and-thinking)
-- [OpenCode providers](https://opencode.ai/docs/providers/) and
+- [OpenCode V2 providers](https://opencode.ai/v2/docs/providers/) and
+  [plugin migration](https://opencode.ai/v2/docs/build/plugins/migrate-v1),
+  plus V1 [providers](https://opencode.ai/docs/providers/),
   [plugins](https://opencode.ai/docs/plugins/), and
   [commands](https://opencode.ai/docs/commands/), source tag
-  [`v1.18.24`](https://github.com/anomalyco/opencode/tree/v1.18.24)
+  [`v1.18.29`](https://github.com/anomalyco/opencode/tree/v1.18.29)
 - [Bun fetch TLS options](https://bun.com/docs/runtime/networking/fetch)

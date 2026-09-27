@@ -1,7 +1,7 @@
 # `opencode-provider-redpill`
 
-RedPill's native OpenCode provider. OpenCode `1.18.24` or newer is recommended.
-Install it globally through OpenCode's official plugin command:
+RedPill's native OpenCode provider. OpenCode `1.18.29` (V1) and OpenCode 2 are
+supported. Install it globally through OpenCode's official plugin command:
 
 ```sh
 opencode plugin opencode-provider-redpill --global
@@ -43,5 +43,5 @@ when OpenCode exits. Gateway receipt and session artifacts have their own
 server-side retention.
 
 Do not add a separate `provider.redpill` block. The plugin registers the
-provider, model catalog, verified fetch, and auth loader through OpenCode's
-native server-plugin API.
+provider, model catalog, verified transport, and credentials through
+OpenCode's native plugin API on both V1 and V2.
