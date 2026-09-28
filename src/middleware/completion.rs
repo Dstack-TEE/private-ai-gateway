@@ -130,10 +130,9 @@ pub async fn run(
             .map(Some)
             .map_err(TransformError::invalid_request),
         Endpoint::CreateModelResponse => validate_responses_request(&params).map(|()| None),
-        // A shape the Chat bridge cannot read states no reasoning here; the
-        // bridge refuses it per candidate and a native route reads it itself.
+        // Encoded per Chat candidate; a native route reads `thinking` itself.
         Endpoint::Messages => {
-            let (requirements, visible) = messages_reasoning(&params).unwrap_or_default();
+            let (requirements, visible) = messages_reasoning(&params);
             Ok(Some((params.clone(), requirements, !visible)))
         }
         _ => Ok(None),

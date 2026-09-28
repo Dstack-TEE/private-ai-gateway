@@ -462,14 +462,9 @@ fn anthropic_chat_chunk(
 // ── OpenAI chat.completion SSE → Messages / Responses SSE ────────────────────
 //
 // Both bridges read a Chat stream the same way and differ only in the events
-// they write. `ChatStream` owns the reading — strict chunk parsing, tool-call
-// assembly, block order, the terminal decision — and drives a `ChatEvents`
-// writer for the client's surface.
-//
-// Output is strictly sequential, as the native protocols stream it: one text,
-// reasoning or tool-call block is open at a time, and a block closes when the
-// upstream moves on to another. Tool calls open in index order once their id
-// and name are known; arguments that arrive earlier are held until then.
+// they write. `ChatStream` owns the reading — lenient chunk parsing, tool-call
+// assembly, the terminal decision — and drives a `ChatEvents` writer for the
+// client's surface.
 
 fn sse_event(event: &str, data: &Value) -> String {
     format!("event: {event}\ndata: {}\n\n", json_str(data))

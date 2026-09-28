@@ -1183,24 +1183,17 @@ pub fn messages_to_chat_params(params: &Value) -> Result<Value, TransformError> 
 /// gets thinking blocks; `omitted` and `updates` hide the reasoning text.
 ///
 /// `output_config.effort` states the level directly. Otherwise a thinking
-/// budget is bucketed as Messages-to-Chat bridges commonly bucket it (≤1024
-/// low, ≤8192 medium, above that high): most Chat reasoning dialects carry only
-/// an effort, and a budget would make those routes unusable. Adaptive thinking
-/// without an effort means Anthropic's default, high.
-pub fn messages_reasoning(
-    params: &Value,
-) -> Result<(Option<ReasoningConfig>, bool), TransformError> {
-    let effort = match params
+/// budget is bucketed as claude-code-router and new-api bucket it (≤1024 low,
+/// ≤8192 medium, above that high): most Chat reasoning dialects carry only an
+/// effort. Adaptive thinking, or enabled thinking without a budget, means
+/// Anthropic's default, high. A shape this gateway cannot read asks for
+/// nothing it could honour.
+pub fn messages_reasoning(params: &Value) -> (Option<ReasoningConfig>, bool) {
+    // An effort this gateway does not know states no level.
+    let effort = params
         .get("output_config")
         .and_then(|config| config.get("effort"))
-    {
-        None | Some(Value::Null) => None,
-        Some(effort) => Some(
-            serde_json::from_value::<ReasoningEffort>(effort.clone()).map_err(|_| {
-                TransformError::invalid_request("output_config.effort is not a supported effort")
-            })?,
-        ),
-    };
+        .and_then(|effort| serde_json::from_value::<ReasoningEffort>(effort.clone()).ok());
     let effort_config = |effort| ReasoningConfig {
         effort: Some(effort),
         ..Default::default()
@@ -1209,36 +1202,33 @@ pub fn messages_reasoning(
         .get("thinking")
         .filter(|thinking| !thinking.is_null())
     else {
-        return Ok((effort.map(effort_config), false));
+        return (effort.map(effort_config), false);
     };
-    let budget = thinking.get("budget_tokens").and_then(Value::as_u64);
     let visible = !matches!(
         thinking.get("display").and_then(Value::as_str),
         Some("omitted" | "updates")
     );
-    match (thinking.get("type").and_then(Value::as_str), budget) {
-        (Some("disabled"), _) => Ok((
+    let budget = thinking
+        .get("budget_tokens")
+        .and_then(Value::as_u64)
+        .filter(|budget| *budget > 0);
+    match thinking.get("type").and_then(Value::as_str) {
+        Some("disabled") => (
             Some(ReasoningConfig {
                 enabled: Some(false),
                 ..Default::default()
             }),
             false,
-        )),
-        (Some("adaptive"), _) => Ok((
-            Some(effort_config(effort.unwrap_or(ReasoningEffort::High))),
-            visible,
-        )),
-        (Some("enabled"), Some(budget @ 1..)) => {
+        ),
+        Some("enabled" | "adaptive") => {
             let effort = effort.unwrap_or(match budget {
-                ..=1024 => ReasoningEffort::Low,
-                1025..=8192 => ReasoningEffort::Medium,
+                Some(..=1024) => ReasoningEffort::Low,
+                Some(1025..=8192) => ReasoningEffort::Medium,
                 _ => ReasoningEffort::High,
             });
-            Ok((Some(effort_config(effort)), visible))
+            (Some(effort_config(effort)), visible)
         }
-        _ => Err(TransformError::invalid_request(
-            "thinking must be enabled with a positive budget_tokens, adaptive, or disabled",
-        )),
+        _ => (effort.map(effort_config), false),
     }
 }
 
@@ -1508,8 +1498,8 @@ fn messages_tools(tools: Option<&Value>) -> Result<Vec<Value>, TransformError> {
     Ok(functions)
 }
 
-/// Chat `tool_choice` for a Messages one. Lossy, a choice naming a tool the
-/// bridge could not carry falls back to the model's own choice.
+/// Chat `tool_choice` for a Messages one. A choice naming a tool the bridge
+/// left out is left to the model.
 fn messages_tool_choice(choice: &Value, tools: &[Value]) -> Result<Option<Value>, TransformError> {
     Ok(Some(match choice.get("type").and_then(Value::as_str) {
         Some("auto") => json!("auto"),
@@ -2981,6 +2971,8 @@ mod tests {
                 true,
             ),
             (json!({ "type": "adaptive" }), None, Some("high"), true),
+            (json!({ "type": "enabled" }), None, Some("high"), true),
+            (json!({ "type": "future" }), None, None, false),
             (
                 json!({ "type": "adaptive", "display": "omitted" }),
                 None,
@@ -3010,7 +3002,7 @@ mod tests {
             if let Some(effort) = effort {
                 request["output_config"] = json!({ "effort": effort });
             }
-            let (reasoning, shown) = messages_reasoning(&request).unwrap();
+            let (reasoning, shown) = messages_reasoning(&request);
             assert_eq!(shown, visible, "{request}");
             let candidates: Vec<RouteCandidate> = serde_json::from_value(json!([
                 { "routeId": "vllm:m", "format": "openai", "reasoningFormat": "reasoning_effort" },
