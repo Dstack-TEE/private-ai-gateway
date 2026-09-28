@@ -419,6 +419,12 @@ or explicit `--key-stdin`. Never pass a credential as an argument. Changing a
 service URL requires a credential for that destination, not implicit forwarding
 of the old one. Exported profiles do not contain credentials.
 
+`pap profiles use ID` exits `0` once the switch is applied and prints the
+resulting status. While protection is on, it restarts on the new profile, so
+that status may still be reconnecting or show that verification failed. A
+profile without a credential is refused while protection is on, and neither
+the active profile nor protection changes.
+
 `--key-stdin` is for a pipe or redirected file, not a terminal. The production
 OS requirement is a shared current policy, not a separate preference per profile;
 `edit --require-production-os` restores the strict policy.

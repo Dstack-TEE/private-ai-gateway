@@ -359,6 +359,68 @@ fn saving_an_offline_profile_does_not_launch_verification() {
     );
 }
 
+/// A switch that would restart protection on a profile without a credential
+/// is refused before protection or the active profile changes.
+#[test]
+fn a_switch_protection_could_not_start_on_changes_nothing() {
+    use desktop_core::contracts::ServiceProvider;
+    use desktop_core::maintenance::{ProfileBackup, ProfileConfiguration};
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = test_runtime(&executor, directory.path());
+    let ready = ConfidentialProfileInput {
+        id: "ready".into(),
+        name: "Ready".into(),
+        provider: ServiceProvider::Custom,
+        remote_url: "https://ready.invalid".into(),
+    };
+    executor
+        .block_on(runtime.save_configuration(ready, true, Some("test-key".into())))
+        .unwrap();
+    runtime
+        .import_profiles(ProfileBackup {
+            version: 1,
+            profiles: vec![ProfileConfiguration {
+                name: "Imported".into(),
+                provider: ServiceProvider::Custom,
+                remote_url: "https://imported.invalid".into(),
+            }],
+        })
+        .unwrap();
+    let state = runtime.state().unwrap();
+    let imported = state
+        .profiles
+        .iter()
+        .find(|profile| !profile.credential_saved)
+        .unwrap()
+        .id
+        .clone();
+    runtime.manager.restore_snapshot(AppState {
+        status: VerificationStatus::Verified,
+        session_active: true,
+        ..state.clone()
+    });
+    let error = runtime.activate_profile(imported.clone()).unwrap_err();
+    assert_eq!(
+        error.code(),
+        desktop_core::protocol::ErrorCode::InvalidState
+    );
+    let unchanged = runtime.state().unwrap();
+    assert_eq!(unchanged.active_profile_id, "ready");
+    assert_eq!(unchanged.status, VerificationStatus::Verified);
+    assert!(unchanged.session_active);
+    assert_eq!(runtime.settings.config().unwrap().active_profile, "ready");
+    // With protection off, the switch only selects what the next start uses.
+    runtime.manager.restore_snapshot(state);
+    assert_eq!(
+        runtime
+            .activate_profile(imported.clone())
+            .unwrap()
+            .active_profile_id,
+        imported
+    );
+}
+
 #[test]
 fn busy_save_is_a_definite_rejection_not_an_unknown_operation() {
     let executor = tokio::runtime::Runtime::new().unwrap();
@@ -610,14 +672,14 @@ fn finished_local_listener_can_restart_at_the_same_address() {
 }
 
 #[test]
-fn recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them() {
+fn recovery_keeps_agent_routes_and_tokens_but_pauses_their_requests() {
     const CHILD: &str = "PAP_TEST_RECOVERY_ROUTES";
     if std::env::var_os(CHILD).is_none() {
         let home = tempfile::tempdir().unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "controller::tests::recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them",
+                "controller::tests::recovery_keeps_agent_routes_and_tokens_but_pauses_their_requests",
                 "--nocapture",
             ])
             .env(CHILD, "1")
@@ -725,12 +787,32 @@ fn recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them() {
         assert_eq!(std::fs::read_to_string(&codex_config).unwrap(), config);
         assert_eq!(files.read("codex").unwrap(), codex_token);
     }
+    // The error type the Local API answers an agent presenting `token` with.
+    let refusal = |token: &str| {
+        use tower::ServiceExt;
+        let request = axum::http::Request::post("/v1/messages")
+            .header("x-api-key", token)
+            .body(axum::body::Body::from(r#"{"model":"test/model"}"#))
+            .unwrap();
+        let response = executor
+            .block_on(agent_bridge::proxy::router(runtime.proxy.clone()).oneshot(request))
+            .unwrap();
+        let body = executor
+            .block_on(axum::body::to_bytes(response.into_body(), 64 * 1024))
+            .unwrap();
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"]["type"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
     runtime.recovery.available.store(false, Ordering::Release);
     runtime.recovery.request();
     runtime.recover_network().unwrap();
     let statuses = runtime.list_agents().unwrap();
     assert!(statuses.iter().all(|status| !status.authorized));
-    assert!(runtime.proxy.tokens().agent_for(&token).is_none());
+    // Its token stays recognized, so the agent learns that requests are
+    // paused rather than that it must reconnect.
+    assert_eq!(refusal(&token), "gateway_not_verified");
     assert_eq!(std::fs::read(&path).unwrap(), projected);
     // A verification failure or block keeps the agents pointed at the Local
     // API, which refuses them; the original provider never gets their requests.
@@ -749,7 +831,7 @@ fn recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them() {
             .unwrap()
             .iter()
             .all(|status| !status.authorized));
-        assert!(runtime.proxy.tokens().agent_for(&token).is_none());
+        assert_eq!(refusal(&token), "gateway_not_verified");
         assert_eq!(std::fs::read(&path).unwrap(), projected);
     }
     let reverify = || {
@@ -773,12 +855,14 @@ fn recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them() {
     assert_eq!(std::fs::read(&path).unwrap(), projected);
     // So does a restart for a profile switch or a settings reload.
     runtime.stop_with_reconnect(true).unwrap();
-    assert!(runtime.proxy.tokens().agent_for(&token).is_none());
+    assert_eq!(refusal(&token), "gateway_not_verified");
     assert_eq!(std::fs::read(&path).unwrap(), projected);
     reverify();
-    // Only the user ending the session restores the original configuration.
+    // Only the user ending the session restores the original configuration,
+    // which revokes the token.
     runtime.stop().unwrap();
     assert!(files.read(agent.id()).unwrap().is_none());
+    assert_eq!(refusal(&token), "unauthorized");
     let restored =
         || serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap();
     assert_eq!(
@@ -788,6 +872,7 @@ fn recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them() {
     // Verified again, the agent is projected again; an update restart keeps
     // it for the updated backend to resume.
     reverify();
+    let token = files.read(agent.id()).unwrap().unwrap();
     let reprojected = std::fs::read(&path).unwrap();
     assert_ne!(
         restored(),
@@ -815,7 +900,7 @@ fn recovery_keeps_agent_routes_and_scans_cannot_reauthorize_them() {
     let moved = std::fs::read(&path).unwrap();
     assert_ne!(moved, reprojected);
     assert!(String::from_utf8_lossy(&moved).contains(&format!("127.0.0.1:{port}")));
-    assert!(runtime.proxy.tokens().agent_for(&token).is_none());
+    assert_eq!(refusal(&token), "gateway_not_verified");
     executor
         .block_on(runtime.shutdown(desktop_core::protocol::ShutdownMode::UpdateRestart, true))
         .unwrap();

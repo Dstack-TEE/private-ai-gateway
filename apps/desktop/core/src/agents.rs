@@ -13,9 +13,12 @@ pub struct AgentStatus {
     /// The agent's configuration folder exists; each agent creates it on
     /// first run, so detection does not depend on how the CLI was installed.
     pub installed: bool,
-    /// A connected link, including one suspended until protection resumes.
+    /// The agent's configuration routes it through the Local API. A
+    /// connection suspended until protection resumes is recorded, not
+    /// connected: its own configuration is restored.
     pub connected: bool,
-    /// A connection record exists (whatever the config now says).
+    /// A connection record exists (whatever the config now says), including
+    /// a suspended one.
     pub recorded: bool,
     /// The proxy would authorize this agent's token right now: recorded,
     /// enabled, config readable and its routing/authentication still managed.

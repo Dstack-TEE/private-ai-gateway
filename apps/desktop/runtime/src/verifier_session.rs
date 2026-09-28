@@ -79,8 +79,10 @@ pub enum VerifierEvent {
         code: Option<String>,
         reason: String,
     },
+    /// Verification cannot run. An `Error::Api` is authored for the user
+    /// and answers a waiting caller as it is.
     Fatal {
-        message: String,
+        error: Error,
     },
     Terminated {
         error: Option<String>,
@@ -145,6 +147,8 @@ struct RuntimeState {
     session_id: String,
     /// Last published catalog, kept across sessions to report removed models.
     last_catalog: Option<CatalogSummary>,
+    /// The verifier's failure behind `state.error`, as the verifier typed it.
+    failure: Option<Error>,
     state: AppState,
 }
 
@@ -197,6 +201,7 @@ impl SessionManager {
                 verification_only: false,
                 session_id,
                 last_catalog: None,
+                failure: None,
                 state,
             }),
             proxy,
@@ -262,6 +267,7 @@ impl SessionManager {
         runtime.service = None;
         runtime.identity_ready = false;
         runtime.verification_only = verification_only;
+        runtime.failure = None;
         if reset_catalog_history {
             runtime.last_catalog = None;
         }
@@ -353,7 +359,11 @@ impl SessionManager {
         self.task_runtime.spawn(async move {
             let budget = Duration::from_secs(if verification_only { 45 } else { 120 });
             if let Err(error) = manager.wait_for_verification(&session_id, budget).await {
-                let _ = manager.fail_if(generation, Some(VerificationStatus::Verifying), error);
+                let _ = manager.fail_if(
+                    generation,
+                    Some(VerificationStatus::Verifying),
+                    error.to_string(),
+                );
             }
         });
         Ok(state)
@@ -363,34 +373,38 @@ impl SessionManager {
         &self,
         session_id: &str,
         budget: Duration,
-    ) -> Result<AppState, String> {
+    ) -> Result<AppState, Error> {
         let mut states = self.state_tx.subscribe();
         tokio::time::timeout(budget, async {
             loop {
                 let state = states.borrow().clone();
                 if state.session_id.as_deref() != Some(session_id) {
-                    return Err("Configuration verification was superseded".to_string());
+                    return Err("Configuration verification was superseded".into());
                 }
                 match state.status {
                     VerificationStatus::Verified => return Ok(state),
                     VerificationStatus::Blocked | VerificationStatus::Error => {
-                        return Err(state
-                            .error
-                            .unwrap_or_else(|| "Configuration verification failed".to_string()));
+                        let failure = self.lock()?.failure.clone();
+                        return Err(failure.unwrap_or_else(|| {
+                            state
+                                .error
+                                .unwrap_or_else(|| "Configuration verification failed".into())
+                                .into()
+                        }));
                     }
                     VerificationStatus::Stopped => {
-                        return Err("Configuration verification was cancelled".to_string())
+                        return Err("Configuration verification was cancelled".into())
                     }
                     VerificationStatus::Verifying => {}
                 }
                 states
                     .changed()
                     .await
-                    .map_err(|_| "Configuration verification stopped unexpectedly".to_string())?;
+                    .map_err(|_| "Configuration verification stopped unexpectedly")?;
             }
         })
         .await
-        .map_err(|_| "Service verification timed out".to_string())?
+        .map_err(|_| "Service verification timed out")?
     }
 
     pub fn restore_snapshot(&self, mut state: AppState) {
@@ -940,6 +954,7 @@ impl SessionManager {
         runtime.state.progress = None;
         runtime.state.catalog = None;
         runtime.state.error = Some(message);
+        runtime.failure = None;
         let epoch = runtime.epoch;
         let session_id = runtime.session_id.clone();
         drop(runtime);

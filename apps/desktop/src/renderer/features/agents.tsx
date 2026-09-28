@@ -128,7 +128,10 @@ export function AgentRow({
         ? { label: "Error", tone: "danger" }
         : agent.connected
           ? { label: "Connected", tone: "success" }
-          : { label: "Not connected", tone: "neutral" };
+          // Saved, its own configuration restored until protection resumes.
+          : agent.recorded
+            ? { label: "Inactive", tone: "neutral" }
+            : { label: "Not connected", tone: "neutral" };
   const disconnecting = pendingConnection ?? agent.recorded;
   const actionable = disconnecting || !agent.error;
   const note = agent.attention ?? agent.error;

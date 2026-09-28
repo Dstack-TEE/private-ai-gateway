@@ -63,8 +63,6 @@ impl DesktopRuntime {
                 .map_err(|_| "Agent state unavailable")?;
             let result = self.manager.stop_with_reconnect(true);
             self.proxy.set_api_key(None);
-            self.publish_agent_tokens(TokenSet::default())
-                .map_err(|error| error.to_string())?;
             result
         })();
         if let Err(error) = paused {
@@ -168,10 +166,10 @@ impl DesktopRuntime {
         self.stop_with_reconnect(false)
     }
 
-    /// Stops the verifier and withdraws every agent token. Only a stop that
-    /// ends the session (the user stopped protection or quit) restores the
-    /// agents' own configuration. A restart keeps them pointed at the Local
-    /// API, which refuses them until protection is verified again.
+    /// Stops the verifier. Only a stop that ends the session (the user stopped
+    /// protection or quit) restores the agents' own configuration and
+    /// withdraws their tokens. A restart keeps them pointed at the Local API,
+    /// which refuses them until protection is verified again.
     pub(super) fn stop_with_reconnect(&self, reconnecting: bool) -> Result<AppState, Error> {
         self.stop_verifier(reconnecting, !reconnecting)
     }
@@ -190,12 +188,14 @@ impl DesktopRuntime {
         if self.instance.is_none() {
             return Ok(result?);
         }
-        self.proxy
-            .set_tokens(with_client_token(TokenSet::default(), &self.credentials)?);
-        if restore_agents && self.agent_configuration_enabled() {
-            let failures = self.current_projector()?.reconcile(None)?;
-            if !failures.is_empty() {
-                return Err(agent_failures(failures).into());
+        if restore_agents {
+            self.proxy
+                .set_tokens(with_client_token(TokenSet::default(), &self.credentials)?);
+            if self.agent_configuration_enabled() {
+                let failures = self.current_projector()?.reconcile(None)?;
+                if !failures.is_empty() {
+                    return Err(agent_failures(failures).into());
+                }
             }
         }
         Ok(result?)

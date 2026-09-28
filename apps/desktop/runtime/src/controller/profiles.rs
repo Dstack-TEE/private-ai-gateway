@@ -127,7 +127,7 @@ impl DesktopRuntime {
                 self.proxy.set_api_key(None);
                 self.manager.restore_snapshot(previous);
                 return Err(match stop_result {
-                    Ok(_) => error.into(),
+                    Ok(_) => error,
                     Err(stop_error) => {
                         format!("{error}. The verifier also could not stop: {stop_error}").into()
                     }
@@ -236,6 +236,14 @@ impl DesktopRuntime {
             || (self.manager.is_running()? && !previous.configuration_verification);
         if !self.settings.config()?.profiles.contains_key(&profile_id) {
             return Err(Error::invalid_state("Confidential AI profile not found"));
+        }
+        // Protection restarts on the new profile, which could not start
+        // without a credential: refuse before anything changes. The app opens
+        // the profile's setup instead.
+        if reconnect && self.load_profile_key(&profile_id)?.is_none() {
+            return Err(Error::invalid_state(
+                "This profile has no credential. Add one before switching to it while protection is on.",
+            ));
         }
         if reconnect {
             self.stop_with_reconnect(true)?;

@@ -326,7 +326,7 @@ impl ProxyState {
             Rejection::new(
                 StatusCode::UNAUTHORIZED,
                 "unauthorized",
-                format!("This endpoint accepts only agents connected through {PRODUCT_NAME}"),
+                format!("Missing API key. Use the Local API key shown in {PRODUCT_NAME}."),
             )
         })?;
         let epoch = self.credential_epoch.load(Ordering::SeqCst);

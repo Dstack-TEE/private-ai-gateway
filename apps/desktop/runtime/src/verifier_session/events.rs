@@ -62,8 +62,9 @@ impl SessionManager {
                 runtime.state.progress = None;
                 runtime.state.catalog = None;
                 runtime.state.error = Some(reason);
+                runtime.failure = None;
             }
-            VerifierEvent::Fatal { message } => {
+            VerifierEvent::Fatal { error } => {
                 runtime.epoch += 1;
                 runtime.identity_ready = false;
                 if runtime.state.status != VerificationStatus::Blocked {
@@ -72,7 +73,8 @@ impl SessionManager {
                 runtime.state.reconnecting = crate::recovery::connection_intended(&runtime.state);
                 runtime.state.progress = None;
                 runtime.state.catalog = None;
-                runtime.state.error = Some(message);
+                runtime.state.error = Some(error.to_string());
+                runtime.failure = Some(error);
             }
             VerifierEvent::Terminated { error } => {
                 drop(runtime);

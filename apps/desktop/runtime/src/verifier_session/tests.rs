@@ -346,6 +346,57 @@ async fn ready_event_loads_catalog_before_opening_the_session() {
     let _ = server.await;
 }
 
+/// A failure the verifier authored, such as an unreachable host, answers the
+/// caller waiting on a profile verification as it is.
+#[tokio::test]
+async fn an_authored_verifier_failure_answers_the_waiting_caller() {
+    use desktop_core::protocol::{self, ErrorCode};
+
+    let (events, _) = tokio::sync::mpsc::channel(8);
+    let proxy = ProxyState::new(events).unwrap();
+    let manager = Arc::new(SessionManager::new(
+        proxy.clone(),
+        Arc::new(UsageStore::memory().unwrap()),
+        Arc::new(WaitingSidecar),
+        Handle::current(),
+        AppState::default(),
+    ));
+    let started = manager
+        .begin_verification(
+            StartConfig {
+                remote_url: "https://unreachable.invalid".into(),
+                require_production_os: true,
+            },
+            false,
+        )
+        .unwrap();
+    let failure = protocol::Error::new(
+        ErrorCode::ServiceConnectionFailed,
+        "Cannot reach unreachable.invalid. Check the service URL and your network connection.",
+    );
+    manager
+        .handle_event(
+            proxy.session().generation,
+            VerifierEvent::Fatal {
+                error: failure.clone().into(),
+            },
+        )
+        .unwrap();
+    let error = manager
+        .wait_for_verification(
+            started.session_id.as_deref().unwrap(),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(protocol::Error::from(error), failure);
+    assert_eq!(
+        manager.snapshot().unwrap().error.as_deref(),
+        Some(failure.message.as_str())
+    );
+    manager.stop().unwrap();
+}
+
 #[test]
 fn unexpected_termination_revokes_forwarding_and_requests_reconnect() {
     let executor = tokio::runtime::Runtime::new().unwrap();
@@ -554,7 +605,7 @@ fn security_blocks_survive_process_failure_and_keep_the_session_until_stopped() 
             .handle_event(
                 generation,
                 VerifierEvent::Fatal {
-                    message: "task failed".into(),
+                    error: "task failed".into(),
                 },
             )
             .unwrap();

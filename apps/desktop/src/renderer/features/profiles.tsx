@@ -61,9 +61,12 @@ export function ProfilesDialog({
   const activeProfileAvailable = profileIsAvailable(activeProfile, state);
   const activeConnection = activeProfile && connectionRequirement(activeProfile);
 
-  const select = (profileId: string) => {
-    if (profileId === state.activeProfileId) onClose();
-    else activate.mutate(profileId);
+  const select = (profile: ConfidentialProfile) => {
+    if (profile.id === state.activeProfileId) onClose();
+    // Protection restarts on the profile it switches to, which needs a
+    // credential first: the backend refuses the switch, so set it up instead.
+    else if (state.sessionActive && !profile.credentialSaved) editor.show({ profile });
+    else activate.mutate(profile.id);
   };
   return (
     <AppDialog {...control} title="Profiles" className="sm:max-w-xl" dismissible={!workingProfileId && !transferBusy} onClose={onClose}>
@@ -86,7 +89,7 @@ export function ProfilesDialog({
                 className="profile-select min-w-0 [&_>_span:nth-child(2)]:min-w-0 [&_>_span:nth-child(2)]:flex-auto [&_>_span:nth-child(2)]:grid [&_>_span:nth-child(2)]:gap-0.5 [&_strong]:min-w-0 [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_small]:min-w-0 [&_small]:overflow-hidden [&_small]:text-ellipsis [&_small]:whitespace-nowrap [&_strong]:text-foreground [&_strong]:text-sm [&_strong]:font-semibold [&_small]:text-muted-foreground [&_small]:text-xs [&_>_svg]:flex-none [&_>_svg]:text-foreground"
                 aria-current={active || undefined}
                 disabled={frozen || Boolean(workingProfileId)}
-                onClick={() => select(profile.id)}
+                onClick={() => select(profile)}
               >
                 <ServiceLogo provider={profile.provider} size="large" />
                 <span><strong>{profile.name}</strong><small>{serviceHost(profile.remoteUrl)} · {status}</small></span>

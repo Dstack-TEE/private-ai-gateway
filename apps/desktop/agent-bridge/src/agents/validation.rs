@@ -413,8 +413,9 @@ impl Projector {
             status.recorded = false;
             return status;
         }
+        // A suspended connection's configuration is restored: it stays
+        // recorded, to resume with protection, but is not connected.
         if record.suspended && !record.cleanup_pending {
-            status.connected = true;
             status.attention = record.attention.clone().or_else(|| {
                 (!installed).then(|| {
                     "The agent's configuration folder was not found; its configuration stays \

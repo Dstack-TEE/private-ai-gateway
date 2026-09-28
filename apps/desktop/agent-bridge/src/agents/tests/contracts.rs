@@ -264,7 +264,8 @@ fn links_survive_stop_restart_and_uninstall_without_owning_inactive_configs() {
         .projector
         .apply(agent, true, &preview.revision, None, &options)
         .unwrap();
-    assert!(status.connected && !status.authorized);
+    // Connected while protection is off: recorded, its config left as is.
+    assert!(status.recorded && !status.connected && !status.authorized);
     assert_eq!(
         doc(&sandbox, agent).get_value(&["model"]),
         Some(ConfigValue::Str("original".into()))
@@ -297,6 +298,10 @@ fn links_survive_stop_restart_and_uninstall_without_owning_inactive_configs() {
         Some(ConfigValue::Str("original-secret".into()))
     );
     assert!(sandbox.projector.load_store().unwrap()[agent.id()].suspended);
+    // Stopped protection restored the config: a saved connection, inactive.
+    let statuses = sandbox.projector.scan(None).unwrap().0;
+    let status = agent_status(&statuses, agent);
+    assert!(status.recorded && !status.connected && !status.authorized);
 
     assert!(sandbox
         .projector
@@ -321,7 +326,9 @@ fn links_survive_stop_restart_and_uninstall_without_owning_inactive_configs() {
         .into_iter()
         .find(|s| s.id == agent.id())
         .unwrap();
-    assert!(status.connected && !status.authorized && status.attention.is_some());
+    assert!(
+        status.recorded && !status.connected && !status.authorized && status.attention.is_some()
+    );
     fs::create_dir_all(&directory).unwrap();
     assert!(sandbox
         .projector

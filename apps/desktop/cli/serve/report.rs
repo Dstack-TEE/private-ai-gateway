@@ -135,7 +135,9 @@ pub(super) fn json_event_sink(event: VerifierEvent) {
         VerifierEvent::Blocked { code: None, reason } => {
             json!({"type": "blocked", "reason": reason})
         }
-        VerifierEvent::Fatal { message } => json!({"type": "fatal", "message": message}),
+        VerifierEvent::Fatal { error } => {
+            json!({"type": "fatal", "message": error.to_string()})
+        }
         VerifierEvent::Terminated { error } => {
             json!({"type": "terminated", "error": error})
         }

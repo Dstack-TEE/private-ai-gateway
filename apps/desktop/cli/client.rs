@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, RwLock};
 
-use crate::aci::tls::{observing_spki_client, SpkiObservations};
+use crate::aci::tls::{error_chain, observing_spki_client, SpkiObservations};
 use futures_util::StreamExt;
 use http_body_util::{BodyExt, LengthLimitError, Limited};
 
@@ -68,6 +68,50 @@ impl std::fmt::Display for GetError {
 impl From<GetError> for String {
     fn from(error: GetError) -> Self {
         error.to_string()
+    }
+}
+
+/// Why a service could not be verified at all: its host could not be reached
+/// or did not answer as an ACI service. Authored for the user; it names only
+/// the host, never a URL, nonce or transport error.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ServiceError {
+    #[error("Cannot reach {host}. Check the service URL and your network connection.")]
+    Unreachable { host: String },
+    #[error("{host} refused the connection. Check the service URL and port.")]
+    Refused { host: String },
+    #[error("{host} did not respond in time. Check the service URL and your network connection.")]
+    TimedOut { host: String },
+    #[error("A secure connection to {host} could not be established. Check the service URL.")]
+    Tls { host: String },
+    #[error("{host} is not a Confidential AI service (it answered HTTP {status}). Check the service URL.")]
+    Status { host: String, status: u16 },
+    #[error("{host} is not a Confidential AI service (it returned no attestation report). Check the service URL.")]
+    NotAci { host: String },
+}
+
+impl ServiceError {
+    /// Classifies a failed request by the error types in its source chain.
+    fn from_request(error: &reqwest::Error, host: &str) -> Self {
+        let host = host.to_string();
+        for cause in error_chain(error) {
+            if cause.is::<rustls::Error>() {
+                return Self::Tls { host };
+            }
+            match cause
+                .downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind)
+            {
+                Some(std::io::ErrorKind::ConnectionRefused) => return Self::Refused { host },
+                Some(std::io::ErrorKind::TimedOut) => return Self::TimedOut { host },
+                _ => {}
+            }
+        }
+        if error.is_timeout() {
+            Self::TimedOut { host }
+        } else {
+            Self::Unreachable { host }
+        }
     }
 }
 
@@ -228,16 +272,31 @@ impl AciClient {
             .map_err(|e| format!("GET {url} failed: {e}"))
     }
 
+    /// Fetch the attestation report from `host`, the host of `base_url`.
     pub async fn fetch_attestation(
         &self,
         base_url: &str,
+        host: &str,
         nonce: &str,
-    ) -> Result<HttpResult, String> {
-        self.get(
-            &format!("{base_url}/v1/aci/attestation?nonce={nonce}"),
-            None,
-        )
-        .await
+    ) -> Result<HttpResult, ServiceError> {
+        let response = self
+            .http()
+            .get(format!("{base_url}/v1/aci/attestation?nonce={nonce}"))
+            .send()
+            .await
+            .map_err(|error| ServiceError::from_request(&error, host))?;
+        let status = response.status().as_u16();
+        let headers = response.headers().clone();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|error| ServiceError::from_request(&error, host))?
+            .to_vec();
+        Ok(HttpResult {
+            status,
+            headers,
+            body,
+        })
     }
 
     pub async fn fetch_receipt(

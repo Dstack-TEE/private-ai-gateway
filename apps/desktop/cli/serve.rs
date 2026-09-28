@@ -34,7 +34,7 @@ use crate::args::ServeArgs;
 use crate::checks::{BodyDigest, EstablishedIdentity, RequiredClaim, VerifierPolicy};
 use crate::client::AciClient;
 use crate::sessions::audit_current_sessions;
-use crate::verify::{verify_service, ServiceVerification};
+use crate::verify::{verify_service, ServiceVerification, VerifyError};
 
 mod audit;
 mod control;
@@ -594,7 +594,7 @@ async fn initialize(
     reporter: Reporter,
     event_sink: VerifierEventSink,
     shutdown: CancellationToken,
-) -> Result<(Arc<ProxyState>, IdentityEvent, String), String> {
+) -> Result<(Arc<ProxyState>, IdentityEvent, String), VerifyError> {
     let verification = verify_service(
         &options.base_url,
         None,
@@ -608,9 +608,9 @@ async fn initialize(
         print!("{}", verification.transcript.render_human(false));
     }
     if !verification.transcript.verified() {
-        return Err(
+        return Err(VerifyError::Failed(
             "service verification failed; refusing to start the proxy (fail closed)".to_string(),
-        );
+        ));
     }
 
     let verification_summary = verification.transcript.to_json(false);
@@ -624,7 +624,8 @@ async fn initialize(
         observed_spki,
         ..
     } = verification;
-    let identity = identity.ok_or("verified run carried no established identity")?;
+    let identity =
+        identity.ok_or_else(|| "verified run carried no established identity".to_string())?;
     let ready_identity = identity_event(
         &report,
         &identity,
@@ -655,11 +656,11 @@ async fn initialize(
     if !state.required_claims.is_empty() {
         let pins = derive_policy_pins(&state).await?;
         if pins.is_empty() {
-            return Err(
+            return Err(VerifyError::Failed(
                 "no current attested session satisfies the --require-claim policy; \
                  refusing to start (fail closed)"
                     .to_string(),
-            );
+            ));
         }
         if options.print_progress {
             println!("policy-accepted sessions pinned ({}):", pins.len());
