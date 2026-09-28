@@ -294,7 +294,7 @@ pub(super) enum Profiles {
     },
     /// Make a saved profile active.
     #[command(
-        long_about = "Make a saved profile active. While protection is on, it restarts on that profile: the command exits 0 once the switch is applied and prints the resulting status, which may still be reconnecting or show that verification failed. A profile without a credential is refused while protection is on, and nothing changes."
+        long_about = "Make a saved profile active. While protection is on, it restarts on that profile: the command exits 0 once the switch is applied and prints the resulting status, which may still be reconnecting or show why protection could not start or verify. A profile without a credential is refused while protection is on, and nothing changes."
     )]
     Use {
         /// Saved profile ID.

@@ -256,11 +256,14 @@ impl DesktopRuntime {
         self.proxy.set_api_key(None);
         self.recovery.cancel();
         let config = self.publish_service_configuration(false)?;
+        // The switch is applied: a failure to start protection on the new
+        // profile is the resulting status, not a failed switch.
         if reconnect {
-            self.start_inner(config)
-        } else {
-            Ok(self.manager.snapshot()?)
+            if let Err(error) = self.start_inner(config) {
+                self.report_error(error);
+            }
         }
+        Ok(self.manager.snapshot()?)
     }
 
     pub async fn delete_profile(&self, profile_id: String) -> Result<AppState, Error> {

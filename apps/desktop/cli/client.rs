@@ -84,15 +84,30 @@ pub enum ServiceError {
     TimedOut { host: String },
     #[error("A secure connection to {host} could not be established. Check the service URL.")]
     Tls { host: String },
-    #[error("{host} is not a Confidential AI service (it answered HTTP {status}). Check the service URL.")]
-    Status { host: String, status: u16 },
-    #[error("{host} is not a Confidential AI service (it returned no attestation report). Check the service URL.")]
+    /// It answered without an attestation report: HTTP 404, or another body.
+    #[error("{host} is not a Confidential AI service: it has no attestation report. Check the service URL.")]
     NotAci { host: String },
+    #[error("{host} is unavailable right now (HTTP {status}). Try again later.")]
+    Unavailable { host: String, status: u16 },
+    #[error(
+        "{host} answered HTTP {status} instead of an attestation report. Check the service URL."
+    )]
+    Status { host: String, status: u16 },
 }
 
 impl ServiceError {
+    /// Classifies an attestation request answered with a non-success status.
+    pub fn from_status(host: &str, status: u16) -> Self {
+        let host = host.to_string();
+        match status {
+            404 => Self::NotAci { host },
+            429 | 500..=599 => Self::Unavailable { host, status },
+            _ => Self::Status { host, status },
+        }
+    }
+
     /// Classifies a failed request by the error types in its source chain.
-    fn from_request(error: &reqwest::Error, host: &str) -> Self {
+    pub fn from_request(error: &reqwest::Error, host: &str) -> Self {
         let host = host.to_string();
         for cause in error_chain(error) {
             if cause.is::<rustls::Error>() {
@@ -218,14 +233,21 @@ impl AciClient {
     }
 
     pub async fn get(&self, url: &str, bearer: Option<&str>) -> Result<HttpResult, String> {
+        self.read_get(url, bearer)
+            .await
+            .map_err(|e| format!("GET {url} failed: {e}"))
+    }
+
+    /// A GET read whole, failing with the request's own error.
+    async fn read_get(
+        &self,
+        url: &str,
+        bearer: Option<&str>,
+    ) -> Result<HttpResult, reqwest::Error> {
         let resp = self.send_get(url, bearer).await?;
         let status = resp.status().as_u16();
         let headers = resp.headers().clone();
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| format!("GET {url}: failed to read body: {e}"))?
-            .to_vec();
+        let body = resp.bytes().await?.to_vec();
         Ok(HttpResult {
             status,
             headers,
@@ -240,7 +262,10 @@ impl AciClient {
         bearer: Option<&str>,
         limit: usize,
     ) -> Result<HttpResult, GetError> {
-        let resp = self.send_get(url, bearer).await.map_err(GetError::Failed)?;
+        let resp = self
+            .send_get(url, bearer)
+            .await
+            .map_err(|e| GetError::Failed(format!("GET {url} failed: {e}")))?;
         let status = resp.status().as_u16();
         let headers = resp.headers().clone();
         let body = Limited::new(reqwest::Body::from(resp), limit)
@@ -262,41 +287,30 @@ impl AciClient {
         })
     }
 
-    async fn send_get(&self, url: &str, bearer: Option<&str>) -> Result<reqwest::Response, String> {
+    async fn send_get(
+        &self,
+        url: &str,
+        bearer: Option<&str>,
+    ) -> Result<reqwest::Response, reqwest::Error> {
         let mut req = self.http().get(url);
         if let Some(token) = bearer {
             req = req.bearer_auth(token);
         }
-        req.send()
-            .await
-            .map_err(|e| format!("GET {url} failed: {e}"))
+        req.send().await
     }
 
-    /// Fetch the attestation report from `host`, the host of `base_url`.
+    /// Fetch the attestation report. The caller classifies a failure with
+    /// [`ServiceError::from_request`].
     pub async fn fetch_attestation(
         &self,
         base_url: &str,
-        host: &str,
         nonce: &str,
-    ) -> Result<HttpResult, ServiceError> {
-        let response = self
-            .http()
-            .get(format!("{base_url}/v1/aci/attestation?nonce={nonce}"))
-            .send()
-            .await
-            .map_err(|error| ServiceError::from_request(&error, host))?;
-        let status = response.status().as_u16();
-        let headers = response.headers().clone();
-        let body = response
-            .bytes()
-            .await
-            .map_err(|error| ServiceError::from_request(&error, host))?
-            .to_vec();
-        Ok(HttpResult {
-            status,
-            headers,
-            body,
-        })
+    ) -> Result<HttpResult, reqwest::Error> {
+        self.read_get(
+            &format!("{base_url}/v1/aci/attestation?nonce={nonce}"),
+            None,
+        )
+        .await
     }
 
     pub async fn fetch_receipt(

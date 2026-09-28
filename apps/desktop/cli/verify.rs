@@ -79,13 +79,12 @@ pub async fn verify_service(
         Some(nonce) => nonce.to_string(),
         None => random_nonce_hex(),
     };
-    let resp = client.fetch_attestation(&base_url, &host, &nonce).await?;
+    let resp = client
+        .fetch_attestation(&base_url, &nonce)
+        .await
+        .map_err(|error| ServiceError::from_request(&error, &host))?;
     if !(200..300).contains(&resp.status) {
-        return Err(ServiceError::Status {
-            host,
-            status: resp.status,
-        }
-        .into());
+        return Err(ServiceError::from_status(&host, resp.status).into());
     }
     let report: AttestationReport = serde_json::from_slice(&resp.body)
         .map_err(|_| ServiceError::NotAci { host: host.clone() })?;
@@ -170,10 +169,19 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let plain = axum::Router::new().route(
-            "/v1/aci/attestation",
-            axum::routing::get(|| async { "not an attestation" }),
-        );
+        let status = |code: u16| {
+            axum::routing::get(
+                move || async move { axum::http::StatusCode::from_u16(code).unwrap() },
+            )
+        };
+        let plain = axum::Router::new()
+            .route(
+                "/v1/aci/attestation",
+                axum::routing::get(|| async { "not an attestation" }),
+            )
+            .route("/busy/v1/aci/attestation", status(503))
+            .route("/limited/v1/aci/attestation", status(429))
+            .route("/private/v1/aci/attestation", status(403));
         tokio::spawn(async move { axum::serve(listener, plain).await });
         assert_eq!(
             failure(&format!("https://127.0.0.1:{port}")).await,
@@ -181,9 +189,27 @@ mod tests {
         );
         assert_eq!(
             failure(&format!("http://127.0.0.1:{port}/elsewhere")).await,
+            ServiceError::NotAci { host: host.clone() }
+        );
+        for (path, status) in [("busy", 503), ("limited", 429)] {
+            let unavailable = failure(&format!("http://127.0.0.1:{port}/{path}")).await;
+            assert_eq!(
+                unavailable,
+                ServiceError::Unavailable {
+                    host: host.clone(),
+                    status
+                }
+            );
+            assert_eq!(
+                unavailable.to_string(),
+                format!("127.0.0.1 is unavailable right now (HTTP {status}). Try again later.")
+            );
+        }
+        assert_eq!(
+            failure(&format!("http://127.0.0.1:{port}/private")).await,
             ServiceError::Status {
                 host: host.clone(),
-                status: 404
+                status: 403
             }
         );
         assert_eq!(

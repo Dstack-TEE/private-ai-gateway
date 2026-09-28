@@ -220,6 +220,12 @@ mod tests {
             reconnecting.configuration_verification = true;
             assert_ne!(action(&reconnecting).operation, ProtectionOperation::Stop);
         }
+        // A session the user has not ended, with nothing running, can still
+        // be stopped to restore its agents.
+        let mut active = state(VerificationStatus::Stopped, true);
+        active.session_active = true;
+        assert_eq!(action(&active).operation, ProtectionOperation::Stop);
+        assert_eq!(action(&active).label, "Stop Protection");
     }
 
     #[test]

@@ -360,23 +360,26 @@ fn saving_an_offline_profile_does_not_launch_verification() {
 }
 
 /// A switch that would restart protection on a profile without a credential
-/// is refused before protection or the active profile changes.
+/// is refused before protection or the active profile changes. Once a switch
+/// is applied, a failed start is its resulting status, not a failed switch.
 #[test]
-fn a_switch_protection_could_not_start_on_changes_nothing() {
+fn a_switch_is_refused_only_before_anything_changes() {
     use desktop_core::contracts::ServiceProvider;
     use desktop_core::maintenance::{ProfileBackup, ProfileConfiguration};
     let executor = tokio::runtime::Runtime::new().unwrap();
     let directory = tempfile::tempdir().unwrap();
     let runtime = test_runtime(&executor, directory.path());
-    let ready = ConfidentialProfileInput {
-        id: "ready".into(),
-        name: "Ready".into(),
-        provider: ServiceProvider::Custom,
-        remote_url: "https://ready.invalid".into(),
-    };
-    executor
-        .block_on(runtime.save_configuration(ready, true, Some("test-key".into())))
-        .unwrap();
+    for id in ["other", "ready"] {
+        let profile = ConfidentialProfileInput {
+            id: id.into(),
+            name: id.into(),
+            provider: ServiceProvider::Custom,
+            remote_url: format!("https://{id}.invalid"),
+        };
+        executor
+            .block_on(runtime.save_configuration(profile, true, Some("test-key".into())))
+            .unwrap();
+    }
     runtime
         .import_profiles(ProfileBackup {
             version: 1,
@@ -410,6 +413,15 @@ fn a_switch_protection_could_not_start_on_changes_nothing() {
     assert_eq!(unchanged.status, VerificationStatus::Verified);
     assert!(unchanged.session_active);
     assert_eq!(runtime.settings.config().unwrap().active_profile, "ready");
+    // The test verifier cannot start: the switch still applies, and the
+    // session it leaves can be stopped.
+    let switched = runtime.activate_profile("other".into()).unwrap();
+    assert_eq!(switched.active_profile_id, "other");
+    assert!(switched.error.is_some());
+    assert_eq!(
+        switched.protection().action.operation,
+        desktop_core::protection::ProtectionOperation::Stop
+    );
     // With protection off, the switch only selects what the next start uses.
     runtime.manager.restore_snapshot(state);
     assert_eq!(

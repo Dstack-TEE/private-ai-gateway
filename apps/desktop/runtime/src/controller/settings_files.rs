@@ -98,6 +98,11 @@ impl DesktopRuntime {
             || key(previous) != key(current)
         {
             // As when switching profiles: protection restarts on the new one.
+            // Unlike a switch, an edited file cannot be refused when the new
+            // active profile has no credential: the files are already the
+            // settings in effect, and protection must not keep running on a
+            // profile they no longer name. The start then fails with its
+            // reason, and the session, still active, offers Stop.
             let state = self.manager.snapshot()?;
             let reconnect = state.session_active
                 || (self.manager.is_running()? && !state.configuration_verification);
