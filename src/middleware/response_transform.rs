@@ -1031,14 +1031,59 @@ pub(super) fn transform_finish_reason(stop_reason: Option<&str>, strict: bool) -
     .to_string()
 }
 
-// OpenAI finish_reason -> Anthropic stop_reason (downstream surface).
-pub(super) fn map_finish_reason(finish_reason: Option<&str>) -> Option<&'static str> {
-    match finish_reason {
-        Some("stop") => Some("end_turn"),
-        Some("length") => Some("max_tokens"),
-        Some("tool_calls") | Some("function_call") => Some("tool_use"),
-        Some("content_filter") => Some("refusal"),
-        _ => None,
+/// How a Chat choice ended, read once for every surface the bridges serve.
+/// Reasons outside the OpenAI vocabulary (or none at all) end the turn
+/// normally, as Chat-to-Messages bridges commonly treat them; an abort or an
+/// `error`/`*_error` reason reports that generation failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ChatFinish {
+    Stop,
+    ToolCalls,
+    Length,
+    ContentFilter,
+    Error,
+}
+
+impl ChatFinish {
+    pub(super) fn parse(reason: Option<&str>) -> Self {
+        match reason {
+            Some("tool_calls" | "function_call") => Self::ToolCalls,
+            Some("length") => Self::Length,
+            Some("content_filter") => Self::ContentFilter,
+            Some(reason)
+                if reason == "error" || reason == "abort" || reason.ends_with("_error") =>
+            {
+                Self::Error
+            }
+            _ => Self::Stop,
+        }
+    }
+
+    /// Cut off before the model finished, so a tool call in flight may be
+    /// partial rather than malformed.
+    pub(super) fn truncated(self) -> bool {
+        matches!(self, Self::Length | Self::ContentFilter)
+    }
+
+    /// The Anthropic stop reason. Whether the turn called a tool is decided by
+    /// the calls it carries, not by what the upstream called its finish.
+    pub(super) fn stop_reason(self, has_tool_calls: bool) -> &'static str {
+        match self {
+            Self::Length => "max_tokens",
+            Self::ContentFilter => "refusal",
+            _ if has_tool_calls => "tool_use",
+            _ => "end_turn",
+        }
+    }
+
+    /// The Responses `status` and the `incomplete_details` saying why a cut-off
+    /// response stopped.
+    pub(super) fn responses_status(self) -> (&'static str, Value) {
+        match self {
+            Self::Length => ("incomplete", json!({ "reason": "max_output_tokens" })),
+            Self::ContentFilter => ("incomplete", json!({ "reason": "content_filter" })),
+            _ => ("completed", Value::Null),
+        }
     }
 }
 
@@ -1186,120 +1231,104 @@ pub fn responses_echo(params: &Value) -> Value {
 /// the first choice's reasoning, text (or refusal) and tool calls become
 /// output items in that order, `finish_reason` becomes `status`, and the
 /// usage buckets take their Responses names. `echo` supplies the request
-/// fields the object repeats.
-pub fn openai_chat_to_responses(response: Value, echo: &Value) -> Value {
+/// fields the object repeats; `id` is the gateway's id for the response.
+///
+/// A tool call the client could not execute fails the response, unless the
+/// upstream was cut off mid-call: then the call is reported incomplete.
+pub fn openai_chat_to_responses(response: Value, echo: &Value, id: &str) -> Value {
     let tool_map = ResponsesToolMap::from_echo(echo);
     let choice = response
         .get("choices")
         .and_then(Value::as_array)
-        .and_then(|choices| choices.first())
-        .cloned();
+        .and_then(|choices| choices.first());
     let message = choice
-        .as_ref()
         .and_then(|choice| choice.get("message"))
-        .cloned()
-        .unwrap_or(Value::Null);
-    let id = match response.get("id").and_then(Value::as_str) {
-        Some(id) if !id.is_empty() => id.to_string(),
-        _ => format!("resp_{}", now_millis()),
-    };
+        .unwrap_or(&Value::Null);
+    let finish = ChatFinish::parse(
+        choice
+            .and_then(|choice| choice.get("finish_reason"))
+            .and_then(Value::as_str),
+    );
 
     let mut output: Vec<Value> = Vec::new();
-    let mut invalid_tool_arguments = false;
-    let mut invalid_tool_call_identity = false;
-    if let Some(text) = reasoning_text(&message) {
-        let item_id = item_id("rs", &id, output.len());
-        output.push(reasoning_item(&item_id, text, "completed"));
-    }
-    if choice.is_some() {
-        let text = message.get("content").and_then(Value::as_str).unwrap_or("");
-        let refusal = message
-            .get("refusal")
-            .and_then(Value::as_str)
-            .filter(|refusal| !refusal.is_empty());
-        let tool_calls = message
-            .get("tool_calls")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let part = match refusal {
-            Some(refusal) => Some(refusal_part(refusal)),
-            // A turn with neither text nor tool calls is still an (empty) message.
-            None if !text.is_empty() || tool_calls.is_empty() => Some(output_text_part(text)),
-            None => None,
-        };
-        if let Some(part) = part {
-            let item_id = item_id("msg", &id, output.len());
-            output.push(message_item(&item_id, part, "completed"));
-        }
-        for call in &tool_calls {
-            let function = call.get("function");
-            let call_id = call.get("id").and_then(Value::as_str).unwrap_or("");
-            let name = function
-                .and_then(|f| f.get("name"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let arguments = function
-                .and_then(|f| f.get("arguments"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            if call_id.trim().is_empty() || name.trim().is_empty() {
-                invalid_tool_call_identity = true;
-                continue;
-            }
-            if tool_map.is_custom(name) {
-                let Some(input) = custom_tool_input(arguments) else {
-                    invalid_tool_arguments = true;
-                    continue;
-                };
-                output.push(custom_tool_call_item(call_id, name, &input, "completed"));
-            } else {
-                let Some(arguments) = validated_function_call_arguments(arguments) else {
-                    invalid_tool_arguments = true;
-                    continue;
-                };
-                let namespace = tool_map.namespace(name);
-                output.push(function_call_item(
-                    call_id,
-                    namespace.map_or(name, |tool| tool.name.as_str()),
-                    namespace.map(|tool| tool.namespace.as_str()),
-                    &arguments,
-                    "completed",
-                ));
-            }
-        }
-    }
-
-    let upstream_error = response
+    let mut error = response
         .get("error")
         .filter(|error| !error.is_null())
-        .cloned();
-    let (status, incomplete_details, error) = match upstream_error {
+        .cloned()
+        .or_else(|| (finish == ChatFinish::Error).then(upstream_failed_error));
+    if let Some(text) = reasoning_text(message) {
+        output.push(reasoning_item(
+            &item_id("rs", id, output.len()),
+            text,
+            "completed",
+        ));
+    }
+    let text = message.get("content").and_then(Value::as_str).unwrap_or("");
+    let refusal = message
+        .get("refusal")
+        .and_then(Value::as_str)
+        .filter(|refusal| !refusal.is_empty());
+    let tool_calls = message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let part = match refusal {
+        Some(refusal) => Some(refusal_part(refusal)),
+        // A turn with neither text nor tool calls is still an (empty) message.
+        None if !text.is_empty() || tool_calls.is_empty() => Some(output_text_part(text)),
+        None => None,
+    };
+    if let Some(part) = part.filter(|_| choice.is_some()) {
+        output.push(message_item(
+            &item_id("msg", id, output.len()),
+            part,
+            "completed",
+        ));
+    }
+    for call in tool_calls {
+        let function = call.get("function");
+        let field = |key| {
+            function
+                .and_then(|function| function.get(key))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+        };
+        let call_id = call.get("id").and_then(Value::as_str).unwrap_or("");
+        let (name, arguments) = (field("name"), field("arguments"));
+        if call_id.trim().is_empty() || name.trim().is_empty() {
+            if !finish.truncated() {
+                error.get_or_insert_with(invalid_tool_call_identity_error);
+            }
+            continue;
+        }
+        let item = match responses_call_value(&tool_map, name, arguments) {
+            Some(value) => responses_call_item(&tool_map, call_id, name, &value, "completed"),
+            None => {
+                if !finish.truncated() {
+                    error.get_or_insert_with(invalid_tool_call_arguments_error);
+                }
+                responses_call_item(&tool_map, call_id, name, "", "incomplete")
+            }
+        };
+        output.push(item);
+    }
+
+    let (status, incomplete_details, error) = match error {
         Some(error) => ("failed", Value::Null, error),
         None => {
-            let terminal = responses_terminal(
-                choice
-                    .as_ref()
-                    .and_then(|choice| choice.get("finish_reason"))
-                    .and_then(Value::as_str),
-            );
-            match terminal {
-                None => ("failed", Value::Null, invalid_finish_reason_error()),
-                Some(("completed", _)) if invalid_tool_call_identity => {
-                    ("failed", Value::Null, invalid_tool_call_identity_error())
-                }
-                Some(("completed", _)) if invalid_tool_arguments => {
-                    ("failed", Value::Null, invalid_tool_call_arguments_error())
-                }
-                Some((status, details)) => (status, details, Value::Null),
-            }
+            let (status, details) = finish.responses_status();
+            (status, details, Value::Null)
         }
     };
     responses_object(
         echo,
         ResponsesHead {
-            id: &id,
-            created_at: now_secs(),
+            id,
+            created_at: response
+                .get("created")
+                .and_then(Value::as_u64)
+                .unwrap_or_else(now_secs),
             model: response.get("model").cloned().unwrap_or(Value::Null),
             status,
             incomplete_details,
@@ -1308,6 +1337,43 @@ pub fn openai_chat_to_responses(response: Value, echo: &Value) -> Value {
         output,
         Some(responses_usage(response.get("usage"))),
     )
+}
+
+/// A Chat tool call as the Responses item the client declared: a custom tool
+/// call, or a function call restored to its namespace.
+pub(super) fn responses_call_item(
+    tool_map: &ResponsesToolMap,
+    call_id: &str,
+    name: &str,
+    value: &str,
+    status: &str,
+) -> Value {
+    if tool_map.is_custom(name) {
+        return custom_tool_call_item(call_id, name, value, status);
+    }
+    let namespace = tool_map.namespace(name);
+    function_call_item(
+        call_id,
+        namespace.map_or(name, |tool| tool.name.as_str()),
+        namespace.map(|tool| tool.namespace.as_str()),
+        value,
+        status,
+    )
+}
+
+/// What the client executes for a finished Chat tool call — a custom tool's
+/// raw input or a function's JSON-object arguments — or `None` when the call
+/// cannot be executed. An unexecutable call's item carries an empty value.
+pub(super) fn responses_call_value(
+    tool_map: &ResponsesToolMap,
+    name: &str,
+    arguments: &str,
+) -> Option<String> {
+    if tool_map.is_custom(name) {
+        custom_tool_input(arguments)
+    } else {
+        function_call_arguments(arguments).map(str::to_string)
+    }
 }
 
 /// The per-response fields of a Responses object, beside the echoed request
@@ -1362,6 +1428,12 @@ pub(super) fn reasoning_text(message: &Value) -> Option<&str> {
         .filter(|text| !text.is_empty())
 }
 
+/// A thinking block for reasoning a Chat model produced. It has no signature:
+/// only Anthropic can sign thinking, and a Chat upstream replays it unsigned.
+pub(super) fn thinking_block(thinking: &str) -> Value {
+    json!({ "type": "thinking", "thinking": thinking, "signature": "" })
+}
+
 pub(super) fn reasoning_item(id: &str, text: &str, status: &str) -> Value {
     json!({
         "id": id,
@@ -1390,7 +1462,7 @@ pub(super) fn refusal_part(refusal: &str) -> Value {
     json!({ "type": "refusal", "refusal": refusal })
 }
 
-pub(super) fn function_call_item(
+fn function_call_item(
     call_id: &str,
     name: &str,
     namespace: Option<&str>,
@@ -1411,7 +1483,7 @@ pub(super) fn function_call_item(
     item
 }
 
-pub(super) fn custom_tool_call_item(call_id: &str, name: &str, input: &str, status: &str) -> Value {
+fn custom_tool_call_item(call_id: &str, name: &str, input: &str, status: &str) -> Value {
     json!({
         "id": format!("ctc_{call_id}"),
         "type": "custom_tool_call",
@@ -1424,7 +1496,7 @@ pub(super) fn custom_tool_call_item(call_id: &str, name: &str, input: &str, stat
 
 /// Decode only the wrapper we advertised upstream. Invalid or truncated JSON
 /// must never become executable custom-tool input.
-pub(super) fn custom_tool_input(arguments: &str) -> Option<String> {
+fn custom_tool_input(arguments: &str) -> Option<String> {
     serde_json::from_str::<Value>(arguments)
         .ok()?
         .as_object()?
@@ -1433,18 +1505,18 @@ pub(super) fn custom_tool_input(arguments: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Parse Chat function arguments only when they are a JSON object, as required
-/// by both Responses function calls and Anthropic tool-use inputs.
-pub(super) fn parse_function_call_arguments(arguments: &str) -> Option<Value> {
+/// Chat function-call arguments as the JSON object Responses function calls
+/// and Anthropic tool inputs require. Empty arguments are the no-argument call
+/// some upstreams send as nothing at all; anything else must already be an
+/// object, so a malformed or truncated call is never guessed into one.
+pub(super) fn function_call_arguments(arguments: &str) -> Option<&str> {
+    if arguments.trim().is_empty() {
+        return Some("{}");
+    }
     serde_json::from_str::<Value>(arguments)
-        .ok()
-        .filter(Value::is_object)
-}
-
-/// Preserve valid Chat function arguments for a Responses function-call item.
-/// Missing or malformed arguments must not be fabricated as an empty object.
-pub(super) fn validated_function_call_arguments(arguments: &str) -> Option<String> {
-    parse_function_call_arguments(arguments).map(|_| arguments.to_string())
+        .ok()?
+        .is_object()
+        .then_some(arguments)
 }
 
 pub(super) fn invalid_tool_call_arguments_error() -> Value {
@@ -1461,22 +1533,11 @@ pub(super) fn invalid_tool_call_identity_error() -> Value {
     })
 }
 
-pub(super) fn invalid_finish_reason_error() -> Value {
+pub(super) fn upstream_failed_error() -> Value {
     json!({
         "code": "server_error",
-        "message": "The upstream provider ended without a valid finish reason",
+        "message": "The upstream provider returned an error",
     })
-}
-
-/// How a chat `finish_reason` ends a response: the `status`, and the
-/// `incomplete_details` that say why a cut-off one stopped.
-pub(super) fn responses_terminal(finish_reason: Option<&str>) -> Option<(&'static str, Value)> {
-    match finish_reason {
-        Some("stop" | "tool_calls") => Some(("completed", Value::Null)),
-        Some("length") => Some(("incomplete", json!({ "reason": "max_output_tokens" }))),
-        Some("content_filter") => Some(("incomplete", json!({ "reason": "content_filter" }))),
-        _ => None,
-    }
 }
 
 /// Responses `usage` from chat `usage`: the token buckets renamed, with the
@@ -1485,11 +1546,7 @@ pub(super) fn responses_usage(usage: Option<&Value>) -> Value {
     let usage = usage.unwrap_or(&Value::Null);
     let input = i64_field(usage, "prompt_tokens");
     let output = i64_field(usage, "completion_tokens");
-    let cached = usage
-        .get("prompt_tokens_details")
-        .map(|details| i64_field(details, "cached_tokens"))
-        .filter(|cached| *cached != 0)
-        .unwrap_or_else(|| i64_field(usage, "cache_read_input_tokens"));
+    let cached = chat_cache_tokens(usage).0.unwrap_or(0);
     let reasoning = usage
         .get("completion_tokens_details")
         .map(|details| i64_field(details, "reasoning_tokens"))
@@ -1507,6 +1564,12 @@ pub(super) fn responses_usage(usage: Option<&Value>) -> Value {
     })
 }
 
+/// Rebuild a chat completion as an Anthropic message: reasoning becomes a
+/// thinking block (the client only receives reasoning it asked for), then
+/// text, then tool calls. A body that cannot be a valid message — a failed
+/// generation, a tool call the client could not execute — is an upstream
+/// error, except for a call cut off by a token or content limit, which is
+/// dropped as Anthropic drops an unfinished one.
 fn openai_to_anthropic_messages(response: Value) -> Result<Value, ResponseTransformError> {
     let choice = response
         .get("choices")
@@ -1515,83 +1578,68 @@ fn openai_to_anthropic_messages(response: Value) -> Result<Value, ResponseTransf
         .ok_or_else(|| malformed_response("chat response requires a choice"))?;
     let message = choice
         .get("message")
-        .and_then(Value::as_object)
+        .filter(|message| message.is_object())
         .ok_or_else(|| malformed_response("chat response requires a message"))?;
-    let finish_reason = choice.get("finish_reason").and_then(Value::as_str);
-    let mut stop_reason = map_finish_reason(finish_reason)
-        .ok_or_else(|| malformed_response("chat response has an invalid finish reason"))?;
-    let truncated = matches!(finish_reason, Some("length" | "content_filter"));
+    let finish = ChatFinish::parse(choice.get("finish_reason").and_then(Value::as_str));
+    if finish == ChatFinish::Error {
+        return Err(malformed_response(
+            "chat response reports a failed generation",
+        ));
+    }
 
     let mut content: Vec<Value> = Vec::new();
-    match message.get("content") {
-        Some(Value::String(text)) if !text.is_empty() => {
-            content.push(json!({ "type": "text", "text": text }));
+    if let Some(thinking) = reasoning_text(message) {
+        content.push(thinking_block(thinking));
+    }
+    for key in ["content", "refusal"] {
+        match message.get(key) {
+            Some(Value::String(text)) if !text.is_empty() => {
+                content.push(json!({ "type": "text", "text": text }));
+            }
+            None | Some(Value::Null | Value::String(_)) => {}
+            _ => return Err(malformed_response("chat message content must be text")),
         }
-        None | Some(Value::Null | Value::String(_)) => {}
-        _ => return Err(malformed_response("chat message content must be text")),
     }
     let tool_calls = match message.get("tool_calls") {
-        None | Some(Value::Null) => None,
-        Some(Value::Array(tool_calls)) => Some(tool_calls),
+        None | Some(Value::Null) => &[][..],
+        Some(Value::Array(tool_calls)) => tool_calls.as_slice(),
         Some(_) => {
             return Err(malformed_response(
                 "chat message tool_calls must be an array",
             ))
         }
     };
-    if let Some(tool_calls) = tool_calls {
-        for call in tool_calls {
-            if !matches!(
-                call.get("type").and_then(Value::as_str),
-                None | Some("function")
-            ) {
-                if truncated {
-                    continue;
-                }
-                return Err(malformed_response(
-                    "chat response contains a non-function tool call",
-                ));
+    let mut has_tool_calls = false;
+    for call in tool_calls {
+        let function = call.get("function");
+        let field = |key| {
+            function
+                .and_then(|function| function.get(key))
+                .and_then(Value::as_str)
+        };
+        let id = call
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty());
+        let name = field("name").filter(|name| !name.is_empty());
+        let input = function_call_arguments(field("arguments").unwrap_or(""))
+            .and_then(|arguments| serde_json::from_str::<Value>(arguments).ok());
+        let is_function = matches!(
+            call.get("type").and_then(Value::as_str),
+            None | Some("function")
+        );
+        match (is_function, id, name, input) {
+            (true, Some(id), Some(name), Some(input)) => {
+                content.push(json!({ "type": "tool_use", "id": id, "name": name, "input": input }));
+                has_tool_calls = true;
             }
-            let id = call
-                .get("id")
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty());
-            let name = call
-                .get("function")
-                .and_then(|function| function.get("name"))
-                .and_then(Value::as_str)
-                .filter(|name| !name.is_empty());
-            let arguments = call
-                .get("function")
-                .and_then(|f| f.get("arguments"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let input = parse_function_call_arguments(arguments);
-            let (Some(id), Some(name), Some(input)) = (id, name, input) else {
-                if truncated {
-                    continue;
-                }
+            _ if finish.truncated() => {}
+            _ => {
                 return Err(malformed_response(
                     "chat response contains an invalid tool call",
-                ));
-            };
-            content.push(json!({
-                "type": "tool_use",
-                "id": id,
-                "name": name,
-                "input": input,
-            }));
+                ))
+            }
         }
-    }
-    let has_tool_calls = content
-        .iter()
-        .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"));
-    if stop_reason == "end_turn" && has_tool_calls {
-        stop_reason = "tool_use";
-    } else if stop_reason == "tool_use" && !has_tool_calls {
-        return Err(malformed_response(
-            "chat response finished for tool calls without a valid tool call",
-        ));
     }
     if content.is_empty() {
         content.push(json!({ "type": "text", "text": "" }));
@@ -1616,7 +1664,7 @@ fn openai_to_anthropic_messages(response: Value) -> Result<Value, ResponseTransf
         "role": "assistant",
         "content": content,
         "model": response.get("model").cloned().unwrap_or(Value::Null),
-        "stop_reason": stop_reason,
+        "stop_reason": finish.stop_reason(has_tool_calls),
         "stop_sequence": Value::Null,
         "usage": usage,
     }))
@@ -2492,7 +2540,7 @@ mod tests {
                 "tool_calls",
             ),
             json!({
-                "choices": [{ "message": { "role": "assistant" }, "finish_reason": "future_reason" }]
+                "choices": [{ "message": { "role": "assistant" }, "finish_reason": "abort" }]
             }),
             json!({
                 "choices": [{
@@ -2532,20 +2580,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(stopped_with_call["stop_reason"], "tool_use");
+
+        // Reasons outside the OpenAI vocabulary end the turn; a no-argument
+        // call arrives with empty arguments; reasoning becomes thinking.
+        let lenient = transform_response(
+            ProviderFormat::Openai,
+            Endpoint::Messages,
+            json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "reasoning_content": "plan",
+                        "tool_calls": [{ "id": "call_1", "function": { "name": "now", "arguments": "" } }]
+                    },
+                    "finish_reason": "eos"
+                }]
+            }),
+        )
+        .unwrap();
+        assert_eq!(lenient["stop_reason"], "tool_use");
+        assert_eq!(
+            lenient["content"],
+            json!([
+                { "type": "thinking", "thinking": "plan", "signature": "" },
+                { "type": "tool_use", "id": "call_1", "name": "now", "input": {} }
+            ])
+        );
     }
 
     #[test]
     fn function_call_arguments_must_be_json_objects() {
         for arguments in ["{}", r#"{"x":1}"#, " { } "] {
-            assert!(parse_function_call_arguments(arguments).is_some());
-            assert_eq!(
-                validated_function_call_arguments(arguments).as_deref(),
-                Some(arguments)
-            );
+            assert_eq!(function_call_arguments(arguments), Some(arguments));
         }
-        for arguments in ["", " ", "null", "[]", "true", "{"] {
-            assert!(parse_function_call_arguments(arguments).is_none());
-            assert!(validated_function_call_arguments(arguments).is_none());
+        // No arguments at all is the empty object a no-argument call means.
+        for arguments in ["", " "] {
+            assert_eq!(function_call_arguments(arguments), Some("{}"));
+        }
+        for arguments in ["null", "[]", "true", "{"] {
+            assert_eq!(function_call_arguments(arguments), None);
         }
     }
 

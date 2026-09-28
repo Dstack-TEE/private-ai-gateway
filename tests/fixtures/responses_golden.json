@@ -21,7 +21,6 @@
         "temperature": 0.2,
         "top_p": 0.9,
         "stream": true,
-        "parallel_tool_calls": false,
         "user": "user-1",
         "prompt_cache_key": "cache-1",
         "provider": { "aci_verified": true }
@@ -471,7 +470,7 @@
         }
       },
       "output": {
-        "id": "chatcmpl_1",
+        "id": "resp_fixture",
         "object": "response",
         "model": "gpt-test",
         "status": "completed",
@@ -480,7 +479,7 @@
         "instructions": "Be concise.",
         "store": false,
         "output": [{
-          "id": "msg_chatcmpl_1_0",
+          "id": "msg_resp_fixture_0",
           "type": "message",
           "role": "assistant",
           "status": "completed",
@@ -526,7 +525,7 @@
         }]
       },
       "output": {
-        "id": "chatcmpl_2",
+        "id": "resp_fixture",
         "object": "response",
         "model": "gpt-test",
         "status": "completed",
@@ -568,7 +567,7 @@
         }]
       },
       "output": {
-        "id": "chatcmpl_3",
+        "id": "resp_fixture",
         "object": "response",
         "model": "gpt-test",
         "status": "completed",
@@ -577,8 +576,8 @@
         "reasoning": { "effort": "high" },
         "store": false,
         "output": [
-          { "id": "rs_chatcmpl_3_0", "type": "reasoning", "summary": [], "content": [{ "type": "reasoning_text", "text": "think" }], "status": "completed" },
-          { "id": "msg_chatcmpl_3_1", "type": "message", "role": "assistant", "status": "completed", "content": [{ "type": "output_text", "text": "answer", "annotations": [] }] }
+          { "id": "rs_resp_fixture_0", "type": "reasoning", "summary": [], "content": [{ "type": "reasoning_text", "text": "think" }], "status": "completed" },
+          { "id": "msg_resp_fixture_1", "type": "message", "role": "assistant", "status": "completed", "content": [{ "type": "output_text", "text": "answer", "annotations": [] }] }
         ],
         "usage": {
           "input_tokens": 0,
@@ -612,7 +611,7 @@
         }]
       },
       "output": {
-        "id": "chatcmpl_bad_args",
+        "id": "resp_fixture",
         "object": "response",
         "model": "gpt-test",
         "status": "failed",
@@ -623,7 +622,9 @@
         },
         "tools": [{ "type": "function", "name": "lookup" }],
         "store": false,
-        "output": [],
+        "output": [
+          { "id": "fc_call_bad", "type": "function_call", "call_id": "call_bad", "name": "lookup", "arguments": "", "status": "incomplete" }
+        ],
         "usage": {
           "input_tokens": 0,
           "input_tokens_details": { "cached_tokens": 0 },
@@ -656,7 +657,7 @@
         }]
       },
       "output": {
-        "id": "chatcmpl_bad_tool",
+        "id": "resp_fixture",
         "object": "response",
         "model": "gpt-test",
         "status": "failed",
@@ -701,7 +702,7 @@
         }]
       },
       "output": {
-        "id": "chatcmpl_4",
+        "id": "resp_fixture",
         "object": "response",
         "model": "gpt-test",
         "status": "incomplete",
@@ -711,11 +712,18 @@
         "tools": [{ "type": "function", "name": "lookup" }],
         "store": false,
         "output": [{
-          "id": "msg_chatcmpl_4_0",
+          "id": "msg_resp_fixture_0",
           "type": "message",
           "role": "assistant",
           "status": "completed",
           "content": [{ "type": "output_text", "text": "partial", "annotations": [] }]
+        }, {
+          "id": "fc_call_truncated",
+          "type": "function_call",
+          "call_id": "call_truncated",
+          "name": "lookup",
+          "arguments": "",
+          "status": "incomplete"
         }],
         "usage": {
           "input_tokens": 0,
@@ -737,18 +745,15 @@
         }]
       },
       "output": {
-        "id": "chatcmpl_missing_finish",
+        "id": "resp_fixture",
         "object": "response",
         "model": "gpt-test",
-        "status": "failed",
+        "status": "completed",
         "incomplete_details": null,
-        "error": {
-          "code": "server_error",
-          "message": "The upstream provider ended without a valid finish reason"
-        },
+        "error": null,
         "store": false,
         "output": [{
-          "id": "msg_chatcmpl_missing_finish_0",
+          "id": "msg_resp_fixture_0",
           "type": "message",
           "role": "assistant",
           "status": "completed",
@@ -772,7 +777,7 @@
         "error": { "code": "server_error", "message": "upstream failed" }
       },
       "output": {
-        "id": "chatcmpl_5",
+        "id": "resp_fixture",
         "object": "response",
         "model": "gpt-test",
         "status": "failed",

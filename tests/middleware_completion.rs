@@ -831,9 +831,9 @@ async fn responses_stream_converts_chat_protocol_and_keeps_receipt_and_cost() {
             "response.in_progress",
             "response.output_item.added",
             "response.function_call_arguments.delta",
-            "response.output_item.added",
             "response.function_call_arguments.done",
             "response.output_item.done",
+            "response.output_item.added",
             "response.custom_tool_call_input.delta",
             "response.custom_tool_call_input.done",
             "response.output_item.done",
@@ -1421,13 +1421,9 @@ async fn responses_tool_argument_failures_preserve_usage_and_meter_the_outcome()
                 let events = sse_events(&wire);
                 if expected_input.is_none() {
                     assert!(
-                        !events.iter().any(|event| matches!(
-                            event["type"].as_str(),
-                            Some(
-                                "response.custom_tool_call_input.done"
-                                    | "response.output_item.done"
-                            )
-                        )),
+                        !events
+                            .iter()
+                            .any(|event| event["type"] == "response.custom_tool_call_input.done"),
                         "{wire}"
                     );
                 }
@@ -1439,7 +1435,15 @@ async fn responses_tool_argument_failures_preserve_usage_and_meter_the_outcome()
             assert_eq!(body["usage"]["cost"], 5);
             match expected_input {
                 Some(value) => assert_eq!(body["output"][0]["input"], value),
-                None => assert_eq!(body["output"], json!([])),
+                // An unexecutable call is reported incomplete, with no input to run.
+                None => assert_eq!(
+                    body["output"],
+                    json!([{
+                        "id": "ctc_call_shell", "type": "custom_tool_call", "call_id": "call_shell",
+                        "name": "shell", "input": "", "status": "incomplete"
+                    }]),
+                    "{wire}"
+                ),
             }
             let report = wait_for_post(&posts, |_| true).await;
             assert_eq!(
@@ -1865,6 +1869,77 @@ async fn malformed_2xx_body_returns_502_upstream() {
 
     let report = wait_for_post(&posts, |r| r["errorSource"] == json!("upstream")).await;
     assert_eq!(report["status"].as_i64(), Some(502));
+}
+
+// Anthropic thinking reaches a Chat route in that route's reasoning dialect,
+// and the client sees the reasoning as thinking only when it asked to.
+#[tokio::test]
+async fn messages_thinking_is_bridged_both_ways() {
+    let chunk = json!({
+        "id": "u", "model": "m",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "reasoning_content": "plan", "content": "hi" },
+            "delta": { "reasoning_content": "plan", "content": "hi" },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 2 }
+    });
+    for streaming in [false, true] {
+        for thinking in [
+            json!({ "type": "enabled", "budget_tokens": 2048 }),
+            Value::Null,
+        ] {
+            let control_url = spawn_control(
+                200,
+                json!({
+                    "allow": true,
+                    "candidates": [{
+                        "routeId": "vllm:m", "format": "openai", "reasoningFormat": "reasoning_effort"
+                    }]
+                }),
+            )
+            .await;
+            let (wire, content_type) = if streaming {
+                (
+                    format!("data: {chunk}\n\ndata: [DONE]\n\n"),
+                    "text/event-stream",
+                )
+            } else {
+                (chunk.to_string(), "application/json")
+            };
+            let (service, requests) = build_recording_service(200, wire.into_bytes(), content_type);
+            let mut input = messages_input(streaming);
+            if !thinking.is_null() {
+                input.params["thinking"] = thinking.clone();
+            }
+            input.received_body = serde_json::to_vec(&input.params).unwrap();
+            let response = middleware(control_url)
+                .handle_completion(&service, input)
+                .await;
+            assert_eq!(response.status(), 200);
+            let (_, body) = raw_body(response).await;
+
+            let upstream = requests.lock().unwrap()[0].body.clone();
+            assert!(upstream.get("thinking").is_none(), "{upstream}");
+            let thinking_shown = if streaming {
+                sse_events(&body)
+                    .iter()
+                    .any(|event| event["delta"]["thinking"] == "plan")
+            } else {
+                serde_json::from_str::<Value>(&body).unwrap()["content"][0]
+                    == json!({ "type": "thinking", "thinking": "plan", "signature": "" })
+            };
+            if thinking.is_null() {
+                assert!(upstream.get("reasoning_effort").is_none(), "{upstream}");
+                assert!(!thinking_shown, "{body}");
+            } else {
+                assert_eq!(upstream["reasoning_effort"], "medium", "{upstream}");
+                assert!(thinking_shown, "{body}");
+            }
+            assert!(body.contains("hi"), "{body}");
+        }
+    }
 }
 
 #[tokio::test]

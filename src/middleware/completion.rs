@@ -35,8 +35,8 @@ use super::errors::{self, Surface};
 use super::reasoning;
 use super::request_features;
 use super::request_transform::{
-    build_candidates, responses_to_chat_params, validate_responses_request, Endpoint,
-    ResponsesCandidateInput, TransformError,
+    build_candidates, messages_reasoning, responses_to_chat_params, validate_responses_request,
+    Endpoint, ResponsesCandidateInput, TransformError,
 };
 use super::sse::{KeepAliveStream, MeterStream, StreamReport};
 use super::stream_transform::{SseTransformStream, StreamTransform, UpstreamUsage};
@@ -130,6 +130,12 @@ pub async fn run(
             .map(Some)
             .map_err(TransformError::invalid_request),
         Endpoint::CreateModelResponse => validate_responses_request(&params).map(|()| None),
+        // A shape the Chat bridge cannot read states no reasoning here; the
+        // bridge refuses it per candidate and a native route reads it itself.
+        Endpoint::Messages => {
+            let (requirements, visible) = messages_reasoning(&params).unwrap_or_default();
+            Ok(Some((params.clone(), requirements, !visible)))
+        }
         _ => Ok(None),
     };
     let (params, reasoning_requirements, exclude_reasoning) = match validated {
@@ -466,25 +472,24 @@ pub async fn run(
             // may name a route twice) cannot disagree on format — and
             // same-id copies shape identically, so a skip can never split
             // them either.
-            let selected_candidate = candidates
-                .iter()
-                .find(|c| c.route_id == forward.selected_route)
-                .or_else(|| candidates.first());
-            let selected_format = selected_candidate
-                .map(|candidate| candidate.format)
-                .unwrap_or(ProviderFormat::Openai);
-            let responses_passthrough = echo.is_some() && forward.selected_path == RESPONSES_PATH;
-            let upstream_endpoint = if echo.is_some() && !responses_passthrough {
-                Endpoint::ChatComplete
-            } else {
-                client_endpoint
-            };
+            let SelectedRoute {
+                format: selected_format,
+                endpoint: upstream_endpoint,
+                responses_passthrough,
+            } = selected_route(
+                &candidates,
+                &forward.selected_route,
+                forward.selected_path,
+                echo.is_some(),
+                client_endpoint,
+            );
 
             // The buffered forward commits the candidate even on non-2xx; a
             // non-2xx body is normalized rather than transformed, but the receipt
             // is finalized either way.
             let (client_status, final_body) = if (200..300).contains(&upstream_status) {
-                let upstream_json: Value = match serde_json::from_slice(&forward.upstream_body) {
+                let mut upstream_json: Value = match serde_json::from_slice(&forward.upstream_body)
+                {
                     Ok(value) => value,
                     Err(_) => {
                         // A malformed 2xx body must not be coerced into a fabricated
@@ -506,6 +511,11 @@ pub async fn run(
                         return finalize_generated(502, body, &[], e2ee, outcome_ctx);
                     }
                 };
+                // Excluded from the upstream body, before any conversion could
+                // re-express the reasoning in the client surface's shape.
+                if exclude_reasoning {
+                    response_transform::exclude_reasoning(&mut upstream_json);
+                }
                 let mut transformed = match response_transform::transform_response(
                     selected_format,
                     upstream_endpoint,
@@ -534,17 +544,17 @@ pub async fn run(
                         return finalize_generated(502, body, &[], e2ee, outcome_ctx);
                     }
                 };
-                if exclude_reasoning {
-                    response_transform::exclude_reasoning(&mut transformed);
-                }
-                response_transform::rewrite_identity(&mut transformed, &identity);
-
                 // Raw usage (pre-cost) goes to the report; cost is injected only
                 // into the client body's top-level usage.
                 let raw_usage = transformed.get("usage").cloned();
                 if let Some(echo) = echo.as_ref().filter(|_| !responses_passthrough) {
-                    transformed = response_transform::openai_chat_to_responses(transformed, echo);
+                    transformed = response_transform::openai_chat_to_responses(
+                        transformed,
+                        echo,
+                        &identity.request_id,
+                    );
                 }
+                response_transform::rewrite_identity(&mut transformed, &identity);
 
                 // Priced from the usage that is reported, so the cost shown is the
                 // cost billed: the bridge's Responses usage cannot carry
@@ -1183,46 +1193,80 @@ pub(super) struct StreamPipelineInputs {
     pub echo: Option<Arc<Value>>,
 }
 
+/// What the route that served a request speaks.
+struct SelectedRoute {
+    format: ProviderFormat,
+    /// The endpoint the upstream answered: chat for a bridged Responses request.
+    endpoint: Endpoint,
+    /// A Responses request served by a route that implements Responses.
+    responses_passthrough: bool,
+}
+
+/// Format is deployment metadata; the path is carried by the forward result
+/// because it is a per-request shaping outcome.
+fn selected_route(
+    candidates: &[RouteCandidate],
+    route_id: &str,
+    path: &str,
+    responses: bool,
+    client_endpoint: Endpoint,
+) -> SelectedRoute {
+    let format = candidates
+        .iter()
+        .find(|candidate| candidate.route_id == route_id)
+        .or_else(|| candidates.first())
+        .map_or(ProviderFormat::Openai, |candidate| candidate.format);
+    let responses_passthrough = responses && path == RESPONSES_PATH;
+    SelectedRoute {
+        format,
+        endpoint: if responses && !responses_passthrough {
+            Endpoint::ChatComplete
+        } else {
+            client_endpoint
+        },
+        responses_passthrough,
+    }
+}
+
 /// Assemble the client-facing streaming pipeline for one committed upstream
 /// stream: the format/visibility/sanitize transforms, then the meter. The meter
 /// sits innermost so it only ever parses real upstream SSE bytes; the caller
 /// layers the keep-alive and finalizer outside it.
 pub(super) fn build_metered_pipeline(
     body: ServiceResponseStream,
-    selected_route: &str,
+    selected_route_id: &str,
     selected_path: &'static str,
     report: StreamReport,
     inputs: &StreamPipelineInputs,
 ) -> ServiceResponseStream {
-    // Format is deployment metadata; the selected upstream path is carried by
-    // the forward result because it is a per-request shaping outcome.
-    let selected_candidate = inputs
-        .candidates
-        .iter()
-        .find(|c| c.route_id == selected_route)
-        .or_else(|| inputs.candidates.first());
-    let selected_format = selected_candidate
-        .map(|candidate| candidate.format)
-        .unwrap_or(ProviderFormat::Openai);
-    let responses_passthrough = inputs.echo.is_some() && selected_path == RESPONSES_PATH;
-    let upstream_endpoint = if inputs.echo.is_some() && !responses_passthrough {
-        Endpoint::ChatComplete
-    } else {
-        inputs.endpoint
-    };
+    let SelectedRoute {
+        format: selected_format,
+        endpoint: upstream_endpoint,
+        responses_passthrough,
+    } = selected_route(
+        &inputs.candidates,
+        selected_route_id,
+        selected_path,
+        inputs.echo.is_some(),
+        inputs.endpoint,
+    );
+    // Reasoning is excluded from the upstream's own chat events — the shape
+    // exclusion reads — before a conversion could re-express it in the client
+    // surface's shape.
+    let visible: ServiceResponseStream =
+        if inputs.exclude_reasoning && selected_format == ProviderFormat::Openai {
+            Box::pin(SseTransformStream::new(
+                body,
+                StreamTransform::ExcludeReasoning,
+            ))
+        } else {
+            body
+        };
     let transformed: ServiceResponseStream =
         match stream_transform::select_stream_transform(selected_format, upstream_endpoint) {
-            Some(transform) => Box::pin(SseTransformStream::new(body, transform)),
-            None => body,
+            Some(transform) => Box::pin(SseTransformStream::new(visible, transform)),
+            None => visible,
         };
-    let visible: ServiceResponseStream = if inputs.exclude_reasoning {
-        Box::pin(SseTransformStream::new(
-            transformed,
-            StreamTransform::ExcludeReasoning,
-        ))
-    } else {
-        transformed
-    };
     // The bridge reshapes usage for the client, so it hands the meter the
     // upstream's own usage to report.
     let bridge = inputs
@@ -1232,14 +1276,14 @@ pub(super) fn build_metered_pipeline(
         .map(|echo| (echo.clone(), UpstreamUsage::default()));
     let surfaced: ServiceResponseStream = match &bridge {
         Some((echo, upstream_usage)) => Box::pin(SseTransformStream::new(
-            visible,
+            transformed,
             StreamTransform::OpenaiChatToResponses(
                 echo.clone(),
                 inputs.identity.clone(),
                 upstream_usage.clone(),
             ),
         )),
-        None => visible,
+        None => transformed,
     };
     // Unconditional, unlike the two above: same-format streaming skips every
     // other transform, and that is exactly the path that used to hand the

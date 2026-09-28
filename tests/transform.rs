@@ -164,6 +164,7 @@ fn chat_responses_match_golden_fixtures() {
         let output = strip_created(&openai_chat_to_responses(
             case["input"].clone(),
             &case["echo"],
+            "resp_fixture",
         ));
         assert!(
             canonical_eq(&output, &case["output"]),

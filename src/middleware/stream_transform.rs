@@ -22,13 +22,12 @@ use crate::aggregator::service::{ServiceError, ServiceResponseStream};
 
 use super::request_transform::{Endpoint, ResponsesToolMap};
 use super::response_transform::{
-    self, anthropic_usage, chat_cache_tokens, custom_tool_call_item, custom_tool_input,
-    function_call_item, i64_field, invalid_finish_reason_error, invalid_tool_call_arguments_error,
-    invalid_tool_call_identity_error, item_id, map_finish_reason, message_item,
-    normalize_reasoning_usage_value, now_millis, now_secs, output_text_part,
-    parse_function_call_arguments, reasoning_item, reasoning_text, refusal_part, responses_object,
-    responses_terminal, responses_usage, transform_finish_reason,
-    validated_function_call_arguments, ResponseIdentity, ResponsesHead,
+    self, anthropic_usage, chat_cache_tokens, function_call_arguments, i64_field,
+    invalid_tool_call_arguments_error, invalid_tool_call_identity_error, item_id, message_item,
+    normalize_reasoning_usage_value, now_millis, now_secs, output_text_part, reasoning_item,
+    reasoning_text, refusal_part, responses_call_item, responses_call_value, responses_object,
+    responses_usage, thinking_block, transform_finish_reason, upstream_failed_error, ChatFinish,
+    ResponseIdentity, ResponsesHead,
 };
 use super::sse::MAX_SSE_LINE_BYTES;
 use super::types::ProviderFormat;
@@ -109,17 +108,50 @@ impl StreamTransform {
             StreamTransform::AnthropicToOpenaiChat => {
                 anthropic_chat_stream(&event, fallback_id, state, STRICT_OPENAI_COMPLIANCE)
             }
-            StreamTransform::OpenaiToAnthropicMessages => {
-                openai_to_anthropic_messages_stream(&event, fallback_id, state)
-            }
-            StreamTransform::OpenaiChatToResponses(echo, identity, upstream_usage) => {
-                openai_chat_to_responses_stream(&event, echo, identity, upstream_usage, state)
+            StreamTransform::OpenaiToAnthropicMessages => state
+                .messages
+                .get_or_insert_with(|| ChatStream::new(MessagesEvents::default()))
+                .event(&event, fallback_id),
+            StreamTransform::OpenaiChatToResponses(..) => {
+                self.responses_stream(state).event(&event, fallback_id)
             }
             StreamTransform::AnthropicCompleteToOpenai => anthropic_complete_stream(&event),
             StreamTransform::ExcludeReasoning | StreamTransform::SanitizeResponse(_, _) => {
                 unreachable!("handled above")
             }
         }
+    }
+
+    /// Close what the stream left open when the upstream ends it. `Err(())`
+    /// means it ended before the response was complete.
+    fn end_of_stream(&self, state: &mut StreamState) -> Result<Option<String>, ()> {
+        match self {
+            StreamTransform::OpenaiToAnthropicMessages => state
+                .messages
+                .as_mut()
+                .map_or(Ok(None), ChatStream::end_of_stream),
+            StreamTransform::OpenaiChatToResponses(..) => state
+                .responses
+                .as_mut()
+                .map_or(Ok(None), ChatStream::end_of_stream),
+            _ => Ok(None),
+        }
+    }
+
+    fn responses_stream<'a>(
+        &self,
+        state: &'a mut StreamState,
+    ) -> &'a mut ChatStream<ResponsesEvents> {
+        let StreamTransform::OpenaiChatToResponses(echo, identity, upstream_usage) = self else {
+            unreachable!("only the Responses bridge has a Responses stream");
+        };
+        state.responses.get_or_insert_with(|| {
+            ChatStream::new(ResponsesEvents::new(
+                echo.clone(),
+                identity.clone(),
+                upstream_usage.clone(),
+            ))
+        })
     }
 }
 
@@ -139,188 +171,17 @@ pub fn select_stream_transform(
     }
 }
 
-/// Mutable per-stream state threaded across events. Fields are split by
-/// direction; a given stream only touches the ones for its transform.
+/// Mutable per-stream state threaded across events. A given stream only
+/// touches the part for its transform.
 #[derive(Default)]
 struct StreamState {
     // Anthropic -> OpenAI chat.
     tool_index: Option<i64>,
     usage: Option<Value>,
     model: Option<String>,
-    // OpenAI -> Anthropic messages.
-    id: Option<String>,
-    input_tokens: i64,
-    output_tokens: i64,
-    cache_read_tokens: Option<i64>,
-    cache_creation_tokens: Option<i64>,
-    has_started: bool,
-    text_content_index: Option<i64>,
-    next_content_index: i64,
-    message_calls: BTreeMap<i64, MessageToolCall>,
-    next_message_call_index: i64,
-    finish_reason: Option<String>,
-    /// Set once the closing events have been emitted, so they cannot be sent twice.
-    terminated: bool,
-    // OpenAI chat -> Responses.
-    responses: ResponsesStream,
-}
-
-#[derive(Default)]
-struct MessageToolCall {
-    id: String,
-    name: String,
-    arguments: String,
-    content_index: Option<i64>,
-}
-
-impl MessageToolCall {
-    fn has_payload(&self) -> bool {
-        !self.id.trim().is_empty() || !self.name.trim().is_empty() || !self.arguments.is_empty()
-    }
-
-    fn has_identity(&self) -> bool {
-        !self.id.trim().is_empty() && !self.name.trim().is_empty()
-    }
-}
-
-#[derive(Default)]
-struct ResponsesStream {
-    sequence: u64,
-    started: bool,
-    terminated: bool,
-    id: String,
-    model: Value,
-    created_at: u64,
-    output: Vec<Value>,
-    open: Option<TextItem>,
-    calls: BTreeMap<i64, CallItem>,
-    next_call_index_to_add: i64,
-    tools: ResponsesToolMap,
-    usage: Option<Value>,
-    finish_reason: Option<String>,
-    error: Option<Value>,
-    invalid_tool_arguments: bool,
-    invalid_tool_call_identity: bool,
-}
-
-struct TextItem {
-    kind: TextKind,
-    id: String,
-    output_index: usize,
-    text: String,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TextKind {
-    Reasoning,
-    Text,
-    Refusal,
-}
-
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-enum CallKind {
-    #[default]
-    Function,
-    Custom,
-}
-
-#[derive(Default)]
-struct CallItem {
-    call_id: String,
-    chat_name: String,
-    response_name: String,
-    namespace: Option<String>,
-    kind: CallKind,
-    arguments: String,
-    output_index: Option<usize>,
-}
-
-impl CallItem {
-    fn resolve_name(&mut self, tools: &ResponsesToolMap) {
-        if tools.is_custom(&self.chat_name) {
-            self.kind = CallKind::Custom;
-            self.response_name.clone_from(&self.chat_name);
-            self.namespace = None;
-        } else if let Some(tool) = tools.namespace(&self.chat_name) {
-            self.kind = CallKind::Function;
-            self.response_name = tool.name.clone();
-            self.namespace = Some(tool.namespace.clone());
-        } else {
-            self.kind = CallKind::Function;
-            self.response_name.clone_from(&self.chat_name);
-            self.namespace = None;
-        }
-    }
-
-    fn item_id(&self) -> String {
-        let prefix = if self.kind == CallKind::Custom {
-            "ctc"
-        } else {
-            "fc"
-        };
-        format!("{prefix}_{}", self.call_id)
-    }
-
-    fn item(&self, value: &str, status: &str) -> Value {
-        if self.kind == CallKind::Custom {
-            custom_tool_call_item(&self.call_id, &self.response_name, value, status)
-        } else {
-            function_call_item(
-                &self.call_id,
-                &self.response_name,
-                self.namespace.as_deref(),
-                value,
-                status,
-            )
-        }
-    }
-}
-
-/// Identity fields may arrive late or repeat, but must not change. There is no
-/// unambiguous way to distinguish fragmented names from cumulative updates.
-fn set_tool_identity(current: &mut String, value: &str) -> Result<(), ()> {
-    if value.is_empty() || current == value {
-        return Ok(());
-    }
-    if !current.is_empty() {
-        return Err(());
-    }
-    current.push_str(value);
-    Ok(())
-}
-
-fn optional_stream_string(value: Option<&Value>) -> Result<&str, ()> {
-    match value {
-        None | Some(Value::Null) => Ok(""),
-        Some(Value::String(value)) => Ok(value),
-        Some(_) => Err(()),
-    }
-}
-
-struct ChatToolDelta<'a> {
-    index: i64,
-    id: &'a str,
-    name: &'a str,
-    arguments: &'a str,
-}
-
-fn parse_chat_tool_delta(value: &Value) -> Result<ChatToolDelta<'_>, ()> {
-    let tool_call = value.as_object().ok_or(())?;
-    let index = tool_call.get("index").and_then(Value::as_i64).ok_or(())?;
-    if index < 0 {
-        return Err(());
-    }
-    let function = match tool_call.get("function") {
-        None | Some(Value::Null) => None,
-        Some(Value::Object(function)) => Some(function),
-        Some(_) => return Err(()),
-    };
-    Ok(ChatToolDelta {
-        index,
-        id: optional_stream_string(tool_call.get("id"))?,
-        name: optional_stream_string(function.and_then(|value| value.get("name")))?,
-        arguments: optional_stream_string(function.and_then(|value| value.get("arguments")))?,
-    })
+    // OpenAI chat -> Anthropic Messages / Responses, built on first use.
+    messages: Option<ChatStream<MessagesEvents>>,
+    responses: Option<ChatStream<ResponsesEvents>>,
 }
 
 /// One SSE event reduced to the fields the transforms consume: the last
@@ -594,862 +455,883 @@ fn anthropic_chat_chunk(
     Some(format!("data: {}\n\n", json_str(&body)))
 }
 
-// ── OpenAI chat.completion SSE → Anthropic Messages SSE ──────────────────────
+// ── OpenAI chat.completion SSE → Messages / Responses SSE ────────────────────
+//
+// Both bridges read a Chat stream the same way and differ only in the events
+// they write. `ChatStream` owns the reading — strict chunk parsing, tool-call
+// assembly, block order, the terminal decision — and drives a `ChatEvents`
+// writer for the client's surface.
+//
+// Output is strictly sequential, as the native protocols stream it: one text,
+// reasoning or tool-call block is open at a time, and a block closes when the
+// upstream moves on to another. Tool calls open in index order once their id
+// and name are known; arguments that arrive earlier are held until then.
 
 fn sse_event(event: &str, data: &Value) -> String {
     format!("event: {event}\ndata: {}\n\n", json_str(data))
 }
 
-/// Emit the events that close an Anthropic message: stops for every open
-/// content block, then either an error event or message_delta + message_stop.
-/// A clean terminal is emitted only after the upstream supplied a recognized
-/// finish reason and every completed tool call has a stable identity and valid
-/// JSON-object arguments.
-fn anthropic_stream_tail(state: &mut StreamState) -> Result<String, ()> {
-    if state.terminated {
-        return Ok(String::new());
+/// A string field that may be absent or null; any other type is malformed.
+fn optional_stream_string(value: Option<&Value>) -> Result<&str, ()> {
+    match value {
+        None | Some(Value::Null) => Ok(""),
+        Some(Value::String(value)) => Ok(value),
+        Some(_) => Err(()),
+    }
+}
+
+/// One Chat chunk, strictly typed: a field of the wrong type fails the stream
+/// rather than being read as absent.
+struct ChatChunk<'a> {
+    usage: Option<&'a Value>,
+    error: Option<&'a Value>,
+    reasoning: Option<&'a str>,
+    content: &'a str,
+    refusal: &'a str,
+    tool_calls: Vec<ToolCallDelta<'a>>,
+    finish_reason: Option<&'a str>,
+}
+
+struct ToolCallDelta<'a> {
+    index: Option<usize>,
+    id: &'a str,
+    name: &'a str,
+    arguments: &'a str,
+}
+
+fn parse_chat_chunk(chunk: &Value) -> Result<ChatChunk<'_>, ()> {
+    let choice = chunk
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first());
+    let delta = match choice.and_then(|choice| choice.get("delta")) {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(delta)) => Some(delta),
+        Some(_) => return Err(()),
+    };
+    let field = |key| optional_stream_string(delta.and_then(|delta| delta.get(key)));
+    let tool_calls = match delta.and_then(|delta| delta.get("tool_calls")) {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(calls)) => calls
+            .iter()
+            .map(parse_tool_call_delta)
+            .collect::<Result<_, _>>()?,
+        Some(_) => return Err(()),
+    };
+    Ok(ChatChunk {
+        usage: chunk.get("usage").filter(|usage| !usage.is_null()),
+        error: chunk.get("error").filter(|error| !error.is_null()),
+        reasoning: choice
+            .and_then(|choice| choice.get("delta"))
+            .and_then(reasoning_text),
+        content: field("content")?,
+        refusal: field("refusal")?,
+        tool_calls,
+        finish_reason: match choice.and_then(|choice| choice.get("finish_reason")) {
+            None | Some(Value::Null) => None,
+            Some(Value::String(reason)) => Some(reason),
+            Some(_) => return Err(()),
+        },
+    })
+}
+
+fn parse_tool_call_delta(value: &Value) -> Result<ToolCallDelta<'_>, ()> {
+    let call = value.as_object().ok_or(())?;
+    let index = match call.get("index") {
+        None | Some(Value::Null) => None,
+        Some(index) => Some(
+            index
+                .as_u64()
+                .and_then(|index| usize::try_from(index).ok())
+                .ok_or(())?,
+        ),
+    };
+    let function = match call.get("function") {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(function)) => Some(function),
+        Some(_) => return Err(()),
+    };
+    let function_field =
+        |key| optional_stream_string(function.and_then(|function| function.get(key)));
+    Ok(ToolCallDelta {
+        index,
+        id: optional_stream_string(call.get("id"))?,
+        name: function_field("name")?,
+        arguments: function_field("arguments")?,
+    })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TextKind {
+    Reasoning,
+    Text,
+    Refusal,
+}
+
+/// A Chat tool call assembled from deltas.
+#[derive(Default)]
+struct ToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+    phase: CallPhase,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum CallPhase {
+    #[default]
+    Pending,
+    Open,
+    Closed,
+}
+
+impl ToolCall {
+    fn identified(&self) -> bool {
+        !self.id.trim().is_empty() && !self.name.trim().is_empty()
     }
 
-    let fr = state.finish_reason.as_deref().ok_or(())?;
-    let is_error_finish = fr == "error" || fr.ends_with("_error");
-    if is_error_finish {
-        state.terminated = true;
-        let error_type = if fr.ends_with("_error") {
-            fr
+    fn started(&self) -> bool {
+        !self.id.trim().is_empty()
+            || !self.name.trim().is_empty()
+            || !self.arguments.trim().is_empty()
+    }
+}
+
+/// Identity fields may arrive late or repeat, but must not change. There is no
+/// unambiguous way to distinguish fragmented names from cumulative updates.
+fn set_tool_identity(current: &mut String, value: &str) -> Result<(), ()> {
+    if value.is_empty() || current == value {
+        return Ok(());
+    }
+    if !current.is_empty() {
+        return Err(());
+    }
+    current.push_str(value);
+    Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Block {
+    Text(TextKind),
+    Call(usize),
+}
+
+/// Why a stream that ended in-band did not complete.
+enum Failure<'a> {
+    /// The upstream reported an error, in an `error` member or its finish.
+    Upstream {
+        error: Option<&'a Value>,
+        reason: Option<&'a str>,
+    },
+    ToolCallIdentity,
+    ToolCallArguments,
+}
+
+enum Outcome<'a> {
+    Finished { finish: ChatFinish, tool_use: bool },
+    Failed(Failure<'a>),
+}
+
+/// The events one client surface writes for a Chat stream.
+trait ChatEvents {
+    /// The first chunk arrived: the message or response begins.
+    fn start(&mut self, chunk: &Value, fallback_id: &str, out: &mut String);
+    /// The upstream reported usage (reasoning tokens already normalized).
+    fn usage(&mut self, _usage: &Value) {}
+    fn open_text(&mut self, kind: TextKind, out: &mut String);
+    fn text_delta(&mut self, kind: TextKind, delta: &str, out: &mut String);
+    fn close_text(&mut self, kind: TextKind, text: &str, out: &mut String);
+    /// A tool call starts, with the arguments that arrived before its identity.
+    fn open_call(&mut self, call: &ToolCall, out: &mut String);
+    fn call_delta(&mut self, delta: &str, out: &mut String);
+    /// Close the call; false when the client could not execute it.
+    fn close_call(&mut self, call: &ToolCall, out: &mut String) -> bool;
+    fn finish(&mut self, outcome: Outcome<'_>, usage: Option<&Value>, out: &mut String);
+}
+
+struct ChatStream<E> {
+    events: E,
+    started: bool,
+    terminated: bool,
+    open: Option<Block>,
+    /// The open text block's text so far.
+    text: String,
+    calls: BTreeMap<usize, ToolCall>,
+    /// The next index allowed to open; calls open in index order.
+    next_call: usize,
+    /// The call an index-less, id-less delta continues.
+    last_call: Option<usize>,
+    executable_calls: usize,
+    invalid_calls: bool,
+    finish_reason: Option<String>,
+    usage: Option<Value>,
+    error: Option<Value>,
+}
+
+impl<E: ChatEvents> ChatStream<E> {
+    fn new(events: E) -> Self {
+        Self {
+            events,
+            started: false,
+            terminated: false,
+            open: None,
+            text: String::new(),
+            calls: BTreeMap::new(),
+            next_call: 0,
+            last_call: None,
+            executable_calls: 0,
+            invalid_calls: false,
+            finish_reason: None,
+            usage: None,
+            error: None,
+        }
+    }
+
+    fn event(&mut self, event: &ParsedEvent, fallback_id: &str) -> Result<Option<String>, ()> {
+        let payload = event.data.as_deref().unwrap_or("").trim();
+        let mut out = String::new();
+        if payload == "[DONE]" {
+            self.finish(&mut out)?;
+        } else if !payload.is_empty() && !self.terminated {
+            let chunk: Value = serde_json::from_str(payload).map_err(|_| ())?;
+            self.chunk(&chunk, fallback_id, &mut out)?;
+        }
+        Ok((!out.is_empty()).then_some(out))
+    }
+
+    /// The upstream closed the connection. `[DONE]` is an OpenAI convention
+    /// some upstreams omit, so a stream that already declared its finish (or
+    /// its error) still terminates; one that did not was cut off.
+    fn end_of_stream(&mut self) -> Result<Option<String>, ()> {
+        if !self.started || self.terminated {
+            return Ok(None);
+        }
+        if self.finish_reason.is_none() && self.error.is_none() {
+            return Err(());
+        }
+        let mut out = String::new();
+        self.finish(&mut out)?;
+        Ok((!out.is_empty()).then_some(out))
+    }
+
+    fn chunk(&mut self, value: &Value, fallback_id: &str, out: &mut String) -> Result<(), ()> {
+        let chunk = parse_chat_chunk(value)?;
+        if !self.started {
+            self.started = true;
+            self.events.start(value, fallback_id, out);
+        }
+        if let Some(usage) = chunk.usage {
+            let mut usage = usage.clone();
+            let _ = normalize_reasoning_usage_value(&mut usage);
+            self.events.usage(&usage);
+            self.usage = Some(usage);
+        }
+        if let Some(error) = chunk.error {
+            self.error = Some(error.clone());
+        }
+        for (kind, text) in [
+            (TextKind::Reasoning, chunk.reasoning.unwrap_or("")),
+            (TextKind::Text, chunk.content),
+            (TextKind::Refusal, chunk.refusal),
+        ] {
+            if !text.is_empty() {
+                self.text(kind, text, out);
+            }
+        }
+        for delta in &chunk.tool_calls {
+            self.tool_delta(delta, out)?;
+        }
+        if let Some(reason) = chunk.finish_reason {
+            self.finish_reason = Some(reason.to_string());
+        }
+        Ok(())
+    }
+
+    fn text(&mut self, kind: TextKind, delta: &str, out: &mut String) {
+        if self.open != Some(Block::Text(kind)) {
+            self.close(false, out);
+            self.open = Some(Block::Text(kind));
+            self.events.open_text(kind, out);
+        }
+        self.text.push_str(delta);
+        self.events.text_delta(kind, delta, out);
+    }
+
+    fn tool_delta(&mut self, delta: &ToolCallDelta<'_>, out: &mut String) -> Result<(), ()> {
+        let slot = self.call_slot(delta)?;
+        self.last_call = Some(slot);
+        let call = self.calls.entry(slot).or_default();
+        set_tool_identity(&mut call.id, delta.id)?;
+        set_tool_identity(&mut call.name, delta.name)?;
+        match call.phase {
+            // The upstream interleaved a call it had already moved on from.
+            CallPhase::Closed if !delta.arguments.is_empty() => return Err(()),
+            CallPhase::Closed => {}
+            CallPhase::Open => {
+                call.arguments.push_str(delta.arguments);
+                if !delta.arguments.is_empty() {
+                    self.events.call_delta(delta.arguments, out);
+                }
+            }
+            CallPhase::Pending => {
+                call.arguments.push_str(delta.arguments);
+                // A delta for another call means the open one is complete.
+                if matches!(self.open, Some(Block::Call(open)) if open != slot) {
+                    self.close(false, out);
+                }
+                self.open_next_call(out);
+            }
+        }
+        Ok(())
+    }
+
+    /// The call a delta belongs to: its index, else the call its id names,
+    /// else — a continuation with neither — the call the last delta was for.
+    fn call_slot(&self, delta: &ToolCallDelta<'_>) -> Result<usize, ()> {
+        if let Some(index) = delta.index {
+            return Ok(index);
+        }
+        if delta.id.is_empty() {
+            return self.last_call.ok_or(());
+        }
+        Ok(self
+            .calls
+            .iter()
+            .find(|(_, call)| call.id == delta.id)
+            .map(|(slot, _)| *slot)
+            .unwrap_or_else(|| self.calls.keys().next_back().map_or(0, |last| last + 1)))
+    }
+
+    fn open_next_call(&mut self, out: &mut String) {
+        let slot = self.next_call;
+        let ready = !matches!(self.open, Some(Block::Call(_)))
+            && self
+                .calls
+                .get(&slot)
+                .is_some_and(|call| call.phase == CallPhase::Pending && call.identified());
+        if ready {
+            self.next_call += 1;
+            self.open_call(slot, out);
+        }
+    }
+
+    fn open_call(&mut self, slot: usize, out: &mut String) {
+        self.close(false, out);
+        let call = self.calls.get_mut(&slot).expect("tool call exists");
+        call.phase = CallPhase::Open;
+        self.open = Some(Block::Call(slot));
+        self.events.open_call(call, out);
+    }
+
+    /// Close the open block. `truncated`: the upstream stopped mid-block, so
+    /// an unfinished call is incomplete rather than malformed.
+    fn close(&mut self, truncated: bool, out: &mut String) {
+        match self.open.take() {
+            None => {}
+            Some(Block::Text(kind)) => {
+                self.events.close_text(kind, &self.text, out);
+                self.text.clear();
+            }
+            Some(Block::Call(slot)) => {
+                let call = self.calls.get_mut(&slot).expect("tool call exists");
+                call.phase = CallPhase::Closed;
+                if self.events.close_call(call, out) {
+                    self.executable_calls += 1;
+                } else if !truncated {
+                    self.invalid_calls = true;
+                }
+            }
+        }
+    }
+
+    fn finish(&mut self, out: &mut String) -> Result<(), ()> {
+        if self.terminated {
+            return Ok(());
+        }
+        // `[DONE]` with nothing before it: there is no response to close.
+        if !self.started {
+            return Err(());
+        }
+        self.terminated = true;
+        let reason = self.finish_reason.clone();
+        let finish = ChatFinish::parse(reason.as_deref());
+        let failed = self.error.is_some() || finish == ChatFinish::Error;
+        let truncated = failed || finish.truncated();
+        self.close(truncated, out);
+        // Calls still waiting on an earlier index or on their identity. One
+        // cut off before it was complete is dropped, as Anthropic drops it, and
+        // a failed generation offers none.
+        let pending: Vec<usize> = self
+            .calls
+            .iter()
+            .filter(|(_, call)| call.phase == CallPhase::Pending)
+            .map(|(slot, _)| *slot)
+            .collect();
+        let mut unidentified = false;
+        for slot in pending {
+            let call = &self.calls[&slot];
+            if !call.identified() {
+                unidentified |= call.started() && !truncated;
+            } else if !failed && (!truncated || function_call_arguments(&call.arguments).is_some())
+            {
+                self.open_call(slot, out);
+                self.close(truncated, out);
+            }
+        }
+        let outcome = if failed {
+            Outcome::Failed(Failure::Upstream {
+                error: self.error.as_ref(),
+                reason: reason.as_deref(),
+            })
+        } else if unidentified {
+            Outcome::Failed(Failure::ToolCallIdentity)
+        } else if self.invalid_calls {
+            Outcome::Failed(Failure::ToolCallArguments)
         } else {
-            "api_error"
+            Outcome::Finished {
+                finish,
+                tool_use: self.executable_calls > 0,
+            }
         };
-        return Ok(sse_event(
-            "error",
-            &json!({
-                "type": "error",
-                "error": { "type": error_type, "message": "The upstream provider returned an error" },
-            }),
+        self.events.finish(outcome, self.usage.as_ref(), out);
+        Ok(())
+    }
+}
+
+// Anthropic Messages events.
+
+#[derive(Default)]
+struct MessagesEvents {
+    /// The index the next content block takes.
+    next_index: usize,
+}
+
+impl MessagesEvents {
+    fn block_start(&mut self, block: Value, out: &mut String) {
+        out.push_str(&sse_event(
+            "content_block_start",
+            &json!({ "type": "content_block_start", "index": self.next_index, "content_block": block }),
         ));
     }
 
-    let mut stop_reason = map_finish_reason(Some(fr)).ok_or(())?;
-    let truncated = matches!(fr, "length" | "content_filter");
-    let mut output = flush_ready_message_calls(state);
-    let invalid_identity = state
-        .message_calls
-        .values()
-        .any(|call| call.has_payload() && !call.has_identity());
-    if invalid_identity && !truncated {
-        return Err(());
-    }
-    if !truncated {
-        output.push_str(&open_pending_message_calls(state));
-    }
-    if !truncated
-        && state
-            .message_calls
-            .values()
-            .filter(|call| call.content_index.is_some())
-            .any(|call| parse_function_call_arguments(&call.arguments).is_none())
-    {
-        return Err(());
-    }
-    let has_tool_calls = state
-        .message_calls
-        .values()
-        .any(|call| call.content_index.is_some());
-    if stop_reason == "end_turn" && has_tool_calls {
-        stop_reason = "tool_use";
-    } else if stop_reason == "tool_use" && !has_tool_calls {
-        return Err(());
+    fn block_delta(&self, delta: Value, out: &mut String) {
+        out.push_str(&sse_event(
+            "content_block_delta",
+            &json!({ "type": "content_block_delta", "index": self.next_index, "delta": delta }),
+        ));
     }
 
-    state.terminated = true;
-    output.push_str(&close_message_text(state));
-    for call in state.message_calls.values_mut() {
-        if let Some(index) = call.content_index.take() {
-            output.push_str(&sse_event(
-                "content_block_stop",
-                &json!({ "type": "content_block_stop", "index": index }),
-            ));
-        }
+    fn block_stop(&mut self, out: &mut String) {
+        out.push_str(&sse_event(
+            "content_block_stop",
+            &json!({ "type": "content_block_stop", "index": self.next_index }),
+        ));
+        self.next_index += 1;
     }
-    output.push_str(&sse_event(
-        "message_delta",
-        &json!({
-            "type": "message_delta",
-            "delta": { "stop_reason": stop_reason, "stop_sequence": Value::Null },
-            "usage": anthropic_usage(
-                state.input_tokens,
-                state.output_tokens,
-                state.cache_read_tokens,
-                state.cache_creation_tokens,
-            ),
-        }),
-    ));
-    output.push_str("event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n");
-    Ok(output)
 }
 
-fn close_message_text(state: &mut StreamState) -> String {
-    let Some(index) = state.text_content_index.take() else {
-        return String::new();
-    };
-    sse_event(
-        "content_block_stop",
-        &json!({ "type": "content_block_stop", "index": index }),
+fn messages_usage(usage: Option<&Value>) -> Value {
+    let usage = usage.unwrap_or(&Value::Null);
+    let (cache_read, cache_creation) = chat_cache_tokens(usage);
+    anthropic_usage(
+        i64_field(usage, "prompt_tokens"),
+        i64_field(usage, "completion_tokens"),
+        cache_read,
+        cache_creation,
     )
 }
 
-fn flush_ready_message_calls(state: &mut StreamState) -> String {
-    let mut output = String::new();
-    loop {
-        let index = state.next_message_call_index;
-        let ready = state
-            .message_calls
-            .get(&index)
-            .is_some_and(|call| call.content_index.is_none() && call.has_identity());
-        if !ready {
-            break;
-        }
-        state.next_message_call_index += 1;
-        output.push_str(&open_message_call(index, state));
-    }
-    output
-}
-
-fn open_pending_message_calls(state: &mut StreamState) -> String {
-    let pending = state
-        .message_calls
-        .iter()
-        .filter(|(_, call)| call.content_index.is_none() && call.has_identity())
-        .map(|(index, _)| *index)
-        .collect::<Vec<_>>();
-    let mut output = String::new();
-    for index in pending {
-        output.push_str(&open_message_call(index, state));
-    }
-    output
-}
-
-fn open_message_call(index: i64, state: &mut StreamState) -> String {
-    let mut output = close_message_text(state);
-    let content_index = state.next_content_index;
-    state.next_content_index += 1;
-    let call = state
-        .message_calls
-        .get_mut(&index)
-        .expect("message tool call exists");
-    call.content_index = Some(content_index);
-    output.push_str(&sse_event(
-        "content_block_start",
-        &json!({
-            "type": "content_block_start",
-            "index": content_index,
-            "content_block": { "type": "tool_use", "id": call.id, "name": call.name, "input": {} },
-        }),
-    ));
-    if !call.arguments.is_empty() {
-        output.push_str(&sse_event(
-            "content_block_delta",
-            &json!({
-                "type": "content_block_delta",
-                "index": content_index,
-                "delta": { "type": "input_json_delta", "partial_json": call.arguments },
-            }),
-        ));
-    }
-    output
-}
-
-fn message_tool_deltas(tool_calls: &[Value], state: &mut StreamState) -> Result<String, ()> {
-    let mut output = String::new();
-    for tool_call in tool_calls {
-        let delta = parse_chat_tool_delta(tool_call)?;
-
-        let was_started = {
-            let call = state.message_calls.entry(delta.index).or_default();
-            set_tool_identity(&mut call.id, delta.id)?;
-            set_tool_identity(&mut call.name, delta.name)?;
-            if !delta.arguments.is_empty() {
-                call.arguments.push_str(delta.arguments);
-            }
-            call.content_index
+impl ChatEvents for MessagesEvents {
+    fn start(&mut self, chunk: &Value, fallback_id: &str, out: &mut String) {
+        let text = |key| {
+            chunk
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
         };
-        if let Some(content_index) = was_started.filter(|_| !delta.arguments.is_empty()) {
-            output.push_str(&sse_event(
-                "content_block_delta",
-                &json!({
-                    "type": "content_block_delta",
-                    "index": content_index,
-                    "delta": { "type": "input_json_delta", "partial_json": delta.arguments },
-                }),
-            ));
-        }
-        output.push_str(&flush_ready_message_calls(state));
-    }
-    Ok(output)
-}
-
-fn openai_to_anthropic_messages_stream(
-    event: &ParsedEvent,
-    fallback_id: &str,
-    state: &mut StreamState,
-) -> Result<Option<String>, ()> {
-    let payload = event.data.as_deref().unwrap_or("").trim();
-
-    if payload == "[DONE]" {
-        let tail = anthropic_stream_tail(state)?;
-        return Ok((!tail.is_empty()).then_some(tail));
-    }
-
-    if payload.is_empty() {
-        return Ok(None);
-    }
-    let parsed: Value = serde_json::from_str(payload).map_err(|_| ())?;
-
-    let mut output = String::new();
-    if let Some(id) = parsed.get("id").and_then(Value::as_str) {
-        state.id = Some(id.to_string());
-    }
-    if let Some(model) = parsed.get("model").and_then(Value::as_str) {
-        state.model = Some(model.to_string());
-    }
-    if let Some(usage) = parsed.get("usage") {
-        let prompt = i64_field(usage, "prompt_tokens");
-        if prompt != 0 {
-            state.input_tokens = prompt;
-        }
-        let completion = i64_field(usage, "completion_tokens");
-        if completion != 0 {
-            state.output_tokens = completion;
-        }
-        let (cache_read, cache_creation) = chat_cache_tokens(usage);
-        state.cache_read_tokens = cache_read.or(state.cache_read_tokens);
-        state.cache_creation_tokens = cache_creation.or(state.cache_creation_tokens);
-    }
-
-    if !state.has_started {
-        let id = parsed
-            .get("id")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .or_else(|| state.id.clone().filter(|s| !s.is_empty()))
-            .unwrap_or_else(|| {
-                if fallback_id.is_empty() {
-                    format!("msg_{}", now_millis())
-                } else {
-                    fallback_id.to_string()
-                }
-            });
-        let model = parsed
-            .get("model")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .or_else(|| state.model.clone().filter(|s| !s.is_empty()))
-            .unwrap_or_else(|| "unknown".to_string());
-        let input_tokens = parsed
-            .get("usage")
-            .map(|usage| i64_field(usage, "prompt_tokens"))
-            .filter(|tokens| *tokens != 0)
-            .unwrap_or(state.input_tokens);
-        output.push_str(&sse_event(
+        let id = text("id").map(str::to_string).unwrap_or_else(|| {
+            if fallback_id.is_empty() {
+                format!("msg_{}", now_millis())
+            } else {
+                fallback_id.to_string()
+            }
+        });
+        let mut usage = messages_usage(chunk.get("usage"));
+        usage["output_tokens"] = json!(0);
+        out.push_str(&sse_event(
             "message_start",
             &json!({
                 "type": "message_start",
                 "message": {
                     "id": id, "type": "message", "role": "assistant", "content": [],
-                    "model": model, "stop_reason": Value::Null, "stop_sequence": Value::Null,
-                    "usage": anthropic_usage(
-                        input_tokens,
-                        0,
-                        state.cache_read_tokens,
-                        state.cache_creation_tokens,
-                    ),
+                    "model": text("model").unwrap_or("unknown"),
+                    "stop_reason": Value::Null, "stop_sequence": Value::Null,
+                    "usage": usage,
                 },
             }),
         ));
-        state.has_started = true;
     }
 
-    let choice = parsed
-        .get("choices")
-        .and_then(Value::as_array)
-        .and_then(|choices| choices.first());
-    let Some(choice) = choice else {
-        return Ok((!output.is_empty()).then_some(output));
-    };
-    let delta = match choice.get("delta") {
-        None | Some(Value::Null) => None,
-        Some(Value::Object(delta)) => Some(delta),
-        Some(_) => return Err(()),
-    };
-
-    let content = match delta.and_then(|delta| delta.get("content")) {
-        None | Some(Value::Null) => None,
-        Some(Value::String(content)) if content.is_empty() => None,
-        Some(Value::String(content)) => Some(content.as_str()),
-        Some(_) => return Err(()),
-    };
-    if let Some(content) = content {
-        let content_index = match state.text_content_index {
-            Some(index) => index,
-            None => {
-                let index = state.next_content_index;
-                state.next_content_index += 1;
-                state.text_content_index = Some(index);
-                output.push_str(&sse_event(
-                    "content_block_start",
-                    &json!({
-                        "type": "content_block_start",
-                        "index": index,
-                        "content_block": { "type": "text", "text": "" },
-                    }),
-                ));
-                index
-            }
+    fn open_text(&mut self, kind: TextKind, out: &mut String) {
+        let block = match kind {
+            TextKind::Reasoning => thinking_block(""),
+            TextKind::Text | TextKind::Refusal => json!({ "type": "text", "text": "" }),
         };
-        output.push_str(&sse_event(
-            "content_block_delta",
-            &json!({
-                "type": "content_block_delta",
-                "index": content_index,
-                "delta": { "type": "text_delta", "text": content },
-            }),
-        ));
+        self.block_start(block, out);
     }
 
-    match delta.and_then(|delta| delta.get("tool_calls")) {
-        None | Some(Value::Null) => {}
-        Some(Value::Array(tool_calls)) => {
-            output.push_str(&message_tool_deltas(tool_calls, state)?);
-        }
-        Some(_) => return Err(()),
-    }
-
-    match choice.get("finish_reason") {
-        None | Some(Value::Null) => {}
-        Some(Value::String(reason)) => state.finish_reason = Some(reason.clone()),
-        Some(_) => return Err(()),
-    }
-
-    Ok((!output.is_empty()).then_some(output))
-}
-
-// ── OpenAI chat.completion SSE → Responses SSE ──────────────────────────────
-
-fn responses_event(state: &mut ResponsesStream, kind: &str, mut body: Value) -> String {
-    let object = body
-        .as_object_mut()
-        .expect("Responses event body is an object");
-    object.insert("type".into(), json!(kind));
-    object.insert("sequence_number".into(), json!(state.sequence));
-    state.sequence += 1;
-    sse_event(kind, &body)
-}
-
-fn start_responses_stream(
-    parsed: &Value,
-    echo: &Value,
-    identity: &ResponseIdentity,
-    state: &mut ResponsesStream,
-) -> String {
-    if state.started {
-        return String::new();
-    }
-    state.started = true;
-    state.id = identity.request_id.clone();
-    state.model = parsed.get("model").cloned().unwrap_or(Value::Null);
-    state.tools = ResponsesToolMap::from_echo(echo);
-    state.created_at = parsed
-        .get("created")
-        .and_then(Value::as_u64)
-        .unwrap_or_else(now_secs);
-
-    let snapshot = || {
-        responses_object(
-            echo,
-            ResponsesHead {
-                id: &state.id,
-                created_at: state.created_at,
-                model: state.model.clone(),
-                status: "in_progress",
-                incomplete_details: Value::Null,
-                error: Value::Null,
-            },
-            Vec::new(),
-            None,
-        )
-    };
-    let created = snapshot();
-    let in_progress = snapshot();
-    let mut output = responses_event(state, "response.created", json!({ "response": created }));
-    output.push_str(&responses_event(
-        state,
-        "response.in_progress",
-        json!({ "response": in_progress }),
-    ));
-    output
-}
-
-fn text_item_value(item: &TextItem, status: &str) -> Value {
-    match item.kind {
-        TextKind::Reasoning => reasoning_item(&item.id, &item.text, status),
-        TextKind::Text => message_item(&item.id, output_text_part(&item.text), status),
-        TextKind::Refusal => message_item(&item.id, refusal_part(&item.text), status),
-    }
-}
-
-fn close_responses_text(state: &mut ResponsesStream) -> String {
-    let Some(item) = state.open.take() else {
-        return String::new();
-    };
-    let mut output = String::new();
-    let content_index = 0;
-    match item.kind {
-        TextKind::Reasoning => output.push_str(&responses_event(
-            state,
-            "response.reasoning_text.done",
-            json!({
-                "item_id": item.id,
-                "output_index": item.output_index,
-                "content_index": content_index,
-                "text": item.text,
-            }),
-        )),
-        TextKind::Text => {
-            let part = output_text_part(&item.text);
-            output.push_str(&responses_event(
-                state,
-                "response.output_text.done",
-                json!({
-                    "item_id": item.id,
-                    "output_index": item.output_index,
-                    "content_index": content_index,
-                    "text": item.text,
-                    "logprobs": [],
-                }),
-            ));
-            output.push_str(&responses_event(
-                state,
-                "response.content_part.done",
-                json!({
-                    "item_id": item.id,
-                    "output_index": item.output_index,
-                    "content_index": content_index,
-                    "part": part,
-                }),
-            ));
-        }
-        TextKind::Refusal => {
-            let part = refusal_part(&item.text);
-            output.push_str(&responses_event(
-                state,
-                "response.refusal.done",
-                json!({
-                    "item_id": item.id,
-                    "output_index": item.output_index,
-                    "content_index": content_index,
-                    "refusal": item.text,
-                }),
-            ));
-            output.push_str(&responses_event(
-                state,
-                "response.content_part.done",
-                json!({
-                    "item_id": item.id,
-                    "output_index": item.output_index,
-                    "content_index": content_index,
-                    "part": part,
-                }),
-            ));
-        }
-    }
-    let completed = text_item_value(&item, "completed");
-    state.output[item.output_index] = completed.clone();
-    output.push_str(&responses_event(
-        state,
-        "response.output_item.done",
-        json!({ "output_index": item.output_index, "item": completed }),
-    ));
-    output
-}
-
-fn open_responses_text(kind: TextKind, state: &mut ResponsesStream) -> String {
-    if state.open.as_ref().is_some_and(|item| item.kind == kind) {
-        return String::new();
-    }
-    let mut output = close_responses_text(state);
-    let output_index = state.output.len();
-    let prefix = if kind == TextKind::Reasoning {
-        "rs"
-    } else {
-        "msg"
-    };
-    let item = TextItem {
-        kind,
-        id: item_id(prefix, &state.id, output_index),
-        output_index,
-        text: String::new(),
-    };
-    let added = text_item_value(&item, "in_progress");
-    state.output.push(added.clone());
-    output.push_str(&responses_event(
-        state,
-        "response.output_item.added",
-        json!({ "output_index": output_index, "item": added }),
-    ));
-    if kind != TextKind::Reasoning {
-        let part = if kind == TextKind::Refusal {
-            refusal_part("")
-        } else {
-            output_text_part("")
-        };
-        output.push_str(&responses_event(
-            state,
-            "response.content_part.added",
-            json!({
-                "item_id": item.id,
-                "output_index": output_index,
-                "content_index": 0,
-                "part": part,
-            }),
-        ));
-    }
-    state.open = Some(item);
-    output
-}
-
-fn responses_text_delta(kind: TextKind, delta: &str, state: &mut ResponsesStream) -> String {
-    let mut output = open_responses_text(kind, state);
-    let item = state.open.as_mut().expect("text item was opened");
-    item.text.push_str(delta);
-    let item_id = item.id.clone();
-    let output_index = item.output_index;
-    let (event, body) = match kind {
-        TextKind::Reasoning => (
-            "response.reasoning_text.delta",
-            json!({
-                "item_id": item_id,
-                "output_index": output_index,
-                "content_index": 0,
-                "delta": delta,
-            }),
-        ),
-        TextKind::Text => (
-            "response.output_text.delta",
-            json!({
-                "item_id": item_id,
-                "output_index": output_index,
-                "content_index": 0,
-                "delta": delta,
-                "logprobs": [],
-            }),
-        ),
-        TextKind::Refusal => (
-            "response.refusal.delta",
-            json!({
-                "item_id": item_id,
-                "output_index": output_index,
-                "content_index": 0,
-                "delta": delta,
-            }),
-        ),
-    };
-    output.push_str(&responses_event(state, event, body));
-    output
-}
-
-fn responses_tool_deltas(tool_calls: &[Value], state: &mut ResponsesStream) -> Result<String, ()> {
-    let mut output = String::new();
-    for tool_call in tool_calls {
-        let delta = parse_chat_tool_delta(tool_call)?;
-
-        let was_started = {
-            let call = state.calls.entry(delta.index).or_default();
-            set_tool_identity(&mut call.call_id, delta.id)?;
-            set_tool_identity(&mut call.chat_name, delta.name)?;
-            if !delta.arguments.is_empty() {
-                call.arguments.push_str(delta.arguments);
-            }
-            call.output_index.is_some()
-        };
-
-        if was_started && !delta.arguments.is_empty() {
-            let call = state.calls.get(&delta.index).expect("tool call exists");
-            if call.kind == CallKind::Function {
-                if let Some(output_index) = call.output_index {
-                    let item_id = call.item_id();
-                    output.push_str(&responses_event(
-                        state,
-                        "response.function_call_arguments.delta",
-                        json!({
-                            "item_id": item_id,
-                            "output_index": output_index,
-                            "delta": delta.arguments,
-                        }),
-                    ));
+    fn text_delta(&mut self, kind: TextKind, delta: &str, out: &mut String) {
+        self.block_delta(
+            match kind {
+                TextKind::Reasoning => json!({ "type": "thinking_delta", "thinking": delta }),
+                TextKind::Text | TextKind::Refusal => {
+                    json!({ "type": "text_delta", "text": delta })
                 }
+            },
+            out,
+        );
+    }
+
+    fn close_text(&mut self, _kind: TextKind, _text: &str, out: &mut String) {
+        self.block_stop(out);
+    }
+
+    fn open_call(&mut self, call: &ToolCall, out: &mut String) {
+        self.block_start(
+            json!({ "type": "tool_use", "id": call.id, "name": call.name, "input": {} }),
+            out,
+        );
+        if !call.arguments.is_empty() {
+            self.call_delta(&call.arguments, out);
+        }
+    }
+
+    fn call_delta(&mut self, delta: &str, out: &mut String) {
+        self.block_delta(
+            json!({ "type": "input_json_delta", "partial_json": delta }),
+            out,
+        );
+    }
+
+    fn close_call(&mut self, call: &ToolCall, out: &mut String) -> bool {
+        self.block_stop(out);
+        function_call_arguments(&call.arguments).is_some()
+    }
+
+    fn finish(&mut self, outcome: Outcome<'_>, usage: Option<&Value>, out: &mut String) {
+        let (finish, tool_use) = match outcome {
+            Outcome::Finished { finish, tool_use } => (finish, tool_use),
+            Outcome::Failed(failure) => {
+                // Rebuilt by the sanitize stage; only a relayable kind survives.
+                let error = match failure {
+                    Failure::Upstream {
+                        error: Some(error), ..
+                    } => error.clone(),
+                    Failure::Upstream { reason, .. } => json!({
+                        "type": reason.filter(|reason| reason.ends_with("_error")).unwrap_or("api_error"),
+                        "message": "The upstream provider returned an error",
+                    }),
+                    Failure::ToolCallIdentity | Failure::ToolCallArguments => json!({
+                        "type": "api_error",
+                        "message": "The upstream provider returned an invalid tool call",
+                    }),
+                };
+                out.push_str(&sse_event(
+                    "error",
+                    &json!({ "type": "error", "error": error }),
+                ));
+                return;
             }
-        }
-        output.push_str(&flush_ready_responses_calls(state));
-    }
-    Ok(output)
-}
-
-fn flush_ready_responses_calls(state: &mut ResponsesStream) -> String {
-    let mut output = String::new();
-    loop {
-        let index = state.next_call_index_to_add;
-        let ready = state.calls.get(&index).is_some_and(|call| {
-            call.output_index.is_none()
-                && !call.call_id.trim().is_empty()
-                && !call.chat_name.trim().is_empty()
-        });
-        if !ready {
-            break;
-        }
-        output.push_str(&open_responses_call(index, state));
-        state.next_call_index_to_add += 1;
-    }
-    output
-}
-
-fn open_responses_call(index: i64, state: &mut ResponsesStream) -> String {
-    let mut output = close_responses_text(state);
-    let output_index = state.output.len();
-    let call = state.calls.get_mut(&index).expect("tool call exists");
-    call.resolve_name(&state.tools);
-    call.output_index = Some(output_index);
-    let item = call.item("", "in_progress");
-    let pending_arguments =
-        (call.kind == CallKind::Function).then(|| (call.item_id(), call.arguments.clone()));
-    state.output.push(item.clone());
-    output.push_str(&responses_event(
-        state,
-        "response.output_item.added",
-        json!({ "output_index": output_index, "item": item }),
-    ));
-    if let Some((item_id, arguments)) =
-        pending_arguments.filter(|(_, arguments)| !arguments.is_empty())
-    {
-        output.push_str(&responses_event(
-            state,
-            "response.function_call_arguments.delta",
-            json!({
-                "item_id": item_id,
-                "output_index": output_index,
-                "delta": arguments,
+        };
+        out.push_str(&sse_event(
+            "message_delta",
+            &json!({
+                "type": "message_delta",
+                "delta": { "stop_reason": finish.stop_reason(tool_use), "stop_sequence": Value::Null },
+                "usage": messages_usage(usage),
             }),
         ));
+        out.push_str(&sse_event(
+            "message_stop",
+            &json!({ "type": "message_stop" }),
+        ));
     }
-    output
 }
 
-fn close_responses_calls(state: &mut ResponsesStream) -> String {
-    state.invalid_tool_call_identity |= state.calls.values().any(|call| {
-        let has_payload = !call.call_id.trim().is_empty()
-            || !call.chat_name.trim().is_empty()
-            || !call.arguments.trim().is_empty();
-        has_payload && (call.call_id.trim().is_empty() || call.chat_name.trim().is_empty())
-    });
-    let pending = state
-        .calls
-        .iter()
-        .filter(|(_, call)| {
-            call.output_index.is_none()
-                && !call.call_id.trim().is_empty()
-                && !call.chat_name.trim().is_empty()
-        })
-        .map(|(index, _)| *index)
-        .collect::<Vec<_>>();
-    let mut output = String::new();
-    for index in pending {
-        output.push_str(&open_responses_call(index, state));
+// OpenAI Responses events.
+
+struct ResponsesEvents {
+    echo: Arc<Value>,
+    identity: Arc<ResponseIdentity>,
+    upstream_usage: UpstreamUsage,
+    tools: ResponsesToolMap,
+    sequence: u64,
+    model: Value,
+    created_at: u64,
+    output: Vec<Value>,
+}
+
+impl ResponsesEvents {
+    fn new(
+        echo: Arc<Value>,
+        identity: Arc<ResponseIdentity>,
+        upstream_usage: UpstreamUsage,
+    ) -> Self {
+        let tools = ResponsesToolMap::from_echo(&echo);
+        Self {
+            echo,
+            identity,
+            upstream_usage,
+            tools,
+            sequence: 0,
+            model: Value::Null,
+            created_at: 0,
+            output: Vec::new(),
+        }
     }
-    let calls = std::mem::take(&mut state.calls);
-    for (_, call) in calls {
-        let Some(output_index) = call.output_index else {
-            continue;
-        };
-        let item_id = call.item_id();
-        if call.kind == CallKind::Custom {
-            let Some(input) = custom_tool_input(&call.arguments) else {
-                state.invalid_tool_arguments = true;
-                continue;
-            };
-            if !input.is_empty() {
-                output.push_str(&responses_event(
-                    state,
-                    "response.custom_tool_call_input.delta",
-                    json!({
-                        "item_id": item_id,
-                        "output_index": output_index,
-                        "delta": input,
-                    }),
-                ));
+
+    fn emit(&mut self, kind: &str, mut body: Value, out: &mut String) {
+        body["type"] = json!(kind);
+        body["sequence_number"] = json!(self.sequence);
+        self.sequence += 1;
+        out.push_str(&sse_event(kind, &body));
+    }
+
+    fn response(
+        &self,
+        status: &str,
+        incomplete_details: Value,
+        error: Value,
+        usage: Option<Value>,
+    ) -> Value {
+        responses_object(
+            &self.echo,
+            ResponsesHead {
+                id: &self.identity.request_id,
+                created_at: self.created_at,
+                model: self.model.clone(),
+                status,
+                incomplete_details,
+                error,
+            },
+            self.output.clone(),
+            usage,
+        )
+    }
+
+    /// The open item: the last one added, which stays open until it is done.
+    fn open_item(&self) -> (usize, String) {
+        let index = self.output.len() - 1;
+        let id = self.output[index]["id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        (index, id)
+    }
+
+    fn add_item(&mut self, item: Value, out: &mut String) {
+        self.output.push(item.clone());
+        let output_index = self.output.len() - 1;
+        self.emit(
+            "response.output_item.added",
+            json!({ "output_index": output_index, "item": item }),
+            out,
+        );
+    }
+
+    fn done_item(&mut self, item: Value, out: &mut String) {
+        let (output_index, _) = self.open_item();
+        self.output[output_index] = item.clone();
+        self.emit(
+            "response.output_item.done",
+            json!({ "output_index": output_index, "item": item }),
+            out,
+        );
+    }
+
+    fn text_item(&self, kind: TextKind, output_index: usize, text: &str, status: &str) -> Value {
+        let request_id = &self.identity.request_id;
+        match kind {
+            TextKind::Reasoning => {
+                reasoning_item(&item_id("rs", request_id, output_index), text, status)
             }
-            output.push_str(&responses_event(
-                state,
-                "response.custom_tool_call_input.done",
+            TextKind::Text | TextKind::Refusal => message_item(
+                &item_id("msg", request_id, output_index),
+                message_part(kind, text),
+                status,
+            ),
+        }
+    }
+}
+
+fn message_part(kind: TextKind, text: &str) -> Value {
+    match kind {
+        TextKind::Refusal => refusal_part(text),
+        TextKind::Text | TextKind::Reasoning => output_text_part(text),
+    }
+}
+
+fn text_event(kind: TextKind, suffix: &str) -> String {
+    let stem = match kind {
+        TextKind::Reasoning => "reasoning_text",
+        TextKind::Text => "output_text",
+        TextKind::Refusal => "refusal",
+    };
+    format!("response.{stem}.{suffix}")
+}
+
+impl ChatEvents for ResponsesEvents {
+    fn start(&mut self, chunk: &Value, _fallback_id: &str, out: &mut String) {
+        self.model = chunk.get("model").cloned().unwrap_or(Value::Null);
+        self.created_at = chunk
+            .get("created")
+            .and_then(Value::as_u64)
+            .unwrap_or_else(now_secs);
+        for kind in ["response.created", "response.in_progress"] {
+            let response = self.response("in_progress", Value::Null, Value::Null, None);
+            self.emit(kind, json!({ "response": response }), out);
+        }
+    }
+
+    fn usage(&mut self, usage: &Value) {
+        *self
+            .upstream_usage
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(usage.clone());
+    }
+
+    fn open_text(&mut self, kind: TextKind, out: &mut String) {
+        let item = self.text_item(kind, self.output.len(), "", "in_progress");
+        self.add_item(item, out);
+        if kind != TextKind::Reasoning {
+            let (output_index, item_id) = self.open_item();
+            let part = message_part(kind, "");
+            self.emit(
+                "response.content_part.added",
+                json!({ "item_id": item_id, "output_index": output_index, "content_index": 0, "part": part }),
+                out,
+            );
+        }
+    }
+
+    fn text_delta(&mut self, kind: TextKind, delta: &str, out: &mut String) {
+        let (output_index, item_id) = self.open_item();
+        let mut body = json!({ "item_id": item_id, "output_index": output_index, "content_index": 0, "delta": delta });
+        if kind == TextKind::Text {
+            body["logprobs"] = json!([]);
+        }
+        self.emit(&text_event(kind, "delta"), body, out);
+    }
+
+    fn close_text(&mut self, kind: TextKind, text: &str, out: &mut String) {
+        let (output_index, item_id) = self.open_item();
+        let mut body =
+            json!({ "item_id": item_id, "output_index": output_index, "content_index": 0 });
+        body[if kind == TextKind::Refusal {
+            "refusal"
+        } else {
+            "text"
+        }] = json!(text);
+        if kind == TextKind::Text {
+            body["logprobs"] = json!([]);
+        }
+        self.emit(&text_event(kind, "done"), body, out);
+        if kind != TextKind::Reasoning {
+            self.emit(
+                "response.content_part.done",
                 json!({
                     "item_id": item_id,
                     "output_index": output_index,
-                    "input": input,
+                    "content_index": 0,
+                    "part": message_part(kind, text),
                 }),
-            ));
-            let item = call.item(&input, "completed");
-            state.output[output_index] = item.clone();
-            output.push_str(&responses_event(
-                state,
-                "response.output_item.done",
-                json!({ "output_index": output_index, "item": item }),
-            ));
-            continue;
+                out,
+            );
         }
-        let Some(arguments) = validated_function_call_arguments(&call.arguments) else {
-            state.invalid_tool_arguments = true;
-            continue;
-        };
-        output.push_str(&responses_event(
-            state,
-            "response.function_call_arguments.done",
-            json!({
-                "item_id": item_id,
-                "output_index": output_index,
-                "name": call.response_name,
-                "arguments": arguments,
-            }),
-        ));
-        let item = call.item(&arguments, "completed");
-        state.output[output_index] = item.clone();
-        output.push_str(&responses_event(
-            state,
-            "response.output_item.done",
-            json!({ "output_index": output_index, "item": item }),
-        ));
+        let item = self.text_item(kind, output_index, text, "completed");
+        self.done_item(item, out);
     }
-    output
-}
 
-fn responses_stream_tail(echo: &Value, state: &mut ResponsesStream) -> String {
-    if state.terminated || !state.started {
-        return String::new();
-    }
-    state.terminated = true;
-    let mut output = close_responses_text(state);
-    output.push_str(&close_responses_calls(state));
-
-    let terminal = responses_terminal(state.finish_reason.as_deref());
-    if state.error.is_none() {
-        match terminal {
-            None => state.error = Some(invalid_finish_reason_error()),
-            Some(("completed", _)) if state.invalid_tool_call_identity => {
-                state.error = Some(invalid_tool_call_identity_error());
-            }
-            Some(("completed", _)) if state.invalid_tool_arguments => {
-                state.error = Some(invalid_tool_call_arguments_error());
-            }
-            _ => {}
+    fn open_call(&mut self, call: &ToolCall, out: &mut String) {
+        let item = responses_call_item(&self.tools, &call.id, &call.name, "", "in_progress");
+        self.add_item(item, out);
+        if !call.arguments.is_empty() {
+            self.call_delta(&call.arguments, out);
         }
     }
 
-    let (status, incomplete_details, event) = if state.error.is_some() {
-        ("failed", Value::Null, "response.failed")
-    } else {
-        let (terminal_status, terminal_details) = terminal.expect("valid terminal status");
-        let event = match terminal_status {
-            "incomplete" => "response.incomplete",
-            _ => "response.completed",
+    /// Custom tool input is wrapped in JSON upstream and only known once the
+    /// call is complete, so only function arguments stream.
+    fn call_delta(&mut self, delta: &str, out: &mut String) {
+        let (output_index, item_id) = self.open_item();
+        if self.output[output_index]["type"] == "function_call" {
+            self.emit(
+                "response.function_call_arguments.delta",
+                json!({ "item_id": item_id, "output_index": output_index, "delta": delta }),
+                out,
+            );
+        }
+    }
+
+    fn close_call(&mut self, call: &ToolCall, out: &mut String) -> bool {
+        let (output_index, item_id) = self.open_item();
+        let Some(value) = responses_call_value(&self.tools, &call.name, &call.arguments) else {
+            let item = responses_call_item(&self.tools, &call.id, &call.name, "", "incomplete");
+            self.done_item(item, out);
+            return false;
         };
-        (terminal_status, terminal_details, event)
-    };
-    let terminal_output = state
-        .output
-        .iter()
-        .filter(|item| item.get("status").and_then(Value::as_str) == Some("completed"))
-        .cloned()
-        .collect();
-    let response = responses_object(
-        echo,
-        ResponsesHead {
-            id: &state.id,
-            created_at: state.created_at,
-            model: state.model.clone(),
+        let item = responses_call_item(&self.tools, &call.id, &call.name, &value, "completed");
+        let ids = json!({ "item_id": item_id, "output_index": output_index });
+        if item["type"] == "custom_tool_call" {
+            if !value.is_empty() {
+                let mut body = ids.clone();
+                body["delta"] = json!(value);
+                self.emit("response.custom_tool_call_input.delta", body, out);
+            }
+            let mut body = ids;
+            body["input"] = json!(value);
+            self.emit("response.custom_tool_call_input.done", body, out);
+        } else {
+            let mut body = ids;
+            body["name"] = item["name"].clone();
+            body["arguments"] = json!(value);
+            self.emit("response.function_call_arguments.done", body, out);
+        }
+        self.done_item(item, out);
+        true
+    }
+
+    fn finish(&mut self, outcome: Outcome<'_>, usage: Option<&Value>, out: &mut String) {
+        let (event, status, incomplete_details, error) = match outcome {
+            Outcome::Finished { finish, .. } => {
+                let (status, details) = finish.responses_status();
+                let event = if status == "incomplete" {
+                    "response.incomplete"
+                } else {
+                    "response.completed"
+                };
+                (event, status, details, Value::Null)
+            }
+            Outcome::Failed(failure) => {
+                let error = match failure {
+                    Failure::Upstream {
+                        error: Some(error), ..
+                    } => error.clone(),
+                    Failure::Upstream { .. } => upstream_failed_error(),
+                    Failure::ToolCallIdentity => invalid_tool_call_identity_error(),
+                    Failure::ToolCallArguments => invalid_tool_call_arguments_error(),
+                };
+                ("response.failed", "failed", Value::Null, error)
+            }
+        };
+        let response = self.response(
             status,
             incomplete_details,
-            error: state.error.clone().unwrap_or(Value::Null),
-        },
-        terminal_output,
-        Some(responses_usage(state.usage.as_ref())),
-    );
-    output.push_str(&responses_event(
-        state,
-        event,
-        json!({ "response": response }),
-    ));
-    output
-}
-
-fn openai_chat_to_responses_stream(
-    event: &ParsedEvent,
-    echo: &Value,
-    identity: &ResponseIdentity,
-    upstream_usage: &UpstreamUsage,
-    stream_state: &mut StreamState,
-) -> Result<Option<String>, ()> {
-    let payload = event.data.as_deref().unwrap_or("").trim();
-    if payload == "[DONE]" {
-        let tail = responses_stream_tail(echo, &mut stream_state.responses);
-        return Ok((!tail.is_empty()).then_some(tail));
+            error,
+            Some(responses_usage(usage)),
+        );
+        self.emit(event, json!({ "response": response }), out);
     }
-    if payload.is_empty() {
-        return Ok(None);
-    }
-    let parsed: Value = serde_json::from_str(payload).map_err(|_| ())?;
-    let state = &mut stream_state.responses;
-    let mut output = start_responses_stream(&parsed, echo, identity, state);
-
-    if let Some(error) = parsed.get("error").filter(|error| !error.is_null()) {
-        state.error = Some(error.clone());
-    }
-    if let Some(usage) = parsed.get("usage").filter(|usage| !usage.is_null()) {
-        state.usage = Some(usage.clone());
-        let mut reported = usage.clone();
-        let _ = normalize_reasoning_usage_value(&mut reported);
-        *upstream_usage
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(reported);
-    }
-    let choice = parsed
-        .get("choices")
-        .and_then(Value::as_array)
-        .and_then(|choices| choices.first());
-    if let Some(choice) = choice {
-        let delta = choice.get("delta").unwrap_or(&Value::Null);
-        if let Some(reasoning) = reasoning_text(delta) {
-            output.push_str(&responses_text_delta(TextKind::Reasoning, reasoning, state));
-        }
-        if let Some(content) = delta
-            .get("content")
-            .and_then(Value::as_str)
-            .filter(|content| !content.is_empty())
-        {
-            output.push_str(&responses_text_delta(TextKind::Text, content, state));
-        }
-        if let Some(refusal) = delta
-            .get("refusal")
-            .and_then(Value::as_str)
-            .filter(|refusal| !refusal.is_empty())
-        {
-            output.push_str(&responses_text_delta(TextKind::Refusal, refusal, state));
-        }
-        if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
-            output.push_str(&responses_tool_deltas(tool_calls, state)?);
-        }
-        if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
-            state.finish_reason = Some(reason.to_string());
-        }
-    }
-    Ok((!output.is_empty()).then_some(output))
 }
 
 // ── Anthropic legacy completion SSE → OpenAI completion chunks ───────────────
@@ -1758,51 +1640,15 @@ impl Stream for SseTransformStream {
                             this.fail("provider sent an event this surface cannot represent");
                         }
                     }
-                    // An Anthropic message has to be closed explicitly, and
-                    // `[DONE]` — the only thing that used to trigger it — is an
-                    // OpenAI convention some upstreams omit entirely. Synthesize
-                    // the tail here so those streams still terminate.
-                    //
-                    // Only on a clean, protocol-complete end: `pending_error`
-                    // means the transport failed, while a missing finish reason
-                    // means it ended before OpenAI declared the generation done.
-                    // A terminal marker in either case would make a truncated
-                    // generation look successful. A no-op if a real `[DONE]`
-                    // already closed the message.
-                    if matches!(this.transform, StreamTransform::OpenaiToAnthropicMessages)
-                        && this.pending_error.is_none()
-                        && this.state.has_started
-                        && !this.state.terminated
-                    {
-                        if this.state.finish_reason.is_some() {
-                            match anthropic_stream_tail(&mut this.state) {
-                                Ok(tail) if !tail.is_empty() => {
-                                    this.queue.push_back(Bytes::from(tail));
-                                }
-                                Ok(_) => {}
-                                Err(()) => {
-                                    this.fail(
-                                        "provider sent an invalid tool call or finish reason",
-                                    );
-                                }
-                            }
-                        } else {
-                            this.fail("provider ended before sending a finish reason");
-                        }
-                    }
-                    if let StreamTransform::OpenaiChatToResponses(echo, ..) = &this.transform {
-                        if this.pending_error.is_none()
-                            && this.state.responses.started
-                            && !this.state.responses.terminated
-                        {
-                            if this.state.responses.finish_reason.is_some() {
-                                let tail = responses_stream_tail(echo, &mut this.state.responses);
-                                if !tail.is_empty() {
-                                    this.queue.push_back(Bytes::from(tail));
-                                }
-                            } else {
-                                this.fail("provider ended before sending a finish reason");
-                            }
+                    // `[DONE]` is an OpenAI convention some upstreams omit, so
+                    // a bridged stream is closed here too. Only on a clean end:
+                    // after a transport failure a synthesized terminal would make
+                    // a truncated generation look complete.
+                    if this.pending_error.is_none() {
+                        match this.transform.end_of_stream(&mut this.state) {
+                            Ok(Some(tail)) => this.queue.push_back(Bytes::from(tail)),
+                            Ok(None) => {}
+                            Err(()) => this.fail("provider ended before finishing its response"),
                         }
                     }
                     // loop to drain any queued output, then end.
@@ -1983,10 +1829,7 @@ mod tests {
             .expect("bare payload after an event line still transforms");
         assert!(out.contains("\"text\":\"hi\""), "{out}");
 
-        let mut state = StreamState {
-            finish_reason: Some("stop".to_string()),
-            ..Default::default()
-        };
+        let mut state = started_messages_state();
         let out = StreamTransform::OpenaiToAnthropicMessages
             .apply(": keepalive\n[DONE]", "fb", &mut state)
             .unwrap()
@@ -2026,14 +1869,23 @@ mod tests {
         );
     }
 
+    fn started_messages_state() -> StreamState {
+        let mut state = StreamState::default();
+        StreamTransform::OpenaiToAnthropicMessages
+            .apply(
+                r#"data: {"choices":[{"delta":{"content":"hi"}}]}"#,
+                "fb",
+                &mut state,
+            )
+            .unwrap();
+        state
+    }
+
     // `data:[DONE]` without the optional space must terminate the
     // OpenAI→Anthropic stream, not be skipped as an unparseable event.
     #[test]
     fn spaceless_done_terminates_openai_to_anthropic() {
-        let mut state = StreamState {
-            finish_reason: Some("stop".to_string()),
-            ..Default::default()
-        };
+        let mut state = started_messages_state();
         let out = StreamTransform::OpenaiToAnthropicMessages
             .apply("data:[DONE]", "fb", &mut state)
             .unwrap()
@@ -2396,16 +2248,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn responses_stream_requires_tool_call_index() {
-        let event = json!({ "choices": [{ "delta": { "tool_calls": [{
-            "id": "call_1",
-            "function": { "name": "lookup", "arguments": "{}" }
-        }] } }] });
-        let (_, error, _) = replay_responses_fixture(&json!({
-            "events": [format!("data: {event}")]
-        }))
-        .await;
-        assert!(error.is_some());
+    async fn responses_stream_assembles_index_less_calls() {
+        let events = [
+            tool_event(
+                json!({ "id": "call_1", "function": { "name": "lookup", "arguments": "" } }),
+            ),
+            chat_event(json!({}), Some("tool_calls")),
+            "data: [DONE]".to_string(),
+        ];
+        let (events, error, wire) = replay_responses_fixture(&json!({ "events": events })).await;
+        assert!(error.is_none(), "{wire}");
+        let terminal = events.last().unwrap();
+        assert_eq!(terminal["type"], "response.completed");
+        assert_eq!(terminal["response"]["output"][0]["call_id"], "call_1");
+        assert_eq!(terminal["response"]["output"][0]["arguments"], "{}");
     }
 
     #[tokio::test]
@@ -2438,8 +2294,8 @@ mod tests {
                 assert!(
                     error
                         .as_ref()
-                        .is_some_and(|err| err.to_string().contains("finish reason")),
-                    "case {name}: expected missing-finish failure, got {error:?}"
+                        .is_some_and(|err| err.to_string().contains("before finishing")),
+                    "case {name}: expected a truncation failure, got {error:?}"
                 );
                 continue;
             }
@@ -2491,151 +2347,188 @@ mod tests {
         assert!(!out.iter().any(|e| e["type"] == json!("message_stop")));
     }
 
-    #[test]
-    fn openai_to_anthropic_tool_stream_is_ordered_and_strict() {
-        let transform = StreamTransform::OpenaiToAnthropicMessages;
-        let tool_event = |call: Value| {
-            format!(
-                "data: {}",
-                json!({ "choices": [{ "delta": { "tool_calls": [call] } }] })
-            )
-        };
-        let mut state = StreamState::default();
-        let first_event = format!(
+    fn chat_event(delta: Value, finish_reason: Option<&str>) -> String {
+        format!(
             "data: {}",
-            json!({
-                "id": "c1",
-                "model": "m",
-                "choices": [{ "delta": { "tool_calls": [{
-                    "index": 0,
-                    "function": { "arguments": "{\"q\":" }
-                }] } }]
-            })
+            json!({ "choices": [{ "delta": delta, "finish_reason": finish_reason }] })
+        )
+    }
+
+    fn tool_event(call: Value) -> String {
+        chat_event(json!({ "tool_calls": [call] }), None)
+    }
+
+    #[test]
+    fn openai_to_anthropic_blocks_are_sequential() {
+        let events = [
+            chat_event(json!({ "reasoning_content": "plan" }), None),
+            chat_event(json!({ "content": "calling" }), None),
+            // Arguments may precede the identity; the block waits for it.
+            tool_event(json!({ "index": 0, "function": { "arguments": "{\"q\":" } })),
+            tool_event(json!({ "index": 0, "id": "call_1", "function": { "name": "first" } })),
+            tool_event(json!({ "index": 0, "function": { "arguments": "\"x\"}" } })),
+            tool_event(json!({ "index": 1, "id": "call_2", "function": { "name": "second" } })),
+            chat_event(json!({ "content": "after" }), Some("stop")),
+            "data: [DONE]".to_string(),
+        ];
+        let refs: Vec<&str> = events.iter().map(String::as_str).collect();
+        let out = run(StreamTransform::OpenaiToAnthropicMessages, &refs);
+
+        let mut open = None;
+        let mut blocks = Vec::new();
+        let mut inputs: BTreeMap<i64, String> = BTreeMap::new();
+        for event in &out {
+            let index = event["index"].as_i64();
+            match event["type"].as_str().unwrap() {
+                "content_block_start" => {
+                    assert!(open.is_none(), "two blocks open at once: {out:?}");
+                    open = index;
+                    blocks.push(event["content_block"].clone());
+                }
+                "content_block_delta" => {
+                    assert_eq!(index, open);
+                    if let Some(json) = event["delta"]["partial_json"].as_str() {
+                        inputs.entry(index.unwrap()).or_default().push_str(json);
+                    }
+                }
+                "content_block_stop" => assert_eq!(open.take(), index),
+                _ => {}
+            }
+        }
+        let kinds: Vec<&str> = blocks
+            .iter()
+            .map(|block| block["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["thinking", "text", "tool_use", "tool_use", "text"]);
+        assert_eq!(blocks[2]["name"], "first");
+        assert_eq!(blocks[3]["name"], "second");
+        assert_eq!(inputs[&2], r#"{"q":"x"}"#);
+        assert!(
+            !inputs.contains_key(&3),
+            "a no-argument call streams no input"
         );
-        let first = transform
-            .apply(&first_event, "fallback", &mut state)
-            .unwrap()
-            .unwrap();
-        assert!(first.contains("message_start"));
-        assert!(!first.contains("content_block_start"));
+        let delta = out.iter().find(|e| e["type"] == "message_delta").unwrap();
+        assert_eq!(delta["delta"]["stop_reason"], "tool_use");
+        assert_eq!(out.last().unwrap()["type"], "message_stop");
+    }
 
-        let id_event = tool_event(json!({ "index": 0, "id": "call_1" }));
-        let id_only = transform.apply(&id_event, "fallback", &mut state).unwrap();
-        assert!(id_only.is_none());
-
-        let name_event = tool_event(json!({
-            "index": 0,
-            "function": { "name": "lookup", "arguments": "\"x\"}" }
-        }));
-        let started = transform
-            .apply(&name_event, "fallback", &mut state)
-            .unwrap()
-            .unwrap();
-        assert_eq!(started.matches("content_block_start").count(), 2);
-        assert!(started.contains(r#""index":0"#));
-        assert!(started.contains(r#""partial_json":"{\"q\":\"x\"}""#));
-
-        let duplicate_event = tool_event(json!({
-            "index": 0,
-            "id": "call_1",
-            "function": { "name": "lookup" }
-        }));
-        let duplicate = transform
-            .apply(&duplicate_event, "fallback", &mut state)
-            .unwrap();
-        assert!(duplicate.is_none());
-
-        transform
-            .apply(
-                r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
-                "fallback",
-                &mut state,
-            )
-            .unwrap();
-        let tail = transform
-            .apply("data: [DONE]", "fallback", &mut state)
-            .unwrap()
-            .unwrap();
-        assert!(tail.contains(r#""stop_reason":"tool_use""#));
-
-        let call_1 = tool_event(json!({
-            "index": 1, "id": "call_2",
-            "function": { "name": "second", "arguments": "{\"b\":2}" }
-        }));
-        let call_0 = tool_event(json!({
-            "index": 0, "id": "call_1",
-            "function": { "name": "first", "arguments": "{\"a\":1}" }
-        }));
-        let content = r#"data: {"choices":[{"delta":{"content":"after"}}]}"#;
-        let finish = r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#;
-        let ordered = run(
-            transform.clone(),
-            &[&call_1, &call_0, content, finish, "data: [DONE]"],
-        );
-        let blocks = ordered
+    #[test]
+    fn index_less_tool_calls_are_assembled_by_id() {
+        let events = [
+            tool_event(
+                json!({ "id": "call_1", "function": { "name": "f", "arguments": "{\"a\":" } }),
+            ),
+            tool_event(json!({ "function": { "arguments": "1}" } })),
+            tool_event(json!({ "id": "call_2", "function": { "name": "g", "arguments": "{}" } })),
+            chat_event(json!({}), Some("tool_calls")),
+            "data: [DONE]".to_string(),
+        ];
+        let refs: Vec<&str> = events.iter().map(String::as_str).collect();
+        let out = run(StreamTransform::OpenaiToAnthropicMessages, &refs);
+        let ids: Vec<&Value> = out
             .iter()
             .filter(|event| event["type"] == "content_block_start")
-            .map(|event| event["content_block"].clone())
-            .collect::<Vec<_>>();
-        assert_eq!(blocks[0]["name"], "first");
-        assert_eq!(blocks[1]["name"], "second");
-        assert_eq!(blocks[2]["type"], "text");
-        assert_eq!(
-            ordered
+            .map(|event| &event["content_block"]["id"])
+            .collect();
+        assert_eq!(ids, [&json!("call_1"), &json!("call_2")]);
+        assert!(out
+            .iter()
+            .any(|event| event["delta"]["partial_json"] == "1}"));
+        assert_eq!(out.last().unwrap()["type"], "message_stop");
+    }
+
+    #[test]
+    fn openai_to_anthropic_stream_endings() {
+        let transform = StreamTransform::OpenaiToAnthropicMessages;
+        let partial_call = tool_event(
+            json!({ "index": 0, "id": "c", "function": { "name": "f", "arguments": "{\"a\":" } }),
+        );
+        let stop_reason = |events: &[&str]| {
+            run(transform.clone(), events)
                 .iter()
                 .find(|event| event["type"] == "message_delta")
-                .unwrap()["delta"]["stop_reason"],
-            "tool_use"
+                .map(|event| event["delta"]["stop_reason"].clone())
+        };
+        // `[DONE]` is the terminal even without a finish reason.
+        let text = chat_event(json!({ "content": "hi" }), None);
+        assert_eq!(
+            stop_reason(&[&text, "data: [DONE]"]),
+            Some(json!("end_turn"))
+        );
+        // A call cut off by the token limit is the limit's doing, not malformed.
+        let length = chat_event(json!({}), Some("length"));
+        assert_eq!(
+            stop_reason(&[&partial_call, &length, "data: [DONE]"]),
+            Some(json!("max_tokens"))
+        );
+        // Unknown vendor reasons end the turn.
+        let eos = chat_event(json!({ "content": "hi" }), Some("eos"));
+        assert_eq!(
+            stop_reason(&[&eos, "data: [DONE]"]),
+            Some(json!("end_turn"))
         );
 
-        let sparse = tool_event(json!({
-            "index": 2, "id": "call_3",
-            "function": { "name": "sparse", "arguments": "{}" }
-        }));
-        let sparse_out = run(
-            transform.clone(),
-            &[
-                &sparse,
-                r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
-                "data: [DONE]",
-            ],
-        );
-        assert!(sparse_out.iter().any(|event| {
-            event["type"] == "content_block_start" && event["content_block"]["name"] == "sparse"
-        }));
-
+        // Calls the client cannot execute end the stream with an in-band error.
+        let tool_calls = chat_event(json!({}), Some("tool_calls"));
+        let unidentified = tool_event(json!({ "index": 0, "function": { "arguments": "{}" } }));
         for events in [
-            vec![tool_event(json!({
-                "id": "call_1",
-                "function": { "name": "f", "arguments": "{}" }
-            }))],
-            vec![
-                tool_event(json!({
-                    "index": 0,
-                    "id": "call_1",
-                    "function": { "name": "f", "arguments": "{" }
-                })),
-                r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#.to_string(),
-                "data: [DONE]".to_string(),
-            ],
-            vec![
-                tool_event(json!({
-                    "index": 0,
-                    "id": "call_1",
-                    "function": { "name": "f", "arguments": "{}" }
-                })),
-                tool_event(json!({ "index": 0, "id": "call_2" })),
-            ],
+            [partial_call.as_str(), tool_calls.as_str(), "data: [DONE]"],
+            [unidentified.as_str(), tool_calls.as_str(), "data: [DONE]"],
         ] {
-            let mut state = StreamState::default();
-            let mut failed = false;
-            for event in events {
-                if transform.apply(&event, "fallback", &mut state).is_err() {
-                    failed = true;
-                    break;
-                }
+            let out = run(transform.clone(), &events);
+            assert_eq!(out.last().unwrap()["type"], "error", "{out:?}");
+            assert!(!out.iter().any(|event| event["type"] == "message_stop"));
+        }
+
+        // An upstream error member fails the stream in-band.
+        let error = format!("data: {}", json!({ "error": { "message": "boom" } }));
+        let out = run(transform.clone(), &[&text, &error, "data: [DONE]"]);
+        assert_eq!(out.last().unwrap()["type"], "error");
+    }
+
+    #[test]
+    fn malformed_tool_streams_fail() {
+        let first = tool_event(
+            json!({ "index": 0, "id": "call_1", "function": { "name": "f", "arguments": "{}" } }),
+        );
+        let second = tool_event(
+            json!({ "index": 1, "id": "call_2", "function": { "name": "g", "arguments": "{}" } }),
+        );
+        for events in [
+            // Identity may not change.
+            vec![
+                first.clone(),
+                tool_event(json!({ "index": 0, "id": "call_9" })),
+            ],
+            // A call the upstream moved on from cannot grow.
+            vec![
+                first.clone(),
+                second,
+                tool_event(json!({ "index": 0, "function": { "arguments": " " } })),
+            ],
+            // A continuation with no call to continue.
+            vec![tool_event(json!({ "function": { "arguments": "{}" } }))],
+            vec![chat_event(json!({ "content": 7 }), None)],
+            vec![chat_event(json!({ "tool_calls": {} }), None)],
+            vec![tool_event(json!({ "index": -1, "id": "c" }))],
+        ] {
+            for transform in [
+                StreamTransform::OpenaiToAnthropicMessages,
+                StreamTransform::OpenaiChatToResponses(
+                    Arc::new(json!({})),
+                    Arc::new(ResponseIdentity {
+                        request_id: "resp".into(),
+                        user_model: None,
+                    }),
+                    UpstreamUsage::default(),
+                ),
+            ] {
+                let mut state = StreamState::default();
+                let failed = events
+                    .iter()
+                    .any(|event| transform.apply(event, "fallback", &mut state).is_err());
+                assert!(failed, "malformed tool stream was accepted: {events:?}");
             }
-            assert!(failed, "malformed tool stream was accepted");
         }
     }
 

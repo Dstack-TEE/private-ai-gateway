@@ -495,9 +495,10 @@ pub(super) async fn responses(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    // Native OpenAI Responses API passthrough (create only). The frontend treats
-    // the body as opaque plaintext (extracts `model`/`stream`); the path flows
-    // through to the upstream as `base_url + /v1/responses`. E2EE v2 is not
+    // OpenAI Responses API (create only): routes that implement it receive the
+    // request as is, Chat-only routes through the Chat Completions bridge. The
+    // frontend treats the body as opaque plaintext (extracts `model`/`stream`).
+    // E2EE v2 is not
     // supported on this endpoint yet — its body uses `input`, not `messages` —
     // so reject E2EE requests cleanly instead of failing later in field decryption.
     if has_e2ee_headers(&headers) {
