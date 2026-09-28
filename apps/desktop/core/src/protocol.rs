@@ -48,7 +48,7 @@ pub struct Version {
     pub executable: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum ShutdownMode {
     Quit,
@@ -64,6 +64,8 @@ pub trait Call: Into<Command> {
 /// `rpc::*` request per command. The backend answers each command with its
 /// declared response in an exhaustive match over `Command`. Every command
 /// takes a JSON object, so commands without parameters are empty structs.
+/// Each request's TypeScript type is its JSON parameters, from which
+/// `contracts.generated.ts` declares the renderer's `UiRequests`.
 macro_rules! commands {
     (@parse [$($variant:tt)*] [$($request:tt)*] [$($name:ident)*]) => {
         /// A command as `{"command": name, "params": {…}}`: the name is the
@@ -105,7 +107,11 @@ macro_rules! commands {
         }
         commands!(@parse
             [$($variant)* $(#[$meta])* $name {},]
-            [$($request)* $(#[$meta])* pub struct $name;]
+            [$($request)*
+                $(#[$meta])*
+                #[derive(ts_rs::TS)]
+                #[ts(type = "Record<symbol, never>")]
+                pub struct $name;]
             [$($names)* $name]
             $($rest)*);
     };
@@ -122,7 +128,11 @@ macro_rules! commands {
         }
         commands!(@parse
             [$($variant)* $(#[$meta])* $name { $($field: $type),* },]
-            [$($request)* $(#[$meta])* pub struct $name { $(pub $field: $type),* }]
+            [$($request)*
+                $(#[$meta])*
+                #[derive(ts_rs::TS)]
+                #[ts(rename_all = "camelCase", optional_fields)]
+                pub struct $name { $(pub $field: $type),* }]
             [$($names)* $name]
             $($rest)*);
     };
@@ -255,7 +265,7 @@ pub fn export_path(path: &Path) -> Result<String, String> {
         .ok_or_else(|| "Export paths must be valid Unicode".into())
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, ts_rs::TS)]
 #[serde(
     tag = "name",
     content = "value",
@@ -277,7 +287,7 @@ pub enum Preference {
 }
 
 /// A field of [`NotificationPreferences`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum NotificationKind {
     Enabled,

@@ -3,48 +3,43 @@ import type {
   AboutLink,
   Appearance,
   ConfidentialProfileInput,
-  AccountBalance,
   AccountBalanceTarget,
-  AccountLoginDetails,
-  AgentAccessStatus,
-  AgentStatus,
   CliRegistration,
   AppState,
-  ImportResult,
   LaunchPreference,
   LaunchPreferences,
-  ListenAddress,
   ListenConfig,
-  LoginPresentation,
   NavigationTarget,
-  NotificationConfiguration,
   NotificationPermissionStatus,
   NotificationPreferences,
   ProfileBackup,
-  RequestActivity,
   ServiceProvider,
   StartConfig,
   UpdateChannel,
   UpdateInfo,
-  UsagePage,
   UsageQuery,
   WebUiConfig,
+  UiMethod,
+  UiResponses,
 } from "./contracts.generated";
 
 export * from "./contracts.generated";
 
+/** What the UI method `M` answers, as the Rust contracts declare it. */
+type UiResult<M extends UiMethod> = Promise<UiResponses[M]>;
+
 export interface DesktopApi {
-  startBackendService(): Promise<AppState>;
+  startBackendService(): UiResult<"start_backend_service">;
   showEditMenu(editable: boolean): Promise<void>;
-  getAppearance(): Promise<Appearance>;
-  setAppearance(appearance: Appearance): Promise<void>;
+  getAppearance(): UiResult<"get_appearance">;
+  setAppearance(appearance: Appearance): UiResult<"set_appearance">;
   onAppearanceChange(listener: (appearance: Appearance) => void): () => void;
   getAppVersion(): Promise<string>;
   setUpdateChannel(channel: UpdateChannel): Promise<UpdateChannel>;
   prepareUpdate(): Promise<UpdateInfo>;
   restartToUpdate(): Promise<void>;
-  getLaunchPreferences(): Promise<LaunchPreferences>;
-  setLaunchPreference(name: LaunchPreference, enabled: boolean): Promise<LaunchPreferences>;
+  getLaunchPreferences(): UiResult<"get_launch_preferences">;
+  setLaunchPreference(name: LaunchPreference, enabled: boolean): UiResult<"set_launch_preference">;
   onLaunchPreferencesChange(listener: (preferences: LaunchPreferences) => void): () => void;
   getCliRegistration(): Promise<CliRegistration>;
   setCliRegistration(installed: boolean): Promise<CliRegistration>;
@@ -55,30 +50,30 @@ export interface DesktopApi {
   /** Quits the app and leaves the background service running. */
   quit: (() => Promise<void>) | undefined;
   copyText(text: string): Promise<void>;
-  getClientKey(): Promise<string>;
-  rotateClientKey(): Promise<string>;
-  saveLocalApiConfig(config: ListenConfig): Promise<AppState>;
-  saveWebUi(config: WebUiConfig): Promise<AppState>;
+  getClientKey(): UiResult<"get_client_key">;
+  rotateClientKey(): UiResult<"rotate_client_key">;
+  saveLocalApiConfig(config: ListenConfig): UiResult<"save_local_api_config">;
+  saveWebUi(config: WebUiConfig): UiResult<"save_web_ui">;
   /** The web UI password; `null` while only the hash an earlier version kept is set. Not for browsers. */
-  getWebUiPassword(): Promise<string | null>;
+  getWebUiPassword(): UiResult<"get_web_ui_password">;
   /** Replaces the web UI password with a generated one, signing out every browser. Not for browsers. */
-  rotateWebUiPassword(): Promise<string>;
+  rotateWebUiPassword(): UiResult<"rotate_web_ui_password">;
   /** Sets a chosen web UI password, signing out every browser. Not for browsers. */
-  setWebUiPassword(password: string): Promise<AppState>;
+  setWebUiPassword(password: string): UiResult<"set_web_ui_password">;
   /** Opens the listening web UI in the system browser; desktop only. */
   openWebUi(): Promise<void>;
-  listListenAddresses(): Promise<ListenAddress[]>;
-  getNotificationSettings(): Promise<NotificationConfiguration>;
+  listListenAddresses(): UiResult<"list_listen_addresses">;
+  getNotificationSettings(): UiResult<"get_notification_settings">;
   selectProfileBackup(): Promise<ProfileBackup | null>;
   /** Saves where the user chooses, unless they cancel. */
   saveProfileExport(): Promise<void>;
   saveDiagnosticsExport(): Promise<void>;
-  importProfiles(backup: ProfileBackup): Promise<ImportResult>;
-  saveNotificationSettings(config: NotificationPreferences): Promise<void>;
+  importProfiles(backup: ProfileBackup): UiResult<"import_profiles">;
+  saveNotificationSettings(config: NotificationPreferences): UiResult<"save_notification_settings">;
   requestNotificationPermission(): Promise<NotificationPermissionStatus>;
   openNotificationSettings(): Promise<void>;
-  getState(): Promise<AppState>;
-  resetSettings(): Promise<AppState>;
+  getState(): UiResult<"get_state">;
+  resetSettings(): UiResult<"reset_settings">;
   onSettingsReset(listener: () => void): () => void;
   onStateChange(listener: (state: AppState) => void): () => void;
   /** A request from the tray or the menu bar; one made before the window listened comes first. Desktop only. */
@@ -89,32 +84,32 @@ export interface DesktopApi {
   openAboutLink(target: AboutLink): Promise<void>;
   openAgentWebsite(agentId: string): Promise<void>;
   openApiKeyPage(provider: ServiceProvider): Promise<void>;
-  start(config: StartConfig): Promise<AppState>;
+  start(config: StartConfig): UiResult<"start">;
   /** Stops protection and saves the OS policy the next start uses. */
-  setRequireProductionOs(required: boolean): Promise<AppState>;
-  saveConfiguration(profile: ConfidentialProfileInput, requireProductionOs: boolean, key?: string): Promise<AppState>;
-  completeAccountLogin(id: string, callbackUrl: string): Promise<void>;
-  beginAccountLogin(profile: ConfidentialProfileInput): Promise<LoginPresentation>;
-  pollAccountLogin(id: string): Promise<AccountLoginDetails | null>;
-  saveAccountLogin(id: string, profile: ConfidentialProfileInput, requireProductionOs: boolean, workspaceId?: number): Promise<AppState>;
-  getAccountDetails(profileId: string): Promise<AccountLoginDetails>;
-  getAccountBalance(target: AccountBalanceTarget): Promise<AccountBalance | null>;
+  setRequireProductionOs(required: boolean): UiResult<"set_require_production_os">;
+  saveConfiguration(profile: ConfidentialProfileInput, requireProductionOs: boolean, key?: string): UiResult<"save_configuration">;
+  completeAccountLogin(id: string, callbackUrl: string): UiResult<"complete_account_login">;
+  beginAccountLogin(profile: ConfidentialProfileInput): UiResult<"begin_account_login">;
+  pollAccountLogin(id: string): UiResult<"poll_account_login">;
+  saveAccountLogin(id: string, profile: ConfidentialProfileInput, requireProductionOs: boolean, workspaceId?: number): UiResult<"save_account_login">;
+  getAccountDetails(profileId: string): UiResult<"get_account_details">;
+  getAccountBalance(target: AccountBalanceTarget): UiResult<"get_account_balance">;
   openOrganization(organizationSlug: string): Promise<void>;
   openTopUp(provider: ServiceProvider, scopeSlug?: string): Promise<void>;
-  cancelAccountLogin(id: string): Promise<void>;
-  activateProfile(profileId: string): Promise<AppState>;
-  deleteProfile(profileId: string): Promise<AppState>;
-  stop(): Promise<AppState>;
-  queryUsage(query: UsageQuery): Promise<UsagePage>;
-  getUsageRecord(recordId: string): Promise<RequestActivity>;
+  cancelAccountLogin(id: string): UiResult<"cancel_account_login">;
+  activateProfile(profileId: string): UiResult<"activate_profile">;
+  deleteProfile(profileId: string): UiResult<"delete_profile">;
+  stop(): UiResult<"stop">;
+  queryUsage(query: UsageQuery): UiResult<"query_usage">;
+  getUsageRecord(recordId: string): UiResult<"get_usage_record">;
   /** The signed receipt document a record's audit checked, exactly as the service returned it. */
-  getUsageReceipt(recordId: string): Promise<string | null>;
-  listAgents(): Promise<AgentStatus[]>;
-  getAgentAccess(): Promise<AgentAccessStatus>;
-  requestAgentAccess(): Promise<AgentAccessStatus>;
-  setAgentConnection(agentId: string, connect: boolean): Promise<AgentStatus>;
+  getUsageReceipt(recordId: string): UiResult<"get_usage_receipt">;
+  listAgents(): UiResult<"list_agents">;
+  getAgentAccess(): UiResult<"get_agent_access">;
+  requestAgentAccess(): UiResult<"request_agent_access">;
+  setAgentConnection(agentId: string, connect: boolean): UiResult<"set_agent_connection">;
   /** Whether Codex's background service still runs with the settings from before a change; `false` when the build cannot stop it. */
-  agentServiceRunning(agentId: string): Promise<boolean>;
+  agentServiceRunning(agentId: string): UiResult<"agent_service_running">;
   /** Stops Codex's background service, ending its running sessions. */
-  stopAgentService(agentId: string): Promise<void>;
+  stopAgentService(agentId: string): UiResult<"stop_agent_service">;
 }

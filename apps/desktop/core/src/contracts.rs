@@ -739,7 +739,7 @@ pub struct WebBootstrap {
 
 #[cfg(test)]
 mod typescript {
-    use std::path::Path;
+    use std::{any::TypeId, path::Path};
 
     use ts_rs::{Config, TS};
 
@@ -755,7 +755,8 @@ mod typescript {
         },
         maintenance::{ImportResult, ProfileBackup, ProfileConfiguration},
         protection::{ProtectionAction, ProtectionOperation, ProtectionPhase, Tone},
-        ui_api::{self, LaunchPreference, LaunchPreferences, ListenAddress, Method},
+        protocol::{rpc, Call},
+        ui_api::{self, requests, HostCall, LaunchPreference, LaunchPreferences, ListenAddress},
         updates::{Installation, UpdateInfo, UpdateNotice},
         usage::{UsageModelPoint, UsagePage, UsagePoint, UsageQuery},
     };
@@ -772,12 +773,47 @@ mod typescript {
         };
     }
 
+    /// Each renderer method (`ui_api::Method`) with the parameters it takes
+    /// and the result it answers: a command's `rpc` request or a host
+    /// method's `ui_api::requests` one.
+    macro_rules! method_contracts {
+        (
+            commands { $($command:ident => $command_variant:ident),+ $(,)? }
+            host { $($host:ident => $host_variant:ident),+ $(,)? }
+        ) => {
+            fn method_contracts(config: &Config) -> Vec<(&'static str, String, String)> {
+                vec![
+                    $(method_contract::<rpc::$command_variant, <rpc::$command_variant as Call>::Response>(
+                        config,
+                        stringify!($command),
+                    ),)+
+                    $(method_contract::<requests::$host_variant, <requests::$host_variant as HostCall>::Response>(
+                        config,
+                        stringify!($host),
+                    ),)+
+                ]
+            }
+        };
+    }
+
+    crate::renderer_methods!(method_contracts);
+
+    /// A method's parameters and result. A method without a result answers
+    /// `null`, which the renderer awaits as `void`.
+    fn method_contract<Request: TS, Response: TS + 'static>(
+        config: &Config,
+        name: &'static str,
+    ) -> (&'static str, String, String) {
+        let response = if TypeId::of::<Response>() == TypeId::of::<()>() {
+            "void".to_owned()
+        } else {
+            Response::name(config)
+        };
+        (name, Request::inline(config), response)
+    }
+
     fn typescript() -> String {
         let config = Config::new().with_large_int("number");
-        let methods: Vec<_> = Method::ALL
-            .iter()
-            .map(|method| format!("\"{}\"", method.name()))
-            .collect();
         let mut output = String::from(
             "// Generated from the Rust contracts by `npm run generate:contracts`. Do not edit.\n\n",
         );
@@ -849,10 +885,20 @@ mod typescript {
         ) {
             output.push_str(&declaration);
         }
-        output.push_str(&format!(
-            "/** A method the shared UI API accepts (`ui_api::Method`). */\nexport type UiMethod = {};\n",
-            methods.join(" | ")
-        ));
+        let methods = method_contracts(&config);
+        output.push_str("/** The parameters each UI method takes (`ui_api::Method`). */\nexport type UiRequests = {\n");
+        for (name, request, _) in &methods {
+            output.push_str(&format!("  {name}: {request};\n"));
+        }
+        output.push_str(
+            "};\n/** The result each UI method answers. */\nexport type UiResponses = {\n",
+        );
+        for (name, _, response) in &methods {
+            output.push_str(&format!("  {name}: {response};\n"));
+        }
+        output.push_str(
+            "};\n/** A method the shared UI API accepts. */\nexport type UiMethod = keyof UiRequests;\n",
+        );
         // Each event with the type of the payload it carries.
         let events = [
             (

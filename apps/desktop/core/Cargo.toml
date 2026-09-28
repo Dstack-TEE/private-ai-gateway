@@ -36,7 +36,9 @@ toml_edit = { version = "0.25", features = ["serde"] }
 tower-service = { version = "0.3", optional = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
-ts-rs = "12"
+# ts-rs warns about serde attributes it ignores, such as `deny_unknown_fields`
+# on an enum, which never change a type's TypeScript shape.
+ts-rs = { version = "12", features = ["no-serde-warnings"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 
