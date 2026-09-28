@@ -6,7 +6,7 @@ The Tinfoil adapter uses Tinfoil's official Python SDK to verify its confidentia
 | --- | --- |
 | Attestation scope | Router |
 | Verifier | `scripts/provider_verifier/tinfoil.py` using `tinfoil.SecureClient` |
-| Verifier ID | `tinfoil-verifier/v1` |
+| Verifier ID | `private-ai-verifier/tinfoil/v1` |
 | Enforced binding | `tls_spki_sha256` |
 | Source repository | `tinfoilsh/confidential-model-router`, overridable with `provider_options.tinfoil_repo` |
 

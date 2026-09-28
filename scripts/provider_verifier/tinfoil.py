@@ -9,7 +9,7 @@ import gzip
 import sys
 from typing import Any
 
-from .common import emit, failed, json_evidence_bundle, provider_options
+from .common import emit, failed, json_evidence_bundle, provider_options, verifier_id_for
 
 
 def tinfoil_report_data(raw: dict[str, Any], intel_quote: str) -> bytes:
@@ -42,6 +42,11 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
     from tinfoil import SecureClient
 
     provider = "tinfoil"
+    # One identity for both outcomes: the failed() helper defaults to
+    # verifier_id_for(), and the verified emit must use the same id, or
+    # downstream consumers grouping sessions/receipts by verifier_id see
+    # two identities for the same adapter.
+    verifier_id = verifier_id_for(provider)
     url_origin = request.get("url_origin") or "https://inference.tinfoil.sh"
     parsed = urlparse(url_origin if "://" in url_origin else f"https://{url_origin}")
     enclave_host = parsed.netloc or parsed.path
@@ -58,7 +63,7 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
         with contextlib.redirect_stdout(sys.stderr):
             doc = await asyncio.to_thread(_verify)
     except Exception as exc:
-        failed(provider, f"Tinfoil verification failed: {exc}")
+        failed(provider, f"Tinfoil verification failed: {exc}", verifier_id=verifier_id)
         return
 
     steps = {
@@ -82,7 +87,12 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
     evidence = json_evidence_bundle(evidence_doc, attestation_url)
 
     if not doc.security_verified:
-        failed(provider, "Tinfoil attestation not verified", evidence=evidence)
+        failed(
+            provider,
+            "Tinfoil attestation not verified",
+            evidence=evidence,
+            verifier_id=verifier_id,
+        )
         return
     spki = doc.tls_public_key
     if not spki:
@@ -90,6 +100,7 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
             provider,
             "Tinfoil verification returned no TLS public key fingerprint",
             evidence=evidence,
+            verifier_id=verifier_id,
         )
         return
 
@@ -109,12 +120,13 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
             "Tinfoil verification was not router-scoped; expected the "
             f"confidential-model-router enclave (repo={repo!r})",
             evidence=evidence,
+            verifier_id=verifier_id,
         )
         return
     emit(
         {
             "result": "verified",
-            "verifier_id": "tinfoil-verifier/v1",
+            "verifier_id": verifier_id,
             "attested_scope": "router",
             "evidence": evidence,
             "channel_bindings": [

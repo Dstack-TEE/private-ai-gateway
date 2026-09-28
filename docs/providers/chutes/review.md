@@ -165,6 +165,9 @@ Tracking criteria 13–14 of [audit-criteria.md](../audit-criteria.md):
   reviewed reproducible build): **TODO** — `MR_TD`/RTMRs are not pinned to a reviewed
   reproducible OS/firmware build.
 - **TCB status / freshness**: done — the bridge requires `UpToDate`.
+  _Update (2026-06-12): the bridge no longer rejects a stale TCB. It records the
+  status, and the session layer refutes `tcb_up_to_date` for any status other
+  than `UpToDate`; see [verification.md](verification.md)._
 
 ## Open Questions
 
