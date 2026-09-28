@@ -5,7 +5,7 @@
 //! replaced; they now serve as a regression guard on the Rust transforms.
 
 use private_ai_gateway::middleware::request_transform::{
-    responses_to_chat_params, transform_to_provider_request, Endpoint,
+    responses_to_chat_params, transform_to_provider_request, Endpoint, Fidelity,
 };
 use private_ai_gateway::middleware::response_transform::{
     openai_chat_to_responses, transform_response,
@@ -141,7 +141,7 @@ fn responses_requests_match_golden_fixtures() {
     let cases = fixture["requests"].as_array().expect("request fixtures");
     for case in cases {
         let name = case["name"].as_str().unwrap();
-        let result = responses_to_chat_params(&case["input"]);
+        let result = responses_to_chat_params(&case["input"], Fidelity::Lossless);
         if case.get("error").and_then(Value::as_bool) == Some(true) {
             assert!(result.is_err(), "case {name}: expected an error");
             continue;

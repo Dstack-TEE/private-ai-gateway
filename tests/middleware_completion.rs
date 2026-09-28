@@ -1356,7 +1356,9 @@ async fn buffered_success_transforms_injects_cost_and_meters() {
 }
 
 #[tokio::test]
-async fn responses_tool_argument_failures_preserve_usage_and_meter_the_outcome() {
+async fn responses_tool_arguments_are_delivered_or_marked_incomplete() {
+    // A malformed call from a model that finished reaches the client as the
+    // model wrote it; only one cut off mid-way is incomplete.
     for (arguments, finish_reason, expected_status, expected_input) in [
         (
             r#"{"input":"pwd"}"#,
@@ -1365,11 +1367,26 @@ async fn responses_tool_argument_failures_preserve_usage_and_meter_the_outcome()
             Some("pwd"),
         ),
         (r#"{"input":""}"#, Some("tool_calls"), "completed", Some("")),
-        ("{}", Some("tool_calls"), "failed", None),
-        (r#"{"input":42}"#, Some("tool_calls"), "failed", None),
-        (r#"{"input":"pwd"#, Some("tool_calls"), "failed", None),
+        ("{}", Some("tool_calls"), "completed", Some("{}")),
+        (
+            r#"{"input":42}"#,
+            Some("tool_calls"),
+            "completed",
+            Some(r#"{"input":42}"#),
+        ),
+        (
+            r#"{"input":"pwd"#,
+            Some("tool_calls"),
+            "completed",
+            Some(r#"{"input":"pwd"#),
+        ),
         (r#"{"input":"pwd"#, Some("length"), "incomplete", None),
-        (r#"{"input":"pwd"#, None, "failed", None),
+        (
+            r#"{"input":"pwd"#,
+            None,
+            "completed",
+            Some(r#"{"input":"pwd"#),
+        ),
     ] {
         for streaming in [false, true] {
             let (control_url, posts) = spawn_control_capturing(
@@ -1954,15 +1971,8 @@ async fn malformed_chat_success_on_messages_returns_502_upstream() {
         "id": "chatcmpl-upstream",
         "model": "internal-model",
         "choices": [{
-            "message": {
-                "role": "assistant",
-                "tool_calls": [{
-                    "type": "function",
-                    "id": "call_1",
-                    "function": { "name": "lookup", "arguments": "{" }
-                }]
-            },
-            "finish_reason": "tool_calls"
+            "message": { "role": "assistant", "content": "partial" },
+            "finish_reason": "abort"
         }]
     });
     let service = build_service_with_upstream(200, serde_json::to_vec(&upstream).unwrap());
@@ -1993,19 +2003,13 @@ async fn messages_bridge_stream_failure_keeps_route_and_usage() {
     .await;
     let chunk = json!({
         "id": "u", "model": "m",
-        "choices": [{
-            "index": 0,
-            "delta": { "tool_calls": [{
-                "index": 0, "id": "call_1", "type": "function",
-                "function": { "name": "lookup", "arguments": "{" }
-            }] },
-            "finish_reason": "tool_calls"
-        }],
+        "choices": [{ "index": 0, "delta": { "content": "partial" } }],
         "usage": { "prompt_tokens": 3, "completion_tokens": 4 }
     });
+    let error = json!({ "error": { "message": "engine failed" } });
     let (service, _) = build_recording_service(
         200,
-        format!("data: {chunk}\n\ndata: [DONE]\n\n").into_bytes(),
+        format!("data: {chunk}\n\ndata: {error}\n\ndata: [DONE]\n\n").into_bytes(),
         "text/event-stream",
     );
     let response = middleware(control_url)

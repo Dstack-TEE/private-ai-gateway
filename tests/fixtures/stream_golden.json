@@ -316,13 +316,14 @@
       "response.in_progress",
       "response.output_item.added",
       "response.function_call_arguments.delta",
+      "response.function_call_arguments.done",
       "response.output_item.done",
-      "response.failed"
+      "response.completed"
     ],
     "terminal": {
-      "status": "failed",
+      "status": "completed",
       "output": [
-        { "id": "fc_call_bad", "type": "function_call", "call_id": "call_bad", "name": "lookup", "arguments": "", "status": "incomplete" }
+        { "id": "fc_call_bad", "type": "function_call", "call_id": "call_bad", "name": "lookup", "arguments": "{\"x\":", "status": "completed" }
       ],
       "usage": {
         "input_tokens": 0,
@@ -344,10 +345,10 @@
     "types": [
       "response.created",
       "response.in_progress",
-      "response.failed"
+      "response.completed"
     ],
     "terminal": {
-      "status": "failed",
+      "status": "completed",
       "output": [],
       "usage": {
         "input_tokens": 0,

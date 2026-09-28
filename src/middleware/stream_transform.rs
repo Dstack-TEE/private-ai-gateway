@@ -15,15 +15,14 @@ use std::task::{Context, Poll};
 
 use axum::body::Bytes;
 use futures_util::Stream;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{ServiceError, ServiceResponseStream};
 
 use super::request_transform::{Endpoint, ResponsesToolMap};
 use super::response_transform::{
-    self, anthropic_usage, chat_cache_tokens, function_call_arguments, i64_field,
-    invalid_tool_call_arguments_error, invalid_tool_call_identity_error, item_id,
+    self, anthropic_usage, chat_cache_tokens, function_call_arguments, i64_field, item_id,
     malformed_response_error, message_item, normalize_reasoning_usage_value, now_millis, now_secs,
     output_text_part, reasoning_item, reasoning_text, refusal_part, responses_call_item,
     responses_call_value, responses_object, responses_usage, thinking_block,
@@ -475,22 +474,20 @@ fn sse_event(event: &str, data: &Value) -> String {
     format!("event: {event}\ndata: {}\n\n", json_str(data))
 }
 
-/// A string field that may be absent or null; any other type is malformed.
-fn optional_stream_string(value: Option<&Value>) -> Result<&str, ()> {
-    match value {
-        None | Some(Value::Null) => Ok(""),
-        Some(Value::String(value)) => Ok(value),
-        Some(_) => Err(()),
-    }
+fn stream_str<'a>(object: Option<&'a Map<String, Value>>, key: &str) -> &'a str {
+    object
+        .and_then(|object| object.get(key))
+        .and_then(Value::as_str)
+        .unwrap_or("")
 }
 
-/// One Chat chunk, strictly typed: a field of the wrong type fails the stream
-/// rather than being read as absent.
+/// One Chat chunk, read leniently: a field of an unexpected shape is read as
+/// absent, so one odd field never costs the whole response.
 struct ChatChunk<'a> {
     has_choice: bool,
     usage: Option<&'a Value>,
     error: Option<&'a Value>,
-    reasoning: Option<&'a str>,
+    reasoning: &'a str,
     content: &'a str,
     refusal: &'a str,
     tool_calls: Vec<ToolCallDelta<'a>>,
@@ -504,75 +501,49 @@ struct ToolCallDelta<'a> {
     arguments: &'a str,
 }
 
-fn parse_chat_chunk(chunk: &Value) -> Result<ChatChunk<'_>, ()> {
-    if !chunk.is_object() {
-        return Err(());
-    }
-    let choice = match chunk.get("choices") {
-        None | Some(Value::Null) => None,
-        Some(Value::Array(choices)) => match choices.first() {
-            None => None,
-            Some(choice @ Value::Object(_)) => Some(choice),
-            Some(_) => return Err(()),
-        },
-        Some(_) => return Err(()),
-    };
-    let delta = match choice.and_then(|choice| choice.get("delta")) {
-        None | Some(Value::Null) => None,
-        Some(Value::Object(delta)) => Some(delta),
-        Some(_) => return Err(()),
-    };
-    let field = |key| optional_stream_string(delta.and_then(|delta| delta.get(key)));
-    let tool_calls = match delta.and_then(|delta| delta.get("tool_calls")) {
-        None | Some(Value::Null) => Vec::new(),
-        Some(Value::Array(calls)) => calls
-            .iter()
-            .map(parse_tool_call_delta)
-            .collect::<Result<_, _>>()?,
-        Some(_) => return Err(()),
-    };
-    Ok(ChatChunk {
+fn parse_chat_chunk(chunk: &Value) -> ChatChunk<'_> {
+    let choice = chunk
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(Value::as_object);
+    let delta = choice
+        .and_then(|choice| choice.get("delta"))
+        .and_then(Value::as_object);
+    let tool_calls = delta
+        .and_then(|delta| delta.get("tool_calls"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .map(|call| {
+            let function = call.get("function").and_then(Value::as_object);
+            ToolCallDelta {
+                index: call
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .and_then(|index| usize::try_from(index).ok()),
+                id: stream_str(Some(call), "id"),
+                name: stream_str(function, "name"),
+                arguments: stream_str(function, "arguments"),
+            }
+        })
+        .collect();
+    ChatChunk {
         has_choice: choice.is_some(),
-        usage: chunk.get("usage").filter(|usage| !usage.is_null()),
+        usage: chunk.get("usage").filter(|usage| usage.is_object()),
         error: chunk.get("error").filter(|error| !error.is_null()),
         reasoning: choice
             .and_then(|choice| choice.get("delta"))
-            .and_then(reasoning_text),
-        content: field("content")?,
-        refusal: field("refusal")?,
+            .and_then(reasoning_text)
+            .unwrap_or(""),
+        content: stream_str(delta, "content"),
+        refusal: stream_str(delta, "refusal"),
         tool_calls,
-        finish_reason: match choice.and_then(|choice| choice.get("finish_reason")) {
-            None | Some(Value::Null) => None,
-            Some(Value::String(reason)) => Some(reason),
-            Some(_) => return Err(()),
-        },
-    })
-}
-
-fn parse_tool_call_delta(value: &Value) -> Result<ToolCallDelta<'_>, ()> {
-    let call = value.as_object().ok_or(())?;
-    let index = match call.get("index") {
-        None | Some(Value::Null) => None,
-        Some(index) => Some(
-            index
-                .as_u64()
-                .and_then(|index| usize::try_from(index).ok())
-                .ok_or(())?,
-        ),
-    };
-    let function = match call.get("function") {
-        None | Some(Value::Null) => None,
-        Some(Value::Object(function)) => Some(function),
-        Some(_) => return Err(()),
-    };
-    let function_field =
-        |key| optional_stream_string(function.and_then(|function| function.get(key)));
-    Ok(ToolCallDelta {
-        index,
-        id: optional_stream_string(call.get("id"))?,
-        name: function_field("name")?,
-        arguments: function_field("arguments")?,
-    })
+        finish_reason: choice
+            .and_then(|choice| choice.get("finish_reason"))
+            .and_then(Value::as_str),
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -603,25 +574,14 @@ impl ToolCall {
     fn identified(&self) -> bool {
         !self.id.trim().is_empty() && !self.name.trim().is_empty()
     }
-
-    fn started(&self) -> bool {
-        !self.id.trim().is_empty()
-            || !self.name.trim().is_empty()
-            || !self.arguments.trim().is_empty()
-    }
 }
 
-/// Identity fields may arrive late or repeat, but must not change. There is no
-/// unambiguous way to distinguish fragmented names from cumulative updates.
-fn set_tool_identity(current: &mut String, value: &str) -> Result<(), ()> {
-    if value.is_empty() || current == value {
-        return Ok(());
+/// Identity fields may arrive late or repeat; the first non-empty value is
+/// kept, as there is no unambiguous way to tell fragments from restatements.
+fn set_tool_identity(current: &mut String, value: &str) {
+    if current.is_empty() {
+        current.push_str(value);
     }
-    if !current.is_empty() {
-        return Err(());
-    }
-    current.push_str(value);
-    Ok(())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -630,17 +590,15 @@ enum Block {
     Call(usize),
 }
 
-/// Why a stream that ended in-band did not complete.
+/// Why a stream that ended in-band has no answer to give.
 enum Failure<'a> {
     /// The upstream reported an error, in an `error` member or its finish.
     Upstream {
         error: Option<&'a Value>,
         reason: Option<&'a str>,
     },
-    /// The stream never carried a choice: there is no response to report.
+    /// The stream never carried a choice.
     Empty,
-    ToolCallIdentity,
-    ToolCallArguments,
 }
 
 enum Outcome<'a> {
@@ -660,8 +618,8 @@ trait ChatEvents {
     /// A tool call starts, with the arguments that arrived before its identity.
     fn open_call(&mut self, call: &ToolCall, out: &mut String);
     fn call_delta(&mut self, delta: &str, out: &mut String);
-    /// Close the call; false when the client could not execute it.
-    fn close_call(&mut self, call: &ToolCall, out: &mut String) -> bool;
+    /// `truncated`: the upstream was cut off, so the call may be unfinished.
+    fn close_call(&mut self, call: &ToolCall, truncated: bool, out: &mut String);
     fn finish(&mut self, outcome: Outcome<'_>, usage: Option<&Value>, out: &mut String);
 }
 
@@ -678,8 +636,7 @@ struct ChatStream<E> {
     next_call: usize,
     /// The call an index-less, id-less delta continues.
     last_call: Option<usize>,
-    executable_calls: usize,
-    invalid_calls: bool,
+    delivered_calls: usize,
     finish_reason: Option<String>,
     usage: Option<Value>,
     error: Option<Value>,
@@ -697,14 +654,16 @@ impl<E: ChatEvents> ChatStream<E> {
             calls: BTreeMap::new(),
             next_call: 0,
             last_call: None,
-            executable_calls: 0,
-            invalid_calls: false,
+            delivered_calls: 0,
             finish_reason: None,
             usage: None,
             error: None,
         }
     }
 
+    /// Apply one SSE event. `Err(())` only for a payload that is not JSON:
+    /// the stream is corrupt, and skipping the event could silently drop part
+    /// of the answer.
     fn event(&mut self, event: &ParsedEvent, fallback_id: &str) -> Result<Option<String>, ()> {
         let payload = event.data.as_deref().unwrap_or("").trim();
         let mut out = String::new();
@@ -712,7 +671,7 @@ impl<E: ChatEvents> ChatStream<E> {
             self.finish(&mut out)?;
         } else if !payload.is_empty() && !self.terminated {
             let chunk: Value = serde_json::from_str(payload).map_err(|_| ())?;
-            self.chunk(&chunk, fallback_id, &mut out)?;
+            self.chunk(&chunk, fallback_id, &mut out);
         }
         Ok((!out.is_empty()).then_some(out))
     }
@@ -732,8 +691,8 @@ impl<E: ChatEvents> ChatStream<E> {
         Ok((!out.is_empty()).then_some(out))
     }
 
-    fn chunk(&mut self, value: &Value, fallback_id: &str, out: &mut String) -> Result<(), ()> {
-        let chunk = parse_chat_chunk(value)?;
+    fn chunk(&mut self, value: &Value, fallback_id: &str, out: &mut String) {
+        let chunk = parse_chat_chunk(value);
         if !self.started {
             self.started = true;
             self.events.start(value, fallback_id, out);
@@ -749,7 +708,7 @@ impl<E: ChatEvents> ChatStream<E> {
         }
         self.answered |= chunk.has_choice;
         for (kind, text) in [
-            (TextKind::Reasoning, chunk.reasoning.unwrap_or("")),
+            (TextKind::Reasoning, chunk.reasoning),
             (TextKind::Text, chunk.content),
             (TextKind::Refusal, chunk.refusal),
         ] {
@@ -758,12 +717,11 @@ impl<E: ChatEvents> ChatStream<E> {
             }
         }
         for delta in &chunk.tool_calls {
-            self.tool_delta(delta, out)?;
+            self.tool_delta(delta, out);
         }
         if let Some(reason) = chunk.finish_reason {
             self.finish_reason = Some(reason.to_string());
         }
-        Ok(())
     }
 
     fn text(&mut self, kind: TextKind, delta: &str, out: &mut String) {
@@ -776,15 +734,18 @@ impl<E: ChatEvents> ChatStream<E> {
         self.events.text_delta(kind, delta, out);
     }
 
-    fn tool_delta(&mut self, delta: &ToolCallDelta<'_>, out: &mut String) -> Result<(), ()> {
-        let slot = self.call_slot(delta)?;
+    fn tool_delta(&mut self, delta: &ToolCallDelta<'_>, out: &mut String) {
+        // A continuation with no call to continue has nowhere to go.
+        let Some(slot) = self.call_slot(delta) else {
+            return;
+        };
         self.last_call = Some(slot);
         let call = self.calls.entry(slot).or_default();
-        set_tool_identity(&mut call.id, delta.id)?;
-        set_tool_identity(&mut call.name, delta.name)?;
+        set_tool_identity(&mut call.id, delta.id);
+        set_tool_identity(&mut call.name, delta.name);
         match call.phase {
-            // The upstream interleaved a call it had already moved on from.
-            CallPhase::Closed if !delta.arguments.is_empty() => return Err(()),
+            // A late fragment of a call already delivered cannot be added to
+            // it; the call stands as delivered.
             CallPhase::Closed => {}
             CallPhase::Open => {
                 call.arguments.push_str(delta.arguments);
@@ -801,24 +762,24 @@ impl<E: ChatEvents> ChatStream<E> {
                 self.open_next_call(out);
             }
         }
-        Ok(())
     }
 
     /// The call a delta belongs to: its index, else the call its id names,
     /// else — a continuation with neither — the call the last delta was for.
-    fn call_slot(&self, delta: &ToolCallDelta<'_>) -> Result<usize, ()> {
+    fn call_slot(&self, delta: &ToolCallDelta<'_>) -> Option<usize> {
         if let Some(index) = delta.index {
-            return Ok(index);
+            return Some(index);
         }
         if delta.id.is_empty() {
-            return self.last_call.ok_or(());
+            return self.last_call;
         }
-        Ok(self
-            .calls
-            .iter()
-            .find(|(_, call)| call.id == delta.id)
-            .map(|(slot, _)| *slot)
-            .unwrap_or_else(|| self.calls.keys().next_back().map_or(0, |last| last + 1)))
+        Some(
+            self.calls
+                .iter()
+                .find(|(_, call)| call.id == delta.id)
+                .map(|(slot, _)| *slot)
+                .unwrap_or_else(|| self.calls.keys().next_back().map_or(0, |last| last + 1)),
+        )
     }
 
     fn open_next_call(&mut self, out: &mut String) {
@@ -842,8 +803,7 @@ impl<E: ChatEvents> ChatStream<E> {
         self.events.open_call(call, out);
     }
 
-    /// Close the open block. `truncated`: the upstream stopped mid-block, so
-    /// an unfinished call is incomplete rather than malformed.
+    /// Close the open block. `truncated`: the upstream stopped mid-block.
     fn close(&mut self, truncated: bool, out: &mut String) {
         match self.open.take() {
             None => {}
@@ -854,11 +814,8 @@ impl<E: ChatEvents> ChatStream<E> {
             Some(Block::Call(slot)) => {
                 let call = self.calls.get_mut(&slot).expect("tool call exists");
                 call.phase = CallPhase::Closed;
-                if self.events.close_call(call, out) {
-                    self.executable_calls += 1;
-                } else if !truncated {
-                    self.invalid_calls = true;
-                }
+                self.events.close_call(call, truncated, out);
+                self.delivered_calls += 1;
             }
         }
     }
@@ -878,24 +835,26 @@ impl<E: ChatEvents> ChatStream<E> {
         let truncated = failed || finish.truncated();
         self.close(truncated, out);
         // Calls still waiting on an earlier index or on their identity. One
-        // cut off before it was complete is dropped, as Anthropic drops it, and
-        // a failed generation offers none.
+        // that has a name gets an id if it lacks one; one without a name
+        // cannot be called and is dropped, as is one cut off before it was
+        // complete. A failed generation offers none.
         let pending: Vec<usize> = self
             .calls
             .iter()
             .filter(|(_, call)| call.phase == CallPhase::Pending)
             .map(|(slot, _)| *slot)
             .collect();
-        let mut unidentified = false;
         for slot in pending {
-            let call = &self.calls[&slot];
-            if !call.identified() {
-                unidentified |= call.started() && !truncated;
-            } else if !failed && (!truncated || function_call_arguments(&call.arguments).is_some())
-            {
-                self.open_call(slot, out);
-                self.close(truncated, out);
+            let call = self.calls.get_mut(&slot).expect("tool call exists");
+            let complete = !truncated || function_call_arguments(&call.arguments).is_some();
+            if failed || call.name.trim().is_empty() || !complete {
+                continue;
             }
+            if call.id.trim().is_empty() {
+                call.id = format!("call_{slot}");
+            }
+            self.open_call(slot, out);
+            self.close(truncated, out);
         }
         let outcome = if failed {
             Outcome::Failed(Failure::Upstream {
@@ -904,14 +863,10 @@ impl<E: ChatEvents> ChatStream<E> {
             })
         } else if !self.answered {
             Outcome::Failed(Failure::Empty)
-        } else if unidentified {
-            Outcome::Failed(Failure::ToolCallIdentity)
-        } else if self.invalid_calls {
-            Outcome::Failed(Failure::ToolCallArguments)
         } else {
             Outcome::Finished {
                 finish,
-                tool_use: self.executable_calls > 0,
+                tool_use: self.delivered_calls > 0,
             }
         };
         self.events.finish(outcome, self.usage.as_ref(), out);
@@ -1049,9 +1004,10 @@ impl ChatEvents for MessagesEvents {
         );
     }
 
-    fn close_call(&mut self, call: &ToolCall, out: &mut String) -> bool {
+    /// The client reads the input from the streamed JSON; one the upstream
+    /// garbled reaches it as streamed, as a native malformed call would.
+    fn close_call(&mut self, _call: &ToolCall, _truncated: bool, out: &mut String) {
         self.block_stop(out);
-        function_call_arguments(&call.arguments).is_some()
     }
 
     fn finish(&mut self, outcome: Outcome<'_>, usage: Option<&Value>, out: &mut String) {
@@ -1070,10 +1026,6 @@ impl ChatEvents for MessagesEvents {
                     Failure::Empty => json!({
                         "type": "api_error",
                         "message": "The upstream provider returned no response",
-                    }),
-                    Failure::ToolCallIdentity | Failure::ToolCallArguments => json!({
-                        "type": "api_error",
-                        "message": "The upstream provider returned an invalid tool call",
                     }),
                 };
                 out.push_str(&sse_event(
@@ -1330,12 +1282,13 @@ impl ChatEvents for ResponsesEvents {
         }
     }
 
-    fn close_call(&mut self, call: &ToolCall, out: &mut String) -> bool {
+    fn close_call(&mut self, call: &ToolCall, truncated: bool, out: &mut String) {
         let (output_index, item_id) = self.active();
-        let Some(value) = responses_call_value(&self.tools, &call.name, &call.arguments) else {
+        let Some(value) = responses_call_value(&self.tools, &call.name, &call.arguments, truncated)
+        else {
             let item = responses_call_item(&self.tools, &call.id, &call.name, "", "incomplete");
             self.done_item(item, out);
-            return false;
+            return;
         };
         let item = responses_call_item(&self.tools, &call.id, &call.name, &value, "completed");
         let ids = json!({ "item_id": item_id, "output_index": output_index });
@@ -1355,7 +1308,6 @@ impl ChatEvents for ResponsesEvents {
             self.emit("response.function_call_arguments.done", body, out);
         }
         self.done_item(item, out);
-        true
     }
 
     fn finish(&mut self, outcome: Outcome<'_>, usage: Option<&Value>, out: &mut String) {
@@ -1376,8 +1328,6 @@ impl ChatEvents for ResponsesEvents {
                     } => error.clone(),
                     Failure::Upstream { .. } => upstream_failed_error(),
                     Failure::Empty => malformed_response_error(),
-                    Failure::ToolCallIdentity => invalid_tool_call_identity_error(),
-                    Failure::ToolCallArguments => invalid_tool_call_arguments_error(),
                 };
                 ("response.failed", "failed", Value::Null, error)
             }
@@ -2266,14 +2216,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn responses_stream_identity_is_immutable() {
-        for (first_name, id, name, accepted) in [
-            ("lookup", "call_1", "lookup", true),
-            ("lookup", "", "", true),
-            ("lookup", "call_12", "lookup", false),
-            ("lookup", "call_1", "lookup_more", false),
-            ("", "call_1", "lookup", true),
-            ("", "call_12", "lookup", false),
+    async fn responses_stream_keeps_the_first_tool_identity() {
+        for (first_name, id, name) in [
+            ("lookup", "call_1", "lookup"),
+            ("lookup", "", ""),
+            ("lookup", "call_12", "lookup"),
+            ("lookup", "call_1", "lookup_more"),
+            ("", "call_1", "lookup"),
+            ("", "call_12", "lookup"),
         ] {
             let first = json!({ "choices": [{ "delta": { "tool_calls": [{
                 "index": 0, "id": "call_1",
@@ -2287,7 +2237,7 @@ mod tests {
                 "events": [format!("data: {first}"), format!("data: {second}"), "data: [DONE]"]
             }))
             .await;
-            assert_eq!(error.is_none(), accepted, "{wire}");
+            assert!(error.is_none(), "{wire}");
             for event in &events {
                 if let Some(item_id) = event.get("item_id") {
                     assert_eq!(item_id, "fc_call_1");
@@ -2297,12 +2247,7 @@ mod tests {
                     assert_eq!(item["name"], "lookup");
                 }
             }
-            assert_eq!(
-                events
-                    .iter()
-                    .any(|event| event["type"] == "response.completed"),
-                accepted
-            );
+            assert_eq!(events.last().unwrap()["type"], "response.completed");
         }
     }
 
@@ -2625,70 +2570,73 @@ mod tests {
             Some(json!("end_turn"))
         );
 
-        // Calls the client cannot execute end the stream with an in-band error.
+        // A garbled call is delivered as streamed; a nameless one is dropped.
         let tool_calls = chat_event(json!({}), Some("tool_calls"));
-        let unidentified = tool_event(json!({ "index": 0, "function": { "arguments": "{}" } }));
+        let nameless =
+            tool_event(json!({ "index": 0, "id": "c", "function": { "arguments": "{}" } }));
+        assert_eq!(
+            stop_reason(&[&partial_call, &tool_calls, "data: [DONE]"]),
+            Some(json!("tool_use"))
+        );
+        assert_eq!(
+            stop_reason(&[&nameless, &tool_calls, "data: [DONE]"]),
+            Some(json!("end_turn"))
+        );
+
+        // Only a stream with no answer fails: an upstream error, or no choice.
         for events in [
-            [partial_call.as_str(), tool_calls.as_str(), "data: [DONE]"],
-            [unidentified.as_str(), tool_calls.as_str(), "data: [DONE]"],
+            vec!["data: {}", "data: [DONE]"],
+            vec![r#"data: {"choices":[null]}"#, "data: [DONE]"],
         ] {
             let out = run(transform.clone(), &events);
             assert_eq!(out.last().unwrap()["type"], "error", "{out:?}");
-            assert!(!out.iter().any(|event| event["type"] == "message_stop"));
         }
-
-        // An upstream error member fails the stream in-band.
         let error = format!("data: {}", json!({ "error": { "message": "boom" } }));
         let out = run(transform.clone(), &[&text, &error, "data: [DONE]"]);
         assert_eq!(out.last().unwrap()["type"], "error");
     }
 
     #[test]
-    fn malformed_tool_streams_fail() {
+    fn odd_upstream_chunks_do_not_cost_the_answer() {
         let first = tool_event(
             json!({ "index": 0, "id": "call_1", "function": { "name": "f", "arguments": "{}" } }),
         );
         let second = tool_event(
             json!({ "index": 1, "id": "call_2", "function": { "name": "g", "arguments": "{}" } }),
         );
-        for events in [
-            // Identity may not change.
-            vec![
-                first.clone(),
-                tool_event(json!({ "index": 0, "id": "call_9" })),
-            ],
-            // A call the upstream moved on from cannot grow.
-            vec![
-                first.clone(),
-                second,
-                tool_event(json!({ "index": 0, "function": { "arguments": " " } })),
-            ],
-            // A continuation with no call to continue.
-            vec![tool_event(json!({ "function": { "arguments": "{}" } }))],
-            vec![chat_event(json!({ "content": 7 }), None)],
-            vec![chat_event(json!({ "tool_calls": {} }), None)],
-            vec![tool_event(json!({ "index": -1, "id": "c" }))],
-            vec!["data: null".to_string()],
-            vec![r#"data: {"choices":[null]}"#.to_string()],
+        for odd in [
+            // A changed identity: the first one stands.
+            tool_event(json!({ "index": 0, "id": "call_9", "function": { "name": "h" } })),
+            // A late fragment of a call already delivered.
+            tool_event(json!({ "index": 0, "function": { "arguments": " " } })),
+            // Fields of an unexpected shape read as absent.
+            chat_event(json!({ "content": 7, "tool_calls": {} }), None),
+            tool_event(json!({ "index": -1, "function": 3 })),
+            "data: null".to_string(),
+            r#"data: {"choices":[null]}"#.to_string(),
         ] {
-            for transform in [
-                messages_transform(),
-                StreamTransform::OpenaiChatToResponses(
-                    Arc::new(json!({})),
-                    Arc::new(ResponseIdentity {
-                        request_id: "resp".into(),
-                        user_model: None,
-                    }),
-                    UpstreamUsage::default(),
-                ),
-            ] {
-                let mut state = StreamState::default();
-                let failed = events
-                    .iter()
-                    .any(|event| transform.apply(event, "fallback", &mut state).is_err());
-                assert!(failed, "malformed tool stream was accepted: {events:?}");
-            }
+            let events = [
+                first.clone(),
+                second.clone(),
+                odd.clone(),
+                chat_event(json!({}), Some("tool_calls")),
+                "data: [DONE]".to_string(),
+            ];
+            let refs: Vec<&str> = events.iter().map(String::as_str).collect();
+            let out = run(messages_transform(), &refs);
+            let names: Vec<&Value> = out
+                .iter()
+                .filter(|event| event["type"] == "content_block_start")
+                .map(|event| &event["content_block"]["name"])
+                .collect();
+            assert_eq!(names, [&json!("f"), &json!("g")], "{odd}");
+            assert_eq!(out.last().unwrap()["type"], "message_stop", "{odd}");
         }
+        // Only a payload that is not JSON fails: the stream itself is corrupt.
+        let mut state = StreamState::default();
+        assert!(messages_transform()
+            .apply("data: {\"choices\":", "fallback", &mut state)
+            .is_err());
     }
 
     /// An Anthropic upstream's error on the chat surface must reach the client

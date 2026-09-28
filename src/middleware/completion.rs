@@ -35,8 +35,8 @@ use super::errors::{self, Surface};
 use super::reasoning;
 use super::request_features;
 use super::request_transform::{
-    build_candidates, messages_reasoning, responses_to_chat_params, validate_responses_request,
-    Endpoint, ResponsesCandidateInput, TransformError,
+    build_candidates, convert_for_chat, messages_reasoning, responses_to_chat_params,
+    validate_responses_request, Endpoint, Fidelity, ResponsesCandidateInput, TransformError,
 };
 use super::sse::{KeepAliveStream, MeterStream, StreamReport};
 use super::stream_transform::{SseTransformStream, StreamTransform, UpstreamUsage};
@@ -169,16 +169,31 @@ pub async fn run(
     let responses = (endpoint == Endpoint::CreateModelResponse).then(|| params.clone());
     // A bridge-only conversion failure is retained until candidates are known:
     // native Responses routes can still receive the original request, while
-    // Chat-only routes are skipped by `build_candidates`.
-    let (params, endpoint, reasoning_requirements, exclude_reasoning, responses_bridge_error) =
+    // Chat-only routes are skipped by `build_candidates`. A lossy conversion
+    // still serves the request, behind every route that serves all of it.
+    let (params, endpoint, reasoning_requirements, exclude_reasoning, responses_bridge) =
         if let Some(original) = responses.as_ref() {
-            match responses_to_chat_params(original).and_then(|chat| {
-                reasoning::normalize_chat_request(&chat).map_err(TransformError::invalid_request)
-            }) {
-                Ok((chat, requirements, exclude)) => {
-                    (chat, Endpoint::ChatComplete, requirements, exclude, None)
-                }
-                Err(err) => (params, endpoint, None, false, Some(err)),
+            let converted = convert_for_chat(|fidelity| {
+                responses_to_chat_params(original, fidelity).and_then(|chat| {
+                    reasoning::normalize_chat_request(&chat)
+                        .map_err(TransformError::invalid_request)
+                })
+            });
+            match converted {
+                Ok(((chat, requirements, exclude), fidelity)) => (
+                    chat,
+                    Endpoint::ChatComplete,
+                    requirements,
+                    exclude,
+                    (fidelity, None),
+                ),
+                Err(err) => (
+                    params,
+                    endpoint,
+                    None,
+                    false,
+                    (Fidelity::Lossless, Some(err)),
+                ),
             }
         } else {
             (
@@ -186,7 +201,7 @@ pub async fn run(
                 endpoint,
                 reasoning_requirements,
                 exclude_reasoning,
-                None,
+                (Fidelity::Lossless, None),
             )
         };
     let echo = responses
@@ -302,7 +317,8 @@ pub async fn run(
         reasoning_requirements.as_ref(),
         responses.as_ref().map(|original| ResponsesCandidateInput {
             original,
-            bridge_error: responses_bridge_error.as_ref(),
+            fidelity: responses_bridge.0,
+            bridge_error: responses_bridge.1.as_ref(),
         }),
     ) {
         Ok(shaped) => shaped,

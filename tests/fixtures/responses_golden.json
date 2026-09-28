@@ -614,16 +614,13 @@
         "id": "resp_fixture",
         "object": "response",
         "model": "gpt-test",
-        "status": "failed",
+        "status": "completed",
         "incomplete_details": null,
-        "error": {
-          "code": "server_error",
-          "message": "The upstream provider returned invalid tool-call arguments"
-        },
+        "error": null,
         "tools": [{ "type": "function", "name": "lookup" }],
         "store": false,
         "output": [
-          { "id": "fc_call_bad", "type": "function_call", "call_id": "call_bad", "name": "lookup", "arguments": "", "status": "incomplete" }
+          { "id": "fc_call_bad", "type": "function_call", "call_id": "call_bad", "name": "lookup", "arguments": "{\"x\":", "status": "completed" }
         ],
         "usage": {
           "input_tokens": 0,
@@ -660,12 +657,9 @@
         "id": "resp_fixture",
         "object": "response",
         "model": "gpt-test",
-        "status": "failed",
+        "status": "completed",
         "incomplete_details": null,
-        "error": {
-          "code": "server_error",
-          "message": "The upstream provider returned a tool call without a valid id or name"
-        },
+        "error": null,
         "tools": [{ "type": "function", "name": "lookup" }],
         "store": false,
         "output": [],
