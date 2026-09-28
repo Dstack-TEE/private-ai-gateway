@@ -41,30 +41,30 @@ export function ProtectionStatus({ state, variant }: { state: AppState; variant:
   );
 }
 
-/** The protection switch; its action is the tray's protection item. */
+/** The protection switch; its action is the tray's protection item. The overview card also labels development mode. */
 export function ProtectedControl({
   state,
   pending,
-  compact = false,
+  variant,
   className,
   onToggle,
 }: {
   state: AppState;
   /** A start or stop is in flight. */
   pending: boolean;
-  /** The page header's control, without the development mode label. */
-  compact?: boolean;
+  variant: "card" | "header";
   className?: string;
   onToggle(): void;
 }): React.JSX.Element {
   const { action } = state.protection;
   const developmentMode = !state.config.requireProductionOs;
+  const card = variant === "card";
   return (
-    <div className={cn("flex items-center gap-2.5 text-xs font-semibold", compact && "max-[440px]:gap-1.5 max-[440px]:pl-1.75", className)}>
-      {developmentMode && !compact && <span className="text-xs font-semibold text-warning">Dev mode</span>}
+    <div className={cn("flex items-center gap-2.5 text-xs font-semibold", !card && "max-[440px]:gap-1.5 max-[440px]:pl-1.75", className)}>
+      {developmentMode && card && <span className="text-xs font-semibold text-warning">Dev mode</span>}
       <SwitchControl
         size="default"
-        className={compact ? undefined : "transition-colors duration-200 ease-out motion-reduce:transition-none"}
+        className={card ? "transition-colors duration-200 ease-out" : undefined}
         checked={action.operation === "stop"}
         label={action.label}
         disabled={!action.enabled || pending}

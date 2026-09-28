@@ -83,7 +83,7 @@ function CopyRow({
       >
         <span className="text-xs font-normal text-muted-foreground">{title}</span>
         <code className="block w-full flex-none overflow-hidden text-ellipsis whitespace-nowrap text-sm text-foreground">{displayValue ?? "Unavailable"}</code>
-        <span className={cn("absolute top-1/2 right-13.5 -translate-y-1/2 text-xs font-semibold text-muted-foreground opacity-0 transition-opacity duration-150 group-hover/button:opacity-100 group-focus-visible/button:opacity-100", copied && "text-primary opacity-100")}>{copied ? "Copied" : "Copy"}</span>
+        <span className={cn("absolute top-1/2 right-13.5 -translate-y-1/2 text-xs font-semibold text-muted-foreground opacity-0 transition-opacity duration-150 group-[:hover]/button:opacity-100 group-focus-visible/button:opacity-100", copied && "text-primary opacity-100")}>{copied ? "Copied" : "Copy"}</span>
       </Button>
       {children}
     </Item>

@@ -74,7 +74,7 @@ export function PageHeader({ titleRef }: { titleRef: RefObject<HTMLHeadingElemen
           <span className={cn("grid min-w-0 justify-items-end leading-4", toneTextClass[protection.tone])}>
             <strong className="text-xs"><ProtectionStatus state={state} variant="header" /></strong>
           </span>
-          <ProtectedControl state={state} pending={protectionPending} compact onToggle={toggleProtection} />
+          <ProtectedControl variant="header" state={state} pending={protectionPending} onToggle={toggleProtection} />
         </div>
       )}
     </header>

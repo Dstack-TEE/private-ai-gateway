@@ -136,7 +136,7 @@ function StatusSurface(): React.JSX.Element {
         <IconButton size="icon-sm" label="Privacy verification" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "privacy" })}><Info aria-hidden="true" /></IconButton>
         </>}
         </div>
-        <ProtectedControl className="col-start-2 row-start-1 min-h-8 self-start justify-self-end" state={state} pending={shell.protectionPending} onToggle={shell.toggleProtection} />
+        <ProtectedControl variant="card" className="col-start-2 row-start-1 min-h-8 self-start justify-self-end" state={state} pending={shell.protectionPending} onToggle={shell.toggleProtection} />
       </CardContent>
     </Card>
   );
@@ -153,8 +153,7 @@ const TrackLayer = memo(function TrackLayer({ active }: { active: boolean }): Re
 function TrackRow({ text, reverse, running }: { text: string; reverse: boolean; running: boolean }): React.JSX.Element {
   return (
     <div className="flex min-w-0 items-center overflow-hidden font-mono text-xs leading-4.5 whitespace-nowrap">
-      {/* Reduced motion stops only the leftward tracks. */}
-      <div className={cn("flex w-max", reverse ? "animate-track-right" : "animate-track-left motion-reduce:animate-none", running ? "[animation-play-state:running]" : "[animation-play-state:paused]")}>
+      <div className={cn("flex w-max motion-reduce:animate-none", reverse ? "animate-track-right" : "animate-track-left", running ? "[animation-play-state:running]" : "[animation-play-state:paused]")}>
         <span className="flex-none pr-8">{text}</span><span className="flex-none pr-8">{text}</span>
       </div>
     </div>
