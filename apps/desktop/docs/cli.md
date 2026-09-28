@@ -206,9 +206,21 @@ pap service stop --yes
 protection. `stop` stops protection and restores managed agent configuration
 but keeps management available.
 `service stop` shuts down the backend. Closing the desktop app does not stop it.
-When no backend is running, `service stop` restores nothing: run
-`service start` first if agents may still point at the Local API, for example
-before uninstalling after an update that was not relaunched.
+When no backend is running, `service stop` restores nothing, and agents may
+still point at the Local API: after an update that was not relaunched, a crash,
+or a Windows sign-out. `stop --offline` does what `stop` does, without a
+backend: it ends the saved protection session, so the next backend start does
+not resume it, and restores the agents through the same restoration journal
+under the same lock, keeping each connection until protection is started again.
+Running it again changes nothing. It holds the backend's instance lock while it
+works and is refused while a backend runs; use `stop` or `service stop` then.
+The Windows uninstaller runs it after `service stop`; if it fails, the
+uninstaller shows why and asks whether to uninstall anyway, keeping the restore
+data (a silent uninstall continues and logs why). If the app data was also
+to be deleted, it cancels instead, since the app data holds the restore data. On macOS (moving the app to the Trash) and Linux (the
+packages run no removal scripts) nothing does, so run `pap --yes service stop`
+and then `pap stop --offline` before removing the app. Mac App Store builds
+restore agents only through the app's Stop All and Quit.
 Stopping first restores the coding-agent configuration; if that fails, `service
 stop` is refused so agents are not left pointing at a stopped Local API: it
 reports that the backend keeps running, and the service log has the reason. Mac
@@ -604,7 +616,7 @@ directory with the home directory shown as `~`.
 
 | Core capability | CLI |
 | --- | --- |
-| Backend and protection lifecycle | `service`, `start`, `stop`, `status --watch` |
+| Backend and protection lifecycle | `service`, `start`, `stop [--offline]`, `status --watch` |
 | Browser management UI | `settings set web-ui.enabled true`, `web-ui password show`/`rotate`, `settings set web-ui.password --value-stdin`, `web-ui.listen-address`/`web-ui.allow-network-access`/`web-ui.client-host`, `app open --web` |
 | Profile inspection, verification and selection | `profiles list/show/add/edit/verify/use/remove` |
 | Credential replacement and removal | `profiles verify --key-stdin`, `token clear-credential` |

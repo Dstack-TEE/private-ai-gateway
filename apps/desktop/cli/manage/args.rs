@@ -44,8 +44,15 @@ pub(super) enum Action {
         #[arg(long, default_value_t = 90, value_parser = clap::value_parser!(u64).range(1..=300))]
         timeout: u64,
     },
-    /// Stop protection and restore managed agent configurations; keep the backend running.
-    Stop,
+    /// Stop protection and restore managed agent configurations. The backend keeps running;
+    /// with --offline, no backend is needed.
+    Stop {
+        /// End the protection session and restore the agents while no backend is running,
+        /// for example before uninstalling after an update that was never relaunched.
+        /// Refused while a backend is running; use `stop` or `service stop` instead.
+        #[arg(long)]
+        offline: bool,
+    },
     /// Manage the local backend process. Starting it may start protection when Protect on launch (`connect-on-launch`) is on.
     Service {
         #[command(subcommand)]

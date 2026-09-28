@@ -73,11 +73,13 @@ one can be bound, agents stay pointed at an address with no listener, which
 refuses them. External edits are preserved and incomplete restoration is kept
 retryable.
 
-A backend that is not running restores nothing: `pap service stop` and
-uninstalling cannot restore agents it left projected (for example after an
-update installed without relaunching the app). Run `pap service start` and
-then `pap service stop`, or choose Stop All and Quit in the app, before
-uninstalling.
+A backend that is not running restores nothing, so agents it left projected
+(for example after an update installed without relaunching the app) keep
+pointing at the Local API until `pap stop --offline` restores them without a
+backend. The Windows uninstaller runs it; in-app updates never do. Moving the
+macOS app to the Trash and removing a Linux package run nothing, so choose Stop
+All and Quit in the app, or run `pap --yes service stop` and then
+`pap stop --offline`, before removing it.
 
 ## Development
 

@@ -969,6 +969,159 @@ fn recovery_keeps_agent_routes_and_tokens_but_pauses_their_requests() {
     assert_eq!(std::fs::read(&path).unwrap(), moved);
 }
 
+/// A backend that stopped without restoring (an update never relaunched, a
+/// crash, a sign-out) left agents projected; uninstalling restores them.
+#[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
+#[test]
+fn offline_restore_follows_the_journal_only_while_no_backend_runs() {
+    const CHILD: &str = "PAP_TEST_OFFLINE_RESTORE";
+    if std::env::var_os(CHILD).is_none() {
+        let home = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "controller::tests::offline_restore_follows_the_journal_only_while_no_backend_runs",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env(desktop_core::paths::HOME_OVERRIDE_ENV, home.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let directory = app_data_dir().unwrap();
+    std::fs::create_dir_all(&directory).unwrap();
+    let home =
+        std::path::PathBuf::from(std::env::var_os(desktop_core::paths::HOME_OVERRIDE_ENV).unwrap());
+    let runtime = test_runtime(&executor, &directory);
+    let helper = runtime.helper_path.clone();
+    std::fs::write(&helper, "#!/bin/sh\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::create_dir_all(home.join(".codex")).unwrap();
+    let claude = home.join(".claude/settings.json");
+    std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
+    // The key the connection takes over is parked in the journal.
+    let original = r#"{"env":{"ANTHROPIC_API_KEY":"sk-original","ANTHROPIC_BASE_URL":"https://api.anthropic.com"}}"#;
+    std::fs::write(&claude, original).unwrap();
+    let catalog =
+        Catalog::from_remote(&serde_json::json!({"data":[{"id":"test/model"}]}), 1).unwrap();
+    let projector = runtime.current_projector().unwrap();
+    let options = ConnectOptions {
+        default_model: Some("test/model".into()),
+    };
+    for agent in [Agent::ClaudeCode, Agent::Codex] {
+        let preview = projector
+            .preview(agent, true, Some(&catalog), &options)
+            .unwrap();
+        projector
+            .apply(agent, true, &preview.revision, Some(&catalog), &options)
+            .unwrap();
+    }
+    drop(runtime);
+    let projected = std::fs::read(&claude).unwrap();
+    assert!(!String::from_utf8_lossy(&projected).contains("sk-original"));
+    // Restore all was interrupted after Codex's tombstone was written.
+    let store_path = directory.join("agent-connections.json");
+    let mut store: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&store_path).unwrap()).unwrap();
+    store["codex"]["disabled"] = true.into();
+    store["codex"]["cleanup_pending"] = true.into();
+    std::fs::write(&store_path, serde_json::to_vec(&store).unwrap()).unwrap();
+    let files = TokenFiles::new(&directory);
+    let codex_config = home.join(".codex/config.toml");
+    let snapshot = || {
+        [
+            &claude,
+            &codex_config,
+            &store_path,
+            &directory.join(crate::local_state::LOCAL_STATE_FILE),
+        ]
+        .map(|path| std::fs::read(path).unwrap())
+    };
+
+    // The backend saved its protection session before it stopped without
+    // ending it; the next backend start resumes a saved session.
+    let usage = directory.join(USAGE_DATABASE);
+    UsageStore::open(usage.clone())
+        .unwrap()
+        .save_active_session("interrupted", 1)
+        .unwrap();
+    let resumes = || {
+        let (events, _) = tokio::sync::mpsc::channel(8);
+        SessionManager::new(
+            ProxyState::new(events).unwrap(),
+            Arc::new(UsageStore::open(usage.clone()).unwrap()),
+            Arc::new(NoVerifier),
+            executor.handle().clone(),
+            AppState::default(),
+        )
+        .snapshot()
+        .unwrap()
+        .reconnecting
+    };
+    assert!(resumes());
+
+    // A running backend owns the agents; nothing is touched.
+    let before = snapshot();
+    let backend = lock::instance(&directory).unwrap().unwrap();
+    assert_eq!(restore_agents_offline(helper.clone()), Ok(None));
+    assert_eq!(snapshot(), before);
+    assert!(files.read(Agent::ClaudeCode.id()).unwrap().is_some());
+    assert!(resumes());
+    drop(backend);
+
+    let statuses = restore_agents_offline(helper.clone()).unwrap().unwrap();
+    let restored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&claude).unwrap()).unwrap();
+    assert_eq!(
+        restored,
+        serde_json::from_str::<serde_json::Value>(original).unwrap()
+    );
+    assert!(files.read(Agent::ClaudeCode.id()).unwrap().is_none());
+    assert!(files.read(Agent::Codex.id()).unwrap().is_none());
+    let codex = std::fs::read_to_string(&codex_config).unwrap();
+    let doc =
+        agent_bridge::config_doc::ConfigDoc::parse(agent_bridge::config_doc::Format::Toml, &codex)
+            .unwrap();
+    assert_eq!(doc.get_str(&["model_provider"]), None);
+    let status = |id: &str| statuses.iter().find(|status| status.id == id).unwrap();
+    // Claude Code is suspended as a stop suspends it; the interrupted
+    // disconnect of Codex is completed.
+    let suspended = status(Agent::ClaudeCode.id());
+    assert!(suspended.recorded && !suspended.connected && !suspended.authorized);
+    assert!(!status(Agent::Codex.id()).recorded);
+    // The session ended as a stop ends it, so no start resumes it and
+    // projects the agents again.
+    assert!(!resumes());
+
+    // Restoring again changes nothing.
+    let after = snapshot();
+    assert_eq!(restore_agents_offline(helper.clone()), Ok(Some(statuses)));
+    assert_eq!(snapshot(), after);
+
+    // The next protected session projects the suspended agent again.
+    let runtime = test_runtime(&executor, &directory);
+    assert!(runtime
+        .current_projector()
+        .unwrap()
+        .reconcile(Some(&catalog))
+        .unwrap()
+        .is_empty());
+    assert!(files.read(Agent::ClaudeCode.id()).unwrap().is_some());
+    assert!(files.read(Agent::Codex.id()).unwrap().is_none());
+}
+
 #[test]
 fn network_loss_revokes_session_and_manual_stop_cancels_recovery() {
     let executor = tokio::runtime::Runtime::new().unwrap();

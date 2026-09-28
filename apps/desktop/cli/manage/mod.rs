@@ -167,7 +167,8 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), CallError> {
                 }
             }
         }
-        Action::Stop => value(client.call(rpc::Stop)?)?,
+        Action::Stop { offline: false } => value(client.call(rpc::Stop)?)?,
+        Action::Stop { offline: true } => restore_agents_offline(&client)?,
         Action::Profiles { command } => {
             match command {
                 Profiles::Login(options) => {
@@ -516,6 +517,21 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), CallError> {
         Action::Completions { .. } => unreachable!(),
     };
     finish_output(output(&result, cli))
+}
+
+/// `stop --offline`: restores what `stop` restores when no backend runs, such
+/// as before uninstalling after an update that was not relaunched.
+fn restore_agents_offline(client: &Client) -> Result<Value, CallError> {
+    const RUNNING: &str =
+        "The backend is running; restore the agents through it with `stop` or `service stop`.";
+    if client.is_running()? {
+        return Err(RUNNING.into());
+    }
+    let helper = std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .map_err(|_| "Cannot locate the application executable")?
+        .with_file_name(agent_bridge::agents::helper_binary_name());
+    value(desktop_runtime::controller::restore_agents_offline(helper)?.ok_or(RUNNING)?)
 }
 
 fn desktop_app() -> Option<PathBuf> {
