@@ -83,6 +83,14 @@ const ALL_AGENTS = [
     files: [".hermes/config.yaml"],
     prompt: ["hermes", "chat", "-q", PROMPT, "--oneshot", "-Q"],
   },
+  {
+    id: "qwen-code",
+    sentinel: { file: ".qwen/settings.json", path: ["ui", "hideTips"], value: true },
+    surface: "chat",
+    files: [".qwen/settings.json"],
+    prompt: ["qwen", "-p", PROMPT],
+    selfWritten: ["$version"],
+  },
 ];
 
 // run.sh --agents limits the test, like the installs, to these ids.
@@ -109,6 +117,8 @@ const RETAINED = [
 const apiKey = readFileSync(0, "utf8").trim();
 const STEPS = ["detected", "reply", "usage", "restored", "revoked"];
 const results = new Map(AGENTS.map((agent) => [agent.id, {}]));
+// Agents a package predates; their rows show "skip" until it supports them.
+const unsupported = new Set();
 const session = {};
 let localApiUrl;
 
@@ -363,11 +373,18 @@ before(async () => {
   }
   assert.equal(papJson("status").gateway.activeProfileId, "redpill");
   localApiUrl = papJson("status").gateway.proxyUrl;
+  const known = new Set(papJson("agents", "list").map(({ id }) => id));
+  for (const agent of AGENTS) if (!known.has(agent.id)) unsupported.add(agent.id);
 });
 
 for (const agent of AGENTS) {
-  test(agent.id, async () => {
+  test(agent.id, async (t) => {
     const row = results.get(agent.id);
+    if (unsupported.has(agent.id)) {
+      for (const name of STEPS) row[name] = "skip";
+      t.skip(`${agent.id} needs a newer package`);
+      return;
+    }
     await step(row, "detected", () => assert.ok(listed(agent)?.installed, `${agent.id} is not detected`));
     writeSetting(agent.sentinel);
     const original = routing(agent);

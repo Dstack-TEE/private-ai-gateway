@@ -37,6 +37,7 @@ use std::process::Command;
 
 mod oh_my_pi;
 mod openclaw;
+mod qwen_code;
 mod selection;
 
 use serde::{Deserialize, Serialize};

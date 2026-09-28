@@ -168,7 +168,7 @@ pub(super) fn stale_helper(
             &["providers", "private-ai-proxy", "key_cmd"][..],
             agent_credential_command(exe, agent, token_path).ok(),
         ),
-        Agent::OpenCode => return false,
+        Agent::OpenCode | Agent::QwenCode => return false,
         Agent::OpenClaw => return false, // Validated with the token path by Projector.
         Agent::OhMyPi => return oh_my_pi::stale_helper(record, exe, token_path),
     };
@@ -308,10 +308,12 @@ pub(super) fn project(
         }
         let previous = match still_ours {
             Some(owned) => owned.previous.clone(),
-            None => match current
-                .clone()
-                .filter(|held| Some(held) != field.value.as_ref())
-            {
+            // A plain value the user already held is restored as theirs, not
+            // removed as if the connection had added it.
+            None => match current.clone().filter(|held| {
+                Some(held) != field.value.as_ref()
+                    || !(sensitive || matches!(held, ConfigValue::Json(_)))
+            }) {
                 Some(held) if sensitive => {
                     let entry = secret_entry(agent, &field.path);
                     pending_secrets.push(PendingSecret {
@@ -570,5 +572,6 @@ pub(super) fn selected_model(agent: Agent, doc: Option<&ConfigDoc>) -> Option<St
         Agent::Hermes => doc.get_str(&["model", "default"]),
         Agent::OpenClaw => openclaw::selected_model(doc),
         Agent::OhMyPi => None,
+        Agent::QwenCode => doc.get_str(&["model", "name"]),
     }
 }

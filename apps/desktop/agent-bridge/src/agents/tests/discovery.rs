@@ -52,7 +52,7 @@ fn helper_relocation_requires_explicit_reconnect_without_scan_writes() {
             .join(helper_binary_name());
         sandbox.projector.helper_exe = stable.clone();
         write_executable(&sandbox.projector.helper_exe, "helper");
-        if agent == Agent::OpenCode {
+        if matches!(agent, Agent::OpenCode | Agent::QwenCode) {
             assert_scan(&sandbox, true, None);
         } else if agent == Agent::OpenClaw {
             assert_scan(
@@ -82,6 +82,7 @@ fn helper_relocation_requires_explicit_reconnect_without_scan_writes() {
             Agent::Hermes => &["providers", "private-ai-proxy", "key_cmd"][..],
             Agent::OpenClaw => &["agents", "defaults", "model", "primary"][..],
             Agent::OhMyPi => &["providers", "private-ai-proxy", "apiKey"][..],
+            Agent::QwenCode => &["providerProtocol", "private-ai-proxy"][..],
         };
         config.set_str(field, "external-edit").unwrap();
         write(&path, &config.render().unwrap());
@@ -314,6 +315,7 @@ fn hermes_windows_installed_command_round_trip() {
                 endpoint: ENDPOINT,
                 helper_exe: executable,
                 token_path: &tokens.path("hermes"),
+                token: None,
                 codex_catalog_path: &data.join(CODEX_CATALOG_FILE),
                 catalog: Some(&catalog()),
                 options: &ConnectOptions::default(),

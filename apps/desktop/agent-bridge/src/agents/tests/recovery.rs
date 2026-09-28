@@ -1017,3 +1017,22 @@ fn long_prices_connect_authorized() {
         assert!(status.authorized, "{}: {:?}", agent.id(), status.attention);
     }
 }
+
+#[test]
+fn values_the_user_already_held_survive_disconnect() {
+    let sandbox = sandbox("already-held");
+    let agent = Agent::QwenCode;
+    let path = agent.config_path(&sandbox.home, false);
+    // The user already routes Qwen Code through OpenAI with the same model id.
+    let original =
+        r#"{"security":{"auth":{"selectedType":"openai"}},"model":{"name":"openai/gpt-oss-20b"}}"#;
+    write(&path, original);
+    assert!(apply_connect(&sandbox, agent, &catalog(), &claude_options()).authorized);
+    disconnect(&sandbox, agent);
+    assert_eq!(
+        doc(&sandbox, agent).get_value(&[]),
+        ConfigDoc::parse(Format::Json, original)
+            .unwrap()
+            .get_value(&[])
+    );
+}

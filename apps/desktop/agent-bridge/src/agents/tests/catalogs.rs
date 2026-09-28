@@ -808,3 +808,85 @@ fn a_record_projected_to_another_endpoint_is_projected_again() {
     assert!(moved.status(agent, &store, Some(&catalog)).authorized);
     assert_eq!(moved.tokens.read(agent.id()).unwrap(), token);
 }
+
+#[test]
+fn qwen_code_projects_a_named_catalog_and_follows_model_switches() {
+    let sandbox = sandbox("qwen-code-catalog");
+    let agent = Agent::QwenCode;
+    let path = agent.config_path(&sandbox.home, false);
+    let original = r#"{"modelProviders":{"openai":[{"id":"gpt-native","envKey":"OPENAI_API_KEY"}]},"security":{"auth":{"selectedType":"qwen-oauth"}},"env":{"OTHER":"kept"}}"#;
+    write(&path, original);
+    let catalog = Catalog::from_remote(
+        &json!({"data": [
+            {"id": "openai/gpt-oss-20b", "name": "GPT OSS 20B", "is_tee": true, "context_length": 131072},
+            {"id": "phala/qwen", "input_modalities": ["text", "image"]}
+        ]}),
+        1,
+    )
+    .unwrap();
+    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+    let token = sandbox.projector.tokens.read(agent.id()).unwrap().unwrap();
+    let ConfigDoc::Json(connected) = doc(&sandbox, agent) else {
+        unreachable!()
+    };
+    assert_eq!(
+        connected["modelProviders"]["private-ai-proxy"],
+        json!([
+            {
+                "id": "openai/gpt-oss-20b",
+                "name": "GPT OSS 20B [TEE]",
+                "envKey": "PRIVATE_AI_PROXY_API_KEY",
+                "baseUrl": "http://127.0.0.1:4180/v1",
+                "generationConfig": {"contextWindowSize": 131072}
+            },
+            {
+                "id": "phala/qwen",
+                "name": "phala/qwen",
+                "envKey": "PRIVATE_AI_PROXY_API_KEY",
+                "baseUrl": "http://127.0.0.1:4180/v1",
+                "generationConfig": {"modalities": {"image": true}}
+            }
+        ])
+    );
+    assert_eq!(connected["modelProviders"]["openai"][0]["id"], "gpt-native");
+    assert_eq!(connected["providerProtocol"]["private-ai-proxy"], "openai");
+    assert_eq!(connected["env"]["PRIVATE_AI_PROXY_API_KEY"], token.as_str());
+    assert_eq!(connected["security"]["auth"]["selectedType"], "openai");
+    assert_eq!(connected["model"]["name"], "openai/gpt-oss-20b");
+    let preview = sandbox
+        .projector
+        .preview(agent, false, None, &ConnectOptions::default())
+        .unwrap();
+    assert!(!serde_json::to_string(&preview).unwrap().contains(&token));
+
+    // /model in Qwen Code rewrites model.name; that keeps access.
+    let mut switched = doc(&sandbox, agent);
+    switched.set_str(&["model", "name"], "phala/qwen").unwrap();
+    write(&path, &switched.render().unwrap());
+    let (statuses, tokens) = sandbox.projector.scan(Some(&catalog)).unwrap();
+    assert!(agent_status(&statuses, agent).authorized);
+    assert_eq!(tokens.agent_for(&token), Some(agent.id()));
+    // A changed endpoint does not.
+    switched
+        .set_str(&["providerProtocol", "private-ai-proxy"], "anthropic")
+        .unwrap();
+    write(&path, &switched.render().unwrap());
+    let (statuses, _) = sandbox.projector.scan(Some(&catalog)).unwrap();
+    assert!(!agent_status(&statuses, agent).authorized);
+    switched
+        .set_str(&["providerProtocol", "private-ai-proxy"], "openai")
+        .unwrap();
+    switched
+        .set_str(&["model", "name"], "openai/gpt-oss-20b")
+        .unwrap();
+    write(&path, &switched.render().unwrap());
+
+    disconnect(&sandbox, agent);
+    assert!(sandbox.projector.tokens.read(agent.id()).unwrap().is_none());
+    assert_eq!(
+        doc(&sandbox, agent).get_value(&[]),
+        ConfigDoc::parse(Format::Json, original)
+            .unwrap()
+            .get_value(&[])
+    );
+}

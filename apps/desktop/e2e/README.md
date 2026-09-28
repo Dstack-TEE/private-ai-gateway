@@ -2,7 +2,8 @@
 
 Tests a published Linux x64 desktop package against the live RedPill service
 with every supported coding agent: Claude Code, Codex, OpenCode, Pi, Oh My Pi,
-OpenClaw and Hermes. `Desktop live E2E` (`.github/workflows/desktop-e2e.yml`)
+OpenClaw, Hermes and Qwen Code. An agent the package predates (it is missing
+from `pap agents list`) is skipped and shows `skip` in the summary. `Desktop live E2E` (`.github/workflows/desktop-e2e.yml`)
 runs it nightly and before a stable release
 ([Live end-to-end test](../docs/distribution.md#live-end-to-end-test)).
 

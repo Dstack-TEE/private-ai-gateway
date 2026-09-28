@@ -373,9 +373,20 @@ impl Projector {
                 ),
             )));
         }
-        let edit = self
-            .edit(agent, true, &mut doc, store, catalog, &options)
-            .map_err(ConnectFailure::Conflict)?;
+        let mut guard = Rollback::default();
+        // An agent that holds its token as a value needs it in the projection.
+        let issued = agent.static_token();
+        if issued {
+            self.issue_token(agent, store, &mut guard)?;
+        }
+        let edit = match self.edit(agent, true, &mut doc, store, catalog, &options) {
+            Ok(edit) => edit,
+            Err(error) => {
+                self.rollback(agent, guard)
+                    .map_err(|_| AgentError::RestorationFailed)?;
+                return Err(ConnectFailure::Conflict(error));
+            }
+        };
         if agent == Agent::Codex {
             self.sync_codex_catalog(catalog.ok_or(AgentError::InvalidState)?)?;
         }
@@ -385,22 +396,9 @@ impl Projector {
         next_record.options = options.clone();
         next_record.catalog_revision = catalog.map(|catalog| catalog.revision.clone());
         next_record.endpoint = Some(self.endpoint.clone());
-        let mut guard = Rollback::default();
         let result = (|| -> Result<(), AgentError> {
-            // A fresh token on every new connection; a leftover file from an
-            // incomplete disconnect is never reused.
-            if store
-                .get(agent.id())
-                .is_some_and(|record| !record.suspended)
-            {
-                self.tokens
-                    .ensure(agent.id())
-                    .map_err(|_| AgentError::ConfigurationWrite)?;
-            } else {
-                self.tokens
-                    .rotate(agent.id())
-                    .map_err(|_| AgentError::ConfigurationWrite)?;
-                guard.revoke_token = true;
+            if !issued {
+                self.issue_token(agent, store, &mut guard)?;
             }
             for secret in &edit.pending_secrets {
                 let previous = self
@@ -466,6 +464,30 @@ impl Projector {
                 Err(_) => AgentError::RestorationFailed,
             }));
         }
+        Ok(())
+    }
+
+    /// A fresh token on every new connection; a leftover file from an
+    /// incomplete disconnect is never reused.
+    fn issue_token(
+        &self,
+        agent: Agent,
+        store: &Store,
+        guard: &mut Rollback,
+    ) -> Result<(), AgentError> {
+        if store
+            .get(agent.id())
+            .is_some_and(|record| !record.suspended)
+        {
+            self.tokens
+                .ensure(agent.id())
+                .map_err(|_| AgentError::ConfigurationWrite)?;
+            return Ok(());
+        }
+        self.tokens
+            .rotate(agent.id())
+            .map_err(|_| AgentError::ConfigurationWrite)?;
+        guard.revoke_token = true;
         Ok(())
     }
 

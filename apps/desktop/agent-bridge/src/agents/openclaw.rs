@@ -593,6 +593,7 @@ mod tests {
             endpoint: "http://127.0.0.1:4180",
             helper_exe: &root.join(helper_binary_name()),
             token_path: &token_path(root),
+            token: None,
             codex_catalog_path: &root.join("unused.json"),
             catalog: Some(&catalog()),
             options,

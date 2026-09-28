@@ -109,11 +109,20 @@ impl Projector {
         let options = connection_options(agent, doc, prior, catalog, options);
         self.validate_native_config(agent, doc, prior, &options, catalog)?;
         let codex_catalog_path = self.codex_catalog_path();
+        // Connect issues the token first; a preview never displays it.
+        let token = agent.static_token().then(|| {
+            self.tokens
+                .read(agent.id())
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+        });
         let inputs = Inputs {
             file_credentials: self.file_credentials,
             endpoint: &self.endpoint,
             helper_exe: &self.helper_exe,
             token_path: &self.tokens.path(agent.id()),
+            token: token.as_deref(),
             codex_catalog_path: &codex_catalog_path,
             catalog,
             options: &options,
@@ -157,6 +166,11 @@ impl Projector {
         match agent {
             Agent::OhMyPi => oh_my_pi::validate_config(doc, prior)
                 .map_err(AgentError::ConfigurationConflict),
+            Agent::QwenCode => qwen_code::validate(
+                &self.home,
+                self.tool_env,
+                options.default_model.is_some(),
+            ),
             Agent::Codex if doc.contains(&["model_providers", "private_ai_proxy", "aws"]) => {
                 Err(AgentError::AuthenticationConflict("Codex's private_ai_proxy provider has AWS authentication, which conflicts with command authentication. Remove that conflict in Codex; it will not be overwritten".to_string()))
             }
@@ -447,7 +461,7 @@ impl Projector {
         }
         let managed = doc.as_ref().is_some_and(|doc| {
             record.fields.iter().all(|field| {
-                (agent == Agent::Codex && field.path == ["model"])
+                agent.user_selection(&field.path)
                     || doc.get_value(&refs(&field.path)) == field.value
             })
         });

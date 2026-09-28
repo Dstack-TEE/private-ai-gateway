@@ -40,6 +40,7 @@ fn every_agent_switches_conservatively_and_reconnects_without_namespace_conflict
             Agent::OpenClaw => r#"{"agents":{"defaults":{"model":{"primary":"original/native","fallbacks":["original/fallback"]}}}}"#,
             Agent::Pi => "{}",
             Agent::OhMyPi => "theme: dark\n",
+            Agent::QwenCode => r#"{"model":{"name":"native"},"security":{"auth":{"selectedType":"qwen-oauth"}},"env":{"OTHER":"kept"}}"#,
         };
             write(&config, original);
             let defaults = match agent {
@@ -79,7 +80,7 @@ fn every_agent_switches_conservatively_and_reconnects_without_namespace_conflict
                 assert!(!connected.contains("private-ai-proxy-helper"));
                 assert!(!connected.contains(&sandbox.projector.data_dir.display().to_string()));
                 assert!(!connected.contains("old-secret"));
-                assert!(!connected.contains(&first_token));
+                assert_eq!(connected.contains(&first_token), agent.static_token());
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
@@ -153,7 +154,7 @@ fn every_agent_switches_conservatively_and_reconnects_without_namespace_conflict
                 .unwrap()
                 .get(agent.id())
                 .cloned();
-            if agent == Agent::ClaudeCode {
+            if matches!(agent, Agent::ClaudeCode | Agent::QwenCode) {
                 assert!(record.is_none());
             } else {
                 let record = record.unwrap();
@@ -204,11 +205,13 @@ fn every_agent_switches_conservatively_and_reconnects_without_namespace_conflict
             assert_eq!(fs::read_to_string(&config).unwrap(), stopped_files);
             assert!(sandbox.projector.tokens.read(agent.id()).unwrap().is_none());
             assert!(enable(&sandbox.projector).authorized);
-            assert_ne!(
-                sandbox.projector.tokens.read(agent.id()).unwrap().unwrap(),
-                first_token
+            let second_token = sandbox.projector.tokens.read(agent.id()).unwrap().unwrap();
+            assert_ne!(second_token, first_token);
+            // Only a token held as a value differs between the two connections.
+            assert_eq!(
+                fs::read_to_string(&config).unwrap(),
+                connected.replace(&first_token, &second_token)
             );
-            assert_eq!(fs::read_to_string(&config).unwrap(), connected);
             assert!(sandbox.projector.disconnect_all().unwrap().is_empty());
         }
     }
@@ -489,6 +492,63 @@ fn opencode_process_overrides_follow_official_merge_order() {
 }
 
 #[test]
+fn qwen_code_system_settings_that_replace_the_provider_are_refused() {
+    const CASE: &str = "PAP_TEST_QWEN_SYSTEM_CASE";
+    if let Ok(case) = env::var(CASE) {
+        let result = qwen_code::validate(Path::new("/nonexistent-home"), true, true);
+        match case.as_str() {
+            "absent" | "unrelated" => assert!(result.is_ok(), "{case}: {result:?}"),
+            _ => assert_eq!(
+                result.unwrap_err().code(),
+                desktop_core::protocol::ErrorCode::ConfigurationConflict,
+                "{case}"
+            ),
+        }
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    for (case, system) in [
+        ("absent", None),
+        (
+            "unrelated",
+            Some(r#"{/* policy */ "privacy": {"usageStatisticsEnabled": false}}"#),
+        ),
+        ("providers", Some(r#"{"modelProviders": {"openai": []}}"#)),
+        (
+            "protocol",
+            Some(r#"{"providerProtocol": {"other": "openai"}}"#),
+        ),
+        (
+            "enforced",
+            Some(r#"{"security": {"auth": {"enforcedType": "qwen-oauth"}}}"#),
+        ),
+    ] {
+        let path = root.path().join(format!("{case}.json"));
+        if let Some(text) = system {
+            write(&path, text);
+        }
+        let output = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "agents::tests::contracts::qwen_code_system_settings_that_replace_the_provider_are_refused",
+            ])
+            .env(CASE, case)
+            .env("QWEN_CODE_SYSTEM_SETTINGS_PATH", &path)
+            .env("QWEN_HOME", root.path().join("qwen"))
+            .env_remove(qwen_code::KEY_ENV)
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
+        assert!(
+            output.status.success(),
+            "{case}: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
 fn opencode_2_provider_entry_in_the_owned_file_is_refused() {
     let sandbox = sandbox("opencode-2-provider");
     let projected = ConfigDoc::Json(json!({
@@ -546,6 +606,7 @@ fn native_auth_and_routing_conflicts_are_read_only_and_deauthorize() {
         (Agent::Hermes, "explicit-key"),
         (Agent::Hermes, "pool"),
         (Agent::Hermes, "fallback"),
+        (Agent::QwenCode, "dotenv"),
     ] {
         let sandbox = sandbox(&format!("conflict-{}-{case}", agent.id()));
         let catalog = catalog();
@@ -610,6 +671,10 @@ fn native_auth_and_routing_conflicts_are_read_only_and_deauthorize() {
             (Agent::Hermes, _) => edited
                 .set_str(&["fallback_model", "provider"], "other")
                 .unwrap(),
+            (Agent::QwenCode, _) => write(
+                &path.with_file_name(".env"),
+                "export PRIVATE_AI_PROXY_API_KEY=sk-test-hidden\n",
+            ),
             _ => unreachable!(),
         }
         write(&path, &edited.render().unwrap());
@@ -638,7 +703,10 @@ fn native_auth_and_routing_conflicts_are_read_only_and_deauthorize() {
             .unwrap_err();
         assert_eq!(
             error.code(),
-            if matches!(case, "aws" | "stored-key" | "explicit-key" | "pool") {
+            if matches!(
+                case,
+                "aws" | "stored-key" | "explicit-key" | "pool" | "dotenv"
+            ) {
                 desktop_core::protocol::ErrorCode::AuthenticationConflict
             } else {
                 desktop_core::protocol::ErrorCode::ConfigurationConflict

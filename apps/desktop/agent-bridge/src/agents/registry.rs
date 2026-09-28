@@ -8,6 +8,12 @@ pub(crate) trait AgentIntegration {
     /// location override is honored.
     fn config_path(self, home: &Path, tool_env: bool) -> PathBuf;
     fn note(self, connect: bool) -> &'static str;
+    /// The agent reads its credential only as a literal value, so its config
+    /// holds the agent's local token itself rather than a command or file.
+    fn static_token(self) -> bool;
+    /// Owned fields the agent rewrites when the user picks another model in
+    /// it; a change there does not pause access.
+    fn user_selection(self, path: &[String]) -> bool;
 }
 
 impl AgentIntegration for Agent {
@@ -15,16 +21,19 @@ impl AgentIntegration for Agent {
         match self {
             Self::Codex => Surface::Responses,
             Self::ClaudeCode => Surface::Messages,
-            Self::OpenCode | Self::Pi | Self::Hermes | Self::OpenClaw | Self::OhMyPi => {
-                Surface::ChatCompletions
-            }
+            Self::OpenCode
+            | Self::Pi
+            | Self::Hermes
+            | Self::OpenClaw
+            | Self::OhMyPi
+            | Self::QwenCode => Surface::ChatCompletions,
         }
     }
 
     fn format(self) -> Format {
         match self {
             Agent::Codex => Format::Toml,
-            Agent::ClaudeCode | Agent::OpenCode | Agent::Pi => Format::Json,
+            Agent::ClaudeCode | Agent::OpenCode | Agent::Pi | Agent::QwenCode => Format::Json,
             Agent::Hermes => Format::Yaml,
             Agent::OpenClaw => Format::Json5,
             Agent::OhMyPi => Format::Yaml,
@@ -48,6 +57,14 @@ impl AgentIntegration for Agent {
                     .join("opencode")
                     .join("opencode.json")
             }),
+            Agent::QwenCode => override_dir("QWEN_HOME")
+                .filter(|path| !path.as_os_str().is_empty())
+                .map(|path| match path.strip_prefix("~") {
+                    Ok(suffix) => home.join(suffix),
+                    Err(_) => path,
+                })
+                .unwrap_or_else(|| home.join(".qwen"))
+                .join("settings.json"),
             Agent::Pi => override_dir("PI_CODING_AGENT_DIR")
                 .map(|path| match path.strip_prefix("~") {
                     Ok(suffix) => home.join(suffix),
@@ -113,6 +130,24 @@ impl AgentIntegration for Agent {
             Agent::Hermes => {
                 "Hermes uses a machine-local token command. Start a new session without --api-key or --base-url overrides; existing native credentials and fallbacks are never erased."
             }
+            Agent::QwenCode => {
+                "Qwen Code will use an app-owned OpenAI-compatible model provider generated from the verified service. Qwen Code reads keys only as values, so its settings hold this agent's machine-local token, which is revoked on disconnect. Restart Qwen Code after applying; a project .qwen/settings.json that defines modelProviders replaces this catalog."
+            }
+        }
+    }
+
+    fn static_token(self) -> bool {
+        matches!(self, Agent::QwenCode)
+    }
+
+    fn user_selection(self, path: &[String]) -> bool {
+        let path: Vec<&str> = path.iter().map(String::as_str).collect();
+        match self {
+            Agent::Codex => path == ["model"],
+            Agent::QwenCode => {
+                path == ["model", "name"] || path == ["security", "auth", "selectedType"]
+            }
+            _ => false,
         }
     }
 }

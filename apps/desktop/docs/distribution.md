@@ -129,7 +129,7 @@ Authenticode remains optional and does not block the release.
 
 `Desktop live E2E` (`desktop-e2e.yml`) installs a published Linux x64 desktop
 package in a fresh `ubuntu:24.04` container and, for Claude Code, Codex,
-OpenCode, Pi, Oh My Pi, OpenClaw and Hermes, checks a real reply through the
+OpenCode, Pi, Oh My Pi, OpenClaw, Hermes and Qwen Code, checks a real reply through the
 live RedPill service, its verified usage record, restoration on disconnect and
 token revocation, then fail-closed behavior and restoration on stop
 ([E2E harness](../e2e/README.md)). A second job repeats the OpenCode checks
@@ -431,7 +431,7 @@ connecting it only edits that folder. Other tools can create these folders too:
 Superset writes `~/.claude/settings.json`, `~/.codex/hooks.json`,
 `~/.pi/agent/extensions` and `~/.omp/agent/extensions` whether or not those Agents
 are installed, so they show as detected on a machine that runs Superset.
-Location overrides such as `CODEX_HOME`, `CLAUDE_CONFIG_DIR` or `HERMES_HOME` are
+Location overrides such as `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `HERMES_HOME` or `QWEN_HOME` are
 read only by the Direct build, and only from the backend's own environment. A backend
 started from Finder, the Dock or a login item inherits the launchd environment, not
 variables exported in shell startup files, so it uses the default locations; the MAS
@@ -467,8 +467,10 @@ do not protect against other programs running as the same OS user.
 OpenCode uses its file reference and OpenClaw its `singleValue` file SecretRef.
 Codex invokes `/bin/cat` with a separate absolute-path argument; Claude Code,
 Pi, Oh My Pi and Hermes use their existing credential-command contracts with a
-quoted `/bin/cat` path. No external Agent launches a PAP executable or reads the
-app container. The same transaction journal restores owned configuration,
+quoted `/bin/cat` path. Qwen Code reads keys only as values, so its
+`settings.json` `env` block holds its agent token itself, in both distributions;
+disconnect removes it and revokes the token. No external Agent launches a PAP
+executable or reads the app container. The same transaction journal restores owned configuration,
 revokes tokens on disconnect/suspend, and rotates them on reconnect. In-memory
 proxy authority is withdrawn before restoration; restoration failures remain
 retryable. File removal alone is not the entire revocation mechanism.

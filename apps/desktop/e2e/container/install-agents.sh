@@ -45,7 +45,7 @@ pinned() {
 # The first --version runs of Claude Code, Codex and OpenCode, and the other
 # commands below, create the folders detection looks for; all exit 0 without
 # a provider.
-for agent in claude-code codex opencode pi oh-my-pi openclaw hermes; do
+for agent in claude-code codex opencode pi oh-my-pi openclaw hermes qwen-code; do
   [[ -z "${PAP_E2E_AGENTS:-}" || ",$PAP_E2E_AGENTS," == *",$agent,"* ]] || continue
   case "$agent" in
     claude-code)
@@ -82,6 +82,12 @@ for agent in claude-code codex opencode pi oh-my-pi openclaw hermes; do
       from_script hermes "https://raw.githubusercontent.com/NousResearch/hermes-agent/$HERMES_VERSION/scripts/install.sh" \
         --branch "$HERMES_VERSION" --non-interactive --skip-browser
       pinned "${HERMES_VERSION#v}" hermes --version
+      ;;
+    qwen-code)
+      logged qwen-code npm install --global "@qwen-code/qwen-code@$QWEN_CODE_VERSION"
+      pinned "$QWEN_CODE_VERSION" qwen --version
+      # Only a prompt creates ~/.qwen; without an auth type it exits 1.
+      qwen -p hi >/dev/null 2>&1 || test -d "$HOME/.qwen"
       ;;
   esac
 done

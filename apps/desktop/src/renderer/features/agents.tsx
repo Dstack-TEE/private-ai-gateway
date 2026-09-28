@@ -6,6 +6,7 @@ import hermesIcon from "@lobehub/icons-static-svg/icons/hermesagent.svg";
 import openCodeIcon from "@lobehub/icons-static-svg/icons/opencode.svg";
 import openClawIcon from "@lobehub/icons-static-svg/icons/openclaw-color.svg";
 import piIcon from "@lobehub/icons-static-svg/icons/pi.svg";
+import qwenCodeIcon from "@lobehub/icons-static-svg/icons/qwen-color.svg";
 import { Button } from "../components/ui/button";
 import { StateLabel } from "../components/state-label";
 import { AgentAttention } from "../components/agent-attention";
@@ -31,6 +32,7 @@ const AGENT_ICONS: Record<string, string> = {
   "oh-my-pi": ohMyPiIcon,
   hermes: hermesIcon,
   openclaw: openClawIcon,
+  "qwen-code": qwenCodeIcon,
 };
 
 function AgentMark({ agent }: { agent: Pick<AgentStatus, "id" | "name"> }): React.JSX.Element {

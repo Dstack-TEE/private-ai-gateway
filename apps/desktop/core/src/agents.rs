@@ -81,10 +81,11 @@ pub enum Agent {
     Hermes,
     OpenClaw,
     OhMyPi,
+    QwenCode,
 }
 
 impl Agent {
-    pub const ALL: [Agent; 7] = [
+    pub const ALL: [Agent; 8] = [
         Agent::ClaudeCode,
         Agent::Codex,
         Agent::Hermes,
@@ -92,6 +93,7 @@ impl Agent {
         Agent::OhMyPi,
         Agent::OpenCode,
         Agent::OpenClaw,
+        Agent::QwenCode,
     ];
 
     pub fn from_id(id: &str) -> Result<Self, String> {
@@ -110,6 +112,7 @@ impl Agent {
             Agent::Hermes => "hermes",
             Agent::OpenClaw => "openclaw",
             Agent::OhMyPi => "oh-my-pi",
+            Agent::QwenCode => "qwen-code",
         }
     }
 
@@ -122,6 +125,7 @@ impl Agent {
             Agent::Hermes => "Hermes Agent",
             Agent::OpenClaw => "OpenClaw",
             Agent::OhMyPi => "Oh My Pi",
+            Agent::QwenCode => "Qwen Code",
         }
     }
 
@@ -134,6 +138,7 @@ impl Agent {
             Agent::Hermes => "https://hermes-agent.nousresearch.com",
             Agent::OpenClaw => "https://openclaw.ai",
             Agent::OhMyPi => "https://omp.sh",
+            Agent::QwenCode => "https://qwenlm.github.io/qwen-code-docs/",
         }
     }
 }
