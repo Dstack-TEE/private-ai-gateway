@@ -69,7 +69,7 @@ export function ProfilesDialog({
     else activate.mutate(profile.id);
   };
   return (
-    <AppDialog {...control} title="Profiles" className="sm:max-w-xl" dismissible={!workingProfileId && !transferBusy} onClose={onClose}>
+    <AppDialog {...control} title="Profiles" className="h-[min(calc(100%-2rem),34rem)] sm:max-w-xl" dismissible={!workingProfileId && !transferBusy} onClose={onClose}>
       <p className="text-sm">Choose the service used when protection starts.</p>
       {!activeProfileAvailable && (
         <p className="banner profile-availability flex items-start gap-1.75 rounded-lg bg-[var(--warning-bg)] px-3 py-2.25 text-warning wrap-anywhere">
@@ -83,10 +83,10 @@ export function ProfilesDialog({
           const working = profile.id === workingProfileId;
           const status = profileIsAvailable(profile, state) ? "Ready" : connectionRequirement(profile);
           return (
-            <div className={`profile-list-row min-w-0 grid grid-cols-[minmax(0,_1fr)_52px] items-center border-b border-b-border [&.is-active]:bg-muted [&.is-active_.profile-select]:bg-transparent last:border-b-0 [&_>_button:last-child]:justify-self-center ${active ? " is-active" : ""}`} role="listitem" key={profile.id}>
+            <div className={`profile-list-row min-w-0 grid grid-cols-[minmax(0,_1fr)_52px] items-center border-b border-b-border [&.is-active]:bg-muted [&.is-active_.profile-select]:bg-transparent last:border-b-0 [&_>_button:last-child]:col-start-2 [&_>_button:last-child]:row-start-1 [&_>_button:last-child]:justify-self-center ${active ? " is-active" : ""}`} role="listitem" key={profile.id}>
               <ActionItem
                 type="button"
-                className="profile-select min-w-0 [&_>_span:nth-child(2)]:min-w-0 [&_>_span:nth-child(2)]:flex-auto [&_>_span:nth-child(2)]:grid [&_>_span:nth-child(2)]:gap-0.5 [&_strong]:min-w-0 [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_small]:min-w-0 [&_small]:overflow-hidden [&_small]:text-ellipsis [&_small]:whitespace-nowrap [&_strong]:text-foreground [&_strong]:text-sm [&_strong]:font-semibold [&_small]:text-muted-foreground [&_small]:text-xs [&_>_svg]:flex-none [&_>_svg]:text-foreground"
+                className="profile-select col-span-full row-start-1 min-w-0 pr-17 [&_>_span:nth-child(2)]:min-w-0 [&_>_span:nth-child(2)]:flex-auto [&_>_span:nth-child(2)]:grid [&_>_span:nth-child(2)]:gap-0.5 [&_strong]:min-w-0 [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_small]:min-w-0 [&_small]:overflow-hidden [&_small]:text-ellipsis [&_small]:whitespace-nowrap [&_strong]:text-foreground [&_strong]:text-sm [&_strong]:font-semibold [&_small]:text-muted-foreground [&_small]:text-xs [&_>_svg]:flex-none [&_>_svg]:text-foreground"
                 aria-current={active || undefined}
                 disabled={frozen || Boolean(workingProfileId)}
                 onClick={() => select(profile)}
