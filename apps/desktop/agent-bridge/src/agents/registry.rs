@@ -31,7 +31,8 @@ impl AgentIntegration for Agent {
             | Self::OhMyPi
             | Self::QwenCode
             | Self::KiloCli
-            | Self::ClineCli => Surface::ChatCompletions,
+            | Self::ClineCli
+            | Self::Crush => Surface::ChatCompletions,
         }
     }
 
@@ -43,7 +44,8 @@ impl AgentIntegration for Agent {
             | Agent::Pi
             | Agent::QwenCode
             | Agent::KiloCli
-            | Agent::ClineCli => Format::Json,
+            | Agent::ClineCli
+            | Agent::Crush => Format::Json,
             Agent::Hermes => Format::Yaml,
             Agent::OpenClaw => Format::Json5,
             Agent::OhMyPi => Format::Yaml,
@@ -55,6 +57,7 @@ impl AgentIntegration for Agent {
         match self {
             Agent::OpenClaw => openclaw::config_path(home, tool_env),
             Agent::ClineCli => cline::config_path(home, tool_env),
+            Agent::Crush => crush::config_path(home, tool_env),
             Agent::OhMyPi => oh_my_pi::config_path(home, tool_env),
             Agent::Codex => override_dir("CODEX_HOME")
                 .unwrap_or_else(|| home.join(".codex"))
@@ -156,6 +159,9 @@ impl AgentIntegration for Agent {
             Agent::ClineCli => {
                 "Cline CLI will use its built-in OpenAI-compatible provider pointed at the verified service, and lists the service's models itself. Cline only accepts that built-in provider, so the one you had there is saved and restored on disconnect. Cline reads keys only as values, so its settings hold this agent's machine-local token, which is revoked on disconnect. Run \"cline hub stop\" or restart Cline after applying. The Cline editor extensions keep their own settings and are not changed."
             }
+            Agent::Crush => {
+                "Crush will use an app-owned provider catalog generated from the verified service, with a machine-local token command, written to its data file where it also saves the models you pick. Restart Crush after applying. Project crush.json files are not inspected and may override the provider."
+            }
             Agent::QwenCode => {
                 "Qwen Code will use an app-owned OpenAI-compatible model provider generated from the verified service. Qwen Code reads keys only as values, so its settings hold this agent's machine-local token, which is revoked on disconnect. Restart Qwen Code after applying; a project .qwen/settings.json that defines modelProviders replaces this catalog."
             }
@@ -170,6 +176,9 @@ impl AgentIntegration for Agent {
         let path: Vec<&str> = path.iter().map(String::as_str).collect();
         match self {
             Agent::ClineCli => cline::user_selection(&path),
+            Agent::Crush => {
+                path == ["models", "large", "provider"] || path == ["models", "large", "model"]
+            }
             Agent::Codex => path == ["model"],
             Agent::QwenCode => {
                 path == ["model", "name"] || path == ["security", "auth", "selectedType"]

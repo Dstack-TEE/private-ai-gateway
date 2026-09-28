@@ -119,7 +119,8 @@ pub(super) fn agent_credential_command(
         let quoted = shlex::try_quote(path).map_err(|_| "The Agent token path cannot be quoted")?;
         return Ok(format!("/bin/cat {quoted}"));
     }
-    if agent == Agent::ClaudeCode {
+    // Claude Code and Crush run it with POSIX shell syntax on every platform.
+    if matches!(agent, Agent::ClaudeCode | Agent::Crush) {
         helper_command(exe, agent.id())
     } else {
         credential_helper_command(exe, agent)
@@ -164,6 +165,12 @@ pub(super) fn stale_helper(
                 .ok()
                 .map(|command| format!("!{command}")),
         ),
+        Agent::Crush => (
+            &["providers", "private-ai-proxy"][..],
+            agent_credential_command(exe, agent, token_path)
+                .ok()
+                .map(|command| format!("$({command})")),
+        ),
         Agent::Hermes => (
             &["providers", "private-ai-proxy", "key_cmd"][..],
             agent_credential_command(exe, agent, token_path).ok(),
@@ -178,9 +185,14 @@ pub(super) fn stale_helper(
             return false;
         }
         let command = match &field.value {
-            Some(ConfigValue::Str(command)) if agent != Agent::Pi => Some(command.as_str()),
+            Some(ConfigValue::Str(command)) if !matches!(agent, Agent::Pi | Agent::Crush) => {
+                Some(command.as_str())
+            }
             Some(ConfigValue::Json(provider)) if agent == Agent::Pi => {
                 provider.get("apiKey").and_then(serde_json::Value::as_str)
+            }
+            Some(ConfigValue::Json(provider)) if agent == Agent::Crush => {
+                provider.get("api_key").and_then(serde_json::Value::as_str)
             }
             _ => None,
         };
@@ -251,6 +263,7 @@ pub(super) fn inactive_provider_value(field: &OwnedField) -> Option<ConfigValue>
             let mut value = value.clone();
             if let Some(object) = value.as_object_mut() {
                 object.remove("apiKey");
+                object.remove("api_key");
                 if let Some(options) = object
                     .get_mut("options")
                     .and_then(serde_json::Value::as_object_mut)
@@ -574,5 +587,6 @@ pub(super) fn selected_model(agent: Agent, doc: Option<&ConfigDoc>) -> Option<St
         Agent::OhMyPi => None,
         Agent::QwenCode => doc.get_str(&["model", "name"]),
         Agent::ClineCli => cline::selected_model(doc),
+        Agent::Crush => crush::selected_model(doc),
     }
 }

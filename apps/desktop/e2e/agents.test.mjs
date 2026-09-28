@@ -112,6 +112,14 @@ const ALL_AGENTS = [
     files: [".cline/data/settings/providers.json"],
     prompt: ["cline", PROMPT],
   },
+  {
+    id: "crush",
+    sentinel: { file: ".local/share/crush/crush.json", path: ["options", "tui", "compact_mode"], value: true },
+    surface: "chat",
+    files: [".local/share/crush/crush.json"],
+    prompt: ["crush", "run", PROMPT],
+    selfWritten: ["recent_models"],
+  },
 ];
 
 // run.sh --agents limits the test, like the installs, to these ids.

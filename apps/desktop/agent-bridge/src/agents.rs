@@ -11,6 +11,7 @@
 
 mod cline;
 mod codex_service;
+mod crush;
 mod discovery;
 mod error;
 mod projection;

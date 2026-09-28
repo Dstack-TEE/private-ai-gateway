@@ -45,7 +45,7 @@ pinned() {
 # The first --version runs of Claude Code, Codex and OpenCode, and the other
 # commands below, create the folders detection looks for; all exit 0 without
 # a provider.
-for agent in claude-code codex opencode pi oh-my-pi openclaw hermes qwen-code kilo cline; do
+for agent in claude-code codex opencode pi oh-my-pi openclaw hermes qwen-code kilo cline crush; do
   [[ -z "${PAP_E2E_AGENTS:-}" || ",$PAP_E2E_AGENTS," == *",$agent,"* ]] || continue
   case "$agent" in
     claude-code)
@@ -97,6 +97,12 @@ for agent in claude-code codex opencode pi oh-my-pi openclaw hermes qwen-code ki
     cline)
       logged cline npm install --global "cline@$CLINE_VERSION"
       pinned "$CLINE_VERSION" cline --version
+      ;;
+    crush)
+      logged crush npm install --global "@charmland/crush@$CRUSH_VERSION"
+      pinned "$CRUSH_VERSION" crush --version
+      # Only a run creates its data folder; without a provider it exits 1.
+      crush run hi >/dev/null 2>&1 || test -d "$HOME/.local/share/crush"
       ;;
   esac
 done

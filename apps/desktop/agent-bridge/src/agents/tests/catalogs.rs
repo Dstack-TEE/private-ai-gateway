@@ -949,3 +949,106 @@ fn cline_takes_over_its_openai_compatible_provider_and_follows_model_switches() 
         Some(ConfigValue::Json(json!({})))
     );
 }
+
+#[test]
+fn crush_writes_its_data_file_and_keeps_model_picks() {
+    let sandbox = sandbox("crush-data");
+    let agent = Agent::Crush;
+    let path = agent.config_path(&sandbox.home, false);
+    if !cfg!(windows) {
+        assert_eq!(path, sandbox.home.join(".local/share/crush/crush.json"));
+    }
+    let original =
+        r#"{"models":{"large":{"model":"claude","provider":"anthropic"}},"recent_models":{}}"#;
+    write(&path, original);
+    let catalog = Catalog::from_remote(
+        &json!({"data": [{
+            "id": "openai/gpt-oss-20b", "name": "GPT OSS 20B", "is_tee": true,
+            "context_length": 131072, "max_output_length": 8192,
+            "supported_features": ["reasoning"], "input_modalities": ["text", "image"],
+            "pricing": {"prompt": "0.0000001", "completion": "0.0000005"}
+        }]}),
+        1,
+    )
+    .unwrap();
+    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+    let ConfigDoc::Json(connected) = doc(&sandbox, agent) else {
+        unreachable!()
+    };
+    let provider = &connected["providers"]["private-ai-proxy"];
+    let command = agent_credential_command(&sandbox.projector.helper_exe, agent, None).unwrap();
+    assert_eq!(
+        *provider,
+        json!({
+            "name": PRODUCT_NAME,
+            "type": "openai-compat",
+            "base_url": "http://127.0.0.1:4180/v1",
+            "api_key": format!("$({command})"),
+            "discover_models": false,
+            "models": [{
+                "id": "openai/gpt-oss-20b",
+                "name": "GPT OSS 20B [TEE]",
+                "can_reason": true,
+                "supports_attachments": true,
+                "context_window": 131072,
+                "default_max_tokens": 8192,
+                "cost_per_1m_in": 0.1,
+                "cost_per_1m_out": 0.5
+            }]
+        })
+    );
+    assert_eq!(
+        connected["models"]["large"],
+        json!({"model": "openai/gpt-oss-20b", "provider": "private-ai-proxy"})
+    );
+    #[cfg(unix)]
+    {
+        // Crush expands the key like a POSIX shell does.
+        let token = sandbox.projector.tokens.read(agent.id()).unwrap().unwrap();
+        write_executable(
+            &sandbox.projector.helper_exe,
+            &format!("#!/bin/sh\nprintf %s {token}\n"),
+        );
+        let output = Command::new("/bin/sh")
+            .args(["-c", &format!("printf %s \"$({command})\"")])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), token);
+    }
+
+    // Crush saves a model picked in its UI as a whole models.large object.
+    let mut picked = doc(&sandbox, agent);
+    picked
+        .set_value(
+            &["models", "large"],
+            &ConfigValue::Json(json!({
+                "model": "openai/gpt-oss-20b", "provider": "private-ai-proxy",
+                "reasoning_effort": "high"
+            })),
+        )
+        .unwrap();
+    write(&path, &picked.render().unwrap());
+    assert!(agent_status(&sandbox.projector.scan(Some(&catalog)).unwrap().0, agent).authorized);
+    picked
+        .set_value(
+            &["models", "large"],
+            &ConfigValue::Json(
+                json!({"model": "openai/gpt-oss-20b", "provider": "private-ai-proxy"}),
+            ),
+        )
+        .unwrap();
+    write(&path, &picked.render().unwrap());
+
+    disconnect(&sandbox, agent);
+    let mut restored = doc(&sandbox, agent);
+    assert!(restored
+        .get_value(&["providers", "private-ai-proxy", "api_key"])
+        .is_none());
+    restored.remove(&["providers", "private-ai-proxy"]).unwrap();
+    assert_eq!(
+        restored.get_value(&[]),
+        ConfigDoc::parse(Format::Json, original)
+            .unwrap()
+            .get_value(&[])
+    );
+}

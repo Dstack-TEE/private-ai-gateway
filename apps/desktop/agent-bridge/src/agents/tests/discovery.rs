@@ -88,6 +88,7 @@ fn helper_relocation_requires_explicit_reconnect_without_scan_writes() {
             Agent::QwenCode => &["providerProtocol", "private-ai-proxy"][..],
             Agent::KiloCli => &["model"][..],
             Agent::ClineCli => &["providers", "openai-compatible", "settings", "baseUrl"][..],
+            Agent::Crush => &["providers", "private-ai-proxy"][..],
         };
         config.set_str(field, "external-edit").unwrap();
         write(&path, &config.render().unwrap());

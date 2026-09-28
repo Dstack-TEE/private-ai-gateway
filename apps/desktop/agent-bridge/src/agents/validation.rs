@@ -174,6 +174,7 @@ impl Projector {
             Agent::OhMyPi => oh_my_pi::validate_config(doc, prior)
                 .map_err(AgentError::ConfigurationConflict),
             Agent::ClineCli => cline::validate(doc),
+            Agent::Crush => crush::validate(&self.home, self.tool_env),
             Agent::QwenCode => qwen_code::validate(
                 &self.home,
                 self.tool_env,

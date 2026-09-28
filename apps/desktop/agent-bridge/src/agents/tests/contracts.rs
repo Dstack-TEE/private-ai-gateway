@@ -40,6 +40,7 @@ fn every_agent_switches_conservatively_and_reconnects_without_namespace_conflict
             Agent::OpenClaw => r#"{"agents":{"defaults":{"model":{"primary":"original/native","fallbacks":["original/fallback"]}}}}"#,
             Agent::Pi => "{}",
             Agent::OhMyPi => "theme: dark\n",
+            Agent::Crush => r#"{"models":{"large":{"model":"native","provider":"anthropic"},"small":{"model":"haiku","provider":"anthropic"}},"options":{"tui":{"compact_mode":true}}}"#,
             Agent::KiloCli => r#"{"model":"original/native","provider":{"original":{"name":"User provider"}}}"#,
             Agent::ClineCli => r#"{"version":1,"lastUsedProvider":"anthropic","modes":{},"providers":{"anthropic":{"settings":{"provider":"anthropic","apiKey":"user-anthropic-key"},"updatedAt":"2026-01-01T00:00:00.000Z","tokenSource":"manual"},"openai-compatible":{"settings":{"provider":"openai-compatible","apiKey":"old-secret","baseUrl":"https://original.invalid/v1","model":"native","protocol":"openai-responses"},"updatedAt":"2026-01-01T00:00:00.000Z","tokenSource":"manual"}}}"#,
             Agent::QwenCode => r#"{"model":{"name":"native"},"security":{"auth":{"selectedType":"qwen-oauth"}},"env":{"OTHER":"kept"}}"#,
@@ -138,6 +139,9 @@ fn every_agent_switches_conservatively_and_reconnects_without_namespace_conflict
                     .is_none()),
                 Agent::Pi | Agent::OhMyPi => assert!(restored
                     .get_value(&["providers", "private-ai-proxy", "apiKey"])
+                    .is_none()),
+                Agent::Crush => assert!(restored
+                    .get_value(&["providers", "private-ai-proxy", "api_key"])
                     .is_none()),
                 Agent::Hermes => assert_eq!(
                     restored
@@ -621,6 +625,8 @@ fn native_auth_and_routing_conflicts_are_read_only_and_deauthorize() {
         (Agent::Hermes, "fallback"),
         (Agent::QwenCode, "dotenv"),
         (Agent::ClineCli, "stored-auth"),
+        (Agent::Crush, "user-layer"),
+        (Agent::Crush, "crushrc"),
     ] {
         let sandbox = sandbox(&format!("conflict-{}-{case}", agent.id()));
         let catalog = catalog();
@@ -685,6 +691,14 @@ fn native_auth_and_routing_conflicts_are_read_only_and_deauthorize() {
             (Agent::Hermes, _) => edited
                 .set_str(&["fallback_model", "provider"], "other")
                 .unwrap(),
+            (Agent::Crush, "user-layer") => write(
+                &sandbox.home.join(".config/crush/crush.json"),
+                r#"{"providers":{"private-ai-proxy":{"disable":true}}}"#,
+            ),
+            (Agent::Crush, _) => write(
+                &sandbox.home.join(".config/crush/crushrc"),
+                "provider private-ai-proxy --api-key sk-test-hidden\n",
+            ),
             (Agent::ClineCli, _) => edited
                 .set_value(
                     &["providers", "openai-compatible", "settings", "auth"],

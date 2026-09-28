@@ -129,7 +129,7 @@ Authenticode remains optional and does not block the release.
 
 `Desktop live E2E` (`desktop-e2e.yml`) installs a published Linux x64 desktop
 package in a fresh `ubuntu:24.04` container and, for Claude Code, Codex,
-OpenCode, Pi, Oh My Pi, OpenClaw, Hermes, Qwen Code, Kilo CLI and Cline CLI, checks a real reply through the
+OpenCode, Pi, Oh My Pi, OpenClaw, Hermes, Qwen Code, Kilo CLI, Cline CLI and Crush, checks a real reply through the
 live RedPill service, its verified usage record, restoration on disconnect and
 token revocation, then fail-closed behavior and restoration on stop
 ([E2E harness](../e2e/README.md)). A second job repeats the OpenCode checks
@@ -432,7 +432,7 @@ connecting it only edits that folder. Other tools can create these folders too:
 Superset writes `~/.claude/settings.json`, `~/.codex/hooks.json`,
 `~/.pi/agent/extensions` and `~/.omp/agent/extensions` whether or not those Agents
 are installed, so they show as detected on a machine that runs Superset.
-Location overrides such as `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `HERMES_HOME`, `QWEN_HOME` or `CLINE_DIR` are
+Location overrides such as `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `HERMES_HOME`, `QWEN_HOME`, `CLINE_DIR` or `CRUSH_GLOBAL_DATA` are
 read only by the Direct build, and only from the backend's own environment. A backend
 started from Finder, the Dock or a login item inherits the launchd environment, not
 variables exported in shell startup files, so it uses the default locations; the MAS
@@ -467,8 +467,8 @@ do not protect against other programs running as the same OS user.
 
 OpenCode and Kilo CLI use their file reference and OpenClaw its `singleValue` file SecretRef.
 Codex invokes `/bin/cat` with a separate absolute-path argument; Claude Code,
-Pi, Oh My Pi and Hermes use their existing credential-command contracts with a
-quoted `/bin/cat` path. Qwen Code and Cline CLI read keys only as values, so
+Pi, Oh My Pi, Hermes and Crush use their existing credential-command contracts
+with a quoted `/bin/cat` path. Qwen Code and Cline CLI read keys only as values, so
 Qwen Code's `settings.json` `env` block and Cline's `providers.json` hold the
 agent token itself, in both distributions; disconnect removes it and revokes
 the token. No external Agent launches a PAP

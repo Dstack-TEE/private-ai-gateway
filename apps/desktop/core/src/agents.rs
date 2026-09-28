@@ -84,10 +84,11 @@ pub enum Agent {
     QwenCode,
     KiloCli,
     ClineCli,
+    Crush,
 }
 
 impl Agent {
-    pub const ALL: [Agent; 10] = [
+    pub const ALL: [Agent; 11] = [
         Agent::ClaudeCode,
         Agent::Codex,
         Agent::Hermes,
@@ -98,6 +99,7 @@ impl Agent {
         Agent::QwenCode,
         Agent::KiloCli,
         Agent::ClineCli,
+        Agent::Crush,
     ];
 
     pub fn from_id(id: &str) -> Result<Self, String> {
@@ -119,6 +121,7 @@ impl Agent {
             Agent::QwenCode => "qwen-code",
             Agent::KiloCli => "kilo",
             Agent::ClineCli => "cline",
+            Agent::Crush => "crush",
         }
     }
 
@@ -134,6 +137,7 @@ impl Agent {
             Agent::QwenCode => "Qwen Code",
             Agent::KiloCli => "Kilo CLI",
             Agent::ClineCli => "Cline CLI",
+            Agent::Crush => "Crush",
         }
     }
 
@@ -149,6 +153,7 @@ impl Agent {
             Agent::QwenCode => "https://qwenlm.github.io/qwen-code-docs/",
             Agent::KiloCli => "https://kilo.ai/cli",
             Agent::ClineCli => "https://cline.bot",
+            Agent::Crush => "https://github.com/charmbracelet/crush",
         }
     }
 }
