@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, RwLock};
 
-use crate::aci::tls::{observing_spki_client, SpkiObservations};
+use crate::aci::tls::{error_chain, observing_spki_client, SpkiObservations};
 use futures_util::StreamExt;
 use http_body_util::{BodyExt, LengthLimitError, Limited};
 
@@ -68,6 +68,65 @@ impl std::fmt::Display for GetError {
 impl From<GetError> for String {
     fn from(error: GetError) -> Self {
         error.to_string()
+    }
+}
+
+/// Why a service could not be verified at all: its host could not be reached
+/// or did not answer as an ACI service. Authored for the user; it names only
+/// the host, never a URL, nonce or transport error.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ServiceError {
+    #[error("Cannot reach {host}. Check the service URL and your network connection.")]
+    Unreachable { host: String },
+    #[error("{host} refused the connection. Check the service URL and port.")]
+    Refused { host: String },
+    #[error("{host} did not respond in time. Check the service URL and your network connection.")]
+    TimedOut { host: String },
+    #[error("A secure connection to {host} could not be established. Check the service URL.")]
+    Tls { host: String },
+    /// It answered without an attestation report: HTTP 404, or another body.
+    #[error("{host} is not a Confidential AI service: it has no attestation report. Check the service URL.")]
+    NotAci { host: String },
+    #[error("{host} is unavailable right now (HTTP {status}). Try again later.")]
+    Unavailable { host: String, status: u16 },
+    #[error(
+        "{host} answered HTTP {status} instead of an attestation report. Check the service URL."
+    )]
+    Status { host: String, status: u16 },
+}
+
+impl ServiceError {
+    /// Classifies an attestation request answered with a non-success status.
+    pub fn from_status(host: &str, status: u16) -> Self {
+        let host = host.to_string();
+        match status {
+            404 => Self::NotAci { host },
+            429 | 500..=599 => Self::Unavailable { host, status },
+            _ => Self::Status { host, status },
+        }
+    }
+
+    /// Classifies a failed request by the error types in its source chain.
+    pub fn from_request(error: &reqwest::Error, host: &str) -> Self {
+        let host = host.to_string();
+        for cause in error_chain(error) {
+            if cause.is::<rustls::Error>() {
+                return Self::Tls { host };
+            }
+            match cause
+                .downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind)
+            {
+                Some(std::io::ErrorKind::ConnectionRefused) => return Self::Refused { host },
+                Some(std::io::ErrorKind::TimedOut) => return Self::TimedOut { host },
+                _ => {}
+            }
+        }
+        if error.is_timeout() {
+            Self::TimedOut { host }
+        } else {
+            Self::Unreachable { host }
+        }
     }
 }
 
@@ -174,14 +233,21 @@ impl AciClient {
     }
 
     pub async fn get(&self, url: &str, bearer: Option<&str>) -> Result<HttpResult, String> {
+        self.read_get(url, bearer)
+            .await
+            .map_err(|e| format!("GET {url} failed: {e}"))
+    }
+
+    /// A GET read whole, failing with the request's own error.
+    async fn read_get(
+        &self,
+        url: &str,
+        bearer: Option<&str>,
+    ) -> Result<HttpResult, reqwest::Error> {
         let resp = self.send_get(url, bearer).await?;
         let status = resp.status().as_u16();
         let headers = resp.headers().clone();
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| format!("GET {url}: failed to read body: {e}"))?
-            .to_vec();
+        let body = resp.bytes().await?.to_vec();
         Ok(HttpResult {
             status,
             headers,
@@ -196,7 +262,10 @@ impl AciClient {
         bearer: Option<&str>,
         limit: usize,
     ) -> Result<HttpResult, GetError> {
-        let resp = self.send_get(url, bearer).await.map_err(GetError::Failed)?;
+        let resp = self
+            .send_get(url, bearer)
+            .await
+            .map_err(|e| GetError::Failed(format!("GET {url} failed: {e}")))?;
         let status = resp.status().as_u16();
         let headers = resp.headers().clone();
         let body = Limited::new(reqwest::Body::from(resp), limit)
@@ -218,22 +287,26 @@ impl AciClient {
         })
     }
 
-    async fn send_get(&self, url: &str, bearer: Option<&str>) -> Result<reqwest::Response, String> {
+    async fn send_get(
+        &self,
+        url: &str,
+        bearer: Option<&str>,
+    ) -> Result<reqwest::Response, reqwest::Error> {
         let mut req = self.http().get(url);
         if let Some(token) = bearer {
             req = req.bearer_auth(token);
         }
-        req.send()
-            .await
-            .map_err(|e| format!("GET {url} failed: {e}"))
+        req.send().await
     }
 
+    /// Fetch the attestation report. The caller classifies a failure with
+    /// [`ServiceError::from_request`].
     pub async fn fetch_attestation(
         &self,
         base_url: &str,
         nonce: &str,
-    ) -> Result<HttpResult, String> {
-        self.get(
+    ) -> Result<HttpResult, reqwest::Error> {
+        self.read_get(
             &format!("{base_url}/v1/aci/attestation?nonce={nonce}"),
             None,
         )

@@ -522,9 +522,12 @@ impl AppState {
     }
 
     /// Shared by the native action label and the management client's toggle.
+    /// A session the user has not ended can always be stopped, even when
+    /// nothing runs, so its agents can be restored.
     pub fn should_stop_protection(&self) -> bool {
         !self.configuration_verification
             && (self.reconnecting
+                || self.session_active
                 || matches!(
                     self.status,
                     VerificationStatus::Verifying

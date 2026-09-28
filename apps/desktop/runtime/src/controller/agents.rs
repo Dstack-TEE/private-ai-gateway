@@ -50,18 +50,23 @@ impl DesktopRuntime {
         self.projector(&self.manager.local_api()?.endpoint)
     }
 
-    // Call under agent_policy so scans cannot reauthorize during recovery.
+    /// Publishes scanned agent tokens for as long as the user's protection
+    /// session lasts, verified or not: the Local API refuses a recognized
+    /// agent with `gateway_not_verified` until verification succeeds, rather
+    /// than telling it to reconnect. Returns whether requests are admitted
+    /// now. Call under agent_policy, so an older scan cannot restore revoked
+    /// credentials.
     pub(super) fn publish_agent_tokens(&self, tokens: TokenSet) -> Result<bool, Error> {
-        let protected = self.manager.snapshot()?.is_protected() && self.proxy.session().verified;
+        let state = self.manager.snapshot()?;
         self.proxy.set_tokens(with_client_token(
-            if protected {
+            if state.session_active {
                 tokens
             } else {
                 TokenSet::default()
             },
             &self.credentials,
         )?);
-        Ok(protected)
+        Ok(state.is_protected() && self.proxy.session().verified)
     }
 
     pub(super) fn reload_agent_tokens(&self) -> Result<(), Error> {
@@ -337,7 +342,7 @@ impl DesktopRuntime {
         // API, which refuses them while protection is not verified: during a
         // restart, a network loss, or a verification failure or block.
         if !protected && state.session_active {
-            self.publish_agent_tokens(TokenSet::default())?;
+            self.publish_agent_tokens(self.current_projector()?.scan(None)?.1)?;
             return Ok(());
         }
         let catalog = if protected { session.catalog } else { None };

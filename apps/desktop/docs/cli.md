@@ -419,6 +419,12 @@ or explicit `--key-stdin`. Never pass a credential as an argument. Changing a
 service URL requires a credential for that destination, not implicit forwarding
 of the old one. Exported profiles do not contain credentials.
 
+`pap profiles use ID` exits `0` once the switch is applied and prints the
+resulting status. While protection is on, it restarts on the new profile, so
+that status may still be reconnecting or show why protection could not start
+or verify. A profile without a credential is refused while protection is on,
+and neither the active profile nor protection changes.
+
 `--key-stdin` is for a pipe or redirected file, not a terminal. The production
 OS requirement is a shared current policy, not a separate preference per profile;
 `edit --require-production-os` restores the strict policy.
@@ -449,6 +455,12 @@ For reviewed agent changes, obtain a preview first:
 pap --json agents connect codex --model MODEL --dry-run
 pap --json --yes agents connect codex --model MODEL --revision REVISION
 ```
+
+`pap --json agents list` reports `recorded: true` for every saved connection
+and `connected: true` only while the agent's configuration routes it through
+the Local API. A connection suspended because protection is off has its own
+configuration restored: it reports `connected: false` (recorded but inactive)
+until protection resumes.
 
 Use the returned revision with the same agent, direction and options. A changed
 configuration is rejected rather than silently re-previewed and approved.

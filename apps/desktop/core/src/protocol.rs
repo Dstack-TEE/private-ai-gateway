@@ -334,6 +334,9 @@ pub enum ErrorCode {
     Busy,
     /// The account service, or signing in to it, failed; the message is authored locally.
     AccountError,
+    /// The Confidential AI service could not be reached or is not one; the
+    /// message names the host and the reason.
+    ServiceConnectionFailed,
     /// The backend kept running; its log has the reason (errdefs System, INTERNAL).
     ShutdownRefused,
     /// An unexpected failure whose details stay in the service (errdefs System, INTERNAL).
@@ -373,7 +376,7 @@ impl ErrorCode {
             | Self::RevisionConflict => 409,
             Self::UnsupportedMediaType => 415,
             Self::TooManyRequests => 429,
-            Self::AccountError => 502,
+            Self::AccountError | Self::ServiceConnectionFailed => 502,
             Self::Busy => 503,
             Self::ShutdownRefused
             | Self::OperationFailed

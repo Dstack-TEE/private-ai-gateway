@@ -9,12 +9,14 @@ use agent_bridge::proxy::{
 };
 use axum::body::{to_bytes, Body};
 use axum::http::StatusCode;
+use desktop_core::protocol::{self, ErrorCode};
 use desktop_runtime::verifier_session::{
     VerifierConfig, VerifierEvent, VerifierEventSink, VerifierLauncher, VerifierTask,
 };
 
 use super::{initialize, proxy_request, text_response, ProxyState, Reporter, VerifierOptions};
 use crate::checks::VerifierPolicy;
+use crate::verify::VerifyError;
 
 impl VerifiedService for ProxyState {
     fn call(
@@ -134,10 +136,18 @@ impl VerifierLauncher for InProcessVerifierLauncher {
                     Ok::<(), String>(())
                 }
                 Err(error) => {
+                    let detail = error.to_string();
                     worker_events(VerifierEvent::Fatal {
-                        message: error.clone(),
+                        error: match error {
+                            VerifyError::Service(error) => protocol::Error::new(
+                                ErrorCode::ServiceConnectionFailed,
+                                error.to_string(),
+                            )
+                            .into(),
+                            VerifyError::Failed(detail) => detail.into(),
+                        },
                     });
-                    Err(error)
+                    Err(detail)
                 }
             }
         });

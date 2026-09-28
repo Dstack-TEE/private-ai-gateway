@@ -236,11 +236,14 @@ export type AgentStatus = { id: string, name: string, configPath: string,
  */
 installed: boolean,
 /**
- * A connected link, including one suspended until protection resumes.
+ * The agent's configuration routes it through the Local API. A
+ * connection suspended until protection resumes is recorded, not
+ * connected: its own configuration is restored.
  */
 connected: boolean,
 /**
- * A connection record exists (whatever the config now says).
+ * A connection record exists (whatever the config now says), including
+ * a suspended one.
  */
 recorded: boolean,
 /**

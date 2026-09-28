@@ -127,7 +127,7 @@ impl DesktopRuntime {
                 self.proxy.set_api_key(None);
                 self.manager.restore_snapshot(previous);
                 return Err(match stop_result {
-                    Ok(_) => error.into(),
+                    Ok(_) => error,
                     Err(stop_error) => {
                         format!("{error}. The verifier also could not stop: {stop_error}").into()
                     }
@@ -237,6 +237,14 @@ impl DesktopRuntime {
         if !self.settings.config()?.profiles.contains_key(&profile_id) {
             return Err(Error::invalid_state("Confidential AI profile not found"));
         }
+        // Protection restarts on the new profile, which could not start
+        // without a credential: refuse before anything changes. The app opens
+        // the profile's setup instead.
+        if reconnect && self.load_profile_key(&profile_id)?.is_none() {
+            return Err(Error::invalid_state(
+                "This profile has no credential. Add one before switching to it while protection is on.",
+            ));
+        }
         if reconnect {
             self.stop_with_reconnect(true)?;
             self.manager.cancel_reconnection();
@@ -248,11 +256,14 @@ impl DesktopRuntime {
         self.proxy.set_api_key(None);
         self.recovery.cancel();
         let config = self.publish_service_configuration(false)?;
+        // The switch is applied: a failure to start protection on the new
+        // profile is the resulting status, not a failed switch.
         if reconnect {
-            self.start_inner(config)
-        } else {
-            Ok(self.manager.snapshot()?)
+            if let Err(error) = self.start_inner(config) {
+                self.report_error(error);
+            }
         }
+        Ok(self.manager.snapshot()?)
     }
 
     pub async fn delete_profile(&self, profile_id: String) -> Result<AppState, Error> {

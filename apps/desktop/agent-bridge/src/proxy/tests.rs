@@ -238,6 +238,12 @@ async fn anonymous_wrong_and_cross_agent_tokens_are_refused() {
         .unwrap();
     assert_eq!(anonymous.status().as_u16(), 401);
     assert!(anonymous.headers().contains_key("www-authenticate"));
+    let body: Value = anonymous.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "unauthorized");
+    assert_eq!(
+        body["error"]["message"],
+        format!("Missing API key. Use the Local API key shown in {PRODUCT_NAME}.")
+    );
     let wrong = client
         .post(format!("{proxy}/v1/messages"))
         .header("x-api-key", "guess")

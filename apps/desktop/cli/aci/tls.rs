@@ -67,26 +67,32 @@ impl fmt::Display for PinMismatch {
 impl std::error::Error for PinMismatch {}
 
 /// Whether `error` (for example a `reqwest::Error`) failed because the TLS
-/// pin refused this request's handshake. The connector surfaces the
-/// handshake's `rustls::Error` as the payload of (possibly nested)
-/// `io::Error`s, which `source()` skips, so an `io::Error` link is descended
-/// through `io::Error::get_ref` and every other link through `source()`.
+/// pin refused this request's handshake.
 pub fn is_pin_mismatch(error: &(dyn std::error::Error + 'static)) -> bool {
-    let mut next = Some(error);
-    while let Some(error) = next {
-        if let Some(RustlsError::InvalidCertificate(CertificateError::Other(OtherError(inner)))) =
-            error.downcast_ref::<RustlsError>()
-        {
-            return inner.is::<PinMismatch>();
-        }
-        next = match error.downcast_ref::<std::io::Error>() {
+    error_chain(error).any(|error| {
+        matches!(
+            error.downcast_ref::<RustlsError>(),
+            Some(RustlsError::InvalidCertificate(CertificateError::Other(OtherError(inner))))
+                if inner.is::<PinMismatch>()
+        )
+    })
+}
+
+/// `error` and its causes. The connector surfaces a handshake's
+/// `rustls::Error` as the payload of (possibly nested) `io::Error`s, which
+/// `source()` skips, so an `io::Error` link is descended through
+/// `io::Error::get_ref` and every other link through `source()`.
+pub fn error_chain<'a>(
+    error: &'a (dyn std::error::Error + 'static),
+) -> impl Iterator<Item = &'a (dyn std::error::Error + 'static)> {
+    std::iter::successors(Some(error), |error| {
+        match error.downcast_ref::<std::io::Error>() {
             Some(io) => io
                 .get_ref()
                 .map(|inner| inner as &(dyn std::error::Error + 'static)),
             None => error.source(),
-        };
-    }
-    false
+        }
+    })
 }
 
 impl SpkiObservations {
