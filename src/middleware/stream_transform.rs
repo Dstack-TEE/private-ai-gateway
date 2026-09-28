@@ -508,10 +508,15 @@ fn parse_chat_chunk(chunk: &Value) -> Result<ChatChunk<'_>, ()> {
     if !chunk.is_object() {
         return Err(());
     }
-    let choice = chunk
-        .get("choices")
-        .and_then(Value::as_array)
-        .and_then(|choices| choices.first());
+    let choice = match chunk.get("choices") {
+        None | Some(Value::Null) => None,
+        Some(Value::Array(choices)) => match choices.first() {
+            None => None,
+            Some(choice @ Value::Object(_)) => Some(choice),
+            Some(_) => return Err(()),
+        },
+        Some(_) => return Err(()),
+    };
     let delta = match choice.and_then(|choice| choice.get("delta")) {
         None | Some(Value::Null) => None,
         Some(Value::Object(delta)) => Some(delta),
@@ -1206,17 +1211,19 @@ impl ResponsesEvents {
             }
             TextKind::Text | TextKind::Refusal => message_item(
                 &item_id("msg", request_id, output_index),
-                message_part(kind, text),
+                text_part(kind, text),
                 status,
             ),
         }
     }
 }
 
-fn message_part(kind: TextKind, text: &str) -> Value {
+/// The content part a text item streams into, alike for every kind.
+fn text_part(kind: TextKind, text: &str) -> Value {
     match kind {
+        TextKind::Reasoning => json!({ "type": "reasoning_text", "text": text }),
+        TextKind::Text => output_text_part(text),
         TextKind::Refusal => refusal_part(text),
-        TextKind::Text | TextKind::Reasoning => output_text_part(text),
     }
 }
 
@@ -1249,15 +1256,17 @@ impl ChatEvents for ResponsesEvents {
     fn open_text(&mut self, kind: TextKind, out: &mut String) {
         let item = self.text_item(kind, self.output.len(), "", "in_progress");
         self.add_item(item, out);
-        if kind != TextKind::Reasoning {
-            let (output_index, item_id) = self.active();
-            let part = message_part(kind, "");
-            self.emit(
-                "response.content_part.added",
-                json!({ "item_id": item_id, "output_index": output_index, "content_index": 0, "part": part }),
-                out,
-            );
-        }
+        let (output_index, item_id) = self.active();
+        self.emit(
+            "response.content_part.added",
+            json!({
+                "item_id": item_id,
+                "output_index": output_index,
+                "content_index": 0,
+                "part": text_part(kind, ""),
+            }),
+            out,
+        );
     }
 
     fn text_delta(&mut self, kind: TextKind, delta: &str, out: &mut String) {
@@ -1282,18 +1291,16 @@ impl ChatEvents for ResponsesEvents {
             body["logprobs"] = json!([]);
         }
         self.emit(&text_event(kind, "done"), body, out);
-        if kind != TextKind::Reasoning {
-            self.emit(
-                "response.content_part.done",
-                json!({
-                    "item_id": item_id,
-                    "output_index": output_index,
-                    "content_index": 0,
-                    "part": message_part(kind, text),
-                }),
-                out,
-            );
-        }
+        self.emit(
+            "response.content_part.done",
+            json!({
+                "item_id": item_id,
+                "output_index": output_index,
+                "content_index": 0,
+                "part": text_part(kind, text),
+            }),
+            out,
+        );
         let item = self.text_item(kind, output_index, text, "completed");
         self.done_item(item, out);
     }
@@ -2335,6 +2342,69 @@ mod tests {
         assert_eq!(out.last().unwrap()["type"], "error", "{out:?}");
     }
 
+    /// Rebuild the output the way a client applies events one by one: every
+    /// part a delta names must have been added, and every done item must be
+    /// what the deltas built.
+    fn accumulate_responses(events: &[Value]) -> Value {
+        let mut output: Vec<Value> = Vec::new();
+        for event in events {
+            let kind = event["type"].as_str().unwrap();
+            let index = event["output_index"].as_u64().map(|index| index as usize);
+            match kind {
+                "response.output_item.added" => {
+                    assert_eq!(index, Some(output.len()), "{event}");
+                    output.push(event["item"].clone());
+                }
+                "response.content_part.added" => {
+                    let content = output[index.unwrap()]["content"].as_array_mut().unwrap();
+                    assert_eq!(event["content_index"], json!(content.len()), "{event}");
+                    content.push(event["part"].clone());
+                }
+                "response.output_text.delta"
+                | "response.reasoning_text.delta"
+                | "response.refusal.delta" => {
+                    let content_index = event["content_index"].as_u64().unwrap() as usize;
+                    let part = output[index.unwrap()]["content"]
+                        .get_mut(content_index)
+                        .unwrap_or_else(|| panic!("delta for a part never added: {event}"));
+                    let key = if kind == "response.refusal.delta" {
+                        "refusal"
+                    } else {
+                        "text"
+                    };
+                    let text = format!(
+                        "{}{}",
+                        part[key].as_str().unwrap(),
+                        event["delta"].as_str().unwrap()
+                    );
+                    part[key] = json!(text);
+                }
+                "response.function_call_arguments.delta" => {
+                    let item = &mut output[index.unwrap()];
+                    let arguments = format!(
+                        "{}{}",
+                        item["arguments"].as_str().unwrap(),
+                        event["delta"].as_str().unwrap()
+                    );
+                    item["arguments"] = json!(arguments);
+                }
+                "response.output_item.done" => {
+                    let item = &mut output[index.unwrap()];
+                    if item.get("content").is_some() {
+                        assert_eq!(item["content"], event["item"]["content"], "{event}");
+                    }
+                    let streamed = item["arguments"].as_str().unwrap_or_default();
+                    if !streamed.is_empty() && event["item"]["status"] == "completed" {
+                        assert_eq!(item["arguments"], event["item"]["arguments"], "{event}");
+                    }
+                    *item = event["item"].clone();
+                }
+                _ => {}
+            }
+        }
+        Value::Array(output)
+    }
+
     #[tokio::test]
     async fn openai_chat_to_responses_stream_matches_fixtures() {
         let cases: Vec<Value> =
@@ -2371,6 +2441,11 @@ mod tests {
                 continue;
             }
             assert!(error.is_none(), "case {name}: unexpected error {error:?}");
+            assert_eq!(
+                accumulate_responses(&events),
+                events.last().unwrap()["response"]["output"],
+                "case {name}: events do not build the final output"
+            );
             let terminal = events.last().expect("terminal event");
             let expected = &case["terminal"];
             assert_eq!(terminal["response"]["status"], expected["status"]);
@@ -2594,6 +2669,7 @@ mod tests {
             vec![chat_event(json!({ "tool_calls": {} }), None)],
             vec![tool_event(json!({ "index": -1, "id": "c" }))],
             vec!["data: null".to_string()],
+            vec![r#"data: {"choices":[null]}"#.to_string()],
         ] {
             for transform in [
                 messages_transform(),
