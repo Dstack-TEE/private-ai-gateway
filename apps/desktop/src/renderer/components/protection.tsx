@@ -2,8 +2,10 @@ import React, { useEffect, useState } from "react";
 import { RefreshCw, ShieldCheck, ShieldX } from "lucide-react";
 import { SwitchControl } from "./controls";
 import type { AppState } from "../../shared/contracts";
+import { cn } from "../lib/utils";
 
-export function ProtectionStatus({ state }: { state: AppState }): React.JSX.Element {
+/** The protection title with the session's elapsed time: large in the overview card, small in the page header. */
+export function ProtectionStatus({ state, variant }: { state: AppState; variant: "card" | "header" }): React.JSX.Element {
   const { phase, title } = state.protection;
   const active = phase === "protected";
   const since = active ? state.protectedSince : undefined;
@@ -26,38 +28,43 @@ export function ProtectionStatus({ state }: { state: AppState }): React.JSX.Elem
   }, [since]);
   const seconds = since === undefined ? undefined : Math.max(0, Math.floor(now / 1_000) - since);
   const elapsed = seconds === undefined ? undefined : [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60].map((value) => String(value).padStart(2, "0")).join(":");
+  const card = variant === "card";
+  const iconSize = card ? 24 : 14;
   return (
-    <span className="protection-status inline-flex items-center justify-center gap-1.25 max-w-full flex-wrap [&_>_svg]:flex-none">
-      {active ? <ShieldCheck size={14} aria-hidden="true" /> : phase === "reconnecting" ? <RefreshCw size={14} aria-hidden="true" /> : <ShieldX size={14} aria-hidden="true" />}
+    <span className={cn("grid max-w-full items-center", card
+      ? "grid-cols-[24px_minmax(0,1fr)] justify-start gap-x-1.5 gap-y-1 text-2xl font-semibold"
+      : "grid-cols-[14px_auto] justify-center justify-items-end gap-x-1.25")}>
+      {active ? <ShieldCheck size={iconSize} aria-hidden="true" /> : phase === "reconnecting" ? <RefreshCw size={iconSize} aria-hidden="true" /> : <ShieldX size={iconSize} aria-hidden="true" />}
       <span aria-live="polite">{title}</span>
-      {elapsed !== undefined && <time className="protection-duration w-[8ch] font-medium text-xs leading-4.5 font-mono tabular-nums text-muted-foreground whitespace-nowrap" dateTime={`PT${seconds}S`} aria-label={`Session elapsed ${elapsed}`}>{elapsed}</time>}
+      {elapsed !== undefined && <time className={cn("w-[8ch] font-mono text-xs leading-4.5 whitespace-nowrap text-muted-foreground tabular-nums", card ? "col-start-2 font-normal" : "col-span-full font-medium")} dateTime={`PT${seconds}S`} aria-label={`Session elapsed ${elapsed}`}>{elapsed}</time>}
     </span>
   );
 }
 
-/** The protection switch; its action is the tray's protection item. */
+/** The protection switch; its action is the tray's protection item. The overview card also labels development mode. */
 export function ProtectedControl({
   state,
   pending,
-  compact = false,
-  iconOnly = false,
+  variant,
+  className,
   onToggle,
 }: {
   state: AppState;
   /** A start or stop is in flight. */
   pending: boolean;
-  compact?: boolean;
-  iconOnly?: boolean;
+  variant: "card" | "header";
+  className?: string;
   onToggle(): void;
 }): React.JSX.Element {
   const { action } = state.protection;
   const developmentMode = !state.config.requireProductionOs;
+  const card = variant === "card";
   return (
-    <div className={`protected-control flex items-center gap-2.5 text-xs font-semibold [&.is-compact]:p-0 max-[440px]:[&.is-compact]:gap-1.5 max-[440px]:[&.is-compact]:pl-1.75 max-[440px]:[&.is-compact]:text-xs ${compact ? "is-compact" : ""} ${iconOnly && !compact ? "is-icon-only mt-0.75" : ""}`}>
-      {!iconOnly && <span>Protected</span>}
-      {developmentMode && !compact && <span className="dev-mode-label text-warning text-xs font-semibold">Dev mode</span>}
+    <div className={cn("flex items-center gap-2.5 text-xs font-semibold", !card && "max-[440px]:gap-1.5 max-[440px]:pl-1.75", className)}>
+      {developmentMode && card && <span className="text-xs font-semibold text-warning">Dev mode</span>}
       <SwitchControl
         size="default"
+        className={card ? "transition-colors duration-200 ease-out" : undefined}
         checked={action.operation === "stop"}
         label={action.label}
         disabled={!action.enabled || pending}

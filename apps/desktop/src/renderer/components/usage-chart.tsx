@@ -51,7 +51,7 @@ export function UsageChart({ page, loading, range, bounds, metric }: {
   const formatValue = useMemo(() => new Intl.NumberFormat(undefined, metric === "cost"
     ? { style: "currency", currency: "USD", maximumFractionDigits: 6 }
     : {}).format, [metric]);
-  return <figure className="usage-chart relative min-h-62.5 m-0 max-[440px]:min-h-43" aria-busy={loading} aria-label={`${metric} usage by model${monthly ? " per month" : " per day"}`}>
+  return <figure className="relative m-0 min-h-62.5 max-[440px]:min-h-43" aria-busy={loading} aria-label={`${metric} usage by model${monthly ? " per month" : " per day"}`}>
         {!page ? <div className="h-72 flex items-center justify-center text-sm text-muted-foreground" role="status">{loading ? null : "Usage data unavailable."}</div> : <Suspense fallback={<div className="h-72" aria-busy="true" />}><UsagePlot rows={rows} series={series} monthly={monthly} metric={metric} formatValue={formatValue} /></Suspense>}
         {page?.summary.requests === 0 && <p className="text-sm text-muted-foreground">No usage in this range.</p>}
         <table className="sr-only" aria-label="Usage by model">

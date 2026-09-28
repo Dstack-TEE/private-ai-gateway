@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { DesktopApi, NotificationConfiguration, NotificationPreferences } from "../../shared/contracts";
 import { SettingsList, SettingsToggle } from "./settings";
-import { AppDialog, type DialogControl } from "./app-dialog";
+import { AppDialog, AppDialogBody, type DialogControl } from "./app-dialog";
 import { Alert, AlertDescription } from "./ui/alert";
 import { DialogFooter } from "./ui/dialog";
 import { Button } from "./ui/button";
@@ -71,7 +71,7 @@ export function NotificationsDialog({ api, ...control }: { api: DesktopApi } & D
   const notifications = useNotificationSettings(api);
   const { data, error, busy, change } = notifications;
   return <AppDialog {...control} title="Notifications" className="sm:max-w-xl" dismissible={!busy}>
-    <div className="-mx-6 flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-6 py-1">
+    <AppDialogBody className="flex flex-1 flex-col gap-4 py-1">
       <NotificationPermissionNotice {...notifications} />
       {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
       {data && <>
@@ -82,7 +82,7 @@ export function NotificationsDialog({ api, ...control }: { api: DesktopApi } & D
           ["verification", "Response verification failures", "A response fails proof verification."],
         ] as const).map(([key, label, description]) => <SettingsToggle key={key} label={label} description={description} checked={data.preferences[key]} disabled={busy || !data.preferences.enabled} onToggle={() => change(key, !data.preferences[key])} />)}</SettingsList>
       </>}
-    </div>
+    </AppDialogBody>
     <DialogFooter><Button variant="outline" disabled={busy} onClick={control.onClose}>Done</Button></DialogFooter>
   </AppDialog>;
 }

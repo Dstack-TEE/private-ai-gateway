@@ -2,7 +2,8 @@ import { createContext, useContext, useEffect, useLayoutEffect, type PropsWithCh
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Hint } from "./hint";
 import type { Appearance, DesktopApi } from "../../shared/contracts";
-import { Item, ItemContent, ItemTitle, ItemActions } from "./ui/item";
+import { ItemContent, ItemTitle, ItemActions } from "./ui/item";
+import { SettingsItem } from "./settings";
 import { FieldLabel } from "./ui/field";
 import { useReportFailure } from "./confirm";
 import { Monitor, Sun, Moon } from "lucide-react";
@@ -50,9 +51,9 @@ export function AppearanceControl({ api }: { api: DesktopApi }) {
     onSuccess: (_, next) => { client.setQueryData(["appearance"], next); },
     onError: (error) => reportFailure("Could not change the appearance", error),
   });
-  return <Item><ItemContent><ItemTitle><FieldLabel id="appearance-label">Theme</FieldLabel></ItemTitle></ItemContent><ItemActions>
+  return <SettingsItem><ItemContent><ItemTitle><FieldLabel id="appearance-label">Theme</FieldLabel></ItemTitle></ItemContent><ItemActions>
     <ToggleGroup size="sm" variant="outline" spacing={0} aria-labelledby="appearance-label" value={[appearance]} disabled={mutation.isPending} onValueChange={([value]) => {
       if (!mutation.isPending && (value === "system" || value === "light" || value === "dark")) mutation.mutate(value);
     }}>{([["system", "System", Monitor], ["light", "Light", Sun], ["dark", "Dark", Moon]] as const).map(([value, label, Icon]) => <Hint key={value} content={label}><ToggleGroupItem value={value} aria-label={label}><Icon className="size-4" /></ToggleGroupItem></Hint>)}</ToggleGroup>
-  </ItemActions></Item>;
+  </ItemActions></SettingsItem>;
 }

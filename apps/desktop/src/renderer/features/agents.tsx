@@ -12,7 +12,7 @@ import { AgentAttention } from "../components/agent-attention";
 import ohMyPiIcon from "../assets/oh-my-pi.svg";
 import type { Tone } from "../../shared/contracts";
 import { Item, ItemActions, ItemContent, ItemTitle } from "../components/ui/item";
-import { SettingsSection } from "../components/settings";
+import { SettingsItem, SettingsSection } from "../components/settings";
 import { SwitchControl } from "../components/controls";
 import type { AgentAccessStatus, AgentStatus } from "../../shared/contracts";
 import { EmptyState } from "../components/detail";
@@ -37,10 +37,10 @@ function AgentMark({ agent }: { agent: Pick<AgentStatus, "id" | "name"> }): Reac
   const icon = AGENT_ICONS[agent.id];
   return (
     <span className={cn(
-      "grid size-8 flex-none place-items-center overflow-hidden rounded-xl border border-border bg-white text-xs font-bold text-muted-foreground [&_img]:size-5 [&_img]:object-contain",
+      "grid size-8 flex-none place-items-center overflow-hidden rounded-xl border border-border bg-white text-xs font-bold text-muted-foreground",
       agent.id === "oh-my-pi" && "bg-[#0d0d0d]",
     )} aria-hidden="true">
-      {icon ? <img src={icon} alt="" /> : agent.name.slice(0, 2).toUpperCase()}
+      {icon ? <img className="size-5 object-contain" src={icon} alt="" /> : agent.name.slice(0, 2).toUpperCase()}
     </span>
   );
 }
@@ -58,7 +58,7 @@ export function AgentsPage(): React.JSX.Element {
         : "Checking access";
   const locked = applying || integrations.controlsLocked;
   return (
-    <div className="max-w-230 min-h-full mt-0 mr-auto mb-0 ml-auto">
+    <div className="mx-auto min-h-full max-w-230">
       <AgentAccessNotice status={accessStatus} busy={authorizing} onAuthorize={integrations.requestAccess} />
       <SettingsSection title={accessStatus === "authorized" && !problem ? "Detected" : "Agents"} detail={accessStatus === "authorized" && !problem ? `${connected} connected` : undefined}>
         {accessStatus !== "authorized" ? agents.map((agent) => (
@@ -135,12 +135,14 @@ export function AgentRow({
   const disconnecting = pendingConnection ?? agent.recorded;
   const actionable = disconnecting || !agent.error;
   const note = agent.attention ?? agent.error;
+  const Row = compact ? Item : SettingsItem;
   return (
-    <Item size={compact ? "xs" : "default"} variant={compact ? "muted" : "default"} className="agent-block">
+    // The overview's last compact row drops its bottom border.
+    <Row size={compact ? "xs" : "default"} variant={compact ? "muted" : "default"} className={cn(compact && "last:border-b-0")}>
       <AgentMark agent={agent} />
       <ItemContent className="min-w-0">
-        <ItemTitle className="row-title-line max-w-full flex items-center flex-wrap gap-y-1 gap-x-2">
-          <span className="row-title">{name}</span>
+        <ItemTitle className="flex max-w-full flex-wrap items-center gap-x-2 gap-y-1">
+          <span>{name}</span>
           {note && pendingConnection === undefined && !detectionLabel
             ? <AgentAttention name={name} message={note} authorized={agent.authorized} action={!disabled ? agent.repairAction : undefined} onRepair={() => onSelect(agent.repairAction === "reconnect")} />
             : <StateLabel tone={presence.tone} text={presence.label} />}
@@ -155,7 +157,7 @@ export function AgentRow({
         onToggle={() => { if (!disabled && !detectionLabel && actionable) onSelect(!disconnecting); }}
       /> : <AgentWebsite agent={agent} />}
       </ItemActions>
-    </Item>
+    </Row>
   );
 }
 

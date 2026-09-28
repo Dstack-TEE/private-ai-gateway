@@ -268,7 +268,7 @@ function Window(): React.JSX.Element {
       <Sidebar navigationRef={navigation} />
       <section className="min-w-0 min-h-0 flex flex-col">
         <PageHeader titleRef={pageTitle} />
-        <div id="page-content" className="flex-auto min-w-0 min-h-0 overflow-auto pt-4 pr-6 pb-6 pl-6 [&_>_[role=alert]]:mb-4 max-[780px]:p-4 max-[440px]:p-3">
+        <div id="page-content" className="min-h-0 min-w-0 flex-auto overflow-auto px-6 pt-4 pb-6 max-[780px]:p-4 max-[440px]:p-3">
           <Outlet />
         </div>
       </section>
