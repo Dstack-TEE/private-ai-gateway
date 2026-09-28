@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.2.0...desktop-v0.2.1) (2026-09-28)
+
+Private AI Proxy 0.2.1 hardens OpenCode 2 support, restores agents when the app is uninstalled, and cleans up the app's internals with no visible change.
+
+### Bug Fixes
+
+* **OpenCode 2.** OpenCode 2 reads the configuration Private AI Proxy writes, so connecting works as before. A native OpenCode 2 `providers.private-ai-proxy` entry could override the proxy's endpoint while the app still showed Connected; it is now reported as a conflict and the connection stays closed.
+* **Uninstall restores agents.** `pap stop --offline` ends the protection session and restores every agent's own configuration without a running backend. The Windows uninstaller runs it (never during in-app updates); if the restore fails it explains why and lets you keep the restore data. On macOS and Linux, choose Stop All and Quit, or run `pap stop --offline`, before removing the app.
+* **Reduce Motion.** With Reduce Motion on, every animation on the protection card stops.
+
+### Internal
+
+* The UI API request and response types are generated from the Rust definitions, so a mismatch fails the build.
+* Renderer rows and notices are composed from the standard components; every screen renders the same as 0.2.0.
+* A nightly live end-to-end test covers all seven agents, OpenCode 2, and a real network outage.
+
 ## [0.2.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.1.6...desktop-v0.2.0) (2026-09-28)
 
 Private AI Proxy 0.2.0 is the first stable release since 0.1.6. It rebuilds the app around one local API, plain settings files and a lean, native-feeling window.
