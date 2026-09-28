@@ -186,6 +186,14 @@ impl ChutesProviderBackend {
         for (name, value) in headers {
             builder = builder.header(name, value);
         }
+        // Chutes builds its invocation headers explicitly instead of forwarding
+        // the prepared request header map. Preserve the gateway's per-attempt
+        // correlation ids on the Chutes invoke request.
+        for name in ["X-Client-Request-Id", "X-Request-Id"] {
+            if let Some(value) = req.request.headers.get(name) {
+                builder = builder.header(name, value);
+            }
+        }
         let resp = builder.send().await.map_err(transport_error)?;
         let status_code = resp.status().as_u16();
         let headers = response_headers(&resp);

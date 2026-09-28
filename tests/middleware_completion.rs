@@ -3,6 +3,7 @@
 //! candidates, and successful forwarding through receipt finalization.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -65,6 +66,58 @@ struct RecordingUpstream {
     status: u16,
     body: Vec<u8>,
     content_type: &'static str,
+}
+
+type RequestHeaderList = Arc<Mutex<Vec<HashMap<String, String>>>>;
+
+struct RequestIdUpstream {
+    requests: RequestHeaderList,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl UpstreamBackend for RequestIdUpstream {
+    fn name(&self) -> &str {
+        "request-id-upstream"
+    }
+
+    fn url_origin(&self) -> Option<&str> {
+        Some("https://request-id-upstream.example")
+    }
+
+    async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+        self.requests.lock().unwrap().push(req.headers);
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let (status_code, provider_header) = match call {
+            0 => (502, Some(("x-request-id", "provider-first"))),
+            1 => (502, None),
+            _ => (200, Some(("cf-ray", "provider-third"))),
+        };
+        let mut headers =
+            HashMap::from([("content-type".to_string(), "application/json".to_string())]);
+        if let Some((name, value)) = provider_header {
+            headers.insert(name.to_string(), value.to_string());
+        }
+        let body = if status_code == 200 {
+            br#"{"id":"upstream-id","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#.to_vec()
+        } else {
+            br#"{"error":{"message":"unavailable"}}"#.to_vec()
+        };
+        Ok(UpstreamResponse {
+            status_code,
+            body,
+            headers,
+            served_instance_id: None,
+        })
+    }
+
+    async fn forward_verified_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        self.forward(req.request).await
+    }
 }
 
 #[async_trait]
@@ -364,6 +417,26 @@ fn build_recording_service(
                 status,
                 body,
                 content_type,
+            }),
+            Arc::new(OkVerifier),
+            Arc::new(InMemoryReceiptStore::default()),
+            AciServiceConfig::for_test(),
+            Arc::new(FixedClock(1_700_000_000)),
+        )
+        .unwrap(),
+    );
+    (service, requests)
+}
+
+fn build_request_id_service() -> (Arc<AciService>, RequestHeaderList) {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let service = Arc::new(
+        AciService::new_with_upstream_verifier(
+            Arc::new(StaticKeyProvider::default()),
+            Arc::new(StubQuoter::default()),
+            Arc::new(RequestIdUpstream {
+                requests: requests.clone(),
+                calls: AtomicUsize::new(0),
             }),
             Arc::new(OkVerifier),
             Arc::new(InMemoryReceiptStore::default()),
@@ -765,6 +838,70 @@ async fn streamed_success_hides_which_upstream_served_it() {
     // Framing and content survive intact.
     assert!(body.contains(r#""content":"hi""#), "{body}");
     assert!(body.contains("data: [DONE]"), "{body}");
+}
+
+#[tokio::test]
+async fn upstream_attempt_ids_are_unique_and_report_provider_ids_per_attempt() {
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [
+                { "routeId": "openai:first", "format": "openai" },
+                { "routeId": "openai:second", "format": "openai" },
+                { "routeId": "openai:third", "format": "openai" }
+            ]
+        }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    let (service, requests) = build_request_id_service();
+
+    let (status, _, body) =
+        response_parts(mw.handle_completion(&service, chat_input()).await).await;
+    assert_eq!(status, 200, "{body}");
+
+    let upstream_ids: Vec<_> = {
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        let ids: Vec<_> = requests
+            .iter()
+            .map(|headers| {
+                let client_id = headers.get("X-Client-Request-Id").unwrap();
+                assert!(client_id.starts_with("ureq_"));
+                assert_eq!(headers.get("X-Request-Id"), Some(client_id));
+                assert_ne!(client_id, "req-1");
+                client_id.clone()
+            })
+            .collect();
+        assert_ne!(ids[0], ids[1]);
+        assert_ne!(ids[1], ids[2]);
+        assert_ne!(ids[0], ids[2]);
+        ids
+    };
+
+    for _ in 0..40 {
+        if posts.lock().unwrap().len() >= 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let reports = posts.lock().unwrap().clone();
+    let attempts: Vec<_> = reports
+        .iter()
+        .filter(|report| report["requestId"] == "req-1")
+        .collect();
+    assert_eq!(attempts.len(), 3, "{reports:?}");
+    let by_index: HashMap<_, _> = attempts
+        .iter()
+        .map(|report| (report["attemptIndex"].as_u64().unwrap(), *report))
+        .collect();
+    assert_eq!(by_index[&0]["upstreamRequestId"], upstream_ids[0]);
+    assert_eq!(by_index[&0]["providerRequestId"], "provider-first");
+    assert_eq!(by_index[&1]["upstreamRequestId"], upstream_ids[1]);
+    assert!(by_index[&1].get("providerRequestId").is_none());
+    assert_eq!(by_index[&2]["upstreamRequestId"], upstream_ids[2]);
+    assert_eq!(by_index[&2]["providerRequestId"], "provider-third");
 }
 
 #[tokio::test]
@@ -1808,6 +1945,8 @@ async fn meter_stream_injects_cost_classifies_completed_and_reports() {
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
         upstream_status: 200,
+        upstream_request_id: "ureq_test".to_string(),
+        provider_request_id: None,
         prefix_hash: None,
         started: std::time::Instant::now(),
         downstream_abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -2483,6 +2622,8 @@ async fn downstream_abort_before_settle_reports_gateway_failure_not_client_close
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
         upstream_status: 200,
+        upstream_request_id: "ureq_test".to_string(),
+        provider_request_id: None,
         prefix_hash: None,
         started: std::time::Instant::now(),
         downstream_abort: downstream_abort.clone(),
@@ -2549,6 +2690,8 @@ async fn downstream_abort_after_settle_does_not_double_report() {
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
         upstream_status: 200,
+        upstream_request_id: "ureq_test".to_string(),
+        provider_request_id: None,
         prefix_hash: None,
         started: std::time::Instant::now(),
         downstream_abort: downstream_abort.clone(),
@@ -3292,6 +3435,8 @@ async fn mid_stream_read_timeout_settles_504_as_upstream_timeout() {
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
         upstream_status: 200,
+        upstream_request_id: "ureq_test".to_string(),
+        provider_request_id: None,
         prefix_hash: None,
         started: std::time::Instant::now(),
         downstream_abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -3484,6 +3629,8 @@ async fn unpolled_drop_is_a_client_disconnect_unless_the_pipeline_marked_itself(
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
         upstream_status: 200,
+        upstream_request_id: "ureq_test".to_string(),
+        provider_request_id: None,
         prefix_hash: None,
         started: std::time::Instant::now(),
         downstream_abort: abort.clone(),
@@ -3840,6 +3987,8 @@ async fn in_band_stream_error_settles_with_a_class_and_none_of_its_text() {
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
         upstream_status: 200,
+        upstream_request_id: "ureq_test".to_string(),
+        provider_request_id: None,
         prefix_hash: None,
         started: std::time::Instant::now(),
         downstream_abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),

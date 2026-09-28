@@ -546,7 +546,12 @@ async fn verified_upstream_request_returns_aci_headers_and_signed_receipt() {
         let calls = h.upstream_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].body, CHAT_REQUEST);
-        assert!(calls[0].headers.is_empty());
+        let upstream_request_id = calls[0].headers.get("X-Request-Id").unwrap();
+        assert!(upstream_request_id.starts_with("ureq_"));
+        assert_eq!(
+            calls[0].headers.get("X-Client-Request-Id"),
+            Some(upstream_request_id)
+        );
     }
 
     {
