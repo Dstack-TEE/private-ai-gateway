@@ -1,7 +1,7 @@
 # Private AI Gateway
 
-**Call the LLM APIs you already know. Verify who can read the request before
-you send it.**
+**Call the LLM APIs you already know. Verify that no one can read your data
+before you send it.**
 
 Private AI Gateway is an OpenAI- and Anthropic-compatible gateway for private
 inference. It runs inside a trusted execution environment (TEE), verifies the
