@@ -186,6 +186,9 @@ lists only the commits since the last beta, so curate the notes before merging.
    gh run watch --exit-status   # choose the Desktop live E2E run
    ```
 
+   Runs share one concurrency group, so a second dispatch while a run is
+   queued cancels the queued run; wait for the run you started to begin.
+
 2. Check the App Store path: `gh workflow run desktop-mac-app-store.yml --ref main`.
    A manual run packages, signs and validates the App Store build without
    uploading it ([Mac App Store](mac-app-store.md#build-and-signing-prerequisites)).
