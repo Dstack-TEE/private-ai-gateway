@@ -5,6 +5,7 @@
 
 use std::fmt;
 
+use desktop_core::contracts::AppState;
 use desktop_core::protocol::{self, ErrorCode};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -30,12 +31,49 @@ impl Error {
         Self::Api(protocol::Error::busy())
     }
 
+    /// A verification is still settling; the change can follow once it ends.
+    pub fn verifying(state: &AppState) -> Self {
+        let message = if state.configuration_verification {
+            "A profile is being verified; try again when it finishes.".to_owned()
+        } else {
+            format!(
+                "Protection is starting on {}; try again when it finishes.",
+                active_profile_name(state)
+            )
+        };
+        Self::Api(protocol::Error::new(ErrorCode::Busy, message))
+    }
+
+    /// Protection already runs; starting it again would change nothing.
+    pub fn already_running(state: &AppState) -> Self {
+        Self::invalid_state(format!(
+            "Protection is running on {}; stop it or switch profiles to restart it on another.",
+            active_profile_name(state)
+        ))
+    }
+
+    /// The app is closing and accepts no further changes.
+    pub fn closing() -> Self {
+        Self::Api(protocol::Error::new(
+            ErrorCode::Busy,
+            "The app is closing; reopen it to make changes.",
+        ))
+    }
+
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::Api(error) => error.code,
             Self::Internal(_) => ErrorCode::OperationFailed,
         }
     }
+}
+
+fn active_profile_name(state: &AppState) -> &str {
+    state
+        .profiles
+        .iter()
+        .find(|profile| profile.id == state.active_profile_id)
+        .map_or("the active profile", |profile| profile.name.as_str())
 }
 
 /// The message the state and the service log show.

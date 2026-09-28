@@ -228,7 +228,7 @@ impl DesktopRuntime {
             .lock()
             .map_err(|_| "Agent state unavailable")?;
         if self.exiting.load(Ordering::Acquire) {
-            return Err("The app is closing".into());
+            return Err(crate::Error::closing());
         }
         if self.instance.is_none() {
             return Err("Another app instance owns the agent configurations".into());

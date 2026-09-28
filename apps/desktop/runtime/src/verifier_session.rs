@@ -248,7 +248,7 @@ impl SessionManager {
             return Err(format!("The local endpoint is unavailable: {error}").into());
         }
         if runtime.task.is_some() {
-            return Err(Error::invalid_state("Protection is already running"));
+            return Err(Error::already_running(&runtime.state));
         }
 
         runtime.generation = runtime.generation.wrapping_add(1);
