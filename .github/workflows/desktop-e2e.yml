@@ -1,0 +1,39 @@
+name: Desktop live E2E
+
+# Connects every supported coding agent to the live RedPill service through a
+# published desktop package (apps/desktop/e2e). It needs the desktop-e2e
+# environment's API key, which only main can use, so it never runs on PRs.
+on:
+  schedule:
+    - cron: "17 11 * * *" # nightly, 4:17 AM PDT
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Desktop release tag to test; empty tests the newest desktop-v* release
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-e2e
+  cancel-in-progress: false
+
+jobs:
+  agents:
+    name: Live agents
+    environment: desktop-e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Run the live end-to-end test
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PAP_E2E_API_KEY: ${{ secrets.PAP_E2E_API_KEY }}
+          TAG: ${{ inputs.tag }}
+        run: apps/desktop/e2e/run.sh ${TAG:+--tag "$TAG"}
