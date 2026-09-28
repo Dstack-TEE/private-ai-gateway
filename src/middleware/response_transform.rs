@@ -2610,6 +2610,36 @@ mod tests {
         assert_eq!(plain["output"][0]["type"], "function_call");
     }
 
+    /// A namespaced tool whose flattened name an earlier function already took
+    /// was never offered to the model, so a call by that name is the function.
+    #[test]
+    fn colliding_tool_names_restore_to_the_declared_tool() {
+        let tools = json!([
+            { "type": "function", "name": "mail__search", "parameters": { "type": "object" } },
+            {
+                "type": "namespace", "name": "mail",
+                "tools": [{ "type": "function", "name": "search", "parameters": { "type": "object" } }]
+            }
+        ]);
+        let chat = crate::middleware::request_transform::responses_to_chat_params(&json!({
+            "model": "m", "input": "hi", "tools": tools
+        }))
+        .unwrap();
+        assert_eq!(chat["tools"].as_array().unwrap().len(), 1);
+        let out = openai_chat_to_responses(
+            json!({
+                "choices": [{
+                    "message": { "tool_calls": [{ "id": "c", "function": { "name": "mail__search", "arguments": "{}" } }] },
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+            &json!({ "tools": tools }),
+            "resp",
+        );
+        assert_eq!(out["output"][0]["name"], "mail__search");
+        assert!(out["output"][0].get("namespace").is_none());
+    }
+
     #[test]
     fn responses_bridge_fails_bodies_without_a_message() {
         for body in [

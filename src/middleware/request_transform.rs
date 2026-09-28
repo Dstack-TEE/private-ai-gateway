@@ -2221,50 +2221,14 @@ pub(super) struct ResponsesToolMap {
 pub(super) const TOOL_SEARCH_PROXY_NAME: &str = "tool_search";
 
 impl ResponsesToolMap {
+    /// How the tools the response echoes were declared to Chat — built by
+    /// the same pass that declared them, so a call is restored to the tool
+    /// the model was actually offered.
     pub(super) fn from_echo(echo: &Value) -> Self {
-        let Some(tools) = echo.get("tools").and_then(Value::as_array) else {
-            return Self::default();
-        };
-        Self::from_tools(tools)
-    }
-
-    fn from_tools(tools: &[Value]) -> Self {
-        let mut map = Self::default();
-        for tool in tools {
-            match tool.get("type").and_then(Value::as_str) {
-                Some("custom") => {
-                    if let Some(name) = tool.get("name").and_then(Value::as_str) {
-                        map.custom.insert(name.to_string());
-                    }
-                }
-                Some("namespace") => {
-                    let Some(namespace) = tool.get("name").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    let Some(children) = tool.get("tools").and_then(Value::as_array) else {
-                        continue;
-                    };
-                    for child in children {
-                        if child.get("type").and_then(Value::as_str) != Some("function") {
-                            continue;
-                        }
-                        let Some(name) = child.get("name").and_then(Value::as_str) else {
-                            continue;
-                        };
-                        map.namespaces.insert(
-                            flatten_namespace_tool_name(namespace, name),
-                            NamespacedTool {
-                                namespace: namespace.to_string(),
-                                name: name.to_string(),
-                            },
-                        );
-                    }
-                }
-                Some("tool_search") => map.tool_search = true,
-                _ => {}
-            }
-        }
-        map
+        let tools = echo.get("tools").and_then(Value::as_array);
+        chat_tools(tools.map_or(&[][..], Vec::as_slice))
+            .map(|(_, map, _)| map)
+            .unwrap_or_default()
     }
 
     pub(super) fn is_custom(&self, name: &str) -> bool {
@@ -2319,22 +2283,33 @@ pub(super) fn effective_responses_tools(params: &Value) -> Result<Vec<Value>, Tr
     Ok(tools)
 }
 
+/// The Chat functions for Responses tools, and how each was declared. A name
+/// already declared keeps its first declaration, in both, as CC-Switch keeps
+/// it: Codex re-declares the groups each tool search loaded, and two searches
+/// may load the same one.
 fn chat_tools(
     tools: &[Value],
 ) -> Result<(Vec<Value>, ResponsesToolMap, HashSet<String>), TransformError> {
-    let tool_map = ResponsesToolMap::from_tools(tools);
+    let mut tool_map = ResponsesToolMap::default();
     let mut translated = Vec::new();
     let mut function_names = HashSet::new();
+    let mut declare = |source: &Value, name: &str, parameters: Option<Value>| {
+        if !function_names.insert(name.to_string()) {
+            return false;
+        }
+        translated.push(chat_function(source, name, parameters));
+        true
+    };
     for tool in tools {
         match tool.get("type").and_then(Value::as_str) {
             Some("function") => {
                 let name = required_string(tool, "name", "function tool")?;
-                push_chat_tool(tool, name, None, &mut translated, &mut function_names);
+                declare(tool, name, None);
             }
             Some("custom") => {
                 // A grammar-constrained tool still takes its input as text.
                 let name = required_string(tool, "name", "custom tool")?;
-                push_chat_tool(
+                let declared = declare(
                     tool,
                     name,
                     Some(json!({
@@ -2347,9 +2322,10 @@ fn chat_tools(
                         },
                         "required": ["input"]
                     })),
-                    &mut translated,
-                    &mut function_names,
                 );
+                if declared {
+                    tool_map.custom.insert(name.to_string());
+                }
             }
             Some("namespace") => {
                 let namespace = required_string(tool, "name", "namespace tool")?;
@@ -2363,10 +2339,17 @@ fn chat_tools(
                     }
                     let name = required_string(child, "name", "namespace function tool")?;
                     let flat = flatten_namespace_tool_name(namespace, name);
-                    push_chat_tool(child, &flat, None, &mut translated, &mut function_names);
+                    if declare(child, &flat, None) {
+                        tool_map.namespaces.insert(
+                            flat,
+                            NamespacedTool {
+                                namespace: namespace.to_string(),
+                                name: name.to_string(),
+                            },
+                        );
+                    }
                 }
             }
-            // Codex runs tool search itself; the model calls it as a function.
             // Codex runs tool search itself; the model calls it as a function,
             // with the client's own schema when it declares one.
             Some("tool_search") => {
@@ -2384,14 +2367,12 @@ fn chat_tools(
                     },
                     "required": ["query"]
                 });
-                push_chat_tool(
+                tool_map.tool_search |= declare(
                     &proxy,
                     TOOL_SEARCH_PROXY_NAME,
                     tool.get("parameters")
                         .is_none()
                         .then_some(default_parameters),
-                    &mut translated,
-                    &mut function_names,
                 );
             }
             // Hosted tools (`web_search`, ...) have no Chat counterpart. Codex
@@ -2403,19 +2384,8 @@ fn chat_tools(
     Ok((translated, tool_map, function_names))
 }
 
-/// Add a Chat function. A name already declared keeps its first declaration,
-/// as CC-Switch keeps it: Codex re-declares the groups each tool search
-/// loaded, and two searches may load the same one.
-fn push_chat_tool(
-    source: &Value,
-    name: &str,
-    parameters: Option<Value>,
-    translated: &mut Vec<Value>,
-    function_names: &mut HashSet<String>,
-) {
-    if !function_names.insert(name.to_string()) {
-        return;
-    }
+/// A Chat function for a Responses tool declaration.
+fn chat_function(source: &Value, name: &str, parameters: Option<Value>) -> Value {
     let mut function = Map::new();
     function.insert("name".into(), json!(name));
     for key in ["description", "parameters", "strict"] {
@@ -2427,7 +2397,7 @@ fn push_chat_tool(
         function.insert("parameters".into(), parameters);
         function.remove("strict");
     }
-    translated.push(json!({ "type": "function", "function": function }));
+    json!({ "type": "function", "function": function })
 }
 
 fn flatten_namespace_tool_name(namespace: &str, name: &str) -> String {
