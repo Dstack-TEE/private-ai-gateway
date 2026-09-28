@@ -169,7 +169,7 @@
     }
   },
   {
-    "name": "responses_identity_and_unknown_dropped",
+    "name": "responses_native_passthrough_keeps_unknown",
     "format": "openai",
     "fn": "createModelResponse",
     "engine": null,
@@ -178,17 +178,17 @@
       "input": "hello",
       "stream": true,
       "instructions": "be brief",
-      "store": true,
-      "previous_response_id": "resp_prev",
-      "not_a_real_param": "x"
+      "service_tier": "flex",
+      "not_a_real_param": "x",
+      "provider": { "aci_verified": true }
     },
     "output": {
-      "input": "hello",
       "model": "gpt-4o",
+      "input": "hello",
+      "stream": true,
       "instructions": "be brief",
-      "previous_response_id": "resp_prev",
-      "store": true,
-      "stream": true
+      "service_tier": "flex",
+      "not_a_real_param": "x"
     }
   },
   {
@@ -589,7 +589,7 @@
     }
   },
   {
-    "name": "anthropic_messages_passthrough_drops_unknown",
+    "name": "anthropic_messages_passthrough_keeps_unknown",
     "format": "anthropic",
     "fn": "messages",
     "engine": null,
@@ -602,8 +602,10 @@
         }
       ],
       "max_tokens": 10,
+      "stream": true,
       "system": "sys",
-      "not_allowed": "drop me"
+      "speed": "fast",
+      "provider": { "aci_verified": true }
     },
     "output": {
       "model": "claude-3",
@@ -614,7 +616,9 @@
         }
       ],
       "max_tokens": 10,
-      "system": "sys"
+      "stream": true,
+      "system": "sys",
+      "speed": "fast"
     }
   }
 ]

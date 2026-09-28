@@ -1360,7 +1360,7 @@ pub(super) fn synthesized_call_id(response_id: &str, index: usize) -> String {
 }
 
 /// A Chat tool call as the Responses item the client declared: a custom tool
-/// call, or a function call restored to its namespace.
+/// call, a tool search, or a function call restored to its namespace.
 pub(super) fn responses_call_item(
     tool_map: &ResponsesToolMap,
     call_id: &str,
@@ -1370,6 +1370,20 @@ pub(super) fn responses_call_item(
 ) -> Value {
     if tool_map.is_custom(name) {
         return custom_tool_call_item(call_id, name, value, status);
+    }
+    if tool_map.is_tool_search(name) {
+        // Codex runs the search it asked for, as CC-Switch restores the call.
+        let arguments = serde_json::from_str::<Value>(value)
+            .ok()
+            .filter(Value::is_object)
+            .unwrap_or_else(|| json!({}));
+        return json!({
+            "type": "tool_search_call",
+            "call_id": call_id,
+            "status": status,
+            "execution": "client",
+            "arguments": arguments,
+        });
     }
     let namespace = tool_map.namespace(name);
     function_call_item(
@@ -2553,6 +2567,46 @@ mod tests {
         );
         let response = openai_chat_to_responses(failed, &json!({}), "resp");
         assert_eq!(response["status"], "failed");
+    }
+
+    #[test]
+    fn responses_tool_search_call_is_restored() {
+        let echo = json!({ "tools": [{ "type": "tool_search" }] });
+        let out = openai_chat_to_responses(
+            json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "id": "ts_1",
+                            "function": { "name": "tool_search", "arguments": "{\"query\":\"mail\"}" }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+            &echo,
+            "resp",
+        );
+        assert_eq!(
+            out["output"],
+            json!([{
+                "type": "tool_search_call", "call_id": "ts_1", "status": "completed",
+                "execution": "client", "arguments": { "query": "mail" }
+            }])
+        );
+        // Without the tool declared, a function of that name stays a function.
+        let plain = openai_chat_to_responses(
+            json!({
+                "choices": [{
+                    "message": { "tool_calls": [{ "id": "c", "function": { "name": "tool_search", "arguments": "{}" } }] },
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+            &json!({}),
+            "resp",
+        );
+        assert_eq!(plain["output"][0]["type"], "function_call");
     }
 
     #[test]

@@ -1169,7 +1169,7 @@ impl ChatEvents for ResponsesEvents {
     /// done. One cut off by a limit is reported incomplete.
     fn tool_call(&mut self, call: &ChatToolCall<'_>, truncated: bool, out: &mut String) -> bool {
         let item = responses_call_item(&self.tools, &call.id, call.name, "", "in_progress");
-        let custom = item["type"] == "custom_tool_call";
+        let kind = item["type"].clone();
         self.add_item(item, out);
         let Some(value) = responses_call_value(&self.tools, call.name, call.arguments, truncated)
         else {
@@ -1180,10 +1180,14 @@ impl ChatEvents for ResponsesEvents {
         let (output_index, item_id) = self.active();
         let ids = json!({ "item_id": item_id, "output_index": output_index });
         let item = responses_call_item(&self.tools, &call.id, call.name, &value, "completed");
-        let (stem, key) = if custom {
-            ("custom_tool_call_input", "input")
-        } else {
-            ("function_call_arguments", "arguments")
+        let (stem, key) = match kind.as_str() {
+            // A tool search carries its arguments in the item alone.
+            Some("tool_search_call") => {
+                self.done_item(item, out);
+                return true;
+            }
+            Some("custom_tool_call") => ("custom_tool_call_input", "input"),
+            _ => ("function_call_arguments", "arguments"),
         };
         if !value.is_empty() {
             let mut body = ids.clone();
@@ -1192,7 +1196,7 @@ impl ChatEvents for ResponsesEvents {
         }
         let mut body = ids;
         body[key] = json!(value);
-        if !custom {
+        if stem == "function_call_arguments" {
             body["name"] = item["name"].clone();
         }
         self.emit(&format!("response.{stem}.done"), body, out);
@@ -2196,6 +2200,45 @@ mod tests {
             assert!(error.is_none(), "{wire}");
             assert_eq!(out.last().unwrap()["type"], terminal, "{wire}");
         }
+    }
+
+    #[test]
+    fn responses_stream_restores_tool_search_calls() {
+        let transform = StreamTransform::OpenaiChatToResponses(
+            Arc::new(json!({ "tools": [{ "type": "tool_search" }] })),
+            Arc::new(ResponseIdentity {
+                request_id: "resp".into(),
+                user_model: None,
+            }),
+            UpstreamUsage::default(),
+        );
+        let call = tool_event(json!({
+            "index": 0, "id": "ts_1",
+            "function": { "name": "tool_search", "arguments": "{\"query\":\"mail\"}" }
+        }));
+        let finish = chat_event(json!({}), Some("tool_calls"));
+        let out = run(transform, &[&call, &finish, "data: [DONE]"]);
+        let kinds: Vec<&str> = out
+            .iter()
+            .map(|event| event["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "response.created",
+                "response.in_progress",
+                "response.output_item.added",
+                "response.output_item.done",
+                "response.completed"
+            ]
+        );
+        assert_eq!(
+            out[3]["item"],
+            json!({
+                "type": "tool_search_call", "call_id": "ts_1", "status": "completed",
+                "execution": "client", "arguments": { "query": "mail" }
+            })
+        );
     }
 
     #[tokio::test]

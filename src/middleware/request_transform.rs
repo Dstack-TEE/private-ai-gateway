@@ -201,9 +201,16 @@ pub fn transform_to_provider_request(
     endpoint: Endpoint,
     engine: Option<Engine>,
 ) -> Result<Value, TransformError> {
-    if format == ProviderFormat::Openai && endpoint == Endpoint::Messages {
-        let chat = messages_to_chat_params(params)?;
-        return transform_to_provider_request(format, &chat, Endpoint::ChatComplete, engine);
+    match (format, endpoint) {
+        (ProviderFormat::Openai, Endpoint::Messages) => {
+            let chat = messages_to_chat_params(params)?;
+            return transform_to_provider_request(format, &chat, Endpoint::ChatComplete, engine);
+        }
+        (ProviderFormat::Anthropic, Endpoint::Messages)
+        | (ProviderFormat::Openai, Endpoint::CreateModelResponse) => {
+            return native_passthrough(params);
+        }
+        _ => {}
     }
     let mut params = params.clone();
     inject_stream_options(&mut params);
@@ -217,6 +224,19 @@ pub fn transform_to_provider_request(
 pub struct ResponsesCandidateInput<'a> {
     pub original: &'a Value,
     pub bridge_error: Option<&'a TransformError>,
+}
+
+/// A request for an upstream that speaks its own protocol goes as the client
+/// wrote it, as CLIProxyAPI forwards it: fields the gateway has never heard of
+/// still reach the API that defines them. Only gateway routing metadata is
+/// removed.
+fn native_passthrough(params: &Value) -> Result<Value, TransformError> {
+    let mut body = params
+        .as_object()
+        .cloned()
+        .ok_or_else(|| TransformError::invalid_request("request body must be a JSON object"))?;
+    body.remove("provider");
+    Ok(Value::Object(body))
 }
 
 /// Shape one body per candidate, preserving failover order. Each entry is the
@@ -639,12 +659,15 @@ fn select_config(
         (Openai, ChatComplete) => openai_chat_complete_config(engine),
         (Openai, Complete) => openai_complete_config(),
         (Openai, Embed) => openai_embed_config(),
-        (Openai, CreateModelResponse) => openai_create_model_response_config(),
         (Anthropic, Complete) => anthropic_complete_config(),
         (Anthropic, ChatComplete) => anthropic_chat_complete_config(),
-        (Anthropic, Messages) => anthropic_messages_config(),
-        // OpenAI Messages is converted to a chat request before shaping.
-        (Openai, Messages) | (Anthropic, Embed) | (Anthropic, CreateModelResponse) => {
+        // Converted to a chat request or passed through before shaping, or
+        // not served by the format.
+        (Openai, Messages)
+        | (Openai, CreateModelResponse)
+        | (Anthropic, Messages)
+        | (Anthropic, Embed)
+        | (Anthropic, CreateModelResponse) => {
             return Err(TransformError::Unsupported { format, endpoint })
         }
     };
@@ -1642,34 +1665,6 @@ fn openai_embed_config() -> ProviderConfig {
     config
 }
 
-fn openai_create_model_response_config() -> ProviderConfig {
-    let mut config = pass!(
-        "background",
-        "include",
-        "instructions",
-        "max_output_tokens",
-        "metadata",
-        "modalities",
-        "parallel_tool_calls",
-        "previous_response_id",
-        "prompt",
-        "prompt_cache_key",
-        "reasoning",
-        "store",
-        "stream",
-        "temperature",
-        "text",
-        "tool_choice",
-        "tools",
-        "top_p",
-        "truncation",
-        "user",
-        "verbosity",
-    );
-    config.extend([p!("input", required), p!("model", required)]);
-    config
-}
-
 // ── Responses API → OpenAI chat.completion request ───────────────────────────
 
 /// Rewrite a Responses API request as the Chat Completions request that
@@ -1821,6 +1816,7 @@ struct ResponsesInputState {
 enum ResponsesCallKind {
     Function,
     Custom,
+    ToolSearch,
 }
 
 impl ResponsesCallKind {
@@ -1828,6 +1824,7 @@ impl ResponsesCallKind {
         match self {
             Self::Function => "function_call_output",
             Self::Custom => "custom_tool_call_output",
+            Self::ToolSearch => "tool_search_output",
         }
     }
 }
@@ -1870,7 +1867,7 @@ fn push_input_item(
     let item_type = item.get("type").and_then(Value::as_str);
     if !matches!(
         item_type,
-        Some("function_call_output" | "custom_tool_call_output")
+        Some("function_call_output" | "custom_tool_call_output" | "tool_search_output")
     ) {
         state.flush_media(messages);
     }
@@ -1931,7 +1928,23 @@ fn push_input_item(
                 state,
             )?;
         }
-        Some(item_type @ ("function_call_output" | "custom_tool_call_output")) => {
+        Some("tool_search_call") => {
+            let call_id = required_string(item, "call_id", "tool_search_call")?;
+            let arguments = item
+                .get("arguments")
+                .map_or_else(|| "{}".to_string(), Value::to_string);
+            push_chat_call(
+                call_id,
+                TOOL_SEARCH_PROXY_NAME,
+                &arguments,
+                ResponsesCallKind::ToolSearch,
+                messages,
+                state,
+            )?;
+        }
+        Some(
+            item_type @ ("function_call_output" | "custom_tool_call_output" | "tool_search_output"),
+        ) => {
             let call_id = required_string(item, "call_id", item_type)?;
             let Some(call_kind) = state.calls.get(call_id).copied() else {
                 return Err(TransformError::invalid_request(format!(
@@ -1950,7 +1963,12 @@ fn push_input_item(
                 )));
             }
             let mut media = Vec::new();
-            let content = tool_output_text(item.get("output"), &mut media)?;
+            let content = match call_kind {
+                // The loaded groups, which are also declared as tools, as
+                // CC-Switch replays them.
+                ResponsesCallKind::ToolSearch => item.to_string(),
+                _ => tool_output_text(item.get("output"), &mut media)?,
+            };
             state.pending_media.append(&mut media);
             messages.push(json!({ "role": "tool", "tool_call_id": call_id, "content": content }));
         }
@@ -2195,7 +2213,12 @@ pub(super) struct NamespacedTool {
 pub(super) struct ResponsesToolMap {
     custom: HashSet<String>,
     namespaces: HashMap<String, NamespacedTool>,
+    tool_search: bool,
 }
+
+/// The Chat function standing in for Codex's client-executed `tool_search`,
+/// as CC-Switch and sub2api proxy it.
+pub(super) const TOOL_SEARCH_PROXY_NAME: &str = "tool_search";
 
 impl ResponsesToolMap {
     pub(super) fn from_echo(echo: &Value) -> Self {
@@ -2237,6 +2260,7 @@ impl ResponsesToolMap {
                         );
                     }
                 }
+                Some("tool_search") => map.tool_search = true,
                 _ => {}
             }
         }
@@ -2251,6 +2275,10 @@ impl ResponsesToolMap {
         self.namespaces.get(name)
     }
 
+    pub(super) fn is_tool_search(&self, name: &str) -> bool {
+        self.tool_search && name == TOOL_SEARCH_PROXY_NAME
+    }
+
     fn has_namespace(&self, namespace: &str) -> bool {
         self.namespaces
             .values()
@@ -2258,24 +2286,34 @@ impl ResponsesToolMap {
     }
 }
 
-/// Merge ordinary Responses tools with the `additional_tools` input item used
-/// by newer Codex clients. Keeping this in one helper makes request lowering
-/// and response tool-name restoration use the same declaration set.
+/// Merge ordinary Responses tools with those Codex declares in `input`: the
+/// `additional_tools` carrier and the groups a `tool_search_output` loaded,
+/// as CC-Switch collects them. Keeping this in one helper makes request
+/// lowering and response tool-name restoration use the same declaration set.
 pub(super) fn effective_responses_tools(params: &Value) -> Result<Vec<Value>, TransformError> {
     let mut tools = match params.get("tools") {
         None => Vec::new(),
         Some(Value::Array(tools)) => tools.clone(),
         Some(_) => return Err(TransformError::invalid_request("tools must be an array")),
     };
-    if let Some(items) = params.get("input").and_then(Value::as_array) {
-        for item in items {
-            if item.get("type").and_then(Value::as_str) != Some("additional_tools") {
-                continue;
+    for item in params
+        .get("input")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        match item.get("type").and_then(Value::as_str) {
+            Some("additional_tools") => {
+                let additional = item.get("tools").and_then(Value::as_array).ok_or_else(|| {
+                    TransformError::invalid_request("additional_tools requires a tools array")
+                })?;
+                tools.extend(additional.iter().cloned());
             }
-            let additional = item.get("tools").and_then(Value::as_array).ok_or_else(|| {
-                TransformError::invalid_request("additional_tools requires a tools array")
-            })?;
-            tools.extend(additional.iter().cloned());
+            Some("tool_search_output") => {
+                let loaded = item.get("tools").and_then(Value::as_array);
+                tools.extend(loaded.into_iter().flatten().cloned());
+            }
+            _ => {}
         }
     }
     Ok(tools)
@@ -2328,9 +2366,24 @@ fn chat_tools(
                     push_chat_tool(child, &flat, None, &mut translated, &mut function_names)?;
                 }
             }
-            // Hosted tools (`web_search`, `tool_search`, ...) have no Chat
-            // counterpart. Codex advertises them alongside client tools even
-            // when a turn does not need them, so they are omitted.
+            // Codex runs tool search itself; the model calls it as a function.
+            Some("tool_search") => push_chat_tool(
+                &json!({ "description": "Search and load tools, plugins, connectors, and MCP namespaces for the current task." }),
+                TOOL_SEARCH_PROXY_NAME,
+                Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "What tools to search for." },
+                        "limit": { "type": "integer", "description": "The most tool groups to return." }
+                    },
+                    "required": ["query"]
+                })),
+                &mut translated,
+                &mut function_names,
+            )?,
+            // Hosted tools (`web_search`, ...) have no Chat counterpart. Codex
+            // advertises them alongside client tools even when a turn does not
+            // need them, so they are omitted.
             _ => {}
         }
     }
@@ -2506,34 +2559,6 @@ fn anthropic_complete_config() -> ProviderConfig {
     ]
 }
 
-fn anthropic_messages_config() -> ProviderConfig {
-    let mut config = pass!(
-        "cache_control",
-        "container",
-        "context_management",
-        "inference_geo",
-        "mcp_servers",
-        "metadata",
-        "output_config",
-        "service_tier",
-        "stop_sequences",
-        "stream",
-        "system",
-        "temperature",
-        "thinking",
-        "tool_choice",
-        "tools",
-        "top_k",
-        "top_p",
-    );
-    config.extend([
-        p!("model", required),
-        p!("messages", required),
-        p!("max_tokens", required),
-    ]);
-    config
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2706,6 +2731,48 @@ mod tests {
             assert_eq!(served[1].0, "responses:m", "{request}");
             assert!(served[0].1.to_string().contains("hello"), "{request}");
         }
+    }
+
+    /// Codex's client-side tool search reaches Chat as a function, as
+    /// CC-Switch proxies it; the groups it loaded become tools.
+    #[test]
+    fn responses_tool_search_is_proxied_as_a_function() {
+        let loaded = json!({
+            "type": "namespace", "name": "mcp__mail",
+            "tools": [{ "type": "function", "name": "_search", "parameters": { "type": "object" } }]
+        });
+        let chat = responses_to_chat_params(&json!({
+            "model": "m",
+            "tools": [{ "type": "tool_search" }],
+            "input": [
+                { "type": "message", "role": "user", "content": "find mail" },
+                {
+                    "type": "tool_search_call", "call_id": "ts_1", "execution": "client",
+                    "arguments": { "query": "mail" }
+                },
+                {
+                    "type": "tool_search_output", "call_id": "ts_1", "execution": "client",
+                    "status": "completed", "tools": [loaded]
+                }
+            ]
+        }))
+        .unwrap();
+        let names: Vec<&Value> = chat["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| &tool["function"]["name"])
+            .collect();
+        assert_eq!(names, [&json!("tool_search"), &json!("mcp__mail___search")]);
+        assert_eq!(
+            chat["messages"][1]["tool_calls"][0]["function"],
+            json!({ "name": "tool_search", "arguments": "{\"query\":\"mail\"}" })
+        );
+        assert_eq!(chat["messages"][2]["role"], "tool");
+        assert!(chat["messages"][2]["content"]
+            .as_str()
+            .unwrap()
+            .contains("mcp__mail"));
     }
 
     #[test]
