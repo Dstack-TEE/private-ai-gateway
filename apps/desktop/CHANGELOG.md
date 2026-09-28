@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.2.0...desktop-v0.2.1) (2026-09-28)
+
+
+### Bug Fixes
+
+* **desktop:** guard OpenCode V2 provider overrides and test OpenCode 2 ([#363](https://github.com/Dstack-TEE/private-ai-gateway/issues/363)) ([d1fa727](https://github.com/Dstack-TEE/private-ai-gateway/commit/d1fa7273b0c10c58e51dcce44e6b10f9b9a55c9a))
+* **desktop:** restore agents offline when the app is uninstalled ([#359](https://github.com/Dstack-TEE/private-ai-gateway/issues/359)) ([0f6db38](https://github.com/Dstack-TEE/private-ai-gateway/commit/0f6db384e0a903923ddc81073be6b8a79d507cc2))
+
+
+### Miscellaneous Chores
+
+* **desktop:** release 0.2.1 ([#365](https://github.com/Dstack-TEE/private-ai-gateway/issues/365)) ([7c1230b](https://github.com/Dstack-TEE/private-ai-gateway/commit/7c1230bb1866dcbb194b1eff7ba586cd8a2ede5f))
+
 ## [0.2.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.1.6...desktop-v0.2.0) (2026-09-28)
 
 Private AI Proxy 0.2.0 is the first stable release since 0.1.6. It rebuilds the app around one local API, plain settings files and a lean, native-feeling window.
