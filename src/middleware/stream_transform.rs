@@ -784,7 +784,7 @@ impl<E: ChatEvents> ChatStream<E> {
                 };
                 tool_use |= self.events.tool_call(&call, finish.truncated(), out);
             }
-            if named == 0 && !self.calls.is_empty() {
+            if named == 0 && !self.calls.is_empty() && !finish.truncated() {
                 Outcome::Failed(Failure::UnusableToolCalls)
             } else {
                 Outcome::Finished { finish, tool_use }
@@ -2159,6 +2159,48 @@ mod tests {
         assert_eq!(terminal["type"], "response.completed");
         assert_eq!(terminal["response"]["output"][0]["call_id"], "call_1");
         assert_eq!(terminal["response"]["output"][0]["arguments"], "{}");
+    }
+
+    /// Streaming agrees with the buffered bodies: a cut-off turn is reported
+    /// as cut off even when its only tool call never got a name, and an
+    /// explicit error fails the turn.
+    #[tokio::test]
+    async fn stream_truncation_and_errors_win_over_tool_call_repair() {
+        let text = chat_event(json!({ "content": "partial" }), None);
+        let nameless =
+            tool_event(json!({ "index": 0, "id": "c", "function": { "arguments": "{" } }));
+        let length = chat_event(json!({}), Some("length"));
+        let error = format!(
+            "data: {}",
+            json!({ "error": { "message": "engine failed" } })
+        );
+        let cut = [
+            text.as_str(),
+            nameless.as_str(),
+            length.as_str(),
+            "data: [DONE]",
+        ];
+        let failed = [text.as_str(), error.as_str(), "data: [DONE]"];
+
+        let out = run(messages_transform(), &cut);
+        let delta = out
+            .iter()
+            .find(|event| event["type"] == "message_delta")
+            .unwrap();
+        assert_eq!(delta["delta"]["stop_reason"], "max_tokens");
+        assert_eq!(
+            run(messages_transform(), &failed).last().unwrap()["type"],
+            "error"
+        );
+
+        for (events, terminal) in [
+            (&cut[..], "response.incomplete"),
+            (&failed[..], "response.failed"),
+        ] {
+            let (out, error, wire) = replay_responses_fixture(&json!({ "events": events })).await;
+            assert!(error.is_none(), "{wire}");
+            assert_eq!(out.last().unwrap()["type"], terminal, "{wire}");
+        }
     }
 
     #[tokio::test]

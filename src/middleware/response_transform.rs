@@ -1226,8 +1226,8 @@ pub fn responses_echo(params: &Value) -> Value {
 /// usage buckets take their Responses names. `echo` supplies the request
 /// fields the object repeats; `id` is the gateway's id for the response.
 ///
-/// Only a body with no answer — no message, an upstream error, tool calls
-/// none of which can be run — fails the response. Tool calls are read by
+/// Only a body with no answer — no message, an upstream error, a finished
+/// turn whose tool calls none can be run — fails the response. Tool calls are read by
 /// [`chat_tool_calls`]; malformed arguments are delivered as written.
 pub fn openai_chat_to_responses(response: Value, echo: &Value, id: &str) -> Value {
     let tool_map = ResponsesToolMap::from_echo(echo);
@@ -1282,7 +1282,7 @@ pub fn openai_chat_to_responses(response: Value, echo: &Value, id: &str) -> Valu
         ));
     }
     let calls = chat_tool_calls(tool_calls, id);
-    if calls.is_empty() && !tool_calls.is_empty() {
+    if calls.is_empty() && !tool_calls.is_empty() && !finish.truncated() {
         error.get_or_insert_with(unusable_tool_calls_error);
     }
     for call in calls {
@@ -1543,8 +1543,10 @@ pub(super) fn function_call_arguments(arguments: &str) -> Option<&str> {
         .then_some(arguments)
 }
 
-/// Tool calls none of which a client can run: ending the turn as if the
-/// model had answered would leave an agent stopped for no reason.
+/// Tool calls none of which a client can run, from a turn that finished:
+/// ending it as if the model had answered would leave an agent stopped for
+/// no reason. A turn cut off by a limit reports that instead, as CC-Switch
+/// does.
 pub(super) fn unusable_tool_calls_error() -> Value {
     json!({
         "code": "server_error",
@@ -1585,12 +1587,16 @@ pub(super) fn responses_usage(usage: Option<&Value>) -> Value {
 
 /// Rebuild a chat completion as an Anthropic message: reasoning becomes a
 /// thinking block (the client only receives reasoning it asked for), then
-/// text, then tool calls. Only a body with no answer — no message, or tool
-/// calls none of which can be run — is an upstream error. Tool calls are read
-/// by [`chat_tool_calls`]; malformed arguments become an empty input, as
+/// text, then tool calls. Only a body with no answer — an `error`, no
+/// message, or a finished turn whose tool calls none can be run — is an
+/// upstream error. Tool calls are read by [`chat_tool_calls`]; malformed
+/// arguments become an empty input, as
 /// CLIProxyAPI, CC-Switch and new-api make them, and a call cut off by a token
 /// or content limit is dropped as Anthropic drops an unfinished one.
 fn openai_to_anthropic_messages(response: Value) -> Result<Value, ResponseTransformError> {
+    if response.get("error").is_some_and(|error| !error.is_null()) {
+        return Err(malformed_response("chat response reports an error"));
+    }
     let choice = response
         .get("choices")
         .and_then(Value::as_array)
@@ -1633,7 +1639,7 @@ fn openai_to_anthropic_messages(response: Value) -> Result<Value, ResponseTransf
         .map(Vec::as_slice)
         .unwrap_or_default();
     let calls = chat_tool_calls(tool_calls, &id);
-    if calls.is_empty() && !tool_calls.is_empty() {
+    if calls.is_empty() && !tool_calls.is_empty() && !finish.truncated() {
         return Err(malformed_response(
             "chat response has tool calls, none of them with a name",
         ));
@@ -2507,6 +2513,44 @@ mod identity_tests {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A cut-off turn is reported as cut off even when its only tool call
+    /// never got a name; an explicit error fails the turn even with a
+    /// message beside it.
+    #[test]
+    fn truncation_and_errors_win_over_tool_call_repair() {
+        let body = |finish_reason: &str, error: Value| {
+            json!({
+                "id": "c",
+                "error": error,
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "partial",
+                        "tool_calls": [{ "id": "call_1", "function": { "arguments": "{\"a\":" } }]
+                    },
+                    "finish_reason": finish_reason
+                }]
+            })
+        };
+        let cut = body("length", Value::Null);
+        let message =
+            transform_response(ProviderFormat::Openai, Endpoint::Messages, cut.clone()).unwrap();
+        assert_eq!(message["stop_reason"], "max_tokens");
+        assert_eq!(
+            message["content"],
+            json!([{ "type": "text", "text": "partial" }])
+        );
+        let response = openai_chat_to_responses(cut, &json!({}), "resp");
+        assert_eq!(response["status"], "incomplete");
+
+        let failed = body("error", json!({ "message": "engine failed" }));
+        assert!(
+            transform_response(ProviderFormat::Openai, Endpoint::Messages, failed.clone()).is_err()
+        );
+        let response = openai_chat_to_responses(failed, &json!({}), "resp");
+        assert_eq!(response["status"], "failed");
+    }
 
     #[test]
     fn responses_bridge_fails_bodies_without_a_message() {
