@@ -115,7 +115,7 @@ pub(super) async fn forward_to_backend(
                     forward.upstream_status,
                     &forward.upstream_body,
                     &input.received_body,
-                    None,
+                    Some(&request_id),
                 )
             }
             // Both fail-closed refusals (§1.2, §5.3) carry a receipt.

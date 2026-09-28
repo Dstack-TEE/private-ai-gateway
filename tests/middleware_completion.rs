@@ -750,13 +750,21 @@ const LEAKY_UPSTREAM_HEADERS: &[(&str, &str)] = &[
     ("set-cookie", "edge_sess=0893731c1786104409;path=/"),
 ];
 
-fn assert_no_upstream_headers(headers: &axum::http::HeaderMap) {
+fn assert_no_upstream_headers(headers: &axum::http::HeaderMap, request_id: &str) {
     for (name, _) in LEAKY_UPSTREAM_HEADERS {
+        if *name == "x-request-id" {
+            continue;
+        }
         assert!(
             headers.get(*name).is_none(),
             "{name} reached the client; response headers must be an allowlist"
         );
     }
+    assert_eq!(headers.get("x-request-id").unwrap(), request_id);
+    assert_ne!(
+        headers.get("x-request-id").unwrap(),
+        "fa57b5a8-4967-4e5c-9ab8-103a9feeeb14"
+    );
 }
 
 async fn raw_body(response: axum::response::Response) -> (axum::http::HeaderMap, String) {
@@ -796,7 +804,7 @@ async fn buffered_success_hides_which_upstream_served_it() {
     let (status, headers, body) =
         response_parts(mw.handle_completion(&service, chat_input()).await).await;
     assert_eq!(status, 200);
-    assert_no_upstream_headers(&headers);
+    assert_no_upstream_headers(&headers, "req-1");
     assert_eq!(body["id"], json!("req-1"));
     assert_eq!(body["model"], json!("gpt-test"));
     assert!(body["choices"][0].get("matched_stop").is_none());
@@ -829,7 +837,7 @@ async fn streamed_success_hides_which_upstream_served_it() {
     input.stream = true;
 
     let (headers, body) = raw_body(mw.handle_completion(&service, input).await).await;
-    assert_no_upstream_headers(&headers);
+    assert_no_upstream_headers(&headers, "req-1");
     assert!(!body.contains("matched_stop"), "{body}");
     assert!(!body.contains("vendor-model-int"), "{body}");
     assert!(!body.contains("b4fa5a1dc59c4b41"), "{body}");
@@ -2001,7 +2009,8 @@ async fn malformed_2xx_body_returns_502_upstream() {
     let service = build_service_with_upstream(200, b"<html>not json</html>".to_vec());
     let input = chat_input();
 
-    let (status, _, body) = response_parts(mw.handle_completion(&service, input).await).await;
+    let (status, headers, body) = response_parts(mw.handle_completion(&service, input).await).await;
+    assert_eq!(headers.get("x-request-id").unwrap(), "req-1");
     assert_eq!(
         status, 502,
         "malformed 2xx must not be a fabricated success"
@@ -2048,11 +2057,16 @@ async fn streaming_upstream_non_2xx_reports_the_serving_route() {
     // A retryable non-2xx that is NOT a capacity signal, so the walk is a single
     // pass and this stays a test about attribution. 429 would take the delayed
     // capacity-retry path, which the capacity_retry_* suite covers on its own.
-    let service = build_service_with_upstream(503, br#"{"error":"unavailable"}"#.to_vec());
+    let service = build_service_with_upstream_headers(
+        503,
+        br#"{"error":"unavailable"}"#.to_vec(),
+        vec![("request-id", "provider-stream-error")],
+    );
     let mut input = chat_input();
     input.stream = true;
 
-    let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
+    let (status, headers, _) = response_parts(mw.handle_completion(&service, input).await).await;
+    assert_eq!(headers.get("x-request-id").unwrap(), "req-1");
     assert_eq!(status, 503, "the upstream status must reach the client");
 
     let report = wait_for_post(&posts, |r| r["status"].as_i64() == Some(503)).await;
@@ -2063,6 +2077,11 @@ async fn streaming_upstream_non_2xx_reports_the_serving_route() {
     );
     assert_eq!(report["isStreaming"], json!(true));
     assert_eq!(report["attemptIndex"], json!(0));
+    assert!(report["upstreamRequestId"]
+        .as_str()
+        .unwrap()
+        .starts_with("ureq_"));
+    assert_eq!(report["providerRequestId"], "provider-stream-error");
     // The record names the failure's class; the upstream's body stays out of it.
     assert_eq!(report["errorMessage"], json!("upstream_http_error"));
     // A real upstream attempt, not a gateway-generated failure: error_source
@@ -3957,6 +3976,39 @@ async fn streaming_upstream_error_text_stays_out_of_reports_and_logs() {
     let report = wait_for_post(&posts, |r| r["status"].as_i64() == Some(503)).await;
     assert_eq!(report["errorMessage"], json!("upstream_http_error"));
     assert_canary_absent(&posts, "probe-canary-stream");
+}
+
+#[tokio::test]
+async fn streamed_in_band_error_response_has_gateway_request_id() {
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [{ "routeId": "openai:gpt", "format": "openai" }]
+        }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    let service = build_service_with_upstream_headers(
+        200,
+        format!("data: {{\"error\":{{\"message\":\"{CANARY}\"}}}}\n\ndata: [DONE]\n\n")
+            .into_bytes(),
+        vec![("x-request-id", "provider-stream-success")],
+    );
+    let mut input = chat_input();
+    input.stream = true;
+
+    let response = mw.handle_completion(&service, input).await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers().get("x-request-id").unwrap(), "req-1");
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(!body.is_empty());
+    let report = wait_for_post(&posts, |report| report["requestId"] == "req-1").await;
+    assert!(report["upstreamRequestId"]
+        .as_str()
+        .unwrap()
+        .starts_with("ureq_"));
+    assert_eq!(report["providerRequestId"], "provider-stream-success");
 }
 
 #[tokio::test]

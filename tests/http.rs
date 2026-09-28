@@ -802,6 +802,11 @@ async fn chat_invalid_json_returns_400_before_forwarding() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(resp
+        .headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("req_")));
     assert!(h.received.lock().unwrap().is_none());
 }
 
@@ -1531,6 +1536,81 @@ impl UpstreamBackend for TimingOutStubUpstream {
     ) -> Result<UpstreamResponse, UpstreamError> {
         self.forward(req.request).await
     }
+}
+
+struct StreamingErrorStubUpstream {
+    headers: Arc<Mutex<Option<std::collections::HashMap<String, String>>>>,
+}
+
+#[async_trait]
+impl UpstreamBackend for StreamingErrorStubUpstream {
+    fn name(&self) -> &str {
+        "stub-streaming-error-upstream"
+    }
+    fn url_origin(&self) -> Option<&str> {
+        Some("http://stub-streaming-error-upstream")
+    }
+    async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+        *self.headers.lock().unwrap() = Some(req.headers);
+        Ok(UpstreamResponse {
+            status_code: 503,
+            body: br#"{"error":{"message":"overloaded"}}"#.to_vec(),
+            headers: std::collections::HashMap::from([(
+                "content-type".to_string(),
+                "application/json".to_string(),
+            )]),
+            served_instance_id: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn direct_streaming_messages_upstream_error_includes_request_id() {
+    let upstream_headers = Arc::new(Mutex::new(None));
+    let svc = AciService::new(
+        Arc::new(StaticKeyProvider::default()),
+        Arc::new(StubQuoter::default()),
+        Arc::new(StreamingErrorStubUpstream {
+            headers: upstream_headers.clone(),
+        }),
+        Arc::new(InMemoryReceiptStore::default()),
+        AciServiceConfig::for_test(),
+        Arc::new(FixedClock(1_700_000_000)),
+    )
+    .unwrap();
+    let app = build_router(Arc::new(svc));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    br#"{"model":"x","messages":[],"stream":true}"#.to_vec(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let header_request_id = resp
+        .headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .unwrap()
+        .to_string();
+    assert!(header_request_id.starts_with("req_"));
+    let sent_headers = upstream_headers.lock().unwrap().clone().unwrap();
+    let upstream_request_id = sent_headers.get("X-Request-Id").unwrap();
+    assert!(upstream_request_id.starts_with("ureq_"));
+    assert_eq!(
+        sent_headers.get("X-Client-Request-Id"),
+        Some(upstream_request_id)
+    );
+    assert_ne!(upstream_request_id, &header_request_id);
+    let value: Value = serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
+    assert_eq!(value["type"], "error");
+    assert_eq!(value["request_id"], header_request_id);
 }
 
 #[tokio::test]
