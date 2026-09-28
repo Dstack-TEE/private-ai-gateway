@@ -5,33 +5,27 @@ import {
   LAUNCH_PREFERENCES_EVENT,
   SETTINGS_RESET_EVENT,
   STATE_EVENT,
-  type AgentAccessStatus,
-  type AgentStatus,
-  type Appearance,
   type CliRegistration,
   type DesktopApi,
   type DistributionCapabilities,
-  type AppState,
-  type ListenConfig,
   type LoginPresentation,
   type NotificationPermissionStatus,
-  type NotificationPreferences,
   type ProfileBackup,
-  type RequestActivity,
   type ServiceProvider,
-  type StartConfig,
   type UiEvent,
   type UiEventPayloads,
   type UiMethod,
+  type UiRequests,
+  type UiResponses,
   type UpdateChannel,
   type UpdateInfo,
-  type UsagePage,
-  type UsageQuery,
-  type WebUiConfig,
 } from "../../shared/contracts";
 
+/** A UI method's parameters, which a method that takes none may omit. */
+export type UiParams<M extends UiMethod> = {} extends UiRequests[M] ? [params?: UiRequests[M]] : [params: UiRequests[M]];
+
 export interface UiTransport {
-  call<T>(method: UiMethod, params?: Record<string, unknown>): Promise<T>;
+  call<M extends UiMethod>(method: M, ...params: UiParams<M>): Promise<UiResponses[M]>;
   subscribe<E extends UiEvent>(event: E, listener: (payload: UiEventPayloads[E]) => void): () => void;
 }
 
@@ -90,9 +84,9 @@ export function createDesktopApi(transport: UiTransport, platform: UiPlatform): 
   const call = transport.call.bind(transport);
   const subscribe = transport.subscribe.bind(transport);
   return {
-    startBackendService: () => call<AppState>("start_backend_service"),
+    startBackendService: () => call("start_backend_service"),
     showEditMenu: platform.showEditMenu,
-    getAppearance: () => call<Appearance>("get_appearance"),
+    getAppearance: () => call("get_appearance"),
     setAppearance: (appearance) => call("set_appearance", { appearance }),
     onAppearanceChange: (listener) => subscribe(APPEARANCE_EVENT, listener),
     getAppVersion: platform.getAppVersion,
@@ -108,12 +102,12 @@ export function createDesktopApi(transport: UiTransport, platform: UiPlatform): 
     closeWindow: platform.closeWindow,
     quit: platform.quit,
     copyText: platform.copyText,
-    getClientKey: () => call<string>("get_client_key"),
-    rotateClientKey: () => call<string>("rotate_client_key"),
-    saveLocalApiConfig: (config: ListenConfig) => call("save_local_api_config", { config }),
-    saveWebUi: (config: WebUiConfig) => call("save_web_ui", { config }),
-    getWebUiPassword: () => call<string | null>("get_web_ui_password"),
-    rotateWebUiPassword: () => call<string>("rotate_web_ui_password"),
+    getClientKey: () => call("get_client_key"),
+    rotateClientKey: () => call("rotate_client_key"),
+    saveLocalApiConfig: (config) => call("save_local_api_config", { config }),
+    saveWebUi: (config) => call("save_web_ui", { config }),
+    getWebUiPassword: () => call("get_web_ui_password"),
+    rotateWebUiPassword: () => call("rotate_web_ui_password"),
     setWebUiPassword: (password) => call("set_web_ui_password", { password }),
     openWebUi: platform.openWebUi,
     listListenAddresses: () => call("list_listen_addresses"),
@@ -122,11 +116,11 @@ export function createDesktopApi(transport: UiTransport, platform: UiPlatform): 
     saveProfileExport: platform.saveProfileExport,
     saveDiagnosticsExport: platform.saveDiagnosticsExport,
     importProfiles: (backup) => call("import_profiles", { backup }),
-    saveNotificationSettings: (config: NotificationPreferences) => call("save_notification_settings", { config }),
+    saveNotificationSettings: (config) => call("save_notification_settings", { config }),
     requestNotificationPermission: platform.requestNotificationPermission,
     openNotificationSettings: platform.openNotificationSettings,
-    getState: () => call<AppState>("get_state"),
-    resetSettings: () => call<AppState>("reset_settings"),
+    getState: () => call("get_state"),
+    resetSettings: () => call("reset_settings"),
     onSettingsReset: (listener) => subscribe(SETTINGS_RESET_EVENT, listener),
     onStateChange: (listener) => subscribe(STATE_EVENT, listener),
     onNavigate: platform.onNavigate,
@@ -135,12 +129,12 @@ export function createDesktopApi(transport: UiTransport, platform: UiPlatform): 
     openAboutLink: platform.openAboutLink,
     openAgentWebsite: platform.openAgentWebsite,
     openApiKeyPage: platform.openApiKeyPage,
-    start: (config: StartConfig) => call<AppState>("start", { config }),
-    setRequireProductionOs: (required) => call<AppState>("set_require_production_os", { required }),
+    start: (config) => call("start", { config }),
+    setRequireProductionOs: (required) => call("set_require_production_os", { required }),
     saveConfiguration: (profile, requireProductionOs, key) => call("save_configuration", { profile, requireProductionOs, key }),
     completeAccountLogin: (id, callbackUrl) => call("complete_account_login", { id, callbackUrl }),
     beginAccountLogin: async (profile) => {
-      const login = await call<LoginPresentation>("begin_account_login", { profile });
+      const login = await call("begin_account_login", { profile });
       platform.presentAccountLogin(login);
       return login;
     },
@@ -151,17 +145,17 @@ export function createDesktopApi(transport: UiTransport, platform: UiPlatform): 
     openOrganization: platform.openOrganization,
     openTopUp: platform.openTopUp,
     cancelAccountLogin: (id) => call("cancel_account_login", { id }),
-    activateProfile: (profileId) => call<AppState>("activate_profile", { profileId }),
-    deleteProfile: (profileId) => call<AppState>("delete_profile", { profileId }),
-    stop: () => call<AppState>("stop"),
-    queryUsage: (query: UsageQuery): Promise<UsagePage> => call("query_usage", { query }),
-    getUsageRecord: (recordId: string): Promise<RequestActivity> => call("get_usage_record", { recordId }),
-    getUsageReceipt: (recordId: string): Promise<string | null> => call("get_usage_receipt", { recordId }),
-    listAgents: (): Promise<AgentStatus[]> => call("list_agents"),
-    getAgentAccess: (): Promise<AgentAccessStatus> => call("get_agent_access"),
-    requestAgentAccess: (): Promise<AgentAccessStatus> => call("request_agent_access"),
-    setAgentConnection: (agentId, connect): Promise<AgentStatus> => call("set_agent_connection", { agentId, connect }),
-    agentServiceRunning: (agentId): Promise<boolean> => call("agent_service_running", { agentId }),
-    stopAgentService: (agentId): Promise<void> => call("stop_agent_service", { agentId }),
+    activateProfile: (profileId) => call("activate_profile", { profileId }),
+    deleteProfile: (profileId) => call("delete_profile", { profileId }),
+    stop: () => call("stop"),
+    queryUsage: (query) => call("query_usage", { query }),
+    getUsageRecord: (recordId) => call("get_usage_record", { recordId }),
+    getUsageReceipt: (recordId) => call("get_usage_receipt", { recordId }),
+    listAgents: () => call("list_agents"),
+    getAgentAccess: () => call("get_agent_access"),
+    requestAgentAccess: () => call("request_agent_access"),
+    setAgentConnection: (agentId, connect) => call("set_agent_connection", { agentId, connect }),
+    agentServiceRunning: (agentId) => call("agent_service_running", { agentId }),
+    stopAgentService: (agentId) => call("stop_agent_service", { agentId }),
   };
 }

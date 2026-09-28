@@ -114,7 +114,11 @@ protection problems, is stored under that key.
   agents, project links and web UI defaults come from Rust as generated
   constants and types in `src/shared/contracts.generated.ts`.
   A method is either the management command of the same name or composed by a
-  `Host` (tray state, Open at Login, notifications) from commands. The names
+  `Host` (tray state, Open at Login, notifications) from commands. Its
+  parameters and result are the command's `rpc` request or the host method's
+  `ui_api::requests` one; they generate `UiRequests` and `UiResponses`, which
+  type the transports' `call`, so a renderer that disagrees with Rust fails
+  typechecking. The names
   are the Tauri command names and the web RPC paths, so the renderer, the CLI
   and both transports use one name per command. The desktop shell runs methods with its own host
   and sends commands to the service; the service answers browsers' methods with

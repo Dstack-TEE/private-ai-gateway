@@ -48,7 +48,7 @@ pub struct Version {
     pub executable: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum ShutdownMode {
     Quit,
@@ -64,6 +64,9 @@ pub trait Call: Into<Command> {
 /// `rpc::*` request per command. The backend answers each command with its
 /// declared response in an exhaustive match over `Command`. Every command
 /// takes a JSON object, so commands without parameters are empty structs.
+/// Each request's TypeScript type is its JSON parameters, from which
+/// `contracts.generated.ts` declares the renderer's `UiRequests`; a field's
+/// `#[ts(…)]` attributes apply only to its request.
 macro_rules! commands {
     (@parse [$($variant:tt)*] [$($request:tt)*] [$($name:ident)*]) => {
         /// A command as `{"command": name, "params": {…}}`: the name is the
@@ -105,12 +108,18 @@ macro_rules! commands {
         }
         commands!(@parse
             [$($variant)* $(#[$meta])* $name {},]
-            [$($request)* $(#[$meta])* pub struct $name;]
+            [$($request)*
+                $(#[$meta])*
+                #[derive(ts_rs::TS)]
+                #[ts(type = "Record<string, never>")]
+                pub struct $name;]
             [$($names)* $name]
             $($rest)*);
     };
     (@parse [$($variant:tt)*] [$($request:tt)*] [$($names:ident)*]
-        $(#[$meta:meta])* $name:ident { $($field:ident: $type:ty),* $(,)? } -> $response:ty;
+        $(#[$meta:meta])* $name:ident {
+            $($(#[$field_meta:meta])* $field:ident: $type:ty),* $(,)?
+        } -> $response:ty;
         $($rest:tt)*) => {
         impl From<rpc::$name> for Command {
             fn from(request: rpc::$name) -> Self {
@@ -122,7 +131,11 @@ macro_rules! commands {
         }
         commands!(@parse
             [$($variant)* $(#[$meta])* $name { $($field: $type),* },]
-            [$($request)* $(#[$meta])* pub struct $name { $(pub $field: $type),* }]
+            [$($request)*
+                $(#[$meta])*
+                #[derive(ts_rs::TS)]
+                #[ts(rename_all = "camelCase", optional_fields)]
+                pub struct $name { $($(#[$field_meta])* pub $field: $type),* }]
             [$($names)* $name]
             $($rest)*);
     };
@@ -219,7 +232,11 @@ commands! {
     ResetSettings -> AppStateWire;
     /// The settings in effect (`config.toml`); never includes a secret.
     Settings -> Config;
-    SetPreference { change: Preference } -> Config;
+    SetPreference {
+        // Only the backend sends it, so the renderer needs no type for it.
+        #[ts(skip)]
+        change: Preference,
+    } -> Config;
 }
 
 impl Command {

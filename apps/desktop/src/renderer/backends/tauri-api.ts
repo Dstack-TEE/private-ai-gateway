@@ -30,7 +30,7 @@ async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> {
 }
 
 const transport: UiTransport = {
-  call: (method, params = {}) => invoke(method, params),
+  call: (method, ...[params]) => invoke(method, params ?? {}),
   subscribe,
 };
 

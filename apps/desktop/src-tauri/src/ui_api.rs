@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
-#[cfg(all(target_os = "macos", feature = "mac-app-store"))]
-use desktop_core::agent_access::AgentAccessStatus;
 use desktop_core::{
+    agent_access::AgentAccessStatus,
     client::{CallError, Client},
     config::{Appearance, NotificationPreferences},
     contracts::{AppStateWire, NotificationConfiguration},
@@ -131,15 +130,14 @@ impl Host for TauriHost {
         })
     }
 
-    async fn request_agent_access(&self) -> Result<Value, String> {
+    async fn request_agent_access(&self) -> Result<AgentAccessStatus, String> {
         let window = self
             .window
             .clone()
             .ok_or_else(|| "Home access requires the main window".to_string())?;
         let client = self.app().state::<Arc<Client>>().inner().clone();
         request_agent_access(window, client).await?;
-        serde_json::to_value(desktop_core::agent_access::status())
-            .map_err(|_| "Management response failed".to_string())
+        Ok(desktop_core::agent_access::status())
     }
 }
 

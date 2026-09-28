@@ -11,11 +11,11 @@ import {
   type UiEvent,
   type UiEventPayloads,
   type UiMethod,
+  type UiResponses,
   type UpdateInfo,
-  type UpdateNotice,
   type WebBootstrap,
 } from "../../shared/contracts";
-import { createDesktopApi, type Backend, type UiPlatform, type UiTransport, type WebSession } from "./create-api";
+import { createDesktopApi, type Backend, type UiParams, type UiPlatform, type UiTransport, type WebSession } from "./create-api";
 import { AuthoredError, SessionEndedError } from "../lib/error-message";
 
 const sessionEnded = "Your web UI session ended or expired. Sign in again.";
@@ -56,7 +56,7 @@ const platform: UiPlatform = {
   setUpdateChannel: async (channel) => channel,
   // The backend's own installation owns updates; the browser only announces them.
   prepareUpdate: async (): Promise<UpdateInfo> => {
-    const notice = await rpc<UpdateNotice>("get_update_notice");
+    const notice = await rpc("get_update_notice");
     return {
       enabled: false,
       systemManaged: true,
@@ -83,11 +83,11 @@ const platform: UiPlatform = {
   selectProfileBackup,
   saveProfileExport: async () => download(
     "private-ai-proxy-profiles.json",
-    await rpc<string>("export_profiles_content"),
+    await rpc("export_profiles_content"),
   ),
   saveDiagnosticsExport: async () => download(
     "private-ai-proxy-diagnostics.json",
-    await rpc<string>("export_diagnostics_content"),
+    await rpc("export_diagnostics_content"),
   ),
   requestNotificationPermission: async () => ({ permission: "unsupported", alertsEnabled: false }),
   openNotificationSettings: async () => undefined,
@@ -106,10 +106,10 @@ const platform: UiPlatform = {
     }
   },
   openOrganization: async (organizationSlug) => openAllowed(
-    await rpc<string>("get_organization_url", { organizationSlug }),
+    await rpc("get_organization_url", { organizationSlug }),
   ),
   openTopUp: async (provider, scopeSlug) => openAllowed(
-    await rpc<string>("get_top_up_url", { provider, scopeSlug }),
+    await rpc("get_top_up_url", { provider, scopeSlug }),
   ),
 };
 
@@ -152,13 +152,13 @@ function endSession(notice: string): void {
   for (const listener of endListeners) listener(notice);
 }
 
-async function rpc<T>(method: UiMethod, params: Record<string, unknown> = {}): Promise<T> {
-  const response = await request<{ result: T }>(
+async function rpc<M extends UiMethod>(method: M, ...[params]: UiParams<M>): Promise<UiResponses[M]> {
+  const response = await request<{ result: UiResponses[M] }>(
     `/api/rpc/${encodeURIComponent(method)}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(params),
+      body: JSON.stringify(params ?? {}),
     },
   );
   return response.result;
@@ -219,7 +219,7 @@ function readEvents(): EventSource {
   // again, so a backend that stopped doesn't keep showing its last state.
   source.addEventListener("error", () => {
     if (events !== source) return;
-    rpc<AppState>("get_state").then(publishState, () => {
+    rpc("get_state").then(publishState, () => {
       if (signedIn) publishState(UNAVAILABLE_STATE);
     });
     if (source.readyState === EventSource.CLOSED) window.setTimeout(() => void resumeEvents(source), 1_000);
