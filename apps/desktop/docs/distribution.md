@@ -125,6 +125,18 @@ recover, use **Re-run failed jobs** on the tag's `Desktop release` run, never
 ([Mac App Store](mac-app-store.md#build-and-signing-prerequisites)). Windows
 Authenticode remains optional and does not block the release.
 
+### Live end-to-end test
+
+`Desktop live E2E` (`desktop-e2e.yml`) installs a published Linux x64 desktop
+package in a fresh `ubuntu:24.04` container and, for Claude Code, Codex,
+OpenCode, Pi, Oh My Pi, OpenClaw and Hermes, checks a real reply through the
+live RedPill service, its verified usage record, restoration on disconnect and
+token revocation, then fail-closed behavior and restoration on stop
+([E2E harness](../e2e/README.md)). It runs nightly on the newest `desktop-v*`
+release and on demand for a given tag. Its `desktop-e2e` environment holds the
+`PAP_E2E_API_KEY` secret and allows only `main`, so the test never runs on
+pull requests. Agent versions are pinned in `e2e/versions.env`.
+
 ### Release GitHub App
 
 Workflows never start from events that `GITHUB_TOKEN` creates. `Desktop release
@@ -166,10 +178,21 @@ expires.
 release-please does not aggregate prereleases: the stable section it writes
 lists only the commits since the last beta, so curate the notes before merging.
 
-1. Check the App Store path: `gh workflow run desktop-mac-app-store.yml --ref main`.
+1. Run the [live end-to-end test](#live-end-to-end-test) on the beta tag being
+   promoted and wait for it to pass:
+
+   ```sh
+   gh workflow run desktop-e2e.yml --ref main -f tag=desktop-v0.2.0-beta.N
+   gh run watch --exit-status   # choose the Desktop live E2E run
+   ```
+
+   Runs share one concurrency group, so a second dispatch while a run is
+   queued cancels the queued run; wait for the run you started to begin.
+
+2. Check the App Store path: `gh workflow run desktop-mac-app-store.yml --ref main`.
    A manual run packages, signs and validates the App Store build without
    uploading it ([Mac App Store](mac-app-store.md#build-and-signing-prerequisites)).
-2. Push an empty commit with the stable version in a `Release-As` footer, then
+3. Push an empty commit with the stable version in a `Release-As` footer, then
    run `Desktop release PR`, because an empty commit does not match its path
    filter:
 
@@ -180,7 +203,7 @@ lists only the commits since the last beta, so curate the notes before merging.
    gh workflow run desktop-release-please.yml --ref main
    ```
 
-3. Curate the release PR (`gh pr list --label "autorelease: pending"`) so that
+4. Curate the release PR (`gh pr list --label "autorelease: pending"`) so that
    it covers every change since 0.1.6, using the beta sections of
    `CHANGELOG.md`:
    - its body becomes the release notes. Keep the header, the `## [0.2.0]`
@@ -191,7 +214,7 @@ lists only the commits since the last beta, so curate the notes before merging.
 
    Every `Desktop release PR` run rewrites both, so while the PR is open, do
    not push `apps/desktop` changes to `main` or run that workflow.
-4. Save both update feeds, which [stopping a bad stable
+5. Save both update feeds, which [stopping a bad stable
    release](#stopping-a-bad-stable-release) restores, then merge the PR:
 
    ```sh
@@ -199,10 +222,10 @@ lists only the commits since the last beta, so curate the notes before merging.
    gh release download desktop-updates-beta --dir feeds/beta
    ```
 
-5. If the tag's `Desktop release` run fails, use only **Re-run failed jobs**,
+6. If the tag's `Desktop release` run fails, use only **Re-run failed jobs**,
    never **Re-run all jobs**, which would upload the App Store build number
    again.
-6. After the release:
+7. After the release:
    - submit the uploaded build in App Store Connect
      ([Submit and rollback](mac-app-store.md#submit-and-rollback));
    - run the tap's `update.yml`
