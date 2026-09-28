@@ -45,7 +45,12 @@ pub(super) enum Action {
         timeout: u64,
     },
     /// Stop protection and restore managed agent configurations; keep the backend running.
-    Stop,
+    Stop {
+        /// Restore the agents without a backend, as before uninstalling when it is not
+        /// running. Refused while a backend runs; use `stop` or `service stop` then.
+        #[arg(long)]
+        offline: bool,
+    },
     /// Manage the local backend process. Starting it may start protection when Protect on launch (`connect-on-launch`) is on.
     Service {
         #[command(subcommand)]

@@ -533,6 +533,35 @@ impl DesktopRuntime {
     }
 }
 
+/// Restores the agents' own configuration without a backend, as a stop that
+/// ends the session does: each connection is suspended through the same
+/// projector, apply lock and restoration journal, so protection resumes it
+/// later. The instance lock is held throughout, so no backend starts
+/// meanwhile. `None` while a backend runs: restore through it instead.
+pub fn restore_agents_offline(helper_path: PathBuf) -> Result<Option<Vec<AgentStatus>>, String> {
+    if cfg!(all(target_os = "macos", feature = "mac-app-store")) {
+        return Err(
+            "The Mac App Store build restores agents only through the app: choose Stop All and Quit"
+                .into(),
+        );
+    }
+    let data_dir = app_data_dir()?;
+    let Some(_instance) = lock::instance(&data_dir)
+        .map_err(|error| format!("Cannot take the instance lock: {error}"))?
+    else {
+        return Ok(None);
+    };
+    let local_state = LocalState::open(&data_dir);
+    local_state.set_importing(crate::settings::legacy::secrets_pending(&data_dir));
+    // Restoring never depends on the Local API endpoint.
+    let projector = Projector::new(helper_path, "", Arc::new(local_state))?;
+    let failures = projector.reconcile(None)?;
+    if !failures.is_empty() {
+        return Err(agent_failures(failures));
+    }
+    Ok(Some(projector.scan(None)?.0))
+}
+
 fn agent_failures(failures: Vec<(String, String)>) -> String {
     failures
         .into_iter()

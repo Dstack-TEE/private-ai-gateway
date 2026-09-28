@@ -1133,10 +1133,25 @@ fn settings_files_are_edited_in_place_and_hand_edits_apply_live() {
 #[test]
 fn shutdown_is_explicit_and_read_only_commands_do_not_restart_backend() {
     let backend = Backend::start();
+    // Restoring without a backend is refused while one owns the agents.
+    let refused = backend
+        .command(&["stop", "--offline", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("The backend is running"));
     backend.run(&["service", "stop", "--yes"]);
     let stopped = backend.run(&["status"]);
     assert!(stopped["backend"].is_null());
     assert_eq!(stopped["status"], "not_running");
+    // It restores without starting one.
+    let agents = backend.run(&["stop", "--offline"]);
+    assert!(agents
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|agent| agent["recorded"] == false));
+    assert_eq!(backend.run(&["status"]), stopped);
     // A fresh CLI starts a backend without needing or launching a desktop UI.
     let starter = backend
         .command(&["service", "start", "--json"])

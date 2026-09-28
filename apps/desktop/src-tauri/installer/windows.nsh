@@ -159,6 +159,18 @@ Var PapStartupLockPath
     ${If} $R0 != 0
       !insertmacro PAP_FAIL "The Private AI Proxy backend could not be stopped. Uninstall was cancelled."
     ${EndIf}
+    ; A backend that was not running (an update never relaunched, a crash, a
+    ; sign-out) left agents pointed at the Local API; restore them as stopping
+    ; it would have. In-app updates (/UPDATE) keep agents on the Local API:
+    ; Tauri's installer skips the uninstaller for them, and this guard keeps
+    ; that true if it ever runs it. A manual reinstall that uninstalls first
+    ; restores them, as the service stop above does.
+    ${If} $UpdateMode <> 1
+      ExecWait '"$R4" --yes stop --offline' $R0
+      ${If} $R0 != 0
+        !insertmacro PAP_FAIL "Private AI Proxy could not restore the coding agents' configuration. Uninstall was cancelled. Open Private AI Proxy, choose Stop All and Quit, then retry."
+      ${EndIf}
+    ${EndIf}
     ; Remove the owned alias on upgrades too, before replacing the canonical executable.
     ExecWait '"$R4" --yes cli uninstall' $R0
     ${If} $R0 != 0

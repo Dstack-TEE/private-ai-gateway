@@ -264,9 +264,11 @@ unlocked OS keychain for a process running as you.
   Stopping protection, Stop All and Quit, `pap service stop`, Reset settings,
   or disconnecting an agent restores its own configuration. Quitting the app
   from the tray or menu leaves the backend running and the agents pointed at
-  it. A backend that is not running cannot restore agents, so before
-  uninstalling, stop it while it runs (`pap service start`, then
-  `pap service stop`).
+  it. A backend that is not running cannot restore agents;
+  `pap stop --offline` restores them without it, and the Windows uninstaller
+  runs it.
+  Before removing the app on macOS or Linux, choose Stop All and Quit, or run
+  `pap --yes service stop` and then `pap stop --offline`.
 
 ## Upgrading from 0.1
 

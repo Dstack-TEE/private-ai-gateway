@@ -7,7 +7,7 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
     match action {
         Action::Status { .. }
         | Action::Start { .. }
-        | Action::Stop
+        | Action::Stop { offline: false }
         | Action::Service {
             command: Service::Status,
         } => status(value),
@@ -63,7 +63,8 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
                 | Agents::DisconnectAll
                 | Agents::Connect { dry_run: false, .. }
                 | Agents::Disconnect { dry_run: false, .. },
-        } => {
+        }
+        | Action::Stop { offline: true } => {
             let agents = value
                 .as_array()
                 .map(Vec::as_slice)
