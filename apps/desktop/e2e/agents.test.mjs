@@ -3,7 +3,7 @@
 // and passes the RedPill API key on stdin, which only `pap profiles add` reads.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
@@ -17,6 +17,7 @@ import { parse as parseYaml, parseDocument } from "yaml";
 const MODEL = "z-ai/glm-5.3-flash";
 const PROMPT = "Reply with exactly: PAP-OK";
 const REPLY = "PAP-OK";
+const REPLY_TIMEOUT = 240_000;
 const SERVICE_URL = "https://tee.redpill.ai";
 // Phases of a protection session that lost its verified service.
 const OUTAGE_PHASES = ["reconnecting", "interrupted"];
@@ -111,8 +112,8 @@ const results = new Map(AGENTS.map((agent) => [agent.id, {}]));
 const session = {};
 let localApiUrl;
 
-function run(command, args, { input, env, timeout = 120_000 } = {}) {
-  const result = spawnSync(command, args, {
+function spawn(command, args, { input, env, timeout = 120_000 } = {}) {
+  return spawnSync(command, args, {
     input,
     env,
     stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
@@ -120,6 +121,10 @@ function run(command, args, { input, env, timeout = 120_000 } = {}) {
     timeout,
     maxBuffer: 64 * 1024 * 1024,
   });
+}
+
+function run(command, args, options) {
+  const result = spawn(command, args, options);
   if (result.error) throw new Error(`${command} did not finish: ${result.error.message}`);
   return result;
 }
@@ -135,7 +140,25 @@ const protection = () => papJson("status").gateway.protection.phase;
 const listed = (agent) => papJson("agents", "list").find(({ id }) => id === agent.id);
 const readToken = (agent) => readFileSync(path.join(TOKENS, agent.id), "utf8").trim();
 const nowSeconds = () => Math.floor(Date.now() / 1000);
-const tail = (text) => text.trim().split("\n").slice(-15).join("\n");
+const tail = (text) => text?.trim().split("\n").slice(-40).join("\n") || "(empty)";
+
+// Masks the API key, agent tokens and anything shaped like a credential in
+// output the test prints.
+function redact(text) {
+  let tokens = [];
+  try {
+    tokens = readdirSync(TOKENS).map((name) => readFileSync(path.join(TOKENS, name), "utf8").trim());
+  } catch {
+    // No agent is connected.
+  }
+  let masked = text;
+  for (const secret of [apiKey, ...tokens].filter(Boolean)) masked = masked.replaceAll(secret, "[redacted]");
+  return masked
+    .replace(/sk-[\w-]{6,}/g, "sk-[redacted]")
+    .replace(/(bearer\s+)[\w.~+/=-]+/gi, "$1[redacted]")
+    .replace(/((?:api[_-]?key|token|secret|password|authorization)["']?\s*[:=]\s*["']?)[^\s"',;}]+/gi, "$1[redacted]")
+    .replace(/\b[0-9a-f]{32,}\b/gi, "[redacted]");
+}
 
 // Waits for `check` to return a truthy value, which it returns.
 async function waitFor(description, check, timeout = 60_000) {
@@ -278,9 +301,33 @@ const normalizeReply = (line) => line.trim().replace(/^[*`"'“”‘’]+|[*`"'
 
 function assertReply(agent) {
   const [command, ...args] = agent.prompt;
-  const { status, stdout, stderr } = run(command, args, { env: AGENT_ENV, timeout: 240_000 });
-  const replied = stdout.split("\n").some((line) => normalizeReply(line) === REPLY);
-  assert.ok(replied, `${agent.id} exited ${status} without replying ${REPLY}:\n${tail(stderr)}\n${tail(stdout)}`);
+  const since = nowSeconds();
+  const { error, status, signal, stdout, stderr } = spawn(command, args, { env: AGENT_ENV, timeout: REPLY_TIMEOUT });
+  if (!error && stdout.split("\n").some((line) => normalizeReply(line) === REPLY)) return;
+
+  let reason = `exited ${status ?? signal} without replying ${REPLY}`;
+  if (error?.code === "ETIMEDOUT") reason = `timed out after ${REPLY_TIMEOUT / 1000} s`;
+  else if (error) reason = `did not finish: ${error.message}`;
+  let usage = "none since the prompt";
+  try {
+    const [record] = papJson("usage", "list", "--agent", agent.id, "--since", String(since), "--limit", "1").items;
+    if (record) {
+      const { method, path: requestPath, status: httpStatus, verified, leftDevice, detail } = record;
+      usage = `${method} ${requestPath}: HTTP ${httpStatus}, verified ${verified}, left device ${leftDevice}: ${detail}`;
+    }
+  } catch (usageError) {
+    usage = `unreadable: ${usageError.message}`;
+  }
+  const report = [
+    `${agent.id} ${reason}`,
+    `--- stdout (last 40 lines)`,
+    tail(stdout),
+    `--- stderr (last 40 lines)`,
+    tail(stderr),
+    `--- latest usage record`,
+    usage,
+  ];
+  assert.fail(redact(report.join("\n")));
 }
 
 // Receipt audits finish after delivery, so wait for every record to settle.

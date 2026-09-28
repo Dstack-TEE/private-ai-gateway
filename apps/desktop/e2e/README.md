@@ -40,6 +40,11 @@ must be Protected again within three minutes, with the tokens accepted and a
 real reply through one agent. Finally, `pap stop` must restore every agent
 and revoke every token, and `pap service stop` must leave them restored.
 
+When an agent's one-shot command times out or does not reply `PAP-OK`, the
+failure shows why: the last 40 lines of its stdout and stderr and its latest
+usage record since the prompt (HTTP status, verification and detail), with the
+API key, agent tokens and anything shaped like a credential masked.
+
 The output ends with one row per agent and the result of each phase.
 
 ## Run locally
