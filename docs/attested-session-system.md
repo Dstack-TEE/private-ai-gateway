@@ -88,7 +88,9 @@ claims from a verified upstream event:
 - A `failed` result asserts nothing.
 - The event's stable `provider_type`, distinct from the operator's per-entry
   `name`, selects one claim mapper. NEAR AI, Chutes, and Phala direct share the
-  Intel TDX mapper. Tinfoil and SecretAI have their own mappers. Every other
+  Intel TDX mapper. Tinfoil and SecretAI have their own mappers. Privatemode's
+  mapper asserts only `tee_attested` as `verifier_derived`, because its
+  manifest observation is not bound to the request's secret. Every other
   verifier, including `aci-service`, uses the generic mapper, which asserts
   only `tee_attested` as `verifier_derived`.
 - A mapper asserts a claim only when its verifier's evidence backs it. Missing
@@ -115,6 +117,7 @@ provider's verification page states which claims its adapter asserts and why:
 [Chutes](providers/chutes/verification.md),
 [NEAR AI](providers/near-ai/verification.md),
 [Phala direct](providers/phala-direct/verification.md),
+[Privatemode](providers/privatemode/verification.md),
 [SecretAI](providers/secret-ai/verification.md), and
 [Tinfoil](providers/tinfoil/verification.md).
 
@@ -122,8 +125,9 @@ provider's verification page states which claims its adapter asserts and why:
 
 A provider's attestation scope decides what one session covers:
 
-- **Router** (NEAR AI, Tinfoil, SecretAI): one session per router channel. The
-  served model is recorded on the receipt, not in the session.
+- **Router** (NEAR AI, Tinfoil, SecretAI, Privatemode): one session per router
+  or proxy channel. The served model is recorded on the receipt, not in the
+  session.
 - **Model** (Phala direct, `aci-service`): one session per upstream model.
 - **Instance** (Chutes): one session per verified instance, so fleet changes do
   not change an unchanged instance's session id.

@@ -40,6 +40,8 @@ class Provider:
     chutes_chute_ids: dict[str, str]
     chutes_e2ee_discovery_rounds: int | None
     chutes_e2ee_discovery_interval_seconds: int | None
+    privatemode_manifest_log_path: str | None
+    privatemode_proxy_image_digest: str | None
 
     @classmethod
     def from_json(cls, value: dict[str, Any]) -> "Provider":
@@ -65,6 +67,12 @@ class Provider:
             ),
             chutes_e2ee_discovery_interval_seconds=optional_int(
                 value, "chutes_e2ee_discovery_interval_seconds"
+            ),
+            privatemode_manifest_log_path=optional_str(
+                value, "privatemode_manifest_log_path"
+            ),
+            privatemode_proxy_image_digest=optional_str(
+                value, "privatemode_proxy_image_digest"
             ),
         )
 
@@ -240,11 +248,19 @@ def pap_bin() -> str:
 
 # Offline `pap audit` skips the quote and live-channel checks, so its verdict is
 # PARTIAL (exit 1). The binding and receipt checks must still pass.
-OFFLINE_AUDIT_PASSES = ("id-2", "id-3", "receipt-1", "receipt-2", "receipt-3", "receipt-4", "upstream-1")
+# `upstream-2` checks the attested session the receipt cites.
+OFFLINE_AUDIT_PASSES = (
+    "id-2", "id-3", "receipt-1", "receipt-2", "receipt-3", "receipt-4", "upstream-1", "upstream-2",
+)
 
 
 def run_pap_audit(
-    report: Path, receipt: Path, nonce: str, request_body: Path, response_body: Path
+    report: Path,
+    receipt: Path,
+    session: Path,
+    nonce: str,
+    request_body: Path,
+    response_body: Path,
 ) -> dict[str, Any]:
     transcript = run_cmd_json(
         [
@@ -254,6 +270,8 @@ def run_pap_audit(
             str(report),
             "--receipt",
             str(receipt),
+            "--session",
+            str(session),
             "--nonce",
             nonce,
             "--request-body",

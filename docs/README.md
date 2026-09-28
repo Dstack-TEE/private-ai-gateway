@@ -36,6 +36,7 @@ For operators and contributors.
 | --- | --- | --- |
 | Build and run the gateway locally | [Local development](getting-started.md) | Tutorial |
 | Deploy the gateway in dstack | [git-launcher deployment](../deploy/README.md) | How-to |
+| Deploy the gateway with the Privatemode proxy | [Privatemode deployment](../deploy/privatemode.md) | How-to |
 | Configure runtime policy and upstreams | [Configuration reference](configuration-reference.md) | Reference |
 | Implement a control plane | [Control-plane contract](control-plane-contract.md) | Reference |
 | Run unit, smoke, and live-provider tests | [Testing guide](live-e2e-test-suite.md) | How-to |

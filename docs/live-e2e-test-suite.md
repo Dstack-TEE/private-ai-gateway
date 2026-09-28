@@ -48,14 +48,15 @@ For each entry with the `chat` capability, the case:
    `/v1/aci/receipts/{receipt_id}`.
 3. Spot-checks the legacy `/v1/signature/{chat_id}` wrapper for its
    `text`, `signature`, `signing_address`, and `signing_algo` fields.
-4. Runs `pap audit` offline on the report, receipt, nonce, and exact request
-   and response bytes. Offline, the audit skips the hardware-quote and
+4. Runs `pap audit` offline on the report, receipt, the one attested session
+   the receipt cites, the nonce, and the exact request and response bytes. Offline, the audit skips the hardware-quote and
    live-channel checks, so the case requires no failed check and passes on:
    - the nonce and keyset binding and the keyset expiry;
    - the receipt signature under the attested keyset and its keyset digest;
    - `request.received.body_hash` against the exact client body and the
      response hash against the exact response body; and
-   - a verified `upstream.verified` event that cites a session.
+   - a verified `upstream.verified` event that cites a session, and that
+     session's content address and binding.
 5. Requires a request the gateway rewrote, such as a mapped model ID, to show
    as a `request.forwarded.body_hash` that differs from
    `request.received.body_hash`.
@@ -222,6 +223,7 @@ Optional fields are:
 | `chutes_chute_ids` | Map from upstream model to known chute identifier. |
 | `chutes_e2ee_discovery_rounds` | Number of Chutes discovery passes. |
 | `chutes_e2ee_discovery_interval_seconds` | Delay between Chutes discovery passes. |
+| `privatemode_manifest_log_path`, `privatemode_proxy_image_digest` | Required for `privatemode`. The runner writes a matching static `privatemode_proxy` policy and a per-run inference token digest; run the official proxy yourself at `base_url`. |
 
 Example:
 

@@ -3,9 +3,11 @@
 //! Endpoints:
 //!
 //! * `POST /v1/chat/completions` - OpenAI-shaped chat-completion
-//!   forwarding with ACI-side hashing and receipt signing. An
-//!   optional `Authorization: Bearer <token>` is recorded on the
-//!   receipt so later lookups can authenticate the original requester.
+//!   forwarding with ACI-side hashing and receipt signing. When an inference
+//!   token digest is configured in direct mode, `Authorization: Bearer <token>`
+//!   must match it; the bearer also owns the receipt for later authenticated
+//!   retrieval. Middleware mode instead preserves each client's bearer for
+//!   control-plane authorization and attribution.
 //! * `POST /v1/completions` - compatibility surface. The aggregator
 //!   forwards legacy prompt completions through the same ACI receipt
 //!   path as chat completions. The E2EE v2 extension is an optional add-on here;
@@ -61,7 +63,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::{DefaultBodyLimit, Request, State},
-    http::{HeaderName, HeaderValue},
+    http::{HeaderName, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::Response,
     routing::{get, post},
@@ -84,6 +86,7 @@ pub(super) const MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
 use crate::aggregator::service::AciService;
 use crate::aggregator::upstream_config::UpstreamConfigManager;
 use crate::middleware::Middleware;
+use util::enforce_inference;
 
 mod backend;
 mod error_responses;
@@ -170,19 +173,39 @@ pub struct AppState {
     pub service: Arc<AciService>,
     pub upstream_config: Option<Arc<UpstreamConfigManager>>,
     pub admin_token: Option<String>,
+    pub inference_access: InferenceAccess,
     middleware: Option<Arc<Middleware>>,
 }
 
+/// Direct-mode admission policy for the inference endpoints, applied before
+/// any request body is read.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct InferenceAccess {
+    /// SHA-256 of the bearer every inference request must present.
+    pub token_sha256: Option<[u8; 32]>,
+    /// Reject requests without E2EE v2. For deployments whose public TLS
+    /// terminates outside the attested workload, so prompts never cross that
+    /// hop in plaintext.
+    pub require_client_e2ee: bool,
+}
+
 pub fn build_router(service: Arc<AciService>) -> Router {
-    build_router_inner(service, None, None, None)
+    build_router_inner(service, None, None, InferenceAccess::default(), None)
 }
 
 pub fn build_router_with_admin(
     service: Arc<AciService>,
     upstream_config: Arc<UpstreamConfigManager>,
     admin_token: Option<String>,
+    inference_access: InferenceAccess,
 ) -> Router {
-    build_router_inner(service, Some(upstream_config), admin_token, None)
+    build_router_inner(
+        service,
+        Some(upstream_config),
+        admin_token,
+        inference_access,
+        None,
+    )
 }
 
 /// Build the gateway router with the middleware, which consults the
@@ -197,6 +220,7 @@ pub fn build_router_with_admin_and_middleware(
         service,
         Some(upstream_config),
         admin_token,
+        InferenceAccess::default(),
         Some(middleware),
     )
 }
@@ -205,26 +229,34 @@ fn build_router_inner(
     service: Arc<AciService>,
     upstream_config: Option<Arc<UpstreamConfigManager>>,
     admin_token: Option<String>,
+    inference_access: InferenceAccess,
     middleware: Option<Arc<Middleware>>,
 ) -> Router {
     let state = AppState {
         service,
         upstream_config,
         admin_token,
+        inference_access,
         middleware,
     };
     Router::new()
-        .route("/", get(root))
-        .route("/health", get(health))
-        // OpenAI- and Anthropic-compatible inference surface.
-        .route("/v1/models", get(models))
-        .route("/v1/models/*rest", get(models_subpath))
-        .route("/v1/embeddings/models", get(embeddings_models))
+        // Apply inference authentication before any handler polls a body
+        // extractor. `route_layer` affects only the inference routes declared
+        // above it; catalogs and operational endpoints remain public.
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/completions", post(completions))
         .route("/v1/embeddings", post(embeddings))
         .route("/v1/messages", post(messages))
         .route("/v1/responses", post(responses))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            inference_auth_middleware,
+        ))
+        .route("/", get(root))
+        .route("/health", get(health))
+        .route("/v1/models", get(models))
+        .route("/v1/models/*rest", get(models_subpath))
+        .route("/v1/embeddings/models", get(embeddings_models))
         // Gateway operations.
         .route("/v1/metrics", get(metrics))
         .route(
@@ -259,10 +291,33 @@ fn build_router_inner(
         .with_state(state)
 }
 
-/// Middleware that stamps `X-ACI-Version` and `X-ACI-Keyset-Digest` on every
-/// response, including errors (§5.2). Unauthenticated routing hints: a
-/// changed digest tells the client to re-fetch and re-verify the attestation
-/// report.
+async fn inference_auth_middleware(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if let Some(response) = enforce_inference(&state, req.headers()) {
+        return response;
+    }
+    if state.inference_access.require_client_e2ee
+        && (req
+            .headers()
+            .get("x-e2ee-version")
+            .and_then(|v| v.to_str().ok())
+            != Some("2")
+            || req.headers().contains_key("x-signing-algo"))
+    {
+        return error_responses::error_response(
+            StatusCode::BAD_REQUEST,
+            "e2ee_required",
+            "this deployment requires attested client E2EE v2",
+        );
+    }
+    next.run(req).await
+}
+
+/// Stamp `X-ACI-Version` and `X-ACI-Keyset-Digest` on every response,
+/// including errors (§5.2), so clients can detect keyset changes.
 async fn aci_headers_middleware(
     State(state): State<AppState>,
     req: Request,

@@ -76,7 +76,8 @@ surface**, not its routing policy:
 
 - Every upstream that offers TEE attestation is verified before it serves,
   and the aggregator reaches it only over the channel that verification
-  bound — a TLS key pin or an upstream E2EE key. Each receipt records the
+  bound — a TLS key pin, an upstream E2EE key, or a measured co-deployed
+  proxy that enforces provider E2EE. Each receipt records the
   outcome (§7.5). Nothing a client sends skips this.
 - Verified serving is required when the operator configures the serving
   endpoint TEE-only, or when the request carries `aci_verified` (§5.3).
@@ -724,7 +725,14 @@ the upstream. Defined shapes:
 ```json
 { "type": "tls_spki_sha256",        "origin": "<https-origin>", "spki_sha256": "<hex>" }
 { "type": "e2ee_public_key_sha256", "provider": "<label>", "key_id": "<optional>", "algorithm": "<algo>", "public_key_sha256": "<hex>" }
+{ "type": "proxy_image_sha256",      "provider": "<label>", "proxy_image_digest": "sha256:<hex>", "credential_sha256": "<hex>" }
 ```
+
+`proxy_image_sha256` applies only when the proxy is part of the aggregator's
+attested deployment. The deployment must pin its image and private endpoint,
+share the credential whose digest is recorded, and route inference only through
+handlers the proxy encrypts. A fetched manifest is observational unless the
+proxy binds it to the secret used for the cited request.
 
 ### 8.3 Typed claims
 
@@ -996,7 +1004,7 @@ these sets requires a published extension document.
 | Purpose / context strings | `aci.report_data.v1` | — (fixed statement tag) |
 | Signature algorithms | `ed25519` baseline. Keysets may carry more (below) | Ignore a keyset entry whose `algo` is unknown. Reject an artifact signed with one |
 | Receipt event types | `request.received`, `request.forwarded`, `response.returned`, `upstream.verified` | Ignore (§7.4) |
-| Channel binding types | `tls_spki_sha256`, `e2ee_public_key_sha256` | Treat as not enforceable |
+| Channel binding types | `tls_spki_sha256`, `e2ee_public_key_sha256`, `proxy_image_sha256` | Treat as not enforceable |
 | Claim names | `tee_attested`, `gpu_attested`, `tcb_up_to_date`, `os_known_good`, `serving_software_known_good`, `model_weights_provenance` | Extra facts live in `claims.extra`. Unknown entries are informational |
 | Claim statuses / sources | `asserted`, `refuted`, `unknown` / `hardware_proven`, `verifier_derived`, `provider_asserted`, `operator_asserted` | Treat the claim as `unknown` |
 | TEE types | `tdx`, `sev_snp` | Requires a published verifier extension (§4.2) |

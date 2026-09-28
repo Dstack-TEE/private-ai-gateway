@@ -9,7 +9,6 @@ from .attested_sessions import assert_upstream_attested_sessions
 from .lifecycle import assert_receipt_log
 
 
-REQUESTER_TOKEN = "live-e2e-requester"
 PROBE_INPUT = "Reply with exactly one short sentence confirming ACI embeddings lifecycle."
 
 
@@ -18,6 +17,7 @@ def run_embeddings_case(
     base_url: str,
     provider: Provider,
     artifact_dir: Path,
+    inference_token: str,
 ) -> dict[str, Any]:
     provider_dir = artifact_dir / provider.name / "embeddings"
     body = {
@@ -31,7 +31,7 @@ def run_embeddings_case(
         "POST",
         f"{base_url}/v1/embeddings",
         headers={
-            "Authorization": f"Bearer {REQUESTER_TOKEN}",
+            "Authorization": f"Bearer {inference_token}",
             "Content-Type": "application/json",
         },
         body=request_body,
@@ -68,7 +68,7 @@ def run_embeddings_case(
     receipt_status, _, receipt_body, receipt = request_json(
         "GET",
         f"{base_url}/v1/aci/receipts/{receipt_id}",
-        headers={"Authorization": f"Bearer {REQUESTER_TOKEN}"},
+        headers={"Authorization": f"Bearer {inference_token}"},
         timeout=120,
     )
     receipt_path = provider_dir / "receipt.json"
@@ -78,8 +78,6 @@ def run_embeddings_case(
             f"{provider.name} embeddings receipt fetch failed: HTTP {receipt_status}"
         )
 
-    verifier_summary = run_pap_audit(report_path, receipt_path, nonce, request_path, response_path)
-    write_json(provider_dir / "user-verification-summary.json", verifier_summary)
     assert_embeddings_receipt_log(provider, receipt)
     attested_sessions = assert_upstream_attested_sessions(
         base_url=base_url,
@@ -87,6 +85,17 @@ def run_embeddings_case(
         receipt=receipt,
         artifact_dir=provider_dir,
     )
+    if len(attested_sessions) != 1:
+        raise RuntimeError(f"{provider.name} expected one serving attested session")
+    verifier_summary = run_pap_audit(
+        report_path,
+        receipt_path,
+        provider_dir / "attested-session-0.json",
+        nonce,
+        request_path,
+        response_path,
+    )
+    write_json(provider_dir / "user-verification-summary.json", verifier_summary)
     return {
         "provider": provider.name,
         "receipt_id": receipt_id,

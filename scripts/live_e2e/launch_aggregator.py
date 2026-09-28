@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import os
+import secrets
 import signal
 import subprocess
 import tempfile
@@ -36,6 +38,9 @@ class AggregatorProcess:
         self.dstack_endpoint = dstack_endpoint
         self.env = {**os.environ, **(env or {})}
         self.artifact_dir = artifact_dir
+        # A per-run bearer owns this run's receipts; Privatemode runs also
+        # require it for inference.
+        self.inference_token = secrets.token_urlsafe(32)
         self._tmp: tempfile.TemporaryDirectory[str] | None = None
         self._process: subprocess.Popen[bytes] | None = None
         self.gateway_config_path: Path | None = None
@@ -57,16 +62,23 @@ class AggregatorProcess:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         config = build_upstream_config(self.providers, self.env)
         write_json(self.upstream_seed_path, config, mode=0o600)
-        write_json(
-            self.gateway_config_path,
-            {
-                "bind": f"127.0.0.1:{self.port}",
-                "state_dir": str(self.state_dir),
-                "upstream_config_seed_path": str(self.upstream_seed_path),
-                "dstack_endpoint": self.dstack_endpoint,
-            },
-            mode=0o600,
+        privatemode_credential_path = tmp_dir / "privatemode-api-key"
+        gateway_config = build_gateway_config(
+            self.providers,
+            self.env,
+            port=self.port,
+            state_dir=self.state_dir,
+            upstream_seed_path=self.upstream_seed_path,
+            dstack_endpoint=self.dstack_endpoint,
+            inference_token=self.inference_token,
+            privatemode_credential_path=privatemode_credential_path,
         )
+        write_json(self.gateway_config_path, gateway_config, mode=0o600)
+        if "privatemode_proxy" in gateway_config:
+            first = next(p for p in self.providers if p.provider == "privatemode")
+            privatemode_credential_path.write_text(
+                self.env[first.api_key_env], encoding="utf-8"
+            )
         if self.artifact_dir:
             write_json(
                 self.artifact_dir / "aggregator-upstreams.redacted.json",
@@ -141,6 +153,73 @@ class AggregatorProcess:
         raise TimeoutError(f"aggregator did not become ready: {last_error}; log: {self.log_path}")
 
 
+def build_gateway_config(
+    providers: list[Provider],
+    env: dict[str, str],
+    *,
+    port: int,
+    state_dir: Path,
+    upstream_seed_path: Path,
+    dstack_endpoint: str,
+    inference_token: str,
+    privatemode_credential_path: Path,
+) -> dict[str, Any]:
+    gateway_config: dict[str, Any] = {
+        "bind": f"127.0.0.1:{port}",
+        "state_dir": str(state_dir),
+        "upstream_config_seed_path": str(upstream_seed_path),
+        "dstack_endpoint": dstack_endpoint,
+    }
+    privatemode = [
+        provider for provider in providers if provider.provider == "privatemode"
+    ]
+    if not privatemode:
+        return gateway_config
+
+    first = privatemode[0]
+    credential = env.get(first.api_key_env)
+    if not credential:
+        raise RuntimeError(f"missing API key env var {first.api_key_env}")
+    required = {
+        "manifest_log_path": first.privatemode_manifest_log_path,
+        "credential_path": str(privatemode_credential_path),
+        "credential_sha256": hashlib.sha256(
+            credential.encode("utf-8")
+        ).hexdigest(),
+        "proxy_image_digest": first.privatemode_proxy_image_digest,
+    }
+    missing = [name for name, value in required.items() if value is None]
+    if missing:
+        raise RuntimeError(
+            f"Privatemode live E2E is missing static fields: {', '.join(missing)}"
+        )
+    expected = (
+        first.base_url,
+        first.privatemode_manifest_log_path,
+        first.privatemode_proxy_image_digest,
+    )
+    if any(
+        (
+            provider.base_url,
+            provider.privatemode_manifest_log_path,
+            provider.privatemode_proxy_image_digest,
+        )
+        != expected
+        for provider in privatemode[1:]
+    ):
+        raise RuntimeError(
+            "all Privatemode routes must share one static proxy deployment"
+        )
+    gateway_config["inference_token_sha256"] = hashlib.sha256(
+        inference_token.encode("utf-8")
+    ).hexdigest()
+    gateway_config["privatemode_proxy"] = {
+        "base_url": first.base_url,
+        **required,
+    }
+    return gateway_config
+
+
 def build_upstream_config(
     providers: list[Provider],
     env: dict[str, str],
@@ -155,13 +234,14 @@ def build_upstream_config(
             "provider": provider.provider,
             "base_url": provider.base_url,
             "models": {provider.public_model: provider.upstream_model},
-            "bearer_token": token,
             "connect_timeout_seconds": 10,
             "read_timeout_seconds": 600,
             "verifier_request_timeout_seconds": 600
             if provider.provider == "chutes"
             else 120,
         }
+        if provider.provider != "privatemode":
+            item["bearer_token"] = token
         for field in (
             "verification_refresh_seconds",
             "session_refresh_seconds",
@@ -181,6 +261,7 @@ def redact_upstream_config(config: list[dict[str, Any]]) -> list[dict[str, Any]]
     out = []
     for item in config:
         redacted = dict(item)
-        redacted["bearer_token"] = "<redacted>"
+        if "bearer_token" in redacted:
+            redacted["bearer_token"] = "<redacted>"
         out.append(redacted)
     return out

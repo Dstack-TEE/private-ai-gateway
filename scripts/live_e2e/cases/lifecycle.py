@@ -8,14 +8,12 @@ from ..common import Provider, json_bytes, request_json, run_pap_audit, write_by
 from .attested_sessions import assert_upstream_attested_sessions
 
 
-REQUESTER_TOKEN = "live-e2e-requester"
-
-
 def run_lifecycle_case(
     *,
     base_url: str,
     provider: Provider,
     artifact_dir: Path,
+    inference_token: str,
 ) -> dict[str, Any]:
     provider_dir = artifact_dir / provider.name / "lifecycle"
     body = {
@@ -36,7 +34,7 @@ def run_lifecycle_case(
         "POST",
         f"{base_url}/v1/chat/completions",
         headers={
-            "Authorization": f"Bearer {REQUESTER_TOKEN}",
+            "Authorization": f"Bearer {inference_token}",
             "Content-Type": "application/json",
         },
         body=request_body,
@@ -74,7 +72,7 @@ def run_lifecycle_case(
     receipt_status, _, receipt_body, receipt = request_json(
         "GET",
         f"{base_url}/v1/aci/receipts/{receipt_id}",
-        headers={"Authorization": f"Bearer {REQUESTER_TOKEN}"},
+        headers={"Authorization": f"Bearer {inference_token}"},
         timeout=120,
     )
     receipt_path = provider_dir / "receipt.json"
@@ -87,7 +85,7 @@ def run_lifecycle_case(
     legacy_status, _, _, legacy_json = request_json(
         "GET",
         f"{base_url}/v1/signature/{chat_id}",
-        headers={"Authorization": f"Bearer {REQUESTER_TOKEN}"},
+        headers={"Authorization": f"Bearer {inference_token}"},
         timeout=120,
     )
     if legacy_status != 200 or not isinstance(legacy_json, dict):
@@ -96,8 +94,6 @@ def run_lifecycle_case(
         if not legacy_json.get(field):
             raise RuntimeError(f"{provider.name} legacy signature wrapper missing {field}")
 
-    verifier_summary = run_pap_audit(report_path, receipt_path, nonce, request_path, response_path)
-    write_json(provider_dir / "user-verification-summary.json", verifier_summary)
     assert_receipt_log(provider, receipt)
     attested_sessions = assert_upstream_attested_sessions(
         base_url=base_url,
@@ -105,6 +101,17 @@ def run_lifecycle_case(
         receipt=receipt,
         artifact_dir=provider_dir,
     )
+    if len(attested_sessions) != 1:
+        raise RuntimeError(f"{provider.name} expected one serving attested session")
+    verifier_summary = run_pap_audit(
+        report_path,
+        receipt_path,
+        provider_dir / "attested-session-0.json",
+        nonce,
+        request_path,
+        response_path,
+    )
+    write_json(provider_dir / "user-verification-summary.json", verifier_summary)
     return {
         "provider": provider.name,
         "chat_id": chat_id,

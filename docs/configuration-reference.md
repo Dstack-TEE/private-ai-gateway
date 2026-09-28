@@ -35,13 +35,17 @@ Minimal container configuration:
 | `upstream_config_seed_path` | string | unset | Read-only upstream JSON copied to `<state_dir>/upstreams.json` only when the active file is missing or whitespace-only. |
 | `upstream_pull` | object | unset | Authenticated HTTPS source for the complete runtime upstream config. See [Upstream pull](#upstream-pull). |
 | `admin_token` | string | unset | Bearer token for the upstream admin API. Admin routes return `404` when unset. |
+| `admin_token_sha256` | hex string | unset | SHA-256 the admin token must match, whether it comes from `admin_token`, `PRIVATE_AI_GATEWAY_ADMIN_TOKEN`, or `PRIVATE_AI_GATEWAY_ENV_FILE`. Startup fails on a missing or mismatched token. |
+| `inference_token_sha256` | hex string | unset | Direct mode only. SHA-256 of the bearer every inference request must present; missing or mismatched bearers are rejected before the body is read. The bearer itself stays with clients. Required with `privatemode_proxy` in direct mode; a startup error with `middleware`, which authorizes each client bearer through the control plane. |
 | `keyset_not_after_seconds` | positive integer | `2592000` | Lifetime of a newly resolved workload keyset. Zero is rejected. |
 | `subject` | string | unset | Optional policy-interpreted workload-keyset subject. The gateway publishes it but generic verifiers do not trust it without an acceptance policy. |
 | `direct_serving` | boolean | `false` | Report `service_capabilities.serving: "direct"` for a workload that performs inference itself and has no upstream hop. Setting it together with `middleware` is a startup error. |
 | `enable_e2ee` | boolean | `true` | Advertise and terminate the [E2EE v2 compatibility extension](../spec/e2ee-v2.md). When false, the report carries `supported_e2ee_versions: []` and v2 requests fail with `400 e2ee_invalid_version`. The legacy `X-Signing-Algo` E2EE path is not affected. |
+| `require_client_e2ee` | boolean | `false` | Direct mode only. Reject inference requests without E2EE v2 (`400 e2ee_required`) before the body is read. Set it when public TLS terminates outside the attested workload, such as Phala's default app URL; a deployment that terminates TLS inside the workload, such as behind dstack-ingress with a [downstream TLS binding](#downstream-tls-binding), does not need it. Requires `enable_e2ee`. |
 | `tls` | object | empty | Downstream certificate bindings published in the attested keyset. See [Downstream TLS binding](#downstream-tls-binding). |
 | `dstack_endpoint` | string | dstack SDK default | dstack SDK endpoint. `unix:/path` and `unix:///path` are normalized to `/path`; HTTP endpoints pass through to the SDK. |
 | `middleware` | object | unset | Enables the in-process middleware and external control-plane client. See [Middleware fields](#middleware-fields). |
+| `privatemode_proxy` | object | unset | Static policy for an official Privatemode proxy co-deployed in the measured Compose. Required before a `privatemode` route can load. See [Privatemode proxy](#privatemode-proxy). |
 
 ### Runtime state files
 
@@ -234,6 +238,7 @@ client-observed body and the provider-facing body.
 | `chutes` | TEE | Per-instance attestation and encrypted Chutes E2EE transport. |
 | `secret-ai` | TEE | SecretVM CPU, GPU, workload, and inference-SPKI verifier. |
 | `phala-direct` | TEE | Direct dstack-vllm-proxy verification through the Python bridge and TLS-SPKI enforcement. |
+| `privatemode` | TEE | Official Privatemode proxy co-deployed in the measured Compose; the proxy owns attestation and E2EE. Forbids `bearer_token` and `path`, and `base_url` must equal static `privatemode_proxy.base_url`. |
 
 TEE classification makes a route eligible for `provider.aci_verified`. A
 successful provider verifier and enforceable binding are still required at
@@ -338,6 +343,28 @@ decide whether the launcher, repository revision, image, compiler, or
 dependencies are approved. Verifier policy must make those acceptance
 decisions.
 
+## Privatemode proxy
+
+`privatemode_proxy` is static deployment policy, so the admin API cannot point
+routes at another proxy or change the measured pins.
+
+| Field | Contract |
+| --- | --- |
+| `base_url` | Internal HTTP(S) origin of the co-deployed proxy. Paths, credentials, queries, and fragments are rejected. |
+| `manifest_log_path` | Absolute path to the proxy's manifest-history log, mounted read-only. The latest complete entry is reported as unbound observation metadata. |
+| `credential_path` | Absolute path to the Compose secret mounted into both gateway and proxy. The gateway checks it at startup and never forwards it. |
+| `credential_sha256` | SHA-256 of that credential. The renderer derives it from `PRIVATEMODE_API_KEY`; a mismatch fails startup. |
+| `proxy_image_digest` | OCI digest of the proxy image pinned in the same Compose, as `sha256:<64-hex>`. |
+
+For `privatemode`, dstack Compose owns the proxy process, image pin, shared
+manifest-history volume, restart policy, and private network. Mutable routes
+must match the static origin and cannot set `bearer_token` or `path`; all share
+the measured Compose credential. The gateway validates the credential digest, requires a bounded
+model-list readiness probe, reports the latest fetched manifest as explicitly
+unbound metadata, and forwards only to the encrypted v1.48 handlers. Separate
+credentials require separate measured deployments.
+See [Privatemode verification](providers/privatemode/verification.md).
+
 ## Secrets and measured compose
 
 dstack publishes the measured compose as `app_compose` in every attestation
@@ -353,6 +380,8 @@ The gateway process and provider-verifier children use:
 | Variable | Use |
 | --- | --- |
 | `PRIVATE_AI_GATEWAY_CONFIG_PATH` | Required path to the static gateway config. |
+| `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` | Optional runtime admin token overriding static `admin_token`. |
+| `PRIVATE_AI_GATEWAY_ENV_FILE` | Optional dotenv file read for `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` when that variable is unset; static `admin_token` applies when the file has none. Parse errors report the position, never the line. `compose.privatemode.yaml` points it at dstack's decrypted in-TEE environment. |
 | `RUST_LOG` | `tracing_subscriber` filter. Defaults to `info`. |
 | `PRIVATE_AI_VERIFIER_DIR` | Optional Python verifier checkout override consumed by provider-verifier child processes. See [Install dependencies](getting-started.md#install-dependencies). |
 | `DSTACK_VERIFIER_URL` | External verifier URL consumed by NEAR AI and PhalaDirect bridge code. Those adapters default to `http://localhost:8080` when unset. |
@@ -365,7 +394,9 @@ The repository entrypoint and deployment manifest also use:
 | `CARGO_HOME` | Cargo cache override used by `entrypoint.sh`. Defaults to `$PRIVATE_AI_GATEWAY_CACHE_DIR/cargo`. |
 | `RUSTUP_HOME` | Rustup state override used by `entrypoint.sh`. Defaults to `$PRIVATE_AI_GATEWAY_CACHE_DIR/rustup`. |
 | `CARGO_TARGET_DIR` | Cargo output override used by `entrypoint.sh`. Defaults to `$PRIVATE_AI_GATEWAY_CACHE_DIR/target`. |
-| `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` | Compose interpolation for the static config's admin token. |
+| `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` | Compose interpolation for the static config's admin token in `compose.yaml`. `compose.privatemode.yaml` instead reads it from dstack's decrypted in-TEE environment. |
+| `PRIVATE_AI_GATEWAY_ADMIN_TOKEN_SHA256`, `PRIVATE_AI_GATEWAY_INFERENCE_TOKEN_SHA256` | Non-secret digests rendered into `compose.privatemode.yaml` as `admin_token_sha256` and `inference_token_sha256`. |
+| `PRIVATEMODE_API_KEY` | Encrypted deployment input mounted as one Compose secret into the gateway and proxy. The renderer derives `PRIVATEMODE_CREDENTIAL_SHA256` from it. |
 
 Provider credentials belong in the upstream config or the deployment mechanism
 that renders it. The live test harness reads its own provider key variables; see

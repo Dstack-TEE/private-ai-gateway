@@ -37,6 +37,10 @@ documents the Sigstore provenance and deployment-verification chain.
 
 Review the launcher image, gateway commit, complete compose content, and runtime policy together. The launcher image alone does not identify the deployed workload.
 
+[`compose.privatemode.yaml`](compose.privatemode.yaml) adds the official
+Privatemode proxy to the same measured workload. It has its own renderer and
+verification steps; see [Deploy with the Privatemode proxy](privatemode.md).
+
 ## Prepare the deployment
 
 Replace `COMMIT_SHA` in the `gateway-pin` config of `compose.yaml` with the full commit hash (40 or 64 hex characters) of the gateway revision you reviewed. Keep it a literal value. dstack measures the compose file before variable substitution, so a commit supplied through a variable would not be part of the measured `compose_hash`, and verifiers could not tell which code runs. Because the commit is a literal in the measured manifest, the compose hash identifies the gateway source.
@@ -218,6 +222,6 @@ Use [Verification and security model](../docs/attested-confidential-inference.md
 
 ## Toolchain trust
 
-`entrypoint.sh` builds `private-ai-gateway` in release mode with `cargo build --release --locked`. If Cargo is absent, it installs `rustup` through the runtime Ubuntu package repositories and resolves the current stable Rust toolchain.
+`entrypoint.sh` builds `private-ai-gateway` in release mode with `cargo build --release --locked`. If a C compiler is absent, it installs `build-essential`; if Cargo is absent, it installs `rustup`. Both come from the runtime Ubuntu package repositories, and `rustup` resolves the current stable Rust toolchain.
 
 That bootstrap is a development-grade trust path: the runtime archive metadata, rustup distribution, resolved stable compiler, and fetched crates participate in the effective build. A production gateway-owned image should pin and attest the compiler and dependencies, or contain a reviewed prebuilt binary. The locked Cargo dependency graph prevents resolver drift but does not by itself make the runtime toolchain reproducible.
