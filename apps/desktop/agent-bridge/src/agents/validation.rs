@@ -230,7 +230,10 @@ impl Projector {
         }
     }
 
-    /// OpenCode v1.18.29 deep-merges these process-level sources in order.
+    /// OpenCode 1.18.29+ deep-merges these process-level sources in order.
+    /// OpenCode 2 reads the same V1 files and normalizes them in memory, but
+    /// its native `providers` entry overlays the V1 `provider` one we write,
+    /// so no source may define `providers.private-ai-proxy`.
     /// Keep the original write/restore path: selecting JSONC instead would
     /// strand old connection journals and our JSON writer would lose comments.
     /// Project/managed/remote sources need CLI context; references stay opaque
@@ -322,11 +325,18 @@ impl Projector {
         }) {
             return Err("OpenCode's enabled_providers/disabled_providers exclude private-ai-proxy or are invalid. Resolve those filters in OpenCode; they will not be overwritten".to_string());
         }
-        for pointer in ["/provider/private-ai-proxy", "/model"] {
+        for (pointer, expected) in [
+            (
+                "/provider/private-ai-proxy",
+                projected.pointer("/provider/private-ai-proxy"),
+            ),
+            ("/providers/private-ai-proxy", None),
+            ("/model", projected.pointer("/model")),
+        ] {
             if pointer == "/model" && !owns_model {
                 continue;
             }
-            if merged.pointer(pointer) != projected.pointer(pointer) {
+            if merged.pointer(pointer) != expected {
                 return Err(format!(
                     "OpenCode's merged config changes the gateway-owned field {pointer}. \
                      Access is disabled. Review {} without changing unrelated providers, \
