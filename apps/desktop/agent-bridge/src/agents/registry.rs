@@ -7,6 +7,9 @@ pub(crate) trait AgentIntegration {
     /// The live user-level config file. With `tool_env` each tool's own
     /// location override is honored.
     fn config_path(self, home: &Path, tool_env: bool) -> PathBuf;
+    /// The folder whose presence means the agent has run; by default the
+    /// folder holding the config file.
+    fn detection_dir(self, home: &Path, tool_env: bool) -> PathBuf;
     fn note(self, connect: bool) -> &'static str;
     /// The agent reads its credential only as a literal value, so its config
     /// holds the agent's local token itself rather than a command or file.
@@ -27,16 +30,20 @@ impl AgentIntegration for Agent {
             | Self::OpenClaw
             | Self::OhMyPi
             | Self::QwenCode
-            | Self::KiloCli => Surface::ChatCompletions,
+            | Self::KiloCli
+            | Self::ClineCli => Surface::ChatCompletions,
         }
     }
 
     fn format(self) -> Format {
         match self {
             Agent::Codex => Format::Toml,
-            Agent::ClaudeCode | Agent::OpenCode | Agent::Pi | Agent::QwenCode | Agent::KiloCli => {
-                Format::Json
-            }
+            Agent::ClaudeCode
+            | Agent::OpenCode
+            | Agent::Pi
+            | Agent::QwenCode
+            | Agent::KiloCli
+            | Agent::ClineCli => Format::Json,
             Agent::Hermes => Format::Yaml,
             Agent::OpenClaw => Format::Json5,
             Agent::OhMyPi => Format::Yaml,
@@ -47,6 +54,7 @@ impl AgentIntegration for Agent {
         let override_dir = |name: &str| tool_env.then(|| env_path(name)).flatten();
         match self {
             Agent::OpenClaw => openclaw::config_path(home, tool_env),
+            Agent::ClineCli => cline::config_path(home, tool_env),
             Agent::OhMyPi => oh_my_pi::config_path(home, tool_env),
             Agent::Codex => override_dir("CODEX_HOME")
                 .unwrap_or_else(|| home.join(".codex"))
@@ -81,6 +89,17 @@ impl AgentIntegration for Agent {
                 })
                 .unwrap_or_else(|| hermes_native_dir(home, tool_env))
                 .join("config.yaml"),
+        }
+    }
+
+    fn detection_dir(self, home: &Path, tool_env: bool) -> PathBuf {
+        match self {
+            Agent::ClineCli => cline::detection_dir(home, tool_env),
+            _ => self
+                .config_path(home, tool_env)
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default(),
         }
     }
 
@@ -134,6 +153,9 @@ impl AgentIntegration for Agent {
                 "Kilo CLI will use an app-owned provider catalog generated from the verified \
                  service and a file-backed machine-local token. Restart Kilo after applying."
             }
+            Agent::ClineCli => {
+                "Cline CLI will use its built-in OpenAI-compatible provider pointed at the verified service, and lists the service's models itself. Cline only accepts that built-in provider, so the one you had there is saved and restored on disconnect. Cline reads keys only as values, so its settings hold this agent's machine-local token, which is revoked on disconnect. Run \"cline hub stop\" or restart Cline after applying. The Cline editor extensions keep their own settings and are not changed."
+            }
             Agent::QwenCode => {
                 "Qwen Code will use an app-owned OpenAI-compatible model provider generated from the verified service. Qwen Code reads keys only as values, so its settings hold this agent's machine-local token, which is revoked on disconnect. Restart Qwen Code after applying; a project .qwen/settings.json that defines modelProviders replaces this catalog."
             }
@@ -141,12 +163,13 @@ impl AgentIntegration for Agent {
     }
 
     fn static_token(self) -> bool {
-        matches!(self, Agent::QwenCode)
+        matches!(self, Agent::QwenCode | Agent::ClineCli)
     }
 
     fn user_selection(self, path: &[String]) -> bool {
         let path: Vec<&str> = path.iter().map(String::as_str).collect();
         match self {
+            Agent::ClineCli => cline::user_selection(&path),
             Agent::Codex => path == ["model"],
             Agent::QwenCode => {
                 path == ["model", "name"] || path == ["security", "auth", "selectedType"]

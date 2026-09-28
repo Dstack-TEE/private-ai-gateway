@@ -9,6 +9,7 @@
 //! custom-provider settings. Disconnecting never depends on the endpoint or
 //! the catalog, so current connections can be restored while offline.
 
+mod cline;
 mod codex_service;
 mod discovery;
 mod error;

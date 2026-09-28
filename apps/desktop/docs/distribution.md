@@ -129,7 +129,7 @@ Authenticode remains optional and does not block the release.
 
 `Desktop live E2E` (`desktop-e2e.yml`) installs a published Linux x64 desktop
 package in a fresh `ubuntu:24.04` container and, for Claude Code, Codex,
-OpenCode, Pi, Oh My Pi, OpenClaw, Hermes, Qwen Code and Kilo CLI, checks a real reply through the
+OpenCode, Pi, Oh My Pi, OpenClaw, Hermes, Qwen Code, Kilo CLI and Cline CLI, checks a real reply through the
 live RedPill service, its verified usage record, restoration on disconnect and
 token revocation, then fail-closed behavior and restoration on stop
 ([E2E harness](../e2e/README.md)). A second job repeats the OpenCode checks
@@ -422,7 +422,8 @@ scoped access only while it does so. The backend resolves the shared bookmark,
 starts scoped access and holds it for its lifetime, and immediately
 scans and shows the detected Agents. Detection derives each Agent's configuration path
 from that authorized Home and reports the Agent when the folder holding that file exists
-(for example `~/.codex`). Every supported Agent creates this folder on its first run,
+(for example `~/.codex`); Cline CLI, whose settings folder appears only once a provider
+is saved, is detected by `~/.cline`. Every supported Agent creates this folder on its first run,
 so detection is the same for every install method (package managers, standalone
 installers, Homebrew, or wrappers such as Superset) and in both distributions, with no
 PATH or login-shell lookup. An Agent installed but never run is listed as not detected
@@ -431,7 +432,7 @@ connecting it only edits that folder. Other tools can create these folders too:
 Superset writes `~/.claude/settings.json`, `~/.codex/hooks.json`,
 `~/.pi/agent/extensions` and `~/.omp/agent/extensions` whether or not those Agents
 are installed, so they show as detected on a machine that runs Superset.
-Location overrides such as `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `HERMES_HOME` or `QWEN_HOME` are
+Location overrides such as `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `HERMES_HOME`, `QWEN_HOME` or `CLINE_DIR` are
 read only by the Direct build, and only from the backend's own environment. A backend
 started from Finder, the Dock or a login item inherits the launchd environment, not
 variables exported in shell startup files, so it uses the default locations; the MAS
@@ -467,9 +468,10 @@ do not protect against other programs running as the same OS user.
 OpenCode and Kilo CLI use their file reference and OpenClaw its `singleValue` file SecretRef.
 Codex invokes `/bin/cat` with a separate absolute-path argument; Claude Code,
 Pi, Oh My Pi and Hermes use their existing credential-command contracts with a
-quoted `/bin/cat` path. Qwen Code reads keys only as values, so its
-`settings.json` `env` block holds its agent token itself, in both distributions;
-disconnect removes it and revokes the token. No external Agent launches a PAP
+quoted `/bin/cat` path. Qwen Code and Cline CLI read keys only as values, so
+Qwen Code's `settings.json` `env` block and Cline's `providers.json` hold the
+agent token itself, in both distributions; disconnect removes it and revokes
+the token. No external Agent launches a PAP
 executable or reads the app container. The same transaction journal restores owned configuration,
 revokes tokens on disconnect/suspend, and rotates them on reconnect. In-memory
 proxy authority is withdrawn before restoration; restoration failures remain

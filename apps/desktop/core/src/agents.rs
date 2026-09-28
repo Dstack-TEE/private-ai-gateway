@@ -83,10 +83,11 @@ pub enum Agent {
     OhMyPi,
     QwenCode,
     KiloCli,
+    ClineCli,
 }
 
 impl Agent {
-    pub const ALL: [Agent; 9] = [
+    pub const ALL: [Agent; 10] = [
         Agent::ClaudeCode,
         Agent::Codex,
         Agent::Hermes,
@@ -96,6 +97,7 @@ impl Agent {
         Agent::OpenClaw,
         Agent::QwenCode,
         Agent::KiloCli,
+        Agent::ClineCli,
     ];
 
     pub fn from_id(id: &str) -> Result<Self, String> {
@@ -116,6 +118,7 @@ impl Agent {
             Agent::OhMyPi => "oh-my-pi",
             Agent::QwenCode => "qwen-code",
             Agent::KiloCli => "kilo",
+            Agent::ClineCli => "cline",
         }
     }
 
@@ -130,6 +133,7 @@ impl Agent {
             Agent::OhMyPi => "Oh My Pi",
             Agent::QwenCode => "Qwen Code",
             Agent::KiloCli => "Kilo CLI",
+            Agent::ClineCli => "Cline CLI",
         }
     }
 
@@ -144,6 +148,7 @@ impl Agent {
             Agent::OhMyPi => "https://omp.sh",
             Agent::QwenCode => "https://qwenlm.github.io/qwen-code-docs/",
             Agent::KiloCli => "https://kilo.ai/cli",
+            Agent::ClineCli => "https://cline.bot",
         }
     }
 }

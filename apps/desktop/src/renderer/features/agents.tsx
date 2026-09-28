@@ -1,5 +1,6 @@
 import React from "react";
 import { ExternalLink, FolderLock, LoaderCircle } from "lucide-react";
+import clineIcon from "@lobehub/icons-static-svg/icons/cline.svg";
 import claudeCodeIcon from "@lobehub/icons-static-svg/icons/claudecode-color.svg";
 import codexIcon from "@lobehub/icons-static-svg/icons/codex-color.svg";
 import hermesIcon from "@lobehub/icons-static-svg/icons/hermesagent.svg";
@@ -35,6 +36,7 @@ const AGENT_ICONS: Record<string, string> = {
   openclaw: openClawIcon,
   "qwen-code": qwenCodeIcon,
   kilo: kiloIcon,
+  cline: clineIcon,
 };
 
 function AgentMark({ agent }: { agent: Pick<AgentStatus, "id" | "name"> }): React.JSX.Element {

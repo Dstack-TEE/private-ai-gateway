@@ -292,7 +292,11 @@ impl Projector {
         let default_model =
             selected_model(agent, Some(&doc)).or_else(|| record.options.default_model.clone());
         let edit = if text.is_some() {
-            restore(&mut doc, &record, self.secrets.as_ref())?
+            let mut edit = restore(&mut doc, &record, self.secrets.as_ref())?;
+            if agent == Agent::ClineCli {
+                cline::remove_created_slot(&mut doc, &mut edit)?;
+            }
+            edit
         } else {
             // A removed config is an uninstall/user action, not a request to
             // recreate fields the gateway previously removed.

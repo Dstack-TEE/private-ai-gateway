@@ -57,10 +57,7 @@ pub(super) fn merge_opencode_config(target: &mut serde_json::Value, source: serd
 /// installed and needs neither PATH nor a login shell, so it behaves the same
 /// inside the macOS App Sandbox.
 pub(super) fn detected(agent: Agent, home: &Path, tool_env: bool) -> bool {
-    agent
-        .config_path(home, tool_env)
-        .parent()
-        .is_some_and(Path::is_dir)
+    agent.detection_dir(home, tool_env).is_dir()
 }
 
 pub(super) fn executable_metadata(path: &Path) -> Option<fs::Metadata> {

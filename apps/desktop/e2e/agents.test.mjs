@@ -3,7 +3,7 @@
 // and passes the RedPill API key on stdin, which only `pap profiles add` reads.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
@@ -99,6 +99,18 @@ const ALL_AGENTS = [
     prompt: ["kilo", "run", PROMPT],
     // Kilo migrates an existing config to permission.bash: allow once.
     selfWritten: ["$schema", "permission"],
+  },
+  {
+    id: "cline",
+    // Cline drops keys its schema does not know when it saves this file.
+    sentinel: {
+      file: ".cline/data/settings/providers.json",
+      path: ["modes", "voiceInput"],
+      value: { providerId: "pap-e2e", modelId: "sentinel" },
+    },
+    surface: "chat",
+    files: [".cline/data/settings/providers.json"],
+    prompt: ["cline", PROMPT],
   },
 ];
 
@@ -235,6 +247,8 @@ const readFiles = (agent) => agent.files.map(readText);
 function writeSetting({ file, path: keys, value }) {
   const absolute = path.join(HOME, file);
   const text = readText(file);
+  // Cline creates its settings folder only once a provider is saved.
+  mkdirSync(path.dirname(absolute), { recursive: true });
   if (/\.ya?ml$/.test(file)) {
     const document = parseDocument(text ?? "");
     document.setIn(keys, value);

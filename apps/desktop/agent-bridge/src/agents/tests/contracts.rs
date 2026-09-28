@@ -41,6 +41,7 @@ fn every_agent_switches_conservatively_and_reconnects_without_namespace_conflict
             Agent::Pi => "{}",
             Agent::OhMyPi => "theme: dark\n",
             Agent::KiloCli => r#"{"model":"original/native","provider":{"original":{"name":"User provider"}}}"#,
+            Agent::ClineCli => r#"{"version":1,"lastUsedProvider":"anthropic","modes":{},"providers":{"anthropic":{"settings":{"provider":"anthropic","apiKey":"user-anthropic-key"},"updatedAt":"2026-01-01T00:00:00.000Z","tokenSource":"manual"},"openai-compatible":{"settings":{"provider":"openai-compatible","apiKey":"old-secret","baseUrl":"https://original.invalid/v1","model":"native","protocol":"openai-responses"},"updatedAt":"2026-01-01T00:00:00.000Z","tokenSource":"manual"}}}"#,
             Agent::QwenCode => r#"{"model":{"name":"native"},"security":{"auth":{"selectedType":"qwen-oauth"}},"env":{"OTHER":"kept"}}"#,
         };
             write(&config, original);
@@ -155,7 +156,7 @@ fn every_agent_switches_conservatively_and_reconnects_without_namespace_conflict
                 .unwrap()
                 .get(agent.id())
                 .cloned();
-            if matches!(agent, Agent::ClaudeCode | Agent::QwenCode) {
+            if matches!(agent, Agent::ClaudeCode | Agent::QwenCode | Agent::ClineCli) {
                 assert!(record.is_none());
             } else {
                 let record = record.unwrap();
@@ -208,10 +209,19 @@ fn every_agent_switches_conservatively_and_reconnects_without_namespace_conflict
             assert!(enable(&sandbox.projector).authorized);
             let second_token = sandbox.projector.tokens.read(agent.id()).unwrap().unwrap();
             assert_ne!(second_token, first_token);
-            // Only a token held as a value differs between the two connections.
+            // Only a token held as a value, and Cline's save time, differ
+            // between the two connections.
+            let comparable = |text: String| {
+                let mut doc = ConfigDoc::parse(agent.format(), &text).unwrap();
+                if agent == Agent::ClineCli {
+                    doc.set_str(&["providers", "openai-compatible", "updatedAt"], "")
+                        .unwrap();
+                }
+                doc.render().unwrap()
+            };
             assert_eq!(
-                fs::read_to_string(&config).unwrap(),
-                connected.replace(&first_token, &second_token)
+                comparable(fs::read_to_string(&config).unwrap()),
+                comparable(connected.replace(&first_token, &second_token))
             );
             assert!(sandbox.projector.disconnect_all().unwrap().is_empty());
         }
@@ -610,6 +620,7 @@ fn native_auth_and_routing_conflicts_are_read_only_and_deauthorize() {
         (Agent::Hermes, "pool"),
         (Agent::Hermes, "fallback"),
         (Agent::QwenCode, "dotenv"),
+        (Agent::ClineCli, "stored-auth"),
     ] {
         let sandbox = sandbox(&format!("conflict-{}-{case}", agent.id()));
         let catalog = catalog();
@@ -674,6 +685,12 @@ fn native_auth_and_routing_conflicts_are_read_only_and_deauthorize() {
             (Agent::Hermes, _) => edited
                 .set_str(&["fallback_model", "provider"], "other")
                 .unwrap(),
+            (Agent::ClineCli, _) => edited
+                .set_value(
+                    &["providers", "openai-compatible", "settings", "auth"],
+                    &ConfigValue::Json(json!({"accessToken": "sk-test-hidden"})),
+                )
+                .unwrap(),
             (Agent::QwenCode, _) => write(
                 &path.with_file_name(".env"),
                 "export PRIVATE_AI_PROXY_API_KEY=sk-test-hidden\n",
@@ -708,7 +725,7 @@ fn native_auth_and_routing_conflicts_are_read_only_and_deauthorize() {
             error.code(),
             if matches!(
                 case,
-                "aws" | "stored-key" | "explicit-key" | "pool" | "dotenv"
+                "aws" | "stored-key" | "explicit-key" | "pool" | "dotenv" | "stored-auth"
             ) {
                 desktop_core::protocol::ErrorCode::AuthenticationConflict
             } else {

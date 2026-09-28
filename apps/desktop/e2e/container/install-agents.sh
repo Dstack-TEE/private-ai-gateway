@@ -45,7 +45,7 @@ pinned() {
 # The first --version runs of Claude Code, Codex and OpenCode, and the other
 # commands below, create the folders detection looks for; all exit 0 without
 # a provider.
-for agent in claude-code codex opencode pi oh-my-pi openclaw hermes qwen-code kilo; do
+for agent in claude-code codex opencode pi oh-my-pi openclaw hermes qwen-code kilo cline; do
   [[ -z "${PAP_E2E_AGENTS:-}" || ",$PAP_E2E_AGENTS," == *",$agent,"* ]] || continue
   case "$agent" in
     claude-code)
@@ -93,6 +93,10 @@ for agent in claude-code codex opencode pi oh-my-pi openclaw hermes qwen-code ki
       from_script kilo https://kilo.ai/cli/install --version "$KILO_VERSION" --no-modify-path
       pinned "$KILO_VERSION" kilo --version
       test -d "$HOME/.config/kilo"
+      ;;
+    cline)
+      logged cline npm install --global "cline@$CLINE_VERSION"
+      pinned "$CLINE_VERSION" cline --version
       ;;
   esac
 done

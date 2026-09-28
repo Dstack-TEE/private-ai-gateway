@@ -73,6 +73,9 @@ impl Projector {
         if !connect {
             let record = store.get(agent.id()).ok_or(AgentError::InvalidState)?;
             let mut edit = restore(doc, record, self.secrets.as_ref())?;
+            if agent == Agent::ClineCli {
+                cline::remove_created_slot(doc, &mut edit)?;
+            }
             if let Some(journal) = &record.selection {
                 edit.selection = selection::restoration(
                     agent,
@@ -170,6 +173,7 @@ impl Projector {
         match agent {
             Agent::OhMyPi => oh_my_pi::validate_config(doc, prior)
                 .map_err(AgentError::ConfigurationConflict),
+            Agent::ClineCli => cline::validate(doc),
             Agent::QwenCode => qwen_code::validate(
                 &self.home,
                 self.tool_env,
@@ -279,11 +283,13 @@ impl Projector {
                 let text = match fs::read_to_string(&path) {
                     Ok(text) => text,
                     Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                    Err(_) => return Err(format!(
+                    Err(_) => {
+                        return Err(format!(
                         "Cannot verify {name} config merge: {} is unreadable. Access is disabled; \
                          fix that file or Disconnect to restore the original config.",
                         path.display(),
-                    )),
+                    ))
+                    }
                 };
                 parse_jsonc(&text).map_err(|reason| {
                     format!(

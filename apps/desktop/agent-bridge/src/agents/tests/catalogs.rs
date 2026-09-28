@@ -890,3 +890,62 @@ fn qwen_code_projects_a_named_catalog_and_follows_model_switches() {
             .get_value(&[])
     );
 }
+
+#[test]
+fn cline_takes_over_its_openai_compatible_provider_and_follows_model_switches() {
+    let sandbox = sandbox("cline-provider");
+    let agent = Agent::ClineCli;
+    // `cline --version` creates only ~/.cline; the settings folder comes later.
+    assert!(!agent_status(&sandbox.projector.scan(None).unwrap().0, agent).installed);
+    fs::create_dir_all(sandbox.home.join(".cline")).unwrap();
+    assert!(agent_status(&sandbox.projector.scan(None).unwrap().0, agent).installed);
+
+    let catalog = catalog();
+    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+    let token = sandbox.projector.tokens.read(agent.id()).unwrap().unwrap();
+    let path = sandbox.home.join(".cline/data/settings/providers.json");
+    assert_eq!(agent.config_path(&sandbox.home, false), path);
+    let ConfigDoc::Json(connected) = doc(&sandbox, agent) else {
+        unreachable!()
+    };
+    let slot = &connected["providers"]["openai-compatible"];
+    assert_eq!(connected["version"], 1);
+    assert_eq!(connected["lastUsedProvider"], "openai-compatible");
+    assert_eq!(
+        slot["settings"],
+        json!({
+            "provider": "openai-compatible",
+            "baseUrl": "http://127.0.0.1:4180/v1",
+            "apiKey": token,
+            "model": "openai/gpt-oss-20b",
+        })
+    );
+    // Cline's schema requires an ISO timestamp on every stored provider.
+    let updated_at = slot["updatedAt"].as_str().unwrap();
+    assert!(chrono::DateTime::parse_from_rfc3339(updated_at).is_ok());
+    assert!(updated_at.ends_with('Z'));
+
+    // Picking another model or provider in Cline keeps access.
+    let mut switched = doc(&sandbox, agent);
+    switched
+        .set_str(
+            &["providers", "openai-compatible", "settings", "model"],
+            "phala/qwen",
+        )
+        .unwrap();
+    switched
+        .set_str(
+            &["providers", "openai-compatible", "updatedAt"],
+            "2026-09-28T00:00:00.000Z",
+        )
+        .unwrap();
+    write(&path, &switched.render().unwrap());
+    assert!(agent_status(&sandbox.projector.scan(Some(&catalog)).unwrap().0, agent).authorized);
+
+    disconnect(&sandbox, agent);
+    // The model picked in the slot the connection created goes with it.
+    assert_eq!(
+        doc(&sandbox, agent).get_value(&[]),
+        Some(ConfigValue::Json(json!({})))
+    );
+}
