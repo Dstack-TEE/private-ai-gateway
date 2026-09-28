@@ -44,6 +44,7 @@ fi
 e2e_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 work="$(mktemp -d "${TMPDIR:-/tmp}/pap-e2e.XXXXXX")"
 container="$(basename "$work")"
+network=bridge
 cleanup() {
   docker rm --force "$container" >/dev/null 2>&1 || true
   rm -rf "$work"
@@ -71,7 +72,7 @@ fi
 # AGENT_PATH holds the installer-writable directories the agents run from.
 # Only install-agents.sh and the agents themselves search them; processes
 # that see the key run from absolute paths with the system PATH.
-docker run --detach --init --name "$container" --env-file "$e2e_dir/versions.env" \
+docker run --detach --init --name "$container" --network "$network" --env-file "$e2e_dir/versions.env" \
   --env DISABLE_AUTOUPDATER=1 --env OPENCODE_DISABLE_AUTOUPDATE=1 \
   --env AGENT_PATH=/home/tester/.local/bin:/home/tester/.npm-global/bin:/home/tester/.opencode/bin \
   --volume "$e2e_dir:/e2e:ro" --volume "$work/pkg:/pkg:ro" ubuntu:24.04 sleep infinity >/dev/null
@@ -85,5 +86,20 @@ as_tester=(docker exec --user tester --workdir /home/tester --env PATH=/usr/loca
 docker exec "$container" bash -c 'pkill --signal KILL --uid tester
   timeout 10 bash -c "while pgrep --uid tester >/dev/null; do sleep 0.2; done" ||
     { pgrep --list-full --uid tester >&2; echo "Test user processes survived" >&2; exit 1; }'
+# The test asks for the outage it checks by printing a marker line; it
+# confirms the service is unreachable, and later reachable again, itself.
 printf '%s' "$PAP_E2E_API_KEY" |
-  "${as_tester[@]}" --interactive "$container" /usr/local/bin/node --test-reporter=spec e2e/agents.test.mjs
+  "${as_tester[@]}" --interactive "$container" /usr/local/bin/node --test-reporter=spec e2e/agents.test.mjs |
+  while IFS= read -r line; do
+    case "$line" in
+      "::pap-e2e network down")
+        echo "Disconnecting the container from $network"
+        docker network disconnect "$network" "$container"
+        ;;
+      "::pap-e2e network up")
+        echo "Reconnecting the container to $network"
+        docker network connect "$network" "$container"
+        ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done

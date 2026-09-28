@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
@@ -16,6 +17,9 @@ import { parse as parseYaml, parseDocument } from "yaml";
 const MODEL = "z-ai/glm-5.3-flash";
 const PROMPT = "Reply with exactly: PAP-OK";
 const REPLY = "PAP-OK";
+const SERVICE_URL = "https://tee.redpill.ai";
+// Phases of a protection session that lost its verified service.
+const OUTAGE_PHASES = ["reconnecting", "interrupted"];
 const HOME = os.homedir();
 // The key reaches pap, so pap and node run from root-owned paths. Only agents
 // search the installer-writable directories in AGENT_PATH.
@@ -127,6 +131,40 @@ const listed = (agent) => papJson("agents", "list").find(({ id }) => id === agen
 const readToken = (agent) => readFileSync(path.join(TOKENS, agent.id), "utf8").trim();
 const nowSeconds = () => Math.floor(Date.now() / 1000);
 const tail = (text) => text.trim().split("\n").slice(-15).join("\n");
+
+// Waits for `check` to return a truthy value, which it returns.
+async function waitFor(description, check, timeout = 60_000) {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    const value = await check();
+    if (value) return value;
+    assert.ok(Date.now() < deadline, `timed out waiting for ${description}`);
+    await sleep(1_000);
+  }
+}
+
+function reachable(host) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host, port: 443, timeout: 5_000 });
+    socket.once("connect", () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once("timeout", () => {
+      socket.destroy();
+      resolve(false);
+    });
+    socket.once("error", () => resolve(false));
+  });
+}
+
+// run.sh disconnects or reconnects the container's network when it reads
+// this line; the test then waits until the service is unreachable or back.
+async function setNetwork(state) {
+  console.log(`::pap-e2e network ${state}`);
+  const host = new URL(SERVICE_URL).hostname;
+  await waitFor(`the network to go ${state}`, async () => (await reachable(host)) === (state === "up"));
+}
 
 async function step(row, name, check) {
   try {
@@ -252,13 +290,26 @@ async function settledUsage(agent, since) {
   }
 }
 
-before(() => {
+const addProfile = (id, name) =>
+  pap(["profiles", "add", "--id", id, "--name", name, "--provider", "redpill", "--url", SERVICE_URL, "--key-stdin", "--yes"], {
+    input: apiKey,
+  });
+
+before(async () => {
   assert.ok(apiKey, "Pass the RedPill API key on stdin");
   pap(["service", "start"]);
-  const profile = ["--id", "redpill", "--name", "RedPill", "--provider", "redpill", "--url", "https://tee.redpill.ai"];
-  pap(["profiles", "add", ...profile, "--key-stdin", "--yes"], { input: apiKey });
+  addProfile("redpill", "RedPill");
   pap(["start", "--yes"]);
-  assert.equal(protection(), "protected");
+  // A second verified profile for the same service: switching to it during
+  // the outage restarts protection, which then cannot verify. Adding it may
+  // restart protection on it, and a switch is refused until that settles.
+  addProfile("redpill-alt", "RedPill (alternate)");
+  await waitFor("protection after adding redpill-alt", () => protection() === "protected");
+  if (papJson("status").gateway.activeProfileId !== "redpill") {
+    pap(["profiles", "use", "redpill", "--yes"]);
+    await waitFor("protection on redpill", () => protection() === "protected");
+  }
+  assert.equal(papJson("status").gateway.activeProfileId, "redpill");
   localApiUrl = papJson("status").gateway.proxyUrl;
 });
 
@@ -295,7 +346,10 @@ for (const agent of AGENTS) {
 const passed = () => AGENTS.filter((agent) => STEPS.every((name) => results.get(agent.id)[name] === "ok"));
 const connected = new Map();
 
-test("fails closed while verification fails and recovers", async () => {
+// Each check is its own subtest, so one failure does not hide the others.
+const check = (t, name, assertion) => t.test(name, () => step(session, name, assertion));
+
+test("fails closed while the network is down", async (t) => {
   const agents = passed();
   assert.ok(agents.length > 0, "no agent passed its own test");
   for (const agent of agents) {
@@ -303,45 +357,54 @@ test("fails closed while verification fails and recovers", async () => {
     connect(agent);
     connected.set(agent.id, { original, files: readFiles(agent), token: readToken(agent) });
   }
-
-  // An imported profile has no credential, so protection cannot verify it.
-  const backup = path.join(os.tmpdir(), "pap-e2e-unverified-profile.json");
-  const name = "E2E unverified";
-  writeFileSync(backup, JSON.stringify({ version: 1, profiles: [{ name, provider: "custom", remoteUrl: "https://unverified.invalid" }] }));
-  pap(["profiles", "import", backup, "--yes"]);
-  const unverified = papJson("profiles", "list").find((profile) => profile.name === name);
-  const since = nowSeconds();
   const clientToken = pap(["token", "show", "--yes"]).trim();
-  await step(session, "fail closed", async () => {
-    const switched = run(PAP, ["--json", "profiles", "use", unverified.id, "--yes"]);
-    assert.equal(switched.status, 1, "an unverifiable profile was accepted");
-    assert.equal(JSON.parse(switched.stderr).error.code, "invalid_state");
-    assert.equal(protection(), "profileRequired");
-    // Agent tokens are withdrawn until protection is verified again.
-    for (const agent of agents) {
-      const { files, token } = connected.get(agent.id);
-      assert.deepEqual(readFiles(agent), files, `${agent.id} no longer points at the Local API`);
-      assert.ok(listed(agent).connected, `${agent.id} is reported disconnected`);
-      const [pathname, body] = INFERENCE[agent.surface];
-      const answer = await localApi(token, pathname, body);
-      assert.deepEqual(answer, { status: 401, code: "unauthorized" }, `${agent.id}: ${pathname} while unverified`);
-    }
-    // The Local API's own client token is still recognized, and the
-    // unverified gateway refuses it.
-    const answer = await localApi(clientToken, ...INFERENCE.chat);
-    assert.deepEqual(answer, { status: 503, code: "gateway_not_verified" }, "client token while unverified");
-    const { items } = papJson("usage", "list", "--since", String(since), "--limit", "100");
-    const forwarded = items.filter(({ leftDevice }) => leftDevice);
-    assert.equal(forwarded.length, 0, `forwarded while unverified: ${forwarded.map(({ path: p }) => p).join(", ")}`);
+  const since = nowSeconds();
+
+  await setNetwork("down");
+  pap(["profiles", "use", "redpill-alt", "--yes"]);
+  const phase = await waitFor("verification to fail", () => {
+    const current = protection();
+    return !["protected", "verifying"].includes(current) && current;
   });
 
-  await step(session, "recovered", async () => {
-    pap(["start", "--profile", "redpill", "--yes"]);
-    assert.equal(protection(), "protected");
+  await check(t, "outage phase", () => assert.ok(OUTAGE_PHASES.includes(phase), `phase ${phase}`));
+  await check(t, "configs kept", () => {
     for (const agent of agents) {
-      const { token } = connected.get(agent.id);
-      assert.equal((await localApi(token, "/v1/models")).status, 200, `${agent.id} token not accepted after recovery`);
+      assert.deepEqual(readFiles(agent), connected.get(agent.id).files, `${agent.id} no longer points at the Local API`);
+      assert.ok(listed(agent).connected, `${agent.id} is reported disconnected`);
     }
+  });
+  await check(t, "agent tokens 503", async () => {
+    for (const agent of agents) {
+      const [pathname, body] = INFERENCE[agent.surface];
+      const answer = await localApi(connected.get(agent.id).token, pathname, body);
+      assert.deepEqual(answer, { status: 503, code: "gateway_not_verified" }, `${agent.id}: ${pathname}`);
+    }
+  });
+  await check(t, "client token 503", async () => {
+    const answer = await localApi(clientToken, ...INFERENCE.chat);
+    assert.deepEqual(answer, { status: 503, code: "gateway_not_verified" });
+  });
+  await check(t, "nothing forwarded", () => {
+    const { items } = papJson("usage", "list", "--since", String(since), "--limit", "100");
+    const forwarded = items.filter(({ leftDevice }) => leftDevice);
+    assert.equal(forwarded.length, 0, `forwarded: ${forwarded.map(({ path: p }) => p).join(", ")}`);
+  });
+});
+
+test("recovers when the network returns", async () => {
+  const agents = passed().filter((agent) => connected.has(agent.id));
+  assert.ok(agents.length > 0, "no agent is connected");
+  await step(session, "recovered", async () => {
+    await setNetwork("up");
+    // Releases that withdraw agent tokens during an outage publish them again
+    // shortly after protection is verified.
+    const accepted = async (agent) => (await localApi(connected.get(agent.id).token, "/v1/models")).status === 200;
+    await waitFor(
+      "protection and the agent tokens to recover",
+      async () => protection() === "protected" && (await Promise.all(agents.map(accepted))).every(Boolean),
+      180_000,
+    );
     assertReply(agents[0]);
   });
 });
@@ -367,6 +430,6 @@ after(() => {
   const rows = [["agent", ...STEPS], ...[...results].map(([id, row]) => [id, ...STEPS.map((name) => row[name] ?? "-")])];
   const widths = rows[0].map((_, column) => Math.max(...rows.map((row) => row[column].length)));
   const lines = rows.map((row) => row.map((cell, column) => cell.padEnd(widths[column])).join("  ").trimEnd());
-  const phases = ["fail closed", "recovered", "stop restores"].map((name) => `${name}: ${session[name] ?? "-"}`);
-  console.log(["", ...lines, "", phases.join("  "), ""].join("\n"));
+  const phases = Object.entries(session).map(([name, result]) => `${name}: ${result}`);
+  console.log(["", ...lines, "", ...phases, ""].join("\n"));
 });

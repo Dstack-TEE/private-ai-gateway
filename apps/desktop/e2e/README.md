@@ -25,15 +25,20 @@ protection with a RedPill profile and checks, for each agent:
    by design;
 5. the agent's old token gets 401.
 
-With the agents that passed connected again, it switches to an imported
-profile without a credential, which protection cannot verify (`pap profiles
-use` fails with `invalid_state`, and the phase is `profileRequired`). Each
-agent's configuration must stay unchanged and none of its requests may leave
-the device. Agent tokens are withdrawn until protection is verified again, so
-their inference requests get 401 `unauthorized`. The Local API's own client
-token gets 503 `gateway_not_verified`. Switching back to RedPill must
-restore protection, the tokens and a reply. Finally, `pap stop` must restore every agent and
-revoke every token, and `pap service stop` must leave them restored.
+It also saves a second profile, `redpill-alt`, for the same service and key,
+and switches back to `redpill` if adding it changed the active profile. With
+the agents that passed connected again, the test asks `run.sh` to disconnect
+the container from its Docker network, confirms the service is unreachable,
+and runs `pap profiles use redpill-alt`, which restarts protection on a
+profile it cannot verify now. The phase must be `reconnecting` or
+`interrupted`, each agent's configuration must still point at the Local API,
+every agent token and the Local API client token must get 503
+`gateway_not_verified`, and no request may leave the device. Releases up to
+0.2.0-beta.11 withdraw agent tokens during an outage and answer 401 instead,
+so that check fails for them. After the network is reconnected, protection
+must be Protected again within three minutes, with the tokens accepted and a
+real reply through one agent. Finally, `pap stop` must restore every agent
+and revoke every token, and `pap service stop` must leave them restored.
 
 The output ends with one row per agent and the result of each phase.
 
