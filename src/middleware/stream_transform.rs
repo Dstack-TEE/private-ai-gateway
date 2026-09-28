@@ -25,8 +25,9 @@ use super::response_transform::{
     self, anthropic_usage, chat_cache_tokens, function_call_arguments, i64_field, item_id,
     malformed_response_error, message_item, normalize_reasoning_usage_value, now_millis, now_secs,
     output_text_part, reasoning_item, reasoning_text, refusal_part, responses_call_item,
-    responses_call_value, responses_object, responses_usage, thinking_block,
-    transform_finish_reason, upstream_failed_error, ChatFinish, ResponseIdentity, ResponsesHead,
+    responses_call_value, responses_object, responses_usage, synthesized_call_id, thinking_block,
+    transform_finish_reason, unusable_tool_calls_error, ChatFinish, ChatToolCall, ResponseIdentity,
+    ResponsesHead,
 };
 use super::sse::MAX_SSE_LINE_BYTES;
 use super::types::ProviderFormat;
@@ -559,46 +560,16 @@ struct ToolCall {
     id: String,
     name: String,
     arguments: String,
-    phase: CallPhase,
-}
-
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-enum CallPhase {
-    #[default]
-    Pending,
-    Open,
-    Closed,
-}
-
-impl ToolCall {
-    fn identified(&self) -> bool {
-        !self.id.trim().is_empty() && !self.name.trim().is_empty()
-    }
-}
-
-/// Identity fields may arrive late or repeat; the first non-empty value is
-/// kept, as there is no unambiguous way to tell fragments from restatements.
-fn set_tool_identity(current: &mut String, value: &str) {
-    if current.is_empty() {
-        current.push_str(value);
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Block {
-    Text(TextKind),
-    Call(usize),
 }
 
 /// Why a stream that ended in-band has no answer to give.
 enum Failure<'a> {
-    /// The upstream reported an error, in an `error` member or its finish.
-    Upstream {
-        error: Option<&'a Value>,
-        reason: Option<&'a str>,
-    },
+    /// The upstream reported an error.
+    Upstream(&'a Value),
     /// The stream never carried a choice.
     Empty,
+    /// Every tool call lacked a name, so none can be run.
+    UnusableToolCalls,
 }
 
 enum Outcome<'a> {
@@ -615,28 +586,30 @@ trait ChatEvents {
     fn open_text(&mut self, kind: TextKind, out: &mut String);
     fn text_delta(&mut self, kind: TextKind, delta: &str, out: &mut String);
     fn close_text(&mut self, kind: TextKind, text: &str, out: &mut String);
-    /// A tool call starts, with the arguments that arrived before its identity.
-    fn open_call(&mut self, call: &ToolCall, out: &mut String);
-    fn call_delta(&mut self, delta: &str, out: &mut String);
+    /// Write one complete tool call; false when the surface leaves it out.
     /// `truncated`: the upstream was cut off, so the call may be unfinished.
-    fn close_call(&mut self, call: &ToolCall, truncated: bool, out: &mut String);
+    fn tool_call(&mut self, call: &ChatToolCall<'_>, truncated: bool, out: &mut String) -> bool;
     fn finish(&mut self, outcome: Outcome<'_>, usage: Option<&Value>, out: &mut String);
 }
 
+/// Reads a Chat stream for a client surface. Text and reasoning stream as
+/// they arrive, one block at a time. Tool calls are assembled by index — or,
+/// for an upstream that omits it, by id, and a bare continuation joins the
+/// last call — and written complete in index order when the stream finishes,
+/// as CLIProxyAPI writes them: deltas of parallel calls may interleave, and a
+/// call is only known complete, and valid, at the end.
 struct ChatStream<E> {
     events: E,
-    started: bool,
+    /// The upstream's id for the response, for tool call ids it omitted.
+    response_id: String,
     answered: bool,
     terminated: bool,
-    open: Option<Block>,
+    open: Option<TextKind>,
     /// The open text block's text so far.
     text: String,
     calls: BTreeMap<usize, ToolCall>,
-    /// The next index allowed to open; calls open in index order.
-    next_call: usize,
     /// The call an index-less, id-less delta continues.
     last_call: Option<usize>,
-    delivered_calls: usize,
     finish_reason: Option<String>,
     usage: Option<Value>,
     error: Option<Value>,
@@ -646,19 +619,21 @@ impl<E: ChatEvents> ChatStream<E> {
     fn new(events: E) -> Self {
         Self {
             events,
-            started: false,
+            response_id: String::new(),
             answered: false,
             terminated: false,
             open: None,
             text: String::new(),
             calls: BTreeMap::new(),
-            next_call: 0,
             last_call: None,
-            delivered_calls: 0,
             finish_reason: None,
             usage: None,
             error: None,
         }
+    }
+
+    fn started(&self) -> bool {
+        !self.response_id.is_empty()
     }
 
     /// Apply one SSE event. `Err(())` only for a payload that is not JSON:
@@ -678,9 +653,10 @@ impl<E: ChatEvents> ChatStream<E> {
 
     /// The upstream closed the connection. `[DONE]` is an OpenAI convention
     /// some upstreams omit, so a stream that already declared its finish (or
-    /// its error) still terminates; one that did not was cut off.
+    /// its error) still terminates; one that did not, or said nothing, was
+    /// cut off.
     fn end_of_stream(&mut self) -> Result<Option<String>, ()> {
-        if !self.started || self.terminated {
+        if self.terminated {
             return Ok(None);
         }
         if self.finish_reason.is_none() && self.error.is_none() {
@@ -693,8 +669,13 @@ impl<E: ChatEvents> ChatStream<E> {
 
     fn chunk(&mut self, value: &Value, fallback_id: &str, out: &mut String) {
         let chunk = parse_chat_chunk(value);
-        if !self.started {
-            self.started = true;
+        if !self.started() {
+            self.response_id = value
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .unwrap_or(fallback_id)
+                .to_string();
             self.events.start(value, fallback_id, out);
         }
         if let Some(usage) = chunk.usage {
@@ -717,7 +698,7 @@ impl<E: ChatEvents> ChatStream<E> {
             }
         }
         for delta in &chunk.tool_calls {
-            self.tool_delta(delta, out);
+            self.tool_delta(delta);
         }
         if let Some(reason) = chunk.finish_reason {
             self.finish_reason = Some(reason.to_string());
@@ -725,99 +706,47 @@ impl<E: ChatEvents> ChatStream<E> {
     }
 
     fn text(&mut self, kind: TextKind, delta: &str, out: &mut String) {
-        if self.open != Some(Block::Text(kind)) {
-            self.close(false, out);
-            self.open = Some(Block::Text(kind));
+        if self.open != Some(kind) {
+            self.close_text(out);
+            self.open = Some(kind);
             self.events.open_text(kind, out);
         }
         self.text.push_str(delta);
         self.events.text_delta(kind, delta, out);
     }
 
-    fn tool_delta(&mut self, delta: &ToolCallDelta<'_>, out: &mut String) {
-        // A continuation with no call to continue has nowhere to go.
-        let Some(slot) = self.call_slot(delta) else {
-            return;
+    fn close_text(&mut self, out: &mut String) {
+        if let Some(kind) = self.open.take() {
+            self.events.close_text(kind, &self.text, out);
+            self.text.clear();
+        }
+    }
+
+    /// Identity fields may arrive late or repeat; the first non-empty value
+    /// stands, as there is no telling fragments from restatements.
+    fn tool_delta(&mut self, delta: &ToolCallDelta<'_>) {
+        let slot = match (delta.index, delta.id) {
+            (Some(index), _) => index,
+            // A continuation with no call to continue has nowhere to go.
+            (None, "") => match self.last_call {
+                Some(slot) => slot,
+                None => return,
+            },
+            (None, id) => self
+                .calls
+                .iter()
+                .find(|(_, call)| call.id == id)
+                .map(|(slot, _)| *slot)
+                .unwrap_or_else(|| self.calls.keys().next_back().map_or(0, |last| last + 1)),
         };
         self.last_call = Some(slot);
         let call = self.calls.entry(slot).or_default();
-        set_tool_identity(&mut call.id, delta.id);
-        set_tool_identity(&mut call.name, delta.name);
-        match call.phase {
-            // A late fragment of a call already delivered cannot be added to
-            // it; the call stands as delivered.
-            CallPhase::Closed => {}
-            CallPhase::Open => {
-                call.arguments.push_str(delta.arguments);
-                if !delta.arguments.is_empty() {
-                    self.events.call_delta(delta.arguments, out);
-                }
-            }
-            CallPhase::Pending => {
-                call.arguments.push_str(delta.arguments);
-                // A delta for another call means the open one is complete.
-                if matches!(self.open, Some(Block::Call(open)) if open != slot) {
-                    self.close(false, out);
-                }
-                self.open_next_call(out);
+        for (field, value) in [(&mut call.id, delta.id), (&mut call.name, delta.name)] {
+            if field.is_empty() {
+                field.push_str(value);
             }
         }
-    }
-
-    /// The call a delta belongs to: its index, else the call its id names,
-    /// else — a continuation with neither — the call the last delta was for.
-    fn call_slot(&self, delta: &ToolCallDelta<'_>) -> Option<usize> {
-        if let Some(index) = delta.index {
-            return Some(index);
-        }
-        if delta.id.is_empty() {
-            return self.last_call;
-        }
-        Some(
-            self.calls
-                .iter()
-                .find(|(_, call)| call.id == delta.id)
-                .map(|(slot, _)| *slot)
-                .unwrap_or_else(|| self.calls.keys().next_back().map_or(0, |last| last + 1)),
-        )
-    }
-
-    fn open_next_call(&mut self, out: &mut String) {
-        let slot = self.next_call;
-        let ready = !matches!(self.open, Some(Block::Call(_)))
-            && self
-                .calls
-                .get(&slot)
-                .is_some_and(|call| call.phase == CallPhase::Pending && call.identified());
-        if ready {
-            self.next_call += 1;
-            self.open_call(slot, out);
-        }
-    }
-
-    fn open_call(&mut self, slot: usize, out: &mut String) {
-        self.close(false, out);
-        let call = self.calls.get_mut(&slot).expect("tool call exists");
-        call.phase = CallPhase::Open;
-        self.open = Some(Block::Call(slot));
-        self.events.open_call(call, out);
-    }
-
-    /// Close the open block. `truncated`: the upstream stopped mid-block.
-    fn close(&mut self, truncated: bool, out: &mut String) {
-        match self.open.take() {
-            None => {}
-            Some(Block::Text(kind)) => {
-                self.events.close_text(kind, &self.text, out);
-                self.text.clear();
-            }
-            Some(Block::Call(slot)) => {
-                let call = self.calls.get_mut(&slot).expect("tool call exists");
-                call.phase = CallPhase::Closed;
-                self.events.close_call(call, truncated, out);
-                self.delivered_calls += 1;
-            }
-        }
+        call.arguments.push_str(delta.arguments);
     }
 
     fn finish(&mut self, out: &mut String) -> Result<(), ()> {
@@ -825,48 +754,40 @@ impl<E: ChatEvents> ChatStream<E> {
             return Ok(());
         }
         // `[DONE]` with nothing before it: there is no response to close.
-        if !self.started {
+        if !self.started() {
             return Err(());
         }
         self.terminated = true;
-        let reason = self.finish_reason.clone();
-        let finish = ChatFinish::parse(reason.as_deref());
-        let failed = self.error.is_some() || finish == ChatFinish::Error;
-        let truncated = failed || finish.truncated();
-        self.close(truncated, out);
-        // Calls still waiting on an earlier index or on their identity. One
-        // that has a name gets an id if it lacks one; one without a name
-        // cannot be called and is dropped, as is one cut off before it was
-        // complete. A failed generation offers none.
-        let pending: Vec<usize> = self
-            .calls
-            .iter()
-            .filter(|(_, call)| call.phase == CallPhase::Pending)
-            .map(|(slot, _)| *slot)
-            .collect();
-        for slot in pending {
-            let call = self.calls.get_mut(&slot).expect("tool call exists");
-            let complete = !truncated || function_call_arguments(&call.arguments).is_some();
-            if failed || call.name.trim().is_empty() || !complete {
-                continue;
-            }
-            if call.id.trim().is_empty() {
-                call.id = format!("call_{slot}");
-            }
-            self.open_call(slot, out);
-            self.close(truncated, out);
-        }
-        let outcome = if failed {
-            Outcome::Failed(Failure::Upstream {
-                error: self.error.as_ref(),
-                reason: reason.as_deref(),
-            })
+        self.close_text(out);
+        let finish = ChatFinish::parse(self.finish_reason.as_deref());
+        let outcome = if let Some(error) = &self.error {
+            Outcome::Failed(Failure::Upstream(error))
         } else if !self.answered {
             Outcome::Failed(Failure::Empty)
         } else {
-            Outcome::Finished {
-                finish,
-                tool_use: self.delivered_calls > 0,
+            let mut named = 0;
+            let mut tool_use = false;
+            for (slot, call) in &self.calls {
+                let name = call.name.trim();
+                if name.is_empty() {
+                    continue;
+                }
+                named += 1;
+                let id = match call.id.trim() {
+                    "" => synthesized_call_id(&self.response_id, *slot),
+                    id => id.to_string(),
+                };
+                let call = ChatToolCall {
+                    id,
+                    name,
+                    arguments: &call.arguments,
+                };
+                tool_use |= self.events.tool_call(&call, finish.truncated(), out);
+            }
+            if named == 0 && !self.calls.is_empty() {
+                Outcome::Failed(Failure::UnusableToolCalls)
+            } else {
+                Outcome::Finished { finish, tool_use }
             }
         };
         self.events.finish(outcome, self.usage.as_ref(), out);
@@ -987,27 +908,24 @@ impl ChatEvents for MessagesEvents {
         self.block_stop(out);
     }
 
-    fn open_call(&mut self, call: &ToolCall, out: &mut String) {
+    /// Malformed arguments become an empty input, as in the buffered
+    /// message; a call cut off by a limit is dropped, as Anthropic drops it.
+    fn tool_call(&mut self, call: &ChatToolCall<'_>, truncated: bool, out: &mut String) -> bool {
+        let input = match function_call_arguments(call.arguments) {
+            Some(input) => input,
+            None if truncated => return false,
+            None => "{}",
+        };
         self.block_start(
             json!({ "type": "tool_use", "id": call.id, "name": call.name, "input": {} }),
             out,
         );
-        if !call.arguments.is_empty() {
-            self.call_delta(&call.arguments, out);
-        }
-    }
-
-    fn call_delta(&mut self, delta: &str, out: &mut String) {
         self.block_delta(
-            json!({ "type": "input_json_delta", "partial_json": delta }),
+            json!({ "type": "input_json_delta", "partial_json": input }),
             out,
         );
-    }
-
-    /// The client reads the input from the streamed JSON; one the upstream
-    /// garbled reaches it as streamed, as a native malformed call would.
-    fn close_call(&mut self, _call: &ToolCall, _truncated: bool, out: &mut String) {
         self.block_stop(out);
+        true
     }
 
     fn finish(&mut self, outcome: Outcome<'_>, usage: Option<&Value>, out: &mut String) {
@@ -1016,16 +934,14 @@ impl ChatEvents for MessagesEvents {
             Outcome::Failed(failure) => {
                 // Rebuilt by the sanitize stage; only a relayable kind survives.
                 let error = match failure {
-                    Failure::Upstream {
-                        error: Some(error), ..
-                    } => error.clone(),
-                    Failure::Upstream { reason, .. } => json!({
-                        "type": reason.filter(|reason| reason.ends_with("_error")).unwrap_or("api_error"),
-                        "message": "The upstream provider returned an error",
-                    }),
+                    Failure::Upstream(error) => error.clone(),
                     Failure::Empty => json!({
                         "type": "api_error",
                         "message": "The upstream provider returned no response",
+                    }),
+                    Failure::UnusableToolCalls => json!({
+                        "type": "api_error",
+                        "message": "The upstream provider returned tool calls without a name",
                     }),
                 };
                 out.push_str(&sse_event(
@@ -1068,8 +984,6 @@ struct ResponsesEvents {
 struct ActiveItem {
     output_index: usize,
     id: String,
-    /// Function arguments stream; custom tool input is only known complete.
-    streams_arguments: bool,
 }
 
 impl ResponsesEvents {
@@ -1135,7 +1049,6 @@ impl ResponsesEvents {
         self.active = Some(ActiveItem {
             output_index,
             id: item["id"].as_str().unwrap_or_default().to_string(),
-            streams_arguments: item["type"] == "function_call",
         });
         self.output.push(item.clone());
         self.emit(
@@ -1257,57 +1170,39 @@ impl ChatEvents for ResponsesEvents {
         self.done_item(item, out);
     }
 
-    fn open_call(&mut self, call: &ToolCall, out: &mut String) {
-        let item = responses_call_item(&self.tools, &call.id, &call.name, "", "in_progress");
+    /// A call reaches the client complete: added, its input in one delta,
+    /// done. One cut off by a limit is reported incomplete.
+    fn tool_call(&mut self, call: &ChatToolCall<'_>, truncated: bool, out: &mut String) -> bool {
+        let item = responses_call_item(&self.tools, &call.id, call.name, "", "in_progress");
+        let custom = item["type"] == "custom_tool_call";
         self.add_item(item, out);
-        if !call.arguments.is_empty() {
-            self.call_delta(&call.arguments, out);
-        }
-    }
-
-    /// Custom tool input is wrapped in JSON upstream and only known once the
-    /// call is complete, so only function arguments stream.
-    fn call_delta(&mut self, delta: &str, out: &mut String) {
-        let (output_index, item_id) = self.active();
-        if self
-            .active
-            .as_ref()
-            .is_some_and(|item| item.streams_arguments)
-        {
-            self.emit(
-                "response.function_call_arguments.delta",
-                json!({ "item_id": item_id, "output_index": output_index, "delta": delta }),
-                out,
-            );
-        }
-    }
-
-    fn close_call(&mut self, call: &ToolCall, truncated: bool, out: &mut String) {
-        let (output_index, item_id) = self.active();
-        let Some(value) = responses_call_value(&self.tools, &call.name, &call.arguments, truncated)
+        let Some(value) = responses_call_value(&self.tools, call.name, call.arguments, truncated)
         else {
-            let item = responses_call_item(&self.tools, &call.id, &call.name, "", "incomplete");
+            let item = responses_call_item(&self.tools, &call.id, call.name, "", "incomplete");
             self.done_item(item, out);
-            return;
+            return true;
         };
-        let item = responses_call_item(&self.tools, &call.id, &call.name, &value, "completed");
+        let (output_index, item_id) = self.active();
         let ids = json!({ "item_id": item_id, "output_index": output_index });
-        if item["type"] == "custom_tool_call" {
-            if !value.is_empty() {
-                let mut body = ids.clone();
-                body["delta"] = json!(value);
-                self.emit("response.custom_tool_call_input.delta", body, out);
-            }
-            let mut body = ids;
-            body["input"] = json!(value);
-            self.emit("response.custom_tool_call_input.done", body, out);
+        let item = responses_call_item(&self.tools, &call.id, call.name, &value, "completed");
+        let (stem, key) = if custom {
+            ("custom_tool_call_input", "input")
         } else {
-            let mut body = ids;
-            body["name"] = item["name"].clone();
-            body["arguments"] = json!(value);
-            self.emit("response.function_call_arguments.done", body, out);
+            ("function_call_arguments", "arguments")
+        };
+        if !value.is_empty() {
+            let mut body = ids.clone();
+            body["delta"] = json!(value);
+            self.emit(&format!("response.{stem}.delta"), body, out);
         }
+        let mut body = ids;
+        body[key] = json!(value);
+        if !custom {
+            body["name"] = item["name"].clone();
+        }
+        self.emit(&format!("response.{stem}.done"), body, out);
         self.done_item(item, out);
+        true
     }
 
     fn finish(&mut self, outcome: Outcome<'_>, usage: Option<&Value>, out: &mut String) {
@@ -1323,11 +1218,9 @@ impl ChatEvents for ResponsesEvents {
             }
             Outcome::Failed(failure) => {
                 let error = match failure {
-                    Failure::Upstream {
-                        error: Some(error), ..
-                    } => error.clone(),
-                    Failure::Upstream { .. } => upstream_failed_error(),
+                    Failure::Upstream(error) => error.clone(),
                     Failure::Empty => malformed_response_error(),
+                    Failure::UnusableToolCalls => unusable_tool_calls_error(),
                 };
                 ("response.failed", "failed", Value::Null, error)
             }
@@ -2429,10 +2322,10 @@ mod tests {
     }
 
     #[test]
-    fn openai_to_anthropic_stream_error_finish_emits_error_event() {
+    fn openai_to_anthropic_stream_error_payload_emits_error_event() {
         let events = [
             "data: {\"id\":\"c1\",\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}",
-            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"overloaded_error\"}]}",
+            "data: {\"error\":{\"type\":\"overloaded_error\",\"message\":\"busy\"}}",
             "data: [DONE]",
         ];
         let out = run(messages_transform(), &events);
@@ -2457,12 +2350,15 @@ mod tests {
         let events = [
             chat_event(json!({ "reasoning_content": "plan" }), None),
             chat_event(json!({ "content": "calling" }), None),
-            // Arguments may precede the identity; the block waits for it.
+            // Arguments may precede the identity, and parallel calls interleave.
             tool_event(json!({ "index": 0, "function": { "arguments": "{\"q\":" } })),
             tool_event(json!({ "index": 0, "id": "call_1", "function": { "name": "first" } })),
+            tool_event(
+                json!({ "index": 1, "id": "call_2", "function": { "name": "second", "arguments": "{\"b\":" } }),
+            ),
             tool_event(json!({ "index": 0, "function": { "arguments": "\"x\"}" } })),
-            tool_event(json!({ "index": 1, "id": "call_2", "function": { "name": "second" } })),
-            chat_event(json!({ "content": "after" }), Some("stop")),
+            tool_event(json!({ "index": 1, "function": { "arguments": "2}" } })),
+            chat_event(json!({ "content": " after" }), Some("stop")),
             "data: [DONE]".to_string(),
         ];
         let refs: Vec<&str> = events.iter().map(String::as_str).collect();
@@ -2493,14 +2389,12 @@ mod tests {
             .iter()
             .map(|block| block["type"].as_str().unwrap())
             .collect();
-        assert_eq!(kinds, ["thinking", "text", "tool_use", "tool_use", "text"]);
+        // Calls are written complete once the stream finishes, after the text.
+        assert_eq!(kinds, ["thinking", "text", "tool_use", "tool_use"]);
         assert_eq!(blocks[2]["name"], "first");
         assert_eq!(blocks[3]["name"], "second");
         assert_eq!(inputs[&2], r#"{"q":"x"}"#);
-        assert!(
-            !inputs.contains_key(&3),
-            "a no-argument call streams no input"
-        );
+        assert_eq!(inputs[&3], r#"{"b":2}"#);
         let delta = out.iter().find(|e| e["type"] == "message_delta").unwrap();
         assert_eq!(delta["delta"]["stop_reason"], "tool_use");
         assert_eq!(out.last().unwrap()["type"], "message_stop");
@@ -2563,30 +2457,34 @@ mod tests {
             stop_reason(&[&partial_call, &length, "data: [DONE]"]),
             Some(json!("max_tokens"))
         );
-        // Unknown vendor reasons end the turn.
-        let eos = chat_event(json!({ "content": "hi" }), Some("eos"));
-        assert_eq!(
-            stop_reason(&[&eos, "data: [DONE]"]),
-            Some(json!("end_turn"))
-        );
+        // Reasons outside the OpenAI vocabulary end the turn.
+        for reason in ["eos", "abort", "overloaded_error"] {
+            let event = chat_event(json!({ "content": "hi" }), Some(reason));
+            assert_eq!(
+                stop_reason(&[&event, "data: [DONE]"]),
+                Some(json!("end_turn"))
+            );
+        }
 
-        // A garbled call is delivered as streamed; a nameless one is dropped.
+        // A garbled call gets an empty input.
         let tool_calls = chat_event(json!({}), Some("tool_calls"));
+        let out = run(
+            transform.clone(),
+            &[&partial_call, &tool_calls, "data: [DONE]"],
+        );
+        assert!(out
+            .iter()
+            .any(|event| event["delta"]["partial_json"] == "{}"));
+        assert_eq!(out.last().unwrap()["type"], "message_stop");
+
+        // Only a stream with no answer fails: an upstream error, no choice, or
+        // tool calls none of which has a name.
         let nameless =
             tool_event(json!({ "index": 0, "id": "c", "function": { "arguments": "{}" } }));
-        assert_eq!(
-            stop_reason(&[&partial_call, &tool_calls, "data: [DONE]"]),
-            Some(json!("tool_use"))
-        );
-        assert_eq!(
-            stop_reason(&[&nameless, &tool_calls, "data: [DONE]"]),
-            Some(json!("end_turn"))
-        );
-
-        // Only a stream with no answer fails: an upstream error, or no choice.
         for events in [
             vec!["data: {}", "data: [DONE]"],
             vec![r#"data: {"choices":[null]}"#, "data: [DONE]"],
+            vec![nameless.as_str(), tool_calls.as_str(), "data: [DONE]"],
         ] {
             let out = run(transform.clone(), &events);
             assert_eq!(out.last().unwrap()["type"], "error", "{out:?}");

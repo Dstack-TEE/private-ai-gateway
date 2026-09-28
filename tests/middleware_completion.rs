@@ -1970,10 +1970,8 @@ async fn malformed_chat_success_on_messages_returns_502_upstream() {
     let upstream = json!({
         "id": "chatcmpl-upstream",
         "model": "internal-model",
-        "choices": [{
-            "message": { "role": "assistant", "content": "partial" },
-            "finish_reason": "abort"
-        }]
+        // A choice with no message: there is no answer to convert.
+        "choices": [{ "finish_reason": "stop" }]
     });
     let service = build_service_with_upstream(200, serde_json::to_vec(&upstream).unwrap());
 

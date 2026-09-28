@@ -238,7 +238,7 @@
       "error": true
     },
     {
-      "name": "namespace_non_function_child_rejected",
+      "name": "namespace_non_function_child_dropped",
       "input": {
         "model": "gpt-test",
         "input": "hello",
@@ -248,7 +248,7 @@
           "tools": [{ "type": "custom", "name": "shell" }]
         }]
       },
-      "error": true
+      "output": {"messages": [{"role": "user", "content": "hello"}], "model": "gpt-test"}
     },
     {
       "name": "unknown_namespace_tool_choice_rejected",
@@ -265,7 +265,7 @@
       "error": true
     },
     {
-      "name": "namespace_tool_choice_rejected",
+      "name": "namespace_tool_choice_dropped",
       "input": {
         "model": "gpt-test",
         "input": "hello",
@@ -276,7 +276,7 @@
         }],
         "tool_choice": { "type": "namespace", "name": "crm" }
       },
-      "error": true
+      "output": {"messages": [{"role": "user", "content": "hello"}], "model": "gpt-test", "tools": [{"type": "function", "function": {"name": "crm__lookup"}}]}
     },
     {
       "name": "custom_tool_and_history",
@@ -344,7 +344,7 @@
       "error": true
     },
     {
-      "name": "non_text_tool_output_rejected",
+      "name": "non_text_tool_output_dropped",
       "input": {
         "model": "gpt-test",
         "input": [
@@ -352,10 +352,10 @@
           { "type": "function_call_output", "call_id": "call_1", "output": [{ "type": "input_image", "image_url": "https://example.com/a.png" }] }
         ]
       },
-      "error": true
+      "output": {"messages": [{"role": "assistant", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "inspect", "arguments": "{}"}}]}, {"role": "tool", "tool_call_id": "call_1", "content": "[The tool returned images; they follow in the next user message.]"}, {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "https://example.com/a.png"}}]}], "model": "gpt-test"}
     },
     {
-      "name": "assistant_refusal_history_rejected",
+      "name": "assistant_refusal_history_dropped",
       "input": {
         "model": "gpt-test",
         "input": [{
@@ -364,10 +364,10 @@
           "content": [{ "type": "refusal", "refusal": "cannot comply" }]
         }]
       },
-      "error": true
+      "output": {"messages": [{"role": "assistant", "content": ""}], "model": "gpt-test"}
     },
     {
-      "name": "custom_tool_grammar_rejected",
+      "name": "custom_tool_grammar_dropped",
       "input": {
         "model": "gpt-test",
         "input": "hello",
@@ -377,7 +377,7 @@
           "format": { "type": "grammar", "syntax": "lark", "definition": "start: /.+/" }
         }]
       },
-      "error": true
+      "output": {"messages": [{"role": "user", "content": "hello"}], "model": "gpt-test", "tools": [{"type": "function", "function": {"name": "sql", "parameters": {"type": "object", "properties": {"input": {"type": "string", "description": "The raw input for this tool, passed through verbatim."}}, "required": ["input"]}}}]}
     },
     {
       "name": "invalid_message_role_rejected",
@@ -424,7 +424,7 @@
       "error": true
     },
     {
-      "name": "file_url_rejected",
+      "name": "file_url_dropped",
       "input": {
         "model": "gpt-test",
         "input": [{
@@ -433,15 +433,15 @@
           "content": [{ "type": "input_file", "file_url": "https://example.com/file.pdf" }]
         }]
       },
-      "error": true
+      "output": {"messages": [{"role": "user", "content": ""}], "model": "gpt-test"}
     },
     {
-      "name": "unsupported_input_item_rejected",
+      "name": "unsupported_input_item_dropped",
       "input": { "model": "gpt-test", "input": [{ "type": "computer_call" }] },
-      "error": true
+      "output": {"messages": [], "model": "gpt-test"}
     },
     {
-      "name": "image_file_id_rejected",
+      "name": "image_file_id_dropped",
       "input": {
         "model": "gpt-test",
         "input": [{
@@ -450,7 +450,7 @@
           "content": [{ "type": "input_image", "file_id": "file_1" }]
         }]
       },
-      "error": true
+      "output": {"messages": [{"role": "user", "content": ""}], "model": "gpt-test"}
     }
   ],
   "responses": [
@@ -657,9 +657,12 @@
         "id": "resp_fixture",
         "object": "response",
         "model": "gpt-test",
-        "status": "completed",
+        "status": "failed",
         "incomplete_details": null,
-        "error": null,
+        "error": {
+          "code": "server_error",
+          "message": "The upstream provider returned tool calls without a name"
+        },
         "tools": [{ "type": "function", "name": "lookup" }],
         "store": false,
         "output": [],

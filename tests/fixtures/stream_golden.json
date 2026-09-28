@@ -277,7 +277,6 @@
       "response.output_item.done",
       "response.output_item.added",
       "response.function_call_arguments.delta",
-      "response.function_call_arguments.delta",
       "response.function_call_arguments.done",
       "response.output_item.done",
       "response.output_item.added",
@@ -345,10 +344,10 @@
     "types": [
       "response.created",
       "response.in_progress",
-      "response.completed"
+      "response.failed"
     ],
     "terminal": {
-      "status": "completed",
+      "status": "failed",
       "output": [],
       "usage": {
         "input_tokens": 0,
