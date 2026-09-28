@@ -32,7 +32,8 @@ impl AgentIntegration for Agent {
             | Self::QwenCode
             | Self::KiloCli
             | Self::ClineCli
-            | Self::Crush => Surface::ChatCompletions,
+            | Self::Crush
+            | Self::MimoCode => Surface::ChatCompletions,
         }
     }
 
@@ -45,7 +46,8 @@ impl AgentIntegration for Agent {
             | Agent::QwenCode
             | Agent::KiloCli
             | Agent::ClineCli
-            | Agent::Crush => Format::Json,
+            | Agent::Crush
+            | Agent::MimoCode => Format::Json,
             Agent::Hermes => Format::Yaml,
             Agent::OpenClaw => Format::Json5,
             Agent::OhMyPi => Format::Yaml,
@@ -65,7 +67,7 @@ impl AgentIntegration for Agent {
             Agent::ClaudeCode => override_dir("CLAUDE_CONFIG_DIR")
                 .unwrap_or_else(|| home.join(".claude"))
                 .join("settings.json"),
-            Agent::OpenCode | Agent::KiloCli => opencode_family::layers(self)
+            Agent::OpenCode | Agent::KiloCli | Agent::MimoCode => opencode_family::layers(self)
                 .map(|layers| layers.config_path(home, tool_env))
                 .unwrap_or_default(),
             Agent::QwenCode => override_dir("QWEN_HOME")
@@ -151,6 +153,10 @@ impl AgentIntegration for Agent {
             }
             Agent::Hermes => {
                 "Hermes uses a machine-local token command. Start a new session without --api-key or --base-url overrides; existing native credentials and fallbacks are never erased."
+            }
+            Agent::MimoCode => {
+                "MiMo Code will use an app-owned provider catalog generated from the verified \
+                 service and a file-backed machine-local token. Restart MiMo Code after applying."
             }
             Agent::KiloCli => {
                 "Kilo CLI will use an app-owned provider catalog generated from the verified \

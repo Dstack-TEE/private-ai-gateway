@@ -89,8 +89,8 @@ fi
 # that see the key run from absolute paths with the system PATH.
 docker run --detach --init --name "$container" --network "$network" "${versions[@]}" \
   --env PAP_E2E_AGENTS="$agents" --env DISABLE_AUTOUPDATER=1 --env OPENCODE_DISABLE_AUTOUPDATE=1 \
-  --env KILO_DISABLE_AUTOUPDATE=1 \
-  --env AGENT_PATH=/home/tester/.local/bin:/home/tester/.npm-global/bin:/home/tester/.opencode/bin:/home/tester/.kilo/bin \
+  --env KILO_DISABLE_AUTOUPDATE=1 --env MIMOCODE_DISABLE_AUTOUPDATE=1 \
+  --env AGENT_PATH=/home/tester/.local/bin:/home/tester/.npm-global/bin:/home/tester/.opencode/bin:/home/tester/.kilo/bin:/home/tester/.mimocode/bin \
   --volume "$e2e_dir:/e2e:ro" --volume "$work/pkg:/pkg:ro" ubuntu:24.04 sleep infinity >/dev/null
 docker exec "$container" /e2e/container/prepare.sh
 

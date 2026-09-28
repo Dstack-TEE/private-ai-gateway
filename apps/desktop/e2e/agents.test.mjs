@@ -120,6 +120,14 @@ const ALL_AGENTS = [
     prompt: ["crush", "run", PROMPT],
     selfWritten: ["recent_models"],
   },
+  {
+    id: "mimo-code",
+    sentinel: { file: ".config/mimocode/mimocode.json", path: ["autoupdate"], value: false },
+    surface: "chat",
+    files: [".config/mimocode/mimocode.json"],
+    prompt: ["mimo", "run", PROMPT],
+    selfWritten: ["$schema"],
+  },
 ];
 
 // run.sh --agents limits the test, like the installs, to these ids.

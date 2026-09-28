@@ -7,6 +7,7 @@ import hermesIcon from "@lobehub/icons-static-svg/icons/hermesagent.svg";
 import kiloIcon from "@lobehub/icons-static-svg/icons/kilocode.svg";
 import openCodeIcon from "@lobehub/icons-static-svg/icons/opencode.svg";
 import openClawIcon from "@lobehub/icons-static-svg/icons/openclaw-color.svg";
+import mimoCodeIcon from "@lobehub/icons-static-svg/icons/xiaomimimo.svg";
 import piIcon from "@lobehub/icons-static-svg/icons/pi.svg";
 import qwenCodeIcon from "@lobehub/icons-static-svg/icons/qwen-color.svg";
 import { Button } from "../components/ui/button";
@@ -37,6 +38,7 @@ const AGENT_ICONS: Record<string, string> = {
   "qwen-code": qwenCodeIcon,
   kilo: kiloIcon,
   cline: clineIcon,
+  "mimo-code": mimoCodeIcon,
 };
 
 function AgentMark({ agent }: { agent: Pick<AgentStatus, "id" | "name"> }): React.JSX.Element {

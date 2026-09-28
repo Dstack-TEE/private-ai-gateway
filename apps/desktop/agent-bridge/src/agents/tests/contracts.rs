@@ -41,6 +41,7 @@ fn every_agent_switches_conservatively_and_reconnects_without_namespace_conflict
             Agent::Pi => "{}",
             Agent::OhMyPi => "theme: dark\n",
             Agent::Crush => r#"{"models":{"large":{"model":"native","provider":"anthropic"},"small":{"model":"haiku","provider":"anthropic"}},"options":{"tui":{"compact_mode":true}}}"#,
+            Agent::MimoCode => r#"{"model":"original/native","provider":{"original":{"name":"User provider"}}}"#,
             Agent::KiloCli => r#"{"model":"original/native","provider":{"original":{"name":"User provider"}}}"#,
             Agent::ClineCli => r#"{"version":1,"lastUsedProvider":"anthropic","modes":{},"providers":{"anthropic":{"settings":{"provider":"anthropic","apiKey":"user-anthropic-key"},"updatedAt":"2026-01-01T00:00:00.000Z","tokenSource":"manual"},"openai-compatible":{"settings":{"provider":"openai-compatible","apiKey":"old-secret","baseUrl":"https://original.invalid/v1","model":"native","protocol":"openai-responses"},"updatedAt":"2026-01-01T00:00:00.000Z","tokenSource":"manual"}}}"#,
             Agent::QwenCode => r#"{"model":{"name":"native"},"security":{"auth":{"selectedType":"qwen-oauth"}},"env":{"OTHER":"kept"}}"#,
@@ -134,7 +135,7 @@ fn every_agent_switches_conservatively_and_reconnects_without_namespace_conflict
             assert!(tokens.agent_for(&first_token).is_none());
             let mut restored = doc(&sandbox, agent);
             match agent {
-                Agent::OpenCode | Agent::KiloCli => assert!(restored
+                Agent::OpenCode | Agent::KiloCli | Agent::MimoCode => assert!(restored
                     .get_value(&["provider", "private-ai-proxy", "options", "apiKey"])
                     .is_none()),
                 Agent::Pi | Agent::OhMyPi => assert!(restored
@@ -1230,4 +1231,79 @@ fn kilo_uses_the_opencode_projection_and_guards_its_own_layers() {
     assert!(restored
         .get_value(&["provider", "private-ai-proxy", "options", "apiKey"])
         .is_none());
+}
+
+#[test]
+fn mimo_code_follows_its_home_and_guards_its_seeded_jsonc() {
+    const CASE: &str = "PAP_TEST_MIMO_CASE";
+    if let Ok(case) = env::var(CASE) {
+        let mut sandbox = sandbox(&format!("mimo-{case}"));
+        sandbox.projector.tool_env = true;
+        let agent = Agent::MimoCode;
+        let root = env_path("MIMOCODE_HOME").unwrap();
+        let path = agent.config_path(&sandbox.home, true);
+        assert_eq!(path, root.join("config/mimocode.json"));
+        // MiMo Code seeds mimocode.jsonc, which merges after mimocode.json.
+        let seeded = if case == "override" {
+            r#"{"$schema":"https://mimo.xiaomi.com/mimocode/config.json","model":"mimo/other"}"#
+        } else {
+            "{\n  \"$schema\": \"https://mimo.xiaomi.com/mimocode/config.json\"\n}\n"
+        };
+        write(&path.with_file_name("mimocode.jsonc"), seeded);
+        let result = sandbox
+            .projector
+            .preview(agent, true, Some(&catalog()), &claude_options());
+        match case.as_str() {
+            "seeded" => {
+                let preview = result.unwrap();
+                sandbox
+                    .projector
+                    .apply(
+                        agent,
+                        true,
+                        &preview.revision,
+                        Some(&catalog()),
+                        &claude_options(),
+                    )
+                    .unwrap();
+                let ConfigDoc::Json(connected) = doc(&sandbox, agent) else {
+                    unreachable!()
+                };
+                assert_eq!(connected["model"], "private-ai-proxy/openai/gpt-oss-20b");
+                assert!(
+                    connected["provider"]["private-ai-proxy"]["options"]["apiKey"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("{file:")
+                );
+            }
+            _ => assert_eq!(
+                result.unwrap_err().code(),
+                desktop_core::protocol::ErrorCode::ConfigurationConflict
+            ),
+        }
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    for case in ["seeded", "override"] {
+        let output = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "agents::tests::contracts::mimo_code_follows_its_home_and_guards_its_seeded_jsonc",
+            ])
+            .env(CASE, case)
+            .env("MIMOCODE_HOME", root.path().join(case))
+            .env_remove("MIMOCODE_CONFIG")
+            .env_remove("MIMOCODE_CONFIG_DIR")
+            .env_remove("MIMOCODE_CONFIG_CONTENT")
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
+        assert!(
+            output.status.success(),
+            "{case}: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

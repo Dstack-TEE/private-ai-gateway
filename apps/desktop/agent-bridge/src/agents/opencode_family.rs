@@ -7,6 +7,8 @@ use super::*;
 pub(super) struct Layers {
     /// Directory name under the XDG config home.
     pub(super) dir: &'static str,
+    /// A variable naming a home whose `config` directory replaces it.
+    pub(super) home_env: Option<&'static str>,
     /// The file this app writes in that directory.
     pub(super) file: &'static str,
     /// Global files in merge order (later ones win).
@@ -22,6 +24,7 @@ pub(super) fn layers(agent: Agent) -> Option<Layers> {
     match agent {
         Agent::OpenCode => Some(Layers {
             dir: "opencode",
+            home_env: None,
             file: "opencode.json",
             global: &["config.json", "opencode.json", "opencode.jsonc"],
             env: "OPENCODE",
@@ -30,6 +33,7 @@ pub(super) fn layers(agent: Agent) -> Option<Layers> {
         }),
         Agent::KiloCli => Some(Layers {
             dir: "kilo",
+            home_env: None,
             file: "kilo.json",
             global: &[
                 "config.json",
@@ -42,6 +46,15 @@ pub(super) fn layers(agent: Agent) -> Option<Layers> {
             home_dirs: &[".kilocode", ".kilo"],
             dir_files: &["kilo.jsonc", "kilo.json", "opencode.jsonc", "opencode.json"],
         }),
+        Agent::MimoCode => Some(Layers {
+            dir: "mimocode",
+            home_env: Some("MIMOCODE_HOME"),
+            file: "mimocode.json",
+            global: &["config.json", "mimocode.json", "mimocode.jsonc"],
+            env: "MIMOCODE",
+            home_dirs: &[".mimocode"],
+            dir_files: &["mimocode.json", "mimocode.jsonc"],
+        }),
         _ => None,
     }
 }
@@ -52,6 +65,12 @@ impl Layers {
     }
 
     pub(super) fn global_dir(&self, home: &Path, tool_env: bool) -> PathBuf {
+        if let Some(root) = self
+            .home_env
+            .and_then(|name| tool_env.then(|| env_path(name)).flatten())
+        {
+            return root.join("config");
+        }
         tool_env
             .then(|| env_path("XDG_CONFIG_HOME"))
             .flatten()

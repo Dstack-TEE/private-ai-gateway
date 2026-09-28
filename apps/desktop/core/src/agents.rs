@@ -85,10 +85,11 @@ pub enum Agent {
     KiloCli,
     ClineCli,
     Crush,
+    MimoCode,
 }
 
 impl Agent {
-    pub const ALL: [Agent; 11] = [
+    pub const ALL: [Agent; 12] = [
         Agent::ClaudeCode,
         Agent::Codex,
         Agent::Hermes,
@@ -100,6 +101,7 @@ impl Agent {
         Agent::KiloCli,
         Agent::ClineCli,
         Agent::Crush,
+        Agent::MimoCode,
     ];
 
     pub fn from_id(id: &str) -> Result<Self, String> {
@@ -122,6 +124,7 @@ impl Agent {
             Agent::KiloCli => "kilo",
             Agent::ClineCli => "cline",
             Agent::Crush => "crush",
+            Agent::MimoCode => "mimo-code",
         }
     }
 
@@ -138,6 +141,7 @@ impl Agent {
             Agent::KiloCli => "Kilo CLI",
             Agent::ClineCli => "Cline CLI",
             Agent::Crush => "Crush",
+            Agent::MimoCode => "MiMo Code",
         }
     }
 
@@ -154,6 +158,7 @@ impl Agent {
             Agent::KiloCli => "https://kilo.ai/cli",
             Agent::ClineCli => "https://cline.bot",
             Agent::Crush => "https://github.com/charmbracelet/crush",
+            Agent::MimoCode => "https://mimo.xiaomi.com/mimocode",
         }
     }
 }

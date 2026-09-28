@@ -175,7 +175,9 @@ pub(super) fn stale_helper(
             &["providers", "private-ai-proxy", "key_cmd"][..],
             agent_credential_command(exe, agent, token_path).ok(),
         ),
-        Agent::OpenCode | Agent::KiloCli | Agent::QwenCode | Agent::ClineCli => return false,
+        Agent::OpenCode | Agent::KiloCli | Agent::MimoCode | Agent::QwenCode | Agent::ClineCli => {
+            return false
+        }
         Agent::OpenClaw => return false, // Validated with the token path by Projector.
         Agent::OhMyPi => return oh_my_pi::stale_helper(record, exe, token_path),
     };
@@ -578,7 +580,7 @@ pub(super) fn selected_model(agent: Agent, doc: Option<&ConfigDoc>) -> Option<St
     match agent {
         Agent::Codex => doc.get_str(&["model"]),
         Agent::ClaudeCode => doc.get_str(&["env", "ANTHROPIC_MODEL"]),
-        Agent::OpenCode | Agent::KiloCli => doc
+        Agent::OpenCode | Agent::KiloCli | Agent::MimoCode => doc
             .get_str(&["model"])
             .and_then(|value| value.strip_prefix("private-ai-proxy/").map(str::to_string)),
         Agent::Pi => None,

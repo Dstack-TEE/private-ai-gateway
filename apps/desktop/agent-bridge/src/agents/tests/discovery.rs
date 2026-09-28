@@ -54,7 +54,7 @@ fn helper_relocation_requires_explicit_reconnect_without_scan_writes() {
         write_executable(&sandbox.projector.helper_exe, "helper");
         if matches!(
             agent,
-            Agent::OpenCode | Agent::KiloCli | Agent::QwenCode | Agent::ClineCli
+            Agent::OpenCode | Agent::KiloCli | Agent::MimoCode | Agent::QwenCode | Agent::ClineCli
         ) {
             assert_scan(&sandbox, true, None);
         } else if agent == Agent::OpenClaw {
@@ -86,7 +86,7 @@ fn helper_relocation_requires_explicit_reconnect_without_scan_writes() {
             Agent::OpenClaw => &["agents", "defaults", "model", "primary"][..],
             Agent::OhMyPi => &["providers", "private-ai-proxy", "apiKey"][..],
             Agent::QwenCode => &["providerProtocol", "private-ai-proxy"][..],
-            Agent::KiloCli => &["model"][..],
+            Agent::KiloCli | Agent::MimoCode => &["model"][..],
             Agent::ClineCli => &["providers", "openai-compatible", "settings", "baseUrl"][..],
             Agent::Crush => &["providers", "private-ai-proxy"][..],
         };
