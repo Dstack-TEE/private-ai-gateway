@@ -1,241 +1,299 @@
-# Attested Confidential Inference
+# Verification and security model
 
-This page is the product-neutral source for `{PRODUCT_NAME}` inference docs.
-Product docs should replace every placeholder before publishing. The
-normative protocol definition is the [ACI Spec](../spec/aci.md).
+This page is for developers deciding whether an ACI deployment protects their
+inference data. It explains the privacy claim, the evidence behind it, the
+checks a client must perform, and the limits that remain.
 
-Primary reader: developers who call the OpenAI-compatible API and verifiers who
-need to prove which attested gateway served a response.
+The [ACI specification](../spec/aci.md) is normative. The
+[quickstart](quickstart.md) is the runnable walkthrough.
 
-## Placeholders
+## The privacy claim
 
-| Placeholder | Meaning |
-| --- | --- |
-| `{PRODUCT_NAME}` | Product name shown in the wrapper docs. |
-| `{API_BASE_URL}` | Base URL without the `/v1` suffix, for example `https://api.example.com`. |
-| `{API_KEY_ENV_VAR}` | Environment variable that holds the model API key. |
-| `{API_KEY_SOURCE}` | Dashboard, console, or account flow where users create the API key. |
-| `{DEFAULT_MODEL_ID}` | Model ID used in quickstart examples. |
-| `{PRODUCTION_VERIFIER_POLICY_URL}` | Published verifier policy for accepted source provenance, image digests, keyset subjects, KMS roots, and TLS bindings. |
+For an accepted ACI request, remote plaintext is limited to the workloads that
+must process it:
 
-## What Verification Proves
+1. the attested gateway workload, including its client-facing TLS terminator;
+   and
+2. the accepted provider workloads on the selected route, including a
+   confidential router and model runner when they are separate.
 
-The API returns normal OpenAI-compatible responses and adds verifiable evidence.
-A verifier checks two layers:
+The client verifies the gateway and its channel before sending the request.
+The measured gateway code then verifies the selected provider and enforces the
+provider's attested channel binding before forwarding. A failed required check
+stops the request before that hop receives the prompt.
 
-1. The gateway attestation report proves which workload keyset serves the API:
-   the hardware quote binds the keyset digest and the verifier's fresh nonce,
-   and the report carries source provenance and evidence.
-2. The per-response receipt proves request and response hashes, selected
-   upstream verification, and the receipt signature under a key from the
+Two parts of this claim come from reviewing the measured release, not from a
+check on the report:
+
+- **Which code runs.** The report proves which compose booted. Whether that
+  compose and the code it names are acceptable is your decision. You can pin
+  reviewed compose hashes, rely on the operator to review its releases, or
+  record the hash and review the release later.
+- **Where private keys live.** The gateway derives its receipt and E2EE keys
+  from dstack KMS inside the TEE, and `pap` can check the receipt key's KMS
+  chain. The TLS private key has no such chain. The gateway serves plain HTTP
+  behind a TLS terminator, and that key stays inside the TEE only if the
+  reviewed compose runs the terminator and keeps its key there.
+
+Under the TEE threat model, the gateway operator, model operator, and cloud host
+cannot inspect protected workload memory. The local application still sees the
+prompt and response. The accepted remote workloads also see plaintext because
+they must process it.
+
+This is not a promise from an API header. It is a policy decision based on
+hardware evidence, measured software, attested keys, and enforced channels that
+the relying party checks independently.
+
+> [!IMPORTANT]
+> Provider verification is a request constraint, not a global gateway mode. A
+> request fails closed only under the constraints in
+> [Require ACI verification](api-reference.md#require-aci-verification).
+
+## Who receives what
+
+| Component | Inference content | Other information |
+| --- | --- | --- |
+| Local client or agent | Plaintext prompt and response | API key and all local context |
+| Attested gateway workload | Plaintext after TLS or E2EE termination | Requested model, credential, routing constraints, and provider response |
+| Accepted provider workload or route | Plaintext needed for routing or inference | Gateway-side provider credential and request metadata |
+| Optional external control plane | No prompt or response body | Bearer-token hash, model, routing options, request features including a prefix hash, usage, and status metadata |
+| Cloud host and workload operator | Not through the accepted TEE memory boundary | Network timing, addresses, sizes, and operational metadata |
+
+### What leaves the request path
+
+The gateway does not log or report prompts, completions, or upstream error
+messages. Of an upstream response body, only its `usage` object is reported.
+This table lists everything that leaves the request path, so you can check it
+against the code:
+
+| Destination | Contents | Defined in |
+| --- | --- | --- |
+| Pre-request consult to the control plane | SHA-256 of the API key, the requested model, the caller's `provider` routing object, the TEE-only host flag, and, unless `middleware.send_request_features` is `false`, request features: a token estimate, input modalities, tool and response-format flags, reasoning intent, and `prefixHash` | `consult_pre` in `src/middleware/control.rs`, `src/middleware/request_features.rs` |
+| Usage report to the control plane, one per attempt | Request ID, endpoint, status, timings, streaming flag, attempt index, selected route, requested model, the upstream's `usage` object, the consult's routing and billing fields echoed back unchanged, `errorSource`, a failure class in `errorMessage`, and `prefixHash` | `PostReport` in `src/middleware/types.rs` |
+| Receipt | SHA-256 hashes of the request and response bodies, never the bodies | `src/aci/receipt.rs` |
+
+Two properties make this checkable:
+
+- `errorMessage` carries no message text. Its type is `ErrorClass`, an enum
+  with no string-bearing variant, so the value is one token from a closed list,
+  such as `upstream_timeout` or `stream_truncated`. An upstream error body is
+  read only to choose a class (`classify_upstream` in
+  `src/middleware/errors.rs`).
+- `tests/middleware_completion.rs` plants a marker in upstream error text on the
+  buffered, streaming, and in-band stream paths. It captures every log event at
+  `TRACE` and fails if the marker appears in any log line or usage report.
+
+The requested model name and the caller's `provider` object are forwarded as
+the caller sent them, so do not put secrets there. The `usage` object is the
+upstream's, forwarded as received.
+
+The gateway has no access log and no per-request outcome line. It logs its own
+errors, such as a failed control-plane call, an upstream timeout, or a response
+that fails partway (`stream_abort`, the one line that carries a request ID).
+Such a line can name the requested model or the request host. It never carries
+request or response content.
+
+`prefixHash` is derived from content: an HMAC-SHA256 of the conversation's
+first 4 KiB, truncated to 32 hex characters, used for cache-affinity routing.
+The gateway derives the HMAC key from dstack KMS, so the key never leaves the
+TEE. The control plane can see when two requests share a prefix, but it cannot
+test a guessed prefix against the hash. See the
+[control-plane contract](control-plane-contract.md) for every field.
+
+Provider workloads can have their own internal routing, telemetry, or storage
+boundaries. Accept only the claims that the provider verifier actually proves.
+The [provider verification index](providers/README.md) records those differences.
+
+## How privacy is enforced
+
+ACI protects the path in three stages.
+
+### 1. Before the client sends data
+
+The client fetches `GET /v1/aci/attestation` with a fresh random nonce and
+checks the ACI §9.1 chain:
+
+1. The hardware quote verifies to an accepted TEE vendor root.
+2. The quote binds `report_data`, which binds the nonce and the digest of the
+   served workload keyset.
+3. The keyset has not expired.
+4. Measured evidence supports source or release provenance accepted by policy.
+5. Private-key custody satisfies the relying party's policy.
+6. The channel used for inference terminates at a TLS or E2EE key in that
    attested keyset.
 
-Verification does not rely on the product API server saying "verified". The
-verifier fetches artifacts, validates signatures and hashes locally, and applies
-the production verifier policy from `{PRODUCTION_VERIFIER_POLICY_URL}`.
+The last check matters. A valid quote beside an ordinary HTTPS connection does
+not protect the request if TLS terminates outside the accepted workload. The
+Rust CLI and the Node and Bun runtime clients pin the connection to the TLS key
+the attested keyset lists for that host. The pin proves which key the
+connection used. That the key's private half stays in the TEE follows from the
+reviewed compose, as described in [The privacy claim](#the-privacy-claim).
 
-## Quick Request
+The browser verifier can check the quote, binding chain, measurement, receipts,
+and sessions. Browser APIs do not expose the peer certificate, so browser-only
+code cannot enforce the TLS SPKI pin.
 
-Create an API key from `{API_KEY_SOURCE}` and keep it in `{API_KEY_ENV_VAR}`.
-The neutral snippets below copy that value into `API_KEY`; product docs can
-render the final environment variable name directly.
+### 2. Before the gateway forwards data
 
-```bash
-export API_BASE_URL="{API_BASE_URL}"
-export API_KEY="<value from {API_KEY_ENV_VAR}>"
-export MODEL="{DEFAULT_MODEL_ID}"
+For a request that requires verified serving, the attested gateway verifies
+the selected provider under its configured policy and forwards the prompt only
+over a connection that enforces the verified TLS SPKI or provider E2EE key.
+Each candidate is checked on its own; one verified origin or channel never
+authorizes another. The steps, caching, and re-verification are in
+[Request-time flow](upstream-verification-lifecycle.md#request-time-flow).
 
-curl "$API_BASE_URL/v1/chat/completions" \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "'"$MODEL"'",
-    "messages": [
-      {"role": "user", "content": "Explain why attestation matters in one sentence."}
-    ]
-  }'
-```
+### 3. After the response
 
-Save these response values:
+The gateway signs a per-request receipt under a key from its attested keyset.
+The receipt commits to:
 
-- Response body bytes.
-- `x-receipt-id` response header.
-- Optional `id` field from the JSON response.
-- `x-aci-keyset-digest` header, if present.
+- the request body the gateway processed;
+- the body forwarded after any gateway rewrite;
+- the upstream verification result and cited session;
+- the exact response bytes returned, including raw SSE framing; and
+- the gateway keyset digest current for the exchange.
 
-`x-receipt-id` is the stable lookup key for verification. The JSON response
-`id` can also work when the response body contains a chat completion ID.
+The receipt stores hashes, not plaintext request or response bodies. For an
+aggregator, its `upstream.verified` event cites a content-addressed attested
+session. The session preserves the provider channel binding, typed claims, and
+evidence used by the verifier.
 
-## Verification Flow
+A receipt proves what the attested gateway recorded. A deep session audit lets
+the relying party reappraise the provider evidence instead of accepting the
+gateway's `verified` label alone.
 
-Generate a fresh nonce before fetching the attestation report.
+### Audit the receipt
 
-```bash
-NONCE="$(openssl rand -hex 32)"
+Given an established workload keyset and the exact request and response bytes,
+a relying party checks:
 
-curl "$API_BASE_URL/v1/aci/attestation?nonce=$NONCE" \
-  -o attestation-report.json
-```
+1. The receipt `signature` verifies over the JCS form of the document without
+   its `signature` member, using the `receipt_signing_keys` entry named by
+   `key_id`.
+2. `api_version` is `aci/1`, and `workload_keyset_digest` matches the
+   established gateway identity.
+3. `request.received.body_hash` matches the plaintext request wire body. For
+   E2EE v2, it instead matches the compact JSON body reconstructed after
+   replacing encrypted fields with their decrypted values.
+4. `response.returned.body_hash` matches the exact bytes received from the
+   wire, including ordered SSE framing and any encrypted response fields.
+5. A required aggregated request has an `upstream.verified` event with
+   `required: true`, `result: "verified"`, and a `session_id`.
+6. The full session hashes to that ID, its evidence hashes to
+   `evidence.digest`, the receipt's `served_at` falls inside its validity
+   window, and its claims satisfy local policy.
 
-Fetch the receipt for the response.
+Compare `request.forwarded.body_hash` with `request.received.body_hash` to
+detect a gateway rewrite. Whether that rewrite is acceptable remains local
+policy. A missing or failed required check makes the response unacceptable.
 
-```bash
-curl "$API_BASE_URL/v1/aci/receipts/$RECEIPT_ID" \
-  -H "Authorization: Bearer $API_KEY" \
-  -o receipt.json
-```
+Fail-closed verification and session-pin refusals also carry `X-Receipt-Id`.
+Their receipts commit to the original request, the failed upstream event, and
+the exact error body, so a client can verify that the attested gateway refused
+before forwarding.
 
-Then verify locally. First establish the workload identity (spec §9.1):
+## Proof layers
 
-1. The hardware quote verifies to the TEE vendor root and binds `report_data`.
-2. The binding chain recomputes: hash the served `workload_keyset` object's
-   JCS form to `workload_keyset_digest`, build the §3.2 statement for your
-   nonce, and check its hash equals `report_data`.
-3. The keyset is not expired (`now < not_after`).
-4. The source provenance is acceptable to the production policy.
-5. Private-key custody evidence satisfies the policy (for this implementation,
-   the dstack KMS chain in the report evidence).
-6. The channel you use is bound: the observed TLS SPKI or the E2EE key you
-   encrypt to is listed in the attested keyset.
+| Layer | Artifact | What it proves | What it does not prove by itself |
+| --- | --- | --- | --- |
+| Gateway identity | Attestation report | Fresh TEE evidence binds the gateway keyset and measured workload | That the relying party approves the measured release |
+| Client channel | Observed TLS certificate or E2EE key | Inference bytes terminate at a key in the attested keyset | Provider-side privacy after the gateway |
+| Provider path | Attested session | The gateway verified and enforced a provider binding with recorded evidence | Claims the provider verifier left `unknown` |
+| Exchange integrity | Signed receipt | Request, rewrite, response, and serving record are bound to the attested gateway | An external timestamp or non-repudiable public log |
 
-Then verify the response (spec §9.3):
+Every layer has a different job. An `x-receipt-id` alone proves nothing until
+the client fetches the receipt, verifies its signature and body hashes, and
+checks the cited session under its own policy.
 
-1. The receipt signature (Ed25519 over the JCS form of the document
-   bytes) verifies under the keyset entry `key_id` names.
-2. The payload's `workload_keyset_digest` matches the established digest.
-3. `request.received.body_hash` matches the request bytes the gateway processed.
-   For E2EE v2, reconstruct the compact JSON body with decrypted field values.
-4. `response.returned.body_hash` matches the response bytes you received (the
-   raw SSE stream for streaming, including encrypted E2EE fields).
+## Pin an upstream session
 
-For aggregator deployments, verify the cited session (spec §9.2): the
-`upstream.verified` event is `verified` and cites a `session_id`; the fetched
-session bytes hash to that id; the evidence data hashes to its digest; the
-session's claims satisfy your policy.
+To accept only provider sessions you audited, list their IDs in
+`provider.aci_session_ids`. A binding rotation creates a new session ID, so a
+pin never silently accepts a new channel. The wire behavior is in
+[Require ACI verification](api-reference.md#require-aci-verification), and the
+audit and pinning commands are in the
+[quickstart](quickstart.md#4-use-it-as-a-local-endpoint).
 
-The verifier should fail closed if a required artifact is missing, malformed,
-expired, unsigned, or rejected by policy.
+## E2EE v2
 
-## Current Artifact Endpoints
+E2EE v2 is an optional compatibility extension that encrypts supported content
+fields between the client and the attested gateway workload. The quote-bound
+`e2ee_public_keys` entry is the key-provenance anchor. Field AAD binds the
+ciphertext to its model, field path, nonce, timestamp, direction, and response
+ID.
 
-| Endpoint | Purpose |
+E2EE v2 protects content across infrastructure in front of the gateway TEE. It
+does not hide content from accepted workloads on the inference path, and it
+does not define encryption for every API field or endpoint. It covers Chat
+Completions, Completions, and Embeddings as specified in the
+[E2EE v2 protocol](../spec/e2ee-v2.md).
+
+The extension is frozen and supported through at least February 10, 2027.
+E2EE v3 is the planned replacement.
+
+## Build a verifier policy
+
+The same report is not automatically acceptable to every user. A production
+policy should state at least:
+
+| Policy input | Decision to make |
 | --- | --- |
-| `GET /v1/aci/attestation?nonce=<nonce>` | Fresh gateway attestation report. |
-| `GET /v1/aci/receipts/{id}` | Signed ACI receipt. `{id}` can be a receipt ID or response chat ID. |
-| `GET /v1/aci/sessions/{session_id}` | Attested-session record referenced by receipt events. |
-| `GET /v1/aci/sessions?upstream_name=&model=` | List a provider's current attested sessions. |
-| `GET /v1/attestation/report` · `GET /v1/signature/{id}` | Legacy dstack-vllm-proxy aliases, with the `X-Signing-Algo` legacy E2EE mode. Kept for pre-ACI clients under the Appendix B rule: they never alter ACI artifacts, and their report bindings use their own quotes. New verifiers should use the `/v1/aci/*` endpoints above. |
+| Hardware roots and TCB states | Which TEE vendors, collateral sources, debug states, and TCB statuses are accepted? |
+| Boot and OS measurements | Which dstack or other platform images are accepted, and how are their measurements reconstructed? |
+| Workload release | Which RTMR3-bound compose hashes or equivalent measured releases were reviewed? |
+| Source provenance | How does the measured artifact map to public source and build provenance? |
+| Key custody | Which KMS roots and derivation chains establish custody for receipt, E2EE, and TLS keys? |
+| Provider evidence | Which verifier versions, channels, claim sources, and model paths are accepted? |
+| Rotation and expiry | How are overlapping releases, keysets, and session changes handled? |
 
-## Tracing a receipt to its session
+The `pap` CLI verifies the DCAP quote, the nonce and keyset binding, expiry,
+the RTMR3 compose measurement, and the TLS key the report declares for the
+host. Policy flags narrow what it accepts:
 
-The artifacts are linked, not bundled. A receipt's `upstream.verified` event
-carries the content-addressed `session_id`; the typed claims, channel
-bindings, and evidence live on the session record. For a deep audit, follow
-that reference to `GET /v1/aci/sessions/{session_id}`: an immutable record with
-the full evidence and per-claim reasons, which the verifier re-checks itself.
-Because `session_id` is a content hash, the session you fetch is exactly the one
-the receipt committed to — race-free, and permanently cacheable.
-
-The gateway never stores request bodies, so there is no body to fetch: the
-rewrite (if any) is committed by `request.forwarded.body_hash` differing from
-`request.received.body_hash`, not by warehousing plaintext.
-
-## Pinning Sessions on a Request
-
-The link also runs forward. A request body MAY carry serving constraints
-(spec §5.3):
-
-```json
-"provider": { "aci_verified": true, "aci_session_ids": ["<session-id>", "..."] }
-```
-
-`aci_verified` requires a verified attested session for this request;
-`aci_session_ids` requires one of the listed sessions — verify candidates from
-`GET /v1/aci/sessions` first, then pin the ids you accept. When no listed
-session can serve, the gateway refuses with `session_not_accepted` (412)
-before forwarding, and the refusal carries its own receipt. The whole
-`provider` member is consumed by the gateway and never reaches an upstream.
-
-## E2EE v2 Compatibility Extension
-
-E2EE v2 encrypts content-bearing request and response fields between the
-client and the attested gateway. It is a separate transport extension, not
-part of the core ACI specification. It is enabled by default and remains
-supported through at least February 10, 2027. E2EE v3 is the planned
-replacement. V2 is frozen except for security, correctness, and
-interoperability fixes.
-
-The normative contract is the
-[E2EE v2 compatibility protocol](../spec/e2ee-v2.md). It defines these five
-request headers:
-
-| Header | Value |
+| Flag | Policy input it enforces |
 | --- | --- |
-| `X-E2EE-Version` | `2` |
-| `X-Client-Pub-Key` | Client public key, hex encoded with the selected suite's curve. |
-| `X-Model-Pub-Key` | Gateway E2EE public key from the attested keyset. |
-| `X-E2EE-Nonce` | A fresh 32-byte random value encoded as 64 hex characters. |
-| `X-E2EE-Timestamp` | Current Unix time in seconds. |
+| `--accept-compose <hash>` | Workload release |
+| `--accept-subject app-id:0x<hex>` with `--accept-dstack-kms-root-public-key <key>` | Key custody for the receipt-signing key |
+| `--require-production-os` | An RTMR3-bound OS image hash on a reviewed allowlist |
 
-Do not send `X-Signing-Algo` for E2EE v2. That header selects the legacy
-compatibility path.
+Without a custody policy, the CLI reports custody as skipped. It does not
+reconstruct MRTD and RTMR0-2, so `--require-production-os` does not replace a
+dstack verifier run over the same quote, event log, and VM configuration. The
+TypeScript verifier does not check custody.
 
-The client selects either `x25519-aes-256-gcm-hkdf-sha256` or
-`secp256k1-aes-256-gcm-hkdf-sha256` by matching the `algo` on an
-`e2ee_public_keys` entry. Each encrypted field is lowercase hex of:
+Do not turn an unproven field into a stronger claim. A reported repository,
+commit, image, model ID, or TCB status remains a label until the applicable
+measurement and policy corroborate it.
 
-```text
-ephemeral_public_key || aes_gcm_nonce (12) || ciphertext || tag (16)
-```
+## Non-goals and remaining exposure
 
-The JSON structure stays OpenAI-compatible. Encrypt request content in place,
-for example `messages.0.content`, and decrypt the corresponding response fields
-such as `choices.0.message.content`. The RFC 8785 JCS AAD binds each field to
-the direction, selected algorithm, request model, full field path, request
-nonce, timestamp, and response id. See
-[E2EE v2 §5](../spec/e2ee-v2.md#5-encrypted-fields) and
-[§6](../spec/e2ee-v2.md#6-associated-data) for the complete contract.
+Even when every applicable check passes:
 
-The quote binds the workload keyset digest directly. V2 does not require, and
-does not reintroduce, a separate workload identity key or keyset endorsement.
-The attested `e2ee_public_keys` entry is the key-provenance anchor.
+- The measured code is trusted to implement the privacy policy correctly.
+  Attestation identifies code; it does not prove that the code is bug-free.
+- Exact model-weight provenance remains unknown unless the provider verifier
+  supplies and checks suitable evidence.
+- The service sees network and account metadata. ACI does not hide client IP,
+  timing, request size, model choice, or credential use. An OHTTP relay is a
+  separate metadata-privacy layer.
+- Receipts are self-timed records, not externally ordered or timestamped
+  statements. Durable non-repudiation needs a transparency service. The
+  reference implementation keeps receipts in memory for one hour and loses
+  them on restart, so fetch them promptly. Its session store is not an
+  externally witnessed log.
+- GPU attestation proves properties of a GPU only to the extent recorded by
+  the provider verifier. It may not prove a hardware binding between that GPU
+  and the serving CPU TEE.
+- Local agents, tools, MCP servers, browser automation, shell commands, and
+  telemetry can expose data outside the model HTTP path.
+- Availability is not guaranteed. Failing closed can turn verifier, collateral,
+  or channel failures into a service outage.
 
-`enable_e2ee` defaults to `true`. Setting it to `false` is an explicit
-operator opt-out: the attestation advertises no supported E2EE versions and
-the gateway rejects v2 requests before decryption.
+## Continue
 
-## Legacy Compatibility
-
-Existing vLLM-proxy-compatible clients can continue to use:
-
-- `GET /v1/attestation/report?signing_algo=...`
-- `GET /v1/signature/{id}`
-- Legacy E2EE headers with `X-Signing-Algo`
-
-Those surfaces exist for compatibility. New verification should treat the ACI
-receipt as the primary per-response proof and the attested keyset as the source
-of receipt-signing and E2EE keys.
-
-## Trust Boundary
-
-Plain TLS requests are visible to the attested gateway after TLS termination.
-E2EE v2 requests are decrypted inside the attested gateway. If middleware is
-enabled, middleware is part of the same deployment trust boundary and can see
-plaintext after gateway decryption.
-
-Upstream model providers are verified before the gateway forwards request bytes.
-The receipt records the upstream verification outcome in `upstream.verified`;
-the enforced channel binding is recorded on the cited session. Some upstreams
-use TLS channel binding. Others use provider-level E2EE keys. The verifier
-should rely on the recorded binding only when the production policy accepts
-that provider and model path.
-
-## Product Wrapper Checklist
-
-Before embedding this page in a product docs site:
-
-1. Replace every placeholder in the table above.
-2. Render the product-specific API key environment variable.
-3. Set a real `{DEFAULT_MODEL_ID}` that exists in that product's model catalog.
-4. Link `{PRODUCTION_VERIFIER_POLICY_URL}` to the published verifier policy.
-5. Keep legacy compatibility sections only where old clients need them.
+- Run the [ACI quickstart](quickstart.md).
+- Compare current [provider verification](providers/README.md).
+- Inspect the [attested-session system](attested-session-system.md).
+- Look up artifact endpoints and legacy routes in the [HTTP API reference](api-reference.md#canonical-aci-endpoints).
+- Read the normative [ACI specification](../spec/aci.md).
+- Track known [implementation gaps](reviews/aci-spec-conformance-gaps.md).

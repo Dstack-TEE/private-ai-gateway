@@ -1,4 +1,4 @@
-# Desktop distribution architecture
+# Distribution architecture
 
 The desktop shell selects `DistributionCapabilities` once at compile time and
 injects the same policy into every native window. Native commands enforce it too.
@@ -65,15 +65,15 @@ GitHub release with that changelog section as its notes.
   not mention the marker anywhere else in the PR description, and separate
   entries with blank lines. Then run `Desktop release PR` manually to refresh
   the release PR.
-- **Shared crates**: release-please assigns a commit to the desktop only if
-  it changes a file under `apps/desktop/`
+- **Shared crates**: release-please assigns a commit to Private AI Proxy only
+  if it changes a file under `apps/desktop/`
   ([commit splitting](https://github.com/googleapis/release-please/blob/v17.11.2/src/util/commit-split.ts)),
   and it has no option to add other paths. A commit that changes only
   `crates/aci-protocol` or `crates/aci-verify` therefore never reaches the
-  desktop changelog or version, even when run manually. When such a change
-  affects the desktop, include a desktop-facing change in the same commit,
-  or follow it with an empty commit whose Conventional Commit title
-  describes the desktop change (release-please counts an empty commit for
+  Private AI Proxy changelog or version, even when run manually. When such a
+  change affects Private AI Proxy, include a change under `apps/desktop/` in
+  the same commit, or follow it with an empty commit whose Conventional Commit
+  title describes the user-visible change (release-please counts an empty commit for
   every package), then run `Desktop release PR` manually.
 
 The tag starts `Desktop release` (`desktop-release.yml`), which runs only for
@@ -296,8 +296,8 @@ every 0.1.6 installation, read. In the beta feed it rewrites only `latest.json`.
 
 ## Updates by installation
 
-Every Direct installation follows the saved update channel (desktop **Update
-channel** toggle, or `pap settings set update-channel beta|stable`); without a saved
+Every Direct installation follows the saved update channel (the desktop app's
+**Update channel** toggle, or `pap settings set update-channel beta|stable`); without a saved
 choice it follows the channel of the running build. Each client reads one
 static Tauri manifest, `desktop-updates-<channel>/latest.json`. Stable releases
 are published to both feeds (as electron-builder's
@@ -344,7 +344,7 @@ Package-manager installs never modify themselves: they announce the release and
 print exact commands built from the compiled feed location and the validated
 version. Linux CLI and Arch packages record their owner in
 `/usr/share/private-ai-proxy/package-manager` (`deb`, `rpm` or `pacman`); the
-desktop disables in-app installation only when that marker says `pacman`. CLI
+desktop app disables in-app installation only when that marker says `pacman`. CLI
 packages from releases up to 0.1.7-beta.1 lack the marker and are reported as a
 system package without commands.
 
@@ -366,7 +366,8 @@ The packages do not check for running processes, like the Chrome, VS Code and
 Firefox packages: dpkg, rpm and pacman already refuse files that another
 package owns, and replacing the executables of a running program is safe on
 Linux. A backend keeps running its old build until it stops; the next client
-command restarts a backend from another build. Package metadata (name,
+command restarts a backend from another build. Run `pap --yes service stop` as
+the owning user to switch at once. Package metadata (name,
 maintainer, homepage and the desktop description) comes from the brand
 configuration, as Tauri's does, and every entry carries the commit time (or
 `SOURCE_DATE_EPOCH`), so builds are reproducible and pacman's file checks match.

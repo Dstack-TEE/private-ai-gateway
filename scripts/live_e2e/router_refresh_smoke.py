@@ -51,7 +51,11 @@ PRESETS = {
 
 def list_sessions(name: str) -> list[dict]:
     try:
-        r = requests.get(f"{BASE}/v1/aci/sessions", params={"provider": name}, timeout=5)
+        r = requests.get(
+            f"{BASE}/v1/aci/sessions",
+            params={"upstream_name": name},
+            timeout=5,
+        )
         if r.status_code == 200:
             return (r.json() or {}).get("sessions", [])
     except Exception:
@@ -97,7 +101,6 @@ def main() -> int:
                     "state_dir": str(state_dir),
                     "upstream_config_seed_path": str(upstream_seed_path),
                     "dstack_endpoint": DEFAULT_DSTACK_ENDPOINT,
-                    "receipt_ttl_seconds": 3600,
                 }
             )
         )

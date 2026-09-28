@@ -1,513 +1,342 @@
-# Live E2E Test Suite Design
+# Run the Live End-to-End Suite
 
-This document defines the live E2E scripts for Private AI Gateway. The suite
-sends real traffic to supported upstream providers,
-verifies upstream attestation and channel binding, checks API fidelity, and
-proves the output back to a relying party through ACI reports and receipts.
-See [upstream-verification-lifecycle.md](upstream-verification-lifecycle.md)
-for the current verification/session lease design and the latest Chutes
-throughput findings.
+The live suite starts a local gateway, calls real provider APIs, verifies
+returned artifacts, and preserves local artifacts for diagnosis. It is an
+operator test, not part of the credential-free CI suite. Configured bearer
+tokens are redacted, but request and response bytes remain in the artifacts.
 
-## Goals
+The implementation lives in `scripts/live_e2e/`.
 
-- Verify each supported provider before sending sensitive traffic.
-- Verify that the gateway enforces the provider binding it accepted.
-- Exercise real OpenAI-compatible traffic through the gateway, not only
-  provider fixture tests.
-- Prove the no-middleware path remains behavior-compatible with the current
-  gateway.
-- Prove the middleware path can rewrite requests and select a target route
-  while backend-owned provider verification facts remain unforgeable.
-- Check API fidelity for the surfaces users rely on: streaming, tool calls,
-  structured outputs, multimodal inputs, context limits, and cache metadata.
-- Give users a concrete verification story for "I received this API response;
-  how do I know it came from the verified gateway and a verified upstream?"
+## Design rules
 
-## Non-Goals
+- Never trust unsigned provider metadata. A strict run compares the verifier
+  result with reviewed references in `provider_refs/`, not with a live
+  endpoint the provider does not sign.
+- Never hide provider bugs with post-processing. The cases assert the
+  provider's real output. A per-provider parameter such as
+  `structured_output_max_tokens` changes the request, never the response.
+- Skip rather than fail on unsupported capabilities. A case runs only for
+  entries whose `capabilities` list includes it, and the structured-output
+  case records `skipped` otherwise.
 
-- Do not make every provider pass every feature. Providers differ. The suite
-  must be capability-aware.
-- Do not treat a live provider metadata endpoint as automatically trusted. If
-  it is not signed by the provider, a strict run uses reviewed vendored
-  reference values.
-- Do not hide provider bugs with response post-processing. The fidelity tests
-  should show the real behavior.
+## What the main runner covers
 
-## Target Script Layout
+`scripts/live_e2e/run.py` performs these phases in order:
 
-Directory:
+1. Check tools, credentials, the dstack socket, the gateway port, and optionally the Rust build.
+2. Run the provider-verifier bridge for every selected provider. Each result
+   must be verified, carry embedded evidence (a digest and a `data:` URI), and
+   include the entry's binding type.
+3. Start a temporary gateway with generated static and upstream configuration,
+   and require `GET /v1/models` to list every entry's `public_model`.
+4. Run one chat lifecycle case for each provider with the `chat` capability.
+5. Run one embeddings case for each provider with the `embeddings` capability.
+6. Run structured-output fidelity cases for `full` and `strict-release` profiles.
+7. Write `summary.json` and stop the gateway.
+
+Every request in these cases is buffered. Receipt hashing over streamed SSE
+bytes is covered only by `streaming_smoke.py`; see
+[Auxiliary scripts](#auxiliary-scripts).
+
+### Lifecycle case
+
+For each entry with the `chat` capability, the case:
+
+1. Sends a chat completion and requires a 2xx response with an `id` and an
+   `x-receipt-id` header.
+2. Fetches `/v1/aci/attestation` with a fresh nonce and the receipt from
+   `/v1/aci/receipts/{receipt_id}`.
+3. Spot-checks the legacy `/v1/signature/{chat_id}` wrapper for its
+   `text`, `signature`, `signing_address`, and `signing_algo` fields.
+4. Runs `pap audit` offline on the report, receipt, nonce, and exact request
+   and response bytes. Offline, the audit skips the hardware-quote and
+   live-channel checks, so the case requires no failed check and passes on:
+   - the nonce and keyset binding and the keyset expiry;
+   - the receipt signature under the attested keyset and its keyset digest;
+   - `request.received.body_hash` against the exact client body and the
+     response hash against the exact response body; and
+   - a verified `upstream.verified` event that cites a session.
+5. Requires a request the gateway rewrote, such as a mapped model ID, to show
+   as a `request.forwarded.body_hash` that differs from
+   `request.received.body_hash`.
+6. Fetches each cited session, recomputes its ID from the fetched bytes,
+   requires the entry's `binding` type, checks the evidence digest, and
+   requires `tee_attested` to be asserted. Chutes instance sessions carry no
+   evidence, so for them the case requires empty evidence instead.
+
+### Embeddings case
+
+For each entry with the `embeddings` capability, the case sends a fixed
+`POST /v1/embeddings` request and checks the OpenAI-compatible shape: a
+non-empty `data[]` whose first `embedding` is numeric and not all zero.
+Embeddings responses carry no `id`, so the case looks up the receipt with the
+`x-receipt-id` response header. It then runs the same audit, requires
+`receipt.endpoint == "/v1/embeddings"`, and checks the receipt events and cited
+sessions as the lifecycle case does. In the checked-in matrix, only the
+`chutes-live-embed` entry has the `embeddings` capability.
+
+The suite does not run load tests, availability measurements, browser verification, or every auxiliary smoke script in `scripts/live_e2e/`.
+
+## Run the local multi-upstream smoke test
+
+The credential-free local smoke suite builds a smoke image and runs two mock ACI upstreams and one router gateway with Docker Compose. All three mount the [forwarded dstack socket](getting-started.md#connect-to-the-dstack-sdk). It does not call the live provider matrix.
+
+It needs Docker with the Compose plugin, `curl`, `jq`, `cargo`, `sha256sum`, `awk`, and `openssl`. `scripts/local_multi_upstream_smoke.sh --help` lists the ports and paths it uses.
+
+```sh
+DSTACK_SOCK=/tmp/aci-dstack-sock-dev.dstack.sock \
+  scripts/local_multi_upstream_smoke.sh
+```
+
+The script checks direct model routing, TLS-bound ACI-service verification, chat and embeddings receipts, attested sessions, runtime config replacement, and metrics. It tears down the Compose stack on exit unless `KEEP_STACK=1` is set.
+
+Use this suite after changes to the ACI-service adapter, routing, receipts, sessions, config replacement, or the deployment-facing HTTP surface.
+
+## Run the Phala multi-upstream smoke test
+
+`scripts/phala_multi_upstream_smoke.sh` runs the same checks on Phala Cloud. It builds and pushes a smoke image (or deploys `IMAGE_REF`), deploys two mock ACI upstreams and one router CVM with a mounted upstream config, and checks routing, receipts, and metrics.
+
+```sh
+scripts/phala_multi_upstream_smoke.sh --help
+scripts/phala_multi_upstream_smoke.sh
+```
+
+It needs `docker buildx`, the `phala` CLI, `curl`, `jq`, `cargo`, `sha256sum`, and `awk`, and writes compose files, reports, receipts, and metrics under `WORK_DIR` (default `/tmp/private-ai-gateway-smoke-router`). The script does not delete the CVMs it deploys.
+
+## Prerequisites
+
+Install the [development prerequisites](getting-started.md#prerequisites) and
+build the gateway:
+
+```sh
+uv sync --locked
+cargo build --bin private-ai-gateway
+```
+
+The main provider matrix requires the credentials named in `scripts/live_e2e/providers.json`:
+
+```sh
+export TINFOIL_API_KEY='...'
+export NEARAI_API_KEY='...'
+export CHUTES_API_KEY='...'
+```
+
+The runner loads a dotenv file before reading the environment. Its default is `.env` in the parent directory of this repository, not `.env` inside the repository. Override it explicitly when needed:
+
+```sh
+uv run python scripts/live_e2e/run.py --env-file .env
+```
+
+Do not commit provider credentials or generated upstream configuration.
+
+### dstack socket
+
+The temporary gateway needs a dstack key provider. By default the suite expects:
 
 ```text
-scripts/live_e2e/
-  run.py
-  bfcl_v4.py
-  preflight.py
-  provider_verify.py
-  launch_gateway.py
-  cases/
-    lifecycle.py
-    embeddings.py
-    framework_no_middleware.py
-    framework_middleware.py
-    fidelity_text.py
-    fidelity_streaming.py
-    fidelity_tools.py
-    fidelity_structured_outputs.py
-    fidelity_multimodal.py
-    fidelity_context.py
-    fidelity_cache.py
-  user_verify.py
-  providers.json
-  provider_refs/
-    tinfoil.json
-    near-ai.json
-    chutes.json
-    aci-service.json
+unix:/tmp/aci-dstack-sock-dev.dstack.sock
 ```
 
-The current tree still has some older helper names, such as
-`launch_aggregator.py`. Rename those as part of the framework test work rather
-than treating the old names as product concepts.
+Start a local dstack simulator or [forward a trusted test CVM socket](getting-started.md#connect-to-the-dstack-sdk) to that path before running the suite. Use `--dstack-endpoint` to select another endpoint.
 
-`run.py` is the orchestrator. It accepts:
+Preflight and the gateway launcher set `DSTACK_VERIFIER_URL` to `http://localhost:18080` when it is not already set, so the NEAR AI and Phala direct verifiers use that dstack verifier during the run. NEAR AI entries declare this variable as a prerequisite.
 
-```bash
-uv run python scripts/live_e2e/run.py --profile quick
-uv run python scripts/live_e2e/run.py --profile full
-uv run python scripts/live_e2e/run.py --profile strict-release
-uv run python scripts/live_e2e/bfcl_v4.py --provider tinfoil
-uv run python scripts/live_e2e/bfcl_v4.py \
-  --provider tinfoil \
-  --test-category simple_python \
-  --max-cases 2
-uv run python scripts/live_e2e/user_verify.py \
-  --base-url https://gateway.example \
-  --chat-id chatcmpl-... \
-  --request-body request.json \
-  --response-body response.json
-pap audit \
-  --report report.json \
-  --receipt receipt.json \
-  --nonce nonce-used-for-report \
-  --request-body request.json \
-  --response-body response.json
+The run uses the vendored Python verifier unless `PRIVATE_AI_VERIFIER_DIR` overrides it; see [Install dependencies](getting-started.md#install-dependencies).
+
+## Run a preflight check
+
+Preflight catches missing credentials, missing executables, a missing Unix socket, a busy port, and a failed gateway build without sending inference requests:
+
+```sh
+uv run python scripts/live_e2e/preflight.py \
+  --env-file .env \
+  --port 18086
 ```
 
-Profiles:
+Preflight also requires the Private AI Proxy CLI, which the lifecycle and embeddings cases use for `pap audit`: `PAP_BIN` if set, else `pap` on `PATH`.
 
-- `quick`: one non-streaming request per provider plus receipt verification and
-  attested-session audit lookup for every verified upstream event.
-- `full`: all capability-enabled fidelity cases.
-- `strict-release`: full profile plus vendored reference pins, gateway code
-  provenance, launcher/image provenance, and fail-closed negative checks.
-- `user-verify`: no provider secrets. Verifies an already received response.
+Use `--no-build` only when the binary was already built and the goal is to avoid another compilation pass.
 
-## Provider Matrix
+## Run the suite
 
-`providers.json` is the mutable test matrix. It contains public aliases, real
-upstream model ids, provider type, base URL, required env vars, and supported
-fidelity cases.
+Run the default quick profile against every configured provider:
 
-Initial entries:
+```sh
+uv run python scripts/live_e2e/run.py \
+  --env-file .env \
+  --profile quick
+```
+
+The runner writes its terminal result to `summary.json` in the artifact
+directory printed at startup. Treat the run as successful only when the
+selected cases are marked passed and the process exits with status 0, subject
+to the warning at the top of this page.
+
+Select one or more entries with repeated `--provider` arguments. A selector can match the entry name, provider type, or public model alias:
+
+```sh
+uv run python scripts/live_e2e/run.py \
+  --env-file .env \
+  --provider tinfoil-live \
+  --provider chutes-live
+```
+
+Pass `--port 0` to allocate a free local port automatically.
+
+## Profiles
+
+| Profile | Provider verification | Chat and embeddings | Structured outputs |
+| --- | --- | --- | --- |
+| `quick` | Live verifier result and channel-binding checks | Yes | No |
+| `full` | Same as `quick` | Yes | Yes, for entries with the capability |
+| `strict-release` | Also checks the configured model and expected binding against `provider_refs/<provider>.json` | Yes | Yes, for entries with the capability |
+
+Strict references are allowlists, not recorded golden responses. The strict check validates that the selected model is accepted and that the verifier emitted the expected binding type. It does not pin every claim, measurement, or evidence byte.
+
+`--skip-provider-verify` skips the standalone bridge phase. Gateway requests still use the verifier configured for their provider, so this option does not turn constrained inference into unverified forwarding.
+
+## Provider matrix format
+
+The providers file is a JSON array. Required fields are:
+
+| Field | Meaning |
+| --- | --- |
+| `name` | Unique test entry and generated upstream name. |
+| `provider` | Gateway provider type. |
+| `base_url` | Provider HTTPS origin. |
+| `public_model` | Model alias exposed by the temporary gateway. |
+| `upstream_model` | Provider model identifier. |
+| `api_key_env` | Environment variable containing the provider credential. |
+| `binding` | Channel-binding type the verifier must return. |
+
+Optional fields are:
+
+| Field | Meaning |
+| --- | --- |
+| `capabilities` | Cases to enable, including `chat`, `embeddings`, and `structured_outputs`. Other labels document provider features for auxiliary tests. |
+| `requires` | Additional environment variables preflight must find. |
+| `structured_output_max_tokens` | Token limit for the structured-output case; default `512`. Reasoning models need more: Tinfoil `kimi-k2-6` writes a long `message.reasoning` before `message.content`, and at 512 tokens it can stop before any content. |
+| `verification_refresh_seconds` | Per-upstream verifier refresh interval. |
+| `session_refresh_seconds` | Provider session refresh interval. |
+| `chutes_e2ee_api_base` | Alternate Chutes E2EE discovery origin. |
+| `chutes_chute_ids` | Map from upstream model to known chute identifier. |
+| `chutes_e2ee_discovery_rounds` | Number of Chutes discovery passes. |
+| `chutes_e2ee_discovery_interval_seconds` | Delay between Chutes discovery passes. |
+
+Example:
 
 ```json
 [
   {
-    "name": "tinfoil-live",
+    "name": "provider-live",
     "provider": "tinfoil",
-    "base_url": "https://inference.tinfoil.sh",
-    "public_model": "live-tinfoil",
-    "upstream_model": "kimi-k2-6",
-    "api_key_env": "TINFOIL_API_KEY",
+    "base_url": "https://inference.example",
+    "public_model": "live-model",
+    "upstream_model": "provider/model-id",
+    "api_key_env": "PROVIDER_API_KEY",
     "binding": "tls_spki_sha256",
-    "capabilities": ["chat", "streaming", "tools", "structured_outputs", "context"],
-    "structured_output_max_tokens": 2048
-  },
-  {
-    "name": "near-ai-live",
-    "provider": "near-ai",
-    "base_url": "https://cloud-api.near.ai",
-    "public_model": "live-near",
-    "upstream_model": "google/gemma-4-31B-it",
-    "api_key_env": "NEARAI_API_KEY",
-    "binding": "tls_spki_sha256",
-    "requires": ["DSTACK_VERIFIER_URL"],
-    "capabilities": ["chat", "streaming", "structured_outputs", "context"]
-  },
-  {
-    "name": "chutes-live",
-    "provider": "chutes",
-    "base_url": "https://api.chutes.ai",
-    "public_model": "live-chutes",
-    "upstream_model": "moonshotai/Kimi-K2.5-TEE",
-    "api_key_env": "CHUTES_API_KEY",
-    "binding": "e2ee_public_key_sha256",
-    "chutes_chute_ids": {
-      "moonshotai/Kimi-K2.5-TEE": "..."
-    },
-    "capabilities": ["chat", "streaming", "context"]
+    "capabilities": ["chat", "streaming", "structured_outputs"],
+    "structured_output_max_tokens": 1024
   }
 ]
 ```
 
-The matrix is explicit. If a provider/model does not support images, strict
-JSON schema, or tools, that case is skipped for that entry instead of being
-marked as passed.
+Validate a new entry with the quick profile before adding a strict reference. A strict reference should come from a reviewed provider policy, not from copying the first observed value.
 
-## Provider Reference Policy
+## Artifacts
 
-Each provider gets a `provider_refs/<provider>.json` reviewed reference file.
-The verifier compares live evidence to this file in `strict-release` mode.
-In `quick` and `full`, the verifier may accept provider-current evidence, but
-it still records the evidence digest and binding in the receipt.
+The default artifact root is:
 
-Reference files should contain:
-
-```json
-{
-  "provider": "chutes",
-  "reviewed_at": "2026-05-15",
-  "expires_at": "2026-06-15",
-  "source_refs": [
-    "https://api.chutes.ai/servers/tee/measurements"
-  ],
-  "accepted_models": {
-    "moonshotai/Kimi-K2.5-TEE": {
-      "expected_binding": "e2ee_public_key_sha256",
-      "accepted_measurement_profiles": ["..."],
-      "requires_gpu_attestation": true
-    }
-  }
-}
+```text
+/tmp/private-ai-gateway-live-e2e/<UTC-like local timestamp>/
 ```
 
-Provider-specific rules:
+Choose another root with `--artifacts-dir`. Each run includes:
 
-- Tinfoil: verify the Tinfoil attestation using the provider-owned verifier
-  and vendored Tinfoil model/router metadata. The accepted binding is the TLS
-  SPKI digest committed in the attestation report data.
-- NEAR AI: request attestation with TLS fingerprint binding, verify the
-  gateway workload through `DSTACK_VERIFIER_URL`, and enforce the gateway TLS
-  SPKI. NEAR AI is a router (`PerRouter`): the attested session is the verified
-  gateway channel, shared by every model. The report is fetched with a model
-  parameter only because that is the shape of NEAR's endpoint; the nested
-  `model_attestations[]` it carries are not required, checked, or recorded —
-  they are not bound to the request's instance — and the served model is a
-  receipt-level identifier. External-provider models that cannot produce
-  gateway-backed evidence are skipped unless a test explicitly expects
-  rejection.
-- Chutes: verify the TDX report data binds `nonce || e2e_pubkey`, verify DCAP,
-  verify the public measurement profile against a reviewed reference, verify
-  NVIDIA evidence when present, and hash the decoded ML-KEM public-key bytes
-  for the binding enforced by the transport. Strict production entries should
-  pin upstream model ids to concrete `chute_id` UUIDs with `chutes_chute_ids`;
-  the verifier and upstream config use the same pins.
-- ACI service: verify `/v1/aci/attestation?nonce=...`, quote report data,
-  dstack KMS key custody, accepted keyset subject or image digest, accepted
-  KMS root, and attested TLS SPKI.
+- `summary.json`, including the selected profile and phase results;
+- `aggregator.log`;
+- `aggregator-upstreams.redacted.json`;
+- standalone provider-verifier requests with credentials redacted;
+- provider-verifier outputs;
+- exact request, response, report, and receipt bytes for each lifecycle case;
+- user-verification summaries;
+- fetched session records and compact summaries;
+- structured-output inputs, outputs, and summaries when enabled.
 
-Reference updates must be reviewed. The script may print a proposed diff with
-`--update-refs-dry-run`, but it should not silently rewrite trust pins.
+The runner writes each provider key into the temporary gateway's upstream config as `bearer_token`, and removes the key's environment variable from the gateway process. The gateway passes credentials to the verifier bridge as JSON on stdin, never through the environment or arguments.
 
-## Test Phases
+The runner removes its temporary directory, which holds the generated gateway config and state, on exit. `KEEP_LIVE_E2E=1` keeps it for debugging. The kept directory contains the real provider keys in `upstreams.seed.json` and `state/upstreams.json`, so delete it when you are done. The artifact directory does not hold those keys, but it can contain model inputs, outputs, attestation evidence, endpoints, and public identity material. Handle it as test records.
 
-### 00 Preflight
+## Auxiliary scripts
 
-Checks:
+The main runner does not dispatch every script in the directory. Run these separately when their narrower behavior is under test:
 
-- Required API keys are present but never printed.
-- The vendored `scripts/confidential_verifier` package exists, or
-  `PRIVATE_AI_VERIFIER_DIR` points at an explicit verifier override.
-- `DSTACK_VERIFIER_URL` responds for NEAR AI and ACI service tests.
-- A local dstack socket exists for gateway attestation tests. The runner writes
-  the static gateway config and defaults `dstack_endpoint` to
-  `unix:/tmp/aci-dstack-sock-dev.dstack.sock`; pass `--dstack-endpoint` to use
-  a different endpoint.
-- The gateway binary builds.
-- The Private AI Proxy CLI resolves: `PAP_BIN` if set, else `pap` on `PATH`.
-  The lifecycle and embeddings cases run `pap audit` with it.
-- No live server is already bound to the selected local port.
+| Script | Purpose |
+| --- | --- |
+| `streaming_smoke.py` | Streams a chat completion and checks that the receipt's `response.returned` hash matches the exact SSE bytes. The main runner does not test streaming. |
+| `chutes_session_smoke.py` | Chutes session discovery and request behavior. |
+| `chutes_rate_probe.py` | Chutes rate and capacity observations. |
+| `router_refresh_smoke.py` | Boots one router upstream (`near-ai` or `tinfoil`) and checks that background refresh re-verifies its session with no inference traffic. |
+| `router_session_smoke.py` | Sends two models through one router upstream and checks that both receipts cite the same session. |
+| `bfcl_v4.py` | BFCL tool-calling evaluation. See [Run the BFCL evaluation](#run-the-bfcl-evaluation). |
+| `user_verify.py` | Verifies a received response. See [Verify a received response](#verify-a-received-response). |
 
-### 10 Provider Attestation
+Read each script's `--help` output before use. These tools call live systems and can consume provider quota. Run the router smokes from `scripts/`, for example `uv run python live_e2e/router_session_smoke.py tinfoil`.
 
-For each provider:
+## Verify a received response
 
-- Run the provider verifier directly.
-- Assert `result == verified`.
-- Assert embedded `evidence.digest`, data-URI `evidence.data`, and at least one channel binding.
-- Assert binding type matches the provider transport.
-- In strict mode, compare evidence claims to `provider_refs/<provider>.json`.
+`scripts/live_e2e/user_verify.py` answers "I received this response; did it come from the verified gateway and a verified upstream?" It fetches the gateway report with a fresh nonce, the receipt, and the session the receipt's `upstream.verified` event cites, then runs `audit` on them:
 
-Negative checks:
+```sh
+uv run python scripts/live_e2e/user_verify.py \
+  --base-url https://gateway.example \
+  --chat-id <chat-id-or-receipt-id> \
+  --bearer-token "$TOKEN" \
+  --request-body request.json \
+  --response-body response.json
+```
 
-- Mutate the TLS SPKI or E2EE public key binding and assert forwarding fails.
-- For Chutes, mutate `key_id` or public-key digest and assert `/e2e/invoke`
-  is never called.
+`--chat-id` accepts either the response's chat ID or the `x-receipt-id` value. `--request-body` and `--response-body` are optional; with them, the audit also checks the request and response hashes. To audit saved artifacts offline, pass `--report-file` and `--receipt-file`, plus `--session-file` and `--nonce` when available. `--pap-bin` defaults to `PAP_BIN`, else `pap`.
 
-### 20 Gateway Launch
+The output is the `pap audit --json` transcript: a `checks` array with each check's ID, spec section, status, and detail, and a `verdict` with the pass, fail, and skip counts. The exit status is non-zero unless the verdict is `VERIFIED`.
 
-The script writes a temporary upstream config from `providers.json`, starts a
-local gateway against the real dstack socket, and deletes the config on
-exit because it contains live bearer tokens.
+## Run the BFCL evaluation
 
-Checks:
+`scripts/live_e2e/bfcl_v4.py` runs the Berkeley Function Calling Leaderboard v4 through a local gateway over Chat Completions. It measures native tool-call and multi-turn fidelity; `run.py` stays the source of truth for report, receipt, and binding verification.
 
-- `GET /v1/models` returns only public aliases.
-- `GET /v1/aci/attestation?nonce=<random>` verifies:
-  - the keyset digest recomputes over the served `workload_keyset` JCS form,
-  - quote report data binds the ACI attestation statement,
-  - the keyset is not expired,
-  - dstack KMS custody verifies when using dstack,
-  - source provenance is absent when unknown, or matches the git-launcher
-    repo/commit pin when present,
-  - attested TLS SPKI is present when configured.
-
-### 30 Lifecycle
-
-For each provider and enabled request mode:
-
-- Send request through the gateway.
-- Assert response status and OpenAI-compatible shape.
-- Fetch `/v1/aci/receipts/{chat_id}` with the original bearer token.
-- Verify receipt signature using the receipt key from the attested keyset.
-- Verify the payload's keyset digest matches the attestation report.
-- Verify `request.received.body_hash` equals the exact client body.
-- Verify `request.forwarded.body_hash` equals the model-rewritten upstream
-  body.
-- Verify a rewrite shows as `request.forwarded.body_hash` differing from
-  `request.received.body_hash`.
-- Verify `upstream.verified` is `verified`, `required == true`, and cites a
-  `session_id` whose fetched bytes hash to it.
-- Verify `response.returned.body_hash` equals the response body for
-  non-streaming requests or the raw ordered SSE wire bytes for streaming.
-
-The first runnable slice covers the non-streaming lifecycle and relying-party
-verification path. The verifier intentionally uses the Rust protocol code
-(`pap audit`) for ACI canonicalization, keyset binding, and receipt signature
-checks instead of reimplementing those rules in Python.
-
-### 32 Embeddings
-
-Capability-gated on `embeddings`. For each provider that lists it, the runner:
-
-- Sends `POST /v1/embeddings` through the gateway with a fixed `input` string.
-- Asserts the OpenAI-compatible response shape (`object: "list"`, non-empty
-  `data[]` with a numeric `embedding[]` whose components are not all zero).
-- Fetches `/v1/aci/receipts/{receipt_id}` using the `x-receipt-id` header value as
-  the lookup id, since OpenAI embeddings responses carry no `id` field. The
-  gateway's receipt endpoint accepts either `chat_id` or `receipt_id` as the
-  path parameter.
-- Runs the same `pap audit` offline verification against the receipt +
-  request + response bodies to confirm canonical request/forwarded/response
-  hashes and the receipt signature.
-- Asserts `receipt.endpoint == "/v1/embeddings"` and that the session cited by
-  `upstream.verified` carries the provider's declared binding (e.g.
-  `e2ee_public_key_sha256` for Chutes embeddings).
-
-The first wired model is `Qwen/Qwen3-Embedding-8B-TEE` on Chutes (chute_id
-`21822836-bfa6-5426-b27e-dd5fdda1249e`), routed via the same
-`ChutesProviderBackend` E2EE path as chat. There is currently no Phala-deployed
-TEE embedding model in `Dstack-TEE/vllm-proxy` (the proxy does not register a
-`/v1/embeddings` route yet), and no Tinfoil/NEAR embedding entry — the matrix
-will expand once those land.
-
-### 35 Framework Compatibility
-
-Run the same lifecycle cases in two gateway modes:
-
-- **No middleware:** frontend calls backend directly. Assert behavior matches
-  the current request path: `body.model` is the target route id, backend rewrites
-  to the upstream model, and receipts contain the same verification and hash
-  facts as today.
-- **Fixture middleware:** frontend forwards plaintext to a local middleware
-  fixture. The fixture rewrites the request and selects a different configured
-  target route id. Backend must validate that route, verify the provider, and
-  record backend-authored route/provider facts that the middleware cannot forge.
-
-Middleware fixture checks:
-
-- Public requests with forged `X-Private-AI-Gateway-*` headers are sanitized by
-  the frontend.
-- Middleware cannot claim `upstream.verified`; backend must author that event.
-- E2EE AAD uses the original user model even when middleware selects a
-  provider-qualified target route.
-- The final receipt distinguishes `request.received`, `middleware.forwarded`,
-  `route.selected`, `upstream.forwarded`, `upstream.verified`, and
-  `response.returned`.
-
-The `bfcl_v4.py` wrapper runs the Berkeley Function Calling Leaderboard v4
-through the local gateway over OpenAI-compatible Chat Completions. It is
-intentionally separate from `run.py`: BFCL is useful for native tool-call
-fidelity and multi-turn agentic behavior, while the ACI runner remains the
-source of truth for report, receipt, and upstream binding verification.
-
-Some models need provider-specific output budgets even when they support the
-same OpenAI-compatible feature. Tinfoil `kimi-k2-6` emits a large
-`message.reasoning` field before final `message.content`; live tests showed
-that 512 completion tokens can stop in reasoning-only output, while the same
-schema succeeds with a larger budget. The provider matrix keeps this as an
-explicit per-provider test parameter instead of rewriting provider responses.
-
-By default the BFCL wrapper expects a sibling checkout at
-`../gorilla-bfcl/berkeley-function-call-leaderboard`, or an explicit
-`--bfcl-dir`. It deterministically samples a spread of 1% of BFCL v4
-`single_turn` and `multi_turn` cases with a two-case-per-category floor because
-BFCL's leaderboard CSV step computes latency standard deviation. Random
-sampling is available only with `--sample-mode random`. The wrapper exposes
-each tested provider under a BFCL-supported OpenAI Chat Completions model key,
-then runs BFCL's own `generate` and `evaluate` commands with `--run-ids` and
-`--partial-eval`. When `--max-cases` caps a broad category group, the cap keeps
-a deterministic spread of categories instead of taking the first categories
-greedily.
-
-`scripts/live_e2e/providers.glm51.json` maps the currently shared GLM 5.1
-family across Tinfoil, NEAR AI, and Chutes. It is the first cross-provider BFCL
-matrix because it exercises the same broad model family while still preserving
-each provider's native attestation and transport path.
-
-Useful tool-call fidelity slice:
-
-```bash
-python3 scripts/live_e2e/bfcl_v4.py \
+```sh
+uv run python scripts/live_e2e/bfcl_v4.py \
   --providers-file scripts/live_e2e/providers.glm51.json \
   --test-category single_turn,multi_turn \
   --max-cases 20 \
   --no-build
 ```
 
-### 40 Fidelity Cases
+The wrapper needs a BFCL checkout at `--bfcl-dir` (default `BFCL_DIR`, or `../gorilla-bfcl/berkeley-function-call-leaderboard`). It exposes each provider under a BFCL-supported OpenAI Chat Completions model key (`--bfcl-model`), then runs BFCL's own `generate` and `evaluate` commands.
 
-These cases are capability-gated per provider/model.
+| Flag | Meaning |
+| --- | --- |
+| `--test-category` | BFCL category or group, repeated or comma-separated. Default `single_turn,multi_turn`. |
+| `--sample-rate` | Fraction of cases per category. Default `0.01`. |
+| `--sample-mode` | `deterministic` (default) spreads samples by case ID; `random` uses `--sample-seed`. |
+| `--min-per-category` | Minimum cases per category. Default `2`, because BFCL's leaderboard step needs two latency points. |
+| `--max-cases` | Cap on total cases, keeping a spread of categories. |
+| `--provider`, `--port`, `--dstack-endpoint`, `--artifacts-dir`, `--env-file`, `--no-build` | Same meaning as for `run.py`. |
 
-Text baseline:
+`scripts/live_e2e/providers.glm51.json` maps the GLM 5.1 family across Tinfoil, NEAR AI, and Chutes, so one BFCL run compares three providers on the same model family, each through its own attestation and transport path.
 
-- Deterministic short instruction with `temperature: 0`.
-- Assert valid OpenAI response shape, stable `id`, `object`, `model`, `choices`,
-  `finish_reason`, and `usage` when provided.
+## Failure diagnosis
 
-Streaming:
+Start with `summary.json`, then inspect `aggregator.log` and the failing provider directory.
 
-- Same request with `stream: true`.
-- Parse every SSE frame.
-- Assert chunk ids are consistent, `[DONE]` arrives, final receipt exists, and
-  receipt response hash covers the exact ordered stream bytes.
+| Failure | First checks |
+| --- | --- |
+| Missing environment variable | Confirm `--env-file`, the selected matrix entry, and `api_key_env` or `requires`. |
+| Missing dstack socket | Start the simulator or pass the correct `--dstack-endpoint`. |
+| Provider verification failure | Inspect `provider-verifier-output.json`, then compare it with the provider policy in `docs/providers/`. |
+| Binding-type mismatch | Check the matrix `binding` and the verifier's `channel_bindings`. Do not weaken the expectation without reviewing the provider protocol. |
+| Gateway never becomes ready | Inspect `aggregator.log`, generated model aliases, and port ownership. |
+| Receipt or session assertion failure | Compare the raw receipt, session artifact, and the [API reference](api-reference.md) before changing the test. |
+| Strict-reference failure | Confirm the model and policy really changed before updating `provider_refs/`. |
 
-Tool calls:
-
-- Use OpenAI `tools` shape and force a specific tool with `tool_choice`.
-- Assert `finish_reason == tool_calls`.
-- Assert tool name and arguments parse as JSON and match the requested schema.
-- For streaming tools, assert incremental chunks reconstruct the same call.
-
-Structured outputs:
-
-- Use `response_format: { "type": "json_schema", ... }` where supported.
-- Assert the returned content parses and validates against the schema.
-- Also run `response_format: { "type": "json_object" }` for models that only
-  support JSON mode.
-
-Multimodal:
-
-- Use a tiny deterministic base64 PNG with embedded text or simple colored
-  geometry.
-- Assert the answer identifies the expected text/color/count.
-- If a model does not support image input, skip rather than fail.
-- PDF/audio/video should be separate optional cases only after the provider
-  matrix has models that explicitly support those inputs.
-
-Context:
-
-- Send a large deterministic prefix with sentinels at the beginning, middle,
-  and end.
-- Ask the model to return the sentinels only.
-- The test size is provider-specific and starts below the advertised context
-  limit. It should not infer a provider's true maximum from one failure.
-
-Cache:
-
-- For provider prompt cache, keep the reusable prefix deterministic and put
-  the varying question at the end.
-- Use provider-supported cache controls only for models that advertise support.
-- Assert cache metadata such as cached token counts or provider cache headers
-  when exposed. If no metadata is exposed, report "unobservable" instead of
-  passing.
-- Response-cache semantics, if we add them later, are tested separately from
-  provider prompt caching because they operate at a different layer.
-
-### 50 Direct Provider Comparison
-
-For each capability case, optionally send the same request directly to the
-provider using the upstream model id and provider transport. Compare normalized
-invariants:
-
-- Response shape and required fields.
-- Tool call name and JSON arguments.
-- Structured-output schema validity.
-- SSE parseability and completion.
-- Usage fields and cache fields if the provider exposes them.
-
-Do not require exact natural-language text equality. Use exact equality only
-for structured values the prompt constrains.
-
-## User Verification Story
-
-`user_verify.py` is the script we should document for users.
-
-Inputs:
-
-- Gateway base URL.
-- Chat id or receipt id.
-- Original request body, optional.
-- Response body or captured stream bytes, optional.
-
-Procedure (delegated to `pap audit`):
-
-1. Fetch `GET /v1/aci/attestation?nonce=<random>`.
-2. Verify the report binding chain (keyset bytes → digest → statement →
-   report_data) and keyset expiry.
-3. Fetch `GET /v1/aci/receipts/{chat_id}`.
-4. Verify the envelope signature under the attested receipt key and the
-   payload's keyset digest against the verified report.
-5. Verify request/response hashes when bodies are supplied.
-6. Fetch the cited `GET /v1/aci/sessions/{session_id}`, recompute the session id
-   from the fetched bytes, check the receipt's `served_at` falls in the
-   validity window and the evidence data hashes to its digest, and show the
-   typed claims.
-
-The final output should be a human-readable summary plus a machine-readable
-JSON result. The verifier should omit `source_provenance` when the gateway
-report omits it because the git-launcher pin is unavailable.
-
-The output is the `pap audit --json` transcript: a `checks` array (id,
-section, status, detail) and a `verdict` object carrying `verified`, the
-pass/fail/skip counts, and the established `workload_keyset_digest`.
-
-## Fidelity Checklist
-
-A gateway that normalizes many providers behind one OpenAI-compatible surface
-has to hold these classes of behavior. The suite should cover each of them:
-
-- Standard chat parameters: `max_tokens`, `temperature`, `stop`, `seed`, and
-  penalty fields where providers accept them.
-- Tool calling and `tool_choice`.
-- Parallel tool calls when supported.
-- `response_format` JSON mode and strict JSON schema.
-- Streaming and non-streaming parity.
-- Multimodal message content: at minimum `image_url`, later `file`,
-  `input_audio`, and `video_url` when supported providers are available.
-- Context length behavior under large prompts.
-- Prompt-cache metadata when a provider exposes it.
-
-## Minimum Implementation Order
-
-1. `user_verify.py` for already captured responses.
-2. `provider_verify.py` plus `provider_refs`.
-3. `run.py --profile quick` for Tinfoil, NEAR AI, Chutes, including
-   attested-session audit lookup.
-4. Framework no-middleware compatibility case.
-5. Framework fixture-middleware case with route selection and rewrite receipts.
-6. Streaming and receipt hash verification.
-7. Tool and structured-output cases.
-8. Multimodal and context cases.
-9. Cache observability.
-10. Strict-release source provenance from the launcher pin and image provenance checks.
+For credential-free validation, use the [repository checks](getting-started.md#run-the-repository-checks) instead of the live suite.

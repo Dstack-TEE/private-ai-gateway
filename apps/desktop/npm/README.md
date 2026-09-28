@@ -2,7 +2,7 @@
 
 The npm release uses a single package name, `private-ai-proxy`, the way
 [`@openai/codex`](https://www.npmjs.com/package/@openai/codex) does. Every
-desktop release publishes seven versions of it:
+Private AI Proxy release publishes seven versions of it:
 
 - the wrapper `private-ai-proxy@<version>`, which provides the `pap`,
   `private-ai-proxy` and `aci` commands
@@ -49,8 +49,9 @@ Codex uses `alpha-<os>-<cpu>`.
 Platform versions are SemVer prereleases, so they never match a plain range such
 as `^0.2.0` or `*`. They can match a prerelease range, which Codex shares:
 until `0.2.0` is published, `^0.2.0-beta.1` resolves to `0.2.0-beta.2-win32-x64`
-rather than to the wrapper `0.2.0-beta.2`. Install `private-ai-proxy`,
-`private-ai-proxy@latest`, `private-ai-proxy@beta` or an exact version.
+rather than to the wrapper `0.2.0-beta.2`. The
+[install guide](../../../docs/private-ai-proxy-install.md#npm) therefore tells
+users to install a tag or an exact version.
 
 A publish sets exactly one dist-tag, and trusted publishing cannot run
 `npm dist-tag` (see [Trusted publishing](#trusted-publishing)). A stable
@@ -58,7 +59,7 @@ release therefore moves only `latest`; `beta` keeps naming the last prerelease
 until the next beta is published. Right after `0.2.0` ships,
 `npm install private-ai-proxy@beta` still installs `0.2.0-beta.N`, an older
 version than `latest`. Install `private-ai-proxy` to get the newest stable
-release. The desktop updater's beta feed differs: a stable release also
+release. The updater's beta feed differs: a stable release also
 advances it when it is newer. A maintainer can move `beta` by hand with an
 interactive `npm dist-tag add private-ai-proxy@<version> beta`, which uses
 their own npm login rather than OIDC.
@@ -79,14 +80,13 @@ published.
 
 ### Linux libc
 
-The Linux binaries require glibc 2.35 or newer. There is no musl build, so
-Alpine and other musl distributions are not supported. npm 9.6.5 and later
-and pnpm honor `libc`, so on musl they skip the Linux version and the launcher
-reports that musl is not supported. Bun ignores `libc` and installs the glibc
-version anyway. Running that binary on musl then fails at load time, and the
-launcher reports the same error. npm 9.6.3 and 9.6.4 (Node 20.0 and 20.1) could
-not detect glibc from `libc` and skip the version even on glibc systems.
-Upgrading npm fixes this.
+There is no musl build ([supported platforms](../../../docs/private-ai-proxy-install.md)).
+npm 9.6.5 and later and pnpm honor `libc`, so on musl they skip the Linux
+version and the launcher reports that musl is not supported. Bun ignores `libc`
+and installs the glibc version anyway. Running that binary on musl then fails at
+load time, and the launcher reports the same error. npm 9.6.3 and 9.6.4 could
+not detect glibc from `libc` and skip the version even on glibc systems; the
+install guide tells users to upgrade npm.
 
 ## Build locally
 
@@ -121,7 +121,7 @@ dispatches the `Private AI Proxy npm packages` workflow at that release tag and
 waits for it. The publish job lives in its own top-level workflow so that its
 GitHub OIDC identity matches the npm trusted publisher. A manual workflow
 dispatch remains available for a package-only review, or to finish an
-interrupted publish against an already published Desktop release.
+interrupted publish against an already published release.
 
 The workflow verifies the GitHub release checksums, checks every tarball's file
 list, and compares every packaged native binary byte-for-byte with the release
@@ -172,9 +172,5 @@ It uses no npm publish token. OIDC authentication covers
 ([npm trusted publishing limitations](https://docs.npmjs.com/trusted-publishers#limitations-and-future-improvements)),
 so the workflow never runs `npm dist-tag`.
 
-The desktop release and the stable and beta updater feeds are updated by the
-desktop workflow. npm is updated by the workflow above. The official shell
-installers read the updater feeds, so they need no release step. The Homebrew
-tap [`Dstack-TEE/homebrew-private-ai`](https://github.com/Dstack-TEE/homebrew-private-ai)
-is not part of the tag pipeline: its own scheduled workflow opens an update
-pull request for each stable release, and a maintainer merges it.
+The other release channels are listed in the
+[release contract](../docs/cli-distribution.md#release-contract).

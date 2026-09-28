@@ -1,5 +1,10 @@
 # Router-Mode Review: Load Balancing, Routing, and Cache Locality
 
+> [!NOTE]
+> This is a point-in-time audit dated 2026-05-18. Provider routing and cache
+> behavior can change independently of this repository. Revalidate the deployed
+> provider revision before relying on these observations.
+
 Scope: load balancing, routing behavior, retries, overload handling, and
 KV/prompt-cache locality for the two router-mode providers we accept today -
 Tinfoil `inference.tinfoil.sh` and NEAR AI `cloud-api.near.ai`. Soundness and

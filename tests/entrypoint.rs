@@ -319,6 +319,27 @@ fn compose_yaml_inlines_only_default_mode_keys() {
 }
 
 #[test]
+fn compose_yaml_measures_the_gateway_commit() {
+    // dstack hashes the compose before variable substitution, so an
+    // interpolated COMMIT_SHA would leave the gateway source unmeasured.
+    let body = deploy_text("compose.yaml");
+    let commit_lines: Vec<&str> = body
+        .lines()
+        .map(str::trim_start)
+        .filter(|line| line.starts_with("COMMIT_SHA="))
+        .collect();
+    assert_eq!(
+        commit_lines.len(),
+        1,
+        "compose.yaml must set COMMIT_SHA once"
+    );
+    assert!(
+        !commit_lines[0].contains('$'),
+        "compose.yaml must set COMMIT_SHA as a literal, not a variable"
+    );
+}
+
+#[test]
 fn deploy_readme_states_ownership_boundary() {
     // Drift here would dilute the contract we are pinning. The text test
     // is intentionally narrow: it checks for the specific phrases that
