@@ -84,7 +84,7 @@ macro_rules! host_calls {
     ($(#[$meta:meta])* $name:ident -> $response:ty; $($rest:tt)*) => {
         $(#[$meta])*
         #[derive(ts_rs::TS)]
-        #[ts(type = "Record<symbol, never>")]
+        #[ts(type = "Record<string, never>")]
         pub struct $name;
         impl HostCall for $name {
             type Response = $response;
